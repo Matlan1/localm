@@ -17,10 +17,12 @@ import pytest
 
 from localm.inference.backends.llamacpp import _abi
 from localm.inference.backends.llamacpp._abi import (
-    MODEL_PARAMS_V1, MODEL_PARAMS_V2, AbiMismatch, evaluate, verify_abi,
+    CONTEXT_PARAMS_V1, CONTEXT_PARAMS_V2, MODEL_PARAMS_V1, MODEL_PARAMS_V2,
+    AbiMismatch, evaluate, verify_abi,
 )
 from localm.inference.backends.llamacpp._structs import (
-    LlamaContextParams, LlamaModelParamsV1, LlamaModelParamsV2,
+    LlamaContextParamsV1, LlamaContextParamsV2, LlamaModelParamsV1,
+    LlamaModelParamsV2,
 )
 
 
@@ -58,8 +60,8 @@ def good_model_v2() -> LlamaModelParamsV2:
 good_model = good_model_v1
 
 
-def good_ctx() -> LlamaContextParams:
-    cp = LlamaContextParams()
+def good_ctx_v1() -> LlamaContextParamsV1:
+    cp = LlamaContextParamsV1()
     cp.n_ctx = 512
     cp.n_batch = 2048
     cp.n_ubatch = 512
@@ -76,6 +78,33 @@ def good_ctx() -> LlamaContextParams:
     return cp
 
 
+def good_ctx_v2() -> LlamaContextParamsV2:
+    # Every field this fixture sets is named identically on both layouts (the
+    # V1/V2 split is a single INSERTED field, n_outputs_max_per_seq, which
+    # nothing here checks) - so the values are exactly the same as good_ctx_v1,
+    # only the class differs. Verified against a real ggml-org b10360 build.
+    cp = LlamaContextParamsV2()
+    cp.n_ctx = 512
+    cp.n_batch = 2048
+    cp.n_ubatch = 512
+    cp.n_seq_max = 1
+    cp.n_threads = 4
+    cp.n_threads_batch = 4
+    cp.rope_scaling_type = -1
+    cp.pooling_type = -1
+    cp.attention_type = -1
+    cp.flash_attn_type = -1
+    cp.type_k = 1
+    cp.type_v = 1
+    cp.offload_kqv = True
+    return cp
+
+
+# The pre-existing tests were written against the only context_params layout
+# that existed then (same rationale as good_model = good_model_v1 above).
+good_ctx = good_ctx_v1
+
+
 class _FakeFn:
     """A stand-in for a bound ctypes function: accepts restype/argtypes and
     returns a fixed value when called."""
@@ -90,12 +119,25 @@ class _FakeFn:
 
 
 class _ParamsFn:
-    """``llama_model_default_params`` stand-in that honours ``restype``.
+    """``*_default_params`` stand-in that FAITHFULLY honours ``restype``.
 
-    The real one is read TWICE with different restypes: once as raw bytes (the
-    layout fingerprint, before any layout is assumed) and once as the chosen
-    struct class. A fake that ignored restype would return the struct to the raw
-    read and the fingerprint would never exercise its actual code path."""
+    The real function is read TWICE with different restypes: once as raw bytes
+    (the layout fingerprint, before any layout is assumed) and once as the
+    chosen struct class. Every call constructs a FRESH instance of whatever
+    class ``restype`` actually is at call time and copies the underlying
+    fixture's bytes into it - exactly what a real by-value FFI return does,
+    reinterpreting the same bytes as whatever type the binding declared,
+    right or wrong.
+
+    This matters beyond the raw-vs-typed split above: if a fake instead
+    always handed back the original fixture object unconditionally (a
+    tempting shortcut, and the previous behaviour of this class), a caller
+    would receive a correctly-typed object no matter what class it actually
+    requested - so a test proving verify_abi() picks the WRONG layout for
+    mismatched bytes could pass by construction, never having exercised
+    whether the selected restype actually reached the returned struct. See
+    test_ctx_v2_bytes_read_as_v1_would_have_been_missed_before_and_are_caught_now
+    and its model_params sibling above, which found exactly this gap."""
 
     def __init__(self, value):
         self._value = value
@@ -103,12 +145,10 @@ class _ParamsFn:
         self.argtypes = None
 
     def __call__(self, *args):
-        if self.restype is _abi._RawParams:
-            raw = _abi._RawParams()
-            ctypes.memmove(ctypes.byref(raw), ctypes.byref(self._value),
-                           ctypes.sizeof(self._value))
-            return raw
-        return self._value
+        out = self.restype()
+        n = min(ctypes.sizeof(out), ctypes.sizeof(self._value))
+        ctypes.memmove(ctypes.byref(out), ctypes.byref(self._value), n)
+        return out
 
 
 class _FakeLib:
@@ -118,10 +158,17 @@ class _FakeLib:
     mirroring a real build - unless *markers* overrides that, which is how the
     probe-contradiction case is constructed."""
 
-    def __init__(self, mp, cp: LlamaContextParams, markers: bool = None,
+    def __init__(self, mp, cp, markers: bool = None,
                  ggml_version: str = None):
         self.llama_model_default_params = _ParamsFn(mp)
-        self.llama_context_default_params = _FakeFn(cp)
+        # _ParamsFn, not _FakeFn: detect_context_params_layout reads this
+        # TWICE, exactly like llama_model_default_params above - once as raw
+        # bytes (the fingerprint, before any layout is assumed) and once as
+        # the chosen struct class. A plain _FakeFn ignores restype and would
+        # hand the raw-bytes reader a typed struct with no .b field, crashing
+        # every test that reaches verify_abi (all of them, since it always
+        # detects context_params layout now).
+        self.llama_context_default_params = _ParamsFn(cp)
         # Every real build exports this; only its ARITY differs. Omitting it
         # would make has_penalties_sampler() return False via the
         # symbol-missing branch, so a test about the arity branch would pass
@@ -161,11 +208,15 @@ def _reset_layout_cache(monkeypatch):
     _abi._detected_layout = None
     _abi._detected_arity = None
     _abi._layout_assumed = False
+    _abi._detected_context_layout = None
+    _abi._context_layout_assumed = False
     _abi._last_verdict = None
     yield
     _abi._detected_layout = None
     _abi._detected_arity = None
     _abi._layout_assumed = False
+    _abi._detected_context_layout = None
+    _abi._context_layout_assumed = False
     _abi._last_verdict = None
 
 
@@ -298,14 +349,26 @@ def test_mechanism_error_fails_open(monkeypatch):
 # --------------------------------------------------------------------------- #
 
 def test_anchor_offsets_match_struct():
-    assert LlamaContextParams.n_ctx.offset == 0
-    assert LlamaContextParams.n_batch.offset == 4
-    assert LlamaContextParams.n_ubatch.offset == 8
-    assert LlamaContextParams.n_seq_max.offset == 12
-    assert LlamaContextParams.rope_scaling_type.offset == 36
-    assert LlamaContextParams.pooling_type.offset == 40
-    assert LlamaContextParams.attention_type.offset == 44
-    assert LlamaContextParams.ctx_other.offset == 152
+    assert LlamaContextParamsV1.n_ctx.offset == 0
+    assert LlamaContextParamsV1.n_batch.offset == 4
+    assert LlamaContextParamsV1.n_ubatch.offset == 8
+    assert LlamaContextParamsV1.n_seq_max.offset == 12
+    assert LlamaContextParamsV1.rope_scaling_type.offset == 36
+    assert LlamaContextParamsV1.pooling_type.offset == 40
+    assert LlamaContextParamsV1.attention_type.offset == 44
+    assert LlamaContextParamsV1.ctx_other.offset == 152
+    assert LlamaContextParamsV2.n_ctx.offset == 0
+    assert LlamaContextParamsV2.n_batch.offset == 4
+    assert LlamaContextParamsV2.n_ubatch.offset == 8
+    assert LlamaContextParamsV2.n_seq_max.offset == 12
+    # The V2 offsets are the whole reason two classes exist: n_outputs_max_per_seq
+    # was inserted before n_threads, shifting the keystone enums +4 vs V1.
+    assert LlamaContextParamsV2.n_outputs_max_per_seq.offset == 24
+    assert LlamaContextParamsV2.rope_scaling_type.offset == 40
+    assert LlamaContextParamsV2.pooling_type.offset == 44
+    assert LlamaContextParamsV2.attention_type.offset == 48
+    assert LlamaContextParamsV2.ctx_other.offset == 152
+    assert ctypes.sizeof(LlamaContextParamsV1) == ctypes.sizeof(LlamaContextParamsV2)
     assert LlamaModelParamsV1.split_mode.offset == 20
     assert LlamaModelParamsV1.use_mmap.offset == 65
     assert LlamaModelParamsV1.main_gpu.offset == 24
@@ -390,6 +453,103 @@ def test_v2_detection_survives_a_drifted_default():
     assert v.status == "ok"
     assert v.layout == MODEL_PARAMS_V2
     assert any("use_extra_bufts" in d for d in v.diagnostics)
+
+
+# --------------------------------------------------------------------------- #
+#  llama_context_params layout detection (the n_outputs_max_per_seq insertion,
+#  discovered 2026-08-11: present on ggml-org b10360, absent on the currently-
+#  shipped amd-rocm lemonade b1307 - so BOTH layouts are live in production and
+#  a single hardcoded struct is wrong for one of them. See _structs' docstring.)
+# --------------------------------------------------------------------------- #
+
+def test_detects_ctx_v1_and_v2_layouts():
+    assert verify_abi(
+        _FakeLib(good_model(), good_ctx_v1())).context_layout == CONTEXT_PARAMS_V1
+    assert verify_abi(
+        _FakeLib(good_model(), good_ctx_v2())).context_layout == CONTEXT_PARAMS_V2
+
+
+def test_ctx_v2_bytes_read_as_v1_would_have_been_missed_before_and_are_caught_now():
+    """The exact silent-corruption case the context_params split exists for -
+    same shape as test_v2_bytes_read_as_v1_..._are_caught_now above, one axis
+    over. A real (post-insertion) build's default-params bytes, forced through
+    the OLD V1 class: rope_scaling_type would be read from offset 40, which on
+    V1 is actually pooling_type - so a real n_ctx/n_batch/etc. would marshal
+    fine but the keystone read would drift from the true field.
+
+    This is also the ORIGINAL bug this whole fix started from: before the V1/V2
+    split existed, localm bound ONE hardcoded context_params class - correct
+    for whichever build happened to match it, silently reading the wrong
+    offsets on the other. Detection here is what prevents that from being a
+    coin flip."""
+    v2_bytes = good_ctx_v2()
+    as_v1 = LlamaContextParamsV1()
+    ctypes.memmove(ctypes.byref(as_v1), ctypes.byref(v2_bytes),
+                   ctypes.sizeof(v2_bytes))
+    # V2's real ctx_type (0, a plausible small enum) lands at V1's
+    # rope_scaling_type offset (36) - readable, plausible, WRONG.
+    assert as_v1.rope_scaling_type == 0
+
+    # The fingerprint (the only signal available - no marker symbol exists for
+    # this insertion) must still pick V2 for genuinely V2-shaped bytes, so this
+    # miscasting is never actually reached in practice.
+    layout, notes, assumed = _abi.detect_context_params_layout(
+        _FakeLib(good_model(), good_ctx_v2()))
+    assert (layout, assumed) == (CONTEXT_PARAMS_V2, False)
+
+
+def test_ctx_layout_detection_survives_a_drifted_default():
+    """Same never-false-positive priority as the model_params fingerprint: a
+    legitimate build that later drifts some OTHER default must still resolve,
+    since ctx_type/the three-field run are the only things checked."""
+    cp = good_ctx_v2()
+    cp.n_ctx = 4096                      # unrelated drift, not part of the fingerprint
+    v = verify_abi(_FakeLib(good_model(), cp))
+    assert v.status == "ok"
+    assert v.context_layout == CONTEXT_PARAMS_V2
+
+
+@pytest.mark.parametrize("builder,want", [
+    (good_ctx_v1, CONTEXT_PARAMS_V1), (good_ctx_v2, CONTEXT_PARAMS_V2)])
+def test_context_fingerprint_is_unambiguous_on_the_real_builds(builder, want):
+    """The measured baseline the scoring rests on, mirroring
+    test_fingerprint_is_unambiguous_on_the_real_builds for model_params."""
+    cp = builder()
+    raw = bytes(bytearray(
+        (ctypes.c_uint8 * ctypes.sizeof(cp)).from_buffer_copy(cp)))
+    assert _abi._fingerprint_context_layout(raw) == want
+
+
+def test_context_fingerprint_still_says_inconclusive_when_it_genuinely_is():
+    """All-zero bytes support neither layout's ctx_type-not-(-1) check (0 != -1
+    passes for BOTH candidate ctx_type offsets, and the -1 runs both fail since
+    everything is 0) - must stay inconclusive rather than picking a winner,
+    exactly the same never-false-positive posture as the model_params
+    fingerprint."""
+    assert _abi._fingerprint_context_layout(bytes(256)) is None
+
+
+def test_context_params_layout_falls_back_to_v1_when_inconclusive():
+    """detect_context_params_layout has no second (symbol) signal to fall back
+    on, unlike model_params - an inconclusive fingerprint goes straight to the
+    V1 fallback (the layout localm shipped before this field existed anywhere),
+    with `assumed=True` so callers know not to treat it as a determination."""
+
+    class _BlankLib:
+        def llama_context_default_params(self):
+            return _abi._RawParams()
+
+    layout, notes, assumed = _abi.detect_context_params_layout(_BlankLib())
+    assert layout == CONTEXT_PARAMS_V1
+    assert assumed is True
+    assert any("inconclusive" in n for n in notes)
+
+
+def test_context_params_class_and_layout_helpers():
+    assert _abi.context_params_class(CONTEXT_PARAMS_V1) is LlamaContextParamsV1
+    assert _abi.context_params_class(CONTEXT_PARAMS_V2) is LlamaContextParamsV2
+    assert _abi.context_params_layout(
+        _FakeLib(good_model(), good_ctx_v2())) == CONTEXT_PARAMS_V2
 
 
 # --------------------------------------------------------------------------- #

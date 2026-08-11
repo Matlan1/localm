@@ -43,7 +43,12 @@ from pathlib import Path
 # reconcile any reported drift.
 LLAMA_ABI_REFS = {
     "v1": "b9870",    # pre-reorder: use_mmap/use_direct_io/use_mlock, main_gpu@24
-    "v2": "b10276",   # post-reorder: load_mode@24, main_gpu@28, load_mtp
+    "v2": "b10360",   # post-reorder: load_mode@24, main_gpu@28, load_mtp. Bumped
+                       # 2026-08-11 from b10276: llama_context_params gained
+                       # n_outputs_max_per_seq (a new uint32_t inserted before
+                       # n_threads) somewhere in between, which b10276 predates
+                       # and so could not have caught. Re-verified clean at
+                       # b10360 - see the corresponding _structs.py fix.
 }
 LLAMA_ABI_REF = LLAMA_ABI_REFS["v2"]
 _REPO = "ggml-org/llama.cpp"
@@ -188,6 +193,16 @@ def _header_model_params_layout(header: str) -> str:
     return "v2" if re.search(r"\bload_mode\b", body) else "v1"
 
 
+def _header_context_params_layout(header: str) -> str:
+    """Which llama_context_params layout a header carries: 'v1' or 'v2'.
+
+    Independent axis from the model_params split above (see _structs' module
+    docstring) - keyed on n_outputs_max_per_seq, the field upstream inserted
+    directly before n_threads sometime between lemonade b1307 and b10360."""
+    body = _strip_comments(_extract_struct_body(header, "llama_context_params"))
+    return "v2" if re.search(r"\bn_outputs_max_per_seq\b", body) else "v1"
+
+
 def _localm_layout(struct_name: str, layout: str):
     """name -> (offset, size) for localm's ctypes struct of the C *struct_name*."""
     import ctypes
@@ -198,7 +213,8 @@ def _localm_layout(struct_name: str, layout: str):
     cls = {
         "llama_model_params": (S.LlamaModelParamsV2 if layout == "v2"
                                else S.LlamaModelParamsV1),
-        "llama_context_params": S.LlamaContextParams,
+        "llama_context_params": (S.LlamaContextParamsV2 if layout == "v2"
+                                 else S.LlamaContextParamsV1),
         "llama_batch": S.LlamaBatch,
     }[struct_name]
     out = {}
@@ -211,9 +227,12 @@ def _localm_layout(struct_name: str, layout: str):
 #  Diff
 # --------------------------------------------------------------------------- #
 
-def _check(struct_name: str, header: str, layout: str) -> int:
+def _check(struct_name: str, header: str, model_layout: str, context_layout: str) -> int:
     body = _extract_struct_body(header, struct_name)
     upstream, up_size = _layout(_parse_fields(body))
+    # llama_batch has no layout axis at all; _localm_layout ignores the value
+    # passed for it, so which one we pick here is immaterial for that struct.
+    layout = context_layout if struct_name == "llama_context_params" else model_layout
     localm, lm_size = _localm_layout(struct_name, layout)
 
     print(f"\n=== {struct_name} ===")
@@ -285,19 +304,30 @@ def main() -> int:
 
     total = 0
     seen_layouts = set()
+    seen_context_layouts = set()
     for label, header in headers:
         layout = _header_model_params_layout(header)
+        context_layout = _header_context_params_layout(header)
         seen_layouts.add(layout)
+        seen_context_layouts.add(context_layout)
         print(f"\n############ Checking localm structs against {label} "
-              f"[llama_model_params layout: {layout}] ############")
+              f"[llama_model_params layout: {layout}, "
+              f"llama_context_params layout: {context_layout}] ############")
         for s in _STRUCTS:
-            total += _check(s, header, layout)
+            total += _check(s, header, layout, context_layout)
 
     # A run that silently exercised only ONE layout would pass while leaving the
-    # other unverified, and read exactly like a full pass. Name it.
+    # other unverified, and read exactly like a full pass. Name it. Two
+    # independent axes (see _structs' module docstring), so check both.
     if not args.header and not args.ref and seen_layouts != {"v1", "v2"}:
-        print(f"\nFAIL: expected to check both layouts, only saw {sorted(seen_layouts)} "
-              "- the pinned refs in LLAMA_ABI_REFS no longer straddle the reorder.")
+        print(f"\nFAIL: expected to check both model_params layouts, only saw "
+              f"{sorted(seen_layouts)} - the pinned refs in LLAMA_ABI_REFS no "
+              "longer straddle the model_params reorder.")
+        total += 1
+    if not args.header and not args.ref and seen_context_layouts != {"v1", "v2"}:
+        print(f"\nFAIL: expected to check both context_params layouts, only saw "
+              f"{sorted(seen_context_layouts)} - the pinned refs in LLAMA_ABI_REFS "
+              "no longer straddle the context_params reorder.")
         total += 1
 
     print()

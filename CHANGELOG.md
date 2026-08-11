@@ -202,6 +202,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   reasons. It now names every backend it tried and why each one failed, your
   original pick included, both as it happens and in the final summary (and
   the saved bug report, which only ever captured that final summary).
+- **No llama.cpp backend could load on a freshly provisioned install.**
+  Upstream inserted a new field into the struct localm passes to the native
+  runtime, which shifted several fields' positions in the exact builds
+  `localm setup-llama` was fetching, while the bundled AMD build still used
+  the older layout. localm's own safety check correctly noticed the mismatch
+  and refused to load rather than risk memory corruption - which is exactly
+  what it is supposed to do - but until now it only recognized the older
+  layout, so every freshly downloaded cuda, vulkan and cpu build was refused.
+  Both layouts are recognized now, detected per install, so this affects
+  every platform equally going forward as upstream keeps evolving.
 
 ## [0.1.5rc2] - 2026-08-08
 

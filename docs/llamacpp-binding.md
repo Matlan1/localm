@@ -58,40 +58,66 @@ with no ABI or soname bump, so `_structs.py` stays safe two ways:
 The `sizeof` asserts in `_structs.py` are a self-consistency guard on our own
 definitions; they do NOT validate against the loaded DLL.
 
-### `LlamaModelParams` (72 bytes native, over-allocated to 104)
+### `LlamaModelParams` (72 bytes native, over-allocated to 104) - TWO layouts
 
-| Offset | Type | Field | Default |
-|--------|------|-------|---------|
-| 0 | ptr | `devices` | NULL |
-| 8 | ptr | `tensor_buft_overrides` | NULL |
-| 16 | i32 | `n_gpu_layers` | -1 (all) |
-| 20 | i32 | `split_mode` | 1 (LAYER) |
-| 24 | i32 | `main_gpu` | 0 |
-| 28 | i32 | *(padding)* | |
-| 32 | ptr | `tensor_split` | static default |
-| 40 | ptr | `progress_callback` | NULL |
-| 48 | ptr | `progress_callback_user_data` | NULL |
-| 56 | ptr | `kv_overrides` | NULL |
-| 64-71 | 8×bool | flags: `vocab_only`, `use_mmap`, `use_direct_io`, `use_mlock`, `check_tensors`, `use_extra_bufts`, `no_host`, `no_alloc` | |
+upstream reordered this struct in place at an unchanged size (`main_gpu`
+moved, `load_mode` inserted, three booleans folded into it), so localm binds
+`LlamaModelParamsV1` (<= lemonade b1288 / upstream b10103) and
+`LlamaModelParamsV2` (>= lemonade b1307 / upstream b10105) and picks one per
+loaded library at load time. There is deliberately no bare `LlamaModelParams`
+name - go through `_abi.model_params_class()` / `_api.llama_model_default_params()`.
 
-### `LlamaContextParams` (152 bytes native on b1288; 160 on b9682+, over-allocated to 224)
+| Offset | Type | V1 field | V2 field | Default |
+|--------|------|----------|----------|---------|
+| 0 | ptr | `devices` | `devices` | NULL |
+| 8 | ptr | `tensor_buft_overrides` | `tensor_buft_overrides` | NULL |
+| 16 | i32 | `n_gpu_layers` | `n_gpu_layers` | -1 (all) |
+| 20 | i32 | `split_mode` | `split_mode` | 1 (LAYER) |
+| 24 | i32 | `main_gpu` | `load_mode` | 0 / 1 (MMAP) |
+| 28 | i32 | *(padding)* | `main_gpu` | / 0 |
+| 32 | ptr | `tensor_split` | `tensor_split` | static default |
+| 40 | ptr | `progress_callback` | `progress_callback` | NULL |
+| 48 | ptr | `progress_callback_user_data` | `progress_callback_user_data` | NULL |
+| 56 | ptr | `kv_overrides` | `kv_overrides` | NULL |
+| 64-71 | 8×bool | `vocab_only`, `use_mmap`, `use_direct_io`, `use_mlock`, `check_tensors`, `use_extra_bufts`, `no_host`, `no_alloc` | `vocab_only`, `check_tensors`, `use_extra_bufts`, `no_host`, `no_alloc`, `load_mtp` | |
 
-Key fields:
+Use `_structs.set_use_mmap()` / `get_use_mmap()` rather than naming `use_mmap`
+directly - it has no V2 counterpart.
 
-| Offset | Type | Field | Default |
-|--------|------|-------|---------|
-| 0 | u32 | `n_ctx` | 512 |
-| 4 | u32 | `n_batch` | 2048 |
-| 24 | i32 | `n_threads` | -1 (auto) |
-| 48 | i32 | `flash_attn_type` | -1 (unspecified) |
-| 80 | f32 | `defrag_thold` | -1.0 |
-| 128 | bool | `embeddings` | False |
-| 129 | bool | `offload_kqv` | True |
-| 131 | bool | `op_offload` | True |
+### `LlamaContextParams` (152 bytes native on b1288; 160 on b9682+; 160 on
+b10360+ with an inserted field, over-allocated to 224) - TWO layouts
+
+upstream inserted a new `uint32_t` field, `n_outputs_max_per_seq`, directly
+before `n_threads` sometime between lemonade b1307 (2026-08-04, confirmed
+absent) and ggml-org b10360 (2026-08-11, confirmed present) - both are live in
+production (the bundled AMD ROCm build vs. the fetched cuda/vulkan/cpu builds),
+so localm binds `LlamaContextParamsV1` (no `n_outputs_max_per_seq`) and
+`LlamaContextParamsV2` (with it) and picks one per loaded library, same
+mechanism as `LlamaModelParams` above. No bare `LlamaContextParams` name - go
+through `_abi.context_params_class()` / `_api.llama_context_default_params()`.
+
+Key fields (everything before `n_threads` and everything from `cb_eval`
+onward is named identically in both, so most call sites need no V1/V2
+awareness at all):
+
+| V1 offset | V2 offset | Type | Field | Default |
+|-----------|-----------|------|-------|---------|
+| 0 | 0 | u32 | `n_ctx` | 512 |
+| 4 | 4 | u32 | `n_batch` | 2048 |
+| - | 24 | u32 | `n_outputs_max_per_seq` | 1 |
+| 24 | 28 | i32 | `n_threads` | -1 (auto) |
+| 36 | 40 | i32 | `rope_scaling_type` | -1 (unspecified) |
+| 48 | 52 | i32 | `flash_attn_type` | -1 (unspecified) |
+| 80 | 84 | f32 | `defrag_thold` | -1.0 |
+| 128 | 128 | bool | `embeddings` | False |
+| 129 | 129 | bool | `offload_kqv` | True |
+| 131 | 131 | bool | `op_offload` | True |
 
 b9682+ appended a trailing `ctx_other` (`struct llama_context *`), taking the
 native struct to 160 bytes; localm names it and over-allocates to 224 for
-headroom.
+headroom (unchanged by the V1/V2 split above: V2's extra 4-byte field exactly
+offsets V1's now-unneeded 4-byte manual alignment pad before `cb_eval`, so
+both layouts total 224 bytes).
 
 ### `LlamaBatch` (56 bytes)
 
@@ -109,17 +135,38 @@ typedef struct {
 ## Runtime ABI self-check (`_abi.py`)
 
 `verify_abi(lib)` runs once inside `load_lib()`, right after the native library
-loads and before any by-value struct crosses the FFI boundary. It calls
-`llama_model_default_params()` / `llama_context_default_params()` (no model, no
-GPU needed) and checks a structural fingerprint of the returned defaults:
+loads and before any by-value struct crosses the FFI boundary. It first decides
+WHICH of the two `LlamaModelParams` and (independently) WHICH of the two
+`LlamaContextParams` layouts is loaded - `detect_model_params_layout()` uses two
+independent signals (the `llama_load_mode_*` marker symbols, plus a value
+fingerprint as corroboration); `detect_context_params_layout()` has no marker
+symbol for its insertion, so it rests on a value fingerprint alone. Both fall
+back to their historical V1 layout when inconclusive, and callers must not treat
+that fallback as a determination.
+
+It then calls `llama_model_default_params()` / `llama_context_default_params()`
+(no model, no GPU needed) using the DETECTED classes and checks a structural
+fingerprint of the returned defaults:
 
 - the long-stable `*_UNSPECIFIED == -1` enums (`rope_scaling_type`,
   `pooling_type`, `attention_type`) - three consecutive `-1` int32s that a
-  shifted layout essentially never reproduces;
+  shifted layout essentially never reproduces (read at each layout's own
+  correct offset, since the check is by field name, not raw offset);
 - a valid `split_mode` (0/1/2/3 = NONE/LAYER/ROW/TENSOR) and ordered window sizes
   (`1 <= n_ubatch <= n_batch`, `n_ctx >= 1`, `n_seq_max >= 1`). Absolute size
   magnitudes are only a non-fatal diagnostic, so a future build that defaults
   higher is never refused.
+
+The context_params LAYOUT DECISION itself (as opposed to the keystone check
+above) scores each candidate layout out of 5: `ctx_type` at the position
+immediately before the run is-not-(-1), plus all FOUR consecutive
+`rope_scaling_type`/`pooling_type`/`attention_type`/`flash_attn_type` reads
+being exactly -1. Checking only three of the four (an earlier version of this
+fingerprint) let a struct with exactly `rope_scaling_type` corrupted score
+HIGHER under the wrong layout than the true one under its own - the field sits
+at the position the other layout treats as `ctx_type`, and "not -1" is nearly
+always true, so a wrong-but-plausible score could outscore a genuinely
+partially-corrupted true one. All four fields close that gap.
 
 On a proven mismatch it raises `AbiMismatch` (a reportable `LocalmError`) naming
 the offending field, instead of letting a wrong layout corrupt memory. It is
@@ -148,10 +195,16 @@ A header-diff VERIFIER (not a generator). It parses `llama_model_params` /
 field's natural-alignment offset, and diffs them against `_structs.py`:
 
 ```
-python scripts/check_llama_abi.py                 # the pinned ref (LLAMA_ABI_REF)
+python scripts/check_llama_abi.py                 # BOTH pinned refs (LLAMA_ABI_REFS["v1"], ["v2"])
 python scripts/check_llama_abi.py --ref latest    # newest upstream release
 python scripts/check_llama_abi.py --header path/to/llama.h
 ```
+
+Checks `llama_model_params` and `llama_context_params` as two INDEPENDENT
+layout axes (see above) - a header carrying, say, model_params v2 but
+context_params v1 is diffed correctly against each struct's own matching
+localm class, not assumed to move in lockstep. The no-arg default run fails
+loudly if either axis's pinned refs stop straddling that axis's reorder.
 
 A mid-struct reorder/insert exits non-zero; a purely trailing addition is a note
 (it is absorbed by the reserved pad). A weekly CI job (`abi-check`) runs
@@ -165,8 +218,11 @@ When you change the prebuilt localm fetches (`DEFAULT_URL` or the pinned tag):
 1. run `python scripts/check_llama_abi.py --ref <the build's tag>` and reconcile
    any reported field drift in `_structs.py`;
 2. if a field was reordered or inserted mid-struct, update `_structs.py` to match
-   and re-probe a real build; update the `_abi` anchors only if a keystone moved;
-3. bump `LLAMA_ABI_REF` in `scripts/check_llama_abi.py`.
+   (add a V2 layout + detection if a field's OFFSET moved for only some
+   currently-shipped builds, not all - see `LlamaContextParamsV1`/`V2` above for
+   the pattern) and re-probe a real build; update the `_abi` anchors only if a
+   keystone moved;
+3. bump the relevant entry in `LLAMA_ABI_REFS` in `scripts/check_llama_abi.py`.
 
 ## API Bindings (`_api.py`)
 

@@ -298,13 +298,52 @@ def get_use_mmap(mp) -> bool:
     return bool(mp.use_mmap)
 
 
-# llama_context_params  (152 bytes - probed)
+# TWO llama_context_params LAYOUTS EXIST, BOTH 224 BYTES (152/160 native + pad)
+# -------------------------------------------------------------------------
+# upstream inserted a new uint32_t field, n_outputs_max_per_seq, directly
+# before n_threads, sometime between llama.cpp 07132750825a (lemonade b1307,
+# 2026-08-04 - confirmed ABSENT: re-diffed against that exact commit's
+# include/llama.h) and ggml-org b10360 (2026-08-11 - confirmed PRESENT, both
+# against the header and empirically against the real prebuilt's raw bytes).
+# The exact commit that introduced it was not bisected; only that it falls in
+# that window. Every field from n_threads onward shifts +4 as a result:
 #
-# Added vs the old layout:
-#   n_rs_seq, n_outputs_max, ctx_type, flash_attn_type,
-#   op_offload, swa_full, kv_unified, samplers, n_samplers
+#     offset   V1 (<= 07132750825a /       V2 (>= somewhere before b10360)
+#              lemonade b1307, upstream
+#              b9870 and older, confirmed)
+#     [20]     n_outputs_max                    n_outputs_max
+#     [24]     n_threads                        n_outputs_max_per_seq  <-- INSERTED
+#     [28]     n_threads_batch                  n_threads               <-- MOVED
+#     [32]     ctx_type                         n_threads_batch
+#     [36]     rope_scaling_type                ctx_type
+#     [40]     pooling_type                     rope_scaling_type
+#     [44]     attention_type                   pooling_type
+#     [48]     flash_attn_type                  attention_type
+#     [52]     rope_freq_base                   flash_attn_type
+#     [84]     _pad1 (alignment filler)         (none - no longer needed:
+#                                                 defrag_thold now ends at 88,
+#                                                 already 8-aligned for cb_eval)
+#     [88]     cb_eval                          cb_eval
+#
+# This is why localm's own AbiMismatch check (a keystone fingerprint reading
+# rope_scaling_type/pooling_type/attention_type at fixed offsets, expecting
+# -1) started refusing to load ANY freshly-provisioned build: those three
+# fields really did move, and a version that only loosened the check without
+# adding a second layout would have accepted a genuinely wrong offset on
+# whichever of V1/V2 it did NOT calibrate against - exactly the corruption
+# risk the check exists to catch. localm therefore ships BOTH layouts and
+# picks one per loaded library at load time (`_abi.detect_context_params_layout`),
+# same as the model_params V1/V2 split above. There is deliberately NO bare
+# `LlamaContextParams` name, for the same reason model_params has none: a
+# caller must go through `_abi.context_params_class()` /
+# `_api.llama_context_default_params()`.
+#
+# Fields that did not move (everything before n_threads, and everything from
+# cb_eval onward) are named identically in both classes, so call sites that
+# only set/read those - which is every current caller - work unchanged
+# regardless of which layout is bound.
 
-class LlamaContextParams(ctypes.Structure):
+class LlamaContextParamsV1(ctypes.Structure):
     _fields_ = [
         # --- batch / sequence limits ---
         ("n_ctx",             ctypes.c_uint32),   # [0]
@@ -363,11 +402,92 @@ class LlamaContextParams(ctypes.Structure):
         ("_reserved",   ctypes.c_uint8 * 64),     # [160]
     ]
 
-# Self-consistency guard ONLY (NOT a check against the DLL - that is
-# _abi.verify_abi). 152 native bytes + 8 (ctx_other) + 64 reserved = 224.
-assert ctypes.sizeof(LlamaContextParams) == 224, (
-    f"LlamaContextParams size mismatch: {ctypes.sizeof(LlamaContextParams)} != 224"
+
+class LlamaContextParamsV2(ctypes.Structure):
+    _fields_ = [
+        # --- batch / sequence limits ---
+        ("n_ctx",             ctypes.c_uint32),   # [0]
+        ("n_batch",           ctypes.c_uint32),   # [4]
+        ("n_ubatch",          ctypes.c_uint32),   # [8]
+        ("n_seq_max",         ctypes.c_uint32),   # [12]
+        ("n_rs_seq",          ctypes.c_uint32),   # [16] recurrent-state snapshots
+        ("n_outputs_max",     ctypes.c_uint32),   # [20] max outputs per ubatch
+        ("n_outputs_max_per_seq", ctypes.c_uint32), # [24] max outputs per sequence
+        # --- threading ---
+        ("n_threads",         ctypes.c_int32),    # [28]
+        ("n_threads_batch",   ctypes.c_int32),    # [32]
+        # --- encoding type enums ---
+        ("ctx_type",          ctypes.c_int32),    # [36] LLAMA_CONTEXT_TYPE_*
+        ("rope_scaling_type", ctypes.c_int32),    # [40] default -1
+        ("pooling_type",      ctypes.c_int32),    # [44] default -1
+        ("attention_type",    ctypes.c_int32),    # [48] default -1
+        ("flash_attn_type",   ctypes.c_int32),    # [52] default -1
+        # --- RoPE / YaRN floats ---
+        ("rope_freq_base",    ctypes.c_float),    # [56]
+        ("rope_freq_scale",   ctypes.c_float),    # [60]
+        ("yarn_ext_factor",   ctypes.c_float),    # [64] -1 = from model
+        ("yarn_attn_factor",  ctypes.c_float),    # [68]
+        ("yarn_beta_fast",    ctypes.c_float),    # [72]
+        ("yarn_beta_slow",    ctypes.c_float),    # [76]
+        ("yarn_orig_ctx",     ctypes.c_uint32),   # [80]
+        ("defrag_thold",      ctypes.c_float),    # [84]
+        # --- backend eval callback ---
+        # No manual pad here: defrag_thold now ends at byte 88, which is
+        # already 8-byte aligned for the pointer below - unlike V1, where an
+        # explicit pad was needed because it is one uint32_t field shorter.
+        ("cb_eval",           ctypes.c_void_p),   # [88]
+        ("cb_eval_user_data", ctypes.c_void_p),   # [96]
+        # --- KV cache types ---
+        ("type_k",            ctypes.c_int32),    # [104] ggml_type
+        ("type_v",            ctypes.c_int32),    # [108] ggml_type
+        # --- abort callback ---
+        ("abort_callback",      ctypes.c_void_p), # [112]
+        ("abort_callback_data", ctypes.c_void_p), # [120]
+        # --- boolean flags (kept together per llama.h comment) ---
+        ("embeddings",  ctypes.c_bool),           # [128]
+        ("offload_kqv", ctypes.c_bool),           # [129]
+        ("no_perf",     ctypes.c_bool),           # [130]
+        ("op_offload",  ctypes.c_bool),           # [131]
+        ("swa_full",    ctypes.c_bool),            # [132]
+        ("kv_unified",  ctypes.c_bool),           # [133]
+        ("_pad2",       ctypes.c_uint8 * 2),      # [134-135]
+        # --- sampler chain hooks ---
+        ("samplers",    ctypes.c_void_p),         # [136]
+        ("n_samplers",  ctypes.c_uint64),         # [144]
+        ("ctx_other",   ctypes.c_void_p),         # [152] struct llama_context*
+        # Forward-compat headroom (see the module docstring): future trailing
+        # fields land here, keep their native default via the default_params
+        # round-trip, and never cause llama_init_from_model to read past us.
+        ("_reserved",   ctypes.c_uint8 * 64),     # [160]
+    ]
+
+# Self-consistency guards ONLY (these do NOT validate against the DLL - that
+# is _abi.verify_abi). Both layouts land at the same total size: V2 adds the
+# 4-byte n_outputs_max_per_seq field but no longer needs V1's 4-byte manual
+# alignment pad before cb_eval, so the two changes exactly cancel out.
+assert ctypes.sizeof(LlamaContextParamsV1) == 224, (
+    f"LlamaContextParamsV1 size mismatch: {ctypes.sizeof(LlamaContextParamsV1)} != 224"
 )
+assert ctypes.sizeof(LlamaContextParamsV2) == 224, (
+    f"LlamaContextParamsV2 size mismatch: {ctypes.sizeof(LlamaContextParamsV2)} != 224"
+)
+for _cls, _off in (
+    (LlamaContextParamsV1, {"n_outputs_max": 20, "n_threads": 24,
+                            "n_threads_batch": 28, "ctx_type": 32,
+                            "rope_scaling_type": 36, "pooling_type": 40,
+                            "attention_type": 44, "flash_attn_type": 48,
+                            "cb_eval": 88, "ctx_other": 152}),
+    (LlamaContextParamsV2, {"n_outputs_max": 20, "n_outputs_max_per_seq": 24,
+                            "n_threads": 28, "n_threads_batch": 32,
+                            "ctx_type": 36, "rope_scaling_type": 40,
+                            "pooling_type": 44, "attention_type": 48,
+                            "flash_attn_type": 52, "cb_eval": 88,
+                            "ctx_other": 152}),
+):
+    for _name, _want in _off.items():
+        _got = getattr(_cls, _name).offset
+        assert _got == _want, f"{_cls.__name__}.{_name} at {_got}, expected {_want}"
+del _cls, _off, _name, _want, _got
 
 
 # llama_sampler_chain_params  (1 byte + padding)

@@ -17,7 +17,6 @@ from ._loader import load_lib
 from ._structs import (
     LlamaBatch,
     LlamaChatMessage,
-    LlamaContextParams,
     LlamaSamplerChainParams,
     llama_token,
 )
@@ -33,6 +32,18 @@ def _model_params_class():
     ``_api -> _abi -> _loader`` import order acyclic."""
     from ._abi import model_params_class, model_params_layout
     return model_params_class(model_params_layout())
+
+
+def _context_params_class():
+    """The ``llama_context_params`` ctypes class matching the LOADED runtime.
+
+    upstream inserted a new field (``n_outputs_max_per_seq``) partway through
+    that struct (see ``_structs``' docstring), so - same reasoning as
+    ``_model_params_class`` above - the class cannot be a module constant.
+    Resolved once per process by ``_abi.context_params_layout``; imported
+    lazily to keep the ``_api -> _abi -> _loader`` import order acyclic."""
+    from ._abi import context_params_class, context_params_layout
+    return context_params_class(context_params_layout())
 
 # Opaque handle types
 LlamaModel   = ctypes.c_void_p   # struct llama_model*
@@ -78,8 +89,16 @@ def llama_model_default_params():
     return fn()
 
 
-def llama_context_default_params() -> LlamaContextParams:
-    fn = _bind("llama_context_default_params", LlamaContextParams)
+def llama_context_default_params():
+    """Native default context params, as an instance of the LOADED build's
+    layout. The concrete class is ``LlamaContextParamsV1`` or ``...V2`` -
+    callers must not assume either (same contract as
+    ``llama_model_default_params`` above). Every field this codebase sets or
+    reads (``n_ctx``, ``n_batch``, ``rope_scaling_type``, ``type_k``, ...) is
+    named identically in both, since the V1/V2 split is a single INSERTED
+    field (``n_outputs_max_per_seq``), not a rename or reorder of anything
+    already in use - see ``_structs``' docstring."""
+    fn = _bind("llama_context_default_params", _context_params_class())
     return fn()
 
 
@@ -126,13 +145,24 @@ def llama_free_model(model: ctypes.c_void_p) -> None:
 
 def llama_init_from_model(
     model: ctypes.c_void_p,
-    params: LlamaContextParams,
+    params,
 ) -> Optional[ctypes.c_void_p]:
+    cls = _context_params_class()
+    if not isinstance(params, cls):
+        # Same corruption risk llama_load_model_from_file guards against
+        # above, on the other params struct: marshaling the wrong
+        # context_params layout by value lands rope_scaling_type/pooling_type/
+        # attention_type/... at the wrong native offsets with no error from
+        # ctypes and no crash from llama.cpp. Refuse loudly instead.
+        raise TypeError(
+            f"context params are {type(params).__name__} but the loaded "
+            f"llama runtime uses {cls.__name__}; build them with "
+            "_api.llama_context_default_params()")
     fn = _bind(
         "llama_init_from_model",
         LlamaContext,
         LlamaModel,
-        LlamaContextParams,
+        cls,
     )
     result = fn(model, params)
     return result if result else None

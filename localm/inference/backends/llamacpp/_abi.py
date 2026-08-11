@@ -60,7 +60,8 @@ from localm.bugreport import LocalmError
 
 from ._structs import (
     _VALID_LOAD_MODES,
-    LlamaContextParams,
+    LlamaContextParamsV1,
+    LlamaContextParamsV2,
     LlamaModelParamsV1,
     LlamaModelParamsV2,
 )
@@ -74,6 +75,17 @@ SKIP_ENV = "LOCALM_SKIP_ABI_CHECK"
 # reorder cannot be detected from sizeof.
 MODEL_PARAMS_V1 = "v1"   # <= 7c158fbb4aec: use_mmap/use_direct_io/use_mlock, main_gpu@24
 MODEL_PARAMS_V2 = "v2"   # >= the load_mode reorder: load_mode@24, main_gpu@28, load_mtp
+
+# The two llama_context_params layouts localm binds. See _structs' module
+# docstring for the byte-level difference; both are 224 bytes (the V2 field
+# insertion and V1's now-unneeded alignment pad exactly cancel out), which is
+# why this reorder ALSO cannot be detected from sizeof - same shape as the
+# model_params split above, distinct namespace deliberately (a caller passing
+# a MODEL_PARAMS_* constant into a context_params_class() call, or vice versa,
+# must get a clear "not a valid layout" rather than silently doing something
+# plausible-looking with the wrong axis).
+CONTEXT_PARAMS_V1 = "ctx_v1"  # <= 07132750825a (lemonade b1307): no n_outputs_max_per_seq
+CONTEXT_PARAMS_V2 = "ctx_v2"  # >= somewhere before b10360: n_outputs_max_per_seq@24 inserted
 
 # Symbols that appear in llama.h in the same change as the V2 reorder. Probed at
 # 8 upstream ggml-org tags spanning the flip (b9870, b10000, b10050, b10080,
@@ -97,6 +109,69 @@ _FINGERPRINT = {
     MODEL_PARAMS_V1: ((24, "i", 0), (65, "B", 1), (69, "B", 1)),
     MODEL_PARAMS_V2: ((24, "i", 1), (65, "B", 0), (66, "B", 1)),
 }
+
+# Byte offsets that llama_context_default_params() must produce for each
+# context_params layout. Unlike the model_params reorder, this insertion
+# shipped no accompanying marker SYMBOL (a plain struct field, not a new API),
+# so layout detection here rests on the value fingerprint ALONE - there is no
+# structural probe to corroborate or contradict it against.
+#
+# ctx_type sits immediately before the four-field run of long-stable
+# UNSPECIFIED(-1) enums (rope_scaling_type/pooling_type/attention_type/
+# flash_attn_type - see the keystone check below), 4 bytes earlier in V1 than
+# in V2 (n_outputs_max_per_seq was inserted directly before n_threads,
+# shifting everything from n_threads onward by +4 - see _structs' module
+# docstring). ctx_type's own default is a small enum ("set the context type
+# e.g. MTP") that does NOT use the -1 UNSPECIFIED convention the other four
+# do (measured 0 on a real b10360 build), so "the byte immediately before a
+# run of -1s is itself NOT -1" reliably locates which offset ctx_type is
+# actually at, hence which layout is loaded - each entry below is
+# (ctx_type_offset, first_offset_of_the_-1_run).
+#
+# ALL FOUR of the run's fields are checked, not three: an earlier version
+# checked only rope_scaling_type/pooling_type/attention_type and MISDETECTED
+# a real-shaped V1 struct as V2 whenever exactly rope_scaling_type (V1's
+# FIRST run field, which is also V2's ctx_type position) was the one
+# corrupted - virtually any non-(-1) value there simultaneously weakens V1's
+# own run AND satisfies V2's "ctx_type looks plausible" check, while leaving
+# V2's own three fields (which V1's corruption never touches) fully intact.
+# Caught by a test proving verify_abi() still refuses a genuinely corrupted
+# keystone (test_keystone_enum_drift_refuses[rope_scaling_type-0]) once the
+# test double was fixed to faithfully reinterpret bytes through whatever
+# class detection actually selects, instead of always handing back the
+# original (correctly-typed) fixture object regardless of restype. Including
+# flash_attn_type breaks the tie: it is genuinely -1 only under the TRUE
+# layout's own run, so the wrong hypothesis loses the one point that used to
+# let it win outright, and the ambiguous case now correctly reports
+# INCONCLUSIVE (falling back to CONTEXT_PARAMS_V1) rather than a confident
+# wrong answer.
+_CONTEXT_FINGERPRINT = {
+    CONTEXT_PARAMS_V1: (32, 36),
+    CONTEXT_PARAMS_V2: (36, 40),
+}
+
+
+def _fingerprint_context_layout(raw: bytes) -> Optional[str]:
+    """Which llama_context_params layout *raw* is consistent with, or None.
+
+    Scored out of 5 per layout (ctx_type-is-not-(-1) plus all FOUR -1 reads
+    from the run immediately after it - rope_scaling_type/pooling_type/
+    attention_type/flash_attn_type) - same never-upgrade-a-weak-signal shape
+    as _fingerprint_layout above: a clear, strictly-ahead majority (allowing
+    one miss) wins; a tie or weak signal is INCONCLUSIVE and must never be
+    treated as a determination on its own (see the module docstring's
+    never-false-positive priority; detect_context_params_layout falls back to
+    CONTEXT_PARAMS_V1 when this returns None)."""
+    scores = {}
+    for layout, (ctx_off, run_off) in _CONTEXT_FINGERPRINT.items():
+        try:
+            ctx_val = struct.unpack_from("<i", raw, ctx_off)[0]
+            run = struct.unpack_from("<iiii", raw, run_off)
+        except struct.error:
+            return None
+        scores[layout] = (ctx_val != -1) + sum(v == -1 for v in run)
+    best, runner = sorted(scores.items(), key=lambda kv: -kv[1])[:2]
+    return best[0] if best[1] >= 4 and best[1] > runner[1] else None
 
 # ggml versions that BRACKET the llama_sampler_init_penalties signature change
 # (upstream 935cad6497e8, 2026-08-04 06:02Z, which prepended an int32 n_vocab).
@@ -173,6 +248,7 @@ class AbiVerdict:
     diagnostics: List[str] = field(default_factory=list)   # value drift notes (not fatal)
     detail: str = ""                                       # human one-liner
     layout: str = ""                                       # MODEL_PARAMS_V1 / _V2
+    context_layout: str = ""                                # CONTEXT_PARAMS_V1 / _V2
 
     @property
     def ok(self) -> bool:
@@ -301,9 +377,49 @@ def model_params_class(layout: str):
     return LlamaModelParamsV2 if layout == MODEL_PARAMS_V2 else LlamaModelParamsV1
 
 
+def detect_context_params_layout(
+    lib: ctypes.CDLL,
+) -> Tuple[str, List[str], bool]:
+    """Decide which ``llama_context_params`` layout *lib* uses.
+
+    Returns ``(layout, notes, assumed)``. Unlike
+    :func:`detect_model_params_layout`, there is no accompanying marker SYMBOL
+    for the ``n_outputs_max_per_seq`` insertion (a plain struct field, not a
+    new API), so this rests on the value fingerprint alone - a single signal,
+    not two independent ones to cross-check. ``assumed`` is True when the
+    fingerprint was inconclusive and CONTEXT_PARAMS_V1 (the layout localm
+    shipped before this field existed anywhere, and the one every
+    currently-known build predates the insertion on) was taken as a fallback -
+    callers must not treat that as a determination, same caveat as
+    :func:`detect_model_params_layout`'s ``assumed``. Never raises: a
+    mechanism failure yields the fallback plus a note, because refusing to
+    load over a failed probe would be a worse outcome than the status quo."""
+    notes: List[str] = []
+    layout: Optional[str] = None
+    try:
+        layout = _fingerprint_context_layout(
+            _read_raw(lib, "llama_context_default_params"))
+    except Exception as e:  # noqa: BLE001 - probe failure must not condemn the lib
+        notes.append(f"context_params fingerprint could not be read ({e})")
+
+    assumed = layout is None
+    if assumed:
+        layout = CONTEXT_PARAMS_V1
+        notes.append(
+            "context_params layout probe was inconclusive; assuming the "
+            f"historical {CONTEXT_PARAMS_V1} llama_context_params layout")
+    return layout, notes, assumed
+
+
+def context_params_class(layout: str):
+    """The ctypes class for *layout*."""
+    return (LlamaContextParamsV2 if layout == CONTEXT_PARAMS_V2
+            else LlamaContextParamsV1)
+
+
 def _read_default_params(
-    lib: ctypes.CDLL, layout: str,
-) -> Tuple[object, LlamaContextParams]:
+    lib: ctypes.CDLL, layout: str, context_layout: str,
+) -> Tuple[object, object]:
     """Call the default-params functions directly off *lib*.
 
     Bound on the handle (not via :mod:`._api`) so this never re-enters
@@ -313,12 +429,12 @@ def _read_default_params(
     mfn.restype = model_params_class(layout)
     mfn.argtypes = []
     cfn = lib.llama_context_default_params
-    cfn.restype = LlamaContextParams
+    cfn.restype = context_params_class(context_layout)
     cfn.argtypes = []
     return mfn(), cfn()
 
 
-def evaluate(mp, cp: LlamaContextParams) -> AbiVerdict:
+def evaluate(mp, cp) -> AbiVerdict:
     """Score real default-params structs against the expected layout.
 
     Refusal (``status == "mismatch"``) is driven only by structural invariants +
@@ -326,8 +442,12 @@ def evaluate(mp, cp: LlamaContextParams) -> AbiVerdict:
     regardless of default-value drift. Exact stable values are recorded as
     non-fatal diagnostics.
 
-    The layout of *mp* is taken from its class, so the model_params checks below
-    read the fields at the offsets that layout actually uses."""
+    The layout of *mp* AND *cp* is taken from their classes (model_params
+    V1/V2, context_params V1/V2 - independent axes, see _structs' module
+    docstring), so every check below reads each field at the offset its
+    actual bound layout uses. This is why the checks name fields, never raw
+    offsets: ``getattr(cp, name)`` resolves correctly regardless of which of
+    the two context_params layouts *cp* actually is."""
     failures: List[str] = []
     diags: List[str] = []
     is_v2 = isinstance(mp, LlamaModelParamsV2)
@@ -336,8 +456,13 @@ def evaluate(mp, cp: LlamaContextParams) -> AbiVerdict:
     # LLAMA_{ROPE_SCALING,POOLING,ATTENTION}_TYPE_UNSPECIFIED have been -1 for
     # years; default_params sets them so the model's own config decides. Changing
     # them would override every model's trained settings, so upstream will not.
-    # Three consecutive int32 reading exactly -1 at 36/40/44 under a shifted
-    # layout is effectively impossible - this is the layout fingerprint.
+    # Three consecutive int32 reading exactly -1 under a shifted layout is
+    # effectively impossible - this is the layout fingerprint. (On the V1
+    # layout that is offsets 36/40/44; on V2, where upstream inserted a new
+    # n_outputs_max_per_seq field before n_threads sometime between lemonade
+    # b1307 and ggml-org b10360, offsets 40/44/48 - see _structs' docstring
+    # for the full history. Named-field access below makes this check itself
+    # oblivious to which offsets are actually in play.)
     for name in ("rope_scaling_type", "pooling_type", "attention_type"):
         val = getattr(cp, name)
         if val != -1:
@@ -433,13 +558,16 @@ def evaluate(mp, cp: LlamaContextParams) -> AbiVerdict:
             diags.append(f"{label} = {got} (typical default {exp})")
 
     layout = MODEL_PARAMS_V2 if is_v2 else MODEL_PARAMS_V1
+    context_layout = (CONTEXT_PARAMS_V2 if isinstance(cp, LlamaContextParamsV2)
+                       else CONTEXT_PARAMS_V1)
     if failures:
         return AbiVerdict(
             status="mismatch", failures=failures, diagnostics=diags, layout=layout,
+            context_layout=context_layout,
             detail=f"{len(failures)} structural ABI check(s) failed",
         )
     return AbiVerdict(
-        status="ok", diagnostics=diags, layout=layout,
+        status="ok", diagnostics=diags, layout=layout, context_layout=context_layout,
         detail="ok (drift noted)" if diags else "ok",
     )
 
@@ -488,6 +616,12 @@ _detected_layout: Optional[str] = None
 # exactly what penalties_arity must not do.
 _layout_assumed: bool = False
 
+# Independent axis, same caching contract - see model_params_layout /
+# context_params_layout below and _structs' module docstring for why
+# model_params and context_params are two separate V1/V2 decisions.
+_detected_context_layout: Optional[str] = None
+_context_layout_assumed: bool = False
+
 
 def model_params_layout(lib: Optional[ctypes.CDLL] = None) -> str:
     """The ``llama_model_params`` layout of the loaded runtime.
@@ -504,6 +638,21 @@ def model_params_layout(lib: Optional[ctypes.CDLL] = None) -> str:
         layout, _notes, _contra, assumed = detect_model_params_layout(lib)
         _detected_layout, _layout_assumed = layout, assumed
     return _detected_layout
+
+
+def context_params_layout(lib: Optional[ctypes.CDLL] = None) -> str:
+    """The ``llama_context_params`` layout of the loaded runtime.
+
+    Resolved once per process, same caching contract as
+    :func:`model_params_layout` (including on the SKIP path)."""
+    global _detected_context_layout, _context_layout_assumed
+    if _detected_context_layout is None:
+        if lib is None:
+            from ._loader import load_lib
+            lib = load_lib()
+        layout, _notes, assumed = detect_context_params_layout(lib)
+        _detected_context_layout, _context_layout_assumed = layout, assumed
+    return _detected_context_layout
 
 
 def _ggml_version(lib: ctypes.CDLL) -> Optional[Tuple[int, ...]]:
@@ -625,17 +774,32 @@ def verify_abi(lib: ctypes.CDLL, lib_path: str = "") -> AbiVerdict:
     once per process from ``load_lib`` (cached with the lib handle), so it adds
     no per-call overhead."""
     global _detected_layout, _layout_assumed
+    global _detected_context_layout, _context_layout_assumed
 
     # Detection runs BEFORE the skip check and never raises. Which layout to
     # bind is not part of the safety CHECK: the escape hatch exists to let a
     # user past a false alarm, and it must not silently downgrade them to the
     # wrong struct class, which is the very corruption it is meant to work
     # around. `contradiction` is the one detection outcome that IS a refusal.
+    #
+    # Two INDEPENDENT layout decisions - model_params (dual-signal: symbol +
+    # value) and context_params (value fingerprint only, no marker symbol
+    # exists for its insertion) - see _structs' module docstring. Only
+    # model_params has a `contradiction` outcome, because only it has two
+    # signals that can disagree; context_params either resolves to a layout
+    # or falls back, never disagrees with itself.
     layout, notes, contradiction, assumed = detect_model_params_layout(lib)
     _detected_layout = layout
     _layout_assumed = assumed
     for note in notes:
         _log(f"llama model_params layout probe: {note}", warn=True)
+
+    context_layout, ctx_notes, ctx_assumed = detect_context_params_layout(lib)
+    _detected_context_layout = context_layout
+    _context_layout_assumed = ctx_assumed
+    for note in ctx_notes:
+        _log(f"llama context_params layout probe: {note}", warn=True)
+    notes = notes + ctx_notes
 
     # Log the contradiction BEFORE the skip check, and carry it into the skipped
     # verdict. The escape hatch suppresses the REFUSAL, and it must not also
@@ -653,22 +817,24 @@ def verify_abi(lib: ctypes.CDLL, lib_path: str = "") -> AbiVerdict:
              "layout can corrupt memory; unset it once the runtime is known good.",
              warn=True)
         return _remember(AbiVerdict(
-            status="skipped", layout=layout,
+            status="skipped", layout=layout, context_layout=context_layout,
             diagnostics=notes + ([contradiction] if contradiction else []),
             detail=f"skipped via {SKIP_ENV}"))
 
     if contradiction:
         verdict = _remember(AbiVerdict(
             status="mismatch", failures=[contradiction], diagnostics=notes,
-            layout=layout, detail="model_params layout probes disagree"))
+            layout=layout, context_layout=context_layout,
+            detail="model_params layout probes disagree"))
         raise _mismatch_error(verdict, lib_path)
 
     try:
-        mp, cp = _read_default_params(lib, layout)
+        mp, cp = _read_default_params(lib, layout, context_layout)
     except Exception as e:  # noqa: BLE001 - any mechanism failure must fail open
         _log(f"llama ABI self-check could not run ({e}); continuing unverified.",
              warn=True)
         return _remember(AbiVerdict(status="unchecked", layout=layout,
+                                    context_layout=context_layout,
                                     detail=f"mechanism error: {e}"))
 
     verdict = _remember(evaluate(mp, cp))
