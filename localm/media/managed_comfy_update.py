@@ -27,6 +27,8 @@ Design + locked decisions: dev-notes/DESIGN-localm-managed-comfyui-2026-07-08.md
 from __future__ import annotations
 
 import json
+import os
+import shutil
 from pathlib import Path
 from typing import Optional
 
@@ -38,6 +40,113 @@ from localm.media.managed_comfy_fresh import (
     COMFYUI_PINNED_COMMIT, COMFYUI_PINNED_VERSION, COMFYUI_REPO)
 from localm.media.managed_comfy_provision import (
     MARKER_FILENAME, ProgressCb, ProvisionResult, _emit, _run, _tail)
+
+
+# --------------------------------------------------------------------------- #
+#  Single-flight: only ONE update may mutate the managed checkout at a time.   #
+# --------------------------------------------------------------------------- #
+# An update is a long MUTATION of one working tree: fetch, checkout to a new commit,
+# re-apply the patch set, and on failure roll the checkout back and re-apply the OLD
+# patch set. Two of those interleaved is not a subtle race - it is a corrupted
+# checkout, or one call's rollback restoring over the other's in-flight update.
+#
+# This was safe only by accident of having exactly ONE caller (the CLI). Adding the
+# GUI route (#1201) made it two, which is the same shape as #1147 (ensure_comfy: no
+# lock across check-then-launch, second trigger added, both spawned) and #1189
+# (apply(): no single-flight, a second call's backup captured the NEW build).
+#
+# It MUST be cross-process, not a threading.Lock: the GUI route does not call this
+# function in-process at all, it spawns `python -m localm comfy update` as a CHILD
+# PROCESS, so the two contenders are separate interpreters. (managed_comfy._remove_lock
+# is a threading.Lock and is correct for ITS job, which is in-process only - do not
+# copy it here, it would guard nothing.)
+#
+# mkdir is ATOMIC; stat-then-create is not - two callers can both observe "free" in
+# the gap and both proceed, which is check-then-act with no atomicity.
+_LOCK_OWNER = "owner.json"
+
+
+def _update_lock_path() -> Path:
+    """Where the update lock lives: a SIBLING of the managed checkout, never inside
+    it, so the update's own ``git checkout --force`` can never disturb the lock that
+    is protecting it."""
+    root = mc.managed_comfy_paths().root
+    return root.parent / (root.name + ".update.lock")
+
+
+def _lock_holder_pid(lock: Path) -> Optional[int]:
+    """The pid recorded in the lock, or None when it cannot be read."""
+    try:
+        data = json.loads((lock / _LOCK_OWNER).read_text(encoding="utf-8"))
+        pid = data.get("pid") if isinstance(data, dict) else None
+        return pid if isinstance(pid, int) else None
+    except (OSError, ValueError):
+        return None
+
+
+def _acquire_update_lock() -> tuple:
+    """Take the update lock. Returns ``(True, "")`` or ``(False, <honest reason>)``.
+
+    FAILS FAST rather than waiting: an update takes minutes, and a caller blocked on a
+    lock is indistinguishable from a hang - the GUI would show a spinner forever and
+    the CLI would look wedged.
+
+    Staleness is judged by PID LIVENESS, never by elapsed time. The operation is
+    unbounded (a fetch over a slow link, a dependency reinstall), so any fixed timeout
+    would eventually reclaim a LIVE holder's lock and produce the exact concurrent
+    mutation this exists to prevent. ``pid_alive`` is conservative - when it genuinely
+    cannot tell it returns True - so an uncertain answer keeps the lock rather than
+    stealing it."""
+    from localm.instances import pid_alive
+    lock = _update_lock_path()
+    for attempt in (1, 2):
+        try:
+            lock.parent.mkdir(parents=True, exist_ok=True)
+            os.mkdir(str(lock))                      # ATOMIC: creates or raises
+        except FileExistsError:
+            pid = _lock_holder_pid(lock)
+            if pid is not None and not pid_alive(pid):
+                # The holder is provably gone (a crash, a killed process). Reclaim
+                # once, then retry the atomic create - never assume the retry wins,
+                # another caller may have taken it in between.
+                logger.debug("reclaiming stale comfy-update lock from dead pid %s", pid)
+                try:
+                    shutil.rmtree(str(lock))
+                except OSError as e:
+                    return False, (f"An earlier ComfyUI update left a lock at {lock} "
+                                   f"that could not be cleared ({e}). Remove that "
+                                   "folder and try again.")
+                if attempt == 1:
+                    continue
+                return False, "Another ComfyUI update is already running."
+            if pid is None:
+                # Cannot tell who holds it: do NOT steal (that is how two updates end
+                # up interleaved). Say exactly how to clear it by hand instead.
+                return False, (f"A ComfyUI update lock exists at {lock} but its owner "
+                               "could not be read. If no update is running, remove "
+                               "that folder and try again.")
+            return False, (f"Another ComfyUI update is already running (process {pid}). "
+                           "Wait for it to finish, then try again.")
+        except OSError as e:
+            return False, f"Could not take the ComfyUI update lock at {lock}: {e}"
+        # Won the create. Record the owner IMMEDIATELY so a contender can judge us.
+        try:
+            (lock / _LOCK_OWNER).write_text(
+                json.dumps({"pid": os.getpid()}), encoding="utf-8")
+        except OSError as e:
+            logger.debug("could not write comfy-update lock owner: %s", e)
+        return True, ""
+    return False, "Another ComfyUI update is already running."
+
+
+def _release_update_lock() -> None:
+    """Drop the lock. Never raises: a failure to clean up must not turn a SUCCESSFUL
+    update into a reported failure - and a leftover lock is self-healing anyway, since
+    the next caller finds our dead pid and reclaims it."""
+    try:
+        shutil.rmtree(str(_update_lock_path()))
+    except OSError as e:
+        logger.debug("could not remove comfy-update lock: %s", e)
 
 
 def _rev_parse_head(root: Path) -> Optional[str]:
@@ -124,6 +233,14 @@ def update_managed_comfy(cfg: Optional[dict] = None, *, on_progress: ProgressCb 
                        "the non-git copy fallback), so a pinned-version update is not "
                        "possible. Reinstall it: 'localm comfy remove' then "
                        "'localm comfy setup'.")
+
+    # Everything from here on MUTATES the working tree (fetch, checkout, patch, and
+    # the rollback's own checkout+patch). Take the single-flight lock first; a second
+    # update is refused honestly rather than interleaved. Read-only refusals above
+    # (not installed, no git history) deliberately never take it.
+    acquired, busy = _acquire_update_lock()
+    if not acquired:
+        return _result(False, "busy", busy)
 
     def _rollback(reason: str) -> ProvisionResult:
         """Return the managed source to prev_commit and re-apply the patch set, then
@@ -230,3 +347,9 @@ def update_managed_comfy(cfg: Optional[dict] = None, *, on_progress: ProgressCb 
     except Exception as e:  # last resort: roll back, never a half-claimed success
         logger.debug("update_managed_comfy failed", exc_info=True)
         return _rollback(f"Update failed: {e}")
+    finally:
+        # Released on EVERY path - success, error, rollback, and the rollback-also-
+        # failed path above. A lock left behind by a crash is self-healing (the next
+        # caller finds our dead pid and reclaims it), but leaking one on an ordinary
+        # error would wedge every later update until someone deleted a folder by hand.
+        _release_update_lock()

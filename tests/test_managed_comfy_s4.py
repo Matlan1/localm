@@ -536,3 +536,129 @@ def test_cli_update_dispatches_to_updater(cli_runner, monkeypatch):
     assert res.exit_code == 0, res.output
     assert seen.get("ran") is True
     assert "updated" in res.output.lower()
+
+
+# --------------------------------------------------------------------------- #
+#  SINGLE-FLIGHT: only one update may mutate the checkout at a time            #
+# --------------------------------------------------------------------------- #
+# update_managed_comfy is a long MUTATION of one working tree (fetch, checkout,
+# patch, and on failure a rollback checkout + patch). It had no lock, which was safe
+# only by accident of having exactly ONE caller (the CLI). The GUI Update route
+# (#1201) made it two, and the GUI one runs `python -m localm comfy update` as a
+# CHILD PROCESS - so the contenders are separate interpreters and an in-process
+# threading.Lock (managed_comfy._remove_lock's shape) would guard nothing.
+
+def _lock_dir():
+    from localm.media import managed_comfy_update as upd
+    return upd._update_lock_path()
+
+
+def _installed_git_checkout(home):
+    """An installed managed ComfyUI that reads as a git checkout, so update gets past
+    its read-only refusals and reaches the locked section."""
+    import json as _json
+    from localm.media.managed_comfy_provision import MARKER_FILENAME
+    paths = mc.managed_comfy_paths()
+    paths.main_py.parent.mkdir(parents=True, exist_ok=True)
+    paths.main_py.write_text("# stand-in\n", encoding="utf-8")
+    paths.venv_python.parent.mkdir(parents=True, exist_ok=True)
+    paths.venv_python.write_text("", encoding="utf-8")
+    (paths.root / MARKER_FILENAME).write_text(_json.dumps({"commit": "old"}),
+                                              encoding="utf-8")
+    return paths
+
+
+def test_update_refuses_while_a_LIVE_holder_owns_the_lock(home, monkeypatch):
+    """The core guarantee. A second update must be REFUSED, not interleaved - two
+    fetch/checkout/patch sequences on one tree corrupt it."""
+    import json as _json
+    from localm.media import managed_comfy_update as upd
+    _installed_git_checkout(home)
+    monkeypatch.setattr(upd, "_rev_parse_head", lambda root: "abc123")
+
+    lock = _lock_dir()
+    lock.mkdir(parents=True)
+    (lock / upd._LOCK_OWNER).write_text(_json.dumps({"pid": os.getpid()}),
+                                        encoding="utf-8")   # THIS process: provably alive
+
+    ran = []
+    monkeypatch.setattr(upd, "_run", lambda *a, **k: (ran.append(a), (True, ""))[1])
+    res = upd.update_managed_comfy()
+
+    assert res.ok is False
+    assert res.status == "busy", res.status
+    assert "already running" in res.message
+    assert str(os.getpid()) in res.message, "name the holder so the user can check"
+    # The decisive assertion: it refused BEFORE touching the tree.
+    assert ran == [], "a refused update must not run a single git command"
+
+
+def test_update_reclaims_a_lock_whose_owner_is_DEAD(home, monkeypatch):
+    """A crashed update must not wedge every later one. Staleness is judged by PID
+    LIVENESS, never elapsed time - the operation is unbounded, so any fixed timeout
+    would eventually reclaim a LIVE holder's lock."""
+    import json as _json
+    from localm.media import managed_comfy_update as upd
+    _installed_git_checkout(home)
+    monkeypatch.setattr(upd, "_rev_parse_head", lambda root: "abc123")
+    monkeypatch.setattr("localm.instances.pid_alive", lambda pid: False)
+
+    lock = _lock_dir()
+    lock.mkdir(parents=True)
+    (lock / upd._LOCK_OWNER).write_text(_json.dumps({"pid": 999999}), encoding="utf-8")
+
+    monkeypatch.setattr(upd, "_run", lambda *a, **k: (True, ""))
+    monkeypatch.setattr(upd, "apply_patches", lambda root: [])
+    monkeypatch.setattr(mc, "is_managed_comfy_installed", lambda: True)
+    res = upd.update_managed_comfy(target_commit="abc123")
+
+    assert res.status != "busy", f"a dead holder must be reclaimed, got {res.message}"
+
+
+def test_update_will_not_steal_a_lock_it_cannot_identify(home, monkeypatch):
+    """An unreadable owner means we cannot tell whether a live update holds it.
+    Conservative: refuse and say how to clear it by hand. Stealing here is exactly how
+    two updates end up interleaved."""
+    from localm.media import managed_comfy_update as upd
+    _installed_git_checkout(home)
+    monkeypatch.setattr(upd, "_rev_parse_head", lambda root: "abc123")
+    lock = _lock_dir()
+    lock.mkdir(parents=True)          # no owner file at all
+
+    ran = []
+    monkeypatch.setattr(upd, "_run", lambda *a, **k: (ran.append(a), (True, ""))[1])
+    res = upd.update_managed_comfy()
+    assert res.ok is False and res.status == "busy"
+    assert "could not be read" in res.message
+    assert str(lock) in res.message, "tell the user WHICH folder to remove"
+    assert ran == []
+
+
+def test_update_releases_the_lock_on_success_and_on_failure(home, monkeypatch):
+    """A leaked lock would wedge every later update until someone deleted a folder by
+    hand, so it must be released on EVERY path - including the failure/rollback one."""
+    from localm.media import managed_comfy_update as upd
+    _installed_git_checkout(home)
+    monkeypatch.setattr(upd, "_rev_parse_head", lambda root: "abc123")
+    monkeypatch.setattr(mc, "is_managed_comfy_installed", lambda: True)
+    monkeypatch.setattr(upd, "apply_patches", lambda root: [])
+
+    monkeypatch.setattr(upd, "_run", lambda *a, **k: (True, ""))
+    upd.update_managed_comfy(target_commit="abc123")
+    assert not _lock_dir().exists(), "lock leaked after a SUCCESSFUL update"
+
+    # Now a failing update: the fetch fails, so it rolls back and returns an error.
+    monkeypatch.setattr(upd, "_run", lambda *a, **k: (False, "boom"))
+    res = upd.update_managed_comfy(target_commit="abc123")
+    assert res.ok is False
+    assert not _lock_dir().exists(), "lock leaked after a FAILED update"
+
+
+def test_the_lock_lives_outside_the_checkout_git_force_cannot_disturb_it(home):
+    """The update's own `git checkout --force` runs inside the checkout. A lock stored
+    in there would be protecting itself from the very operation it guards."""
+    _installed_git_checkout(home)
+    root = mc.managed_comfy_paths().root
+    lock = _lock_dir()
+    assert root not in lock.parents, f"lock {lock} must not live inside {root}"
+    assert lock.parent == root.parent

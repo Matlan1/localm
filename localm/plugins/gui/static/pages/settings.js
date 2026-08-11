@@ -1706,6 +1706,9 @@ export async function renderManagedComfyPanel(host, toggleFields) {
       update.textContent = "Updating...";
       ulog.style.display = "";
       ulog.textContent = "";
+      // Drop any error block from a PREVIOUS attempt, or a retry stacks a stale
+      // reason above the fresh one and the user reads the wrong failure.
+      for (const old of host.querySelectorAll(".comfy-managed-update-error")) old.remove();
       const resetUpdate = () => { update.disabled = false; update.textContent = "Update"; };
       let jobId;
       try {
@@ -1725,18 +1728,29 @@ export async function renderManagedComfyPanel(host, toggleFields) {
         resetUpdate();
         return;
       }
-      let last = "";
+      const tail = [];
       const end = await streamJob(jobId, (line) => {
         ulog.textContent += line + "\n";
-        if (line && line.trim()) last = line.trim();
+        // Keep a short TAIL, not just the last line: update_managed_comfy's failure
+        // messages are long sentences and the console wraps them, so the final line
+        // alone is often a fragment ("...comfy setup'.") with the actual reason lost.
+        if (line && line.trim()) { tail.push(line.trim()); if (tail.length > 6) tail.shift(); }
         ulog.scrollTop = ulog.scrollHeight;
       });
       const ok = !!(end && end.status === "done");
-      // On failure show the REASON the job actually gave (the non-git refusal, a
-      // fetch error, a rollback note) instead of a generic "see the log" - that
-      // sentence is the whole point of surfacing this in the GUI at all.
+      const reason = tail.join(" ").trim();
+      if (!ok) {
+        // Rule 5: update_managed_comfy distinguishes states a user MUST be able to
+        // tell apart - rolled back cleanly, rolled back but the patch re-apply
+        // failed, and the rollback ITSELF failed (a genuinely mixed install). A GUI
+        // that renders all of them as "update failed" swallows exactly the
+        // distinction that module goes to trouble to make, so show its own words.
+        const why = el("div", "sub comfy-managed-update-error");
+        why.textContent = reason || "The update did not finish. See the log below.";
+        host.insertBefore(why, ulog);
+      }
       toast(ok ? "localm's ComfyUI is up to date"
-               : (last || "Update did not finish (see the log)"), !ok);
+               : (reason || "Update did not finish (see the log)"), !ok);
       // Same reasoning as Set up: never re-render over a failure log the toast just
       // pointed at. On success re-render so the version line and pill refresh.
       if (ok) renderManagedComfyPanel(host, toggleFields);

@@ -22,6 +22,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   ComfyUI was installed by copying rather than as a git checkout it cannot take
   a version update, and the button now says so instead of failing part way in.
 
+### Fixed
+- **Two ComfyUI updates can no longer run at once.** Updating localm's own
+  ComfyUI rewrites its files in place, and until now nothing stopped a second
+  update starting while the first was still going, which could leave the
+  install in a broken half-updated state. Only one can run at a time now,
+  whether started from the command line or the Settings button; a second one
+  stops immediately and says which update is already in progress rather than
+  waiting or interfering. If an update is ever interrupted, the next one tidies
+  up after it automatically.
+
 ### Changed
 - **localm's own managed ComfyUI now installs v0.31.1**, up from v0.9.2. The
   pinned version had not moved since July and was roughly 21 releases behind
