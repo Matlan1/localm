@@ -534,6 +534,18 @@ class HFRunner:
     def is_alive(self) -> bool:
         return self._proc is not None and self._proc.is_alive()
 
+    def _exit_reason(self) -> str:
+        """The child's exit code DECODED - "-4 (killed by signal SIGILL)" rather
+        than "-4".
+
+        Every user-facing report of a dead worker goes through this rather than
+        interpolating the raw code, mirroring ``ModelRunner._exit_reason``. The
+        decoder lives in ``_mp_spawn`` precisely so this runner reuses it
+        instead of growing a second version."""
+        from localm._mp_spawn import describe_exit_code
+        proc = self._proc
+        return describe_exit_code(None if proc is None else proc.exitcode)
+
     def _native_crash_trace(self) -> str:
         """This child's captured native-fault trace, consumed and removed, or ""
         when there is none.
@@ -632,11 +644,10 @@ class HFRunner:
                 result = self._resp_q.get(timeout=_POLL_INTERVAL)
             except _queue.Empty:
                 if not self._proc.is_alive():
-                    code = self._proc.exitcode
                     raise RuntimeError(
                         f"The HuggingFace model-loading process crashed (exit "
-                        f"code {code}) while loading. The server stayed up."
-                        + self._crash_detail())
+                        f"code {self._exit_reason()}) while loading. The server "
+                        "stayed up." + self._crash_detail())
                 if time.monotonic() > deadline:
                     self.shutdown(grace=0)
                     raise RuntimeError(
@@ -687,7 +698,7 @@ class HFRunner:
                             if not self.is_alive():
                                 raise RuntimeError(
                                     f"Native inference fault (worker exit "
-                                    f"{self._proc.exitcode}). The model has been "
+                                    f"{self._exit_reason()}). The model has been "
                                     "unloaded and will reload on the next "
                                     "request." + self._crash_detail())
                             if time.monotonic() > deadline:
@@ -794,7 +805,7 @@ class HFRunner:
                     if not self.is_alive():
                         raise RuntimeError(
                             f"The HF model process crashed (exit code "
-                            f"{self._proc.exitcode}) while handling '{name}'."
+                            f"{self._exit_reason()}) while handling '{name}'."
                             + self._crash_detail())
                     if time.monotonic() > deadline:
                         self.shutdown(grace=0)

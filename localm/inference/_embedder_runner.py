@@ -321,6 +321,18 @@ class EmbedderRunner:
     def is_alive(self) -> bool:
         return self._proc is not None and self._proc.is_alive()
 
+    def _exit_reason(self) -> str:
+        """The child's exit code DECODED - "-4 (killed by signal SIGILL)" rather
+        than "-4".
+
+        Every user-facing report of a dead worker goes through this rather than
+        interpolating the raw code, mirroring ``ModelRunner._exit_reason``. The
+        decoder lives in ``_mp_spawn`` precisely so this runner reuses it
+        instead of growing a second version."""
+        from localm._mp_spawn import describe_exit_code
+        proc = self._proc
+        return describe_exit_code(None if proc is None else proc.exitcode)
+
     def _native_crash_trace(self) -> str:
         """This child's captured native-fault trace, consumed and removed, or ""
         when there is none.
@@ -425,11 +437,10 @@ class EmbedderRunner:
                 result = self._resp_q.get(timeout=_POLL_INTERVAL)
             except _queue.Empty:
                 if not self._proc.is_alive():
-                    code = self._proc.exitcode
                     raise RuntimeError(
                         f"The embedding worker process crashed (exit code "
-                        f"{code}) during '{label}'. The server stayed up."
-                        + self._crash_detail())
+                        f"{self._exit_reason()}) during '{label}'. The server "
+                        "stayed up." + self._crash_detail())
                 if time.monotonic() > deadline:
                     self.shutdown(grace=0)
                     raise RuntimeError(
