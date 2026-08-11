@@ -2566,7 +2566,31 @@ def implicit_split_capacity(config: Optional[dict] = None, *,
             return {}
         frees.append(free)
         totals.append(total)
-    return {"free": sum(frees), "total": sum(totals), "devices": len(devices)}
+    out = {"free": sum(frees), "total": sum(totals), "devices": len(devices)}
+    # SURFACE THE DECISION (rule 5), same contract and same level as
+    # resolve_auto_split_ratios' own "auto GPU split: distributing by free VRAM"
+    # line, and for the same reason: the always-on ring buffer is INFO+, so a bug
+    # report about a wrongly-sized load shows WHICH budget was used and which
+    # per-device readings produced it. Until this line existed the success path
+    # was silent - only the DECLINE path logged - so a capture could not tell a
+    # load budgeted against the whole board from one budgeted against a single
+    # card, which is precisely the defect this function was added to fix.
+    #
+    # INFO is affordable here because this runs per LOAD, not per poll: the
+    # callers are the backend's load-time preflights (_check_vram,
+    # _auto_gpu_layers, _auto_ctx_max), and the GUI's polling routes reach
+    # sysstats.estimate_vram instead, which borrows only the pure
+    # _bytes_per_token helper and never this. A single user-initiated load emits
+    # this at most three times, not the per-poll flood that a 2.5s heartbeat
+    # would make of it.
+    logger.info(
+        "implicit GPU split: sizing against %d devices by free VRAM - %s "
+        "(combined %.1f GB free / %.1f GB total)",
+        out["devices"],
+        ", ".join(f"device {d.get('index')}: {f / 1024 ** 3:.1f} GB free"
+                  for d, f in zip(devices, frees)),
+        out["free"] / 1024 ** 3, out["total"] / 1024 ** 3)
+    return out
 
 
 def split_device_count(config: Optional[dict] = None) -> int:
