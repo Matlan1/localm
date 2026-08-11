@@ -115,6 +115,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   count well above what the native GBNF parser actually accepts, so a request
   in that range used to clear the check and could fail later instead of
   getting an immediate, clear error.
+- **`localm run` and `localcoder` no longer fail to reach your own server
+  once you set an API key.** Attaching to an already-running local server
+  presented the wrong credential once auth was turned on, so setting a key
+  - the recommended way to protect an install from other local processes -
+  broke the everyday `localm run <model>` / `localcoder` workflow with a
+  bare connection error. Fixed for both, including `localcoder --no-server`.
 
 ## [0.1.5rc2] - 2026-08-08
 
