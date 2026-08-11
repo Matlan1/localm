@@ -514,6 +514,47 @@ def test_cli_rename_falls_back_locally_when_no_server_is_running(monkeypatch):
     assert cli_models._rename_on_running_server("a", "b") is None
 
 
+def test_cli_rename_does_not_redo_a_rename_that_a_lost_reply_hid(
+        models_home, monkeypatch, capsys):
+    """A read timeout means the request WAS sent and the answer was lost, so
+    the rename may well have been applied. Renaming locally on top of that
+    reports "Not found" for work that actually completed. The registry is the
+    ground truth, so it gets read instead of guessed at."""
+    import requests
+
+    from localm.cli import models as cli_models
+
+    _patch_instance(monkeypatch, {"port": 1234})
+    # The state a server that DID apply the rename leaves behind.
+    _register(models_home, {"b": {"path": "x/b.gguf", "source": "local"}})
+
+    def timeout(*a, **kw):
+        raise requests.ReadTimeout("timed out")
+
+    monkeypatch.setattr(requests, "post", timeout)
+    assert cli_models._rename_on_running_server("a", "b") is True
+    assert "Renamed" in capsys.readouterr().out
+
+
+def test_cli_rename_falls_back_when_a_lost_reply_hid_nothing(
+        models_home, monkeypatch, capsys):
+    """The other half of the same unknown: the registry shows the rename was
+    NOT applied, so the user's rename is still to do. Fall back, and say why."""
+    import requests
+
+    from localm.cli import models as cli_models
+
+    _patch_instance(monkeypatch, {"port": 1234})
+    _register(models_home, {"a": {"path": "x/a.gguf", "source": "local"}})
+
+    def timeout(*a, **kw):
+        raise requests.ReadTimeout("timed out")
+
+    monkeypatch.setattr(requests, "post", timeout)
+    assert cli_models._rename_on_running_server("a", "b") is None
+    assert "No reply" in capsys.readouterr().out
+
+
 def test_cli_rename_stops_when_the_server_rejects_the_rename_itself(monkeypatch):
     """A 409 "name already taken" is the server's verdict on the rename, not a
     transport problem - retrying locally would move the entry the server just

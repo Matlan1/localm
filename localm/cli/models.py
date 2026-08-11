@@ -462,11 +462,34 @@ def _rename_on_running_server(old_name: str, new_name: str):
         resp = requests.post(f"{url}/v1/models/rename", headers=headers,
                              params={"model": old_name, "new_name": new_name},
                              timeout=60, verify=tls.requests_verify(url))
-    except requests.RequestException as e:
-        # A registered instance we cannot reach is usually a stale entry for a
-        # process that has gone. Say so at the altitude it deserves and fall
-        # back, rather than refusing a rename because of a dead entry.
+    except requests.ConnectionError as e:
+        # Never established, so the server certainly did not act. Usually a
+        # stale registry entry for a process that has gone. Say so at the
+        # altitude it deserves and fall back, rather than refusing a rename
+        # because of a dead entry. (ConnectTimeout subclasses this, and it
+        # belongs here: no connection means no request.)
         console.print(f"[dim]No reachable server at {url} ({e}) - renaming locally.[/dim]")
+        return None
+    except requests.RequestException as e:
+        # The request WAS sent and the reply did not arrive (a read timeout
+        # while the plugin executor is busy is the realistic one). Whether the
+        # rename was applied is now unknown, and BOTH wrong answers cost the
+        # user something: renaming locally on top of a rename that succeeded
+        # reports "Not found" for work that actually completed, and reporting
+        # success for one that did not is a rule 5 violation. The registry is
+        # the ground truth, so read it rather than guess.
+        from ..config import load_registry
+        from ..model_manager import _sanitize_name
+        safe = _sanitize_name(new_name)
+        reg = load_registry()
+        if safe in reg and old_name not in reg:
+            console.print(f"[green]✓[/green] Renamed [bold]{old_name}[/bold] -> "
+                          f"[bold]{safe}[/bold]")
+            console.print(f"[dim](no reply from the server: {e} - but the rename "
+                          f"itself completed)[/dim]")
+            return True
+        console.print(f"[yellow]No reply from {url} ({e}); the rename does not "
+                      f"appear to have been applied - doing it locally.[/yellow]")
         return None
 
     if resp.ok:
