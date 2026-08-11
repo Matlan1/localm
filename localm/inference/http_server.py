@@ -1628,6 +1628,134 @@ def rekey_loaded_model(old_name: str, new_name: str) -> bool:
     return True
 
 
+async def rename_registered_model(model: str, new_name_raw: str) -> dict:
+    """Move a registry entry to a new name AND re-key the live engine, in that
+    order, in ONE process. The single entry point every rename route uses.
+
+    The re-key is not bookkeeping that can be added later by whoever remembers:
+    until it runs, the registry holds the new name while the engine map is
+    still keyed on the old one, and every name-keyed check downstream then asks
+    about a name nothing is under. Pairing the two here means a route cannot
+    perform half of it. Renaming from OUTSIDE this process cannot do the second
+    half at all, which is why ``localm rename`` asks a running server to call
+    this rather than moving the registry entry behind its back.
+
+    Raises HTTPException (404 unregistered, 409 name taken, 400 rename failed)
+    so both the /v1 and the GUI route answer identically. Returns the response
+    body: status, the old name, the sanitized new name, and the migration
+    notes, which must reach the caller rather than only the server log - a user
+    has no other way to learn that e.g. a per-project coder config still names
+    the old model.
+    """
+    from localm.config import load_registry
+    from localm.executor import get_plugin_executor
+    from localm.model_manager import _sanitize_name, rename_model_with_notes
+
+    registry = load_registry()
+    if model not in registry:
+        raise HTTPException(404, f"Model not registered: {model}")
+    # Sanitizing happens server-side, so the collision check and the eventual
+    # response must both speak the sanitized name, not the raw text the caller
+    # sent (REG-562: prechecking the raw name let a collision through, and
+    # answering with the raw name named an entry that does not exist).
+    new_name = _sanitize_name(new_name_raw)
+    if new_name != model and new_name in registry:
+        raise HTTPException(409, f"Name already taken: {new_name}")
+    loop = asyncio.get_running_loop()
+    try:
+        renamed, notes = await loop.run_in_executor(
+            get_plugin_executor(), rename_model_with_notes, model, new_name_raw)
+    except Exception as e:
+        raise HTTPException(400, f"Rename failed: {e}")
+    if not renamed:
+        # rename_model_with_notes distinguishes "vanished" from "name taken" in
+        # its own console output, but only the bool crosses the executor
+        # boundary - re-derive which race it lost.
+        if model not in load_registry():
+            raise HTTPException(404, f"Model not registered: {model}")
+        raise HTTPException(409, f"Name already taken: {new_name}")
+    # Synchronous, in-memory only (no await) - safe to call directly on the
+    # event loop right after the executor call above returns.
+    rekey_loaded_model(model, new_name)
+    return {"status": "renamed", "model": model, "new_name": new_name,
+            "notes": notes}
+
+
+def loaded_engine_holding_model_file(model: str, registry: dict | None = None) -> str | None:
+    """The in-memory key of a LOADED engine whose model file is the very file
+    that removing registry entry *model* would delete, or None when no live
+    engine holds it (or when the removal would not delete a file at all).
+
+    IDENTITY BY FILE PATH, NOT BY NAME, and that is the whole point. The
+    remove route's older guards ask "is a loaded engine keyed under THIS NAME",
+    which is the same question only for as long as every renamer re-keys the
+    engine map. ``localm rename`` runs in a SEPARATE PROCESS and cannot reach
+    into this one's memory, so after a CLI rename the engine is still keyed on
+    the old name, both name-keyed guards miss, and the route goes on to spawn
+    ``localm rm`` and delete the GGUF out from under a live, serving engine.
+    That is not recoverable: the user's downloaded model file is gone.
+
+    A guard that holds only while every caller remembers to re-key is exactly
+    how that became possible, so this one asks the question the deletion itself
+    turns on. Any future caller that forgets the re-key is covered by
+    construction rather than by review.
+
+    Alias-aware, mirroring remove_model: while another registered name still
+    points at the file, the removal keeps the bytes and only drops the name, so
+    there is nothing to refuse. Pass *registry* to reuse a load the caller has
+    already done.
+
+    Does filesystem I/O (Path.resolve on registry paths, which can block on a
+    UNC entry), so callers on the event loop run it in the executor.
+    """
+    from pathlib import Path
+
+    from localm.config import load_registry
+    from localm.model_manager import (
+        _entry_path, find_aliases_by_path, resolve_deletion_target)
+
+    reg = load_registry() if registry is None else registry
+    entry = reg.get(model)
+    if not isinstance(entry, dict):
+        return None
+    epath = _entry_path(entry)
+    if epath is None:
+        return None
+    path = Path(epath)
+    if any(a != model for a in find_aliases_by_path(path, reg)):
+        return None
+    target = resolve_deletion_target(path)
+    if target is None:
+        return None
+
+    # Snapshot: _engines is mutated by loads/evictions on the event loop while
+    # this runs in a worker thread, and iterating it live would raise.
+    candidates = list(_engines.items())
+    # _engine is normally the same object as _engines[active], but a startup
+    # (`localm serve <path.gguf>`) or test-injected engine can sit outside the
+    # map - and it is holding the file just as hard.
+    if _engine is not None and not any(e is _engine for _, e in candidates):
+        candidates.append((getattr(_engine, "display_name", "") or model, _engine))
+
+    want = os.path.normcase(str(target))
+    for key, engine in candidates:
+        if not getattr(engine, "loaded", False):
+            continue
+        mpath = getattr(engine, "model_path", None)
+        if not mpath:
+            continue
+        try:
+            held = Path(mpath).resolve()
+        except (OSError, ValueError):
+            continue
+        # normcase because the two paths reach here by different routes (one
+        # from the registry, one from whatever the engine was constructed with)
+        # and on Windows those can differ in case or separator.
+        if os.path.normcase(str(held)) == want:
+            return key
+    return None
+
+
 def _sanitize_client_context(raw) -> dict:
     """Reduce an untrusted GUI ``client`` payload to a safe, bounded dict for a bug
     report: only known string fields (capped) plus a capped list of console-error

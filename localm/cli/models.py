@@ -426,6 +426,80 @@ def alias(existing, new_name):
         sys.exit(1)
 
 
+def _rename_on_running_server(old_name: str, new_name: str):
+    """Ask the localm server serving this directory to perform the rename, so
+    the registry move and the live engine's re-key happen in ONE process.
+
+    Returns True on success, False when the server did the rename and refused
+    (it has already been reported), or None when there is no server to ask and
+    the caller should rename locally instead.
+
+    Why this exists: a rename done in THIS process moves the registry entry
+    while a running server keeps its loaded engine keyed under the OLD name -
+    two processes, no shared memory. The server then believes it is serving a
+    model the registry no longer lists, requests naming the NEW name reload the
+    same file into a second engine, and every name-keyed check on the server
+    side is asking about a name nothing is under.
+    """
+    import os
+
+    import requests
+
+    from .. import instances, tls
+    from ..auth import resolve_bearer_headers
+
+    url = os.environ.get("LOCALM_URL", "").rstrip("/")
+    entry = None
+    if not url:
+        entry = instances.find_attachable(HOME_DIR, instances.resolve_root_dir())
+        if entry is None:
+            return None                      # nothing running: rename locally
+        scheme = entry.get("scheme", "http")
+        url = f"{scheme}://{entry.get('host', '127.0.0.1')}:{entry.get('port')}"
+
+    headers = resolve_bearer_headers(entry.get("token") if entry is not None else None)
+    try:
+        resp = requests.post(f"{url}/v1/models/rename", headers=headers,
+                             params={"model": old_name, "new_name": new_name},
+                             timeout=60, verify=tls.requests_verify(url))
+    except requests.RequestException as e:
+        # A registered instance we cannot reach is usually a stale entry for a
+        # process that has gone. Say so at the altitude it deserves and fall
+        # back, rather than refusing a rename because of a dead entry.
+        console.print(f"[dim]No reachable server at {url} ({e}) - renaming locally.[/dim]")
+        return None
+
+    if resp.ok:
+        data = resp.json()
+        console.print(f"[green]✓[/green] Renamed [bold]{old_name}[/bold] -> "
+                      f"[bold]{data.get('new_name', new_name)}[/bold]")
+        for note in data.get("notes") or []:
+            console.print(f"[dim]{note}[/dim]")
+        return True
+
+    detail = ""
+    try:
+        detail = resp.json().get("detail", "")
+    except Exception:
+        pass
+    if resp.status_code in (404, 409) and detail:
+        # The server's own verdict on the rename itself (unregistered model,
+        # name already taken). Renaming locally would fail identically, so
+        # report it and stop rather than trying again behind its back.
+        console.print(f"[red]{detail}[/red]")
+        return False
+    # Anything else (401 without a key, a server too old to have the route, a
+    # 5xx) leaves the rename undone, and the user asked for a rename. Do it
+    # locally and say plainly what the running server now believes - a silent
+    # fallback here is how the server ends up serving an orphaned name.
+    console.print(f"[yellow]The running server declined the rename "
+                  f"({resp.status_code}{': ' + detail if detail else ''}).[/yellow]")
+    console.print("[yellow]Renaming locally; that server will keep the model "
+                  "loaded under its old name until it is restarted or the "
+                  "model is unloaded ([bold]localm unload[/bold]).[/yellow]")
+    return None
+
+
 @main.command()
 @click.argument("old_name", shell_complete=_complete_model_name)
 @click.argument("new_name")
@@ -439,12 +513,20 @@ def rename(old_name, new_name):
     and is not touched - update it by hand in any project that pinned this
     model.
 
+    If a localm server is serving this directory it performs the rename, so a
+    model that is loaded right now keeps serving under its new name instead of
+    being stranded under the old one. Set LOCALM_URL to target a different
+    instance, and LOCALM_API_KEY if it requires one.
+
     \b
     Example:
       localm rename gemma3-12b daily-driver
     """
     from ..model_manager import rename_model
 
+    done = _rename_on_running_server(old_name, new_name)
+    if done is not None:
+        sys.exit(0 if done else 1)
     if not rename_model(old_name, new_name):
         sys.exit(1)
 

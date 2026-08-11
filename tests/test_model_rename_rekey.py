@@ -4,10 +4,28 @@ record of a loaded model's identity after its registry entry is renamed, so a
 still-loaded/serving engine is not orphaned under its old name. See
 tests/test_driving_engine.py for the sibling http_server module-state test
 pattern this reuses.
+
+The second half of this file covers what happens when NOBODY re-keys, which is
+not a hypothetical: `localm rename` runs in a separate process and physically
+cannot reach into a running server's memory, so it leaves the engine map keyed
+on the old name while the registry holds the new one. Every name-keyed guard on
+the remove route then missed, and the route deleted a loaded model's GGUF.
+Those tests use a REAL file inside a REAL models dir, because the guard turns
+on `resolve_deletion_target`, and a fixture with a fictional path like
+"x/a.gguf" can never make it return anything - it would execute the guard and
+be structurally unable to fail on the bug.
 """
 
 from __future__ import annotations
 
+import json
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+import localm.config as config
+import localm.model_manager as model_manager
 from localm.inference import http_server as hs
 
 
@@ -97,3 +115,473 @@ def test_rekey_fixes_the_stale_active_model_guard_hazard():
 
     assert hs._engine.display_name == "new"
     _reset()
+
+
+# ---------------------------------------------------------------------------
+#  The other half: when the re-key CANNOT happen (a rename from another
+#  process), the file must still not be deletable. Guard by FILE IDENTITY.
+# ---------------------------------------------------------------------------
+
+
+class _FileEngine:
+    """An engine holding a real file, the way a loaded one does."""
+
+    def __init__(self, name, path, loaded=True):
+        self.display_name = name
+        self.model_path = str(path)
+        self.loaded = loaded
+
+
+@pytest.fixture
+def models_home(tmp_path, monkeypatch):
+    """A throwaway data dir whose models root every call site resolves through.
+
+    model_manager.MODELS_DIR is what is_owned_model_path (and therefore
+    resolve_deletion_target) reads; config.MODELS_DIR is pinned to the same
+    directory so nothing can silently answer against the session's real home
+    and make these tests pass vacuously. Same reasoning as
+    tests/test_cli_rm_prompt.py's `home` fixture, which documents why leaving
+    the second one unpinned once made a whole file pass against the very bug it
+    existed to catch.
+    """
+    home = tmp_path / ".localm"
+    models = home / "models"
+    models.mkdir(parents=True)
+    monkeypatch.setenv("LOCALM_HOME", str(home))
+    monkeypatch.setattr(model_manager, "MODELS_DIR", models)
+    monkeypatch.setattr(config, "HOME_DIR", home)
+    monkeypatch.setattr(config, "MODELS_DIR", models)
+    monkeypatch.setattr(config, "CONFIG_FILE", home / "config.json")
+    monkeypatch.setattr(config, "REGISTRY_FILE", home / "registry.json")
+    return home
+
+
+def _make_model_file(models_home, filename="m.gguf", data=b"GGUF" + b"\0" * 64):
+    path = models_home / "models" / filename
+    path.write_bytes(data)
+    return path
+
+
+def _register(models_home, entries):
+    (models_home / "registry.json").write_text(json.dumps(entries), encoding="utf-8")
+
+
+@pytest.fixture
+def gui_client(monkeypatch):
+    """The REAL GUI router, and a start_cli that runs the REAL removal.
+
+    Substituting an in-process ``remove_model(name)`` for the spawned
+    ``localm rm <name> --yes`` is faithful: that subprocess does exactly this
+    and nothing else (``--yes`` skips the only other step, the prompt). It is
+    also the point of the harness - the property under test is whether the
+    user's FILE survives, and a start_cli that merely records its arguments
+    could never observe a deletion, so it could never fail on the bug either.
+    """
+    from localm.plugins.gui.web import attach_gui
+
+    app = FastAPI()
+    started = []
+
+    class _FakeJob:
+        id = "job-test"
+
+    def fake_start_cli(self, kind, cli_args, **kw):
+        started.append(list(cli_args))
+        args = list(cli_args)
+        if args and args[0] == "rm":
+            model_manager.remove_model(args[1])
+        return _FakeJob()
+
+    monkeypatch.setattr("localm.plugins.gui.jobs.JobManager.start_cli", fake_start_cli)
+
+    async def switch_model(name):
+        return {"status": "loaded", "model": name}
+
+    attach_gui(app, self_url="http://127.0.0.1:9/v1",
+               switch_model=switch_model,
+               # No engine is ACTIVE in these tests: the whole point is the
+               # loaded-but-not-active, wrongly-named case the two name-keyed
+               # guards were blind to. An active_model() that named something
+               # would let the FIRST guard answer, and the test would pass
+               # without ever reaching the one under test.
+               active_model=lambda: "")
+    return app, started
+
+
+def test_remove_refuses_a_model_whose_file_a_live_engine_still_holds(
+        models_home, gui_client):
+    """THE regression: the shape `localm rename` leaves behind.
+
+    The registry has been renamed old-name -> new-name by another process, so
+    the running server's engine map is still keyed on "old-name" while the
+    request names "new-name". Both name-keyed guards miss. Without the
+    file-identity guard the route removes it and the GGUF is gone for good.
+    """
+    app, started = gui_client
+    gguf = _make_model_file(models_home)
+    _register(models_home, {"new-name": {"path": str(gguf), "source": "local"}})
+
+    hs._engines.clear()
+    hs._engines_lru.clear()
+    hs._engine = None
+    hs._engines["old-name"] = _FileEngine("old-name", gguf)
+    try:
+        with TestClient(app) as client:
+            r = client.post("/api/models/remove", json={"model": "new-name"})
+        assert r.status_code == 409, (
+            "a file a live engine is serving must never be deletable, whatever "
+            f"name the registry or the engine currently uses: {r.text}")
+        assert "old-name" in r.json()["detail"], (
+            "the refusal must name the key it is actually loaded under, or the "
+            "user cannot work out what to unload")
+        assert gguf.exists(), "the user's model file was deleted"
+        assert started == [], "the removal job must not even be started"
+        assert "new-name" in config.load_registry()
+    finally:
+        hs._engines.clear()
+        hs._engines_lru.clear()
+
+
+def test_remove_still_deletes_an_unloaded_model_for_real(models_home, gui_client):
+    """The control for the test above, and it has to be here.
+
+    If this harness could not delete a file, the assertion that the file
+    survives would hold for reasons that have nothing to do with the guard.
+    Nothing is loaded, so the removal proceeds and the GGUF really goes.
+    """
+    app, started = gui_client
+    gguf = _make_model_file(models_home)
+    _register(models_home, {"spare": {"path": str(gguf), "source": "local"}})
+
+    hs._engines.clear()
+    hs._engine = None
+    with TestClient(app) as client:
+        r = client.post("/api/models/remove", json={"model": "spare"})
+    assert r.status_code == 200, r.text
+    assert started == [["rm", "spare", "--yes"]]
+    assert not gguf.exists(), (
+        "the harness cannot observe a deletion, so the sibling test's "
+        "'file survives' assertion would be vacuous")
+    assert "spare" not in config.load_registry()
+
+
+def test_remove_still_allows_an_alias_of_a_loaded_file(models_home, gui_client):
+    """Not over-refusing: while a SECOND registered name points at the file,
+    removing one of them keeps the bytes (remove_model returns early), so there
+    is no data loss to guard against and the request must still succeed. A
+    guard that refused here would break `localm alias` cleanup for every loaded
+    model."""
+    app, started = gui_client
+    gguf = _make_model_file(models_home)
+    _register(models_home, {
+        "keeper": {"path": str(gguf), "source": "local"},
+        "spare-name": {"path": str(gguf), "source": "local"},
+    })
+
+    hs._engines.clear()
+    hs._engine = None
+    hs._engines["keeper"] = _FileEngine("keeper", gguf)
+    try:
+        with TestClient(app) as client:
+            r = client.post("/api/models/remove", json={"model": "spare-name"})
+        assert r.status_code == 200, r.text
+        assert started == [["rm", "spare-name", "--yes"]]
+        assert gguf.exists(), "an alias removal must never delete the file"
+        reg = config.load_registry()
+        assert "keeper" in reg and "spare-name" not in reg
+    finally:
+        hs._engines.clear()
+
+
+def test_guard_ignores_an_unloaded_engine_and_an_unowned_path(models_home):
+    """Two ways the guard must answer None, both of which would otherwise make
+    it refuse removals that destroy nothing."""
+    gguf = _make_model_file(models_home)
+    outside = models_home / "elsewhere.gguf"      # NOT under <data dir>/models
+    outside.write_bytes(b"GGUF")
+    _register(models_home, {
+        "unloaded": {"path": str(gguf), "source": "local"},
+        "external": {"path": str(outside), "source": "local"},
+    })
+
+    hs._engines.clear()
+    hs._engine = None
+    try:
+        hs._engines["unloaded"] = _FileEngine("unloaded", gguf, loaded=False)
+        assert hs.loaded_engine_holding_model_file("unloaded") is None, (
+            "an engine that is not loaded is not holding the file open")
+
+        hs._engines.clear()
+        hs._engines["external"] = _FileEngine("external", outside)
+        assert hs.loaded_engine_holding_model_file("external") is None, (
+            "remove_model never deletes a path outside <data dir>/models, so "
+            "there is nothing to refuse")
+    finally:
+        hs._engines.clear()
+
+
+def test_guard_sees_the_startup_engine_that_is_not_in_the_engine_map(models_home):
+    """`localm serve <path.gguf>` can leave the running engine as the module
+    singleton without an _engines entry. It is holding the file exactly as
+    hard, so a scan of _engines alone would miss it."""
+    gguf = _make_model_file(models_home)
+    _register(models_home, {"served": {"path": str(gguf), "source": "local"}})
+
+    hs._engines.clear()
+    hs._engine = _FileEngine("started-as-this", gguf)
+    try:
+        assert hs.loaded_engine_holding_model_file("served") == "started-as-this"
+    finally:
+        hs._engine = None
+        hs._engines.clear()
+
+
+# ---------------------------------------------------------------------------
+#  POST /v1/models/rename - the always-present route the CLI drives, so a
+#  rename from another process re-keys the live engine instead of stranding it.
+# ---------------------------------------------------------------------------
+
+
+_INSTANCE_TOKEN = "rename-instance-token-0123456789"
+
+
+def _core_app(engine):
+    """The real core app, carrying the per-instance attach token a local
+    management client presents. Without it _origin_guard's open-mode gate
+    refuses every unsafe method with 403 before the route is ever reached -
+    which is what a management route on this surface really faces, and what a
+    test that patched `requests` would never see."""
+    app = hs.create_app(engine)
+    app.state.instance_token = _INSTANCE_TOKEN
+    return app
+
+
+_AUTH = {"Authorization": f"Bearer {_INSTANCE_TOKEN}"}
+
+
+def test_v1_rename_route_moves_the_registry_and_rekeys_the_engine(models_home):
+    """On the /v1 surface, not only the GUI's /api one: a headless
+    `localm serve` has no GUI routes, and it is exactly as capable of holding a
+    model open."""
+    gguf = _make_model_file(models_home)
+    _register(models_home, {"old-name": {"path": str(gguf), "source": "local"}})
+
+    _reset()
+    eng = _FileEngine("old-name", gguf)
+    hs._engines["old-name"] = eng
+    hs._engines_lru.append("old-name")
+    hs._active_model_name = "old-name"
+    hs._engine = eng
+    try:
+        with TestClient(_core_app(eng)) as client:
+            r = client.post("/v1/models/rename", headers=_AUTH,
+                            params={"model": "old-name", "new_name": "new-name"})
+        assert r.status_code == 200, r.text
+        assert r.json()["new_name"] == "new-name"
+        assert "new-name" in config.load_registry()
+        assert "old-name" not in config.load_registry()
+        assert hs._engines["new-name"] is eng
+        assert eng.display_name == "new-name"
+        # The whole reason the CLI routes through here: after this, the file is
+        # not deletable under EITHER name, because the engine map agrees with
+        # the registry again.
+        assert hs.loaded_engine_holding_model_file("new-name") == "new-name"
+    finally:
+        _reset()
+
+
+def test_v1_rename_route_reports_an_unregistered_model(models_home):
+    _register(models_home, {})
+    _reset()
+    eng = _FileEngine("only", models_home / "models" / "nothing.gguf")
+    try:
+        with TestClient(_core_app(eng)) as client:
+            r = client.post("/v1/models/rename", headers=_AUTH,
+                            params={"model": "ghost", "new_name": "x"})
+        assert r.status_code == 404, r.text
+    finally:
+        _reset()
+
+
+# ---------------------------------------------------------------------------
+#  `localm rename` drives that route when a server is up, and falls back
+#  LOUDLY (never silently) when it cannot.
+# ---------------------------------------------------------------------------
+
+
+class _FakeResponse:
+    def __init__(self, status_code, payload=None):
+        self.status_code = status_code
+        self.ok = 200 <= status_code < 300
+        self._payload = payload if payload is not None else {}
+        self.text = json.dumps(self._payload)
+
+    def json(self):
+        return self._payload
+
+
+def _patch_instance(monkeypatch, entry):
+    from localm import instances
+    monkeypatch.setattr(instances, "find_attachable", lambda *a, **kw: entry)
+    monkeypatch.setattr(instances, "resolve_root_dir", lambda *a, **kw: "root")
+    monkeypatch.delenv("LOCALM_URL", raising=False)
+
+
+def test_cli_rename_asks_a_running_server_instead_of_renaming_behind_its_back(
+        monkeypatch):
+    """The fix for the data loss: this process cannot re-key another process's
+    engine map, so it must not move the registry entry on its own while a
+    server is up."""
+    import requests
+
+    from localm.cli import models as cli_models
+
+    _patch_instance(monkeypatch, {"scheme": "http", "host": "127.0.0.1",
+                                  "port": 1234, "token": "tok"})
+    seen = {}
+
+    def fake_post(url, **kw):
+        seen["url"] = url
+        seen["params"] = kw.get("params")
+        return _FakeResponse(200, {"status": "renamed", "model": "a",
+                                   "new_name": "b", "notes": ["note one"]})
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    # The local rename must NOT also run: two renames would leave the second
+    # reporting "Not found" and, worse, imply the registry move happened twice.
+    monkeypatch.setattr("localm.model_manager.rename_model",
+                        lambda *a: pytest.fail("renamed locally as well"))
+
+    assert cli_models._rename_on_running_server("a", "b") is True
+    assert seen["url"] == "http://127.0.0.1:1234/v1/models/rename"
+    assert seen["params"] == {"model": "a", "new_name": "b"}
+
+
+def test_cli_rename_falls_back_locally_when_no_server_is_running(monkeypatch):
+    """The ordinary offline case must be untouched: no server, no network call,
+    plain local rename."""
+    import requests
+
+    from localm.cli import models as cli_models
+
+    _patch_instance(monkeypatch, None)
+    monkeypatch.setattr(requests, "post",
+                        lambda *a, **kw: pytest.fail("dialled with no server"))
+    assert cli_models._rename_on_running_server("a", "b") is None
+
+
+def test_cli_rename_stops_when_the_server_rejects_the_rename_itself(monkeypatch):
+    """A 409 "name already taken" is the server's verdict on the rename, not a
+    transport problem - retrying locally would move the entry the server just
+    refused to move."""
+    import requests
+
+    from localm.cli import models as cli_models
+
+    _patch_instance(monkeypatch, {"port": 1234})
+    monkeypatch.setattr(requests, "post", lambda *a, **kw: _FakeResponse(
+        409, {"detail": "Name already taken: b"}))
+    assert cli_models._rename_on_running_server("a", "b") is False
+
+
+def test_cli_rename_warns_out_loud_before_falling_back_past_a_live_server(
+        monkeypatch, capsys):
+    """A 401 (a keyed server this CLI has no credential for) still leaves the
+    user's rename to do, so it happens locally - but that strands the running
+    server on the old name, and saying nothing about it is exactly the silent
+    degradation that produced this bug. The warning must name the remedy."""
+    import requests
+
+    from localm.cli import models as cli_models
+
+    _patch_instance(monkeypatch, {"port": 1234})
+    monkeypatch.setattr(requests, "post", lambda *a, **kw: _FakeResponse(
+        401, {"detail": "Unauthorized"}))
+    assert cli_models._rename_on_running_server("a", "b") is None
+    out = capsys.readouterr().out
+    assert "401" in out
+    assert "old name" in out
+    assert "localm unload" in out
+
+
+# ---------------------------------------------------------------------------
+#  Real HTTP: the whole CLI path, through the real _origin_guard.
+#
+#  The four tests above patch `requests.post`, so they cannot see the gate that
+#  actually stands in front of this route. It is not hypothetical: the first
+#  version of the /v1 tests above passed a mocked client and 403'd the moment a
+#  real one was used ("Open-mode management requires ..."). A rename that
+#  cannot authenticate is a rename that silently falls back and strands the
+#  server, which is the bug, so this has to be exercised for real.
+# ---------------------------------------------------------------------------
+
+
+def _start_real_server(engine):
+    import asyncio
+    import socket as _socket
+    import threading
+    import time as _time
+
+    import uvicorn
+
+    app = _core_app(engine)
+    lsock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+    lsock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+    lsock.bind(("127.0.0.1", 0))
+    port = lsock.getsockname()[1]
+
+    server = uvicorn.Server(uvicorn.Config(app, log_level="warning", lifespan="on"))
+    thread = threading.Thread(target=lambda: asyncio.run(server.serve(sockets=[lsock])),
+                              daemon=True)
+    thread.start()
+    deadline = _time.monotonic() + 10.0
+    while not server.started and _time.monotonic() < deadline:
+        _time.sleep(0.02)
+    assert server.started, "uvicorn did not start"
+    return app, port, server, thread
+
+
+def test_cli_rename_over_real_http_rekeys_the_live_engine(models_home, monkeypatch):
+    """End to end: `localm rename` against a REAL running server moves the
+    registry entry AND re-keys the engine, so the file the engine is serving is
+    not left orphaned under a name the registry no longer has.
+
+    The server runs in a thread in this process, so its engine map IS the one
+    asserted on here - the same reason the fix has to happen server-side.
+    """
+    from click.testing import CliRunner
+
+    from localm import instances
+    from localm.cli import main
+
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    monkeypatch.delenv("LOCALM_URL", raising=False)
+    gguf = _make_model_file(models_home)
+    _register(models_home, {"old-name": {"path": str(gguf), "source": "local"}})
+
+    _reset()
+    eng = _FileEngine("old-name", gguf)
+    hs._engines["old-name"] = eng
+    hs._engines_lru.append("old-name")
+    hs._active_model_name = "old-name"
+    hs._engine = eng
+    app, port, server, thread = _start_real_server(eng)
+    try:
+        monkeypatch.setattr(instances, "find_attachable", lambda *a, **k: {
+            "scheme": "http", "host": "127.0.0.1", "port": port,
+            "token": _INSTANCE_TOKEN})
+        monkeypatch.setattr(instances, "resolve_root_dir", lambda *a, **k: "root")
+        res = CliRunner().invoke(main, ["rename", "old-name", "new-name"])
+
+        assert res.exit_code == 0, res.output
+        assert "403" not in res.output and "401" not in res.output, res.output
+        assert "new-name" in config.load_registry()
+        assert hs._engines.get("new-name") is eng, (
+            "the server that holds the file must end up keyed on the new name")
+        assert "old-name" not in hs._engines
+        assert eng.display_name == "new-name"
+        assert hs.loaded_engine_holding_model_file("new-name") == "new-name"
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10.0)
+        _reset()

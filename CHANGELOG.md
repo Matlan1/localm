@@ -78,6 +78,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   replied "successfully uninstalled". It now reports an error explaining the
   plugin is not fully uninstalled in that case, matching what the CLI already
   told you.
+- **`localm rename` could lead to a loaded model's file being deleted.** The
+  rename happened only in the CLI's own process, so a running server kept
+  serving the model under its old name, and removing it from the Models page
+  then deleted the GGUF out from under it. A model file that is loaded right
+  now can no longer be deleted, whatever name it is registered or loaded
+  under, and `localm rename` now hands the rename to the running server so a
+  loaded model keeps serving under its new name.
 
 ## [0.1.5rc2] - 2026-08-08
 

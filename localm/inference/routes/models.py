@@ -169,6 +169,28 @@ def register(app: FastAPI, ctx) -> None:
             return await _hs.unload_one_model(model)
         return await _hs.unload_all_models()
 
+    @app.post("/v1/models/rename",
+              dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
+    async def rename_model(model: str, new_name: str):
+        """
+        Rename a registered model, re-keying a loaded engine in place.
+
+        Unlike an alias, the old name stops working: this MOVES the
+        registration (and best-effort migrates config/job/RAG references that
+        named it). A model that is currently loaded keeps serving, under the
+        new name.
+
+        This lives on the always-present /v1 surface rather than only on the
+        GUI's /api one because the caller that needs it most is `localm
+        rename`, and a headless `localm serve` has no GUI routes. Renaming a
+        model from a separate process CANNOT re-key this server's in-memory
+        engine map, which would leave the engine orphaned under a name the
+        registry no longer has - so the CLI asks the server to do the whole
+        rename here instead, where the registry move and the re-key happen in
+        one process with no window between them.
+        """
+        return await _hs.rename_registered_model(model, new_name)
+
     @app.post("/v1/models/load",
               dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
     async def load_model(model: str | None = None):
