@@ -90,12 +90,23 @@ def register(app: FastAPI, ctx) -> None:
                 "(from GET /api/session) in the X-CSRF-Token header.")
         # Real, server-side logout: drop the session row so the cookie value can
         # never be replayed (deleting the cookie alone left a valid server session).
+        warnings: list[str] = []
         if source == "cookie" and token:
             from localm import sessions
-            sessions.revoke(token)
+            if sessions.revoke(token) is None:
+                # The store write failed, so the session id is STILL VALID on the
+                # server. Clearing the cookie below stops this browser using it,
+                # but that is exactly the "deleting the cookie alone" state the
+                # server-side revocation exists to improve on, so reporting a
+                # clean sign-out here would be the rule-5 lie. sessions.revoke
+                # has already warned to the local log with the reason.
+                warnings.append(sessions.REVOKE_FAILURE_LABEL)
         secure = request.url.scheme == "https"
         response.delete_cookie(_hs.SESSION_COOKIE, path="/", httponly=True, secure=secure, samesite="strict")
-        return {"authed": False}
+        # "authed" stays False and is honest either way: this browser's cookie is
+        # gone. The warning says the SERVER-side session was not dropped, which is
+        # a different fact and the one a caller cannot otherwise discover.
+        return {"authed": False, "warnings": warnings}
 
     @app.post("/api/auth/key/clear",
               dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))],
@@ -121,9 +132,12 @@ def register(app: FastAPI, ctx) -> None:
         # The key that minted every current session is gone; those sessions carry
         # their own ADMIN scope snapshot, so they MUST be revoked or a leftover
         # cookie would keep full access after the key was cleared (would defeat the
-        # clear). Sign out everywhere.
+        # clear). Sign out everywhere - and READ THE RESULT: revoke_all returns None
+        # when the store could not be written, which is a failed sign-out, not an
+        # empty store. Discarding it is what made this route claim a completed clear
+        # while every session stayed live.
         from localm import sessions
-        sessions.revoke_all()
+        revoked = sessions.revoke_all()
         secure = request.url.scheme == "https"
         # Invalidate the session cookie immediately so the browser is forced
         # back to the key gate on the next navigation (the old cookie value
@@ -131,27 +145,35 @@ def register(app: FastAPI, ctx) -> None:
         response.delete_cookie(_hs.SESSION_COOKIE, path="/", httponly=True,
                                secure=secure, samesite="strict")
         from localm.debuglog import logger as _dbg
-        if failed:
-            # Rule 5: a security step that failed must never report success. The
-            # sessions ARE revoked either way (done above), but a surviving
-            # auth.key/keystore still grants access, so "cleared": true would be
-            # a lie the GUI then shows the user as open mode. Report it honestly
-            # rather than raising - the revocation half did happen, and a 500
-            # would imply nothing had.
-            #
-            # ONLY the path-free "what" labels go on the wire. clear_api_key also
-            # returns "path" (an absolute filesystem path, which carries the
-            # account name - rule 2) and "error" (raw OS exception text -
-            # py/stack-trace-exposure). Those are for the LOCAL CLI and the local
-            # log, never for an HTTP response.
-            #
-            # Nothing is logged HERE, on purpose - this is not a silenced warning.
-            # clear_api_key already warns to THIS SAME logger once per thing it
-            # could not remove (localm/auth.py, the OSError handlers), and those
-            # lines carry the path and the OS error, so they are strictly more
-            # informative than anything this route could add. A second line for
-            # the same event would only restate it with less detail.
-            return {"cleared": False, "warnings": [f["what"] for f in failed]}
+        # Rule 5: a security step that failed must never report success. BOTH
+        # halves of this route are such a step, and each can fail on its own:
+        # a surviving auth.key/keystore still grants access, and a surviving
+        # ADMIN session cookie still grants access. So "cleared" is true only
+        # when BOTH completed. Previously the session half was not read at all,
+        # and the comment here asserted "the sessions ARE revoked either way"
+        # as established fact - it was an unmeasured premise, not a proof, and
+        # it is deleted rather than worked around because a false invariant
+        # comment is worse than no comment: it is what the docs were written
+        # from. Reported honestly rather than raised - a 500 would imply
+        # NOTHING had happened, when typically one half did.
+        #
+        # ONLY path-free labels go on the wire. clear_api_key also returns
+        # "path" (an absolute filesystem path, which carries the account name -
+        # rule 2) and "error" (raw OS exception text - py/stack-trace-exposure);
+        # sessions.REVOKE_FAILURE_LABEL is path-free for the same reason. Those
+        # other fields are for the LOCAL CLI and the local log only.
+        #
+        # Nothing is logged HERE for the credential half, on purpose - this is
+        # not a silenced warning. clear_api_key already warns to THIS SAME
+        # logger once per thing it could not remove (localm/auth.py, the OSError
+        # handlers), and those lines carry the path and the OS error, so they
+        # are strictly more informative than anything this route could add.
+        # sessions.revoke_all warns for its own half on the same logger.
+        warnings = [f["what"] for f in failed]
+        if revoked is None:
+            warnings.append(sessions.REVOKE_FAILURE_LABEL)
+        if warnings:
+            return {"cleared": False, "warnings": warnings}
         _dbg.info("owner API key cleared via /api/auth/key/clear; session invalidated")
         return {"cleared": True, "warnings": []}
 

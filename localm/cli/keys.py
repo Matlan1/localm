@@ -139,9 +139,21 @@ def key_clear(yes):
                           f"{item['path']} ({item['error']})")
         console.print("[dim]Delete the listed file(s) by hand, then run "
                       "'localm key clear' again to confirm.[/dim]")
-    else:
+    elif revoked is not None:
         console.print("[green]✓[/green] API key cleared - open mode.")
-    if revoked:
+    if revoked is None:
+        # Rule 5, the session half. revoke_all returns None only when the store
+        # could not be written, which means live sessions REMAIN live - a leftover
+        # owner cookie keeps full ADMIN access the moment any key is configured
+        # again, which is precisely what this command exists to prevent. The old
+        # code could not tell this from "there were no sessions" and printed the
+        # green tick regardless. Local surface, so it names the file and the fix.
+        console.print("[red]x[/red] Browser sessions were NOT signed out - a "
+                      "signed-in browser may still have access:")
+        console.print(f"  [yellow]-[/yellow] {sessions.sessions_file()}")
+        console.print("[dim]Re-run 'localm key clear' once that file is "
+                      "writable, or delete it by hand.[/dim]")
+    elif revoked:
         console.print("[dim]Browser sessions were signed out.[/dim]")
     _note_env_override("is still set, so a key remains active from the environment.")
 
@@ -177,7 +189,27 @@ def key_recover():
     if had:
         console.print("[dim]The previous owner key no longer works; scoped device "
                       "keys are unchanged.[/dim]")
-    if revoked:
+    if revoked is None:
+        # THE SHARPEST INSTANCE of the rule-5 session gap, which is why it is
+        # spelled out here as well as in key_clear. This command's whole purpose
+        # is locking a compromised owner OUT, and unlike 'key clear' it always
+        # configures a NEW key - so a surviving ADMIN cookie is not merely inert
+        # residue, it resolves immediately against the fresh key and keeps full
+        # access. Reporting a completed recovery here would tell a user under
+        # active compromise that they were safe when they were not.
+        #
+        # Reported, not raised, and the exit code stays 0 - matching what the
+        # credential half of `key clear` already does for its own failure, and
+        # what the HTTP route does (200 with cleared:false). The new key is
+        # printed above and IS usable, so failing the command would be its own
+        # kind of lie, and inventing a non-zero exit here would break scripts
+        # for a contract this fix has no business changing.
+        console.print("[red]x[/red] Browser sessions were NOT signed out, so a "
+                      "captured session cookie may still have access:")
+        console.print(f"  [yellow]-[/yellow] {sessions.sessions_file()}")
+        console.print("[dim]Delete that file by hand, then re-run "
+                      "'localm key recover' to confirm.[/dim]")
+    elif revoked:
         console.print("[dim]Browser sessions were reset; sign in again with the "
                       "new key.[/dim]")
     _note_env_override("is set and overrides this stored key until it is unset.")

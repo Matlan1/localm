@@ -1010,7 +1010,20 @@ def revoke_key(key_id: str) -> bool:
     if target and target.get("hash"):
         try:
             from localm import sessions
-            sessions.revoke_by_key_hash(target["hash"])
+            if sessions.revoke_by_key_hash(target["hash"]) is None:
+                # WARNING, not debug: the docstring above calls this
+                # belt-and-suspenders because the cookie path re-validates a
+                # scoped session's key every request - but an ADMIN-scoped
+                # session is exempt from that re-check (so an owner-key roll
+                # cannot sign the owner out). So for an ADMIN-scoped DEVICE key
+                # this cleanup IS the enforcement, and a failed write leaves its
+                # cookie working. The key itself is genuinely revoked either way,
+                # which is what this function reports, so the honest altitude is
+                # a warning naming the residue rather than failing the revoke.
+                logger.warning(
+                    "key %s was revoked, but its browser sessions could not be "
+                    "dropped; an admin-scoped session for it may still be "
+                    "usable until the session store is writable again", key_id)
         except Exception as e:
             logger.debug("session cleanup after key revoke failed (non-fatal): %s", e)
     return True

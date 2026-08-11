@@ -12,6 +12,19 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Fixed
+- **`localm key clear` and `localm key recover` no longer report success when
+  they could not sign browser sessions out.** If the session store could not be
+  written (a locked or read-only file), both commands printed their normal
+  success message and `POST /api/auth/key/clear` returned `"cleared": true`,
+  while every signed-in browser stayed signed in. This mattered most for
+  `key recover`, whose whole purpose is locking a compromised owner out and
+  which always sets a new key, so a surviving session kept working against it.
+  All three now say plainly that sessions were not signed out and name the file
+  to fix, and the clear endpoint reports `"cleared": false` with the reason in
+  `warnings`. `POST /api/session/logout` gained the same `warnings` list for the
+  case where the browser cookie is cleared but the server-side session survives.
+  Revoking a scoped key now also logs a warning if its sessions could not be
+  dropped, instead of only a debug line.
 - **Scheduled jobs no longer lose their shell step when you roll the API key.**
   Rolling the key deliberately keeps you signed in to the web UI. But a
   scheduled coder job created from that still-signed-in browser afterwards was

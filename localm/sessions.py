@@ -268,11 +268,26 @@ def _touch_last_used(id_hash: str) -> None:
         logger.debug("session last_used stamp failed (non-fatal): %s", e)
 
 
-def revoke(sid: Optional[str]) -> bool:
-    """Delete the session behind *sid* (real, server-side logout). Returns True if
-    it existed. Never raises on a missing/unreadable store (logout must not error)."""
+# The path-free label a caller may put on a NETWORK surface when revocation could
+# not complete. Mirrors auth.clear_api_key's ``what`` vocabulary, and lives here so
+# both the HTTP route and the CLI name the same thing: the store PATH carries the
+# account name (rule 2) and must never ride out on a response.
+REVOKE_FAILURE_LABEL = "browser sessions (some devices may still be signed in)"
+
+
+def revoke(sid: Optional[str]) -> Optional[bool]:
+    """Delete the session behind *sid* (real, server-side logout).
+
+    Returns True if it existed, False if it did not, and **None when the store
+    could not be written**. That third case is the point: a failed revocation is
+    NOT the same as "there was nothing to revoke", and a caller that cannot tell
+    them apart will report a sign-out that did not happen (AGENTS.md rule 5).
+    None is falsy, so an existing ``if revoke(...)`` keeps its old meaning; only a
+    caller that asks ``is None`` learns the difference.
+
+    Still never raises: logout must not 500. It reports instead of throwing."""
     if not sid or not sid.strip():
-        return False
+        return False               # nothing presented: a real answer, not a failure
     h = _hash(sid.strip())
     try:
         with _LOCK:
@@ -283,14 +298,23 @@ def revoke(sid: Optional[str]) -> bool:
             _save(remaining)
         return True
     except (OSError, ValueError) as e:
-        logger.warning("could not revoke session (%s); the store may be unreadable", e)
-        return False
+        logger.warning("could not revoke session (%s); the store may be unreadable; "
+                       "the session id remains valid on the server", e)
+        return None
 
 
-def revoke_by_key_hash(key_hash: Optional[str]) -> int:
+def revoke_by_key_hash(key_hash: Optional[str]) -> Optional[int]:
     """Delete every session minted from the key with this hash, so revoking a scoped
-    key also drops the sessions it authorized. Returns the count removed. Never
-    raises on a missing/unreadable store."""
+    key also drops the sessions it authorized. Returns the count removed, or **None
+    when the store could not be written** (see ``revoke`` for why that is a distinct
+    answer rather than 0). Never raises on a missing/unreadable store.
+
+    A failure here is not always contained by the per-request re-check: the cookie
+    path re-validates a session's owning key against the live keystore on every
+    request, which covers a scoped key - but an ADMIN-scoped session is exempt from
+    that check (so an owner-key roll cannot sign the owner out). So if this cleanup
+    fails for an ADMIN-scoped DEVICE key, its cookie keeps working. That is why the
+    caller is given something to report rather than a silent 0."""
     if not key_hash:
         return 0
     try:
@@ -303,7 +327,7 @@ def revoke_by_key_hash(key_hash: Optional[str]) -> int:
             return removed
     except (OSError, ValueError) as e:
         logger.warning("could not revoke sessions for a key (%s)", e)
-        return 0
+        return None
 
 
 def relink_key_hash(old_hash: Optional[str], new_hash: Optional[str]) -> int:
@@ -340,9 +364,24 @@ def relink_key_hash(old_hash: Optional[str], new_hash: Optional[str]) -> int:
         return 0
 
 
-def revoke_all() -> int:
-    """Delete EVERY session (log out all devices). Returns the count removed. Used
-    by the explicit 'clear owner key' / 'sign out everywhere' flows."""
+def revoke_all() -> Optional[int]:
+    """Delete EVERY session (log out all devices). Used by the explicit 'clear owner
+    key' / 'sign out everywhere' flows: ``localm key clear``, ``localm key recover``,
+    and ``POST /api/auth/key/clear``.
+
+    Returns the count removed, or **None when the store could not be written**.
+
+    That distinction is the whole reason this signature is not a plain ``int``.
+    Returning 0 for a FAILED write is indistinguishable from 0 for "there were no
+    sessions", so all three callers reported a completed sign-out while every
+    session was still live. ``key recover`` is the sharpest case: its entire stated
+    purpose is locking a compromised owner out, and it always configures a NEW key,
+    so a surviving ADMIN cookie resolves against it immediately. A security step
+    that fails must never report success (AGENTS.md rule 5).
+
+    None is falsy, so an existing ``if revoke_all():`` keeps its old meaning (do not
+    claim devices were signed out); a caller must ask ``is None`` to distinguish a
+    failure from an empty store, and every caller in-tree now does."""
     try:
         with _LOCK:
             records = _load()
@@ -351,8 +390,9 @@ def revoke_all() -> int:
                 _save([])
             return n
     except (OSError, ValueError) as e:
-        logger.warning("could not clear sessions (%s)", e)
-        return 0
+        logger.warning("could not clear sessions (%s); sessions that were live "
+                       "REMAIN live and the sign-out did not happen", e)
+        return None
 
 
 def sweep() -> int:
