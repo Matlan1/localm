@@ -2033,7 +2033,16 @@ def remove_model(name: str) -> None:
     # decision and the action refer to the same file by construction, rather than
     # by a reader noticing they agree.
     target = resolve_deletion_target(path)
-    if target is not None:
+    # is_owned_model_path is asked AGAIN here, deliberately, even though a
+    # non-None target already means it answered True inside the helper. A
+    # destructive sink keeps its authorization inline and dominating at the
+    # sink rather than inheriting it from a helper's return contract: a later
+    # edit that gave resolve_deletion_target one more reason to return a path
+    # would silently widen what rmtree/unlink touch, with nothing at the delete
+    # site saying otherwise. The repeat costs one resolve of an already-resolved
+    # path and is what keeps "the gate stands immediately in front of
+    # shutil.rmtree / unlink" a true statement about this code.
+    if target is not None and is_owned_model_path(target):
         if target.is_dir():
             import shutil
             shutil.rmtree(target)
