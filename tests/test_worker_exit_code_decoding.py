@@ -197,7 +197,16 @@ class TestRunnerReportsTheDecodedCode:
         """A grep-style guard on the source itself. Every crash message must go
         through _exit_reason(); a new one that reaches for _exitcode() directly
         would silently reintroduce the bare number, and no behavioural test would
-        catch it because the message would still be produced."""
+        catch it because the message would still be produced.
+
+        MEASURED, and it is why this static guard is load-bearing rather than
+        belt-and-braces: with the call sites reverted to the raw code, THIS IS
+        THE ONLY TEST IN THIS FILE THAT GOES RED ON WINDOWS. The behavioural test
+        above cannot - the fault-injection abort exits 3 there, and "3" is what
+        both the raw and the decoded form produce, so nothing distinguishes them.
+        On POSIX the behavioural test goes red too (SIGABRT disappears from the
+        message). Do not delete this scan on the grounds that an end-to-end test
+        covers it; on this project's own dev platform it does not."""
         import inspect
 
         from localm.inference.backends.llamacpp import _runner
