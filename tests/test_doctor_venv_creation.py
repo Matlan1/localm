@@ -54,3 +54,36 @@ def test_venv_creation_check_reports_failure_when_venv_creation_is_broken(monkey
     out = _run_check_capturing_output(monkeypatch)
     assert "venv creation FAILED" in out
     assert "WinError 2" in out
+
+
+def test_venv_creation_check_reports_failure_when_pip_did_not_land(monkeypatch):
+    """NEW-MANAGED-COMFY-VENV-MISSING-PIP: `-m venv` can report success (return
+    code 0, the interpreter file present) while its own mandatory ensurepip
+    bootstrap silently failed - the managed-ComfyUI installer immediately
+    pip-installs into a venv it just created, so a pip-less venv used to read as
+    doctor-green right up until provisioning failed deep inside with an opaque
+    "No module named pip". Runs a REAL `-m venv` (unmocked) and fakes only the
+    follow-up `-m pip --version` probe failing, so this proves the check reads
+    that SECOND subprocess call rather than merely reacting to any failure."""
+    import subprocess
+
+    real_run = subprocess.run
+
+    class _BrokenPip:
+        returncode = 1
+        stdout = ""
+        stderr = "No module named pip"
+
+    def _fake_run(cmd, **kwargs):
+        if "pip" in cmd:
+            return _BrokenPip()
+        return real_run(cmd, **kwargs)
+
+    # _check_venv_creation() does `import subprocess` locally (same module
+    # object/singleton), so patching subprocess.run here is visible to it.
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+
+    out = _run_check_capturing_output(monkeypatch)
+    assert "venv creation FAILED" in out
+    assert "no working pip" in out.lower()
+    assert "No module named pip" in out

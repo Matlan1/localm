@@ -274,6 +274,85 @@ def test_ensure_comfy_reports_launcher_immediate_exit(tmp_path):
     assert "exited immediately with code 1" in msg
 
 
+def test_ensure_comfy_immediate_exit_includes_the_launch_log_tail(tmp_path):
+    """NEW-MANAGED-COMFY-VENV-MISSING-PIP: an immediate-exit failure must say WHY,
+    not just the exit code - the real reason (a traceback) is what the launcher
+    wrote to its own captured output before dying, and the caller should not have
+    to go find comfy-launch.log by hand. Writes through the SAME stdout handle
+    ensure_comfy itself opened and passed to Popen (mirroring how a real launcher
+    process's output actually lands there), so this proves the file is read back,
+    not merely that some string was appended."""
+    from localm.config import home_dir
+    home_dir().mkdir(parents=True, exist_ok=True)  # ensure_comfy expects this to exist
+
+    launcher = tmp_path / f"comfyui.{_ext()}"
+    launcher.write_text("exit 1\n", encoding="utf-8")
+    cfg = {"comfy_launch_cmd": None, "comfy_workdir": str(tmp_path),
+           "comfy_launch_timeout": 30}
+
+    def fake_popen(argv, cwd=None, stdout=None, **kw):
+        if hasattr(stdout, "write"):
+            stdout.write("Traceback (most recent call last):\n"
+                         "ModuleNotFoundError: No module named 'sqlalchemy'\n")
+            stdout.flush()
+        proc = MagicMock()
+        proc.poll.return_value = 1
+        proc.returncode = 1
+        return proc
+
+    with patch("localm.config.load_config", return_value=cfg), \
+         patch.object(comfy_client, "_comfy_alive", side_effect=lambda *a, **k: False), \
+         patch("subprocess.Popen", side_effect=fake_popen):
+        ok, msg = comfy.ensure_comfy("http://127.0.0.1:8188")
+    assert ok is False
+    assert "exited immediately with code 1" in msg
+    assert "ModuleNotFoundError" in msg
+    assert "sqlalchemy" in msg
+
+
+def test_ensure_comfy_timeout_message_includes_the_launch_log_tail(monkeypatch, tmp_path):
+    """NEW-MANAGED-COMFY-VENV-MISSING-PIP: the "did not come up within N minutes"
+    message already names the log FILE; it must also fold in the file's own tail
+    so the reason is visible without a second trip to disk. Fast-forwards the
+    deadline poll loop to zero iterations via a fake monotonic clock rather than
+    waiting out a real 30s timeout."""
+    import time as time_mod
+    from localm.config import home_dir
+    home_dir().mkdir(parents=True, exist_ok=True)  # ensure_comfy expects this to exist
+
+    launcher = tmp_path / f"comfyui.{_ext()}"
+    launcher.write_text("echo hi\n", encoding="utf-8")
+    cfg = {"comfy_launch_cmd": None, "comfy_workdir": str(tmp_path),
+           "comfy_launch_timeout": 30}
+
+    def fake_popen(argv, cwd=None, stdout=None, **kw):
+        if hasattr(stdout, "write"):
+            stdout.write("aiohttp.client_exceptions.ClientConnectorError\n")
+            stdout.flush()
+        proc = MagicMock()
+        proc.poll.return_value = None   # never exits - times out instead
+        return proc
+
+    calls = {"n": 0}
+
+    def fake_monotonic():
+        calls["n"] += 1
+        # 1st call sets the deadline (0 + wait_seconds); every call after must
+        # already be past it, so the poll loop body runs zero times.
+        return 0.0 if calls["n"] == 1 else 10_000.0
+
+    monkeypatch.setattr(time_mod, "monotonic", fake_monotonic)
+    monkeypatch.setattr(time_mod, "sleep", lambda s: None)
+
+    with patch("localm.config.load_config", return_value=cfg), \
+         patch.object(comfy_client, "_comfy_alive", side_effect=lambda *a, **k: False), \
+         patch("subprocess.Popen", side_effect=fake_popen):
+        ok, msg = comfy.ensure_comfy("http://127.0.0.1:8188")
+    assert ok is False
+    assert "did not come up within" in msg
+    assert "aiohttp.client_exceptions.ClientConnectorError" in msg
+
+
 def _spawn_with_cfg(tmp_path, cfg):
     """Run ensure_comfy with a discoverable launcher in tmp_path and capture the
     spawned argv. Returns the argv (str on Windows, list on POSIX).
