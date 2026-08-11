@@ -364,6 +364,48 @@ def relink_key_hash(old_hash: Optional[str], new_hash: Optional[str]) -> int:
         return 0
 
 
+def remember_owner_key_minted(sid: Optional[str]) -> bool:
+    """Back-fill ``owner_key_minted`` on a session PROVEN to be the owner's.
+
+    Best-effort, and never raises: the caller has already established the fact by
+    comparing the recorded ``key_hash`` against the live owner key, so this run is
+    correct either way and the next request re-proves it identically. Returns True
+    when the record was actually updated.
+
+    It exists for one narrow but real case. A session minted BEFORE the field
+    existed carries no stamp, so it is recognised as the owner's only while the
+    owner key still has the value it was minted with. Roll the key and that proof
+    is gone - the recorded hash then matches neither the new owner key nor any
+    keystore entry - so the session would be treated as a revocable keystore key's
+    and signed out, which is exactly the "a GUI key roll must not log the browser
+    out" promise this whole design exists to keep. Recording the proof while it
+    still holds closes that, the same way jobs' ``_remember_owner_key_job`` does
+    for a job row.
+
+    Writes at most once per session: after this the stamp short-circuits the
+    value comparison, so the auth path does not keep re-writing the store."""
+    if not sid or not sid.strip():
+        return False
+    h = _hash(sid.strip())
+    try:
+        with _LOCK:
+            records = _load()
+            for r in records:
+                if r.get("id_hash") == h:
+                    if r.get("owner_key_minted") is True:
+                        return False            # already recorded: nothing to do
+                    r["owner_key_minted"] = True
+                    _save(records)
+                    return True
+            return False
+    except Exception as e:
+        # Not silenced: if this keeps failing the session stays exposed to being
+        # signed out on the owner's next key roll, and that has to be findable.
+        logger.debug("could not record the owner-key stamp on a session (%s); "
+                     "it will be re-derived on the next request", e)
+        return False
+
+
 def revoke_all() -> Optional[int]:
     """Delete EVERY session (log out all devices). Used by the explicit 'clear owner
     key' / 'sign out everywhere' flows: ``localm key clear``, ``localm key recover``,

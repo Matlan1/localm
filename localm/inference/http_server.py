@@ -2302,6 +2302,56 @@ def _request_token(request) -> tuple[Optional[str], str]:
     return None, "none"
 
 
+def _session_minted_by_owner_key(rec, token=None) -> bool:
+    """Whether *rec* was minted by the OWNER KEY itself, as opposed to a minted
+    (and therefore revocable) keystore key.
+
+    Asked POSITIVELY and answered from the owner key alone. Two ways, in cost
+    order, and both are proofs rather than inferences:
+
+    1. the ``owner_key_minted`` stamp recorded at login (``sessions.create``);
+    2. for a record written before that field existed, the recorded ``key_hash``
+       still equalling the live owner key's digest. Only the owner key's own
+       digest can match that, so a keystore key's session can never satisfy it -
+       which is why this needs no way to tell an ABSENT stamp from a False one.
+
+    On (2) the proof is written back (``remember_owner_key_minted``) while it
+    still holds: after an owner-key roll the recorded hash matches neither the new
+    owner key nor any keystore entry, so without the back-fill a pre-existing
+    owner session would start failing the re-check below and be signed out on the
+    roll - the exact behaviour the exemption exists to prevent.
+
+    Deliberately NOT derived from the scope set, and NOT from a keystore read:
+
+    - **ADMIN is not the question.** The owner may mint ADMIN-scoped KEYSTORE
+      keys, which stay revocable; treating "holds ADMIN" as "is the owner" is what
+      gave such a key an exemption it was never entitled to.
+    - **Nothing here reads the keystore**, so ``_load_keystore()``'s fail-OPEN
+      behaviour (``[]`` on OSError/ValueError) cannot promote anything, and no
+      answer is derived from a NEGATIVE such as ``not key_hash_live``. Both of
+      those shapes produced privilege escalations in the jobs plugin's equivalent
+      check (see ``builtin/jobs/plug.py``)."""
+    if rec.get("owner_key_minted") is True:
+        return True
+    from localm.auth import _hash_key, _legacy_owner_identity, ct_equal, get_api_key
+    owner_key = get_api_key()
+    if not owner_key:
+        return False
+    kh = rec.get("key_hash")
+    if not kh:
+        return False
+    # The LEGACY unsalted digest counts too: the owner key's identity moved to a
+    # salted KDF, and a session minted before that upgrade still carries the old
+    # value until relink_key_hash rewrites it.
+    if not (ct_equal(kh, _hash_key(owner_key))
+            or ct_equal(kh, _legacy_owner_identity(owner_key))):
+        return False
+    if token:
+        from localm import sessions
+        sessions.remember_owner_key_minted(token)
+    return True
+
+
 def _valid_session(token):
     """The session record behind a presented cookie *token*, or None if it does not
     resolve to a session this server still honours.
@@ -2309,25 +2359,57 @@ def _valid_session(token):
     THE single gate for reading anything off a cookie session. It exists so that
     every consumer of a session attribute goes through the same re-validation
     rather than each calling ``sessions.lookup()`` and re-deciding: a bare lookup
-    returns a record that this function would REJECT (a scoped key's session whose
-    key has since been revoked or expired), so a second reader written against
-    ``lookup`` would honour a session that auth already refuses everywhere else."""
+    returns a record that this function would REJECT (a key's session whose key has
+    since been revoked or expired), so a second reader written against ``lookup``
+    would honour a session that auth already refuses everywhere else."""
     if not token:
         return None
     from localm import sessions
     rec = sessions.lookup(token)
     if rec is None:
         return None
-    if scopes.ADMIN not in set(rec.get("scopes", [])):
-        # A SCOPED-key session lives only as long as its key: re-validate the
+    if not _session_exempt_from_key_recheck(rec, token):
+        # A KEYSTORE key's session lives only as long as its key: re-validate the
         # owning key against the live keystore every request, so revoking or
         # expiring it cuts the session off (parity with the bearer path's
-        # per-request verify()). An owner/ADMIN session is exempt - decoupled
-        # from the key VALUE so an owner-key ROLL does not log the owner out.
+        # per-request verify()).
         from localm.auth import key_hash_live
         if not key_hash_live(rec.get("key_hash")):
             return None
     return rec
+
+
+def _session_exempt_from_key_recheck(rec, token=None) -> bool:
+    """Whether *rec* may skip the per-request keystore liveness re-check.
+
+    The exemption is for the OWNER KEY, not for ADMIN. It exists because the owner
+    key is not a keystore entry and a session is decoupled from the key VALUE, so
+    an owner-key ROLL must not log the owner out. Keying it on the SCOPE SET alone
+    handed the same exemption to any ADMIN-scoped KEYSTORE key - which is revocable
+    by design - so revoking such a key did not reliably end its cookie, and if the
+    store cleanup also failed the cookie kept working indefinitely. Removing the
+    exemption outright is not the fix either: that reintroduces the owner signing
+    themselves out, which is the whole reason it is here.
+
+    ADMIN is NECESSARY but not SUFFICIENT, and that conjunction is deliberate. It
+    is not a return to inferring the owner from the scope set - the owner proof
+    below is what actually grants the exemption. ADMIN is required ALONGSIDE it
+    because a record claiming to be owner-minted while carrying narrower scopes is
+    self-contradictory: every mint site records the owner key's own scope snapshot,
+    which is ADMIN. No mint site can produce that combination, so only a tampered
+    or corrupted store can, and requiring both means one flipped boolean is not
+    enough to buy a session that can never be revoked."""
+    if scopes.ADMIN not in set(rec.get("scopes", [])):
+        return False
+    if _session_minted_by_owner_key(rec, token):
+        return True
+    # No key identity at all. The re-check asks whether a REVOCABLE KEYSTORE
+    # CREDENTIAL behind this session is still live; a session that records no key
+    # has no such credential, so the question does not apply to it and answering it
+    # with key_hash_live(None) -> False would reject the session for the wrong
+    # reason. Distinct from the defect above, where the session DOES name a live
+    # keystore entry and is exactly the thing that must stay revocable.
+    return not rec.get("key_hash")
 
 
 def _principal_from_token(token, source):
@@ -2385,7 +2467,12 @@ def caller_minted_by_owner_key(request: Request) -> bool:
     if source != "cookie":
         return False
     rec = _valid_session(token)
-    return bool(rec) and rec.get("owner_key_minted") is True
+    # Shares _session_minted_by_owner_key with the exemption gate rather than
+    # re-reading the raw stamp, so "is this the owner's session" has exactly one
+    # answer. Without that, a pre-upgrade owner session (no stamp, recognised by
+    # value) would be exempt from the keystore re-check yet not count as the owner
+    # here - two notions of the same thing, disagreeing on the same record.
+    return bool(rec) and _session_minted_by_owner_key(rec, token)
 
 
 def _csrf_secret(request) -> str:

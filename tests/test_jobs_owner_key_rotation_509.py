@@ -356,13 +356,25 @@ def test_expired_admin_keystore_key_over_a_live_cookie_is_not_the_owner(home):
     # Preconditions: this is the exact state that fooled the negative test.
     assert auth.verify(created["key"]) is None          # bearer would be rejected
     assert auth.key_hash_live(kh) is False              # "not live"...
-    assert sessions.lookup(sid) is not None             # ...but the cookie lives
-    assert caller_scopes(req) == {S.ADMIN}
-    assert principal_id(req) == kh
+    assert sessions.lookup(sid) is not None             # ...and the RAW record lives
 
     assert _caller_is_owner_key(req) is False, (
         "an EXPIRED admin-scoped keystore key was stamped as the owner key - "
         "that hands a revoked credential permanent shell (LM-DA-014)")
+
+    # UPDATED, and the change is the point: this session is now rejected OUTRIGHT
+    # rather than merely failing to count as the owner. The exemption from the
+    # per-request keystore re-check used to key on the ADMIN scope, so this
+    # expired ADMIN-scoped KEYSTORE key's cookie still resolved a principal
+    # everywhere; it now keys on the owner-key proof, which this record does not
+    # have. The assertions below previously read
+    #     caller_scopes(req) == {S.ADMIN}   and   principal_id(req) == kh
+    # i.e. the session resolved despite its key being dead. That was the weaker
+    # state this fix removes, so the LM-DA-014 property above now holds for a
+    # strictly stronger reason: not "resolves but is not the owner", but "does
+    # not resolve at all".
+    assert caller_scopes(req) is None
+    assert principal_id(req) is None
 
 
 def test_an_unreadable_keystore_cannot_promote_a_key_to_owner(home, monkeypatch):
@@ -520,11 +532,21 @@ def test_the_owner_login_records_the_stamp_and_a_scoped_login_does_not(jobs_app)
     assert S.ADMIN in owner_rec["scopes"] and S.ADMIN in scoped_rec["scopes"]
 
 
-def test_a_session_recorded_before_this_field_existed_is_not_the_owner(home):
-    """Fail closed on absence. A session minted by an older build has no
-    ``owner_key_minted`` key at all; it must read as False rather than inheriting
-    a privilege it never proved. (It still resolves correctly by key VALUE until
-    the owner rolls - that is the pre-existing behaviour, not a new grant.)"""
+def test_a_session_recorded_before_this_field_existed_is_backfilled(home):
+    """A session minted by an older build carries no ``owner_key_minted`` key, so
+    the raw record still reads False - it never inherits a privilege it did not
+    prove. But it IS recognised as the owner's by key VALUE, and that proof is now
+    WRITTEN BACK while it still holds.
+
+    UPDATED: this test previously asserted the opposite tail - that once the owner
+    rolled, an un-stamped legacy session stopped matching - and called that "the
+    pre-existing behaviour rather than a new hole". That limitation was real and
+    is now removed deliberately. Once the exemption from the keystore re-check
+    keys on the owner-key proof rather than on the ADMIN scope, a legacy session
+    that lost the proof at the roll would not merely stop counting as the owner's,
+    it would be SIGNED OUT - which is precisely the promise ("a GUI key roll must
+    not log the browser out") this whole design exists to keep. Back-filling on
+    first sight closes it."""
     from localm import auth, sessions
     from localm.plugins.builtin.jobs.plug import _caller_is_owner_key
 
@@ -538,13 +560,16 @@ def test_a_session_recorded_before_this_field_existed_is_not_the_owner(home):
     sessions.sessions_file().write_text(json.dumps(raw), encoding="utf-8")
     sessions._CACHE["mtime"] = None          # force a re-read of the edited file
 
-    assert sessions.lookup(sid)["owner_key_minted"] is False
-    # Still the owner by VALUE, because the key has not rolled yet.
+    assert sessions.lookup(sid)["owner_key_minted"] is False   # nothing recorded
+    # Recognised by VALUE, because the key has not rolled yet...
     assert _caller_is_owner_key(_cookie_request(sid)) is True
-    # ...and once it rolls, the un-stamped legacy session correctly stops matching,
-    # which is exactly the pre-fix behaviour rather than a new hole.
+    # ...and that recognition is now PERSISTED, so the proof survives the roll.
+    assert sessions.lookup(sid)["owner_key_minted"] is True
+
     auth.regenerate_key()
-    assert _caller_is_owner_key(_cookie_request(sid)) is False
+    assert _caller_is_owner_key(_cookie_request(sid)) is True
+    assert sessions.lookup(sid) is not None, \
+        "the owner's own browser session was signed out by a key roll"
 
 
 def test_a_truthy_non_bool_in_the_store_is_not_the_owner_stamp(home):
