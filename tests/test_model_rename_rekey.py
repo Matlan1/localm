@@ -41,6 +41,8 @@ def _reset():
     hs._inference_sems.clear()
     hs._last_activity_per_model.clear()
     hs._active_model_name = None
+    hs._default_model_name = None
+    hs._last_active_model_name = None
     hs._engine = None
 
 
@@ -72,6 +74,43 @@ def test_rekey_is_a_noop_when_the_old_name_is_not_loaded():
     assert hs.rekey_loaded_model("nowhere", "elsewhere") is False
     assert hs._engines == {}
     assert hs._active_model_name is None
+    _reset()
+
+
+def test_rekey_also_moves_the_startup_and_last_active_pointers():
+    """Found by the live repro, not by reasoning: after renaming the model a
+    server was STARTED with, GET /v1/models still listed a row for the old
+    name, because list_models adds _default_model_name whenever the registry
+    lacks it. The same stale pointer also makes switch_engine's registration
+    check accept a name the registry no longer has, and
+    _resolve_unnamed_model_name falls back to _last_active_model_name after an
+    eviction. All three are records of a loaded model's identity, so all three
+    move."""
+    _reset()
+    eng = _FakeEngine("old")
+    hs._engines["old"] = eng
+    hs._default_model_name = "old"
+    hs._last_active_model_name = "old"
+
+    assert hs.rekey_loaded_model("old", "new") is True
+
+    assert hs._default_model_name == "new"
+    assert hs._last_active_model_name == "new"
+    _reset()
+
+
+def test_rekey_leaves_another_models_pointers_alone():
+    """The pointers move only when they NAME the renamed model - renaming a
+    background model must not steal the startup identity of a different one."""
+    _reset()
+    hs._engines["bg"] = _FakeEngine("bg")
+    hs._default_model_name = "startup-one"
+    hs._last_active_model_name = "startup-one"
+
+    assert hs.rekey_loaded_model("bg", "bg-renamed") is True
+
+    assert hs._default_model_name == "startup-one"
+    assert hs._last_active_model_name == "startup-one"
     _reset()
 
 

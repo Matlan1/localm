@@ -1606,10 +1606,26 @@ def rekey_loaded_model(old_name: str, new_name: str) -> bool:
     A synchronous, in-memory-only op (dict/list mutation, no I/O, no
     ``await``), so it is safe to call directly from an async route body: on
     a single-threaded event loop nothing else can interleave between the pop
-    and the re-insert. Returns False (no-op) when *old_name* is not
-    currently loaded - the common case, since renaming an unloaded model
-    needs no runtime bookkeeping."""
-    global _active_model_name
+    and the re-insert. Returns whether an ENGINE was re-keyed: False when
+    *old_name* had none, which is the common case, since renaming a model
+    that was never loaded in this process needs no engine bookkeeping.
+
+    The startup and last-active POINTERS are corrected either way, before
+    that early return, because they are wrong the moment the registry moves
+    regardless of what is in the engine map. Measured live, on a server
+    started with the renamed model: a stale ``_default_model_name`` puts a
+    ghost row for the old name into ``GET /v1/models`` (list_models adds the
+    startup name when the registry lacks it) and makes ``switch_engine``'s
+    registration check at ``name != _default_model_name`` accept a request
+    for a name the registry no longer has, instead of answering the honest
+    404. ``_last_active_model_name`` is the same shape one step along:
+    ``_resolve_unnamed_model_name`` falls back to it after a full eviction,
+    so an unnamed request would resolve to a name that no longer exists."""
+    global _active_model_name, _default_model_name, _last_active_model_name
+    if _default_model_name == old_name:
+        _default_model_name = new_name
+    if _last_active_model_name == old_name:
+        _last_active_model_name = new_name
     engine = _engines.pop(old_name, None)
     if engine is None:
         return False
