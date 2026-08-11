@@ -202,7 +202,8 @@ CORE_FIELDS: list = [
                  "Device indices to split a model across when it is too large "
                  "for one card (2+ needed to take effect). Each card's share "
                  "follows its free VRAM at load time unless GPU split ratios "
-                 "pins exact weights. Blank uses a single GPU (Main GPU above).",
+                 "pins exact weights. Blank still spreads a model over every "
+                 "GPU by free VRAM; set this to control which cards.",
                  group="Engine", applies=Applies.NEXT_LOAD),
     SettingField("gpu_split_ratios", Widget.HIDDEN, "GPU split ratios",
                  "Optional relative weight per device in Split across GPUs "

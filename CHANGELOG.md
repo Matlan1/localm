@@ -43,6 +43,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   captured the message now says so plainly rather than sending you to look for a
   trace that was never written. This covers the GGUF, HuggingFace and embedding
   workers alike.
+- **Models are now sized against all your GPUs, not just one of them.** If you
+  have more than one card, localm already spread a model across all of them at
+  load time, but when working out how much it could offload it only ever looked
+  at a single card's free memory. So it offloaded far less than your machine
+  could hold and left the rest idle: on one three-card machine a load used
+  39 GB and left 21.5 GB unused. Both the number of layers put on the GPU and
+  the context size are now worked out from the free memory of every card the
+  model will actually be spread over, including cards of different sizes. You
+  do not need to configure anything for this. If you have one GPU, nothing
+  changes.
 - **Opening the web UI on an install that has an API key set now asks for the
   key, instead of signing you in automatically.** When a key was configured, the
   page would still hand a full owner session to whoever asked for it, with no key
