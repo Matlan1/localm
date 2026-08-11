@@ -256,9 +256,10 @@ def test_forcing_grammar_prelude_is_bounded_below_the_native_ceiling():
     """An unbounded prelude keeps alive a parse in which the model may emit text
     forever and never reach the call, silently defeating the forcing. The bound
     must also stay under llama.cpp's own repetition ceiling, MEASURED at 1999 on
-    the bundled runtime (2000 is rejected as "exceeds sane defaults"). Note that
-    localm's MAX_GRAMMAR_REPEAT_COUNT is 10000, i.e. ABOVE the native limit, so
-    check_grammar_structure alone cannot catch a too-large count."""
+    the bundled runtime (2000 is rejected as "exceeds sane defaults"). localm's
+    MAX_GRAMMAR_REPEAT_COUNT is now aligned at 1900 (same margin), so this also
+    doubles as a check that the prelude bound stays inside the structural
+    pre-check's own ceiling, not just the native one."""
     import re
     bounds = [int(m) for m in re.findall(r"\{0,(\d+)\}", TOOL_CALLS_AFTER_THINK)]
     assert bounds, "the reasoning prelude must carry an explicit {0,N} bound"
