@@ -772,7 +772,30 @@ def verify_abi(lib: ctypes.CDLL, lib_path: str = "") -> AbiVerdict:
     Returns the verdict on success (status ok / skipped / unchecked). Raises
     :class:`AbiMismatch` only when the structural fingerprint is broken. Called
     once per process from ``load_lib`` (cached with the lib handle), so it adds
-    no per-call overhead."""
+    no per-call overhead.
+
+    GUARANTEE FOR A FUTURE THIRD (or Nth) LAYOUT this module does not yet know
+    about: this fails safe, never a silent misbind, via TWO independent
+    layers. (1) If a genuinely unknown layout's bytes do not decisively match
+    either known context_params/model_params fingerprint,
+    detect_context_params_layout/detect_model_params_layout report
+    ``assumed=True`` and fall back to V1 - but that fallback is not "trust
+    blindly". (2) Whatever layout gets bound - detected OR assumed - is
+    handed to :func:`evaluate`, which independently RE-CHECKS the actual
+    keystone field values (the -1 enums, split_mode/load_mode range, batch
+    ordering) at wherever that layout says they live. A wrong bind almost
+    always reads garbage into at least one of those, and (2) catches it even
+    when (1) was confidently WRONG (a fingerprint can score a decisive but
+    incorrect match for an unknown layout that happens to resemble a known
+    one in its own checked window - proven empirically 2026-08-11 with a
+    synthetic "V3": the fingerprint confidently called it v2, but evaluate()
+    still caught the resulting garbage rope_scaling_type and refused; see
+    test_unknown_third_layout_still_fails_safe). Detection choosing wrong is
+    therefore not, by itself, memory corruption - evaluate() is the actual
+    gate. Preserve this when adding a V3: whatever chooses between V1/V2/V3
+    may be imperfect, but the class it is bound into must still pass through
+    evaluate()'s real value checks before a single by-value struct crosses
+    the FFI boundary."""
     global _detected_layout, _layout_assumed
     global _detected_context_layout, _context_layout_assumed
 
