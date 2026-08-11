@@ -109,6 +109,43 @@ def _prerelease_suffix(v: str):
     return (tag.lower(), int(tail_num) if tail_num else 0)
 
 
+def _leading_digit(v: str) -> bool:
+    """Whether *v* (after ``normalize()``) starts with a digit - i.e. looks like
+    an actual version number, as opposed to an arbitrary tag (``"stable"``,
+    ``"nightly"``, ``"release-5"``). Mirrors ``_parse()``'s own per-segment
+    leading-digit extraction: a tag that fails this silently parses to ``(0,)``,
+    indistinguishable from a real version that is genuinely older or equal."""
+    t = normalize(v)
+    return bool(t) and t[0].isdigit()
+
+
+def comparable(candidate: str, current: str) -> bool:
+    """Whether ``is_newer(candidate, current)`` can meaningfully ORDER the two,
+    as opposed to both silently degrading to the same ``(0,)`` tuple because one
+    side is not a recognizable version number.
+
+    ``current`` in ``("", "unknown")`` is always comparable - the same special
+    case ``is_newer`` makes (no signal -> any real candidate counts as an
+    update). Otherwise BOTH sides must start with a digit (see
+    ``_leading_digit``); a bare ``candidate`` (falsy) is never comparable.
+
+    Read this ALONGSIDE ``is_newer()``'s result, never as a replacement for it:
+    when ``is_newer`` already returns True the ordering is already known
+    regardless of this function (e.g. a malformed *current* against a
+    well-formed *candidate* still resolves True, "fails open toward offering" -
+    see ``test_is_newer_prerelease_never_more_permissive_than_before``). This
+    function exists for the OTHER case: ``is_newer`` returns False and the
+    caller needs to know whether that means "genuinely not newer" or "could not
+    tell", so it is not reported as a false "up to date"."""
+    cand = normalize(candidate)
+    cur = normalize(current)
+    if not cand:
+        return False
+    if cur in ("", "unknown"):
+        return True
+    return _leading_digit(candidate) and _leading_digit(current)
+
+
 def is_newer(candidate: str, current: str) -> bool:
     """True if *candidate* is a strictly newer version than *current*.
 

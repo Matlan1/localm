@@ -86,6 +86,24 @@ def test_check_no_releases(monkeypatch):
     assert res["latest"] is None and res["newer"] is False
 
 
+def test_check_comparable_true_for_a_real_tie(monkeypatch):
+    monkeypatch.setattr("localm.config.load_config", lambda: {"bugreport_upload_url": "https://w"})
+    monkeypatch.setattr(_version, "read_version", lambda: "0.2.0")
+    res = updater.check(opener=_opener({"version": "v0.2.0"}))
+    assert res["newer"] is False and res["comparable"] is True
+
+
+def test_check_comparable_false_for_an_unrecognized_tag(monkeypatch):
+    """The honesty fix: a tag the comparator cannot order (e.g. a "stable"/
+    "nightly" release name, unreachable in practice through the proxy's own
+    APP_TAG_RE filter but defended here regardless) must be flagged, not
+    silently folded into "not newer"."""
+    monkeypatch.setattr("localm.config.load_config", lambda: {"bugreport_upload_url": "https://w"})
+    monkeypatch.setattr(_version, "read_version", lambda: "0.1.4")
+    res = updater.check(opener=_opener({"version": "nightly"}))
+    assert res["newer"] is False and res["comparable"] is False
+
+
 def test_check_unconfigured_raises(monkeypatch):
     monkeypatch.setattr("localm.config.load_config", lambda: {})
     from localm.bugreport import LocalmError
@@ -150,6 +168,27 @@ def test_opting_out_after_an_rc_does_not_strand_or_downgrade(monkeypatch):
     # prerelease tie-break (no new code needed for this case).
     res2 = updater.check(opener=_opener({"ok": True, "version": "0.1.4"}))
     assert res2["newer"] is True
+
+
+# --------------- anti-rollback unaffected by the comparable() signal -------
+
+def test_refuse_downgrade_unaffected_by_the_new_comparable_signal(monkeypatch):
+    """_version.comparable() is a purely additive signal for CLI/API messaging
+    (localm/cli/maintenance.py's update_cmd) - _refuse_downgrade still calls
+    is_newer() directly and unchanged, so it must refuse exactly what it
+    refused before this fix. In particular, an unparseable *new_version*
+    (attacker-controlled input to apply(), via a compromised/MITM'd proxy
+    response) must stay REFUSED, never newly accepted because comparable()
+    would call the comparison uncertain."""
+    from localm.bugreport import LocalmError
+    monkeypatch.setattr(_version, "read_version", lambda: "0.1.5")
+    with pytest.raises(LocalmError):
+        updater._refuse_downgrade("nightly")   # unparseable candidate: still refused
+    with pytest.raises(LocalmError):
+        updater._refuse_downgrade("0.1.4")     # plain older: still refused
+    with pytest.raises(LocalmError):
+        updater._refuse_downgrade("0.1.5")     # exact tie: still refused
+    updater._refuse_downgrade("0.1.6")         # plain newer: still allowed, unchanged
 
 
 # ------------------------------ classify --------------------------------

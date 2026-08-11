@@ -302,7 +302,13 @@ def update_cmd(check_only: bool, yes: bool, do_rollback: bool) -> None:
         console.print(f"[dim]No releases published yet. You are on {cur}.[/dim]")
         return
     if not info["newer"]:
-        console.print(f"[green]localm is up to date[/green] (running {cur}; latest {latest}).")
+        if not info.get("comparable", True):
+            console.print(
+                f"[yellow]Could not tell whether {latest} is newer than your "
+                f"version {cur}[/yellow] (unrecognized version format) - "
+                "check the release notes yourself before assuming you are up to date.")
+        else:
+            console.print(f"[green]localm is up to date[/green] (running {cur}; latest {latest}).")
         return
 
     console.print(f"[bold]Update available:[/bold] {latest}  [dim](you have {cur})[/dim]")
