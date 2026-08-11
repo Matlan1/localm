@@ -1047,6 +1047,39 @@ def key_hash_live(key_hash: Optional[str]) -> bool:
     return False
 
 
+def scopes_for_key_hash(key_hash: Optional[str]) -> Optional[set]:
+    """The scopes a LIVE keystore key with this sha256 *key_hash* grants, or None.
+
+    The by-hash sibling of ``verify()``: same liveness rules (a missing or expired
+    record grants nothing), but keyed on the stored digest rather than a presented
+    secret, so a background path that only ever recorded a principal id can still
+    ask what that principal is allowed to do. ``verify()`` cannot serve that - it
+    needs the plaintext key, which is exactly what is never persisted.
+
+    Returns None (not an empty set) when nothing matches, so "no such key" stays
+    distinguishable from "a key that grants nothing". A caller making a privilege
+    decision must treat None as DENY.
+
+    Does NOT resolve the owner key: it is not a keystore entry, so a caller that
+    cares about the owner must compare against ``get_api_key()`` itself. Nor is it
+    a substitute for ``key_hash_live``: a caller wanting only liveness should keep
+    asking that, and this adds the scope question on top."""
+    if not key_hash:
+        return None
+    now = time.time()
+    # _load_keystore() fails OPEN (returns [] on OSError/ValueError), so a
+    # transient unreadable auth.json makes this return None - which the contract
+    # above requires callers to read as DENY. That is the safe direction, and it
+    # is why the return is Optional rather than a bare set.
+    for r in _load_keystore():
+        if r.get("hash") == key_hash:
+            exp = r.get("expires")
+            if exp is not None and now > float(exp):
+                return None
+            return set(r.get("scopes", []))
+    return None
+
+
 def _keystore_configured() -> bool:
     """True when the scoped keystore should count as 'auth in effect'.
 

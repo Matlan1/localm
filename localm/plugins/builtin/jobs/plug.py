@@ -99,6 +99,39 @@ def _check_model_name(model) -> None:
         raise HTTPException(400, err)
 
 
+def _effective_cwd(cwd, request: Request):
+    """The working directory a job may actually be stored with: *cwd* as asked when
+    the caller is allowed to choose one, else the instance's project root.
+
+    ``_check_cwd`` below asks what SHAPE the path is; this asks WHO is choosing it.
+    The coder route already draws exactly this line - a restricted caller is forced
+    into the project root "so a scoped key cannot point the (confined) file tools at
+    arbitrary paths" - and the scheduler had no equivalent, so a plain
+    ``jobs``-scoped key got read plus confined-write anywhere on the server just by
+    scheduling a job there.
+
+    CONFINED rather than REJECTED, which is the opposite of how ``allow_shell`` is
+    handled two routes down, and the difference is the point: ``allow_shell`` is an
+    optional opt-in, so refusing it still leaves a working job and tells the caller
+    the opt-in was denied. ``cwd`` is MANDATORY for a coder job (Job.validate), so
+    refusing it would not restrict the feature, it would remove it - a jobs-scoped
+    key could no longer schedule a coder job at all. Confining matches the coder
+    route exactly and keeps the capability.
+
+    Not silent either: the created/updated job is returned to the caller with its
+    effective ``cwd``, so the value that will actually be used is visible in the
+    response rather than assumed. The runner ALSO confines at run time
+    (``_cwd_trusted``), because this route is not the only writer - the CLI and rows
+    persisted by older builds reach the scheduler without passing here - and it
+    reports the confinement in the job's own output when it bites."""
+    if cwd is None or not str(cwd).strip():
+        return cwd                    # nothing chosen: let validate() have its say
+    if _caller_can_allow_shell(request):
+        return cwd
+    from localm.instances import resolve_root_dir
+    return resolve_root_dir()
+
+
 def _check_cwd(cwd) -> None:
     """Refuse a coder job's ``cwd`` when it is UNC or device syntax.
 
@@ -298,6 +331,9 @@ async def create_job(req: JobCreate, request: Request):
             "coder job otherwise runs restricted (read + confined edit, no shell).")
     _check_model_name(req.model)
     _check_cwd(req.cwd)
+    # Shape checked above; AUTHORITY checked here. A caller not allowed to choose a
+    # directory gets the project root instead, and sees it in the response.
+    req_cwd = _effective_cwd(req.cwd, request)
     from localm.inference.http_server import principal_id
     try:
         job = Job(
@@ -307,7 +343,7 @@ async def create_job(req: JobCreate, request: Request):
             schedule_kind=req.schedule_kind,
             schedule=req.schedule,
             model=req.model,
-            cwd=req.cwd,
+            cwd=req_cwd,
             scope=req.scope,
             collection=req.collection,
             allow_shell=req.allow_shell,
@@ -357,6 +393,10 @@ async def update_job(job_id: str, req: JobUpdate, request: Request,
         _check_model_name(changes["model"])
     if "cwd" in changes:
         _check_cwd(changes["cwd"])
+        # Same authority gate as POST: PUT is the second write path into cwd, and
+        # without this the create-time confinement is simply routed around with an
+        # update.
+        changes["cwd"] = _effective_cwd(changes["cwd"], request)
     try:
         job = store.update(job_id, **changes)
     except KeyError:

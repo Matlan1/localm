@@ -558,6 +558,55 @@ def _shell_still_authorized(job: Job) -> bool:
     return key_hash_live(job.owner)
 
 
+def _cwd_trusted(job: Job) -> bool:
+    """True when this job's CREATOR was allowed to choose an arbitrary working
+    directory, i.e. the owner (or a ``coder:full`` / ADMIN key) rather than a plain
+    ``jobs``-scoped key.
+
+    The coder ROUTE already draws this line deliberately (builtin/coder/plug.py: a
+    restricted caller is "forced into the project root, ignoring req.cwd, so a
+    scoped key cannot point the (confined) file tools at arbitrary paths"). The
+    scheduler did not: ``cwd`` was validated only for UNC/device SHAPE, never for
+    who chose it, so a ``jobs``-only key got read plus confined-write anywhere on
+    the server by scheduling a job there.
+
+    Re-derived at RUN time rather than stamped, which is deliberate and is the
+    opposite choice from ``owner_is_owner_key`` next door - because unlike that
+    one, this question IS still answerable later, and re-deriving is strictly
+    better: a key whose scopes are narrowed, or which is revoked or expires, loses
+    its arbitrary-cwd freedom on the very next tick instead of keeping a grant
+    stamped months ago. Four positives, in cost order:
+
+    - no owner at all: a tokenless / open-mode creation, which IS the loopback
+      owner (``_caller_can_allow_shell`` returns True with no key configured), so
+      there is no lesser principal to confine;
+    - the REG-509 stamp: the owner key or an owner session created it. This is the
+      one case re-derivation cannot reach, because after a key ROLL the recorded
+      hash matches nothing, which is exactly why that stamp exists. Reused here
+      rather than adding a second field that would need its own back-fill;
+    - the recorded principal still IS the owner key by value (covers a job created
+      before the stamp existed, while the key has not rolled);
+    - the recorded principal is a live keystore key holding ADMIN or coder:full.
+
+    Anything else - notably a live ``jobs``-only key, and any hash that resolves to
+    nothing - is untrusted, and ``_run_coder`` confines it to the project root.
+    Fails CLOSED: ``scopes_for_key_hash`` returns None when the keystore cannot be
+    read, and None is not a grant."""
+    if job.owner is None:
+        return True
+    if getattr(job, "owner_is_owner_key", False):
+        return True
+    from localm import scopes as S
+    from localm.auth import (_hash_key, _legacy_owner_identity, get_api_key,
+                             scopes_for_key_hash)
+    owner_key = get_api_key()
+    if owner_key and job.owner in (_hash_key(owner_key),
+                                   _legacy_owner_identity(owner_key)):
+        return True
+    held = scopes_for_key_hash(job.owner)
+    return held is not None and (S.ADMIN in held or S.CODER_FULL in held)
+
+
 def _remember_owner_key_job(job: Job) -> None:
     """Persist ``owner_is_owner_key`` on a legacy job we just proved is the
     owner's (best-effort).
@@ -603,9 +652,34 @@ def _run_coder(job: Job, *, engine=None) -> str:
     if _bad_cwd:
         raise RuntimeError(_bad_cwd)
 
-    cwd = Path(job.cwd or ".").expanduser()
+    # WHO chose this cwd, not just what SHAPE it is. cwd_unc_error above rejects
+    # UNC/device syntax for everyone; it says nothing about authority, so a plain
+    # jobs-scoped key could name any local directory and get read plus confined
+    # write there. Mirror what the coder route already does deliberately for a
+    # restricted caller: ignore the requested cwd and force the project root.
+    cwd_confined = not _cwd_trusted(job)
+    if cwd_confined:
+        from localm.instances import resolve_root_dir
+        # The same project root the coder route uses via app.state.root_dir; the
+        # runner has no request/app to read it from, so it resolves it the same
+        # way that value was produced.
+        requested, job_cwd = job.cwd, resolve_root_dir()
+    else:
+        requested, job_cwd = job.cwd, job.cwd
+
+    cwd = Path(job_cwd or ".").expanduser()
     if not cwd.is_dir():
-        raise RuntimeError(f"coder cwd is not a directory: {job.cwd}")
+        raise RuntimeError(f"coder cwd is not a directory: {job_cwd}")
+    if cwd_confined and requested and Path(requested).expanduser() != cwd:
+        # Never a silent degrade (rule 5), same as the shell downgrade below: the
+        # job asked to run somewhere it is not allowed to, and a run that quietly
+        # happens elsewhere would look like the automation simply not working.
+        # The job's own output carries it too, because that is where a user looks.
+        logger.warning(
+            "job %r (%s) requested a working directory its creating key is not "
+            "allowed to choose; running in the project root instead. Re-create "
+            "the job with the owner key or a coder:full key to choose a "
+            "directory.", job.name, job.id)
 
     backend = _coder_backend(job)
     mode = effective_mode("coder")
@@ -648,12 +722,26 @@ def _run_coder(job: Job, *, engine=None) -> str:
     )
     try:
         out = (agent.run_task(job.prompt) or "").strip()
+        notes = []
         if downgraded:
-            note = ("[jobs] This job opted into shell execution, but its owning "
-                    "key is no longer authorized (revoked or expired), so it ran "
-                    "RESTRICTED: no run_shell. Re-create it with a live key to "
-                    "restore shell access.")
-            out = f"{note}\n\n{out}" if out else note
+            notes.append("[jobs] This job opted into shell execution, but its "
+                         "owning key is no longer authorized (revoked or "
+                         "expired), so it ran RESTRICTED: no run_shell. "
+                         "Re-create it with a live key to restore shell access.")
+        if cwd_confined and requested:
+            # Same rule-5 reasoning as the shell note above, and reported the
+            # same way: the run did something narrower than configured, and the
+            # job output is where a user actually looks. The requested path is
+            # echoed back to the OWNER of the job in the job's own result, not
+            # onto a shared surface, so it discloses nothing the creator did not
+            # supply themselves.
+            notes.append("[jobs] This job requested a working directory its "
+                         "creating key is not allowed to choose, so it ran in "
+                         "the project root instead. Re-create it with the owner "
+                         "key or a coder:full key to choose a directory.")
+        if notes:
+            joined = "\n\n".join(notes)
+            out = f"{joined}\n\n{out}" if out else joined
         return out
     finally:
         close = getattr(agent, "close", None)
