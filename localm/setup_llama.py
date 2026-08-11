@@ -2015,11 +2015,13 @@ def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
             _try(fb, False)
         except Exception as e:
             console.print(f"[red]{fb} provisioning failed:[/red] {e}")
+            detail = str(e)
             continue
-        ok, _ = _native_loads_ok()
+        ok, detail = _native_loads_ok()
         if ok:
             console.print(f"[green]OK - {fb} runtime loads.[/green]")
             return fb
+        console.print(f"[red]{fb} provisioned but failed to load:[/red] {detail or 'unknown'}")
     # Nothing loaded - the one genuinely stuck case. Raise a typed, reportable
     # error and let the CLI's single graceful handler say sorry + offer a bug
     # report. setup-llama describes the failure; it does not own reporting.
