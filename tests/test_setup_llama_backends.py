@@ -25,6 +25,11 @@ def test_detect_returns_valid_shape():
 
 def test_recommended_install_backend_policy(monkeypatch):
     """The ONE installer-backend policy both setup.bat and setup.sh share."""
+    # This table asserts the NO-SYSTEM-TOOLKIT baseline explicitly (deterministic
+    # regardless of the test-running machine's own ROCm install, if any) - the
+    # WITH-a-detected-toolkit escalation (-> hip) is covered by its own dedicated
+    # tests in test_hwdetect.py.
+    monkeypatch.setattr(hwdetect, "_rocm_toolkit_present", lambda: False)
     def rec(vendors, names, platform="win32"):
         monkeypatch.setattr(hwdetect.sys, "platform", platform)
         return hwdetect.recommended_install_backend(
@@ -32,11 +37,13 @@ def test_recommended_install_backend_policy(monkeypatch):
     # AMD on Windows: RX 6000 / unknown keep the self-contained gfx103X ROCm build...
     assert rec(["amd"], "amd radeon rx 6900 xt") == "amd-rocm"
     assert rec(["amd"], "amd radeon graphics") == "amd-rocm"
-    # ...but a CLEARLY non-gfx103X AMD downgrades to the universal Vulkan build.
+    # ...but a CLEARLY non-gfx103X AMD with no ROCm/HIP toolkit detected downgrades
+    # to the universal Vulkan build (hip genuinely cannot run here without one).
     assert rec(["amd"], "amd radeon rx 7800 xt") == "vulkan"
     assert rec(["amd"], "amd radeon rx 9070") == "vulkan"
     assert rec(["amd"], "amd radeon rx 5700") == "vulkan"
-    # AMD on Linux is always vulkan (the self-contained bundle is Windows-only).
+    # AMD on Linux with no toolkit detected is vulkan too (no self-contained
+    # bundle exists there, and hip needs the toolkit this asserts is absent).
     assert rec(["amd"], "amd radeon rx 6900 xt", platform="linux") == "vulkan"
     # NVIDIA: cuda on BOTH Windows and Linux - llama.cpp ships a self-contained
     # cudart bundle on both, and 2026-08-11 field testing confirmed CUDA works
@@ -55,7 +62,7 @@ def test_hwdetect_cli_prints_vendor_and_backend(capsys):
     assert hwdetect.main() == 0
     out = capsys.readouterr().out.strip().split()
     assert len(out) == 2
-    assert out[1] in ("vulkan", "cuda", "cpu", "metal", "amd-rocm")
+    assert out[1] in ("vulkan", "cuda", "cpu", "metal", "amd-rocm", "hip")
 
 
 # --------------------------- auto backend policy -------------------------- #

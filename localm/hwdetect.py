@@ -6,11 +6,17 @@ contributes nothing. ``detect()`` reports which GPU vendors are present and the
 recommended llama.cpp backend.
 
 Backend-selection policy (maintainer's own words: "the best performing one is
-always our suggestion; vulkan is a fallback"): pick the best-performing backend
-THIS MACHINE CAN ACTUALLY HAVE SELF-PROVISIONED, with no user-installed vendor
-toolkit. Where the best performer needs a toolkit we cannot fetch ourselves,
-recommend the best one we CAN safely auto-provision instead - that gap belongs
-in the backlog as a missing capability, not papered over silently.
+always our suggestion; vulkan is a fallback" - "amd for amd, detect hardware,
+use best version for that hardware; cuda for nvidia; for intel their
+solution; vulkan as a ONE catch all"): recommend the best-performing backend
+this hardware actually has, checking what can genuinely be provisioned or is
+already present - self-contained bundle, an already-installed vendor
+toolkit, or a real prebuilt binary this machine can run - before ever
+falling back to vulkan. "We do not ship that" is the START of an
+investigation, never a permanent excuse to default to the lesser path
+(global CLAUDE.md: "make it work; do not declare it impossible and
+soft-degrade"). Where no real vendor path can be confirmed runnable today,
+that is named as a genuine gap for the backlog, not silently routed around.
   * NVIDIA, any OS -> ``cuda``: llama.cpp ships a self-contained cudart bundle
     for both Windows and Linux (setup-llama fetches the CUDA runtime libraries
     itself, no Toolkit needed - see ``_provision_backend``'s cuda branch and
@@ -23,18 +29,22 @@ in the backlog as a missing capability, not papered over silently.
     box, and the setup-llama load-test + vulkan fallback (``_provision_with_
     fallback``) already covers a bad guess on any platform - see
     dev-notes/BLACKWELL-FIELD-FIXES-fix_plan.md, U5.
-  * ``vulkan`` is the default for every OTHER GPU (AMD outside the self-contained
-    gfx103X/Windows build, Intel, any mixed/unrecognised box) - not because it is
-    the fastest there, but because it is the best backend we can auto-provision
-    with no pre-installed vendor toolkit. The vendor-optimal alternatives
-    (``hip`` for AMD, ``sycl`` for Intel) ARE downloadable prebuilt binaries on
-    both platforms, but both require a SEPARATELY installed system ROCm/oneAPI
-    runtime we do not verify or fetch - offered as an explicit opt-in, never the
-    default, because recommending a backend we cannot confirm will load is worse
-    than vulkan (AGENTS.md rule 5). Genuinely missing self-contained builds
-    (e.g. no gfx110X/gfx120X self-contained Windows ROCm build) are a gap in
-    what we ship, not a wrong recommendation - tracked separately, not silently
-    routed around here.
+  * AMD, any OS -> ``hip`` when a working system ROCm/HIP toolkit is DETECTED
+    present (``_rocm_toolkit_present`` - the same ``rocminfo``/``rocm-smi``/
+    ``/opt/rocm`` signal ``detect()`` already probes for vendor identification,
+    now acted on instead of discarded), else ``vulkan``. ``hip`` is a real
+    downloadable prebuilt binary on both platforms (``setup_llama.
+    _BACKEND_ASSETS``) - "we do not ship a Linux/gfx110X ROCm path" was never
+    true; the toolkit-presence signal was simply never escalated into the
+    recommendation until 2026-08-11 (see dev-notes/BLACKWELL-FIELD-FIXES-
+    fix_plan.md, U5). gfx103X on Windows keeps the self-contained ``amd-rocm``
+    bundle regardless, since it needs no system toolkit at all and so beats
+    ``hip`` even when both are viable.
+  * ``vulkan`` is the ONE catch-all for a GPU with no better path detected as
+    actually runnable here (Intel - no toolkit-presence probe exists yet for
+    oneAPI, a genuine gap tracked separately; AMD with no ROCm/HIP toolkit
+    found; any mixed/unrecognised box) - never a stand-in for "we have not
+    built that yet" (AGENTS.md rule 5 / "make it work, do not soft-degrade").
   * ``cpu`` when no GPU is detected.
 
 Detection is intentionally conservative: a missing tool or an unparseable name
@@ -168,6 +178,30 @@ def _amd_known_non_gfx103x(names: str) -> bool:
                ("rx 5", "rx 7", "rx 9", "radeon vii", "instinct"))
 
 
+def _rocm_toolkit_present() -> bool:
+    """Whether a working system ROCm/HIP toolkit is installed on THIS machine,
+    independent of GPU-name matching - the SAME signal ``detect()`` already
+    probes (``rocminfo``/``rocm-smi`` on both platforms, ``/opt/rocm`` on
+    Linux) to help decide "is amd present", factored out here so
+    ``recommended_install_backend()`` can act on it directly instead of
+    letting the vendor-detection OR-chain discard the answer. The `hip`
+    llama.cpp backend is a real downloadable prebuilt binary on both
+    platforms (see ``setup_llama._BACKEND_ASSETS``) that NEEDS exactly this
+    toolkit present to load - so this is the difference between "we do not
+    ship a Linux/gfx110X ROCm path" (false; we do) and "we never checked
+    whether the one we ship could actually run here" (true, until now).
+    Best-effort like the rest of this module - False on any failure, never
+    raises."""
+    try:
+        if shutil.which("rocminfo") or shutil.which("rocm-smi"):
+            return True
+        if sys.platform != "win32" and Path("/opt/rocm").is_dir():  # hygiene-ok: generic ROCm system path
+            return True
+    except Exception:
+        return False
+    return False
+
+
 def amd_gfx_family(names: str) -> str:
     """Best-effort AMD GPU family from the adapter name, used to pick a Windows
     PyTorch ROCm wheel source. Coarse and conservative - an unrecognised AMD card
@@ -201,17 +235,25 @@ def recommended_install_backend(det: "Detection | None" = None) -> str:
         (RTX PRO 4000 Blackwell) confirmed CUDA works and outperforms vulkan there -
         maintainer's ruling: "the best performing one is always our suggestion;
         vulkan is a fallback". See dev-notes/BLACKWELL-FIELD-FIXES-fix_plan.md, U5.)
-      * AMD on Windows, RX 6000 / unknown     -> amd-rocm  (self-contained gfx103X build)
-      * AMD on Windows, clearly not RX 6000    -> vulkan    (gfx103X build won't fit;
-        no self-contained build exists for gfx110X/gfx120X - a gap in what we ship,
-        not a wrong recommendation; hip is downloadable but needs a system ROCm
-        install we do not verify, so it stays opt-in, not default)
-      * any other GPU (Intel, Linux AMD, mixed)-> vulkan    (no vendor toolkit needed;
-        sycl/hip are downloadable prebuilt binaries on Linux too, but both need a
-        SEPARATELY installed vendor runtime we do not verify or fetch, so recommending
-        them by default risks a confirmed-broken suggestion - opt-in only)
+      * AMD, Windows, RX 6000 / unknown       -> amd-rocm  (self-contained gfx103X
+        build; needs no system toolkit at all, so it wins even when a system ROCm
+        install is ALSO present)
+      * AMD, any OS, elsewhere, WITH a working system ROCm/HIP toolkit detected
+        (see ``_rocm_toolkit_present``)       -> hip        (a real downloadable
+        prebuilt binary on both platforms - see ``setup_llama._BACKEND_ASSETS`` -
+        that genuinely needs this toolkit to load. This covers Linux AMD and
+        Windows gfx110X/gfx120X, where no SELF-CONTAINED build exists but the
+        vendor path is not actually unavailable if the user already has ROCm/HIP
+        installed - see dev-notes/BLACKWELL-FIELD-FIXES-fix_plan.md, U5.)
+      * AMD, any OS, elsewhere, WITHOUT a detected toolkit -> vulkan (the vendor
+        path genuinely cannot run here - THIS is what "vulkan as a fallback"
+        means, not "we have not built that yet")
+      * Intel, any OS                         -> vulkan    (``sycl`` is Intel's
+        own solution and a real downloadable binary too, but localm has no
+        toolkit-presence probe for it at all yet - see the same dev-note, "Intel
+        costing" - so it stays opt-in until that detection exists)
     The self-contained ROCm bundle is gfx103X + Windows only; self-contained CUDA is
-    now both-OS, hence only the AMD vendor-optimized case is still narrowed to Windows."""
+    now both-OS, hence only the AMD gfx103X case is still narrowed to Windows."""
     d = det or detect()
     if "apple" in d.vendors:
         return "metal"
@@ -219,9 +261,11 @@ def recommended_install_backend(det: "Detection | None" = None) -> str:
         return "cpu"
     if "nvidia" in d.vendors:
         return "cuda"
-    if (sys.platform == "win32" and d.vendors == ["amd"]
-            and not _amd_known_non_gfx103x(d.gpu_names)):
-        return "amd-rocm"
+    if d.vendors == ["amd"]:
+        if sys.platform == "win32" and not _amd_known_non_gfx103x(d.gpu_names):
+            return "amd-rocm"
+        if _rocm_toolkit_present():
+            return "hip"
     return "vulkan"
 
 
