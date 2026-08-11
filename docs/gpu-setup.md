@@ -180,11 +180,20 @@ localm run myvisionmodel --image photo.jpg --prompt "Describe this image."
 
 GGUF inference needs no PyTorch - this section is only for HF-format models. The
 installer auto-detects your GPU and installs the matching torch wheels. To do it
-by hand, use the line for your hardware:
+by hand, use the line for your hardware - if you are not sure which NVIDIA line
+applies, ask localm's own detector rather than guessing:
+`.venv/bin/python -m localm.hwdetect torch-args cuda` (Windows:
+`.venv\Scripts\python -m localm.hwdetect torch-args cuda`) prints the exact
+`uv pip install` arguments for the card actually in this machine.
 
 ```bash
-# NVIDIA (CUDA), any OS:
+# NVIDIA (CUDA), pre-Blackwell (most cards shipped before 2026), any OS:
 uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/cu126
+
+# NVIDIA (CUDA), Blackwell and newer (RTX 50-series, RTX PRO Blackwell,
+# B100/B200) - the cu126 wheels above carry no kernels for these and PyTorch
+# would silently run CPU-only:
+uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/cu130
 
 # Intel (Arc / Xe), any OS - the wheels carry the oneAPI runtime:
 uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/xpu

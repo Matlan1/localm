@@ -126,7 +126,7 @@ self-contained - the same tradeoff `setup.bat`/`setup.sh`'s "Shared" choice
 describes), just drop the `UV_PYTHON_INSTALL_DIR`/`UV_CACHE_DIR`/
 `--python-preference` and run the plain `uv venv --python 3.12 .venv`.
 
-The base line above works on NVIDIA, Intel, and CPU; only AMD RDNA2 users add `[gpu]` (the ROCm torch stack). `localm setup-llama` is required after a manual install to fetch the native backend (`setup.bat` does this for you). NVIDIA users who also want HuggingFace/torch models install CUDA torch separately: `uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/cu126`.
+The base line above works on NVIDIA, Intel, and CPU; only AMD RDNA2 users add `[gpu]` (the ROCm torch stack). `localm setup-llama` is required after a manual install to fetch the native backend (`setup.bat` does this for you). NVIDIA users who also want HuggingFace/torch models install CUDA torch separately - the index depends on GPU generation (Blackwell and newer need a different one than older cards), so ask localm's own detector rather than guessing: `uv pip install -p .venv $(.venv/bin/python -m localm.hwdetect torch-args cuda)` (see [docs/gpu-setup.md](docs/gpu-setup.md#huggingface-transformers-pytorch) for the full table and Windows form).
 
 A pip extra and a plugin install are two separate steps. The extra installs a plugin's heavy Python dependencies into the venv; `localm plugin install <name>` activates the plugin itself. The defined extras are:
 

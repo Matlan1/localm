@@ -95,8 +95,13 @@ install torch yourself, e.g.:
 
 ```sh
 uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/rocm6.2
-# or .../whl/cu126  (CUDA)  or  .../whl/cpu  (CPU)
+# or .../whl/cu126 (CUDA, most cards) or .../whl/cu130 (CUDA, Blackwell and
+# newer - cu126 has no kernels for these) or .../whl/cpu (CPU)
 ```
+
+Not sure which CUDA line your card needs? `.venv/bin/python -m localm.hwdetect
+torch-args cuda` prints the exact one for the GPU actually in this machine (see
+[gpu-setup.md](gpu-setup.md#huggingface-transformers-pytorch) for the full table).
 
 ### `pip install "localm[gpu]"` is Windows-only
 
