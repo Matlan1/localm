@@ -332,6 +332,22 @@ def _provisioned_build(target: Path) -> "Optional[str]":
     return parts[1] if parts and len(parts) > 1 else None
 
 
+def installed_backend() -> "Optional[str]":
+    """The backend actually provisioned on this box right now, or None when
+    nothing is provisioned yet (a fresh install, or one that predates the
+    marker).
+
+    Public, read-only convenience for callers OUTSIDE this module that need
+    "what is installed" rather than "what would be recommended fresh" -
+    updater.py's own backend-preservation (an update must never silently swap
+    a user to a different backend just because the hardware-recommendation
+    policy changed) and the Settings page's backend display. Resolves the
+    target directory the same way the provisioning code does
+    (_repo_runtime_lib), so it always reads the marker the real install
+    actually wrote."""
+    return _provisioned_backend(_repo_runtime_lib())
+
+
 def _is_wanted(f: Path) -> bool:
     """Whether to copy *f*: the loadable library, its ggml deps, and the runtime
     libraries - matched by platform-appropriate naming (incl. versioned .so.N).
