@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import collections
 import contextlib
+import itertools
 import logging
 import os
 import re
@@ -412,6 +413,33 @@ def hang_trace_path() -> Path:
     d = logs_dir()
     d.mkdir(parents=True, exist_ok=True)
     return d / f"hang_{time.strftime('%Y-%m-%d_%H%M%S')}_{os.getpid()}.log"
+
+
+# --- Native-fault trace for an isolated CHILD process ---------------------- #
+# A child that dies from a native SIGNAL (SIGILL/SIGSEGV/SIGABRT/SIGBUS/SIGFPE)
+# never regains control in Python, so no `except` clause and no logging call in
+# that child can record why - see llamacpp/_runner.py's _runner_entry. Only a
+# signal-safe writer armed BEFORE the fault can, which is what faulthandler is.
+# The parent arms nothing itself: it picks the path, hands it to the child, and
+# relays whatever the child left there into the shared debug log.
+_crash_trace_counter = itertools.count()
+
+
+def child_crash_trace_path(tag: str) -> Path:
+    """A fresh per-child native-fault trace file under the logs dir.
+    *tag* names the kind of child (e.g. "gguf-worker") so a leftover file says
+    what died.
+
+    CALLED BY THE PARENT, ONCE, and the resulting path is passed to the child
+    explicitly rather than recomputed there. That is deliberate: `logs_dir()`
+    reads `config.HOME_DIR`, which is frozen at IMPORT time, so a spawned child
+    that inherited a different LOCALM_HOME would resolve a DIFFERENT directory
+    and the two sides would silently disagree about where the trace went (the
+    test suite does exactly this - conftest re-points LOCALM_HOME per test). One
+    derivation, handed over, cannot diverge."""
+    d = logs_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    return d / f"crash_{tag}_{os.getpid()}_{next(_crash_trace_counter)}.txt"
 
 
 def enable_debug() -> Path:
