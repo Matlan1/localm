@@ -18,10 +18,20 @@ these on ``sys.platform`` instead would leave the branch that actually matters
 permanently unexercised while the file still read as covered.
 """
 
+import os
+
 import pytest
 
 from localm._mp_spawn import describe_exit_code
+from localm.inference.backends.llamacpp import _runner as runner_mod
 from localm.inference.backends.llamacpp._runner import ModelRunner
+
+
+@pytest.fixture(autouse=True)
+def _clean_fault_env():
+    os.environ.pop(runner_mod._FAULT_ENV, None)
+    yield
+    os.environ.pop(runner_mod._FAULT_ENV, None)
 
 
 class TestPosixSignalDecoding:
@@ -143,6 +153,45 @@ class TestRunnerReportsTheDecodedCode:
         r._proc = _FakeProc()
         monkeypatch.setattr("localm._mp_spawn.os.name", "posix")
         assert "SIGILL" in r._exit_reason()
+
+    def test_a_real_native_death_reports_a_decoded_code_end_to_end(
+            self, monkeypatch):
+        """The behavioural half, driven through a REAL child process killed by a
+        REAL native abort - not a fake exitcode.
+
+        Needed alongside the source scan below because the two catch different
+        things: the scan proves no call site interpolates the raw code, this
+        proves the decoding survives into the message a user actually reads.
+
+        THE WINDOWS ARM DOES NOT ASSERT 0xC0000409, AND MUST NOT BE "FIXED" TO.
+        An unarmed Windows abort does exit 0xC0000409 (measured), but the worker
+        now arms faulthandler before anything else, and faulthandler installs a
+        SIGABRT handler - so os.abort() takes the ordinary CRT path and exits 3
+        instead of __fastfail's NTSTATUS. Measured both ways this session: armed
+        -> 3, unarmed -> 0xC0000409. So on Windows this fault mode no longer
+        yields a decodable code at all, and what characterises the fault is the
+        captured trace instead. Asserting the NTSTATUS here would be asserting a
+        value the crash-trace capture removed."""
+        monkeypatch.setenv(runner_mod._FAULT_ENV, "abort")
+        r = ModelRunner()
+        r._spawn()
+        try:
+            with pytest.raises(RuntimeError) as ei:
+                list(r.chat_stream(messages=[{"role": "user", "content": "hi"}]))
+            message = str(ei.value)
+        finally:
+            r.shutdown(grace=0)
+
+        if os.name == "nt":
+            # 3 is an ordinary exit status, not an NTSTATUS: the decoder must
+            # leave it alone rather than invent a meaning, and above all must not
+            # apply the POSIX negative-means-signal rule on this platform.
+            assert "worker exit 3)" in message, message
+            assert "signal" not in message.lower(), message
+            # The fault is still characterised - by the captured trace.
+            assert "Aborted" in message, message
+        else:
+            assert "SIGABRT" in message, message
 
     def test_no_user_facing_message_interpolates_the_raw_exitcode(self):
         """A grep-style guard on the source itself. Every crash message must go
