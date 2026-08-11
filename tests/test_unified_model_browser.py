@@ -84,6 +84,89 @@ class TestGetComfyWorkdirManagedAwareness:
         assert get_comfy_api_url() == "http://127.0.0.1:8199"
 
 
+class TestManagedScanFindsRealModels:
+    """NEW-MODEL-SCAN-BLIND-TO-MANAGED-MODELS-DIR: get_comfy_workdir() correctly
+    reports the managed checkout root (see TestGetComfyWorkdirManagedAwareness
+    above - that value is still right for display purposes), but
+    scan_comfy_models/preview_comfy_models blindly appended "/models" to
+    whatever it returned. A managed ComfyUI's models live in the SIBLING
+    comfyui-models dir, never inside a `models` subfolder under the checkout
+    (managed_comfy_provision.py's copy step excludes "models"), so a real
+    managed install with real downloaded files always previewed/scanned as
+    empty - the "Scan for ComfyUI models" button found nothing even with a
+    running managed instance serving real generations."""
+
+    def _install_managed(self, home_dir):
+        from localm.media import managed_comfy as mc
+        from localm.media.managed_comfy_provision import MARKER_FILENAME
+        paths = mc.managed_comfy_paths()
+        paths.main_py.parent.mkdir(parents=True, exist_ok=True)
+        paths.main_py.write_text("# stand-in for ComfyUI main.py\n", encoding="utf-8")
+        paths.venv_python.parent.mkdir(parents=True, exist_ok=True)
+        paths.venv_python.write_text("", encoding="utf-8")
+        (paths.root / MARKER_FILENAME).write_text("{}", encoding="utf-8")
+        assert mc.is_managed_comfy_installed()
+        return paths
+
+    def test_preview_finds_real_files_in_the_managed_models_dir(self, comfy_home):
+        import localm.config as cfg
+        paths = self._install_managed(comfy_home)
+        cfg.save_config({**cfg.load_config(), "comfy_target": "own"})
+
+        unet_dir = paths.models_dir / "unet"
+        unet_dir.mkdir(parents=True)
+        (unet_dir / "flux_unet.safetensors").write_bytes(b"UNET")
+
+        with patch("localm.model_manager.scan.comfy_object_info", return_value=None):
+            preview = preview_comfy_models(comfy_url="http://localhost:8188")
+
+        assert preview.counts == {"diffusion-unet": 1}
+        assert preview.already_registered == 0
+
+    def test_workdir_override_of_the_managed_root_also_finds_it(self, comfy_home):
+        """The "Use localm's own ComfyUI" quick-fill in the Import-from-ComfyUI
+        modal hands back the managed checkout root as an explicit workdir
+        override (models.js fetchManagedComfyPath(), fed by managed-status's
+        `path` field) - that must resolve the same way as the no-override
+        auto-detect path above, not scan a <root>/models that never exists."""
+        import localm.config as cfg
+        paths = self._install_managed(comfy_home)
+        cfg.save_config({**cfg.load_config(), "comfy_target": "own"})
+
+        lora_dir = paths.models_dir / "loras"
+        lora_dir.mkdir(parents=True)
+        (lora_dir / "style.safetensors").write_bytes(b"LORA")
+
+        with patch("localm.model_manager.scan.comfy_object_info", return_value=None):
+            preview = preview_comfy_models(comfy_url="http://localhost:8188",
+                                           workdir=str(paths.root))
+
+        assert preview.counts == {"lora": 1}
+
+    def test_explicit_workdir_for_an_unrelated_folder_still_uses_models_subfolder(
+        self, comfy_home, tmp_path
+    ):
+        """Guard against over-broadening the managed-root special case: an
+        ordinary external ComfyUI folder (the common case for this override -
+        picked via Browse or typed by hand) must still resolve to
+        <workdir>/models exactly as before, even while a managed instance
+        happens to be installed and active."""
+        self._install_managed(comfy_home)
+        import localm.config as cfg
+        cfg.save_config({**cfg.load_config(), "comfy_target": "own"})
+
+        external = tmp_path / "external-comfy"
+        vae_dir = external / "models" / "vae"
+        vae_dir.mkdir(parents=True)
+        (vae_dir / "external_vae.safetensors").write_bytes(b"VAE")
+
+        with patch("localm.model_manager.scan.comfy_object_info", return_value=None):
+            preview = preview_comfy_models(comfy_url="http://localhost:8188",
+                                           workdir=str(external))
+
+        assert preview.counts == {"vae": 1}
+
+
 @pytest.fixture()
 def temp_registry(tmp_path, monkeypatch):
     """Temp registry storage and path monkeypatched."""
