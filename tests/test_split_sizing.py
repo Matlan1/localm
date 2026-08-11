@@ -663,3 +663,39 @@ class TestSingleGpuPathUnchanged:
         with _vram(15 * GB, 16 * GB):
             with pytest.raises(RuntimeError, match="cannot fit regardless"):
                 b._check_vram()
+
+
+class TestImplicitSplitDecisionIsRecorded:
+    """The combined budget must leave a trace naming the figures it used.
+
+    Rule 5, surface the decision - the same contract resolve_auto_split_ratios
+    states for its own INFO line. Until this existed only the DECLINE path
+    logged, so a bug report about a wrongly-sized load could not distinguish a
+    budget taken across the whole board from one taken against a single card,
+    which is exactly the defect implicit_split_capacity was added to fix.
+    """
+
+    def test_combined_budget_logs_the_devices_and_the_figures(
+            self, tmp_path, monkeypatch, caplog):
+        import logging
+        _implicit_box(monkeypatch, UNEVEN_BOX)
+        b = _model(tmp_path, MODEL_45GB)
+        with caplog.at_level(logging.INFO, logger="localm"):
+            assert b._split_free_total_bytes() == (51 * GB, 64 * GB, 3)
+        line = "\n".join(r.getMessage() for r in caplog.records)
+        assert "implicit GPU split" in line
+        assert "3 devices" in line
+        # The COMBINED figure, and the per-device readings behind it - a line
+        # naming neither could not answer the question a bug report asks.
+        assert "51.0 GB free" in line
+        assert "64.0 GB total" in line
+        assert "22.0 GB free" in line and "6.0 GB free" in line
+
+    def test_single_gpu_box_stays_silent(self, tmp_path, monkeypatch, caplog):
+        import logging
+        _implicit_box(monkeypatch, [(8 * GB, 16 * GB)])
+        b = _model(tmp_path, MODEL_20GB)
+        with caplog.at_level(logging.INFO, logger="localm"):
+            assert b._split_free_total_bytes() == (None, None, 0)
+        assert "implicit GPU split" not in "\n".join(
+            r.getMessage() for r in caplog.records)
