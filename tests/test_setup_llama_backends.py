@@ -38,10 +38,12 @@ def test_recommended_install_backend_policy(monkeypatch):
     assert rec(["amd"], "amd radeon rx 5700") == "vulkan"
     # AMD on Linux is always vulkan (the self-contained bundle is Windows-only).
     assert rec(["amd"], "amd radeon rx 6900 xt", platform="linux") == "vulkan"
-    # NVIDIA: cuda on Windows (the release ships a self-contained cudart bundle),
-    # but vulkan on Linux (the Linux cuda build needs a system CUDA toolkit).
+    # NVIDIA: cuda on BOTH Windows and Linux - llama.cpp ships a self-contained
+    # cudart bundle on both, and 2026-08-11 field testing confirmed CUDA works
+    # and outperforms vulkan on real NVIDIA Linux hardware (maintainer: "the best
+    # performing one is always our suggestion; vulkan is a fallback").
     assert rec(["nvidia"], "nvidia geforce rtx 4090") == "cuda"
-    assert rec(["nvidia"], "nvidia geforce rtx 4090", platform="linux") == "vulkan"
+    assert rec(["nvidia"], "nvidia geforce rtx 4090", platform="linux") == "cuda"
     # Intel -> vulkan; no GPU -> cpu; Apple Silicon -> metal.
     assert rec(["intel"], "intel arc a770") == "vulkan"
     assert rec([], "") == "cpu"
@@ -81,20 +83,22 @@ def test_auto_backend_nvidia_is_cuda_on_windows(monkeypatch):
     assert sl._auto_backend() == "cuda"
 
 
-def test_auto_backend_nvidia_is_vulkan_on_linux(monkeypatch):
+def test_auto_backend_nvidia_is_cuda_on_linux(monkeypatch):
+    # bare `setup-llama` (auto) must match the installer: NVIDIA on Linux -> cuda
+    # (both OSes ship a self-contained cudart bundle; see hwdetect's docstring).
     monkeypatch.setattr(hwdetect.sys, "platform", "linux")
     monkeypatch.setattr(hwdetect, "detect", _fake_detect(["nvidia"], "vulkan"))
-    assert sl._auto_backend() == "vulkan"
+    assert sl._auto_backend() == "cuda"
 
 
 def test_auto_backend_mixed_amd_nvidia(monkeypatch):
-    # A box with both: cuda on Windows (NVIDIA is the priority vendor and its
-    # cudart bundle is self-contained), vulkan on Linux (no self-contained cuda).
+    # A box with both: cuda on either OS (NVIDIA is the priority vendor and its
+    # cudart bundle is self-contained on both Windows and Linux).
     monkeypatch.setattr(hwdetect, "detect", _fake_detect(["nvidia", "amd"], "vulkan"))
     monkeypatch.setattr(hwdetect.sys, "platform", "win32")
     assert sl._auto_backend() == "cuda"
     monkeypatch.setattr(hwdetect.sys, "platform", "linux")
-    assert sl._auto_backend() == "vulkan"
+    assert sl._auto_backend() == "cuda"
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="amd-rocm bundled build is Windows-only")

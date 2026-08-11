@@ -237,6 +237,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   - correctly detected GPUs, no error, just no acceleration, with a warning
   easy to miss in a long setup log. Both installers now pick a PyTorch build
   that matches the card.
+- **Setup now recommends CUDA for NVIDIA on Linux, not Vulkan.** The
+  self-contained Linux CUDA path was new and unconfirmed on real NVIDIA Linux
+  hardware, so Vulkan stayed the safer default while it proved itself.
+  Real-hardware testing has since confirmed it works and outperforms Vulkan,
+  so a bare `setup.sh` / `localm setup-llama` on an NVIDIA Linux box now
+  installs CUDA by default, matching what Windows has always done. The
+  existing load-test-then-fallback safety net still applies if CUDA cannot
+  load on your machine; Vulkan remains available with `--backend vulkan`.
 
 ## [0.1.5rc2] - 2026-08-08
 
