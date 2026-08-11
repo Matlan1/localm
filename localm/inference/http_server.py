@@ -1129,7 +1129,7 @@ def _resolve_unnamed_model_name() -> str | None:
     return _active_model_name or _last_active_model_name or _default_model_name
 
 
-async def get_engine(model_name: str, *, load: bool = True) -> Engine:
+async def get_engine(model_name: str | None, *, load: bool = True) -> Engine:
     """Resolve the engine for *model_name*, loading it if necessary.
 
     With ``load=False`` the resolved engine is returned WITHOUT forcing a load -

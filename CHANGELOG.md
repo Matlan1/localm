@@ -41,6 +41,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   stops immediately and says which update is already in progress rather than
   waiting or interfering. If an update is ever interrupted, the next one tidies
   up after it automatically.
+- **A chat or completion request that did not name a model reported back the
+  literal word "localm" instead of the model that actually answered.**
+  `/v1/chat/completions` and `/v1/completions` already resolved an unnamed
+  request to whichever model was in use, but the reply's `model` field still
+  said "localm" rather than that model's real name, because "localm" doubled
+  as both the field's default and its own separate documented meaning of "no
+  preference". A request that explicitly asks for "localm" still gets
+  "localm" back; only the truly unnamed case changes.
 
 ### Changed
 - **localm's own managed ComfyUI now installs v0.31.1**, up from v0.9.2. The

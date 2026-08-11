@@ -98,7 +98,11 @@ class EmbeddingRequest(BaseModel):
 
 class CompletionRequest(BaseModel):
     """OpenAI /v1/completions (raw text completion) request."""
-    model: str = "localm"
+    # None, not "localm": "localm" is truthy, so a request that OMITS this field
+    # was indistinguishable from one that explicitly asked for the "localm"
+    # sentinel - `req.model or engine.display_name` below never fell through, and
+    # the client was told "localm" instead of the model that actually answered.
+    model: Optional[str] = None
     prompt: str
     stream: bool = False
     # A request-level cap must be >= 1. The engine uses max_tokens <= 0 internally
@@ -122,7 +126,9 @@ class CompletionRequest(BaseModel):
 
 
 class ChatRequest(BaseModel):
-    model: str = "localm"
+    # None, not "localm": see CompletionRequest.model for why the sentinel must
+    # not also be the field's own default.
+    model: Optional[str] = None
     messages: List[Message]
     stream: bool = False
     # See CompletionRequest for the rationale: a request cap must be >= 1 (0/negative

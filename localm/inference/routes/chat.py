@@ -55,7 +55,7 @@ def register(app: FastAPI, ctx) -> None:
     @app.post("/v1/chat/completions", dependencies=[Depends(_require_auth)])
     async def chat_completions(req: ChatRequest, request: Request):
         # An empty model means "no preference" - exactly what this field's own
-        # default ("localm", see protocol.ChatRequest) means - so resolve it the
+        # default (None, see protocol.ChatRequest) means - so resolve it the
         # same way instead of refusing it up front.
         #
         # Refusing here made get_engine's recovery chain UNREACHABLE from this
@@ -80,11 +80,14 @@ def register(app: FastAPI, ctx) -> None:
 
         engine = await _hs.get_engine(req.model)
         # Report the model that ACTUALLY answered when the request named none.
-        # model_id is echoed straight into the response envelope, so an unnamed
-        # request used to come back as `"model": ""` - an empty field in an
-        # OpenAI-shaped reply, and a caller with no way to learn which model
-        # served it. (A request that says "localm" still echoes "localm"; that
-        # is the pre-existing sentinel behaviour and is not changed here.)
+        # model_id is echoed straight into the response envelope. Both shapes of
+        # "unnamed" - the field omitted (Optional default is None) and an
+        # explicit "" - are falsy and fall through to engine.display_name. Only
+        # an explicit "localm" is a real value the client sent, so it still
+        # echoes "localm" unchanged; that sentinel behaviour is deliberate. (The
+        # default here used to BE the string "localm", which made an omitted
+        # field indistinguishable from an explicit "localm" and defeated this
+        # exact fallback - see the model field's own comment in protocol.py.)
         reported_model = req.model or engine.display_name
         # Pin the engine the instant we own it - SYNCHRONOUSLY, before the inlet
         # or any other await - so a concurrent model load cannot evict it out from
