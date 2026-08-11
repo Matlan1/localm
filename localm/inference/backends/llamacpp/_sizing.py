@@ -335,10 +335,21 @@ class VramSizingMixin:
 
     @classmethod
     def _split_free_total_bytes(cls) -> "tuple[Optional[int], Optional[int], int]":
-        """``(free, total, devices)`` summed across the 2+ devices a configured
-        multi-GPU split will spread this load over, or ``(None, None, 0)`` when
-        no combined budget applies and the caller must fall back to the
-        single-device readings above.
+        """``(free, total, devices)`` summed across the 2+ devices this load
+        will actually spread over, or ``(None, None, 0)`` when no combined
+        budget applies and the caller must fall back to the single-device
+        readings above.
+
+        BOTH SPLITS COUNT, and missing the second one is what left a field
+        board with 21.5 GB idle. A CONFIGURED ``gpu_split_indices`` writes an
+        explicit ``tensor_split`` (``discover.apply_gpu_split``). An UNSET one
+        does NOT produce a single-GPU load: it leaves llama.cpp's own defaults,
+        which are ``LLAMA_SPLIT_MODE_LAYER`` with ``tensor_split = NULL``, and
+        that is an IMPLICIT layer split across every registered GPU weighted by
+        each device's free memory. ``discover.implicit_split_capacity`` owns
+        that second case and documents the upstream source it was read from.
+        Sizing the whole load against the main card in that case understated
+        the budget by the rest of the board.
 
         WHY a combined budget: ``discover.apply_gpu_split`` tensor-splits the
         WEIGHTS across the configured devices, and llama.cpp places each
@@ -367,9 +378,12 @@ class VramSizingMixin:
           isolated native probe declines to answer on a 2+-GPU-device box
           (``_loader._resolve_gpu_memory``), so a genuinely split load can
           never be mis-judged against one device's reading in the worker.
-        - No ``gpu_split_indices`` configured: the common single-GPU case,
-          answered from config alone with NO hardware probe (mirrors
-          ``vram_capacity``'s own short-circuit).
+        - Fewer than 2 GPU devices are detected, whether or not a split is
+          configured: the single-GPU majority. With no ``gpu_split_indices``
+          this is answered by ``discover.implicit_split_capacity``, which
+          short-circuits from config alone (no hardware probe) only when a
+          split IS configured; on a genuine single-GPU box it costs one
+          ``list_gpus`` call, which the sizing path was making anyway.
         - The probe did not complete fresh this call (non-``GPU_PROBE_OK``):
           the served figure may be a frozen last-known-good value, and sizing
           or refusing a load from stale data is the rule-5 gap the admission
@@ -402,7 +416,13 @@ class VramSizingMixin:
             from localm.config import load_config
             cfg = load_config()
             if not cfg.get("gpu_split_indices"):
-                return None, None, 0
+                from localm.discover import implicit_split_capacity
+                info = implicit_split_capacity(cfg, wait_for_inflight=True)
+                free, total = info.get("free"), info.get("total")
+                devices = info.get("devices") or 0
+                if devices < 2 or free is None or total is None:
+                    return None, None, 0
+                return int(free), int(total), int(devices)
             from localm.discover import GPU_PROBE_OK, vram_capacity
             try:
                 result = vram_capacity(cfg, return_status=True,
@@ -430,6 +450,27 @@ class VramSizingMixin:
             _dbg.debug("combined split VRAM reading unavailable (%s); sizing "
                        "against the single main GPU instead", type(e).__name__)
             return None, None, 0
+
+    def _split_overhead_bytes(self, devices: int) -> int:
+        """``_VRAM_OVERHEAD_BYTES`` scaled by how many devices the load spreads
+        over - the flat constant when it spreads over one (or the count is not
+        known), so the single-GPU path is arithmetically unchanged.
+
+        The constant covers "KV cache + compute buffers beyond model weights",
+        and COMPUTE BUFFERS ARE PER DEVICE: llama.cpp reserves a compute buffer
+        on each device that holds layers, so an N-device split reserves N of
+        them, not one. Charging the flat figure against a combined N-device
+        budget is the arithmetic that turns a correct combined budget into an
+        over-commitment - which is exactly the direction that OOMs a user's box
+        rather than merely wasting memory, so it is corrected in the same change
+        that started summing.
+
+        It also absorbs the two residuals a free-proportional split leaves
+        behind, both bounded and both in the same direction: layers are
+        integral, so a device can receive at most one layer more than its exact
+        share; and the free reading is a snapshot another process can invalidate
+        between the probe and the load."""
+        return self._VRAM_OVERHEAD_BYTES * max(1, int(devices or 1))
 
     @staticmethod
     def _vram_levels() -> list:
@@ -681,6 +722,7 @@ class VramSizingMixin:
             if free is None:
                 return  # can't measure (no torch / no GPU) - nothing useful to say
             total = self._total_vram_bytes()
+            split_devices = 1   # single-device reading - the flat overhead
         # _effective_model_bytes_for_vram(), not the raw _model_bytes(): an
         # n_cpu_moe load pins its routed-expert weights to system RAM, where
         # they never draw on this budget at all - see that method's
@@ -700,7 +742,7 @@ class VramSizingMixin:
         else:
             layers = self._cached_layer_count() or self._ASSUMED_LAYERS
             weights = int(model_bytes * min(1.0, gpu_layers / layers))
-        need = weights + kv_cache + self._VRAM_OVERHEAD_BYTES
+        need = weights + kv_cache + self._split_overhead_bytes(split_devices)
         ctx_hint = f"weights + a {self.n_ctx:,}-token KV cache + buffers"
         if total is not None and need > total:
             # On a split box the single-GPU wording ("this GPU only has...")
@@ -906,9 +948,10 @@ class VramSizingMixin:
         by both load paths), so its footprint draws on the combined pool, not
         one card's.
         """
-        free, _split_total, _split_devices = self._split_free_total_bytes()
+        free, _split_total, split_devices = self._split_free_total_bytes()
         if free is None:
             free = self._free_vram_bytes()
+            split_devices = 1   # single-device reading - the flat overhead
         if free is None:
             return self._AUTO_CTX_FALLBACK
         # _effective_model_bytes_for_vram(), not the raw _model_bytes() - see
@@ -916,7 +959,7 @@ class VramSizingMixin:
         # expert weights never draw on this budget, so charging the whole
         # file here under-budgets the context ceiling for no reason.
         model = self._effective_model_bytes_for_vram()
-        budget = (free - model - self._VRAM_OVERHEAD_BYTES
+        budget = (free - model - self._split_overhead_bytes(split_devices)
                   - embedder_ctx_reservation_bytes())
         if budget <= 0:
             return max(self.n_ctx, self._AUTO_CTX_MIN)
@@ -977,13 +1020,17 @@ class VramSizingMixin:
         run entirely on CPU, still a working (slow) load, the extreme end of the
         promised RAM offload.
 
-        "Free VRAM" is the applied multi-GPU split's COMBINED free when one is
-        measurable (see _split_free_total_bytes) - sizing a split load against
+        "Free VRAM" is the COMBINED free across every device the load will
+        actually spread over when that is measurable (see
+        _split_free_total_bytes) - a CONFIGURED split, and equally the IMPLICIT
+        one llama.cpp performs by default on any multi-GPU box. Sizing against
         the main GPU alone silently halved the offload on exactly the
-        model-bigger-than-one-card case the split exists for."""
-        free, _split_total, _split_devices = self._split_free_total_bytes()
+        model-bigger-than-one-card case, and on a three-card field board left
+        21.5 GB unused."""
+        free, _split_total, split_devices = self._split_free_total_bytes()
         if free is None:
             free = self._free_vram_bytes()
+            split_devices = 1   # single-device reading - the flat overhead
         if free is None:
             return None                       # unmeasurable - honest fallback (A0)
         if self._model_bytes() <= 0:
@@ -996,7 +1043,7 @@ class VramSizingMixin:
         # on arithmetic blind to where n_cpu_moe actually put its weights.
         model = self._effective_model_bytes_for_vram()
         kv = self.n_ctx * self._kv_bytes_per_token()
-        overhead = self._VRAM_OVERHEAD_BYTES
+        overhead = self._split_overhead_bytes(split_devices)
         if model <= 0 or free >= model + kv + overhead:
             return self._DEFAULT_GPU_LAYERS    # full offload fits (or nothing left to size)
         weight_budget = free - kv - overhead
