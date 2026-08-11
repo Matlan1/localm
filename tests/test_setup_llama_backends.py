@@ -25,6 +25,11 @@ def test_detect_returns_valid_shape():
 
 def test_recommended_install_backend_policy(monkeypatch):
     """The ONE installer-backend policy both setup.bat and setup.sh share."""
+    # This table asserts the NO-SYSTEM-TOOLKIT baseline explicitly (deterministic
+    # regardless of the test-running machine's own ROCm install, if any) - the
+    # WITH-a-detected-toolkit escalation (-> hip) is covered by its own dedicated
+    # tests in test_hwdetect.py.
+    monkeypatch.setattr(hwdetect, "_rocm_toolkit_present", lambda: False)
     def rec(vendors, names, platform="win32"):
         monkeypatch.setattr(hwdetect.sys, "platform", platform)
         return hwdetect.recommended_install_backend(
@@ -32,11 +37,13 @@ def test_recommended_install_backend_policy(monkeypatch):
     # AMD on Windows: RX 6000 / unknown keep the self-contained gfx103X ROCm build...
     assert rec(["amd"], "amd radeon rx 6900 xt") == "amd-rocm"
     assert rec(["amd"], "amd radeon graphics") == "amd-rocm"
-    # ...but a CLEARLY non-gfx103X AMD downgrades to the universal Vulkan build.
+    # ...but a CLEARLY non-gfx103X AMD with no ROCm/HIP toolkit detected downgrades
+    # to the universal Vulkan build (hip genuinely cannot run here without one).
     assert rec(["amd"], "amd radeon rx 7800 xt") == "vulkan"
     assert rec(["amd"], "amd radeon rx 9070") == "vulkan"
     assert rec(["amd"], "amd radeon rx 5700") == "vulkan"
-    # AMD on Linux is always vulkan (the self-contained bundle is Windows-only).
+    # AMD on Linux with no toolkit detected is vulkan too (no self-contained
+    # bundle exists there, and hip needs the toolkit this asserts is absent).
     assert rec(["amd"], "amd radeon rx 6900 xt", platform="linux") == "vulkan"
     # NVIDIA: cuda on BOTH Windows and Linux - llama.cpp ships a self-contained
     # cudart bundle on both, and 2026-08-11 field testing confirmed CUDA works
@@ -55,7 +62,7 @@ def test_hwdetect_cli_prints_vendor_and_backend(capsys):
     assert hwdetect.main() == 0
     out = capsys.readouterr().out.strip().split()
     assert len(out) == 2
-    assert out[1] in ("vulkan", "cuda", "cpu", "metal", "amd-rocm")
+    assert out[1] in ("vulkan", "cuda", "cpu", "metal", "amd-rocm", "hip")
 
 
 # --------------------------- auto backend policy -------------------------- #
@@ -105,6 +112,58 @@ def test_auto_backend_mixed_amd_nvidia(monkeypatch):
 def test_auto_backend_amd_only_is_rocm_on_windows(monkeypatch):
     monkeypatch.setattr(hwdetect, "detect", _fake_detect(["amd"], "vulkan"))
     assert sl._auto_backend() == "amd-rocm"
+
+
+# ------------------- _ASSET_MATCH vs the real upstream release ------------- #
+
+@pytest.mark.integration
+def test_every_asset_fragment_resolves_against_the_real_latest_release():
+    """Every substring in _ASSET_MATCH must match at least one real asset name
+    in the CURRENT live ggml-org/llama.cpp release - not a cached snapshot, not
+    a fixture. Upstream renamed the Windows ROCm/HIP asset from
+    "bin-win-hip-radeon-x64" to "bin-win-rocm-<ver>-x64" at tag b10356
+    (2026-08-11) with no announcement anywhere in this repo; the OLD fragment
+    silently stopped matching anything, and _resolve_backend_asset fell
+    through to a GUESSED url (the "could not verify release asset list"
+    branch) that 404s against the live tag. This test exists so the NEXT
+    upstream rename is caught here, not by a user's failed provision -
+    caught 2026-08-11 while building the AMD ROCm-detection escalation (see
+    dev-notes/BLACKWELL-FIELD-FIXES-fix_plan.md, U5).
+
+    Scoped to _ASSET_MATCH's own generic upstream-repo resolution. TWO
+    combinations are deliberately excluded, both already documented at their
+    OWN call sites in setup_llama.py, not newly discovered here:
+      * linux/cuda - ggml-org publishes no bare Linux CUDA binary at all
+        (dev-notes/ADR-0010); _resolve_backend_asset special-cases this
+        combination and resolves against hybridgroup/llama-cpp-builder
+        instead, BEFORE ever reaching _ASSET_MATCH, so that entry is
+        unreachable dead data rather than a real matcher.
+      * amd-rocm is not in _ASSET_MATCH at all - it resolves against
+        lemonade-sdk/llamacpp-rocm via its own special case, checked
+        separately."""
+    tag = sl._latest_tag()
+    assets = sl._release_assets(tag)
+    names = [str(a.get("name", "")).lower() for a in assets]
+    assert names, (
+        f"could not fetch a real asset listing for tag {tag!r} - a network "
+        "problem here means this test proves nothing, not that everything "
+        "matched; investigate rather than treat this as a pass")
+
+    excluded = {("linux", "cuda")}
+    unmatched = []
+    for plat, backends in sl._ASSET_MATCH.items():
+        for backend, matchers in backends.items():
+            if (plat, backend) in excluded:
+                continue
+            # cuda on win32 is a dict keyed by cuda_line, not a flat list.
+            groups = matchers.values() if isinstance(matchers, dict) else [matchers]
+            for group in groups:
+                if not any(m in n for m in group for n in names):
+                    unmatched.append((plat, backend, group))
+
+    assert not unmatched, (
+        f"these _ASSET_MATCH fragments match NOTHING in the real {tag!r} "
+        f"release (upstream likely renamed an asset): {unmatched}")
 
 
 # --------------------------- TLS verification (SSL) ----------------------- #

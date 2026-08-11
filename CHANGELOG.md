@@ -262,6 +262,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
   installs CUDA by default, matching what Windows has always done. The
   existing load-test-then-fallback safety net still applies if CUDA cannot
   load on your machine; Vulkan remains available with `--backend vulkan`.
+- **Setup now recommends the ROCm/HIP build for AMD cards it could not
+  self-contain a build for, when it detects you already have the toolkit
+  installed.** Previously any AMD card outside the bundled RX 6000 build
+  (RX 7000/9000, and every AMD card on Linux) always recommended Vulkan, even
+  on a machine with a working ROCm/HIP install already present. Setup now
+  detects that toolkit the same way it already detects the card itself, and
+  recommends the faster vendor build when it finds one. Vulkan remains the
+  recommendation when no toolkit is present, and the RX 6000 build is
+  unaffected - it needs no toolkit at all, so it stays the default there.
 
 ## [0.1.5rc2] - 2026-08-08
 

@@ -203,24 +203,44 @@ def test_install_backend_linux_nvidia_blackwell_is_cuda(monkeypatch):
 
 
 def test_install_backend_win_amd_rx6000_is_rocm(monkeypatch):
+    # gfx103X keeps the self-contained amd-rocm bundle EVEN when a system ROCm
+    # toolkit is also present - it needs no toolkit at all, so it wins outright.
     monkeypatch.setattr(hwdetect.sys, "platform", "win32")
+    monkeypatch.setattr(hwdetect, "_rocm_toolkit_present", lambda: True)
     d = Detection(vendors=["amd"], gpu_names="amd radeon rx 6800 xt")
     assert hwdetect.recommended_install_backend(d) == "amd-rocm"
 
 
-def test_install_backend_win_amd_rx7000_is_vulkan(monkeypatch):
-    # RX 7000 is clearly NOT the bundled gfx103X build -> vulkan, not amd-rocm.
+def test_install_backend_win_amd_rx7000_without_rocm_is_vulkan(monkeypatch):
+    # RX 7000 is clearly NOT the bundled gfx103X build, and with no system ROCm
+    # toolkit detected, hip genuinely cannot run here -> vulkan is the correct
+    # fallback (not "we have not built that yet" - see _rocm_toolkit_present).
     monkeypatch.setattr(hwdetect.sys, "platform", "win32")
+    monkeypatch.setattr(hwdetect, "_rocm_toolkit_present", lambda: False)
     d = Detection(vendors=["amd"], gpu_names="amd radeon rx 7900 xtx")
     assert hwdetect.recommended_install_backend(d) == "vulkan"
+
+
+def test_install_backend_win_amd_rx7000_with_rocm_is_hip(monkeypatch):
+    # The escalation this unit adds: gfx110X has no self-contained build, but
+    # `hip` is a real downloadable binary that works when the user already has
+    # the AMD HIP SDK installed - detected via the same signal detect() already
+    # probes for vendor identification, now acted on for the recommendation too.
+    monkeypatch.setattr(hwdetect.sys, "platform", "win32")
+    monkeypatch.setattr(hwdetect, "_rocm_toolkit_present", lambda: True)
+    d = Detection(vendors=["amd"], gpu_names="amd radeon rx 7900 xtx")
+    assert hwdetect.recommended_install_backend(d) == "hip"
 
 
 def test_install_backend_win_amd_unknown_name_defaults_to_rocm(monkeypatch):
     # Policy (see docstring): an UNKNOWN AMD card on Windows DEFAULTS to the
     # bundled gfx103X build (amd-rocm), with setup-llama's load-test + vulkan
     # fallback as the net. Empty gpu_names ("could not read the adapter name")
-    # is the unknown case, so it must be amd-rocm, NOT vulkan.
+    # is the unknown case, so it must be amd-rocm, NOT vulkan - even with a
+    # system ROCm toolkit present, since the self-contained path still needs
+    # nothing extra and is the safer guess for an unidentified card.
     monkeypatch.setattr(hwdetect.sys, "platform", "win32")
+    monkeypatch.setattr(hwdetect, "_rocm_toolkit_present", lambda: True)
     assert hwdetect.recommended_install_backend(
         Detection(vendors=["amd"], gpu_names="")) == "amd-rocm"
 
@@ -234,11 +254,55 @@ def test_install_backend_win_amd_order_must_be_exact(monkeypatch):
         Detection(vendors=["amd", "nvidia"], gpu_names="rx 6800")) == "cuda"
 
 
-def test_install_backend_linux_amd_is_vulkan(monkeypatch):
-    # The amd-rocm bundle is Windows-only; AMD on Linux -> vulkan.
+def test_install_backend_linux_amd_without_rocm_is_vulkan(monkeypatch):
+    # No self-contained bundle exists for Linux AMD, and with no system ROCm
+    # toolkit detected, hip genuinely cannot run here -> vulkan is correct.
     monkeypatch.setattr(hwdetect.sys, "platform", "linux")
+    monkeypatch.setattr(hwdetect, "_rocm_toolkit_present", lambda: False)
     d = Detection(vendors=["amd"], gpu_names="amd radeon rx 6800")
     assert hwdetect.recommended_install_backend(d) == "vulkan"
+
+
+def test_install_backend_linux_amd_with_rocm_is_hip(monkeypatch):
+    # The escalation this unit adds: "the amd-rocm bundle is Windows-only" never
+    # meant "Linux AMD has no real vendor path" - hip is a real downloadable
+    # binary on Linux too (setup_llama._BACKEND_ASSETS), viable the moment a
+    # working system ROCm install is detected.
+    monkeypatch.setattr(hwdetect.sys, "platform", "linux")
+    monkeypatch.setattr(hwdetect, "_rocm_toolkit_present", lambda: True)
+    d = Detection(vendors=["amd"], gpu_names="amd radeon rx 6800")
+    assert hwdetect.recommended_install_backend(d) == "hip"
+
+
+# ------------------------- _rocm_toolkit_present -------------------------
+
+def test_rocm_toolkit_present_via_rocminfo(monkeypatch):
+    monkeypatch.setattr(hwdetect.shutil, "which",
+                        lambda n: "/usr/bin/rocminfo" if n == "rocminfo" else None)
+    assert hwdetect._rocm_toolkit_present() is True
+
+
+def test_rocm_toolkit_present_via_rocm_smi(monkeypatch):
+    monkeypatch.setattr(hwdetect.shutil, "which",
+                        lambda n: "/usr/bin/rocm-smi" if n == "rocm-smi" else None)
+    assert hwdetect._rocm_toolkit_present() is True
+
+
+def test_rocm_toolkit_present_via_opt_rocm_dir_linux_only(monkeypatch):
+    monkeypatch.setattr(hwdetect.shutil, "which", lambda n: None)
+    monkeypatch.setattr(hwdetect.Path, "is_dir", lambda self: True)
+    monkeypatch.setattr(hwdetect.sys, "platform", "linux")
+    assert hwdetect._rocm_toolkit_present() is True
+    # The /opt/rocm check is Linux-only (a Windows install would never have
+    # this Linux-only path be meaningful) - confirm it is NOT consulted there.
+    monkeypatch.setattr(hwdetect.sys, "platform", "win32")
+    assert hwdetect._rocm_toolkit_present() is False
+
+
+def test_rocm_toolkit_absent_is_false(monkeypatch):
+    monkeypatch.setattr(hwdetect.shutil, "which", lambda n: None)
+    monkeypatch.setattr(hwdetect.Path, "is_dir", lambda self: False)
+    assert hwdetect._rocm_toolkit_present() is False
 
 
 # ----------------------- recommended_torch_variant -----------------------
