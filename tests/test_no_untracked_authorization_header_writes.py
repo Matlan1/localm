@@ -75,7 +75,7 @@ latter would flag these two as violations:
                                  Legitimately env/flag-scoped, not a self-call
                                  to THIS install.
 
-  localm/plugins/gui/cli.py:109 `_mount_remote_gui` asks a SIBLING localm
+  localm/plugins/gui/cli.py:125 `_mount_remote_gui` asks a SIBLING localm
                                  instance (found via discovery, "api" mode) to
                                  mount its own GUI, using THAT instance's own
                                  registry attach token - the route
@@ -106,7 +106,7 @@ _REVIEWED_SITES = {
     ("localm/inference/http_engine.py", 108),
     ("localm/inference/http_engine.py", 203),
     ("localm/plugins/coder/backends/http.py", 353),
-    ("localm/plugins/gui/cli.py", 109),
+    ("localm/plugins/gui/cli.py", 125),
 }
 
 
