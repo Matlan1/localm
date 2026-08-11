@@ -557,6 +557,12 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         is_alive = getattr(self._runner, "is_alive", None)
         return True if is_alive is None else bool(is_alive())
 
+    # llama.cpp applies a GBNF grammar natively in the sampler, with no optional
+    # dependency behind it, so this backend can always honour one. Declared as a
+    # plain class attribute (shadowing BaseBackend's deny-by-default property)
+    # because the answer is fixed for every GGUF model and every install.
+    supports_grammar: bool = True
+
     def validate_grammar(self, grammar: Optional[str]) -> None:
         """Raise :class:`InvalidGrammarError` for a malformed GBNF string, up front,
         so a bad grammar is a clean 400 rather than a native fault that would latch

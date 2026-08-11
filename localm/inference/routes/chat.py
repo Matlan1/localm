@@ -25,7 +25,8 @@ from fastapi.responses import StreamingResponse
 
 import localm.inference.http_server as _hs
 from localm.inference.backends.base import (
-    EmbedBatchTooLargeError, InvalidGrammarError, messages_contain_image,
+    EmbedBatchTooLargeError, GrammarUnsupportedError, InvalidGrammarError,
+    messages_contain_image,
 )
 from localm.inference.chat_pipeline import ChatHookContext
 from localm.inference.gbnf import check_grammar_structure, validate_trigger_patterns
@@ -205,6 +206,24 @@ def register(app: FastAPI, ctx) -> None:
                     # this rejects that shape before any of it reaches the parser.
                     check_grammar_structure(req.grammar)
                     engine.validate_grammar(req.grammar)
+                except GrammarUnsupportedError as e:
+                    # The backend cannot apply a grammar AT ALL (a HuggingFace
+                    # model without the [grammar] extra). Refusing here is the
+                    # whole point: this used to be a silent no-op, so the request
+                    # ran to completion and returned unconstrained text that the
+                    # caller had no way to tell from a grammar-conformant answer.
+                    #
+                    # NOT folded into the InvalidGrammarError arm below, even
+                    # though both are 400: that message says "Invalid grammar",
+                    # which would send the caller to fix a grammar that is
+                    # perfectly good. Same wrong-thing-to-fix failure the worker
+                    # -fault arm further down was written to correct.
+                    #
+                    # This sits ABOVE the `if req.stream:` branch, so the
+                    # streaming and non-streaming paths get the identical status
+                    # and the identical reason - the refusal happens before a
+                    # single byte of either response is committed.
+                    raise HTTPException(400, str(e))
                 except InvalidGrammarError as e:
                     raise HTTPException(400, f"Invalid grammar: {e}")
                 except RuntimeError as e:
@@ -508,6 +527,12 @@ def register(app: FastAPI, ctx) -> None:
                     # this rejects that shape before any of it reaches the parser.
                     check_grammar_structure(req.grammar)
                     engine.validate_grammar(req.grammar)
+                except GrammarUnsupportedError as e:
+                    # Same capability refusal as /v1/chat/completions above, for
+                    # the same reason: without it a grammar request against a
+                    # backend that cannot apply one returns unconstrained text
+                    # with a 200 and no signal. See that route for the full note.
+                    raise HTTPException(400, str(e))
                 except InvalidGrammarError as e:
                     raise HTTPException(400, f"Invalid grammar: {e}")
                 except RuntimeError as e:
@@ -545,7 +570,20 @@ def register(app: FastAPI, ctx) -> None:
                 # non-streaming path): an aborted request releases the per-model
                 # _inference_lock instead of generating to end-of-budget and
                 # blocking the next request to this model.
-                text = await _generate_full(engine, messages, request, **gen_kwargs)
+                #
+                # The same backend error contract as _complete, from the same
+                # table, so the two non-streaming handlers cannot answer the
+                # identical failure differently. This route had NO exception
+                # handling here at all, so every backend refusal - an image this
+                # model could not process, a grammar rejected at sampler-build
+                # time - reached the generic backstop as an opaque 500 with the
+                # reason discarded, while /v1/chat/completions' streaming twin
+                # reported it. A bug that is not one of these still falls through
+                # to that backstop, deliberately: see backend_error_status.
+                try:
+                    text = await _generate_full(engine, messages, request, **gen_kwargs)
+                except _hs._BACKEND_ERROR_TYPES as e:
+                    raise HTTPException(_hs.backend_error_status(e), str(e))
 
             # Outlet fully controls the returned content in the non-streaming path;
             # then record the exchange (audit + transcript), exactly like chat.

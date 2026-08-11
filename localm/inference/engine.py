@@ -397,15 +397,35 @@ class Engine:
             return self._embed_via_dedicated(texts)
         return self._backend.embed(texts)
 
+    @property
+    def supports_grammar(self) -> bool:
+        """True when the active backend can actually constrain generation to a
+        grammar. See ``BaseBackend.supports_grammar`` for why the default denies."""
+        return getattr(self._backend, "supports_grammar", False)
+
     def validate_grammar(self, grammar: Optional[str]) -> None:
-        """Best-effort up-front grammar validation. Delegates to the backend when
-        it can parse GBNF (the GGUF/llama backend); a backend without the check is
-        a no-op. Raises :class:`InvalidGrammarError` for a malformed grammar so the
-        request path can reject it with a clean 400 instead of a native fault that
-        silently degrades the whole feature."""
-        fn = getattr(self._backend, "validate_grammar", None)
-        if callable(fn):
-            fn(grammar)
+        """Up-front grammar validation, delegated to the backend.
+
+        Raises :class:`GrammarUnsupportedError` when the backend cannot apply a
+        grammar at all, and :class:`InvalidGrammarError` when it can but this
+        grammar will not parse. Either way the request path turns it into a clean
+        4xx instead of generating text that silently ignores the constraint.
+
+        Called unconditionally, NOT probed with ``getattr``. It used to be:
+
+            fn = getattr(self._backend, "validate_grammar", None)
+            if callable(fn):
+                fn(grammar)
+
+        which asked "does this backend have a validator" and acted on the answer
+        as though it had asked "can this backend apply a grammar". Only the GGUF
+        backend defined the method, so every grammar sent to an HF-backed model
+        skipped validation AND, when the optional ``[grammar]`` extra is absent,
+        was then dropped by the worker - a 200 full of unconstrained text with
+        nothing anywhere telling the caller the grammar had been ignored. The
+        method now lives on ``BaseBackend`` and denies by default, so an absent
+        capability answers the question it was actually asked."""
+        self._backend.validate_grammar(grammar)
 
     def chat_stream(
         self,

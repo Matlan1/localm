@@ -216,6 +216,37 @@ class HFBackend(BaseBackend):
         `not self._backend.loaded` check is what triggers the reload."""
         return self._can_embed
 
+    @property
+    def supports_grammar(self) -> bool:
+        """True only when xgrammar (the optional ``[grammar]`` extra) is
+        installed, because that package IS this backend's grammar support.
+
+        Without it ``_grammar_processor`` in the worker logs a warning and
+        returns no logits processor, so generation runs UNCONSTRAINED while the
+        caller still gets a normal 200. Reporting True here regardless of the
+        extra would keep that silent degrade alive behind an honest-looking
+        capability flag, which is worse than the original bug.
+
+        Deliberately NOT gated on ``loaded``, unlike ``supports_images`` above:
+        this is a fact about the INSTALL, not about the checkpoint or the worker,
+        and the up-front request check in the chat routes runs before a model is
+        necessarily loaded. Gating it on liveness would refuse a grammar request
+        that the backend can serve perfectly well after the auto-reload.
+
+        ``find_spec`` rather than a real import: importing xgrammar pulls in
+        torch and costs seconds, and this runs on the event loop for every
+        grammar request. The worker child runs the same interpreter out of the
+        same environment, so importability here predicts importability there.
+        """
+        import importlib.util
+        try:
+            return importlib.util.find_spec("xgrammar") is not None
+        except (ImportError, ValueError):
+            # A broken/partial install: the parent package is missing or the
+            # module has no spec. Either way the child's own import would fail
+            # too, so the honest answer is the same one it would produce.
+            return False
+
     # ------------------------------------------------------------------ #
     #  Load / unload                                                       #
     # ------------------------------------------------------------------ #
