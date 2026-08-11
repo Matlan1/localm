@@ -1390,6 +1390,13 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
   color: var(--yellow); font-size: 11px; border: 1px solid var(--yellow);
   border-radius: 5px; padding: 1px 6px; margin-left: 8px;
 }
+/* Chunk-level or metadata damage (a corrupt/malformed file on disk), distinct
+   from .retrieval-badge's "not embedded yet" - this means data may be lost
+   or unreadable, not just un-optimized, so it gets the stronger red. */
+.corrupt-badge {
+  color: var(--red); font-size: 11px; border: 1px solid var(--red);
+  border-radius: 5px; padding: 1px 6px; margin-left: 8px;
+}
 .data-table button {
   background: none; border: 1px solid var(--border); color: var(--text-dim);
   border-radius: 6px; padding: 3px 10px; font-size: 12px; cursor: pointer;

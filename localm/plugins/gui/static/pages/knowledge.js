@@ -118,6 +118,16 @@ export async function refreshKnowledgePage() {
           + (c.vector_degrade_reason ? " (" + c.vector_degrade_reason + ")" : "");
       retrievalTd.appendChild(badge);
     }
+    // c.corrupt covers three distinct on-disk faults (a corrupt meta.json, a
+    // malformed line in chunks.jsonl, or an unreconstructable roots map) - the
+    // wording below is true of all three rather than naming one. Separate from
+    // needsReembed: a corrupt index needs 'localm rag repair', not re-embed.
+    if (c.corrupt) {
+      const badge = el("span", "corrupt-badge", "index damaged");
+      badge.title = "Part of this collection's index is corrupt or malformed "
+        + "on disk. Run 'localm rag repair' to fix it.";
+      retrievalTd.appendChild(badge);
+    }
     tr.appendChild(retrievalTd);
     const actions = el("td");
     actions.style.textAlign = "right";
@@ -638,6 +648,16 @@ export async function kbInfoModal(name) {
       `${data.n_docs} documents · ${data.n_chunks} chunks · ` +
       (data.has_vectors ? "hybrid retrieval (BM25 + embeddings)"
                         : "lexical retrieval (BM25)")));
+    // Surface on-disk index damage (meta.json, chunks.jsonl, or the roots map -
+    // see store.py's three self.corrupt = True sites) rather than only via the
+    // CLI's "(corrupt index ...)" listing marker (AGENTS rule 5).
+    if (data.corrupt) {
+      const warn = el("div", "sub",
+        "⚠ Part of this collection's index is corrupt or malformed on disk. "
+        + "Run 'localm rag repair' to fix it.");
+      warn.style.color = "var(--red)";
+      body.appendChild(warn);
+    }
     // Surface a degraded semantic index instead of silently answering lexically
     // (AGENTS rule 5). The server sets this when vectors are corrupt/stale/mismatched.
     if (data.vector_degrade_reason) {
