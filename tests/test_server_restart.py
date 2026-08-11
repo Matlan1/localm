@@ -53,6 +53,34 @@ def test_do_restart_unloads_before_relaunch(monkeypatch):
     assert list(order[-1][2]) == http_server._restart_argv()
 
 
+def test_do_restart_sets_restart_in_progress_flag_before_relaunch(monkeypatch):
+    """A restart's re-exec'd process must not auto-open a NEW browser tab: the
+    tab the user is already looking at shows a reconnect overlay that resumes
+    in place (tests-js/server-restart.test.mjs, models.js's
+    onServerUnreachable). _do_restart signals this to the re-exec'd process by
+    setting LOCALM_RESTART_IN_PROGRESS right before os.execv, so it is present
+    in the environment the new process image inherits;
+    plugins/gui/cli.py's _should_auto_open_browser consumes it on the other
+    end (see test_gui_restart_no_new_tab.py)."""
+    monkeypatch.setattr(http_server, "_engine", None)
+    seen = {}
+
+    def _fake_relaunch(exe, argv):
+        seen["flag"] = os.environ.get("LOCALM_RESTART_IN_PROGRESS")
+        raise SystemExit(0)
+
+    monkeypatch.setattr(os, "execv", _fake_relaunch)
+    os.environ.pop("LOCALM_RESTART_IN_PROGRESS", None)
+    try:
+        try:
+            http_server._do_restart()
+        except SystemExit:
+            pass
+        assert seen.get("flag") == "1"
+    finally:
+        os.environ.pop("LOCALM_RESTART_IN_PROGRESS", None)
+
+
 def test_do_restart_releases_embedder(monkeypatch):
     """The shared embedder (localm.inference.embedder) is a separate lifecycle
     from _engines - it was previously never released before a restart's

@@ -31,6 +31,22 @@ def _report_preload_failure(console, exc: Exception) -> None:
     logger.exception("background model preload failed")
 
 
+def _should_auto_open_browser(no_browser: bool) -> bool:
+    """Whether THIS process's own startup should auto-open a browser tab.
+
+    False whenever the caller passed --no-browser, and ALSO false when this
+    process was re-exec'd by a server restart: http_server._do_restart sets
+    LOCALM_RESTART_IN_PROGRESS right before os.execv, because the tab the user
+    is already looking at shows a reconnect overlay that polls and reloads
+    itself in place once this process is back up - opening a second tab here
+    would strand that overlay instead of reusing it. The flag is CONSUMED
+    (popped), not merely read, so it can never leak into a later, genuinely
+    fresh launch that happens to inherit this process's environment."""
+    import os
+    is_restart = os.environ.pop("LOCALM_RESTART_IN_PROGRESS", None) is not None
+    return (not no_browser) and (not is_restart)
+
+
 def _tray_callbacks(app, hs):
     """Build the (on_restart, on_stop) callables for the tray control surface
     (appface.start_app_face).
@@ -770,7 +786,7 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
         except Exception:
             pass
 
-    if not no_browser:
+    if _should_auto_open_browser(no_browser):
         threading.Thread(target=_open_when_ready, args=(open_url, chosen_port),
                          daemon=True, name="open-browser").start()
 

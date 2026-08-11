@@ -41,6 +41,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   nothing to restore from if a rollback was ever needed. A second concurrent
   apply is now refused immediately with a clear message, and each apply uses
   its own private working directory until it succeeds.
+- **Restarting the server from Settings no longer opens a second browser tab.**
+  The restart re-launches the server process the same way a fresh `localm gui`
+  launch does, which used to auto-open a browser tab regardless. The tab you
+  restarted from already reconnects in place once the server is back up, so a
+  restart no longer opens anything new.
 - **`localm key clear` and `localm key recover` no longer report success when
   they could not sign browser sessions out.** If the session store could not be
   written (a locked or read-only file), both commands printed their normal
