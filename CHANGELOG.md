@@ -30,16 +30,19 @@ permanent public record of what shipped and are never rewritten; the in-progress
   segfault or a deliberate abort, and those point at different causes. On Windows
   the well-known native fault codes are named the same way, including the one
   produced by a clashing GPU library version. Codes that are not faults are left
-  exactly as they are rather than dressed up as one.
-- **When the model process dies from a native crash, the error now tells you what
-  crashed instead of only that something did.** The message has always ended with
-  "see the debug log for the native stack trace", but for the worst kind of crash
-  there was never any trace to find: a hard native fault never returns to Python,
-  so nothing localm could run afterwards was able to record where it happened.
-  The model process now arms a crash handler before it loads anything, so a fault
-  leaves a trace behind, and the error you get names the fault and points at the
-  full trace in the debug log. If nothing could be captured the message now says
-  so plainly rather than sending you to look for a trace that was never written.
+  exactly as they are rather than dressed up as one. This covers the GGUF,
+  HuggingFace and embedding workers alike.
+- **When a model or embedding process dies from a native crash, the error now
+  tells you what crashed instead of only that something did.** The message has
+  always ended with "see the debug log for the native stack trace", but for the
+  worst kind of crash there was never any trace to find: a hard native fault
+  never returns to Python, so nothing localm could run afterwards was able to
+  record where it happened. These processes now arm a crash handler before they
+  load anything, so a fault leaves a trace behind, and the error you get names
+  the fault and points at the full trace in the debug log. If nothing could be
+  captured the message now says so plainly rather than sending you to look for a
+  trace that was never written. This covers the GGUF, HuggingFace and embedding
+  workers alike.
 - **Opening the web UI on an install that has an API key set now asks for the
   key, instead of signing you in automatically.** When a key was configured, the
   page would still hand a full owner session to whoever asked for it, with no key

@@ -190,7 +190,56 @@ def _ctrl_msg_cancels_seq(msg, current_seq) -> bool:
 # Child side - runs ONLY inside the isolated worker process.
 # --------------------------------------------------------------------------- #
 
-def _runner_entry(req_q, resp_q, ctrl_q) -> None:
+_crash_trace_fh = None   # child-side: kept alive so faulthandler can write to it
+
+
+def _arm_native_crash_trace(path) -> None:
+    """Child side: point faulthandler at *path* so a death by native SIGNAL
+    leaves a trace the parent can relay into the debug log.
+
+    THIS IS THE ONLY THING THAT CAN CAPTURE THAT CLASS. ``_runner_entry``'s
+    ``except BaseException`` below covers a crash that still has a Python
+    exception; a SIGILL/SIGSEGV/SIGABRT inside native code (a torch forward
+    pass, a CUDA/ROCm kernel, a fast tokenizer's Rust stage) never returns to
+    Python at all, so no handler written in Python can run and this runner's
+    "see the debug log for the native stack trace" had nothing behind it.
+
+    Ported from ``llamacpp/_runner.py``, where the same gap was closed first;
+    issues 1222 / 1223 are that shape (``worker exit -4`` is SIGILL, since
+    multiprocessing reports ``-N`` for signal N) and neither field log contains
+    any trace.
+
+    Armed as early as possible - before torch or any native library is anywhere
+    near loaded - because a fault can only be captured by a handler that was
+    already installed when it happened.
+
+    Failures are logged, never raised: losing the trace must not stop the worker
+    from doing its job. But it is NOT silenced (AGENTS.md rule 5) and
+    ``is_enabled()`` is checked rather than trusting "enable() did not raise" -
+    that exact silent-no-op is on record in bugreport.arm_crash_guard, where
+    every native-trace file on the maintainer's box came out 0 bytes with no
+    clue why."""
+    global _crash_trace_fh
+    if path is None:
+        return
+    import faulthandler
+    from localm.debuglog import logger
+    try:
+        _crash_trace_fh = open(path, "w", encoding="utf-8")
+        faulthandler.enable(file=_crash_trace_fh, all_threads=True)
+        if not faulthandler.is_enabled():
+            logger.warning(
+                "hf worker: faulthandler.enable() returned without raising "
+                "but is_enabled() is False - a native fault in this worker will "
+                "produce no stack trace")
+    except Exception as e:   # noqa: BLE001 - a diagnostic must never break the worker
+        logger.warning(
+            "hf worker: could not arm the native-fault trace (%s: %s) - a "
+            "native fault in this worker will produce no stack trace",
+            type(e).__name__, e)
+
+
+def _runner_entry(req_q, resp_q, ctrl_q, crash_trace_path=None) -> None:
     """Process target. Wraps ``_runner_main`` so any exception escaping it is
     logged via the ``logging`` module before the process dies, not left to
     multiprocessing's own ``traceback.print_exc()`` alone - mirrors
@@ -200,7 +249,14 @@ def _runner_entry(req_q, resp_q, ctrl_q) -> None:
     to print anything; a ``logging.FileHandler`` writes through its own
     Python-level stream, independent of fd 2, so it survives that unwind).
     Deliberately RE-RAISES: this only ADDS a capture, never changes how or
-    whether the process exits."""
+    whether the process exits.
+
+    Does NOT help a genuine native crash with no Python exception at all
+    (SIGSEGV, a raw abort): Python never regains control there, so no ``except``
+    clause, including this one, can run. That residual half is covered by the
+    faulthandler trace :func:`_arm_native_crash_trace` leaves behind, which is
+    the one mechanism that CAN say where such a fault happened."""
+    _arm_native_crash_trace(crash_trace_path)
     try:
         _runner_main(req_q, resp_q, ctrl_q)
     except BaseException:
@@ -470,9 +526,63 @@ class HFRunner:
         # child-assigned: the child has no independent notion of "which
         # request is this" beyond what the parent tells it.
         self._stream_seq = 0
+        # Where THIS runner's child writes its native-fault trace. Chosen by the
+        # parent (see debuglog.child_crash_trace_path for why it is not
+        # recomputed child-side) and set in _spawn(); None before the first spawn.
+        self._crash_trace_path = None
 
     def is_alive(self) -> bool:
         return self._proc is not None and self._proc.is_alive()
+
+    def _native_crash_trace(self) -> str:
+        """This child's captured native-fault trace, consumed and removed, or ""
+        when there is none.
+
+        Consuming rather than merely reading is deliberate: the file is a
+        one-shot record of one death, so leaving it in place would let a later
+        reader (or the next spawn of a reused runner) attribute a stale trace to
+        a fresh crash. Fully guarded - a diagnostic read must never replace the
+        real crash error with an IO error."""
+        path = self._crash_trace_path
+        if path is None:
+            return ""
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            return ""
+        finally:
+            self._discard_native_crash_trace()
+        return text
+
+    def _discard_native_crash_trace(self) -> None:
+        """Remove this child's trace file. Best-effort: a leftover costs one
+        small file in the logs dir, never correctness."""
+        path = self._crash_trace_path
+        if path is None:
+            return
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    def _crash_detail(self) -> str:
+        """A trailing detail for a crash message: the native trace when one was
+        captured, else a plain statement that none was.
+
+        Saying "no native stack trace was captured" OUT LOUD matters as much as
+        relaying one (AGENTS.md rule 5): before this existed, the message claimed
+        a trace was in the debug log whether or not anything had ever written
+        one, so a user following that instruction found nothing and had no way to
+        tell an empty capture from their own failure to find it."""
+        trace = self._native_crash_trace()
+        if not trace:
+            return " No native stack trace was captured for this fault."
+        from localm.debuglog import logger
+        # Logged as well as returned: the trace is multi-line and belongs in the
+        # debug log the message points at, not inlined into an HTTP error body.
+        logger.error("hf worker native fault trace:\n%s", trace)
+        first = trace.splitlines()[0].strip()
+        return f" Native fault: {first} (full trace in the debug log)."
 
     def _spawn(self) -> None:
         from localm._mp_spawn import ensure_spawn_uses_venv_python
@@ -481,8 +591,22 @@ class HFRunner:
         self._req_q = ctx.Queue()
         self._resp_q = ctx.Queue()
         self._ctrl_q = ctx.Queue()
+        # A previous child of this runner may have left one behind (a crash whose
+        # trace nothing consumed); drop it before the new child claims the name,
+        # so a stale trace can never be reported against the new process.
+        self._discard_native_crash_trace()
+        from localm.debuglog import child_crash_trace_path, logger
+        try:
+            self._crash_trace_path = child_crash_trace_path("hf-worker")
+        except OSError as e:
+            # An unwritable logs dir costs the trace, not the worker.
+            logger.warning("could not allocate a native-fault trace file (%s); "
+                           "a native fault in this worker will not be traced", e)
+            self._crash_trace_path = None
         self._proc = ctx.Process(
-            target=_runner_entry, args=(self._req_q, self._resp_q, self._ctrl_q),
+            target=_runner_entry,
+            args=(self._req_q, self._resp_q, self._ctrl_q,
+                  self._crash_trace_path),
             name="localm-hf-worker", daemon=True)
         self._proc.start()
 
@@ -511,8 +635,8 @@ class HFRunner:
                     code = self._proc.exitcode
                     raise RuntimeError(
                         f"The HuggingFace model-loading process crashed (exit "
-                        f"code {code}) while loading. The server stayed up; "
-                        "see the debug log for the native stack trace.")
+                        f"code {code}) while loading. The server stayed up."
+                        + self._crash_detail())
                 if time.monotonic() > deadline:
                     self.shutdown(grace=0)
                     raise RuntimeError(
@@ -564,8 +688,8 @@ class HFRunner:
                                 raise RuntimeError(
                                     f"Native inference fault (worker exit "
                                     f"{self._proc.exitcode}). The model has been "
-                                    "unloaded and will reload on the next request. "
-                                    "See the debug log for the native stack trace.")
+                                    "unloaded and will reload on the next "
+                                    "request." + self._crash_detail())
                             if time.monotonic() > deadline:
                                 self.shutdown(grace=0)
                                 if awaiting_first:
@@ -670,7 +794,8 @@ class HFRunner:
                     if not self.is_alive():
                         raise RuntimeError(
                             f"The HF model process crashed (exit code "
-                            f"{self._proc.exitcode}) while handling '{name}'.")
+                            f"{self._proc.exitcode}) while handling '{name}'."
+                            + self._crash_detail())
                     if time.monotonic() > deadline:
                         self.shutdown(grace=0)
                         raise RuntimeError(f"'{name}' timed out waiting for the HF model process.")
@@ -728,3 +853,10 @@ class HFRunner:
         self._req_q = None
         self._resp_q = None
         self._ctrl_q = None
+        # A worker torn down through shutdown() has had its exit accounted for by
+        # whoever called it, so any trace it left is either already relayed or
+        # describes a death nobody is going to report. Either way it must not
+        # outlive the process it describes, or the logs dir grows one file per
+        # model load for the life of the server.
+        self._discard_native_crash_trace()
+        self._crash_trace_path = None
