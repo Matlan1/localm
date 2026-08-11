@@ -9,6 +9,7 @@ and are referenced via ``_hs.``.
 from __future__ import annotations
 
 import asyncio
+import re
 
 from fastapi import Depends, FastAPI, HTTPException
 
@@ -26,6 +27,46 @@ def _watchdog_probe_host(bind_host) -> str:
     ONLY to a non-loopback interface (loopback would then be unreachable)."""
     h = (bind_host or "").strip()
     return "127.0.0.1" if h in ("", "0.0.0.0", "::") else h
+
+
+# Keep a Changelog's in-progress heading. Matched case-insensitively with flexible
+# spacing because it is prose in a hand-edited file, but anchored to the start of a
+# line and to the "## " level so it can only ever match a section heading.
+_UNRELEASED_HEADING = re.compile(r"^##[ \t]*\[unreleased\]", re.IGNORECASE)
+
+# Keep a Changelog also carries a link-reference definition per section, at the foot of
+# the file: ``[Unreleased]: https://github.com/.../compare/vX...HEAD``. With the section
+# gone that line is a dangling pointer to something the reader is not being served, so
+# it goes too. Anchored to the LINE START and to the ``]:`` definition form, which is
+# what keeps it from matching the same words used in prose - the header sentence
+# explaining the convention, and (measured on the real file) a bullet INSIDE a released
+# section that refers back to a correction made in the unreleased one. Both of those
+# must survive: the second is part of the permanent public record of a shipped release.
+_UNRELEASED_LINKDEF = re.compile(r"^\[unreleased\]:[ \t]", re.IGNORECASE)
+
+
+def _strip_unreleased(markdown: str) -> str:
+    """Return *markdown* with the ``[Unreleased]`` section (and its link-reference
+    definition) removed, or UNCHANGED when there is no such section.
+
+    Deliberately a LINE SCAN rather than a regex span across the whole document. The
+    file is ~3600 lines and the only realistic way to break this is a pattern that
+    matches past the section's end and silently eats a real release - a changelog
+    missing its newest shipped version is far worse than showing one extra section.
+    A line scan cannot over-match: it removes exactly from the heading up to the next
+    line beginning ``## ``, and touches nothing else.
+
+    A section that runs to end-of-file (``[Unreleased]`` last or only, the legitimate
+    shape of a project with no releases yet) is removed to EOF. Serving it instead
+    would be serving precisely the unreleased content this exists to withhold."""
+    lines = markdown.splitlines(keepends=True)
+    start = next((i for i, ln in enumerate(lines) if _UNRELEASED_HEADING.match(ln)), None)
+    if start is None:
+        return markdown
+    end = next((j for j in range(start + 1, len(lines)) if lines[j].startswith("## ")),
+               len(lines))
+    kept = lines[:start] + lines[end:]
+    return "".join(ln for ln in kept if not _UNRELEASED_LINKDEF.match(ln))
 
 
 def register(app: FastAPI, ctx) -> None:
@@ -174,20 +215,29 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.get("/api/changelog", dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
     async def changelog_ep():
-        """Serve the release CHANGELOG.md so the Settings "Show changelog" button can
-        show the full version history (newest first) in-app, without leaving for
+        """Serve the RELEASED history from CHANGELOG.md so the Settings "Show
+        changelog" button can show it (newest first) in-app, without leaving for
         GitHub. Read-only, public build content; scoped like its Updates sibling. The
         path is resolved via updater.repo_root() so it is correct in dev AND in an
         installed release. Returns {available, version, markdown}, or {available:
         false} when the file is absent from this build - an honest signal, never a
-        faked empty success (we do not hide problems)."""
+        faked empty success (we do not hide problems).
+
+        The in-progress ``[Unreleased]`` section is REMOVED before serving. It
+        describes changes that are not in the running build, so showing it tells users
+        about fixes they do not have - and on a security-fix day it describes those
+        fixes in detail before they ship. Stripped HERE rather than in the GUI because
+        this endpoint is the single serving point: a client-side filter would leave the
+        raw section reachable over the API by anyone who asks. Published prereleases
+        (0.1.5rc1 and the like) are NOT stripped - they are on GitHub, so they shipped."""
         import localm
         from localm import updater
         try:
             markdown = (updater.repo_root() / "CHANGELOG.md").read_text(encoding="utf-8")
         except OSError:
             return {"available": False}
-        return {"available": True, "version": localm.__version__, "markdown": markdown}
+        return {"available": True, "version": localm.__version__,
+                "markdown": _strip_unreleased(markdown)}
 
     @app.post("/api/update/apply", dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
     async def update_apply_ep():

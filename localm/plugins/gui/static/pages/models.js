@@ -1131,7 +1131,9 @@ export async function updateApply() {
 if ($("update-check")) $("update-check").onclick = updateCheck;
 if ($("update-apply")) $("update-apply").onclick = updateApply;
 
-// Changelog: show the full release history (newest first) in the shared modal.
+// Changelog: show the RELEASED history (newest first) in the shared modal. The
+// endpoint strips the in-progress [Unreleased] section before serving, so this
+// never shows changes that are not in the running build.
 // Fetched from /api/changelog and rendered via renderMarkdown - the same
 // DOMPurify(marked) path chat uses, so it is XSS-safe. Always available (it ships
 // in every build); a missing/failed fetch is shown in the modal, never left blank.
