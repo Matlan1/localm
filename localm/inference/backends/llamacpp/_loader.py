@@ -580,14 +580,37 @@ def compute_backends_available() -> bool:
 
 
 # ggml_backend_dev_type values (ggml-backend.h): the class of device the runtime
-# will run ops on. A GPU build registers a GPU (or ACCEL) device ALONGSIDE the
-# CPU one; a cpu build registers only CPU. So "any device whose type is not CPU"
-# is the honest test for whether localm actually runs inference on the GPU -
-# independent of nvidia-smi/rocm-smi/torch, which never see the Vulkan, Metal or
-# bundled-ROCm paths (the doctor "CPU mode only" false-negative, audit doctor-1).
+# will run ops on. A GPU build registers a GPU (or an accelerator) device
+# ALONGSIDE the CPU one; a cpu build registers only CPU. So "any device whose
+# type is not CPU" is the honest test for whether localm actually runs inference
+# on the GPU - independent of nvidia-smi/rocm-smi/torch, which never see the
+# Vulkan, Metal or bundled-ROCm paths (the doctor "CPU mode only" false-negative,
+# audit doctor-1).
+#
+# ONLY CPU AND GPU ARE DECLARED, AND THAT IS DELIBERATE: THE REST OF THIS ENUM
+# HAS MOVED, AND WE DO NOT PIN WHICH llama.cpp A USER HAS.
+#
+# MEASURED 2026-08-11 by fetching ggml/include/ggml-backend.h at several tags:
+#
+#     b6000                          CPU 0, GPU 1, ACCEL 2
+#     b8100 .. b9870 .. master       CPU 0, GPU 1, IGPU 2, ACCEL 3, META 4
+#
+# IGPU was inserted AHEAD of ACCEL, so ACCEL is 2 on an older runtime and 3 on a
+# current one. setup_llama.py resolves /releases/latest DYNAMICALLY (falling back
+# to _FALLBACK_TAG), and a box may still have an older runtime provisioned, so
+# there is no single correct value to declare for it. This module previously
+# declared GGML_DEV_TYPE_ACCEL = 2, which on any runtime since roughly b8100
+# silently means INTEGRATED GPU - a name asserting something the value does not
+# say. It was inert (every use compares against CPU), and it is removed rather
+# than "corrected" because correcting the number just recreates the same trap
+# pointing the other way, for older runtimes.
+#
+# CPU 0 and GPU 1 have held at every tag sampled, which is why those two are safe
+# to declare and why discover.implicit_split_capacity ALLOWLISTS GPU rather than
+# excluding iGPUs and accelerators by value. Anything needing another member must
+# read the header for the runtime actually provisioned, not add a constant here.
 GGML_DEV_TYPE_CPU = 0
 GGML_DEV_TYPE_GPU = 1
-GGML_DEV_TYPE_ACCEL = 2
 
 
 def _ggml_dev_handles() -> "List[ctypes.CDLL]":

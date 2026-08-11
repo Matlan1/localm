@@ -380,6 +380,22 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 #sec-performance input[type="range"] { width: 100%; margin: 4px 0 12px; accent-color: var(--accent); }
 .perf-estimate { font-variant-numeric: tabular-nums; margin: 4px 0 2px; }
 .perf-estimate.perf-warn { color: var(--yellow); }
+.perf-backend-row { margin: 0 0 10px; }
+/* :not([hidden]) - an unconditional `display` here would outrank the
+   browser's own `[hidden] { display: none }` UA rule (author CSS always
+   beats user-agent CSS, regardless of selector specificity), so setting the
+   hidden PROPERTY in JS would stop actually hiding the element. Measured
+   live: the hint rendered on an AMD box with hidden correctly set to true. */
+.perf-backend-hint:not([hidden]) {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+}
+.perf-backend-hint {
+  margin: 0 0 14px; padding: 8px 12px; border-radius: 8px;
+  background: color-mix(in srgb, var(--yellow) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--yellow) 40%, transparent);
+  font-size: 13px; color: var(--text);
+}
+.perf-backend-hint .btn-secondary { flex-shrink: 0; padding: 5px 12px; font-size: 12.5px; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-dim); }
 .dot.ok { background: var(--green); }
 .dot.busy { background: var(--yellow); }

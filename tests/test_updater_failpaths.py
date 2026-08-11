@@ -124,37 +124,67 @@ def test_apply_crash_then_rollback_failure_demands_manual_recovery(tmp_path, mon
 
 
 # --------------------------- _installed_backend ---------------------------
+# _installed_backend() must PRESERVE whatever backend is already installed
+# (setup_llama's on-disk marker) rather than re-derive one from the current
+# hardware-recommendation policy. See updater.py's own docstring for why this
+# is no longer "just call recommended_install_backend()" (that WAS the #833
+# fix, and it stopped being correct the moment the recommendation policy
+# itself changed for hardware someone was already running on - b8878c2b moved
+# NVIDIA-Linux from vulkan to cuda, which would have silently re-provisioned
+# an already-working vulkan install onto cuda on the next runtime update).
 
-def test_installed_backend_uses_the_shared_install_policy_not_the_legacy_field(monkeypatch):
-    """_installed_backend() must call recommended_install_backend() - the ONE policy
-    setup.bat/setup.sh/setup_llama.py's own _auto_backend() all share - never
-    Detection.recommended, a legacy field that can only ever be "vulkan" or "cpu"
-    and predates the CUDA/ROCm-aware policy.
+def test_installed_backend_preserves_what_is_actually_installed(tmp_path, monkeypatch):
+    """THE regression test: an install with amd-rocm actually provisioned must
+    stay on amd-rocm across an update, even though the CURRENT hardware
+    recommendation has since moved to something else entirely. Exercises the
+    REAL on-disk marker (setup_llama._record_provisioned_backend /
+    _provisioned_backend) rather than a mocked return value, so this proves
+    the whole read path, not just the updater's own branching.
 
-    The previous version of this test used vendors=[] (no GPU), where BOTH the
-    legacy field and the correct policy return "cpu" - it passed identically
-    whichever one the code called, so it caught nothing (the #833-class bug this
-    guards against shipped anyway; see updater.py's own docstring for the measured
-    case). The two mocks below return DELIBERATELY DIFFERENT values so this fails
-    loud if the wrong one is ever read again."""
-    from localm import hwdetect
+    Asserts recommended_install_backend was never even CALLED, from OUTSIDE
+    the call (a plain counter, not a raised exception) - _installed_backend()
+    wraps both its lookups in a broad except, so an exception raised as the
+    mock's side_effect would be silently swallowed and prove nothing (see
+    diff-review-discipline item 13)."""
+    from localm import hwdetect, setup_llama
+    monkeypatch.setattr(setup_llama, "_repo_runtime_lib", lambda: tmp_path)
+    setup_llama._record_provisioned_backend(tmp_path, "amd-rocm")
 
-    class _FakeDetection:
-        recommended = "vulkan-from-the-legacy-field"   # must NOT be read
+    calls = []
+    monkeypatch.setattr(
+        hwdetect, "recommended_install_backend",
+        lambda *a, **k: calls.append(1) or "cuda-from-a-changed-recommendation")
 
-    monkeypatch.setattr(hwdetect, "detect", lambda: _FakeDetection())
+    assert updater._installed_backend() == "amd-rocm"
+    assert calls == [], ("must not re-derive a recommendation when a backend "
+                         "is already installed")
+
+
+def test_installed_backend_falls_back_to_recommendation_when_nothing_provisioned(
+        tmp_path, monkeypatch):
+    """No marker on disk (a fresh install, or one predating the marker) means
+    there is nothing to preserve, so this is a first-time pick - not an
+    override - and falls back to the current hardware recommendation."""
+    from localm import hwdetect, setup_llama
+    monkeypatch.setattr(setup_llama, "_repo_runtime_lib", lambda: tmp_path)   # empty: no marker
     monkeypatch.setattr(hwdetect, "recommended_install_backend",
-                        lambda *a, **k: "amd-rocm-from-the-shared-policy")
-    assert updater._installed_backend() == "amd-rocm-from-the-shared-policy"
+                        lambda *a, **k: "cuda-from-the-policy")
+    assert updater._installed_backend() == "cuda-from-the-policy"
 
 
-def test_installed_backend_falls_back_to_vulkan_when_detect_raises(monkeypatch):
-    from localm import hwdetect
+def test_installed_backend_falls_back_to_vulkan_when_everything_fails(monkeypatch):
+    """Both the marker read AND the hardware detection raise -> the universal
+    default. A detection failure must never break an update."""
+    from localm import hwdetect, setup_llama
 
-    def boom():
+    def boom_lib_dir():
+        raise RuntimeError("runtime lib dir blew up")
+    monkeypatch.setattr(setup_llama, "_repo_runtime_lib", boom_lib_dir)
+
+    def boom_recommend(*a, **k):
         raise RuntimeError("detection blew up")
-    monkeypatch.setattr(hwdetect, "detect", boom)
-    # A detection failure must not break an update; default to the universal backend.
+    monkeypatch.setattr(hwdetect, "recommended_install_backend", boom_recommend)
+
     assert updater._installed_backend() == "vulkan"
 
 

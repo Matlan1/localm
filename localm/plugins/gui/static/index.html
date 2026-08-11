@@ -569,6 +569,13 @@
               <div class="sub">Adjust the running model without a reload: how much of it is on the GPU,
               and how large its context window is. The Runtime &amp; GPU settings above are the persisted
               next-load defaults; these apply right now. The VRAM figure is an estimate.</div>
+              <div id="perf-backend-row" class="sub perf-backend-row" hidden>Backend: <span id="perf-backend-value">-</span></div>
+              <div id="perf-backend-hint" class="perf-backend-hint" hidden>
+                <span>An NVIDIA GPU was detected; the CUDA backend usually performs better than the
+                currently installed Vulkan backend. localm never switches this for you - re-run
+                <code>localm setup-llama --backend cuda</code> if you want to try it.</span>
+                <button type="button" id="perf-backend-hint-dismiss" class="btn-secondary">Dismiss</button>
+              </div>
               <label>GPU layers (0-999) - how much of the model to offload to the GPU</label>
               <input type="number" id="perf-gpu-layers" min="0" max="999" step="1" value="999">
               <label>Context window - the most tokens the model can attend to
