@@ -53,13 +53,16 @@ things you ask for.
 Indexing through the GUI or the HTTP API is confined by a folder policy
 (Settings): **whitelist** mode (the default) allows only your home folder, the
 working directory, and any folders you add to it; **blacklist** mode allows
-everywhere except the folders you deny. In both modes the localm data
-directory (it holds your API key and registry) and well-known credential
+everywhere except the folders you deny. In both modes well-known credential
 folders (`.ssh`, `.aws`, `.gnupg`, ...) are always refused, wherever they
-appear in the path. Picking a folder outside the whitelist offers an
-"add this folder and continue" prompt rather than a dead end. The local CLI
-(`localm rag add`) is unconfined: the person running it can already read
-their own files.
+appear in the path. The localm data directory (it holds your API key and
+registry) is NOT specially excluded from that confinement - if it falls within
+an allowed folder, its contents are indexable like any other file, since the
+owner already has direct filesystem access to their own data; this is a
+deliberate choice for a local, single-user tool, not an oversight. Picking a
+folder outside the whitelist offers an "add this folder and continue" prompt
+rather than a dead end. The local CLI (`localm rag add`) is unconfined: the
+person running it can already read their own files.
 
 ## Supported file types
 
