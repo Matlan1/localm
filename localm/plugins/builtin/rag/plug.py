@@ -367,8 +367,15 @@ def _collection_provenance_report() -> list:
     per-collection verdict.
 
     Best-effort per collection, same as ``_collection_dim_report``: one that
-    fails to even construct is still named, with the failure as its reason,
-    rather than silently dropped from the count."""
+    fails to even construct is still named, with the failure NOTED (not
+    silently dropped from the count) - but unlike that function, this one's
+    return value is serialized straight into an HTTP response body (the
+    dry-run JSON), not just read internally for a name to log. So the
+    exception's own text is logged server-side only, never placed in the
+    field this function returns - the raw message can carry a filesystem
+    path or other implementation detail (CWE-209), and reaching the response
+    is exactly the leak _collection_dim_report never had because its own
+    'reason' string is only ever read for logging, never re-serialized."""
     from localm.rag import Collection, collection_names
     out: list = []
     for name in collection_names():
@@ -376,8 +383,10 @@ def _collection_provenance_report() -> list:
             coll = Collection(name)
             stats = coll.stats()
         except Exception as e:
+            logger.warning("rag: %r could not be read for the embedding-switch "
+                           "impact preview (%s: %s)", name, type(e).__name__, e)
             out.append({"name": name, "built_with": None, "n_chunks": None,
-                        "reason": f"could not be read ({type(e).__name__}: {e})"})
+                        "reason": "could not be read"})
             continue
         if not stats.get("has_vectors"):
             continue

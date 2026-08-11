@@ -359,6 +359,39 @@ class TestEmbeddingSetConfirmGate:
 
         assert r.json()["collections"] == []
 
+    def test_unconfirmed_names_an_unreadable_collection_without_leaking_the_exception(
+            self, embedding_route_app, rag_home, caplog):
+        """CodeQL py/stack-trace-exposure (alert #292): a construction failure
+        must still be NAMED in the response (rule 5 - not silently dropped,
+        mirroring _collection_dim_report's own 'unknown' bucket), but the raw
+        exception text must never reach the HTTP response body - only the
+        server-side log. _collection_dim_report's identical 'reason' field
+        never had this problem because its only reader is _setup(), which logs
+        just the collection NAME, never re-serializes 'reason' into a
+        response; this route serializes its whole report straight into JSON,
+        so the exception text itself must be kept out of the field it returns."""
+        rogue = rag_home / "not a valid name!"
+        rogue.mkdir(parents=True)
+        (rogue / "meta.json").write_text("{}", encoding="utf-8")
+
+        from fastapi.testclient import TestClient
+        with TestClient(embedding_route_app) as c, \
+                caplog.at_level("WARNING", logger="localm"):
+            r = c.post("/api/rag/embedding", json={"model": "new-model"})
+
+        data = r.json()
+        assert len(data["collections"]) == 1
+        entry = data["collections"][0]
+        assert entry["name"] == "not a valid name!"
+        assert entry["reason"] == "could not be read"
+        # The property under test: nothing exception-shaped in the RESPONSE.
+        body_text = r.text
+        assert "ValueError" not in body_text
+        assert "Traceback" not in body_text
+        # The failure is still surfaced, just server-side (rule 5: noted, not muted).
+        assert "not a valid name!" in caplog.text
+        assert "ValueError" in caplog.text
+
     def test_confirming_after_a_dry_run_actually_switches(
             self, embedding_route_app, rag_home, monkeypatch):
         _collection(rag_home, "docs", ["alpha", "beta"], dim=768)
