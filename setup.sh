@@ -221,11 +221,14 @@ if [ "$uv_present" != 1 ]; then
 fi
 
 # ---- detect GPU acceleration ------------------------------------------------
+# Checked in the SAME vendor priority as hwdetect.py's VENDORS ("nvidia", "amd",
+# "intel"): nvidia-smi first, so leftover ROCm tooling on an NVIDIA box (a shared
+# ML rig, a base image bundling both vendor stacks) never shadows the real GPU.
 detect_gpu() {
-  if command -v rocminfo >/dev/null 2>&1 || command -v rocm-smi >/dev/null 2>&1 || [ -d /opt/rocm ]; then
-    echo rocm
-  elif command -v nvidia-smi >/dev/null 2>&1; then
+  if command -v nvidia-smi >/dev/null 2>&1; then
     echo cuda
+  elif command -v rocminfo >/dev/null 2>&1 || command -v rocm-smi >/dev/null 2>&1 || [ -d /opt/rocm ]; then
+    echo rocm
   elif command -v lspci >/dev/null 2>&1 && lspci 2>/dev/null | grep -Eiq 'intel.*(arc|dg2|xe)'; then
     echo intel
   else
