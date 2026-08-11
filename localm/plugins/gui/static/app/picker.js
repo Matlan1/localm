@@ -15,11 +15,14 @@
 import { $, authHeaders, el, openModal, toast } from "./helpers.js";
 
 /** GET the listing for `path`. include_files adds files; meta adds the
- *  entries[] array of {name, is_dir, size, mtime}. */
-export async function fetchDirs(path, includeFiles = false, meta = false) {
+ *  entries[] array of {name, is_dir, size, mtime}; includeHidden asks the
+ *  server for dot-prefixed entries too (the picker always passes this and
+ *  decides visibility itself - see renderList()'s showHidden check). */
+export async function fetchDirs(path, includeFiles = false, meta = false, includeHidden = false) {
   let url = "/api/fs/dirs?path=" + encodeURIComponent(path || "");
   if (includeFiles) url += "&include_files=true";
   if (meta) url += "&meta=true";
+  if (includeHidden) url += "&include_hidden=true";
   const r = await fetch(url, { headers: authHeaders() });
   const data = await r.json();
   if (!r.ok) throw new Error(data.detail || r.statusText);
@@ -123,6 +126,7 @@ export function pickPath(opts = {}) {
       let current = "";          // resolved current directory ("" = drive list)
       let data = null;           // last good listing
       let filterText = "";
+      let showHidden = false;    // dot-prefixed entries hidden until toggled on
       let activeIdx = -1;        // keyboard highlight into visibleRows
       let visibleRows = [];
       let reqSeq = 0;
@@ -171,11 +175,22 @@ export function pickPath(opts = {}) {
         };
       }
 
+      const hiddenLabel = el("label", "picker-hidden-toggle");
+      const hiddenCb = document.createElement("input");
+      hiddenCb.type = "checkbox";
+      hiddenCb.setAttribute("aria-label", "Show hidden files and folders");
+      hiddenCb.onchange = () => {
+        showHidden = hiddenCb.checked;
+        renderList();
+        updateCount();
+      };
+      hiddenLabel.append(hiddenCb, document.createTextNode(" Hidden"));
+
       const countEl = el("span", "picker-count");
       if (typeSelect) {
-        tools.append(filterWrap, typeSelect, countEl);
+        tools.append(filterWrap, hiddenLabel, typeSelect, countEl);
       } else {
-        tools.append(filterWrap, countEl);
+        tools.append(filterWrap, hiddenLabel, countEl);
       }
       const listEl = el("div", "picker-list");
       listEl.tabIndex = 0;
@@ -277,15 +292,20 @@ export function pickPath(opts = {}) {
         const ordered = dirs.concat(files);   // folders first
         const q = filterText.toLowerCase();
         for (const entry of ordered) {
+          if (!showHidden && entry.name.startsWith(".")) continue;
           if (q && !entry.name.toLowerCase().includes(q)) continue;
           const row = buildRow(entry);
           listEl.appendChild(row);
           visibleRows.push(row);
         }
         if (!visibleRows.length) {
+          const onlyHidden = !showHidden && entries.length > 0
+            && entries.every((e) => e.name.startsWith("."));
           listEl.appendChild(el("div", "picker-empty",
-            q ? "No matches" : (data && data.parent === null)
-              ? "No drives found" : "This folder is empty"));
+            q ? "No matches" : onlyHidden
+              ? "This folder only has hidden items - turn on \"Hidden\" to show them"
+              : (data && data.parent === null)
+                ? "No drives found" : "This folder is empty"));
         }
         // The server caps very large listings; say so rather than silently
         // showing a partial folder (AGENTS rule 5).
@@ -349,7 +369,7 @@ export function pickPath(opts = {}) {
       function navigate(path, { push = true } = {}) {
         const seq = ++reqSeq;
         setLoading(true);
-        return fetchDirs(path, true, true).then((d) => {
+        return fetchDirs(path, true, true, true).then((d) => {
           if (seq !== reqSeq) return;                 // superseded by a newer nav
           if (push && current !== d.path) history.push(current);
           current = d.path;

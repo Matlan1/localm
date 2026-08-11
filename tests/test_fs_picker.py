@@ -5,8 +5,8 @@
   (effective_fs_access == "host"): owner / open mode / a key minted with
   fs_access=host. A merely config:read key can no longer enumerate the disk.
 - The listing itself: meta=true entries[] with size/mtime, include_files gating,
-  hidden-file exclusion, 404, the large-listing cap (`truncated`), and no
-  symlink-follow for metadata.
+  hidden-file/dir exclusion by default plus the include_hidden opt-in (#1220),
+  404, the large-listing cap (`truncated`), and no symlink-follow for metadata.
 - /api/fs/places: home + only the standard subfolders that exist, plus a drive.
 - The fs_access attribute round-trips on a key and surfaces via /api/capabilities.
 """
@@ -120,6 +120,39 @@ class TestListing:
             assert entries["a.txt"]["size"] == 5              # len("hello")
             assert entries["a.txt"]["mtime"] is not None
             assert entries["sub"]["size"] is None             # dirs carry no faked size
+
+    def test_include_hidden_reveals_dotdirs_and_dotfiles(self, fs_app, tmp_path):
+        """Issue #1220: dot-directories (and dot-files) are invisible by
+        default, matching plain `ls`. The GUI picker always requests
+        include_hidden=true and shows its own toggle client-side, so the
+        server has to actually have the entries to give it when asked -
+        this covers a hidden DIRECTORY, which the `tree` fixture above never
+        exercised (it only had a hidden file)."""
+        d = tmp_path / "withdots"
+        d.mkdir()
+        (d / "visible_dir").mkdir()
+        (d / ".hidden_dir").mkdir()
+        (d / "visible.txt").write_text("x", encoding="utf-8")
+        (d / ".hidden.txt").write_text("x", encoding="utf-8")
+        with TestClient(fs_app) as c:
+            key = _host_key()
+            params = {"path": str(d), "include_files": "true", "meta": "true"}
+            r = c.get("/api/fs/dirs", params=params, headers=_hdr(key))
+            assert r.status_code == 200, r.text
+            names = {e["name"] for e in r.json()["entries"]}
+            assert names == {"visible_dir", "visible.txt"}, \
+                "default must still exclude dot-entries (back-compat)"
+
+            r2 = c.get("/api/fs/dirs", params={**params, "include_hidden": "true"},
+                        headers=_hdr(key))
+            assert r2.status_code == 200, r2.text
+            body2 = r2.json()
+            names2 = {e["name"] for e in body2["entries"]}
+            assert names2 == {"visible_dir", "visible.txt", ".hidden_dir", ".hidden.txt"}
+            by_name = {e["name"]: e for e in body2["entries"]}
+            assert by_name[".hidden_dir"]["is_dir"] is True
+            assert ".hidden_dir" in body2["dirs"]
+            assert ".hidden.txt" in body2["files"]
 
     def test_without_meta_is_backcompat(self, fs_app, tree):
         with TestClient(fs_app) as c:
