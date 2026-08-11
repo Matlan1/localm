@@ -245,7 +245,7 @@ localm job disable JOB_ID
 localm job remove JOB_ID         # delete the job and its results
 ```
 
-The `localm job` CLI, the Jobs GUI tab, and the `/api/jobs` routes share one on-disk store. The scheduler only ticks while a `localm gui`/`localm serve` (with the jobs plugin active) is up. See [docs/jobs.md](../docs/jobs.md).
+The `localm job` CLI, the Jobs GUI tab, and the plugin's `/api/jobs` routes share one on-disk store. The scheduler only ticks while a `localm gui`/`localm serve` (with the jobs plugin active) is up. See [docs/jobs.md](../docs/jobs.md).
 
 ---
 
@@ -420,7 +420,65 @@ localm coder --model mymodel --verify "pytest -x"            # interactive, same
 localm coder --model mymodel --seed 1234                     # reproducible sampling
 ```
 
-The agent auto-starts `localm serve` when needed, plans with tool calls (read, write, edit, patch, shell, search, tests, image generation, Knowledge-collection search, plus tools exported by other installed plugins), asks before destructive actions, tracks a turn budget so it asks for help instead of guessing forever, and verifies its own code changes before answering. Privacy mode is the default: nothing is persisted unless you opt into `--mode log` or `--mode full`.
+The agent auto-starts `localm serve` when needed and plans with tool calls: reading and searching the project, writing and patching files, running the shell and the test suite, git, web fetch and search, image generation, Knowledge-collection search, background jobs, and delegating to sub-agents. Plus any MCP server tools, plugin-exported tools, and Agent Skills available in that project. The full list is in [Built-in tools](#built-in-tools) below. It asks before destructive actions, tracks a turn budget so it asks for help instead of guessing forever, and verifies its own code changes before answering. Privacy mode is the default: nothing is persisted unless you opt into `--mode log` or `--mode full`.
+
+### Built-in tools
+
+The agent ships 34 built-in tools. "Confirms" means the agent stops and asks
+before running it by default; "Restricted" means a shared, non-owner session may
+use it at all. The GUI coder has the same set (see [gui.md](gui.md)).
+
+| Tool | What it does | Confirms | Restricted |
+|---|---|---|---|
+| `read_file` | Read a file, truncating large ones (re-read a region with offset) | no | yes |
+| `list_dir` | List a directory | no | yes |
+| `tree` | Recursive tree with sizes, skipping noise dirs | no | yes |
+| `search_files` | Find files matching a glob | no | yes |
+| `grep` | Regex search over file contents, skipping noise dirs | no | yes |
+| `git_status` | Working-tree status | no | yes |
+| `git_diff` | Unstaged diff, or staged with `staged=true` | no | yes |
+| `git_log` | Recent commits, oneline | no | yes |
+| `read_todos` | Read back the task list written with `set_todos` | no | yes |
+| `set_todos` | Record the session task list (replaces the previous one) | no | yes |
+| `write_file` | Write or overwrite a file | yes | yes |
+| `edit_file` | Replace the first occurrence of exact text | yes | yes |
+| `edit_files` | Apply the same exact-string edit across several files, all-or-nothing | yes | yes |
+| `edit_notebook_cell` | Replace one cell's source in a `.ipynb` | yes | yes |
+| `patch_file` | Apply a unified diff, more reliable than `edit_file` for multi-hunk | yes | yes |
+| `search_replace` | Regex search and replace across many files | yes | yes |
+| `read_env` | Read `.env` and environment, with secret-looking values masked | no | no |
+| `run_tests` | Run the detected suite (pytest, cargo, go, npm/yarn) | no | no |
+| `run_shell` | Execute a shell command | yes | no |
+| `run_shell_background` | Start a shell command in the background, returning a job id | yes | no |
+| `check_shell_job` | Check a background shell job's state and output | no | no |
+| `kill_shell_job` | Stop a background job and its process tree | yes | no |
+| `git_commit` | Stage and commit | yes | no |
+| `git_create_branch` | Create a branch, optionally checking it out | yes | no |
+| `git_push` | Push the current branch | yes | no |
+| `spawn_agent` | Spawn a sub-agent for a sub-task and return its result | yes | no |
+| `spawn_agent_background` | Start a sub-agent in the background, returning a job id | yes | no |
+| `check_agent_job` | Check a background sub-agent's state and result | no | no |
+| `dispatch_parallel` | Run up to 2 sub-tasks at once, each in its own git worktree | yes | no |
+| `fetch_url` | Fetch a URL and return its text, HTML stripped | see below | no |
+| `web_search` | Search the web, returning titles, URLs and snippets | see below | no |
+| `generate_image` | Generate or refine an image with the local pipeline | no | no |
+| `rag_list_collections` | List indexed Knowledge collections and their stats | no | no |
+| `rag_search` | Search a named Knowledge collection for excerpts | yes | no |
+
+Four things the table cannot express, and each of them matters:
+
+- **`fetch_url` and `web_search` follow the network policy, not this column.**
+  They confirm when `net_mode` is `ask` (the default) and run without asking when
+  it is `allow`. See [network.md](network.md).
+- **"Confirms: no" is not "harmless".** `run_tests` and `generate_image` both
+  have real side effects and neither asks by default. `run_tests` runs your
+  project's own test command, which can do anything that command does.
+- **Restricted sessions are allowlisted, not denylisted.** A newly added tool is
+  unavailable to a shared session until it is explicitly added, so this column
+  fails closed rather than open.
+- **The `--scope` glob confines file tools only.** `run_shell` and `run_tests`
+  start a process, which a path check cannot bound, so a command can still reach
+  outside the scope. Disable those tools for a hard boundary.
 
 **Verification by exit code.** The agent's own "I am done" is not evidence, so localm
 judges a change by running a command and reading its exit code - the harness runs it,

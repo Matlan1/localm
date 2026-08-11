@@ -70,7 +70,7 @@ Coder is a plugin: this tab and its routes appear only when the coder plugin is 
 
 Pair with an AI agent on code tasks. Point it at a project directory and give it a goal - the agent reads files, writes code, runs tests, searches, and can call any MCP tools configured for that project.
 
-**Start a session:** Click the "New session" button, pick a directory, and give the agent a task. The agent gets the same tools as the terminal version: read, write, edit, patch, shell, search, tests, image generation, Knowledge-collection search, plus any MCP tools configured in `.localcoder/config.toml` for that project.
+**Start a session:** Click the "New session" button, pick a directory, and give the agent a task. The agent gets the same tools as the terminal version: reading and searching the project, writing and patching files, shell and tests, git, web fetch and search, image generation, Knowledge-collection search, background jobs, and sub-agent delegation, plus any MCP server tools, plugin-exported tools, and Agent Skills available in that project. The full list, including which tools ask before running, is in [cli.md](cli.md#built-in-tools). A session opened with a shared, non-owner key is restricted to a read-and-confined-edit subset: no shell, no git writes, no sub-agents.
 
 **Common workflows:**
 - **Build a feature:** "Add a login form to pages/auth.tsx that validates email and password" - the agent writes components, runs tests, and shows you diffs before applying changes.
