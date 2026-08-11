@@ -71,6 +71,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   read as being unable to touch your files at all.
 - The coder's stuck-loop detector now recognises a model that keeps rewording
   the same non-answer, not only one that repeats it character for character.
+- **The `uninstall_plugin` MCP tool no longer reports success when a plugin's
+  files could not actually be removed.** If the installed directory was locked,
+  held by antivirus, or blocked by a permission denial, the plugin was still
+  disabled and unloaded but its files stayed on disk; the tool nonetheless
+  replied "successfully uninstalled". It now reports an error explaining the
+  plugin is not fully uninstalled in that case, matching what the CLI already
+  told you.
 
 ## [0.1.5rc2] - 2026-08-08
 
