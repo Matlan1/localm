@@ -12,7 +12,7 @@ Authentication: open (no key required) until an API key exists - the
 scoped key minted with `localm key create` / the GUI's key manager /
 `POST /v1/keys`. Once any key is configured, every route below requires
 `Authorization: Bearer <key>` (or the GUI's session cookie) except `GET
-/health` and `GET /localm-ca.crt`, which stay public. Most authenticated
+/health`, `GET /localm-ca.crt`, and `GET /whoami`, which stay public. Most authenticated
 routes also check the caller's key for a specific scope (noted per section
 below; the `admin` scope implies every other one). CORS is locked to
 localhost by default; widen it with the `cors_origins` config key. See
@@ -238,6 +238,12 @@ plugin from a local directory (`{"source": "/path/to/plugin"}`, which must
 contain a `plugin.toml`) - the HTTP sibling of `localm plugin install
 <dir>`. The plugin loads on the next server start.
 
+### `POST /api/plugins/{name}/install-deps` / `GET /api/plugins/{name}/install-deps/events`
+
+`PLUGINS_ADMIN` scope. Installs a plugin's pip extras on this host (the HTTP
+sibling of `localm plugin install-deps NAME`) and streams progress via the
+events route, the same job-events pattern used elsewhere in this API.
+
 ## API key endpoints
 
 Scope: `keys:admin`.
@@ -247,6 +253,29 @@ Scope: `keys:admin`.
 | `GET /v1/keys` | List every scoped key (metadata only, never the plaintext key) plus whether the caller is the owner and the configured key presets. |
 | `POST /v1/keys` | Mint a new scoped key. Body: `name`, `scopes` (list of scope strings), and either `expires_in` (seconds from now) or `expires` (epoch seconds); returns the plaintext key exactly once. Only an owner/`admin` caller may grant a privileged scope (`admin`, `plugins:admin`, `keys:admin`, `config:write`, `coder:full`); a non-owner request for one gets 403. Minting the very first key from an open-mode loopback GUI also seeds an owner key and hands that browser a session cookie, so the local user is never locked out. |
 | `DELETE /v1/keys/{key_id}` | Revoke a key. 404 if no such key exists. |
+
+`POST /api/auth/key/clear` (scope `config:write`; CSRF-protected for
+cookie-authenticated callers) deletes the server-side owner key and signs out
+every session - the HTTP sibling of `localm key clear` and the GUI's clear
+button. `cleared` and `warnings` describe the STORED CREDENTIAL only: a full
+clear returns `{"cleared": true, "warnings": []}`, and a credential that could
+not be removed (a virus scanner or search indexer holding the file open, for
+example) returns `{"cleared": false, "warnings": [...]}` naming what survived,
+since a surviving key still grants access. Signing out browser sessions is a
+separate step and its outcome is not reflected in either field, so do not read
+`"cleared": true` as confirmation that every session was revoked.
+
+## Knowledge (RAG) endpoints (rag plugin)
+
+These routes exist only when the `rag` plugin is installed and enabled;
+otherwise they `404`. Scope: `rag`. See [rag.md](rag.md) for the retrieval
+design, indexing confinement, and CLI equivalents.
+
+| Route | Purpose |
+|---|---|
+| `POST /api/rag/collections/{name}/add` | Index paths into a collection. Always starts a background job and returns `{"job_id": ...}` immediately, on `localm gui` and a headless `localm serve` alike. Follow progress with `GET /api/jobs/{id}/events`. |
+| `POST /api/rag/collections/{name}/upload` | Same, for uploaded files; same `{"job_id": ...}` response. |
+| `POST /api/rag/embedding` | Install or switch the embedding model; also starts a job and returns `{"job_id": ...}`. Changing the model requires an owner (admin-scoped) key. |
 
 ## Memory endpoints (memory plugin)
 
@@ -297,6 +326,9 @@ for chunk in stream:
 - **Context**: the window starts at `n_ctx` and grows on demand up to
   `n_ctx_max` (see the dynamic context section of the README). Conversations
   that outgrow the ceiling get a clear error instead of an OOM.
-- **GUI endpoints**: `localm gui` adds further `/api/*` routes (coder sessions,
-  model switching, image jobs) on top of this API; the `/api/plugins*`
-  management routes above are already part of the base server. See [gui.md](gui.md).
+- **GUI-only routes**: only a handful of `/api/models/*` model-switching
+  routes are actually gated behind `localm gui`. Everything else
+  plugin-contributed - coder sessions (`/api/coder/*`), the Knowledge routes
+  above, image/music/video generation, and the `/api/plugins*` management
+  routes above - mounts the moment its plugin is enabled, on a headless
+  `localm serve` too. See [gui.md](gui.md).

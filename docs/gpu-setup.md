@@ -149,6 +149,33 @@ Set `--gpu-layers 0` to disable GPU offloading:
 localm run mymodel --gpu-layers 0 --prompt "hello"
 ```
 
+## Mixture-of-Experts: reducing VRAM footprint
+
+A Mixture-of-Experts (MoE) model's expert layers can be kept in system RAM
+instead of VRAM, so it fits in far less GPU memory. Off by default:
+
+```bash
+localm config n_cpu_moe 16        # keep 16 layers' worth of experts on system RAM
+localm config n_cpu_moe 0         # off - the default
+```
+
+It is a footprint dial, not a speedup - the same VRAM budget runs at about the
+same tokens/sec either way. Measured on a 7B MoE model: GPU footprint dropped
+from 3961 MiB to 241 MiB with all 16 layers set. Has no effect on a normal
+(dense) model, and says so instead of silently doing nothing. The Settings
+page has the same field ("MoE expert layers on CPU").
+
+## Vision projector (image understanding) placement
+
+Loading an image runs the vision projector (mtmd) on the GPU by default,
+falling back to CPU only if the GPU attempt genuinely fails (logging why).
+Set `LOCALM_MTMD_CPU=1` to force the old CPU-only behaviour:
+
+```bash
+set LOCALM_MTMD_CPU=1
+localm run myvisionmodel --image photo.jpg --prompt "Describe this image."
+```
+
 ## HuggingFace Transformers (PyTorch)
 
 GGUF inference needs no PyTorch - this section is only for HF-format models. The

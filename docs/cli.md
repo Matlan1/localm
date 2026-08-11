@@ -126,6 +126,7 @@ localm add D:\models\mymodel.gguf
 localm add D:\models\my-hf-model --name mymodel
 localm add D:\ollama\manifests\registry.ollama.ai\library\<model>\<tag>
 localm alias mymodel short                   # second name for the same file
+localm rename mymodel newname                # rename it outright (unlike alias, the old name stops working)
 ```
 
 By default `add` (and `pull` with a local path) registers the file where it already is - nothing is copied or moved. Pass `--store copy` or `--store move` to bring it into `<data dir>/models` first and register it from there instead, so it's managed exactly like a pulled model:
@@ -218,6 +219,7 @@ localm rag query NAME "text"     # show the top matching excerpts
 localm rag resync NAME           # re-walk the indexed folders: pick up new and
                                  # changed files, flag ones that have vanished
 localm rag repair NAME           # re-index every known document from scratch
+localm rag reembed NAME          # recompute vectors with the current embedding model, without re-reading source files
 localm rag rm NAME [--yes]       # delete a collection (index only, files kept)
 ```
 
@@ -287,6 +289,25 @@ localm config main_gpu_index 1     # load models onto device 1 instead
 ```
 
 The GUI has the same control: Settings > Live tuning shows a "Main GPU" dropdown once more than one GPU is detected. An index that no longer matches a currently-detected device falls back to device 0 with a logged warning rather than silently loading onto the wrong card.
+
+`localm gpus` omits the free-VRAM figure (printing a note instead) rather than show a number it cannot stand behind, when the reading is process-scoped or otherwise untrusted for the platform - notably AMD ROCm/HIP on Windows.
+
+### Mixture-of-Experts: reducing VRAM footprint
+
+`n_cpu_moe` keeps the expert weights of the first N layers of a MoE model in
+system RAM while the rest still runs on the GPU, off by default:
+
+```bash
+localm config n_cpu_moe 16        # keep 16 layers' worth of experts on CPU
+localm config n_cpu_moe 0         # off - the default
+```
+
+It is a footprint dial, not a speedup - at the same VRAM it runs at about the
+same speed - so it is worth reaching for when a model would not otherwise fit,
+or when something else needs the card. No effect on a normal (dense) model.
+The Settings page has the same field ("MoE expert layers on CPU"). See
+[docs/gpu-setup.md](../docs/gpu-setup.md#mixture-of-experts-reducing-vram-footprint)
+for measured VRAM numbers.
 
 ### Multi-GPU: splitting one model across several cards
 
@@ -399,7 +420,7 @@ localm coder --model mymodel --verify "pytest -x"            # interactive, same
 localm coder --model mymodel --seed 1234                     # reproducible sampling
 ```
 
-The agent auto-starts `localm serve` when needed, plans with tool calls (read, write, edit, patch, shell, search, tests, image generation, plus tools exported by other installed plugins), asks before destructive actions, tracks a turn budget so it asks for help instead of guessing forever, and verifies its own code changes before answering. Privacy mode is the default: nothing is persisted unless you opt into `--mode log` or `--mode full`.
+The agent auto-starts `localm serve` when needed, plans with tool calls (read, write, edit, patch, shell, search, tests, image generation, Knowledge-collection search, plus tools exported by other installed plugins), asks before destructive actions, tracks a turn budget so it asks for help instead of guessing forever, and verifies its own code changes before answering. Privacy mode is the default: nothing is persisted unless you opt into `--mode log` or `--mode full`.
 
 **Verification by exit code.** The agent's own "I am done" is not evidence, so localm
 judges a change by running a command and reading its exit code - the harness runs it,
@@ -431,6 +452,17 @@ again after a full model reload. That is one hardware and software combination, 
 guarantee: different GPUs, backends, llama.cpp builds, or concurrent load were not
 measured, and `--anthropic` ignores the flag because the Anthropic API has no seed
 parameter.
+
+**Episodic memory.** The agent keeps a per-project log of lessons learned across sessions. Manage it without starting a session:
+
+```bash
+localm coder --episodes                    # list stored lessons and exit
+localm coder --episodes-archive            # list dropped (merged/evicted/forgotten) lessons and exit
+localm coder --forget-episode ID           # drop one lesson (archived, recoverable) and exit
+localm coder --forget-episodes             # erase ALL episodic memory for this project and exit
+localm coder --restore-episode ID          # bring an archived lesson back into recall and exit
+localm coder --consolidate-episodes        # ask the model to merge related lessons (opt-in, manual only)
+```
 
 Give the agent standing guidance (conventions, style, constraints) with a `.localcoder/system.md` file in the repo - it is injected into the system prompt under "## User Instructions" for every session in that project. The `--system TEXT` flag overrides the file for a single run. This is separate from `LOCALCODER.md`, the project-memory file, which holds facts **you** add with `/remember` and drop with `/forget`; the agent does not write it itself (its own close-time reflection is stored in the localm data dir, not in your repo).
 

@@ -75,7 +75,7 @@ localm serve mymodel                        # OpenAI-compatible API server
 
 - **For GGUF GPU inference:** a compiled `llama.dll` + GPU runtime DLLs. `localm setup-llama` provisions these for you (see [GPU setup](#gpu-setup)). The installer detects your hardware and chooses the backend automatically.
 
-- **NVIDIA CUDA (peak performance):** on **Windows** the installer now recommends **CUDA** for NVIDIA - it fetches a self-contained CUDA runtime, so no CUDA Toolkit is needed, and an old driver simply falls back to Vulkan. Prefer the universal driver-only build? Choose **Vulkan** in the setup menu (or `localm setup-llama --backend vulkan`). On **Linux**, NVIDIA uses Vulkan by default (the Linux CUDA build needs a system CUDA runtime). Details in [GPU setup](#gpu-setup).
+- **NVIDIA CUDA (peak performance):** on **Windows** the installer now recommends **CUDA** for NVIDIA - it fetches a self-contained CUDA runtime, so no CUDA Toolkit is needed, and an old driver simply falls back to Vulkan. Prefer the universal driver-only build? Choose **Vulkan** in the setup menu (or `localm setup-llama --backend vulkan`). On **Linux**, Vulkan is still the default recommendation; `--backend cuda` is self-contained there too now (no Toolkit), but it is newer and not yet confirmed on real NVIDIA Linux hardware, so it is an explicit opt-in. Details in [GPU setup](#gpu-setup).
 
 Run `localm doctor` after installing to check Python, the native library, GPU driver, VRAM, and optional packages in one shot.
 
@@ -113,8 +113,8 @@ https://astral.sh/uv/install.sh | sh` on Linux/macOS).
 # choice. The UV_* vars only apply to this one command, never persisted.
 UV_PYTHON_INSTALL_DIR="$PWD/.python" UV_CACHE_DIR="$PWD/.cache" \
   uv venv --python 3.12 --python-preference only-managed .venv
-uv pip install -p .venv -e ".[coder,voice]"       # base: NVIDIA / Intel / CPU (GGUF chat needs no torch)
-uv pip install -p .venv -e ".[gpu,coder,voice]"   # AMD RDNA2 ROCm ONLY - do NOT use on NVIDIA/Intel
+uv pip install -p .venv -e ".[coder,voice,monitor]"       # base: NVIDIA / Intel / CPU (GGUF chat needs no torch)
+uv pip install -p .venv -e ".[coder,voice,monitor,gpu,audio]"   # AMD RDNA2 ROCm ONLY - do NOT use on NVIDIA/Intel
 localm setup-llama                                 # provision the native llama.cpp backend (Vulkan/CUDA/CPU)
 ```
 
@@ -140,7 +140,7 @@ A pip extra and a plugin install are two separate steps. The extra installs a pl
 | `monitor` | Live hardware monitor in the GUI status bar (`psutil`) |
 | `grammar` | Grammar-constrained decoding for HuggingFace models (`xgrammar`, layers on `[gpu]`) |
 | `cpu` | Explicit CPU-only marker (empty; core already runs GGUF on CPU) |
-| `dev` | Contributor / CI tooling: `ruff` + `pytest` |
+| `dev` | Contributor / CI tooling: `ruff`, `pytest`, `pytest-cov`, `pytest-xdist`, plus `pypdf`/`psutil` so the tests that need them do not skip |
 
 Not every plugin needs an extra: the image/music/video plugins talk to an external media-generation server you run (ComfyUI today), jobs and web have no extra, and tts runs in the browser.
 
@@ -240,6 +240,7 @@ localm pull SPEC                  # download from HuggingFace or URL
 localm search QUERY               # search HuggingFace for GGUF models
 localm add PATH                   # register a local model (--store copy|move to import it into <data dir>/models)
 localm alias MODEL NEWNAME        # add a second name
+localm rename MODEL NEWNAME       # rename it outright (unlike alias, the old name stops working)
 localm set-type MODEL TYPE        # fix a model's detected type (llm, vae, lora, unknown, ...)
 localm list [--type TYPE]        # registered models, optionally filtered by type
 localm rm MODEL                   # remove a model
@@ -293,7 +294,7 @@ localm setup-llama --from <build-dir>    # or copy your own llama.cpp build
 
 Vulkan runs on any GPU with just the vendor's normal driver; CUDA/ROCm give peak performance when their runtime is present; CPU always works. The AMD ROCm build is self-contained (it bundles its ROCm runtime via the `[gpu]` extra's `rocm-sdk` wheels). macOS/Metal is experimental. See [docs/phone.md](docs/phone.md) to reach the GUI from a phone.
 
-**NVIDIA users:** on **Windows** the installer recommends **CUDA** (peak performance) - press Enter to accept it: it fetches a self-contained CUDA runtime (no Toolkit needed), verifies the build loads, and falls back to Vulkan with a clear message if your driver is too old for the CUDA line your GPU needs (12.4+ for most GPUs; Blackwell - RTX 50-series and datacenter B100/B200 - is detected automatically and needs a newer driver, CUDA 13.3+, for its own 13.x build). Prefer the universal driver-only build with no vendor-runtime download? Choose **Vulkan** in the setup menu (or run `localm setup-llama --backend vulkan`). On **Linux**, NVIDIA uses Vulkan by default (the Linux CUDA build needs a system CUDA runtime present).
+**NVIDIA users:** on **Windows** the installer recommends **CUDA** (peak performance) - press Enter to accept it: it fetches a self-contained CUDA runtime (no Toolkit needed), verifies the build loads, and falls back to Vulkan with a clear message if your driver is too old for the CUDA line your GPU needs (12.4+ for most GPUs; Blackwell - RTX 50-series and datacenter B100/B200 - is detected automatically and needs a newer driver, CUDA 13.3+, for its own 13.x build). Prefer the universal driver-only build with no vendor-runtime download? Choose **Vulkan** in the setup menu (or run `localm setup-llama --backend vulkan`). On **Linux**, Vulkan stays the default recommendation, but `--backend cuda` is self-contained there too now: setup fetches a build from a third-party builder plus the CUDA runtime libraries, with no Toolkit install. That path is newer and has not yet been confirmed across real NVIDIA Linux hardware, so choose it explicitly if you want to try it.
 
 localm resolves the binary directory in order: `LLAMA_CPP_LIB` env > `binary_dir` config > the bundled runtime wheel. No absolute path is ever assumed as a default; an unprovisioned install resolves to nothing and points you at `localm setup-llama`. Before loading a model, localm checks free VRAM against the model size and warns when it will not fit, instead of crashing mid-load.
 

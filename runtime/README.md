@@ -5,9 +5,12 @@ its own runtime inside its venv** instead of depending on a folder elsewhere on
 disk.
 
 `localm_llama_runtime/lib/` holds `llama.dll` + `ggml-*.dll` (and, for a GPU
-prebuilt, the matched ROCm/CUDA runtime DLLs and the `llama-cli`/`llama-server`
-executables). These binaries are **never committed** - they are large,
-GPU/platform-specific, and license-encumbered - so the directory ships empty.
+prebuilt, the matched ROCm/CUDA runtime DLLs). Libraries only, never the
+upstream `llama-cli`/`llama-server`/`llama-bench` executables or the RPC
+server daemon - localm loads the runtime in-process and never shells out to
+them, so they are not copied in. These binaries are **never committed** -
+they are large, GPU/platform-specific, and license-encumbered - so the
+directory ships empty.
 
 ## Provisioning
 

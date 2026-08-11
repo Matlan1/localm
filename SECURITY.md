@@ -32,6 +32,13 @@ mint named, scope-limited keys with `localm key create --scope <scope>` - the CL
 never mints a privileged scope into a named key; only an owner-authenticated API
 call (`POST /v1/keys`) can (see *Capability scopes* below).
 
+A key you chose yourself (`localm key set`, `LOCALM_API_KEY`, or writing
+`auth.key` by hand) can be short or memorable, so its fingerprint - recorded in
+`sessions.json` and `jobs.json` to check ownership - uses a slow, salted
+derivation (scrypt) rather than a fast hash, so it cannot be brute-forced
+offline from those files. A key localm generates for you is random and long
+enough that this does not matter, and keeps using the cheap path.
+
 Because the default is fail-open for reads, a network bind without a key is unsafe,
 so **both `localm gui` and `localm serve` refuse to bind past loopback unless an API
 key is set** (printing how to set one). `--insecure` overrides this for a trusted,
@@ -111,12 +118,47 @@ localm process's own permissions rather than a sandbox:
   property of the folders rather than of one route. It is narrower than it
   looks - the folders hold generated media and files you uploaded, not your
   keys or sessions - but if that matters to you, issue one media key.
-- **`config:write` / `plugins:admin` / `keys:admin`** are privileged and are never
-  granted implicitly - only the owner key may mint keys carrying them.
+- **Host filesystem access** is a separate dial, and it gates the model and
+  media routes that can name a path on the server: pulling a model by naming a
+  path that already exists there, scanning for ComfyUI models, downloading a
+  curated ComfyUI model, and moving a generated media file out of the data
+  directory (see above). Without it, a key holding those scopes is confined to
+  HuggingFace-by-name pulls and the folders localm already manages. It is a
+  per-route gate on those routes, not a blanket property of every scope.
+- **Installing a plugin** (a store name, or a third-party directory via
+  `localm plugin install <path>` / `POST /api/plugins/install-external`)
+  refuses a source tree containing any symlink or Windows junction, so a
+  malicious plugin source cannot smuggle a file's contents out through a link
+  or drive a large copy through a self-referencing cycle.
+- **`config:write` / `plugins:admin` / `keys:admin` / `coder:full` / `admin`**
+  are privileged and are never granted implicitly - only the owner key may
+  mint keys carrying them.
 
 These are deliberate grants to *you*: a scoped key (or an exposed GUI) grants its
 holder that capability on your machine, so only issue keys to - or expose the GUI to -
 clients you trust.
+
+## Model trust boundaries
+
+- **A model name from the API, an MCP client, or a scheduled job must be one
+  you have already registered** - it is never treated as a filesystem path, so
+  a request cannot point the server at an arbitrary folder (which, for a
+  HuggingFace-format model, would otherwise run that folder's own bundled
+  Python unconditionally). Naming a model straight from a path on the command
+  line (`localm run D:\models\foo.gguf`, `localm gui <path>`, `localm mcp
+  --model <path>`) is unchanged and still allowed - you typed it yourself.
+- **A model's own bundled code does not run just because you loaded it.**
+  Custom model code (`trust_remote_code`) is off by default; a model that
+  needs it is refused with an explanation, and the owner-only "Allow
+  model-bundled custom code" setting (Settings -> Security) turns it back on
+  for a model you trust.
+- **A downloaded model or vision-projector filename** cannot resolve to
+  something other than the plain file it appears to be: a repo-supplied name
+  is rejected if it contains a colon (which can open a hidden Windows
+  alternate-data-stream), matches an 8.3 short-name alias for an unrelated
+  file you already have, names a reserved Windows device, or ends in a dot or
+  space (which Windows silently strips). This applies to `localm pull`, the
+  same-repo vision-projector auto-attach, and `--mmproj`.
 
 ## Software updates
 
