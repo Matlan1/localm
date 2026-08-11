@@ -50,12 +50,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
   preference". A request that explicitly asks for "localm" still gets
   "localm" back; only the truly unnamed case changes.
 - **An embeddings request that did not name a model was refused outright,
-  instead of using whatever model was already active like chat and completion
-  requests do.** `/v1/embeddings` required an explicit `model` unconditionally,
-  with no fallback to the active model - now it resolves an unnamed request
-  the same way `/v1/chat/completions` and `/v1/completions` do, and only
-  refuses when there is genuinely nothing loaded to serve it with. A request
-  that explicitly asks for "localm" still gets "localm" back unchanged.
+  even when your embedding model was already set up.** `/v1/embeddings`
+  required an explicit `model` unconditionally, with no fallback at all - now
+  an unnamed request uses your configured embedding model automatically, and
+  only refuses when nothing is loaded to serve it with. Deliberately not
+  simply "whatever model is active" like chat and completions: embeddings
+  from different models cannot be mixed the way chat replies can, so an
+  unnamed request always prefers your one configured embedder rather than
+  whichever chat model you happen to be using at the time. A request that
+  explicitly asks for "localm" still gets "localm" back unchanged.
 
 ### Changed
 - **localm's own managed ComfyUI now installs v0.31.1**, up from v0.9.2. The
