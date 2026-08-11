@@ -161,10 +161,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   named the wrong cause.** After your chosen backend failed to load, setup
   falls back through the universal Vulkan and CPU builds; if those failed too,
   the final message always blamed whatever went wrong with your *original*
-  pick, even though it was the fallback builds that were actually the last
-  thing tried. It now reports the real reason the last build tried would not
-  load, and also prints why each fallback failed as it happens instead of only
-  at the very end.
+  pick, even though the fallback builds had failed for their own, different
+  reasons. It now names every backend it tried and why each one failed, your
+  original pick included, both as it happens and in the final summary (and
+  the saved bug report, which only ever captured that final summary).
 
 ## [0.1.5rc2] - 2026-08-08
 
