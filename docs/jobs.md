@@ -1,8 +1,12 @@
 # Scheduled jobs
 
-> Jobs are provided by the `jobs` plugin. The GUI **Jobs** tab, the `/api/jobs`
-> routes, and the in-app scheduler appear only when it is installed and enabled
-> (`localm plugin install jobs`). The plugin has no pip extra.
+> Scheduled jobs are provided by the `jobs` plugin. The GUI **Jobs** tab, the
+> in-app scheduler, and the seven `/api/jobs` routes listed below appear only
+> when it is installed and enabled (`localm plugin install jobs`). The plugin
+> has no pip extra. Two other paths under the same prefix,
+> `/api/jobs/{id}/events` and `/api/jobs/{id}/cancel`, belong to a different
+> thing and are always present; see
+> [Two things live under `/api/jobs`](#two-things-live-under-apijobs).
 
 A job runs a chat prompt, a coder task, a memory-synthesis pass, or a knowledge
 collection re-sync on a
@@ -22,8 +26,8 @@ Three things to know up front:
   job runs as soon as its interval has elapsed, and a cron job back-fires only a
   slot missed within the last 24 hours; a slot missed longer ago is skipped.
 - **The CLI, GUI, and API share one on-disk store.** `localm job ...`,
-  the Jobs page, and the `/api/jobs` routes all read and write the same files
-  under `<data dir>/jobs/`. A change made from the terminal is picked up by a
+  the Jobs page, and the seven `/api/jobs` routes below all read and write the
+  same files under `<data dir>/jobs/`. A change made from the terminal is picked up by a
   running server on its next tick.
 - **Run results are explicit user data.** Like generated images, a job's
   recorded results are saved in every session mode, including privacy; the
@@ -111,6 +115,51 @@ need no `prompt`), `prompt`, `schedule_kind` (`interval` or `cron`), `schedule`
 or a `coder:full` key, so a plain `jobs`-scoped client cannot schedule a
 shell-capable job. `collection` is required for a `rag` job and refused at
 creation if it is not a valid collection name.
+
+## Two things live under `/api/jobs`
+
+Two unrelated things answer under this prefix, and they are meant to. The seven
+routes above are this plugin's: they manage recurring task DEFINITIONS in a
+store on disk, and once an API key is configured every one of them is gated on
+the `jobs` capability.
+
+`GET /api/jobs/{id}/events` and `POST /api/jobs/{id}/cancel` belong to the
+server's registry of operations running RIGHT NOW: a model pull, a knowledge
+index, an image or video generation, a ComfyUI setup. They are part of the
+server itself, so they answer on a headless `localm serve` with no plugins
+installed, and they are gated on a valid key plus ownership of that particular
+operation, never on the `jobs` scope. Their ids come from the response of
+whichever POST started the operation. Nothing is shared between the two
+families: an id from one returns 404 on the other, exactly as an id that does
+not exist does, and the two kinds of id look identical, so the path you call is
+what decides which registry answers.
+
+`GET /api/activity` is how you find those in-flight operations without already
+holding an id. It answers `{"now": <server clock>, "operations": [...]}`, where
+each entry carries `id`, `kind`, `status`, `created_at`, `finished_at` (null
+while it runs), `cancellable`, a `label` that is only set for model pulls and
+ComfyUI setup (fall back to `kind`), and `pct`/`phase` once the operation has
+something real to report. `pct` is absent, never `0`, before then. Compute an
+age as `now - created_at`, using the server's `now` rather than your own clock.
+It is deliberately not under `/api/jobs`, so that one prefix does not mean two
+things. `localm status` and the MCP activity tool read this same route; on a
+server with no API key configured they authenticate with that instance's local
+attach token, which is why a bare `curl` with no credentials is refused there.
+
+What it does not promise: the registry is in memory, so it is empty again after
+a restart; a finished operation is dropped about an hour after it finishes, and
+only when some new operation starts, so an idle server may keep showing it
+longer; an operation still marked `running` is never dropped, at any age.
+Cancelling always answers `{"status": "cancelling"}`, whatever state the
+operation was in. It terminates the subprocess behind a model pull, a model
+removal or a ComfyUI setup; for the in-process operations it is only a request
+the work has to notice, and image, video and music generation are the ones that
+notice it, while a knowledge index, upload, re-embed or embedding setup keeps
+running to completion after being marked `cancelled`. On a server with API keys
+configured, you see and can touch only the operations your own key started (an
+owner or `admin` key sees all); with no key configured there are no owners, so
+any authenticated local caller sees everything, which is the intended behaviour
+for a single-owner machine.
 
 ## Keeping an indexed folder current
 

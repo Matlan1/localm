@@ -245,7 +245,7 @@ localm job disable JOB_ID
 localm job remove JOB_ID         # delete the job and its results
 ```
 
-The `localm job` CLI, the Jobs GUI tab, and the `/api/jobs` routes share one on-disk store. The scheduler only ticks while a `localm gui`/`localm serve` (with the jobs plugin active) is up. See [docs/jobs.md](../docs/jobs.md).
+The `localm job` CLI, the Jobs GUI tab, and the plugin's `/api/jobs` routes share one on-disk store. The scheduler only ticks while a `localm gui`/`localm serve` (with the jobs plugin active) is up. See [docs/jobs.md](../docs/jobs.md).
 
 ---
 
