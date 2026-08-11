@@ -43,6 +43,17 @@ _UNTESTED_DIRECTION_INPUT = "a" * 1800
 _PANIC_PATTERN = r"(a+)+b"
 _PANIC_INPUT = "a" * 60
 
+# Same shape as _PANIC_PATTERN, keyed to a PUNCTUATION character instead of a
+# letter - the isalnum() bypass closed 2026-08-11 (same defect class as
+# _trigger_probe.py's own punctuation-keyed fix, PR #1177): before the fix,
+# _pattern_derived_probes silently dropped every non-alnum character from
+# consideration, so this pattern's ambiguity - keyed to the literal comma -
+# got no derived probe at all and passed as "OK" despite being genuinely
+# catastrophic. _PROBE_PUNCTUATION in _FIXED_PROBES does not catch it either:
+# it interleaves 16 distinct punctuation characters, so no run of consecutive
+# commas long enough to trip the ambiguity ever forms.
+_PANIC_PATTERN_PUNCT = r"(,+)+b"
+
 # The real, unmodified GPT-2 byte-level pre-tokenizer pattern (also used by
 # GPT-NeoX and others), via \p{L}/\p{N} Unicode-property escapes that Python's
 # `re` does not support at all.
@@ -124,6 +135,47 @@ def test_re_rejects_the_real_gpt2_pattern_oniguruma_does_not():
 
 
 # ---------------------------------------------------------------------------
+#  _pattern_derived_probes: punctuation must not be filtered out (isalnum())
+# ---------------------------------------------------------------------------
+
+def test_pattern_derived_probes_includes_punctuation_characters():
+    """The isalnum() filter (closed 2026-08-11, same defect class already
+    fixed in _trigger_probe.py by PR #1177) meant a pattern whose
+    catastrophic-backtracking ambiguity is keyed to a PUNCTUATION character -
+    e.g. the literal comma in ``(,+)+b`` - never got a derived probe for that
+    character at all, since isalnum() silently dropped it before the
+    frequency count ever saw it. Every distinct character the pattern names
+    is now a candidate, not just alnum() ones."""
+    from localm.inference._hf_tokenizer_probe import _pattern_derived_probes
+
+    probes = _pattern_derived_probes(_PANIC_PATTERN_PUNCT)
+    derived_chars = {p[0] for p in probes}
+    assert "," in derived_chars, (
+        f"comma never got a derived probe - derived chars were {derived_chars!r}; "
+        "a punctuation-keyed catastrophic pattern is invisible to this layer")
+
+
+def test_pattern_derived_probes_still_bounded_with_many_punctuation_characters():
+    """Widening the character set to include punctuation must not create a
+    new cost sink: _MAX_DERIVED_PROBE_CHARS still bounds probe COUNT
+    regardless of how many distinct punctuation characters a pattern names -
+    the internal per-pattern wall-clock budget (_PROBE_LOOP_BUDGET_SECONDS)
+    is what bounds total cost, and it does so by bounding how many probes
+    ever run, not by which characters they are drawn from."""
+    from localm.inference._hf_tokenizer_probe import (
+        _MAX_DERIVED_PROBE_CHARS, _pattern_derived_probes)
+
+    # ASCII 33-47 is fifteen consecutive punctuation characters, none alnum.
+    many_punct = "".join(chr(c) for c in range(33, 48))
+    assert not any(ch.isalnum() for ch in many_punct)
+    probes = _pattern_derived_probes(many_punct)
+    assert len(probes) == _MAX_DERIVED_PROBE_CHARS, (
+        f"got {len(probes)} probes for {len(many_punct)} distinct punctuation "
+        f"characters - the _MAX_DERIVED_PROBE_CHARS={_MAX_DERIVED_PROBE_CHARS} "
+        "count bound no longer holds")
+
+
+# ---------------------------------------------------------------------------
 #  _check_one (the probe subprocess's per-pattern check)
 # ---------------------------------------------------------------------------
 
@@ -132,6 +184,19 @@ def test_check_one_catches_the_panic_and_returns_a_bad_verdict():
     the test above motivates is actually in place and working, called
     in-process here (safe: this pattern panics fast, it does not hang)."""
     verdict = _check_one(_PANIC_PATTERN)
+    assert verdict.startswith("BAD "), f"expected a BAD verdict, got {verdict!r}"
+    assert "retry-limit" in verdict or "Panic" in verdict
+
+
+def test_check_one_catches_ambiguous_nested_quantifier_keyed_to_punctuation():
+    """Same defect class as test_check_one_catches_the_panic_and_returns_a_bad_verdict
+    above, but keyed to a PUNCTUATION character rather than a letter - the
+    isalnum() bypass this closes (2026-08-11). Before the fix this pattern
+    passed as "OK": _pattern_derived_probes dropped the comma from
+    consideration entirely, and _FIXED_PROBES' own punctuation corpus mixes
+    16 distinct characters, so no run of consecutive commas long enough to
+    trip the ambiguity ever forms there either."""
+    verdict = _check_one(_PANIC_PATTERN_PUNCT)
     assert verdict.startswith("BAD "), f"expected a BAD verdict, got {verdict!r}"
     assert "retry-limit" in verdict or "Panic" in verdict
 
@@ -185,6 +250,7 @@ def test_plain_string_pattern_is_not_treated_as_regex(tmp_path):
 @pytest.mark.parametrize("pattern, reason_substr", [
     (_UNTESTED_DIRECTION_PATTERN, "Oniguruma safety probe"),
     (_PANIC_PATTERN, "retry-limit"),
+    (_PANIC_PATTERN_PUNCT, "retry-limit"),
 ])
 def test_dangerous_pre_tokenizer_pattern_is_refused(tmp_path, pattern, reason_substr):
     d = _model_dir(tmp_path, "dangerous", _with_pre_tokenizer_regex(pattern))
