@@ -109,6 +109,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   now can no longer be deleted, whatever name it is registered or loaded
   under, and `localm rename` now hands the rename to the running server so a
   loaded model keeps serving under its new name.
+- **A grammar with a very large repeat count now gets a clean error instead of
+  possibly reaching the native parser unrejected.** The upfront structural
+  check on a `grammar` field (chat completions and the coder) allowed a repeat
+  count well above what the native GBNF parser actually accepts, so a request
+  in that range used to clear the check and could fail later instead of
+  getting an immediate, clear error.
 
 ## [0.1.5rc2] - 2026-08-08
 

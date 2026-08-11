@@ -128,22 +128,28 @@ opt-ws     ::= [ \t\n\r]? [ \t\n\r]? [ \t\n\r]?
 # exists to provide. Bounded, the only legal continuation after N prelude
 # characters is "</think>", so the model MUST arrive at the call.
 #
-# 1900 IS MEASURED, NOT CHOSEN. llama.cpp's GBNF parser rejects a repetition
-# count it considers unreasonable ("number of repetitions exceeds sane
-# defaults") and the limit is NOT the one localm's own pre-check enforces:
-# MAX_GRAMMAR_REPEAT_COUNT above is 10000, which is ABOVE the native ceiling,
-# so check_grammar_structure() cannot catch this and a too-large count fails
-# only at the native parse. Binary-searched against the bundled runtime on
-# 2026-08-11 via Engine.validate_grammar (negative control confirmed: a broken
-# grammar IS rejected by the same call, so the measurement is not a blind
-# pass):
+# 1900 IS MEASURED, NOT CHOSEN, and it now shares its value with
+# MAX_GRAMMAR_REPEAT_COUNT below (the structural pre-check's own repeat-count
+# ceiling for ANY grammar, not just this one) - see that constant's comment
+# for the measurement and why they are meant to move together. llama.cpp's
+# GBNF parser rejects a repetition count it considers unreasonable ("number
+# of repetitions exceeds sane defaults"); binary-searched against the bundled
+# runtime, re-confirmed independently on 2026-08-11 via two separate loaded-
+# model probes (Engine.validate_grammar and, later the same day, a fresh
+# GgufBackend.check_grammar probe against a different runtime build the
+# runtime had since been updated to - both landed on the identical ceiling,
+# suggestive but not proof that it is a llama.cpp/ggml grammar-parser
+# constant rather than something that varies with the GPU backend; each
+# probe included a negative control confirming a broken grammar IS rejected
+# by the same call, so neither measurement is a blind pass):
 #
 #     {0,1999} -> parses      {0,2000} -> "exceeds sane defaults"
 #
-# 1900 leaves margin under that measured 1999 in case another build's ceiling
-# is slightly lower. A build whose ceiling is lower still would make this
-# grammar unparseable rather than silently wrong, and the coder's escalation
-# treats an unusable forcing grammar as forcing-unavailable and says so.
+# 1900 leaves margin under that measured 1999 in case a future llama.cpp
+# release's ceiling is lower. A build whose ceiling is lower still would make
+# this grammar unparseable rather than silently wrong, and the coder's
+# escalation treats an unusable forcing grammar as forcing-unavailable and
+# says so.
 TOOL_CALLS_AFTER_THINK = r"""
 root        ::= opt-think opt-ws tool-block+ opt-ws
 opt-think   ::= ("<think>" think-body "</think>")?
@@ -212,7 +218,21 @@ TOOL_CALL_TRIGGER = r"(<tool_call>[\s\S]*)"
 # deep) while being far below anything that risks the native stack.
 MAX_GRAMMAR_BYTES = 65536
 MAX_GRAMMAR_NESTING_DEPTH = 128
-MAX_GRAMMAR_REPEAT_COUNT = 10000
+
+# 1900, NOT a round number chosen for tidiness: it is the same measured-and-
+# margined value as TOOL_CALLS_AFTER_THINK's think-body bound above (see that
+# grammar's comment for the measurement) - llama.cpp's native GBNF parser
+# rejects a repeat count above 1999 ("number of repetitions exceeds sane
+# defaults"), so a pre-check ceiling ABOVE that native limit cannot do its
+# job: a caller-supplied grammar with a repeat count between this check's old
+# limit (10000) and the real native one (1999) used to clear
+# check_grammar_structure() cleanly and then fail at the native parse
+# instead, defeating the whole point of an up-front structural check (a
+# clean 400 instead of a native fault). 1900 keeps 99 counts of margin under
+# the measured 1999 for the same reason TOOL_CALLS_AFTER_THINK does: a future
+# llama.cpp release with a slightly lower ceiling still gets a clean rejection
+# here rather than a native one.
+MAX_GRAMMAR_REPEAT_COUNT = 1900
 
 _REPEAT_COUNT_RE = re.compile(r"\{(\d+)(?:,(\d+))?\}")
 
@@ -253,7 +273,9 @@ def check_grammar_structure(grammar: str) -> None:
             if group is not None and int(group) > MAX_GRAMMAR_REPEAT_COUNT:
                 raise InvalidGrammarError(
                     f"grammar repeat count {{{m.group(0)}}} exceeds the "
-                    f"{MAX_GRAMMAR_REPEAT_COUNT} limit")
+                    f"{MAX_GRAMMAR_REPEAT_COUNT} limit (llama.cpp's native "
+                    "GBNF parser rejects repeat counts above roughly 2000 "
+                    "as unreasonable; reduce this repeat count)")
 
 
 #  Trigger-pattern validation (GitHub #928, #833)

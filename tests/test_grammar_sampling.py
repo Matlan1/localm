@@ -308,6 +308,29 @@ def test_check_grammar_structure_rejects_huge_repeat_count():
         check_grammar_structure('root ::= "a"{100000}')
 
 
+def test_check_grammar_structure_rejects_count_above_native_ceiling_margin():
+    """MAX_GRAMMAR_REPEAT_COUNT must sit AT OR BELOW llama.cpp's real native
+    GBNF parser ceiling (measured 1999 on the bundled runtime via a live
+    check_grammar probe with a negative control - see gbnf.py's own comment),
+    not merely below some arbitrary round number. Before this test's fix,
+    MAX_GRAMMAR_REPEAT_COUNT was 10000: a repeat count of 5000 is well over
+    the real native ceiling but used to clear this structural pre-check
+    cleanly, so it would fail only much later at the native parse instead of
+    getting a clean 400 up front - exactly the failure this pre-check exists
+    to prevent. The error must also name the actual configured limit, so a
+    caller hitting it knows what to change."""
+    from localm.inference.backends.base import InvalidGrammarError
+    from localm.inference.gbnf import MAX_GRAMMAR_REPEAT_COUNT, check_grammar_structure
+
+    assert MAX_GRAMMAR_REPEAT_COUNT <= 1999, (
+        "the structural pre-check's ceiling must not sit above the measured "
+        "native ceiling, or it cannot catch what the native parser rejects")
+
+    with pytest.raises(InvalidGrammarError) as exc_info:
+        check_grammar_structure('root ::= "a"{5000}')
+    assert str(MAX_GRAMMAR_REPEAT_COUNT) in str(exc_info.value)
+
+
 def test_generate_never_calls_accept_after_sample():
     llm = _bare_llama()
     mock_api = MagicMock()

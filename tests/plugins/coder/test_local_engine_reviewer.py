@@ -55,6 +55,35 @@ def test_local_backend_loads_only_once(monkeypatch):
     eng.load.assert_called_once()                  # not reloaded on the 2nd call
 
 
+def test_local_backend_supports_grammar_true_for_gguf(monkeypatch):
+    """LocalEngineBackend must not claim grammar support it cannot back: true
+    only when the underlying engine actually picked GgufBackend, whose native
+    sampler enforces a GBNF grammar or raises up front (never a routine
+    silent drop) - see the constructor's own comment for why HFBackend's
+    best-effort xgrammar path does not meet that bar."""
+    from localm.inference.backends.gguf import GgufBackend
+    from localm.plugins.coder.backends.local_engine import LocalEngineBackend
+
+    fake_engine = _patched_engine(monkeypatch, [])
+    fake_engine._backend = MagicMock(spec=GgufBackend)
+    b = LocalEngineBackend("/models/mini.gguf")
+    assert b.supports_grammar is True
+
+
+def test_local_backend_supports_grammar_false_for_hf(monkeypatch):
+    """The HF backend's grammar path is a deliberate, ROUTINE soft-degrade
+    (silently generates unconstrained whenever the optional [grammar] extra
+    is missing), so LocalEngineBackend must not promise callers it will be
+    enforced."""
+    from localm.inference.backends.hf import HFBackend
+    from localm.plugins.coder.backends.local_engine import LocalEngineBackend
+
+    fake_engine = _patched_engine(monkeypatch, [])
+    fake_engine._backend = MagicMock(spec=HFBackend)
+    b = LocalEngineBackend("/models/some-hf-dir")
+    assert b.supports_grammar is False
+
+
 # --------------------------------------------------------------------------- #
 #  Factory: the "local" reviewer kind                                          #
 # --------------------------------------------------------------------------- #
