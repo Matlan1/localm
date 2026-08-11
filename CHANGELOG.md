@@ -230,6 +230,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   a valid build, just not for that card - so `localm doctor` reported no
   usable GPU with no indication why. Linux now detects the same way Windows
   already did, so the build fetched actually matches the card.
+- **The HuggingFace/PyTorch backend, and localm's own managed ComfyUI, always
+  installed the same PyTorch build regardless of which NVIDIA GPU was
+  present.** On the newest NVIDIA architectures that build has no compute
+  kernels for the card at all, so PyTorch loaded but silently ran on the CPU
+  - correctly detected GPUs, no error, just no acceleration, with a warning
+  easy to miss in a long setup log. Both installers now pick a PyTorch build
+  that matches the card.
 
 ## [0.1.5rc2] - 2026-08-08
 

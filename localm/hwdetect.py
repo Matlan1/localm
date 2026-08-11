@@ -250,24 +250,70 @@ def recommended_torch_variant(backend: str, det: "Detection | None" = None) -> s
 
 
 # PyTorch wheel index URLs by variant. Centralised so setup.bat / setup.sh never
-# drift on the source. cu126 = current CUDA line; xpu = Intel (the wheels carry the
-# oneAPI runtime); rocm-linux = upstream ROCm wheels (broad gfx); rocm-win = AMD's
-# Windows ROCm wheels (public preview, RDNA3/RDNA4). AMD-on-Windows is resolved PER
-# gfx family in torch_pip_args - gfx103X uses localm's bundled self-contained build.
+# drift on the source. cu126 = current CUDA line, the broadly-compatible default;
+# cuda-blackwell = the line needed for Blackwell-and-newer NVIDIA architectures,
+# whose kernels are absent from the cu126 wheels (see pytorch_index_url); xpu =
+# Intel (the wheels carry the oneAPI runtime); rocm-linux = upstream ROCm wheels
+# (broad gfx); rocm-win = AMD's Windows ROCm wheels (public preview, RDNA3/RDNA4).
+# AMD-on-Windows is resolved PER gfx family in torch_pip_args - gfx103X uses
+# localm's bundled self-contained build.
 _TORCH_INDEX = {
     "cuda": "https://download.pytorch.org/whl/cu126",
+    "cuda-blackwell": "https://download.pytorch.org/whl/cu130",
     "xpu": "https://download.pytorch.org/whl/xpu",
     "rocm-linux": "https://download.pytorch.org/whl/rocm6.2",
     "rocm-win": "https://download.pytorch.org/whl/rocm6.4",
     "cpu": "https://download.pytorch.org/whl/cpu",
 }
 
+# Mirrors setup_llama._BLACKWELL_MIN_CAP exactly and intentionally: data-center
+# Blackwell (B100/B200) is compute capability 10.x, consumer/workstation
+# Blackwell (RTX 50-series, RTX PRO Blackwell) is 12.x - (10, 0) is the lower
+# bound so both are covered by one threshold, same reasoning as the llama.cpp
+# cuda_line split this mirrors.
+_CUDA_BLACKWELL_MIN_CAP = (10, 0)
+
+
+def _cuda_compute_capabilities() -> list:
+    """Every NVIDIA GPU's compute capability on this machine, as comparable
+    tuples (one per card; multi-GPU boxes report one line per device).
+    Best-effort like the rest of this module - [] on any failure, never
+    raises. A small local probe (mirrors setup_llama.nvidia_preflight's own
+    nvidia-smi query) rather than an import from setup_llama: this module is
+    called standalone via `python -m localm.hwdetect torch-args <backend>`,
+    a SEPARATE process from `localm setup-llama` (see setup.sh), so there is
+    no in-process NvidiaInfo to reuse across that process boundary anyway,
+    and hwdetect.py is deliberately dependency-free."""
+    exe = shutil.which("nvidia-smi") or "nvidia-smi"
+    out = _run([exe, "--query-gpu=compute_cap", "--format=csv,noheader"])
+    caps = []
+    for line in out.strip().splitlines():
+        line = line.strip()
+        try:
+            caps.append(tuple(int(p) for p in line.split(".")))
+        except ValueError:
+            continue
+    return caps
+
 
 def pytorch_index_url(variant: str) -> "str | None":
     """The PyTorch wheel index URL for a torch *variant* key ("cuda" | "xpu" |
     "rocm-linux" | "rocm-win" | "cpu"), or None if unknown. Public accessor so other
     callers (the managed-ComfyUI fresh install picks the ComfyUI torch here) share
-    this ONE index table instead of duplicating the URLs and drifting from it."""
+    this ONE index table instead of duplicating the URLs and drifting from it.
+
+    For "cuda" specifically, this ALSO detects whether any installed NVIDIA GPU
+    needs the Blackwell-and-newer wheel line and returns that instead of the
+    cu126 default - self-contained here (not requiring every caller to pass
+    compute-capability info through) so ComfyUI's torch install gets the same
+    fix as the HF backend's, both of which used to hand back a flat cu126
+    regardless of hardware and silently run CPU-only on Blackwell (found live,
+    2026-08-11, on a real 3x-Blackwell box: torch loaded but warned every GPU
+    had no matching kernels)."""
+    if variant == "cuda":
+        caps = _cuda_compute_capabilities()
+        if any(cap >= _CUDA_BLACKWELL_MIN_CAP for cap in caps):
+            return _TORCH_INDEX["cuda-blackwell"]
     return _TORCH_INDEX.get(variant)
 
 
@@ -280,7 +326,9 @@ def torch_pip_args(backend: str, det: "Detection | None" = None) -> str:
     AMD-on-Windows routing lives in one tested place and the two installers cannot
     drift.
 
-      * cuda            -> CUDA wheels (cu126); any OS with NVIDIA
+      * cuda            -> CUDA wheels (cu126, or the Blackwell-and-newer line
+                           when this machine has one - see pytorch_index_url);
+                           any OS with NVIDIA
       * xpu             -> Intel wheels (self-provision the oneAPI runtime)
       * rocm, Linux     -> upstream ROCm wheels (broad gfx support)
       * rocm, Windows, gfx103X (RX 6000 / RDNA2) -> localm's bundled self-contained
@@ -296,7 +344,10 @@ def torch_pip_args(backend: str, det: "Detection | None" = None) -> str:
     the verified one."""
     variant = recommended_torch_variant(backend, det)
     if variant == "cuda":
-        return f"torch torchvision --index-url {_TORCH_INDEX['cuda']}"
+        # Routes through pytorch_index_url so the Blackwell-aware detection
+        # lives in exactly one place (also used by the managed-ComfyUI fresh
+        # install) rather than being duplicated here.
+        return f"torch torchvision --index-url {pytorch_index_url('cuda')}"
     if variant == "xpu":
         return f"torch torchvision --index-url {_TORCH_INDEX['xpu']}"
     if variant == "rocm":

@@ -237,8 +237,13 @@ def test_torch_install_args_amd_uses_extra_index(monkeypatch):
 
 
 def test_torch_install_args_cuda_uses_index_url(monkeypatch):
+    from localm import hwdetect
     from localm.media import managed_comfy_fresh as fresh
     monkeypatch.setattr(sys, "platform", "linux")
+    # Deterministic regardless of the test-running machine's own hardware -
+    # see test_hwdetect_pytorch_index_url_public_accessor for the Blackwell
+    # case this same accessor now also handles.
+    monkeypatch.setattr(hwdetect, "_cuda_compute_capabilities", lambda: [])
     spec = fresh.comfy_torch_spec(_det(["nvidia"], "NVIDIA GeForce RTX 4090"))
     args = fresh.comfy_torch_install_args(spec)
     assert args[:2] == ["torch", "torchvision"]
@@ -246,10 +251,25 @@ def test_torch_install_args_cuda_uses_index_url(monkeypatch):
     assert "https://download.pytorch.org/whl/cu126" in args
 
 
-def test_hwdetect_pytorch_index_url_public_accessor():
+def test_torch_install_args_cuda_blackwell_uses_cu130(monkeypatch):
+    """ComfyUI's own torch install shares hwdetect.pytorch_index_url with the
+    HF backend's, so it gets the same Blackwell fix for free - proven here
+    rather than assumed, since this is a SEPARATE call site
+    (managed_comfy_fresh.comfy_torch_spec) from torch_pip_args."""
+    from localm import hwdetect
+    from localm.media import managed_comfy_fresh as fresh
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(hwdetect, "_cuda_compute_capabilities", lambda: [(12, 0)])
+    spec = fresh.comfy_torch_spec(_det(["nvidia"], "NVIDIA RTX PRO 4000 Blackwell"))
+    args = fresh.comfy_torch_install_args(spec)
+    assert "https://download.pytorch.org/whl/cu130" in args
+
+
+def test_hwdetect_pytorch_index_url_public_accessor(monkeypatch):
     """The shared index table is reachable via a public hwdetect accessor (single
     source of truth), including the newly-added cpu key."""
     from localm import hwdetect
+    monkeypatch.setattr(hwdetect, "_cuda_compute_capabilities", lambda: [])
     assert hwdetect.pytorch_index_url("cuda") == "https://download.pytorch.org/whl/cu126"
     assert hwdetect.pytorch_index_url("cpu") == "https://download.pytorch.org/whl/cpu"
     assert hwdetect.pytorch_index_url("nonsense") is None
