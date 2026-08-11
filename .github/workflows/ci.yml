@@ -286,3 +286,23 @@ jobs:
               print("  -", f)
           sys.exit(1 if v.status == "mismatch" else 0)
           PY
+
+  # Maintenance signal for a second bundled-and-pinned dependency, same shape as
+  # abi-check above but far cheaper: one GitHub API call, no clone, no prebuilt
+  # download. Runs on every trigger of this workflow (no run_abi-style opt-in
+  # needed) because unlike abi-check it can never fail the build - the script
+  # always exits 0 and the step itself is continue-on-error, so a stale pin (or
+  # even a bug in the script) never turns CI red. See scripts/check_comfyui_pin.py.
+  comfyui-pin-check:
+    name: ComfyUI pin currency (warn-only)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Compare bundled ComfyUI pin against upstream latest release
+        continue-on-error: true
+        run: python scripts/check_comfyui_pin.py
