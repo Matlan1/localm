@@ -975,7 +975,8 @@ class ModelRunner:
                                 f"The model was unloaded while handling '{name}'.")
                         raise RuntimeError(
                             f"The model process crashed (exit code "
-                            f"{self._exit_reason()}) while handling '{name}'.")
+                            f"{self._exit_reason()}) while handling '{name}'."
+                            + self._crash_detail())
                     if time.monotonic() > deadline:
                         self.shutdown(grace=0)
                         raise RuntimeError(f"'{name}' timed out waiting for the model process.")

@@ -500,6 +500,47 @@ class TestNativeSignalCrashDiagnosticsReachDebugLog:
             f"a cleanly shut-down worker left {trace_path} behind")
 
 
+class TestSimpleRequestNativeSignalCrashDiagnosticsReachDebugLog:
+    """The trace-relay fix TestNativeSignalCrashDiagnosticsReachDebugLog
+    proves for chat_stream() must also hold for _simple_request() - the code
+    path count_tokens()/check_grammar() go through. Before this fix,
+    _simple_request's native-crash branch reported the exit code but never
+    called _crash_detail(), so a trace the child DID capture was never read:
+    ModelRunner.shutdown()'s own comment says a trace surviving to teardown
+    is "either already relayed or describes a death nobody is going to
+    report" and discards it unconditionally - so a fault during a token
+    count or a grammar check left the exact issue 1222/1223 symptom
+    (a bare exit code, no trace) that chat_stream's fix already closed for
+    generation."""
+
+    def test_native_abort_during_count_tokens_is_reported_with_its_trace(
+            self, monkeypatch, caplog):
+        monkeypatch.setenv(runner_mod._FAULT_ENV, "abort")
+        r = ModelRunner()
+        r._spawn()
+        try:
+            with caplog.at_level(logging.ERROR, logger="localm"):
+                with pytest.raises(RuntimeError) as ei:
+                    r.count_tokens("hello")
+            assert not r.is_alive()
+        finally:
+            r.shutdown(grace=0)
+
+        message = str(ei.value)
+        assert "crashed" in message.lower()
+        assert "Fatal Python error" in message, (
+            "a real native-signal death during count_tokens produced no "
+            "captured trace in the error - the same issue 1222/1223 symptom "
+            f"chat_stream's fix already closed\n--- message ---\n{message}")
+
+        # The FULL trace has to reach the debug log too, not just the
+        # summary line folded into the message - same requirement as
+        # chat_stream's own version of this test above.
+        logged = "\n".join(rec.getMessage() for rec in caplog.records)
+        assert "Fatal Python error" in logged and "_runner.py" in logged, (
+            f"the trace never reached the localm logger\n{logged}")
+
+
 # --------------------------------------------------------------------------- #
 # THE regression oracle: prove the actual reported bug is fixed for
 # GgufBackend too, not just the runner's own synchronous timeout contract.
