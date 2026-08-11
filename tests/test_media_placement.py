@@ -12,9 +12,16 @@ Design + scope: dev-notes/media-split-gpu/SPEC-placement.md. These tests exercis
 REAL shipped workflow JSONs and the REAL helper code paths, not mocks of them.
 
 VERIFIED-ON-DISK constraint this suite must NOT lie about: localm's MANAGED ComfyUI is
-pinned at v0.9.2 (8f40b43e, 2026-01-15), which PREDATES the placement nodes (first added
-2026-05-25, #7063). So on the managed install the probe returns unavailable and placement
-declines cleanly - the capability probe is what makes that safe. These tests cover the
+pinned at v0.31.1, which DOES ship the placement nodes (they first appear in tag v0.23.0;
+the file landed 2026-05-25, #7063). Confirmed live against a real provisioned instance's
+/object_info: all three Select*Device classes register. So a decline on the managed
+install is no longer "localm's ComfyUI is too old" - it is upstream's own rule that the
+device combo only offers gpu:N once ComfyUI sees MORE THAN ONE card
+(model_management.get_gpu_device_options), which on a single-GPU box yields
+['default', 'cpu'] and nothing to place onto.
+
+The capability probe is still what makes this safe, and still has real work to do: a
+ComfyUI of the USER'S OWN may predate the nodes. These tests cover the
 probe/plan/inject/notice plumbing; whether weights actually land on card 1 needs 2 real
 GPUs and is a documented follow-up.
 """
@@ -159,9 +166,10 @@ def test_probe_available_when_nodes_present_and_two_gpus(monkeypatch):
 
 
 def test_probe_unavailable_when_node_absent(monkeypatch):
-    """NEGATIVE: localm's managed pin (v0.9.2) has NO Select*Device nodes. The probe
-    must say unavailable and NAME why - this is the real managed-install case and the
-    thing that keeps placement from injecting a node ComfyUI would reject."""
+    """NEGATIVE: a ComfyUI with NO Select*Device nodes. The probe must say unavailable
+    and NAME why - the thing that keeps placement from injecting a node ComfyUI would
+    reject. Since the managed pin advanced to v0.31.1 this is the USER'S-OWN-ComfyUI
+    case (anything older than tag v0.23.0), not the managed-install case."""
     from localm.media import comfy_client as cc
     monkeypatch.setattr(cc, "comfy_object_info",
                         lambda url, timeout=10.0: _object_info(model=False, clip=False,
@@ -189,6 +197,77 @@ def test_probe_unavailable_when_server_unreachable(monkeypatch):
     cap = cc.probe_placement_capability("http://127.0.0.1:8188")
     assert cap.available is False
     assert cap.reason
+
+
+# --------------------------------------------------------------------------- #
+#  The pin and the prose must not drift apart again.                          #
+# --------------------------------------------------------------------------- #
+# The defect these two guard: localm pinned ComfyUI at v0.9.2, upstream shipped the
+# placement nodes in v0.23.0, and for months the Settings page went on telling users
+# that per-component placement needed "a ComfyUI new enough" because "localm's own
+# managed ComfyUI is older". Every word of that was true when written and none of it
+# was true later - a self-inflicted staleness worn as an external limitation. Nothing
+# mechanical could notice, because the claim lived only in prose.
+
+def _ver(s: str) -> tuple:
+    """'v0.31.1' -> (0, 31, 1). Numeric compare, so v0.9.2 < v0.23.0 (which a plain
+    string compare gets BACKWARDS, and that is exactly the mistake in play here)."""
+    return tuple(int(p) for p in s.lstrip("v").split("."))
+
+
+def _placement_help() -> str:
+    from localm.settings_schema import CORE_FIELDS
+    field = next(f for f in CORE_FIELDS if f.key == "comfy_gpu_placement")
+    return field.help
+
+
+def test_pinned_comfyui_is_new_enough_for_per_component_placement():
+    """The shipped pin must be at or after the first upstream tag carrying
+    comfy_extras/nodes_multigpu.py. This is the machine-checkable form of the claim the
+    help text makes in prose; if a future pin ever moves BACK below it, this fails and
+    the text below has to change with it."""
+    from localm.media.managed_comfy_fresh import (COMFYUI_PINNED_VERSION,
+                                                  COMFYUI_PLACEMENT_MIN_VERSION)
+    assert _ver(COMFYUI_PINNED_VERSION) >= _ver(COMFYUI_PLACEMENT_MIN_VERSION), (
+        f"pin {COMFYUI_PINNED_VERSION} predates {COMFYUI_PLACEMENT_MIN_VERSION}, the "
+        "first ComfyUI release with the Select*Device nodes - so the managed install "
+        "cannot place, and comfy_gpu_placement's help text must say so honestly")
+
+
+def test_placement_help_does_not_call_localms_own_comfyui_too_old():
+    """Given the pin above DOES offer placement, the user-facing text must not still
+    tell users localm's own managed ComfyUI is the thing holding them back."""
+    import re
+    from localm.media.managed_comfy_fresh import (COMFYUI_PINNED_VERSION,
+                                                  COMFYUI_PLACEMENT_MIN_VERSION)
+    assert _ver(COMFYUI_PINNED_VERSION) >= _ver(COMFYUI_PLACEMENT_MIN_VERSION)
+
+    help_text = _placement_help()
+    # "managed ... older/too old/does not/predates" in one breath is the shape of the lie.
+    bad = re.search(
+        r"managed[^.]{0,80}?\b(is older|older than|too old|predates|cannot|does not "
+        r"(?:offer|support))", help_text, re.IGNORECASE)
+    assert not bad, (
+        "comfy_gpu_placement's help text still describes localm's OWN managed ComfyUI "
+        f"as unable to place, but the pin is {COMFYUI_PINNED_VERSION}: {bad.group(0)!r}")
+
+    # No retired pin version may be quoted as the current one.
+    for stale in re.findall(r"\bv\d+\.\d+\.\d+\b", help_text):
+        assert stale == COMFYUI_PINNED_VERSION, (
+            f"help text names ComfyUI {stale} but the pin is {COMFYUI_PINNED_VERSION}")
+
+
+def test_placement_help_still_states_the_two_gpu_precondition():
+    """The other direction, so correcting the staleness above cannot overshoot into
+    promising placement everywhere: two or more GPUs is a REAL precondition. Upstream's
+    get_gpu_device_options only appends gpu:N when it sees MORE THAN ONE card, so on a
+    single-GPU box the combo is ['default', 'cpu'] and there is nothing to place onto
+    (measured live on this box at the current pin)."""
+    help_text = _placement_help().lower()
+    assert "two or more" in help_text or "2+" in help_text, (
+        "the help text must keep stating that placement needs 2+ GPUs")
+    assert "single-gpu" in help_text or "single gpu" in help_text, (
+        "the help text must keep telling single-GPU users nothing changes for them")
 
 
 # --------------------------------------------------------------------------- #

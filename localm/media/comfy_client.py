@@ -273,8 +273,8 @@ def resolve_media_placement(config: Optional[dict], api_url: str):
     - **Enabled and the running ComfyUI can place** (probe finds the Select*Device nodes
       and 2+ GPUs): returns ``(plan, <placement notice>)`` - the second card carries the
       text encoder + VAE.
-    - **Enabled but the running ComfyUI cannot** (old ComfyUI without the nodes - e.g.
-      localm's own managed pin v0.9.2 - or only one GPU visible): returns ``(None, <honest
+    - **Enabled but the running ComfyUI cannot** (an old ComfyUI of the USER'S OWN,
+      predating the nodes - or only one GPU visible): returns ``(None, <honest
       reason notice>)`` so the user learns WHY placement did not happen.
 
     Best-effort and never raises: the probe swallows its own errors and any doubt yields
@@ -404,9 +404,12 @@ def probe_placement_capability(api_url: str, *,
     """Ask the LIVE ComfyUI (``/object_info``) whether it offers per-component placement
     and how many GPUs it enumerates. This is what makes placement SAFE by construction:
 
-    - localm's MANAGED ComfyUI is pinned at v0.9.2, which PREDATES the multigpu nodes
-      (first added upstream 2026-05-25). There the probe returns unavailable and
+    - It is the guard for a ComfyUI that PREDATES the multigpu nodes (first added
+      upstream 2026-05-25, tag v0.23.0). There the probe returns unavailable and
       placement declines cleanly, rather than injecting a node ComfyUI would reject.
+      That is now only ever a ComfyUI of the user's OWN: localm's managed pin is
+      v0.31.1 and DOES offer the nodes (verified live against ``/object_info``; see
+      ``COMFYUI_PLACEMENT_MIN_VERSION`` next to the pin itself).
     - It reads ComfyUI's OWN device enumeration (the ``gpu:N`` combo), which is
       authoritative about how many cards ComfyUI actually sees. (The caller's Gate 2
       uses ``applied_split_device_count`` as a cheap Vulkan-sound pre-filter; this probe

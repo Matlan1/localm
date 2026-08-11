@@ -783,13 +783,13 @@ CORE_FIELDS: list = [
                  "Split media across GPUs (experimental)",
                  "EXPERIMENTAL, off by default. On a machine with two or more "
                  "GPUs, put the text encoder and VAE on a second card so the "
-                 "diffusion model has more room on the first - only if the running "
-                 "ComfyUI is new enough to offer per-component placement (upstream "
-                 "2026-05-25 or newer; localm's own managed ComfyUI is older and "
-                 "declines cleanly). This does NOT split one model across cards "
-                 "(no ComfyUI feature does that). Unproven on real multi-GPU "
-                 "hardware, so it stays off until you turn it on; with it off, or "
-                 "on a single-GPU box, media generation is unchanged.",
+                 "diffusion model has more room on the first. Needs a ComfyUI that "
+                 "offers per-component placement (upstream 2026-05-25 or newer): "
+                 "localm's own managed ComfyUI does; an older ComfyUI of your own "
+                 "declines cleanly and says why. This does NOT split one model "
+                 "across cards (no ComfyUI feature does that). Unproven on real "
+                 "multi-GPU hardware, so it stays off until you turn it on; with "
+                 "it off, or on a single-GPU box, media generation is unchanged.",
                  group="Media", owner="image", applies=Applies.RESTART),
     SettingField("reload_llm_after_imagine", Widget.TOGGLE,
                  "Reload chat model after generating",
