@@ -673,6 +673,167 @@ def test_apply_warns_when_prior_manifest_unlink_fails(tmp_path, monkeypatch, sig
     assert manifest.exists()   # the write below the failed unlink still overwrote it
 
 
+# --------------- apply() single-flight / concurrency (SEC-UPDATE-RACE) -----
+#
+# checkup 2026-08-11 item 7: two concurrent apply() calls had no single-flight and
+# shared fixed scratch/backup paths, so a second call's "pre-update" backup could
+# end up holding the FIRST call's already-swapped NEW build - an unrecoverable
+# install. Fixed with a cross-process mkdir lock (_apply_lock) plus a unique
+# per-run scratch directory (_new_run_dir) whose backup is promoted to the stable
+# path only after that run's own swap has succeeded (_promote_backup).
+
+def _setup_apply_env(tmp_path, monkeypatch):
+    monkeypatch.setattr("localm.config.load_config", lambda: {"bugreport_upload_url": "https://w"})
+    home = tmp_path / "home"
+    monkeypatch.setattr("localm.config.home_dir", lambda: home)
+    return home, _fake_install(tmp_path, deps=("click",))
+
+
+def test_apply_second_concurrent_call_refused_without_download(tmp_path, monkeypatch, sig_env):
+    """A second apply() while the lock is held must be refused BEFORE it downloads
+    anything. Proven deterministically via re-entrancy (the outer call's own
+    opener attempts a second apply()) rather than relying on real thread timing -
+    the mechanism assertion is a call-count of zero on the blocked call's opener,
+    not merely that something eventually raised."""
+    home, inst = _setup_apply_env(tmp_path, monkeypatch)
+    op, sig = _signed_build("0.2.0", ["click"])
+    from localm.bugreport import LocalmError
+
+    inner_calls = {"n": 0}
+    inner_error = {}
+
+    def outer_opener(url, headers, timeout, dest):
+        def inner_opener(*a, **k):
+            inner_calls["n"] += 1
+        try:
+            updater.apply(5, installed=inst, signature=sig, download_opener=inner_opener)
+        except LocalmError as e:
+            inner_error["e"] = e
+        op(url, headers, timeout, dest)   # let the outer call proceed normally
+
+    updater.apply(5, installed=inst, signature=sig, download_opener=outer_opener)
+
+    assert inner_calls["n"] == 0, "the blocked second call must never attempt a download"
+    assert "already being applied" in str(inner_error.get("e", ""))
+
+
+def test_apply_concurrent_threads_exactly_one_proceeds_backup_has_old_content(
+        tmp_path, monkeypatch, sig_env):
+    """The property that actually matters (not just 'one call raised'): drive two
+    REAL concurrent threads at the lock with a barrier, then assert on the CONTENT
+    of the backup - it must hold the PRE-update build, never a NEW one, proving
+    the losing call's backup step never ran against an already-swapped install
+    (it never ran at all)."""
+    import threading
+    home, inst = _setup_apply_env(tmp_path, monkeypatch)
+    op, sig = _signed_build("0.2.0", ["click"])
+    from localm.bugreport import LocalmError
+
+    barrier = threading.Barrier(2)
+    results = {}
+
+    def worker(key):
+        barrier.wait(timeout=5)
+        try:
+            results[key] = ("ok", updater.apply(5, installed=inst, signature=sig,
+                                                 download_opener=op))
+        except Exception as e:
+            results[key] = ("err", e)
+
+    t1 = threading.Thread(target=worker, args=("a",))
+    t2 = threading.Thread(target=worker, args=("b",))
+    t1.start(); t2.start()
+    t1.join(timeout=10); t2.join(timeout=10)
+
+    outcomes = [results.get("a", ("missing",))[0], results.get("b", ("missing",))[0]]
+    assert outcomes.count("ok") == 1, f"exactly one apply should have proceeded: {results}"
+    assert outcomes.count("err") == 1, f"the other must be refused, not silently dropped: {results}"
+    _, err = results["a"] if results["a"][0] == "err" else results["b"]
+    assert isinstance(err, LocalmError)
+    assert "already being applied" in str(err)
+
+    backup_init = home / "updates" / "backup" / "localm" / "__init__.py"
+    assert backup_init.read_text(encoding="utf-8") == "# 0.1.0", \
+        "the backup must hold the PRE-update build, not either NEW one"
+    assert (inst / "localm" / "__init__.py").read_text(encoding="utf-8") == "# 0.2.0"
+
+
+def test_apply_fresh_lock_is_not_reclaimed(tmp_path, monkeypatch, sig_env):
+    home, inst = _setup_apply_env(tmp_path, monkeypatch)
+    from localm.bugreport import LocalmError
+    (home / "updates" / "apply.lock").mkdir(parents=True)   # fresh - well within the stale window
+
+    called = {"n": 0}
+    with pytest.raises(LocalmError, match="already being applied"):
+        updater.apply(5, installed=inst, signature="x",
+                      download_opener=lambda *a: called.__setitem__("n", called["n"] + 1))
+    assert called["n"] == 0
+
+
+def test_apply_stale_lock_is_reclaimed(tmp_path, monkeypatch, sig_env):
+    """A lock left behind by a crashed process (older than the stale threshold)
+    must not strand every future update forever."""
+    import os
+    import time as _time
+    home, inst = _setup_apply_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(updater, "_APPLY_LOCK_STALE_S", 0.01)
+    op, sig = _signed_build("0.2.0", ["click"])
+
+    lock_dir = home / "updates" / "apply.lock"
+    lock_dir.mkdir(parents=True)
+    old = _time.time() - 10
+    os.utime(lock_dir, (old, old))
+
+    res = updater.apply(5, installed=inst, signature=sig, download_opener=op)
+    assert res["applied"] is True
+    assert not lock_dir.exists()   # released again once the reclaimed run finished
+
+
+def test_apply_lock_released_after_success(tmp_path, monkeypatch, sig_env):
+    home, inst = _setup_apply_env(tmp_path, monkeypatch)
+    op, sig = _signed_build("0.2.0", ["click"])
+    updater.apply(5, installed=inst, signature=sig, download_opener=op)
+    assert not (home / "updates" / "apply.lock").exists()
+
+
+def test_apply_lock_released_after_early_failure(tmp_path, monkeypatch, sig_env):
+    home, inst = _setup_apply_env(tmp_path, monkeypatch)
+    op, sig = _signed_build("0.2.0", ["click"])
+    from localm.bugreport import LocalmError
+    with pytest.raises(LocalmError):
+        updater.apply(5, installed=inst, signature="AAAA", download_opener=op)  # bad signature
+    assert not (home / "updates" / "apply.lock").exists()
+
+
+def test_apply_cleans_up_run_scratch_after_success(tmp_path, monkeypatch, sig_env):
+    home, inst = _setup_apply_env(tmp_path, monkeypatch)
+    op, sig = _signed_build("0.2.0", ["click"])
+    updater.apply(5, installed=inst, signature=sig, download_opener=op)
+    runs_dir = home / "updates" / "runs"
+    assert not runs_dir.exists() or not any(runs_dir.iterdir())
+
+
+def test_apply_preserves_run_backup_when_swap_and_rollback_both_fail(tmp_path, monkeypatch, sig_env):
+    """When BOTH the swap and its own internal rollback fail, the run's backup
+    must survive on disk - the surfaced error message names its exact path as
+    where to manually recover from, so deleting it here would destroy the one
+    thing that message points a human at."""
+    home, inst = _setup_apply_env(tmp_path, monkeypatch)
+    from localm import _apply_update as au
+
+    monkeypatch.setattr(au, "apply_files", lambda *a, **k: (_ for _ in ()).throw(OSError("swap boom")))
+    monkeypatch.setattr(au, "rollback", lambda *a, **k: (_ for _ in ()).throw(OSError("rollback boom")))
+    op, sig = _signed_build("0.2.0", ["click"])
+    with pytest.raises(RuntimeError, match="rollback also failed"):
+        updater.apply(5, installed=inst, signature=sig, download_opener=op)
+
+    runs_dir = home / "updates" / "runs"
+    backups = list(runs_dir.glob("*/backup")) if runs_dir.exists() else []
+    assert len(backups) == 1 and backups[0].is_dir()
+    assert (backups[0] / "localm" / "__init__.py").read_text(encoding="utf-8") == "# 0.1.0"
+    assert not (home / "updates" / "apply.lock").exists()   # still released despite the double failure
+
+
 # ------------------------ spawn_health_watchdog (LM-DA-011) ----------------
 #
 # spawn_health_watchdog() never actually runs scripts/update_watchdog.py in these

@@ -22,6 +22,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
   in the API response and in the job's own output when an existing job is moved),
   and the check runs again at each run, so narrowing or revoking a key takes
   effect on its next tick.
+- **Applying an update from two places at once could no longer be safely rolled
+  back.** `localm update` had no protection against running twice concurrently
+  (two browser tabs both pressing "Update now", or the CLI racing a live
+  server), and both used the same fixed scratch and backup locations. The
+  second call's "pre-update" backup could end up silently holding the first
+  call's already-installed new build rather than the true original, leaving
+  nothing to restore from if a rollback was ever needed. A second concurrent
+  apply is now refused immediately with a clear message, and each apply uses
+  its own private working directory until it succeeds.
 - **`localm key clear` and `localm key recover` no longer report success when
   they could not sign browser sessions out.** If the session store could not be
   written (a locked or read-only file), both commands printed their normal

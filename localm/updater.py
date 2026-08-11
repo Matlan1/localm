@@ -20,7 +20,11 @@ the install root.
 
 from __future__ import annotations
 
+import contextlib
 import json as _json
+import shutil
+import time
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -440,6 +444,103 @@ def _updates_dir() -> Path:
     return d
 
 
+# SEC-UPDATE-RACE: how long an apply.lock may be held before it is treated as an
+# orphan from a crashed process rather than a live apply. Generous on purpose: a
+# "runtime"-class apply re-provisions the native llama.cpp binaries
+# (post_swap_command -> setup-llama), which can legitimately take several minutes
+# on a slow connection, on top of the download/signature/swap steps ahead of it. A
+# threshold shorter than the slowest real apply would steal a genuinely
+# in-progress lock and reopen the exact race this exists to close.
+_APPLY_LOCK_STALE_S = 1800.0
+
+
+@contextlib.contextmanager
+def _apply_lock():
+    """Cross-process, cross-thread single-flight guard for :func:`apply` (SEC-
+    UPDATE-RACE, checkup 2026-08-11 item 7 - the only data-destroying finding in
+    that run). ``mkdir`` is atomic, the same idiom this repo's own test-slot lock
+    uses, so two concurrent callers - two browser tabs' ``POST /api/update/apply``
+    (both landing in the SAME process via ``asyncio.to_thread``), or the CLI
+    racing a live server in a SEPARATE process - cannot both proceed past this
+    point.
+
+    Without a lock, a second call's OWN backup step can run AFTER the first
+    call's swap has already replaced the install, so the "pre-update" backup it
+    writes actually contains the FIRST call's NEW build, not the true original.
+    If that second call then needs to roll back, it restores the wrong state and
+    the true pre-update install is gone for good.
+
+    The SECOND caller fails FAST with a clear refusal rather than blocking: an
+    apply can legitimately run for minutes, and a caller blocked that long is
+    indistinguishable from a hang. A lock held past ``_APPLY_LOCK_STALE_S`` is
+    assumed to be an orphan (the holder crashed without releasing it) and is
+    reclaimed rather than stranding every future update forever."""
+    lock_dir = _updates_dir() / "apply.lock"
+    try:
+        lock_dir.mkdir()
+    except FileExistsError:
+        try:
+            age = time.time() - lock_dir.stat().st_mtime
+        except OSError:
+            age = _APPLY_LOCK_STALE_S + 1   # cannot stat it -> treat as gone, do not block forever
+        if age >= _APPLY_LOCK_STALE_S:
+            # Reclaim a stale lock. If we lose a race to reclaim it (someone else's
+            # mkdir wins), our own mkdir below raises FileExistsError again, and we
+            # report that exactly like a live lock - safe either way, since that
+            # means a genuinely concurrent, non-stale caller now holds it.
+            with contextlib.suppress(OSError):
+                lock_dir.rmdir()
+        try:
+            lock_dir.mkdir()
+        except FileExistsError:
+            from localm.bugreport import LocalmError
+            raise LocalmError(
+                "another update is already being applied",
+                reason="wait for it to finish, then try again")
+    try:
+        yield
+    finally:
+        with contextlib.suppress(OSError):
+            lock_dir.rmdir()
+
+
+def _new_run_dir() -> Path:
+    """A fresh, unique-per-call scratch directory for ONE apply() run (SEC-UPDATE-
+    RACE, defense in depth alongside :func:`_apply_lock`): the download, staging
+    extraction, and swap-time backup for this run never share a path with any
+    other run's, so even if the lock were ever bypassed, two runs cannot corrupt
+    each other's files on disk. uuid4 needs no coordination and will not collide
+    in practice."""
+    d = _updates_dir() / "runs" / uuid.uuid4().hex
+    d.mkdir(parents=True)
+    return d
+
+
+def _promote_backup(run_backup_dir: Path, backup_dir: Path) -> None:
+    """Move *run_backup_dir* (this run's own, just-written backup) to the stable
+    *backup_dir* location :func:`rollback_last` reads, replacing whatever was
+    there.
+
+    Called ONLY after ``swap_with_backup`` has already succeeded, i.e.
+    *run_backup_dir* is a complete, self-contained COPY of the pre-update install
+    (``_apply_update.backup`` copies, never moves, the live tree) - relocating an
+    already-independent copy cannot lose or corrupt it; this is not the "a backup
+    you moved data out of is not a backup" hazard, because the live install was
+    never the thing being moved.
+
+    Best-effort: a failure here does not undo the update (the new build is
+    already live and correct) but IS surfaced, never silently swallowed, since it
+    degrades a later ``update --rollback`` (AGENTS.md rule 5)."""
+    try:
+        if backup_dir.exists():
+            shutil.rmtree(backup_dir)
+        shutil.move(str(run_backup_dir), str(backup_dir))
+    except OSError as e:
+        _apply_warn("update applied, but could not move this run's backup from %s "
+                    "to %s: %s; a later `update --rollback` may not find it",
+                    run_backup_dir, backup_dir, e)
+
+
 def apply(asset_id, *, signature=None, installed=None, download_opener=None,
           runner=None) -> dict:
     """Download, VERIFY (signature + anti-rollback), and swap a build into the
@@ -452,6 +553,16 @@ def apply(asset_id, *, signature=None, installed=None, download_opener=None,
     unconfigured key, or a downgrade all raise before anything is swapped (fail
     closed - we never install an unverified build).
 
+    Single-flight (:func:`_apply_lock`): a second concurrent call is refused
+    immediately rather than racing the first. Each call also downloads, extracts,
+    and takes its swap-time backup in its OWN unique scratch directory
+    (:func:`_new_run_dir`) - defense in depth alongside the lock - and, once its
+    swap has succeeded, moves that backup to the stable location
+    :func:`rollback_last` reads (:func:`_promote_backup`). Without both, a second
+    caller's "pre-update" backup could end up holding the FIRST caller's
+    already-swapped NEW build instead of the true original, making the real
+    pre-update install unrecoverable.
+
     Rolls back on a swap or post-step failure (never a half-applied tree). Does NOT
     restart - the caller does (the CLI tells the user; the server re-execs). The file
     primitives live in :mod:`localm._apply_update`. *installed* defaults to the real
@@ -463,79 +574,104 @@ def apply(asset_id, *, signature=None, installed=None, download_opener=None,
     from localm.bugreport import LocalmError
     target = Path(installed) if installed else repo_root()
     updir = _updates_dir()
-    zip_path, staging, backup_dir = updir / "build.zip", updir / "staging", updir / "backup"
+    backup_dir = updir / "backup"   # the STABLE location rollback_last() reads
 
-    download(asset_id, zip_path, opener=download_opener)
-    # SIGNATURE GATE - authenticity, before verify_zip/extract/swap, i.e. before any
-    # of the downloaded build's code can be extracted or executed. Fails closed.
-    verify_signature(zip_path.read_bytes(), signature)
-    au.verify_zip(zip_path)
-    root = au.extract(zip_path, staging)
-    vf = root / "VERSION"
-    new_version = vf.read_text(encoding="utf-8").strip() if vf.exists() else ""
-    # ANTI-ROLLBACK - a validly SIGNED but OLDER build must not be installable.
-    _refuse_downgrade(new_version)
-    klass = classify(root, target, read_manifest(root))
-    # A STALE applied_names.json from a PREVIOUS update would mis-describe THIS one: the
-    # updates dir persists across updates and this file is only ever overwritten below,
-    # so a failed write would leave the prior update's names and a later rollback would
-    # then remove/restore the WRONG top-level set (stranding a file THIS build dropped -
-    # silent install data loss reported as rolled_back:True). Remove it BEFORE the swap
-    # so that, once backup/ is replaced, a stale manifest can never coexist with a fresh
-    # backup: a failed write (or a crash) then degrades to the backup-dir listing
-    # (correct for pre-existing names), never to stale data. Placed AFTER download/verify/
-    # extract so an early abort there leaves the previous update's manifest intact.
-    manifest_path = updir / "applied_names.json"
-    try:
-        manifest_path.unlink()
-    except FileNotFoundError:
-        pass
-    except OSError as e:
-        _apply_warn("could not remove the previous update manifest %s: %s; if recording "
-                    "the new one below also fails, a later rollback may use stale names",
-                    manifest_path, e)
-
-    names = au.swap_with_backup(root, target, backup_dir)
-    # Record the FULL swap set (including brand-new top-level entries, which the backup
-    # dir does NOT contain because they had nothing to back up) so a later manual
-    # `update --rollback` removes them too, matching the pre-apply state. Without this,
-    # rollback_last() sees only backed-up (pre-existing) names and would strand new files.
-    try:
-        import json
-        manifest_path.write_text(json.dumps(sorted(names)), encoding="utf-8")
-    except OSError as e:
-        # Best-effort, but a failed write is now VISIBLE: the manifest was unlinked above,
-        # so a later rollback falls back to the backup-dir listing (correct for pre-existing
-        # names) and cannot remove brand-new top-level entries this update added. Say so.
-        _apply_warn("could not record the update manifest %s: %s; a later "
-                    "`update --rollback` will fall back to the backup listing and cannot "
-                    "remove brand-new top-level entries this update added", manifest_path, e)
-
-    cmd = au.post_swap_command(klass, backend=_installed_backend())
-    if cmd:
-        run = runner or (lambda c: subprocess.run(c, cwd=str(target)).returncode)
-
-        def _rollback_or_raise(why):
-            # If recovery ITSELF fails, say so loudly - never report a clean rollback
-            # over a broken install (we do not hide problems).
-            try:
-                au.rollback(backup_dir, target, names)
-            except Exception as rb:
-                raise LocalmError(
-                    "the post-update step failed AND rollback failed - manual recovery needed",
-                    reason=f"{why}; rollback: {rb}; restore from {backup_dir}")
+    with _apply_lock():
+        run_dir = _new_run_dir()
+        zip_path, staging, run_backup_dir = (
+            run_dir / "build.zip", run_dir / "staging", run_dir / "backup")
 
         try:
-            rc = int(run(cmd))
-        except Exception as e:
-            _rollback_or_raise(f"post-update step crashed: {e}")
-            raise LocalmError("the post-update step crashed; rolled back", reason=str(e))
-        if rc != 0:
-            _rollback_or_raise(f"{cmd[0]} exited {rc}")
-            raise LocalmError("the post-update step failed; rolled back",
-                              reason=f"{cmd[0]} exited {rc}")
-    return {"applied": True, "version": new_version, "klass": klass,
-            "backup": str(backup_dir), "restart_needed": True}
+            download(asset_id, zip_path, opener=download_opener)
+            # SIGNATURE GATE - authenticity, before verify_zip/extract/swap, i.e. before
+            # any of the downloaded build's code can be extracted or executed. Fails closed.
+            verify_signature(zip_path.read_bytes(), signature)
+            au.verify_zip(zip_path)
+            root = au.extract(zip_path, staging)
+            vf = root / "VERSION"
+            new_version = vf.read_text(encoding="utf-8").strip() if vf.exists() else ""
+            # ANTI-ROLLBACK - a validly SIGNED but OLDER build must not be installable.
+            _refuse_downgrade(new_version)
+            klass = classify(root, target, read_manifest(root))
+        except Exception:
+            # Nothing precious was written yet (no backup exists for this run) -
+            # safe to clean up unconditionally.
+            shutil.rmtree(run_dir, ignore_errors=True)
+            raise
+
+        # A STALE applied_names.json from a PREVIOUS update would mis-describe THIS one: the
+        # updates dir persists across updates and this file is only ever overwritten below,
+        # so a failed write would leave the prior update's names and a later rollback would
+        # then remove/restore the WRONG top-level set (stranding a file THIS build dropped -
+        # silent install data loss reported as rolled_back:True). Remove it BEFORE the swap
+        # so that, once backup/ is replaced, a stale manifest can never coexist with a fresh
+        # backup: a failed write (or a crash) then degrades to the backup-dir listing
+        # (correct for pre-existing names), never to stale data. Placed AFTER download/verify/
+        # extract so an early abort there leaves the previous update's manifest intact.
+        manifest_path = updir / "applied_names.json"
+        try:
+            manifest_path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            _apply_warn("could not remove the previous update manifest %s: %s; if recording "
+                        "the new one below also fails, a later rollback may use stale names",
+                        manifest_path, e)
+
+        # swap_with_backup backs up to run_backup_dir FIRST, then swaps - if the swap
+        # itself fails it rolls back using run_backup_dir and re-raises. On failure we
+        # deliberately do NOT touch run_dir: its error message may point a human at
+        # run_backup_dir for manual recovery (if the rollback ALSO failed), and deleting
+        # it here would destroy the one thing that message tells them to restore from.
+        names = au.swap_with_backup(root, target, run_backup_dir)
+        # This run's swap succeeded: promote its backup to the stable path BEFORE
+        # anything downstream (the manifest write, the post-swap command's own
+        # rollback) touches `backup_dir`, so both keep using the exact same fixed
+        # path rollback_last() expects - unchanged from before this function grew
+        # per-run scratch directories.
+        _promote_backup(run_backup_dir, backup_dir)
+        shutil.rmtree(run_dir, ignore_errors=True)   # zip/staging no longer needed
+
+        # Record the FULL swap set (including brand-new top-level entries, which the backup
+        # dir does NOT contain because they had nothing to back up) so a later manual
+        # `update --rollback` removes them too, matching the pre-apply state. Without this,
+        # rollback_last() sees only backed-up (pre-existing) names and would strand new files.
+        try:
+            import json
+            manifest_path.write_text(json.dumps(sorted(names)), encoding="utf-8")
+        except OSError as e:
+            # Best-effort, but a failed write is now VISIBLE: the manifest was unlinked above,
+            # so a later rollback falls back to the backup-dir listing (correct for pre-existing
+            # names) and cannot remove brand-new top-level entries this update added. Say so.
+            _apply_warn("could not record the update manifest %s: %s; a later "
+                        "`update --rollback` will fall back to the backup listing and cannot "
+                        "remove brand-new top-level entries this update added", manifest_path, e)
+
+        cmd = au.post_swap_command(klass, backend=_installed_backend())
+        if cmd:
+            run = runner or (lambda c: subprocess.run(c, cwd=str(target)).returncode)
+
+            def _rollback_or_raise(why):
+                # If recovery ITSELF fails, say so loudly - never report a clean rollback
+                # over a broken install (we do not hide problems).
+                try:
+                    au.rollback(backup_dir, target, names)
+                except Exception as rb:
+                    raise LocalmError(
+                        "the post-update step failed AND rollback failed - manual recovery needed",
+                        reason=f"{why}; rollback: {rb}; restore from {backup_dir}")
+
+            try:
+                rc = int(run(cmd))
+            except Exception as e:
+                _rollback_or_raise(f"post-update step crashed: {e}")
+                raise LocalmError("the post-update step crashed; rolled back", reason=str(e))
+            if rc != 0:
+                _rollback_or_raise(f"{cmd[0]} exited {rc}")
+                raise LocalmError("the post-update step failed; rolled back",
+                                  reason=f"{cmd[0]} exited {rc}")
+        return {"applied": True, "version": new_version, "klass": klass,
+                "backup": str(backup_dir), "restart_needed": True}
 
 
 def _installed_backend() -> str:
