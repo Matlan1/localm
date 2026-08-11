@@ -118,7 +118,36 @@ class GgufWorker(VramSizingMixin):
         process, which is exactly the isolation this class exists inside; the
         parent detects the dead child and reports it (see ``_runner.py``)."""
         from localm.inference.backends.llamacpp._loader import load_lib
-        load_lib()   # ensure DLLs are loaded before importing the class
+        from localm.inference.backends.llamacpp.llama import _capture_stdio
+        from localm.debuglog import suppress_console_mirror
+
+        # load_lib() (native CDLL open + ggml backend registration) can print
+        # a native banner with no capture scope of its own - the only one
+        # that exists opens inside LlamaCpp.__init__ below, strictly AFTER
+        # load_lib() has already run. Left unredirected it lands mid-line in
+        # whatever this process's inherited console is currently rendering -
+        # the parent's live Rich load spinner - corrupting it. Paired with
+        # suppress_console_mirror() for the same reason llama.py's own merged
+        # native-call scope needs it: load_lib()'s logger.warning calls (e.g.
+        # "no ggml compute backends registered") go through Python's logging
+        # module, not fd 1/2, and the debug-mode console mirror is BY DESIGN
+        # immune to an fd redirect (see suppress_console_mirror's docstring).
+        with suppress_console_mirror(), _capture_stdio() as captured:
+            try:
+                load_lib()   # ensure DLLs are loaded before importing the class
+            except Exception as e:
+                # A genuine failure's native cause (e.g. the OS loader's own
+                # dlopen error text) may be sitting in the very output just
+                # suppressed - never let the capture swallow it (AGENTS.md
+                # rule 5). Append it to load_lib()'s own already-actionable
+                # message rather than raising a fresh exception, so this
+                # stays the same type callers already handle.
+                detail = captured.tail()
+                if detail:
+                    extra = f"\n\nCaptured native output during load:\n{detail}"
+                    e.args = ((f"{e.args[0]}{extra}",) + tuple(e.args[1:])
+                              if e.args else (extra,))
+                raise
 
         from localm.inference.backends.llamacpp import LlamaCpp
 

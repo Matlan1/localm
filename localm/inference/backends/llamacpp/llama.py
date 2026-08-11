@@ -211,6 +211,94 @@ def _capture_stderr():
             os.unlink(path)
 
 
+class _CapturedStdio:
+    """Holder yielded by _capture_stdio; .tail() reads whatever native text
+    landed on EITHER stream while it was open. Distinct from _CapturedStderr
+    above (fd 2 only, used for llama.cpp's structured load_tensors report) -
+    this one exists purely to keep an uncategorised native banner off the
+    terminal and, on failure, off the floor entirely."""
+
+    def __init__(self, out_path: str, err_path: str) -> None:
+        self._out_path = out_path
+        self._err_path = err_path
+
+    def _read(self, path: str) -> str:
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                return fh.read()
+        except OSError:
+            return ""
+
+    def tail(self, max_chars: int = 1500) -> str:
+        # Best-effort read of whatever landed on stdout/stderr; never raise
+        # from a diagnostics helper. Order between the two streams is not
+        # preserved (they are separate files) - good enough for "was there
+        # anything at all", which is all a caller needs to decide whether to
+        # surface it.
+        text = "\n".join(s for s in (self._read(self._out_path),
+                                      self._read(self._err_path)) if s).strip()
+        return text[-max_chars:] if len(text) > max_chars else text
+
+
+@contextlib.contextmanager
+def _capture_stdio():
+    """Redirect BOTH fd 1 (stdout) and fd 2 (stderr) into temp files for the
+    duration of the block.
+
+    Unlike _capture_stderr above (fd 2 only - llama.cpp's structured
+    load_tensors report is always on stderr), this exists for native output
+    whose stream is not documented and not worth trusting either way: the
+    ggml/backend-registration banner a GPU build prints while its native
+    library loads (e.g. "ggml_cuda_init: found 1 ROCm devices..."), which
+    load_lib() (_loader.py) triggers with no capture scope of its own. Left
+    unredirected it lands mid-line in whatever this process's inherited
+    console is currently rendering - a parent-owned live Rich load spinner,
+    on the one caller (GgufWorker.load) this was written for.
+
+    Always pair with debuglog.suppress_console_mirror() around the SAME
+    scope: this only handles the OS-level fd redirect, and load_lib() also
+    calls logger.warning (e.g. "no ggml compute backends registered") - in
+    debug mode that reaches the terminal through the console mirror, which
+    is BY DESIGN immune to an fd redirect (see suppress_console_mirror's own
+    docstring; _capture_stderr's caller in this same module hit the exact
+    same gap first, for the exact same reason).
+
+    The temp files are removed when the block exits, so a caller that wants
+    .tail() MUST read it from inside the ``with`` block, same contract as
+    _capture_stderr above - see its docstring for why (reading after exit
+    silently returns "").
+    """
+    out_fd, out_path = tempfile.mkstemp(prefix="localm_loadlib_", suffix=".out.log")
+    err_fd, err_path = tempfile.mkstemp(prefix="localm_loadlib_", suffix=".err.log")
+    saved_out = os.dup(1)
+    saved_err = os.dup(2)
+    os.dup2(out_fd, 1)
+    os.dup2(err_fd, 2)
+    os.close(out_fd)
+    os.close(err_fd)
+    try:
+        yield _CapturedStdio(out_path, err_path)
+    finally:
+        os.dup2(saved_out, 1)
+        os.dup2(saved_err, 2)
+        os.close(saved_out)
+        os.close(saved_err)
+        from localm.debuglog import native_stderr_target
+        target_fd = native_stderr_target()
+        if target_fd is not None:
+            try:
+                for p in (out_path, err_path):
+                    with open(p, "rb") as src:
+                        os.write(target_fd, src.read())
+            except OSError:
+                pass
+            finally:
+                os.close(target_fd)
+        for p in (out_path, err_path):
+            with contextlib.suppress(OSError):
+                os.unlink(p)
+
+
 # LLAMA_DEFAULT_SEED from llama.h
 _DEFAULT_SEED = 0xFFFF_FFFF
 
