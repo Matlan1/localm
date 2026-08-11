@@ -1628,6 +1628,16 @@ def native_gpu_devices() -> Optional[list]:
             v = d.get(key)
             if isinstance(v, int) and v > 0:
                 entry[key] = v
+        # ggml_backend_dev_type, passed through so a caller can tell a DISCRETE
+        # GPU from an integrated one or an accelerator. llama.cpp treats them
+        # very differently when placing layers - it skips ACCEL entirely and
+        # uses an iGPU ONLY when no discrete GPU exists - so a caller summing
+        # capacity across "the devices this load will spread over" must be able
+        # to filter. Absent when the probe did not report one; a caller that
+        # NEEDS the distinction must then decline rather than assume.
+        t = d.get("type")
+        if isinstance(t, int):
+            entry["type"] = t
         out.append(entry)
     return out
 
@@ -2491,6 +2501,30 @@ def implicit_split_capacity(config: Optional[dict] = None, *,
         devices = native_gpu_devices()
         if not devices:
             return {}
+        # DISCRETE GPUs ONLY, and this is a load-safety filter, not tidiness.
+        # The native registry reports every non-CPU device, but llama.cpp's
+        # device list SKIPS accelerators outright and appends integrated GPUs
+        # only when no discrete GPU was found. So a box with a discrete card
+        # AND an iGPU - an ordinary laptop, or any desktop CPU with integrated
+        # graphics - would otherwise have the iGPU's memory summed into a
+        # budget llama.cpp then places entirely on the discrete card. That
+        # over-budgets, which is the direction that OOMs rather than merely
+        # wasting memory.
+        #
+        # Filter to GGML_DEV_TYPE_GPU rather than excluding the others by
+        # value: the enum has GROWN (IGPU was inserted ahead of ACCEL, so the
+        # numeric value of ACCEL differs between builds we may ship), and this
+        # module cannot know which llama.cpp is provisioned. CPU=0 and GPU=1
+        # have been stable throughout, so an allowlist is version-independent
+        # where a denylist is not. A device whose type the probe did not report
+        # is not assumed to be discrete - it fails the filter and, if that
+        # leaves fewer than 2, the single-device reading stands.
+        #
+        # The iGPU-only box needs no special case: llama.cpp keeps at most ONE
+        # integrated GPU, so it can never reach the 2+ devices this requires.
+        from localm.inference.backends.llamacpp._loader import GGML_DEV_TYPE_GPU
+        devices = [d for d in devices
+                   if isinstance(d, dict) and d.get("type") == GGML_DEV_TYPE_GPU]
     else:
         devices, status = _list_gpus_kw(return_status=True,
                                         wait_for_inflight=wait_for_inflight)

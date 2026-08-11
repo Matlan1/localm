@@ -169,10 +169,15 @@ def test_gpu_memory_isolated_still_parses_memory(monkeypatch):
 # ------------------------------------------------------------------ #
 
 def test_native_gpu_devices_shapes_for_selectors(monkeypatch):
-    """Selector shape: {"index","name"} plus total/free when positive ints;
-    the human description wins over the backend's terse name; a device with
-    no usable description keeps the name; non-positive memory is omitted (a
-    key the JS checks by type, not by zero)."""
+    """Selector shape: {"index","name"} plus total/free when positive ints and
+    the ggml device type when reported; the human description wins over the
+    backend's terse name; a device with no usable description keeps the name;
+    non-positive memory is omitted (a key the JS checks by type, not by zero).
+
+    "type" is carried so a caller can tell a DISCRETE GPU from an integrated
+    one - discover.implicit_split_capacity must exclude an iGPU, because
+    llama.cpp only uses one when there is no discrete card and summing it in
+    would over-budget the load. The selectors ignore the extra key."""
     from localm import discover
     from localm.inference.backends.llamacpp import _loader
     raw = [
@@ -185,8 +190,8 @@ def test_native_gpu_devices_shapes_for_selectors(monkeypatch):
     monkeypatch.setattr(_loader, "gpu_devices_isolated", lambda: raw)
     assert discover.native_gpu_devices() == [
         {"index": 0, "name": "AMD Radeon RX 6900 XT (RADV NAVI21)",
-         "total": 16 * GB, "free": 15 * GB},
-        {"index": 1, "name": "Vulkan1"},
+         "total": 16 * GB, "free": 15 * GB, "type": 1},
+        {"index": 1, "name": "Vulkan1", "type": 1},
     ]
 
 

@@ -91,7 +91,8 @@ def _forbidden_list_gpus(**kw):
     raise AssertionError("list_gpus must not be probed on this path")
 
 
-def _implicit_box(monkeypatch, per_gpu, *, vulkan=False, status=GPU_PROBE_OK):
+def _implicit_box(monkeypatch, per_gpu, *, vulkan=False, status=GPU_PROBE_OK,
+                  dev_types=None):
     """A box with NO gpu_split_indices, where llama.cpp's own default layer
     split spreads the load over the given [(free, total), ...] devices.
 
@@ -104,7 +105,12 @@ def _implicit_box(monkeypatch, per_gpu, *, vulkan=False, status=GPU_PROBE_OK):
     monkeypatch.setattr(_loader, "native_lib_loaded", lambda: False)
     monkeypatch.setattr("localm.discover._native_backend_has_vulkan",
                         lambda: vulkan)
-    devices = [{"index": i, "name": f"GPU {i}", "free": f, "total": t}
+    # type defaults to GGML_DEV_TYPE_GPU (discrete). It is carried even on the
+    # list_gpus path, where it is ignored, so the two fixtures stay comparable.
+    # A fixture WITHOUT a type cannot fail the discrete-only filter at all -
+    # the field that decides right from wrong has to be in the data.
+    devices = [{"index": i, "name": f"GPU {i}", "free": f, "total": t,
+                "type": (dev_types[i] if dev_types else 1)}
                for i, (f, t) in enumerate(per_gpu)]
     if vulkan:
         monkeypatch.setattr("localm.discover.native_gpu_devices",
@@ -551,6 +557,48 @@ class TestImplicitSplitSizing:
         _implicit_box(monkeypatch, UNEVEN_BOX, vulkan=True)
         b = _model(tmp_path, MODEL_45GB)
         assert b._split_free_total_bytes() == (51 * GB, 64 * GB, 3)
+
+    def test_igpu_alongside_a_discrete_card_is_not_summed(self, tmp_path,
+                                                          monkeypatch):
+        # THE OOM CASE, and an ordinary one: any laptop, or any desktop CPU with
+        # integrated graphics, on the vulkan build. The native registry reports
+        # every non-CPU device, but llama.cpp appends integrated GPUs ONLY when
+        # no discrete GPU was found - so it places the whole load on the two
+        # discrete cards. Summing the iGPU's memory in would budget 8 GB that
+        # llama.cpp never uses, and over-budgeting is the direction that OOMs.
+        # GGML_DEV_TYPE: CPU 0, GPU 1, IGPU 2.
+        _implicit_box(monkeypatch,
+                      [(22 * GB, 24 * GB), (23 * GB, 24 * GB), (8 * GB, 8 * GB)],
+                      vulkan=True, dev_types=[1, 1, 2])
+        b = _model(tmp_path, MODEL_45GB)
+        # 45 GB free / 48 GB total over the two DISCRETE cards - the iGPU's
+        # 8 GB is excluded, and it does not count toward the device total.
+        assert b._split_free_total_bytes() == (45 * GB, 48 * GB, 2)
+
+    def test_one_discrete_card_plus_an_igpu_is_a_single_gpu_box(self, tmp_path,
+                                                                monkeypatch):
+        # Same filter, the commoner shape: llama.cpp puts everything on the one
+        # discrete card, so there is no combined budget at all and the
+        # single-device reading must stand.
+        _implicit_box(monkeypatch, [(22 * GB, 24 * GB), (8 * GB, 8 * GB)],
+                      vulkan=True, dev_types=[1, 2])
+        b = _model(tmp_path, MODEL_45GB)
+        assert b._split_free_total_bytes() == (None, None, 0)
+
+    def test_untyped_native_devices_decline_rather_than_assume_discrete(
+            self, tmp_path, monkeypatch):
+        # The probe did not report a device class. We cannot tell a discrete
+        # card from an iGPU, and guessing "discrete" is the OOM direction, so
+        # the combined budget is declined.
+        monkeypatch.setattr("localm.config.load_config", lambda: {})
+        monkeypatch.setattr(_loader, "native_lib_loaded", lambda: False)
+        monkeypatch.setattr("localm.discover._native_backend_has_vulkan",
+                            lambda: True)
+        monkeypatch.setattr("localm.discover.native_gpu_devices", lambda: [
+            {"index": 0, "name": "A", "free": 22 * GB, "total": 24 * GB},
+            {"index": 1, "name": "B", "free": 23 * GB, "total": 24 * GB}])
+        b = _model(tmp_path, MODEL_45GB)
+        assert b._split_free_total_bytes() == (None, None, 0)
 
     def test_a_blind_device_declines_rather_than_undercounting(self, tmp_path,
                                                                monkeypatch):
