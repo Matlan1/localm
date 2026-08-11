@@ -430,9 +430,9 @@ def _rename_on_running_server(old_name: str, new_name: str):
     """Ask the localm server serving this directory to perform the rename, so
     the registry move and the live engine's re-key happen in ONE process.
 
-    Returns True on success, False when the server did the rename and refused
-    (it has already been reported), or None when there is no server to ask and
-    the caller should rename locally instead.
+    Returns True on success, False when the server refused the rename ITSELF
+    (already reported to the user, and renaming locally would fail the same
+    way), or None when the caller should go ahead and rename locally.
 
     Why this exists: a rename done in THIS process moves the registry entry
     while a running server keeps its loaded engine keyed under the OLD name -
@@ -505,10 +505,17 @@ def _rename_on_running_server(old_name: str, new_name: str):
         detail = resp.json().get("detail", "")
     except Exception:
         pass
-    if resp.status_code in (404, 409) and detail:
-        # The server's own verdict on the rename itself (unregistered model,
-        # name already taken). Renaming locally would fail identically, so
-        # report it and stop rather than trying again behind its back.
+    # Match the two verdicts the rename route itself raises, NOT the status
+    # code alone: a server too old to have this route answers 404 as well, with
+    # FastAPI's bare "Not Found", and treating that as "model not registered"
+    # would refuse a rename the user is perfectly entitled to. Falling through
+    # to the local rename is the safe direction; refusing is not.
+    _verdict = detail.lower()
+    if resp.status_code in (404, 409) and (
+            "not registered" in _verdict or "already taken" in _verdict):
+        # The server's own verdict on the rename itself. Renaming locally would
+        # fail identically, so report it and stop rather than going behind its
+        # back.
         console.print(f"[red]{detail}[/red]")
         return False
     # Anything else (401 without a key, a server too old to have the route, a

@@ -569,6 +569,24 @@ def test_cli_rename_stops_when_the_server_rejects_the_rename_itself(monkeypatch)
     assert cli_models._rename_on_running_server("a", "b") is False
 
 
+def test_cli_rename_treats_a_missing_route_as_fall_back_not_as_a_refusal(
+        monkeypatch, capsys):
+    """A server too old to have /v1/models/rename answers 404 with FastAPI's
+    bare "Not Found", which by STATUS alone is indistinguishable from this
+    route's own "Model not registered". Reading it as a verdict would refuse a
+    rename the user is entitled to, i.e. trade the data-loss bug for a broken
+    feature. It must fall back and warn instead."""
+    import requests
+
+    from localm.cli import models as cli_models
+
+    _patch_instance(monkeypatch, {"port": 1234})
+    monkeypatch.setattr(requests, "post",
+                        lambda *a, **kw: _FakeResponse(404, {"detail": "Not Found"}))
+    assert cli_models._rename_on_running_server("a", "b") is None
+    assert "old name" in capsys.readouterr().out
+
+
 def test_cli_rename_warns_out_loud_before_falling_back_past_a_live_server(
         monkeypatch, capsys):
     """A 401 (a keyed server this CLI has no credential for) still leaves the
