@@ -6,6 +6,8 @@ _confine() is the security boundary for all file tools - it must reliably
 reject any path that resolves outside cwd.
 """
 
+import os
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -189,6 +191,35 @@ class TestVerifySyntaxPython:
     def test_empty_file_is_valid(self, tmp_path):
         result = _verify_syntax(self._path(tmp_path), "")
         assert result is None
+
+    def test_leaves_no_compiled_artifact_in_system_temp(self, tmp_path):
+        """_verify_syntax used to check Python syntax by writing the content to
+        a real temp .py file and compiling it with py_compile; CPython's own
+        import-cache write left a matching .pyc - this file's compiled
+        CONTENT - behind in the system temp dir's __pycache__/, and nothing
+        ever unlinked it, in every session mode (checkup 2026-08-11 item 11).
+        compile() the builtin parses to an in-memory code object and touches
+        disk nowhere, so there is nothing left to gate by mode here - this
+        proves the artifact class is gone rather than merely suppressed.
+
+        Diffed against a before/after snapshot, not "the dir is empty",
+        because this is a SHARED system temp dir other processes may also
+        write .pyc files into concurrently on this box."""
+        pycache = Path(tempfile.gettempdir()) / "__pycache__"
+        before = set(pycache.glob("*.pyc")) if pycache.is_dir() else set()
+
+        canary = f"localm_verify_syntax_canary_{os.getpid()}"
+        src = f"def foo():\n    return '{canary}'\n"
+        result = _verify_syntax(self._path(tmp_path, "leak_check.py"), src)
+        assert result is None
+
+        after = set(pycache.glob("*.pyc")) if pycache.is_dir() else set()
+        for p in after - before:
+            try:
+                data = p.read_bytes()
+            except OSError:
+                continue
+            assert canary.encode() not in data, f"compiled artifact leaked into {p}"
 
 
 # ---------------------------------------------------------------------------

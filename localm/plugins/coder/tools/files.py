@@ -90,23 +90,17 @@ def _verify_syntax(path: Path, content: str) -> Optional[str]:
     """
     suffix = path.suffix.lower()
     if suffix == ".py":
-        import py_compile
-        import tempfile
-        import os as _os
+        # compile() builtin only: it parses to a code object in memory and never
+        # touches disk. py_compile.compile() (the previous approach) writes the
+        # source to a temp .py file to compile it, and CPython's import-cache
+        # write leaves a matching .pyc behind in the system temp dir's
+        # __pycache__/ that nothing here ever unlinked - i.e. the file's own
+        # content, compiled, sitting in shared temp storage regardless of
+        # session mode. compile() has no such side effect.
         try:
-            with tempfile.NamedTemporaryFile(suffix=".py", delete=False, mode="w",
-                                             encoding="utf-8") as tmp:
-                tmp.write(content)
-                tmp_path = tmp.name
-            py_compile.compile(tmp_path, doraise=True)
-        except py_compile.PyCompileError as e:
-            msg = str(e).replace(tmp_path, str(path))
-            return f"Python syntax error: {msg}"
-        finally:
-            try:
-                _os.unlink(tmp_path)
-            except Exception:
-                pass
+            compile(content, str(path), "exec")
+        except SyntaxError as e:
+            return f"Python syntax error: {e}"
     elif suffix == ".json":
         try:
             json.loads(content)
