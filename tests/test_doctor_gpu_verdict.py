@@ -349,9 +349,52 @@ def test_compute_devices_reports_real_devices_when_provisioned():
     assert any(t == _loader.GGML_DEV_TYPE_CPU for t in types_), (
         f"a computing runtime must register a CPU device; got {devices}"
     )
-    assert all(t in (
-        _loader.GGML_DEV_TYPE_CPU,
-        _loader.GGML_DEV_TYPE_GPU,
-        _loader.GGML_DEV_TYPE_ACCEL,
-    ) for t in types_), f"unexpected ggml device type in {devices}"
+    # A RANGE, not an enumerated set of named constants. This used to assert
+    # membership in (CPU, GPU, ACCEL) with ACCEL declared as 2 - and upstream
+    # later inserted IGPU at 2, pushing ACCEL to 3. So on any current runtime
+    # that assertion PASSED for an integrated GPU while believing it was an
+    # accelerator, and would FAIL on a real accelerator (3) or a meta device
+    # (4). Both halves wrong, and neither visible from the test.
+    #
+    # 4 is META, the highest member measured (ggml-backend.h at master and at
+    # b9870, 2026-08-11). A failure here is therefore informative rather than
+    # flaky: it means the enum GREW again, and _loader's device-type comment
+    # needs re-reading against the header for the provisioned runtime.
+    assert all(isinstance(t, int) and 0 <= t <= 4 for t in types_), (
+        f"ggml device type outside the known enum range in {devices}; "
+        "the enum may have grown - re-read ggml-backend.h"
+    )
     assert all(isinstance(n, str) and n for n in names)
+
+
+def test_only_stable_ggml_device_type_constants_are_declared():
+    """CPU and GPU are the only ggml_backend_dev_type members safe to hardcode.
+
+    MEASURED 2026-08-11 from ggml/include/ggml-backend.h at several tags:
+
+        b6000                       CPU 0, GPU 1, ACCEL 2
+        b8100 .. b9870 .. master    CPU 0, GPU 1, IGPU 2, ACCEL 3, META 4
+
+    IGPU was inserted AHEAD of ACCEL. setup_llama.py resolves the llama.cpp tag
+    dynamically and a box may hold an older runtime, so ACCEL has no single
+    correct value here - it was declared as 2, which on a current runtime means
+    INTEGRATED GPU. This guards the removal: re-adding a constant for any member
+    past GPU reintroduces a name that silently means something else on half the
+    runtimes we can ship, and it is inert until the day someone compares
+    against it.
+
+    Anything needing another member must read the header for the runtime
+    actually provisioned. discover.implicit_split_capacity ALLOWLISTS GPU for
+    exactly this reason rather than excluding iGPUs/accelerators by value.
+    """
+    from localm.inference.backends.llamacpp import _loader
+
+    assert _loader.GGML_DEV_TYPE_CPU == 0
+    assert _loader.GGML_DEV_TYPE_GPU == 1
+
+    declared = [n for n in dir(_loader) if n.startswith("GGML_DEV_TYPE_")]
+    assert sorted(declared) == ["GGML_DEV_TYPE_CPU", "GGML_DEV_TYPE_GPU"], (
+        f"only the version-stable members may be declared; found {declared}. "
+        "Members past GPU have moved between llama.cpp releases - read the "
+        "header for the provisioned runtime instead of hardcoding one."
+    )
