@@ -555,6 +555,29 @@ class TestMoeSkipReasonPrint:
         assert "CANARY-MESSAGE" in out, (
             "the parent did not read from the shared MOE_SKIP_MESSAGES table")
 
+    def test_skipped_override_never_prints_a_placement_line(self, tmp_path, capsys):
+        """The trap this class exists to close: a load can report a
+        moe_skip_reason AND a non-empty weight_placement in the SAME
+        metadata dict (the placement report is populated from every
+        load_tensors line regardless of whether n_cpu_moe applied - see
+        _worker.py's load() docstring). When the override was skipped, the
+        placement numbers describe an ordinary, unrelated load and must
+        never be printed alongside the skip message - a reader sees
+        "n_cpu_moe: ... does nothing here" immediately followed by
+        "moe placement: ... across N backend buffer(s) (n_cpu_moe=2)" and
+        reasonably concludes the setting moved something. It did not run at
+        all."""
+        b = _backend(tmp_path, n_cpu_moe=2)
+        _load(b, weight_placement=[
+            {"backend": "ROCm0", "mib": 630.59, "is_ram": False},
+            {"backend": "ROCm_Host", "mib": 7669.77, "is_ram": True},
+        ], moe_skip_reason="no_experts")
+        out = capsys.readouterr().out
+        assert "this model has no experts" in out
+        assert "moe placement" not in out, (
+            "printed a placement summary for a load where the n_cpu_moe "
+            "override never ran")
+
 
 # --------------------------------------------------------------------------- #
 #  REAL end-to-end: does the reported placement match what llama.cpp did?     #

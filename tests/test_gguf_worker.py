@@ -130,6 +130,101 @@ class TestLoad:
         assert kwargs.get("n_ctx_max") == 32768
 
 
+# --------------------------------------------------------------------------- #
+#  load_lib()'s own console-corruption regression - the native banner        #
+#  (e.g. "ggml_cuda_init: found 1 ROCm devices...") had no capture scope of  #
+#  its own: the only one that exists opens inside LlamaCpp.__init__, AFTER   #
+#  load_lib() has already CDLL'd the native libs. Same spy-order pattern as  #
+#  test_moe_placement_report.py's TestMergedNativeCallScope.                 #
+# --------------------------------------------------------------------------- #
+
+class TestLoadLibConsoleScope:
+    def _drive(self, monkeypatch, events, tmp_path, *, load_lib_error=None,
+               tail_text=""):
+        import contextlib
+
+        from localm.inference.backends.llamacpp import llama as llama_mod
+
+        @contextlib.contextmanager
+        def spy_capture():
+            events.append("capture_enter")
+
+            class _Stub:
+                def tail(self, max_chars=1500):
+                    return tail_text
+            yield _Stub()
+            events.append("capture_exit")
+
+        @contextlib.contextmanager
+        def spy_mirror():
+            events.append("mirror_enter")
+            yield
+            events.append("mirror_exit")
+
+        def _fake_load_lib():
+            events.append("load_lib")
+            if load_lib_error is not None:
+                raise load_lib_error
+
+        monkeypatch.setattr(llama_mod, "_capture_stdio", spy_capture)
+        monkeypatch.setattr("localm.debuglog.suppress_console_mirror", spy_mirror)
+        monkeypatch.setattr(
+            "localm.inference.backends.llamacpp._loader.load_lib", _fake_load_lib)
+
+        w = _worker(str(tmp_path / "m.gguf"))
+        fake_llamacpp_module = MagicMock()
+        fake_llamacpp_module.LlamaCpp.return_value = _StubLlm()
+        with patch.dict(sys.modules,
+                        {"localm.inference.backends.llamacpp": fake_llamacpp_module}):
+            if load_lib_error is not None:
+                with pytest.raises(type(load_lib_error)) as exc_info:
+                    w.load()
+                return exc_info.value
+            w.load()
+            return None
+
+    def test_load_lib_runs_inside_one_mirror_and_capture_scope(self, monkeypatch,
+                                                                 tmp_path):
+        """The regression this class guards: load_lib() must run strictly
+        between the mirror/capture enter and their exit, not before either
+        opens - a call before mirror_enter would still reach the terminal
+        raw."""
+        events = []
+        self._drive(monkeypatch, events, tmp_path)
+        assert events == [
+            "mirror_enter", "capture_enter",
+            "load_lib",
+            "capture_exit", "mirror_exit",
+        ], events
+
+    def test_captured_diagnostics_survive_a_load_lib_failure(self, monkeypatch,
+                                                               tmp_path):
+        """The trap this scope closes wrong if done carelessly: capturing
+        load_lib()'s native output must never SWALLOW the reason a genuine
+        failure happened (AGENTS.md rule 5). Whatever landed in the
+        suppressed stream must be appended to the propagated error, not
+        discarded with the temp file."""
+        events = []
+        err = RuntimeError(
+            "Cannot find llama.dll - the native inference runtime is not "
+            "provisioned.")
+        raised = self._drive(monkeypatch, events, tmp_path, load_lib_error=err,
+                              tail_text="native loader banner text")
+        assert "native loader banner text" in str(raised)
+        assert "Cannot find llama.dll" in str(raised)
+
+    def test_no_diagnostics_appended_when_nothing_was_captured(self, monkeypatch,
+                                                                 tmp_path):
+        """The common case (an ordinary failure with nothing on stdout/stderr):
+        the error message must stay exactly as load_lib() raised it, no empty
+        "Captured native output" tacked on."""
+        events = []
+        err = RuntimeError("some ordinary failure")
+        raised = self._drive(monkeypatch, events, tmp_path, load_lib_error=err,
+                              tail_text="")
+        assert str(raised) == "some ordinary failure"
+
+
 class TestTokenisation:
     def test_count_tokens(self, tmp_path):
         w = _worker(str(tmp_path / "m.gguf"))

@@ -428,7 +428,12 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         # as quiet as before. An empty report is stated honestly rather than
         # silently showing nothing: a user who set n_cpu_moe and sees no
         # confirmation cannot otherwise tell "it worked but there is nothing to
-        # show" from "it silently did nothing" (AGENTS.md rule 5).
+        # show" from "it silently did nothing" (AGENTS.md rule 5). When
+        # moe_skip_reason is set the override never ran at all, so the
+        # placement numbers below describe an ordinary, unrelated load - they
+        # are only printed in the branch where the override actually applied
+        # (skip_reason is None); printing them alongside a skip message would
+        # read as proof the setting moved something when it did nothing here.
         if self.n_cpu_moe > 0:
             # Why the override did NOT apply (no experts on this model, or the
             # CPU buffer type could not be resolved) - rendered HERE, in the
@@ -444,19 +449,20 @@ class GgufBackend(VramSizingMixin, BaseBackend):
                 console.print(MOE_SKIP_MESSAGES.get(
                     skip_reason,
                     f"[yellow]  n_cpu_moe:[/yellow] did not apply ({skip_reason})."))
-            placement = meta.get("weight_placement") or []
-            if placement:
-                ram_mib = sum(b["mib"] for b in placement if b["is_ram"])
-                vram_mib = sum(b["mib"] for b in placement if not b["is_ram"])
-                console.print(
-                    f"[dim]  moe placement: {ram_mib:.2f} MiB system RAM / "
-                    f"{vram_mib:.2f} MiB VRAM across {len(placement)} backend "
-                    f"buffer(s) (n_cpu_moe={self.n_cpu_moe})[/dim]")
             else:
-                console.print(
-                    "[dim]  moe placement: not reported by this llama.cpp "
-                    f"build (n_cpu_moe={self.n_cpu_moe} was still "
-                    "requested)[/dim]")
+                placement = meta.get("weight_placement") or []
+                if placement:
+                    ram_mib = sum(b["mib"] for b in placement if b["is_ram"])
+                    vram_mib = sum(b["mib"] for b in placement if not b["is_ram"])
+                    console.print(
+                        f"[dim]  moe placement: {ram_mib:.2f} MiB system RAM / "
+                        f"{vram_mib:.2f} MiB VRAM across {len(placement)} backend "
+                        f"buffer(s) (n_cpu_moe={self.n_cpu_moe})[/dim]")
+                else:
+                    console.print(
+                        "[dim]  moe placement: not reported by this llama.cpp "
+                        f"build (n_cpu_moe={self.n_cpu_moe} was still "
+                        "requested)[/dim]")
 
         console.print("[green]✓[/green] Model loaded")
 
