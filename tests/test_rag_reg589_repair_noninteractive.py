@@ -61,7 +61,8 @@ def _fake_repair_collection(monkeypatch, ragcli, *, has_vectors, captured):
         def stats(self):
             return {"has_vectors": has_vectors}
 
-        def add_paths(self, paths, *, force=False, embed_fn=None, on_progress=None):
+        def add_paths(self, paths, *, force=False, embed_fn=None, on_progress=None,
+                     model_name=None):
             captured["embed_fn"] = embed_fn
             captured["ran"] = True
             return {"added": 0, "updated": len(paths), "skipped": 0,

@@ -688,6 +688,16 @@ async def rag_add(name: str, req: RagAddRequest, request: Request):
     embed = req.embed
     self_embed, self_classify, self_describe = _self_services(request)
     embed_fn = self_embed if embed else None
+    # Same configured-name lookup _make_self_embed itself sends over the wire
+    # (see there) - recorded so a collection built the ordinary way through
+    # this route ends up with embedding_model() on record, not only reembed()
+    # (FIX4). None (embed off) is fine: never reached without embed_fn.
+    model_name = None
+    if embed:
+        from localm.config import load_config
+        from localm.inference.embedder import DEFAULT_EMBEDDING_MODEL
+        model_name = str(load_config().get("embedding_model")
+                          or DEFAULT_EMBEDDING_MODEL).strip()
     # Kernel-level since ADR-0008, so a bare `localm serve` has one too. This
     # used to branch on "jobs is None" and index SYNCHRONOUSLY for a headless
     # server; that server now gets the same streamed background job the GUI
@@ -701,6 +711,7 @@ async def rag_add(name: str, req: RagAddRequest, request: Request):
         try:
             result = coll.add_paths(
                 paths, embed_fn=embed_fn, classify_fn=self_classify,
+                model_name=model_name,
                 describe_image_fn=self_describe,
                 policy=policy, force=req.reindex,
                 on_progress=_job_progress(job))
@@ -785,6 +796,13 @@ async def rag_upload(name: str, req: RagUploadRequest, request: Request):
     embed = req.embed
     self_embed, self_classify, self_describe = _self_services(request)
     embed_fn = self_embed if embed else None
+    # See rag_add: record which model this upload actually embeds with (FIX4).
+    model_name = None
+    if embed:
+        from localm.config import load_config
+        from localm.inference.embedder import DEFAULT_EMBEDDING_MODEL
+        model_name = str(load_config().get("embedding_model")
+                          or DEFAULT_EMBEDDING_MODEL).strip()
     # See rag_add: kernel-level job registry, so the headless synchronous branch
     # is gone and an upload streams as a background job here too.
     jobs = _require_jobs(request)
@@ -795,6 +813,7 @@ async def rag_upload(name: str, req: RagUploadRequest, request: Request):
         try:
             result = coll.add_uploads(
                 uploads, embed_fn=embed_fn, classify_fn=self_classify,
+                model_name=model_name,
                 describe_image_fn=self_describe,
                 force=req.reindex,
                 on_progress=_job_progress(job))
