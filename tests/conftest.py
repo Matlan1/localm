@@ -737,12 +737,18 @@ def _vulkan_split_configured() -> bool:
 
 
 def _real_multi_gpu_hardware_configured() -> bool:
-    """True once opted into the Tier 2 real-hardware gate (a real rented 2-GPU
-    box - lavapipe cannot approximate real VRAM pressure/allocator/OOM behavior
-    or the amd-rocm/HIP backend at all). Same style as
+    """True once opted into the Tier 2 real-hardware gate (any real 2-GPU box,
+    owned or rented - lavapipe cannot approximate real VRAM pressure/allocator/
+    OOM behavior or the amd-rocm/HIP backend at all). Same style as
     _vulkan_split_configured(): the gate only checks opt-in, the real
     assertions live in tests/test_gpu_split_real_hardware.py. See
-    scripts/tier2_gpu_split/README.md."""
+    scripts/tier2_gpu_split/README.md.
+
+    Deliberately says "owned or rented": this reason string is what a user
+    READS on a skip, and saying "rented" described the environment someone
+    imagined rather than the condition actually checked. The tests gate on two
+    visible GPUs, an smi tool and a provisioned runtime - never on a rental -
+    so a locally-owned 2-GPU box runs the whole gate for nothing."""
     return bool(os.environ.get("LOCALM_TEST_REAL_MULTI_GPU"))
 
 
@@ -757,8 +763,8 @@ _RESOURCE_GATES = (
      "set LOCALM_TEST_LAVAPIPE_ICD to a second Vulkan device's ICD manifest "
      "path (see dev-notes/split-gpu-testing-research-2026-07-13.md Tier 1)"),
     ("real_multi_gpu_hardware", _real_multi_gpu_hardware_configured,
-     "set LOCALM_TEST_REAL_MULTI_GPU=1 on a real rented 2-GPU box (Tier 2 - "
-     "see scripts/tier2_gpu_split/README.md)"),
+     "set LOCALM_TEST_REAL_MULTI_GPU=1 on any real 2-GPU box, owned or rented "
+     "(Tier 2 - see scripts/tier2_gpu_split/README.md)"),
 )
 
 

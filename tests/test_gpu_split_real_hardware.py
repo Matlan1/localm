@@ -8,12 +8,14 @@ works using a real GPU plus a free SOFTWARE second Vulkan device (Mesa
 lavapipe) - by design it cannot touch real VRAM pressure/allocator/OOM behavior
 (lavapipe is backed by system RAM, not a real second memory domain) or the
 amd-rocm/HIP backend at all (no software HIP implementation exists). This file
-is what closes that gap; it only means anything on a REAL rented 2-GPU box -
-see scripts/tier2_gpu_split/README.md for the exact spec, cost, and how to run
-the gate that gets a real box provisioned and these tests executed.
+is what closes that gap; it only means anything on a REAL 2-GPU box, owned or
+rented. If you already have two GPUs, run it directly - nothing here needs a
+rental (see PREREQUISITES below; the gate is two visible devices, an smi tool
+and a provisioned runtime). See scripts/tier2_gpu_split/README.md for the exact
+spec, and for the rental path when no such box is to hand.
 
-PREREQUISITES (this file does not perform them - scripts/tier2_gpu_split/
-provision_remote.sh does):
+PREREQUISITES (this file does not perform them - do them yourself on a box you
+own, or scripts/tier2_gpu_split/provision_remote.sh does them for a rental):
   1. A real 2+ GPU Linux box (NVIDIA via the vulkan backend, or AMD via the
      amd-rocm backend), provisioned with localm + the matching native runtime
      (localm setup-llama --backend <vulkan|amd-rocm>) and, purely so this
