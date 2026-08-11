@@ -364,6 +364,225 @@ def test_guard_ignores_an_unloaded_engine_and_an_unowned_path(models_home):
         hs._engines.clear()
 
 
+# ---------------------------------------------------------------------------
+#  FAIL CLOSED. The question is not "do these paths compare equal" but "can I
+#  establish nothing live is using this file". Every input where the comparison
+#  cannot be MADE was answered "nothing holds it, delete away".
+#
+#  None of these cases can be expressed by the fixtures above: they all build a
+#  real, resolvable temp file, so the comparison always succeeds and the error
+#  paths are unreachable. That is precisely why they slipped past six
+#  fires-controls and a green suite.
+# ---------------------------------------------------------------------------
+
+
+class _UnresolvableEngine:
+    """A loaded engine whose path will not resolve - a UNC share that is
+    momentarily unreachable, a permission error, an embedded NUL."""
+
+    def __init__(self, name, exc=OSError("network path not found")):
+        self.display_name = name
+        self.loaded = True
+        self._exc = exc
+
+    @property
+    def model_path(self):
+        return "//unreachable-share/models/m.gguf"
+
+
+def _raise_on_resolve(monkeypatch, bad: str, exc=OSError("unreachable")):
+    """Make Path.resolve() raise for one specific path and behave normally for
+    every other, so the test does not have to disable resolution process-wide
+    (which would take the target side down with the engine side).
+
+    Compared through Path + normcase, NOT as the raw string handed in: on
+    Windows ``str(Path("//share/x"))`` comes back with BACKSLASHES, so a raw
+    equality test silently never matches. The first version of this helper did
+    exactly that - the fault was never injected, nothing refused, and the file
+    was deleted. The test caught it, but only because it asserts on the FILE.
+    """
+    import os as _os
+    from pathlib import Path as _P
+    real = _P.resolve
+    want = _os.path.normcase(str(_P(bad)))
+
+    def fake(self, *a, **kw):
+        if _os.path.normcase(str(self)) == want:
+            raise exc
+        return real(self, *a, **kw)
+
+    monkeypatch.setattr(_P, "resolve", fake)
+    # Prove the injection took. A patch that silently fails to match looks
+    # exactly like a guard that correctly found nothing to refuse.
+    try:
+        _P(bad).resolve()
+    except type(exc):
+        pass
+    else:
+        raise AssertionError(f"the resolve fault was not injected for {bad!r}")
+
+
+def test_remove_refuses_when_a_loaded_engines_path_will_not_resolve(
+        models_home, gui_client, monkeypatch):
+    """THE fail-open: `except (OSError, ValueError): continue` skipped a LOADED
+    engine and let the loop fall through to "nothing holds this file". A model
+    served off a momentarily-unreachable UNC share therefore had its GGUF
+    deleted out from under it - the same unrecoverable outcome the guard
+    exists to prevent, reached through the error path."""
+    app, started = gui_client
+    gguf = _make_model_file(models_home)
+    _register(models_home, {"victim": {"path": str(gguf), "source": "local"}})
+
+    bad = "//unreachable-share/models/m.gguf"
+    _raise_on_resolve(monkeypatch, bad)
+
+    hs._engines.clear()
+    hs._engine = None
+    hs._engines["serving"] = _UnresolvableEngine("serving")
+    try:
+        with TestClient(app) as client:
+            r = client.post("/api/models/remove", json={"model": "victim"})
+        assert gguf.exists(), (
+            "a file was deleted while an engine that could not be ruled out "
+            "was loaded")
+        assert started == []
+        assert r.status_code == 409, r.text
+        detail = r.json()["detail"]
+        assert "could not be resolved" in detail, (
+            f"the refusal must say WHY, or a user hunts a phantom in-use "
+            f"model: {detail}")
+        assert "serving" in detail
+    finally:
+        hs._engines.clear()
+
+
+def test_remove_refuses_when_a_loaded_engine_has_no_recorded_path(
+        models_home, gui_client):
+    """The second fail-open, three lines up from the first: `if not mpath:
+    continue`. An engine with no recorded model_path has not been shown to be
+    free of this file either."""
+    app, started = gui_client
+    gguf = _make_model_file(models_home)
+    _register(models_home, {"victim": {"path": str(gguf), "source": "local"}})
+
+    pathless = _FileEngine("pathless", gguf)
+    pathless.model_path = ""
+
+    hs._engines.clear()
+    hs._engine = None
+    hs._engines["pathless"] = pathless
+    try:
+        with TestClient(app) as client:
+            r = client.post("/api/models/remove", json={"model": "victim"})
+        assert gguf.exists(), (
+            "a file was deleted while a loaded engine with no recorded path "
+            "was resident - it was never shown to be free of this file")
+        assert started == []
+        assert r.status_code == 409, r.text
+        assert "no recorded model file path" in r.json()["detail"]
+    finally:
+        hs._engines.clear()
+
+
+def test_remove_refuses_when_the_models_own_path_will_not_resolve(
+        models_home, gui_client, monkeypatch):
+    """The third case, and it is NOT a data-loss one - stated precisely
+    because the other two are and it would be easy to bundle them.
+
+    MEASURED against the previous code: an unresolvable registry path made
+    find_aliases_by_path raise (it resolves the path it is handed and catches
+    only for SIBLING entries), so the guard blew up before reaching
+    resolve_deletion_target and the route answered 500. Nothing was deleted.
+    So the collapse inside resolve_deletion_target - which returns None for
+    "unresolvable" exactly as it does for "outside the models dir" and
+    "already gone" - was LATENT, not live.
+
+    Two reasons it is fixed anyway. A guard whose job is to answer a question
+    calmly should not crash the request (rule 5: a failure gets reported at
+    its own altitude, not as a stack trace). And the latent hole goes LIVE the
+    moment anything reorders those two calls - which this very change does,
+    moving the resolve probe ahead of find_aliases_by_path.
+    """
+    app, started = gui_client
+    gguf = _make_model_file(models_home)
+    _register(models_home, {"victim": {"path": str(gguf), "source": "local"}})
+
+    _raise_on_resolve(monkeypatch, str(gguf))
+
+    hs._engines.clear()
+    hs._engine = None
+    hs._engines["serving"] = _FileEngine("serving", models_home / "models" / "other.gguf")
+    try:
+        with TestClient(app) as client:
+            r = client.post("/api/models/remove", json={"model": "victim"})
+        assert gguf.exists()
+        assert started == []
+        assert r.status_code == 409, r.text
+        assert "registered file path could not be resolved" in r.json()["detail"]
+    finally:
+        hs._engines.clear()
+
+
+def test_an_unresolvable_path_with_nothing_loaded_is_not_a_refusal(
+        models_home, monkeypatch):
+    """Failing closed must not become failing always. With NOTHING resident,
+    nothing can be holding the file, so the answer is a certain no however
+    unresolvable the paths are - the user can still tidy their library on a box
+    with a flaky network share.
+
+    Asserted on the guard directly rather than through the route: with the
+    target unresolvable, remove_model itself raises out of find_aliases_by_path,
+    and this harness runs that removal synchronously where production spawns it
+    as a job. Driving the route here would measure the harness's own shape
+    rather than the property.
+    """
+    gguf = _make_model_file(models_home)
+    _register(models_home, {"spare": {"path": str(gguf), "source": "local"}})
+    _raise_on_resolve(monkeypatch, str(gguf))
+
+    hs._engines.clear()
+    hs._engine = None
+    assert hs.loaded_engine_holding_model_file("spare") is None
+
+
+def test_a_proven_holder_is_named_ahead_of_an_unresolvable_one(models_home):
+    """Both refuse, but only one of them can say truthfully WHICH engine has
+    the file, so the scan completes rather than returning the first unknown it
+    trips over."""
+    gguf = _make_model_file(models_home)
+    _register(models_home, {"victim": {"path": str(gguf), "source": "local"}})
+
+    hs._engines.clear()
+    hs._engine = None
+    hs._engines["broken"] = _UnresolvableEngine("broken")
+    hs._engines["the-real-holder"] = _FileEngine("the-real-holder", gguf)
+    try:
+        hold = hs.loaded_engine_holding_model_file("victim")
+        assert hold is not None
+        assert hold.key == "the-real-holder"
+        assert hold.reason is None, "a proven holder is not a cautious guess"
+    finally:
+        hs._engines.clear()
+
+
+def test_an_unloaded_engine_with_a_broken_path_is_not_a_refusal(models_home):
+    """Only LOADED engines can hold a file open, so a broken path on an
+    unloaded one is not an unknown - it is irrelevant."""
+    gguf = _make_model_file(models_home)
+    _register(models_home, {"spare": {"path": str(gguf), "source": "local"}})
+
+    dead = _UnresolvableEngine("dead")
+    dead.loaded = False
+
+    hs._engines.clear()
+    hs._engine = None
+    hs._engines["dead"] = dead
+    try:
+        assert hs.loaded_engine_holding_model_file("spare") is None
+    finally:
+        hs._engines.clear()
+
+
 def test_guard_sees_the_startup_engine_that_is_not_in_the_engine_map(models_home):
     """`localm serve <path.gguf>` can leave the running engine as the module
     singleton without an _engines entry. It is holding the file exactly as
@@ -374,7 +593,7 @@ def test_guard_sees_the_startup_engine_that_is_not_in_the_engine_map(models_home
     hs._engines.clear()
     hs._engine = _FileEngine("started-as-this", gguf)
     try:
-        assert hs.loaded_engine_holding_model_file("served") == "started-as-this"
+        assert hs.loaded_engine_holding_model_file("served").key == "started-as-this"
     finally:
         hs._engine = None
         hs._engines.clear()
@@ -429,7 +648,7 @@ def test_v1_rename_route_moves_the_registry_and_rekeys_the_engine(models_home):
         # The whole reason the CLI routes through here: after this, the file is
         # not deletable under EITHER name, because the engine map agrees with
         # the registry again.
-        assert hs.loaded_engine_holding_model_file("new-name") == "new-name"
+        assert hs.loaded_engine_holding_model_file("new-name").key == "new-name"
     finally:
         _reset()
 
@@ -683,7 +902,7 @@ def test_cli_rename_over_real_http_rekeys_the_live_engine(models_home, monkeypat
             "the server that holds the file must end up keyed on the new name")
         assert "old-name" not in hs._engines
         assert eng.display_name == "new-name"
-        assert hs.loaded_engine_holding_model_file("new-name") == "new-name"
+        assert hs.loaded_engine_holding_model_file("new-name").key == "new-name"
     finally:
         server.should_exit = True
         thread.join(timeout=10.0)
