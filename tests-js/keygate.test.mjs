@@ -266,3 +266,53 @@ test("AUTH-2: both API-key inputs get a show/hide reveal toggle", async () => {
     assert.equal(btn.textContent, "show");
   }
 });
+
+// P1a (COORDINATOR-DISPATCH-2026-08-11): several boot-time functions
+// (refreshKbSelect/refreshPersonas/refreshMemory/refreshVoiceStatus/
+// loadClientPlugins/refreshPluginCommands/setupPerfCard/startHwStats/
+// reattachSessions/reattachActivity, plus the two setInterval polls) used to
+// sit at the top level of init.js, past the end of the async boot IIFE - an
+// async IIFE that is never awaited does not block the module body that
+// follows it, so a keyless (401) client fired every one of them, with a
+// bearer/session header, before the key gate ever showed. They now run
+// sequenced behind bootAuthProbe() inside that same IIFE.
+test("P1a: a keyless (401) boot fires ONLY the one auth probe - zero other " +
+     "/api requests before the key gate is shown", async () => {
+  const calls = [];
+  const fetchImpl = async (url) => {
+    calls.push(String(url));
+    return {
+      ok: false, status: 401,
+      json: async () => ({ detail: "Missing or invalid API key" }),
+      text: async () => "Missing or invalid API key",
+    };
+  };
+  const { window } = loadApp({ fetchImpl });
+  await tick(); await tick();
+
+  assert.deepEqual(calls, ["/api/models"],
+    "a keyless boot must fire exactly the one auth probe (bootAuthProbe's own " +
+    "/api/models check) and nothing else - every other boot-time /api call must " +
+    "wait behind a confirmed auth state, not race it");
+  const gate = window.document.getElementById("key-gate");
+  assert.notEqual(gate.style.display, "none", "sanity check: the key gate is showing");
+});
+
+test("P1a: an authenticated (200) boot still fires the normal boot-time /api " +
+     "calls - the sequencing fix must not silently drop them for the common case", async () => {
+  const calls = [];
+  const fetchImpl = async (url) => {
+    calls.push(String(url));
+    return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
+  };
+  const { window } = loadApp({ fetchImpl });
+  await tick(); await tick();
+
+  for (const path of ["/api/rag/collections", "/api/prompts", "/api/memory",
+                       "/api/voice/status", "/api/capabilities", "/api/coder/sessions",
+                       "/api/activity", "/api/stats"]) {
+    assert.ok(calls.some((u) => u.startsWith(path)),
+      `authed boot still fires ${path} (not gated away entirely)`);
+  }
+  assert.equal(window.__localmLocked, false, "sanity check: this boot is unlocked");
+});
