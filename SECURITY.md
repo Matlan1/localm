@@ -98,9 +98,14 @@ localm process's own permissions rather than a sandbox:
 - **`coder:full`** runs shell commands and reads/writes files (the `--scope` glob
   narrows *which* files; `run_shell` is intentionally unscoped). The plain **`coder`**
   scope is restricted - read plus confined file edits within the scope, no shell.
-- **`rag`** indexing over the HTTP API is confined to your home folder and the
-  working directory and refuses the localm data dir and credential folders
-  (`~/.ssh`, ...), so an API client cannot index-and-read arbitrary system files.
+- **`rag`** indexing over the HTTP API is confined to your home folder, the
+  working directory, and any folders you explicitly allow, and always refuses
+  credential folders (`~/.ssh`, ...) wherever they appear, so an API client
+  cannot index-and-read arbitrary system files. The localm data directory is
+  NOT specially excluded from that confinement - if it falls within an allowed
+  folder, its contents are indexable like any other file, on the reasoning that
+  the owner already has direct filesystem access to their own data; this is a
+  deliberate choice for a local, single-user tool, not an oversight.
   The `localm rag` CLI is unconfined (a local user can already read their own files).
   A `rag`-scoped key can still read documents under the allowed roots back through a
   query, so issue one only to clients you trust.
