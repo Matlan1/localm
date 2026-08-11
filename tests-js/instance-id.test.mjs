@@ -314,34 +314,34 @@ test("GUI-LIVE-WIPE: leaving privacy mode re-arms the wipe latch, so a LATER " +
     "the sidebar must be repainted clean on the second privacy confirmation too");
 });
 
-test("reconcileInstanceId: a matching id is a no-op (nothing wiped)", () => {
+test("reconcileInstanceId: a matching id returns \"confirmed\" (nothing wiped)", () => {
   const { window } = loadApp();
   window.localStorage.setItem("localm.instanceId", "same-id");
   window.localStorage.setItem("localm.conversations", JSON.stringify([FOREIGN_CONV]));
-  const trusted = window.reconcileInstanceId("same-id");
-  assert.equal(trusted, true);
+  const state = window.reconcileInstanceId("same-id");
+  assert.equal(state, "confirmed");
   assert.ok(window.localStorage.getItem("localm.conversations"),
     "cache is left untouched on a confirmed match");
 });
 
-test("reconcileInstanceId: a missing server id is a no-op (older server, no " +
-     "information to act on)", () => {
+test("reconcileInstanceId: a missing server id returns \"unknown\" (older " +
+     "server, no information to act on)", () => {
   const { window } = loadApp();
   window.localStorage.setItem("localm.conversations", JSON.stringify([FOREIGN_CONV]));
-  const trusted = window.reconcileInstanceId(undefined);
-  assert.equal(trusted, true);
+  const state = window.reconcileInstanceId(undefined);
+  assert.equal(state, "unknown");
   assert.ok(window.localStorage.getItem("localm.conversations"),
     "nothing is wiped without a server id to compare against");
 });
 
-test("reconcileInstanceId: a mismatch wipes every instance-scoped key and " +
-     "re-caches the new id", () => {
+test("reconcileInstanceId: a mismatch returns \"mismatched\", wipes every " +
+     "instance-scoped key and re-caches the new id", () => {
   const { window } = loadApp();
   window.localStorage.setItem("localm.instanceId", "old");
   runScript(window, "window.__keys = INSTANCE_SCOPED_KEYS;");
   for (const key of window.__keys) window.localStorage.setItem(key, "x");
-  const trusted = window.reconcileInstanceId("new");
-  assert.equal(trusted, false);
+  const state = window.reconcileInstanceId("new");
+  assert.equal(state, "mismatched");
   for (const key of window.__keys) {
     assert.equal(window.localStorage.getItem(key), null, `${key} must be wiped on a mismatch`);
   }
@@ -406,4 +406,97 @@ test("AUD-INSTANCEID: the startup overlay stays up until refreshCtxLimit's " +
   assert.ok(!window.document.getElementById("conv-list").textContent
     .includes("Someone else's private chat"),
     "by the time the overlay comes down, the foreign conversation is gone from the DOM");
+});
+
+// --------------------------------------------------------------------------- //
+//  Residual 1 (COORDINATOR-DISPATCH-2026-08-11): a confirmed mismatch never   //
+//  re-asserted the landing PAGE, only the conversation cache + cwd input.     //
+// --------------------------------------------------------------------------- //
+
+test("AUD-INSTANCEID residual 1: a confirmed mismatch corrects the landing PAGE " +
+     "too, not just the cache - a savedView from a DIFFERENT prior backend was " +
+     "already restored optimistically before the round trip could catch it", async () => {
+  // Same held-back-/v1/config technique as the startup-overlay race test above:
+  // in the REAL browser the synchronous setTimeout(0) savedView restore always
+  // wins the race against a genuine network round trip, so the test must force
+  // that same ordering rather than let the stub fetch resolve instantly (which
+  // would let the mismatch-driven correction win first via pure microtasks and
+  // never actually exercise the residual).
+  let resolveConfig;
+  const configGate = new Promise((r) => (resolveConfig = r));
+  const fetchImpl = async (url) => {
+    const u = String(url);
+    if (u === "/v1/config") {
+      await configGate;
+      return { ok: true, status: 200, text: async () => "", json: async () => (
+        { effective_mode: "log", n_ctx_max: 16384, instance_id: "backend-b" }) };
+    }
+    if (u.startsWith("/api/conversations?")) {
+      return { ok: true, status: 200, text: async () => "", json: async () => (
+        { enabled: true, total: 0, conversations: [] }) };
+    }
+    return { ok: true, status: 200, text: async () => "", json: async () => (
+      { models: [], active: "", conversations: [], plugins: [] }) };
+  };
+  const { window } = loadApp({
+    fetchImpl,
+    seedLocalStorage: {
+      "localm.instanceId": "backend-a",   // a PREVIOUSLY confirmed, DIFFERENT backend
+      "localm.activeView": "models",      // that backend's last-open page
+    },
+  });
+
+  assert.ok(await waitFor(() =>
+    window.document.getElementById("view-models").classList.contains("active")),
+    "precondition: the foreign savedView is restored optimistically (init.js's " +
+    "setTimeout(0) fast path), before the instance-id round trip can catch it");
+
+  resolveConfig();   // let refreshCtxLimit's round trip proceed and detect the mismatch
+  assert.ok(await waitFor(() =>
+    window.document.getElementById("view-chat").classList.contains("active")),
+    "the confirmed mismatch must correct the landing page back to chat once " +
+    "detected, not leave the foreign install's page showing indefinitely");
+  assert.equal(window.document.getElementById("view-models").classList.contains("active"),
+    false, "the foreign view is no longer the active one");
+});
+
+// --------------------------------------------------------------------------- //
+//  Residual 2 (COORDINATOR-DISPATCH-2026-08-11): "unknown" and "confirmed"    //
+//  used to collapse into the same boolean, so a failed/old-server round trip  //
+//  could authorise an upload meant only for a real confirmed match.           //
+// --------------------------------------------------------------------------- //
+
+test("AUD-INSTANCEID residual 2: an UNKNOWN instance state (old server, no " +
+     "instance_id field) still renders an already-cached local-only conversation " +
+     "but must NEVER upload it - only a CONFIRMED match may write to the backend", async () => {
+  const putCalls = [];
+  const { window } = loadApp({
+    // instanceId left undefined: cfg.instance_id comes back missing/falsy,
+    // exactly what an older server (or a failed round trip) looks like.
+    fetchImpl: makeFetch({ instanceId: undefined, putCalls, indexConversations: [] }),
+    seedLocalStorage: {
+      // A previously-confirmed pairing with SOME backend, so the synchronous
+      // boot-time fast path in init.js does not wipe the cache outright - the
+      // server THIS load talks to just happens not to report instance_id at
+      // all, so reconcileInstanceId can neither confirm nor refute the match.
+      "localm.instanceId": "backend-old",
+      "localm.conversations": JSON.stringify([{
+        id: "local-only-2", title: "Not yet synced (old server)", updated_at: 1,
+        pinned: false, folder: null, branches: [], messages: [{ role: "user", content: "hi" }],
+      }]),
+    },
+  });
+  runScript(window, "window.chatState = chat;");
+  await drain();
+
+  assert.equal(window.chatState.conversations.length, 1,
+    "an unconfirmed (unknown) instance state still renders whatever is already " +
+    "cached - it is not a confirmed mismatch, so nothing is wiped");
+  const listText = window.document.getElementById("conv-list").textContent;
+  assert.ok(listText.includes("Not yet synced (old server)"));
+
+  await new Promise((r) => setTimeout(r, 900));   // ride out pushConversation's 600ms debounce
+  assert.equal(putCalls.length, 0,
+    "an UNCONFIRMED (unknown) instance state must never upload a local-only " +
+    "conversation to the backend's own store - only a CONFIRMED match may");
 });

@@ -63,28 +63,33 @@ export function instanceCacheTrusted() {
 }
 
 /** Reconcile the cached instance id against the one the connected backend just
- *  reported (cfg.instance_id from /v1/config). Returns true when the
- *  instance-scoped cache is CONFIRMED to belong to THIS backend (safe to
- *  render/merge/upload); false when it was just wiped because it either
- *  belonged to a DIFFERENT backend or had never been confirmed for this origin
- *  before - a brand-new pairing, exactly the cross-instance leak scenario
- *  (AUD-INSTANCEID). A missing/falsy *serverInstanceId* (an older server that
- *  predates this field) is a no-op: there is nothing to compare against, so
- *  existing behaviour is preserved rather than wiping on missing information. */
+ *  reported (cfg.instance_id from /v1/config). Returns one of three states -
+ *  callers must not collapse them back into a boolean (that collapse is
+ *  exactly what let an "unknown" read authorise an upload meant only for a
+ *  "confirmed" one, AUD-INSTANCEID residual 2):
+ *   - "confirmed": the cached id matches THIS backend - safe to render, merge
+ *     AND upload.
+ *   - "mismatched": the cache just belonged to a DIFFERENT backend, or had
+ *     never been confirmed for this origin before (a brand-new pairing,
+ *     exactly the cross-instance leak scenario) - every instance-scoped key is
+ *     wiped before returning.
+ *   - "unknown": a missing/falsy *serverInstanceId* (an older server that
+ *     predates this field) or an unreadable localStorage means there is
+ *     nothing to compare against - existing (optimistic) rendering is
+ *     preserved, but callers must NOT treat this as a confirmed match for
+ *     anything that writes data back to the backend. */
 export function reconcileInstanceId(serverInstanceId) {
-  if (!serverInstanceId) return true;
+  if (!serverInstanceId) return "unknown";
   let cached;
   try { cached = localStorage.getItem(INSTANCE_ID_KEY); }
-  catch (e) { return true; }   // localStorage unavailable - nothing to protect
-  const matched = cached === serverInstanceId;
-  if (!matched) {
-    for (const key of INSTANCE_SCOPED_KEYS) {
-      try { localStorage.removeItem(key); } catch (e) { /* best-effort wipe */ }
-    }
-    try { localStorage.setItem(INSTANCE_ID_KEY, serverInstanceId); }
-    catch (e) { /* storage full/blocked - callers still correct in-memory state */ }
+  catch (e) { return "unknown"; }   // localStorage unavailable - nothing to protect or confirm
+  if (cached === serverInstanceId) return "confirmed";
+  for (const key of INSTANCE_SCOPED_KEYS) {
+    try { localStorage.removeItem(key); } catch (e) { /* best-effort wipe */ }
   }
-  return matched;
+  try { localStorage.setItem(INSTANCE_ID_KEY, serverInstanceId); }
+  catch (e) { /* storage full/blocked - callers still correct in-memory state */ }
+  return "mismatched";
 }
 
 // S2: the API key is no longer kept in JS-readable localStorage. Open mode uses

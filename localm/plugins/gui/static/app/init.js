@@ -296,42 +296,72 @@ window.bootAuthProbe = bootAuthProbe;
   // not refreshModels alone - otherwise the foreign list can flash before the
   // mismatch is detected and the DOM corrected.
   Promise.allSettled([modelsReady, convReady]).finally(hideStartupOverlay);
+
+  // P1a: everything below talks to an authenticated /api endpoint (or starts a
+  // timer that will), so none of it may run until bootAuthProbe() above has
+  // actually confirmed this client is authed (or in open/loopback mode). These
+  // used to sit at the top level, past the end of this IIFE - but an async IIFE
+  // that is never awaited does not block the module body that follows it: the
+  // module's synchronous execution reached these calls and fired them before
+  // bootAuthProbe()'s own `await fetch(...)` had a chance to resolve, so a
+  // keyless client (a 401 boot) fired every one of them before the key gate
+  // ever showed. Moving them here - behind the `authed` check above - is a
+  // SEQUENCING fix, not a flag check: a `window.__localmLocked` guard on each
+  // function would have been a structural no-op for this exact race, since the
+  // flag itself is not set until lockUI()/unlockUI() run, which is further
+  // down this same async chain.
+  refreshKbSelect();
+  refreshPersonas();
+  refreshMemory();
+  refreshVoiceStatus();
+  loadClientPlugins();
+  refreshPluginCommands();
+  setInterval(refreshModels, 30000);
+  startHwStats();   // live CPU/RAM/VRAM/GPU readout in the status bar
+  setupPerfCard();  // Settings: GPU-layers/context sliders + live VRAM estimate
+  // The resolved ctx ceiling only exists once a model has loaded - keep the
+  // compaction threshold in sync as models load or switch.
+  setInterval(refreshCtxLimit, 30000);
+  reattachSessions();
+  reattachActivity();   // ADR-0008 U4: cross-session/cross-tab background operations
 })();
 // Reveal toggles on the API-key inputs (AUTH-2): the in-page gate and the
-// Settings key field, so the user can confirm the key they typed.
+// Settings key field, so the user can confirm the key they typed. Pure DOM
+// wiring (no fetch) - stays outside the authed gate above so the key gate's
+// own input is usable while still locked.
 addRevealToggle($("key-gate-input"));
 addRevealToggle($("gui-api-key"));
-refreshKbSelect();
-refreshPersonas();
-refreshMemory();
-refreshVoiceStatus();
 // Voice picker + client-side plugins (the tts plugin installs a neural voice).
+// populateVoicePicker() itself only reads local browser APIs (speechSynthesis /
+// the not-yet-installed ttsProvider) - no fetch, so it is safe before auth is
+// confirmed too.
 if (window.speechSynthesis) speechSynthesis.onvoiceschanged = populateVoicePicker;
 if ($("p-voice")) $("p-voice").onchange = onVoicePick;
 populateVoicePicker();
-loadClientPlugins();
-refreshPluginCommands();
 // Re-sync plugin command hints when the window regains focus, so a plugin
 // toggled in another terminal/tab while sitting on the chat view is reflected
 // without a reload (the view-switch path in pages.js covers navigation).
-window.addEventListener("focus", refreshPluginCommands);
+// Registering the listener is harmless while locked; P1a is about the fetch
+// each callback fires, so each one bails while still locked (or not yet
+// resolved either way - `!== false` covers "never confirmed" the same as
+// "confirmed locked"). A real focus/storage/visibility event needs a user
+// already looking at the page, well after bootAuthProbe's one network round
+// trip has settled one way or the other in practice, but the guard costs
+// nothing and closes the same class of gap this fix exists for.
+window.addEventListener("focus", () => {
+  if (window.__localmLocked === false) refreshPluginCommands();
+});
 // R50: a plugin toggled in ANOTHER tab bumps a shared localStorage rev; the
 // storage event fires in every OTHER same-origin tab, so we re-sync nav/commands
 // promptly. A tab parked on the now-disabled plugin's page is redirected to chat
 // by reconcileActiveView instead of erroring on its unmounted routes.
 // visibilitychange covers a tab becoming visible without a focus event.
 window.addEventListener("storage", (e) => {
-  if (e.key === "localm.pluginsRev") refreshPluginCommands();
+  if (e.key === "localm.pluginsRev" && window.__localmLocked === false) refreshPluginCommands();
 });
 document.addEventListener("visibilitychange", () => {
-  if (!document.hidden) refreshPluginCommands();
+  if (!document.hidden && window.__localmLocked === false) refreshPluginCommands();
 });
-setInterval(refreshModels, 30000);
-startHwStats();   // live CPU/RAM/VRAM/GPU readout in the status bar
-setupPerfCard();  // Settings: GPU-layers/context sliders + live VRAM estimate
-// The resolved ctx ceiling only exists once a model has loaded - keep the
-// compaction threshold in sync as models load or switch.
-setInterval(refreshCtxLimit, 30000);
 // AUD-INSTANCEID (see helpers.js reconcileInstanceId): never paint the raw,
 // unverified localStorage cache before a same-instance confirmation exists for
 // this origin (see _instanceTrusted above). A brand-new pairing starts from an
@@ -349,8 +379,9 @@ if (chat.conversations.length) {
   renderConvList();
 }
 renderChat();
-reattachSessions();
-reattachActivity();   // ADR-0008 U4: cross-session/cross-tab background operations
+// reattachSessions()/reattachActivity() moved into the authed IIFE above
+// (P1a) - they fetch authenticated state and used to run here, unguarded,
+// before bootAuthProbe() had resolved.
 // Deep links + restore. Deferred a tick so pages.js has installed
 // window.onViewShown and the #pull-start handler. Skipped while the hard auth
 // gate is locked (nothing of the app should activate behind the onboarding).
@@ -414,10 +445,17 @@ reattachActivity();   // ADR-0008 U4: cross-session/cross-tab background operati
       }
     }, 0);
   } else {
-    // Restore the last active page (set in non-privacy mode only). Gated on a
-    // confirmed same-instance cache (AUD-INSTANCEID, see helpers.js): an
-    // unverified pairing ignores the stored view and stays on the chat default
-    // rather than trust a value that may belong to a different backend.
+    // Restore the last active page (set in non-privacy mode only). Gated on
+    // _instanceTrusted (AUD-INSTANCEID, see helpers.js instanceCacheTrusted) -
+    // which is a PRESENCE check only (some instance id was confirmed for this
+    // origin at some point), not yet a confirmed match with the backend THIS
+    // load is talking to; that confirmation is an async round trip
+    // (refreshCtxLimit -> reconcileInstanceId, chat.js) that has not resolved
+    // yet at this synchronous point. So this restore is optimistic: correct
+    // for the common case (the same backend as last time), and self-corrects
+    // via chat.js's mismatch branch (showView("chat")) once the round trip
+    // confirms otherwise - never trust this read as a real per-backend
+    // confirmation on its own.
     const savedView = _instanceTrusted ? localStorage.getItem("localm.activeView") : null;
     if (savedView && savedView !== "chat") {
       setTimeout(() => { if (!window.__localmLocked) showView(savedView); }, 0);

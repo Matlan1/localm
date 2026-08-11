@@ -26,14 +26,24 @@ export const chat = {
   privacy: false,    // server in privacy mode → conversations not persisted
   persist: false,    // non-privacy: conversations sync to the server store
   stick: true,       // R31: follow the stream to the bottom until the user scrolls up
-  // AUD-INSTANCEID: true once the connected backend's instance id (from
-  // /v1/config) is CONFIRMED to match the one this browser origin last saw.
-  // Defaults to true (permissive) so an old server without the field, or a
-  // failed /v1/config round trip, never wipes the cache on pure missing
-  // information - only an ACTUAL confirmed mismatch (reconcileInstanceId
-  // returning false) flips this to false. See initServerConversations, which
-  // gates re-uploading a not-yet-synced local conversation on this flag.
+  // AUD-INSTANCEID residual 2: true ONLY once reconcileInstanceId returns
+  // "confirmed" - a real, positive match against the connected backend's
+  // instance id. Defaults to true so the FIRST paint (before refreshCtxLimit's
+  // round trip lands) still renders optimistically, but refreshCtxLimit
+  // overwrites it on every call, so by the time anything acts on it the value
+  // reflects the last real answer, never a guess. Deliberately NOT true for
+  // "unknown" (an old server with no instance_id field, or a failed round
+  // trip) - unknown state may still RENDER whatever is cached (see
+  // refreshCtxLimit below), but must never be read as permission to upload.
+  // See initServerConversations, which gates re-uploading a not-yet-synced
+  // local conversation on this flag.
   instanceMatch: true,
+  // The raw tri-state itself ("confirmed" | "mismatched" | "unknown"), kept
+  // alongside instanceMatch so a caller that needs to tell "unknown" and
+  // "mismatched" apart (initServerConversations' render gate, below) does not
+  // have to re-derive it - only instanceMatch (confirmed-only) is the right
+  // gate for anything that WRITES to the backend.
+  instanceState: "confirmed",
   // True once the in-memory privacy-mode wipe below has run for this page
   // load. refreshCtxLimit() also runs on a 30s poll for the tab's whole
   // lifetime (init.js), and the wipe must fire only the FIRST time privacy
@@ -191,14 +201,17 @@ export async function refreshCtxLimit() {
 
       // AUD-INSTANCEID: confirm this browser origin is actually talking to the
       // SAME backend data directory whose cache it holds, BEFORE any of that
-      // cache is trusted for merging/uploading. A mismatch (or no prior
-      // confirmation at all - a brand-new pairing, exactly the reported
-      // cross-instance leak) wipes the instance-scoped localStorage keys AND
-      // the in-memory state a synchronous boot-time read may already have
-      // loaded, then repaints so nothing foreign is ever shown or re-uploaded.
-      const sameInstance = reconcileInstanceId(cfg.instance_id);
-      chat.instanceMatch = sameInstance;
-      if (!sameInstance) {
+      // cache is trusted for merging/uploading. Three states now (residual 2):
+      // "confirmed" is the only one that may upload; "mismatched" wipes the
+      // instance-scoped localStorage keys AND the in-memory state a synchronous
+      // boot-time read may already have loaded, then repaints so nothing
+      // foreign is ever shown or re-uploaded; "unknown" (no server info, e.g.
+      // an old server or a failed round trip) keeps whatever is already
+      // rendered - permissive about DISPLAY, never about upload.
+      const instanceState = reconcileInstanceId(cfg.instance_id);
+      chat.instanceState = instanceState;
+      chat.instanceMatch = instanceState === "confirmed";
+      if (instanceState === "mismatched") {
         chat.conversations = [];
         chat.activeId = null;
         convUI.collapsed = new Set();
@@ -213,6 +226,14 @@ export async function refreshCtxLimit() {
         // it here. Nothing else re-reads that key into the field afterwards.
         const cwdInput = $("setup-cwd");
         if (cwdInput) cwdInput.value = "";
+        // Residual 1: the landing PAGE is the same kind of leftover as the
+        // input above - a savedView restored synchronously at boot (init.js,
+        // gated only on instanceCacheTrusted()'s PRESENCE check, not a
+        // confirmed match) can already have switched to a foreign install's
+        // last-open page before this round trip lands. Nothing else re-asserts
+        // the view afterwards, so a confirmed mismatch must correct it here,
+        // the same way it already corrects the cache and the cwd input.
+        showView("chat");
       }
 
       // Privacy mode: conversations live in memory only - wipe anything a
@@ -414,21 +435,29 @@ export async function initServerConversations() {
     for (const local of chat.conversations) {
       const remote = byId.get(local.id);
       if (!remote) {
-        // AUD-INSTANCEID: a cached conversation THIS backend's own index does
-        // not know about is either (a) a real local-only chat not yet synced
-        // back to the SAME instance after a restart (legitimate - keep + push),
-        // or (b) a conversation that belongs to an entirely DIFFERENT backend
-        // data directory that happens to share this browser origin. Keeping
-        // (b) would show foreign chat history in the sidebar, and
-        // pushConversation would PERMANENTLY WRITE it into this install's own
-        // data directory - the worst part of the cross-instance leak. Only a
-        // CONFIRMED same-instance pairing (chat.instanceMatch, set by
-        // refreshCtxLimit's reconcileInstanceId) may take the keep+push path;
-        // anything else is dropped here - never rendered, never uploaded.
-        if (chat.instanceMatch) {
-          byId.set(local.id, local);
-          pushConversation(local);
-        }
+        // AUD-INSTANCEID residual 2: a cached conversation THIS backend's own
+        // index does not know about is either (a) a real local-only chat not
+        // yet synced back to the SAME instance after a restart (legitimate -
+        // keep + push), or (b) a conversation that belongs to an entirely
+        // DIFFERENT backend data directory that happens to share this browser
+        // origin. Keeping (b) would show foreign chat history in the sidebar,
+        // and pushConversation would PERMANENTLY WRITE it into this install's
+        // own data directory - the worst part of the cross-instance leak.
+        //
+        // RENDERING and UPLOADING are different risk levels, so they are
+        // gated separately. A CONFIRMED "mismatched" state (chat.instanceState,
+        // set by refreshCtxLimit's reconcileInstanceId) already wiped
+        // chat.conversations entirely before this ever runs (see refreshCtxLimit),
+        // so there is nothing foreign left in this loop to render by the time
+        // we get here - the check below is a defensive belt for that same
+        // property, not a coincidence this code relies on silently. An
+        // "unknown" state (an old server with no instance_id field, or a
+        // failed /v1/config round trip) is NOT a confirmed mismatch, so it may
+        // keep rendering whatever was already cached (an old server, or an
+        // offline boot, must still work) - but only a CONFIRMED match
+        // (chat.instanceMatch) may write it into the backend's own store.
+        if (chat.instanceState !== "mismatched") byId.set(local.id, local);
+        if (chat.instanceMatch) pushConversation(local);
         continue;
       }
       // Keep the local FULL copy unless the server has a strictly newer version
