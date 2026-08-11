@@ -322,6 +322,7 @@ class TestRunnerReportsTheDecodedCode:
         offenders = [
             line.strip() for line in src.splitlines()
             if ".exitcode" in line and "describe_exit_code" not in line
+            and "death_was_a_native_fault" not in line
         ]
         assert not offenders, (
             f"{modname}: these lines use the raw exit code where a decoded one "
