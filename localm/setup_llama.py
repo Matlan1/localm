@@ -8,26 +8,34 @@ depending on a folder elsewhere on disk.
 
 Backends (``--backend``), so any machine has a working out-of-the-box path:
   * ``auto`` (default) - detect the GPU and pick the fastest backend that works
-    with no user-installed toolkit: NVIDIA on Windows -> ``cuda`` (self-contained
-    cudart fetch, see below); AMD on Windows -> the self-contained ROCm build (AMD
-    on Linux, and NVIDIA on Linux, -> ``vulkan``); other GPUs -> ``vulkan`` (runs
-    on NVIDIA/Intel/AMD through the normal display driver, no vendor toolkit);
-    Apple Silicon -> ``metal``; no GPU -> ``cpu``.
-  * ``vulkan`` - universal GPU build from upstream llama.cpp (a no-toolkit option
-    for any vendor; the default for Intel, and for NVIDIA/AMD on Linux).
-  * ``cuda`` - NVIDIA peak performance. On Windows the matching self-contained
-    ``cudart`` bundle from the same release is fetched too, so NO CUDA Toolkit is
-    needed; a driver preflight + load-test fall back to ``vulkan`` if the driver
-    is too old. On Windows the CUDA asset LINE is also chosen from the detected
-    GPU architecture (Blackwell - sm_100/sm_120 - automatically gets the newer
-    13.x line; every older architecture stays on the broad-compatibility 12.x
-    line). On Linux the cuda build needs a system CUDA runtime present and is
-    always the 12.x line (no self-contained cudart bundling or per-line asset
-    split exists there).
+    with no user-installed toolkit: NVIDIA, any OS -> ``cuda`` (self-contained
+    build + runtime fetch on both Windows and Linux, see below); AMD on Windows
+    (RX 6000 / unknown) -> the self-contained ROCm build; AMD elsewhere with a
+    system ROCm/HIP toolkit detected present -> ``hip``; Intel and AMD with no
+    toolkit detected -> ``vulkan`` (runs on NVIDIA/Intel/AMD through the normal
+    display driver, no vendor toolkit); Apple Silicon -> ``metal``; no GPU ->
+    ``cpu``. See ``hwdetect.recommended_install_backend`` for the full policy.
+  * ``vulkan`` - universal GPU build from upstream llama.cpp (a no-toolkit
+    fallback for any vendor; the default for Intel, and for AMD with no ROCm/HIP
+    toolkit detected).
+  * ``cuda`` - NVIDIA peak performance, self-contained on BOTH Windows and Linux:
+    the matching ``cudart`` runtime bundle (Windows) or CUDA runtime libraries
+    (Linux, fetched from PyPI) are fetched alongside the build, so NO CUDA
+    Toolkit is needed on either OS; a driver preflight + load-test fall back to
+    ``vulkan`` if the driver is too old. The CUDA asset LINE is also chosen from
+    the detected GPU architecture on both platforms (Blackwell - sm_100/sm_120 -
+    automatically gets the newer 13.x line; every older architecture stays on
+    the broad-compatibility 12.x line).
+  * ``hip`` - AMD peak performance via an already-installed system ROCm/HIP
+    toolkit (a real downloadable prebuilt binary on both Windows and Linux;
+    needs that toolkit present to load - see ``_rocm_toolkit_present`` in
+    hwdetect.py).
   * ``sycl`` / ``cpu`` - upstream llama.cpp prebuilts. ``sycl`` delivers peak
-    Intel performance but needs the oneAPI runtime; ``cpu`` is self-contained.
+    Intel performance but needs the oneAPI runtime (no toolkit-presence probe
+    for it yet, so it stays opt-in); ``cpu`` is self-contained.
   * ``amd-rocm`` - the self-contained gfx103X (RDNA2) ROCm build (bundles its
-    own ROCm runtime; the current default for AMD RX 6000).
+    own ROCm runtime; the current default for AMD RX 6000 on Windows, since it
+    needs no system toolkit at all).
 
 Sources, in order of preference:
   * ``--from <dir>``  - copy from a local llama.cpp build output (any backend).
@@ -552,10 +560,11 @@ def _auto_backend() -> str:
     installers use (``hwdetect.recommended_install_backend``), so bare
     ``setup-llama`` and setup.bat / setup.sh can never drift:
 
-      NVIDIA on Windows -> cuda (self-contained cudart fetch, peak performance);
-      AMD on Windows (RX 6000 / unknown) -> the self-contained ROCm build; Apple
-      Silicon -> metal; every other GPU (incl. NVIDIA on Linux, where cuda needs a
-      system toolkit) -> vulkan; no GPU -> cpu."""
+      NVIDIA, any OS -> cuda (self-contained build + runtime fetch on both
+      Windows and Linux, peak performance); AMD on Windows (RX 6000 / unknown)
+      -> the self-contained ROCm build; AMD elsewhere with a system ROCm/HIP
+      toolkit detected -> hip; Apple Silicon -> metal; every other GPU (Intel,
+      AMD with no toolkit detected) -> vulkan; no GPU -> cpu."""
     try:
         from localm import hwdetect
         det = hwdetect.detect()
@@ -2080,11 +2089,12 @@ def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
               type=click.Choice(["auto", "vulkan", "cuda", "sycl", "hip", "cpu",
                                  "metal", "amd-rocm"], case_sensitive=False),
               help="Which prebuilt to fetch. 'auto' detects your GPU and picks "
-                   "the fastest no-toolkit-needed backend: cuda for NVIDIA on "
-                   "Windows (self-contained cudart, falls back to vulkan if the "
-                   "driver is too old); vulkan for Intel and for NVIDIA/AMD on "
-                   "Linux; the self-contained ROCm build for AMD on Windows; cpu "
-                   "if no GPU.")
+                   "the best-performing backend it can run out of the box: cuda "
+                   "for NVIDIA on both Windows and Linux (self-contained, falls "
+                   "back to vulkan if the driver is too old); the self-contained "
+                   "ROCm build for AMD RX 6000 on Windows; hip for AMD elsewhere "
+                   "when a system ROCm/HIP toolkit is detected; vulkan for Intel "
+                   "and for AMD with no toolkit detected; cpu if no GPU.")
 @click.option("--url", default=None, help="Override with an explicit prebuilt archive URL.")
 @click.option("--sha256", "sha256", default=None,
               help="Expected sha256 of the downloaded archive. When given, the "

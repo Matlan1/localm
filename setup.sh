@@ -364,9 +364,10 @@ uv pip install -p .venv -e ./runtime >/dev/null 2>&1 || true
 # ---- provision the native library (official llama.cpp prebuilt) -------------
 # The RECOMMENDED backend comes from the SAME tested policy the Windows installer
 # uses (`python -m localm.hwdetect` -> "<vendor> <backend>"), so the two installers
-# can never drift: any GPU -> vulkan (runs on AMD/NVIDIA/Intel via the display
-# driver, no vendor toolkit), Apple Silicon -> metal, no GPU -> cpu. CUDA/ROCm are
-# offered below for peak vendor performance (they need that vendor's runtime).
+# can never drift: NVIDIA -> cuda (self-contained on both OSes), AMD -> hip when a
+# system ROCm/HIP toolkit is detected present (else vulkan; gfx103X on Windows
+# always gets the self-contained amd-rocm build regardless), Intel -> vulkan (no
+# toolkit-presence probe for oneAPI yet), Apple Silicon -> metal, no GPU -> cpu.
 # setup-llama fetches the matching upstream build, so a tester never compiles by hand.
 REC="$(.venv/bin/python -m localm.hwdetect 2>/dev/null | awk '{print $2}')"
 case "$REC" in
@@ -448,7 +449,12 @@ else
   say "  You picked the '$BACKEND' runtime, so no vendor GPU torch was auto-installed."
   say "  For HuggingFace transformers models, add PyTorch later (see docs/gpu-setup.md):"
   say "    CPU (any machine): uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/cpu"
-  say "    NVIDIA CUDA:       uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/cu126"
+  # NVIDIA CUDA's wheel line depends on GPU generation (Blackwell and newer need
+  # a different index than older cards - see hwdetect.pytorch_index_url), so ask
+  # localm's own detector for THIS machine's actual line instead of hardcoding
+  # one that would silently install kernel-less torch on a Blackwell card.
+  cudaspec="$(.venv/bin/python -m localm.hwdetect torch-args cuda 2>/dev/null)"
+  say "    NVIDIA CUDA:       uv pip install -p .venv ${cudaspec:-torch torchvision --index-url https://download.pytorch.org/whl/cu126}"
   say "    AMD ROCm (Linux):  uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/rocm6.2"
   say "    Intel Arc / XPU:   uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/xpu"
 fi

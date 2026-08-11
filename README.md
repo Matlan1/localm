@@ -49,7 +49,7 @@ localm serve mymodel                        # OpenAI-compatible API server
 
 ## Features
 
-- **Local model inference.** GGUF files load through a small ctypes binding to `llama.dll`, so there is no `llama-cpp-python` to build. HuggingFace models work too. The installer detects your GPU and provisions the matching llama.cpp backend - **Vulkan** runs on any AMD/NVIDIA/Intel GPU with no vendor toolkit, with CUDA/ROCm offered for peak performance and CPU when there is no GPU - and localm auto-detects the GPU at load.
+- **Local model inference.** GGUF files load through a small ctypes binding to `llama.dll`, so there is no `llama-cpp-python` to build. HuggingFace models work too. The installer detects your GPU and picks the best backend it can run out of the box - **CUDA for NVIDIA, ROCm/HIP for AMD when a system toolkit is present, Vulkan as the universal fallback** (any AMD/NVIDIA/Intel GPU, no vendor toolkit needed), **CPU** when there is no GPU - and localm auto-detects the GPU at load.
 
 - **Pick how you talk to it.** A browser GUI, a plain terminal chat, and an OpenAI-compatible server for when you want other apps to connect.
 
@@ -75,7 +75,7 @@ localm serve mymodel                        # OpenAI-compatible API server
 
 - **For GGUF GPU inference:** a compiled `llama.dll` + GPU runtime DLLs. `localm setup-llama` provisions these for you (see [GPU setup](#gpu-setup)). The installer detects your hardware and chooses the backend automatically.
 
-- **NVIDIA CUDA (peak performance):** on **Windows** the installer now recommends **CUDA** for NVIDIA - it fetches a self-contained CUDA runtime, so no CUDA Toolkit is needed, and an old driver simply falls back to Vulkan. Prefer the universal driver-only build? Choose **Vulkan** in the setup menu (or `localm setup-llama --backend vulkan`). On **Linux**, Vulkan is still the default recommendation; `--backend cuda` is self-contained there too now (no Toolkit), but it is newer and not yet confirmed on real NVIDIA Linux hardware, so it is an explicit opt-in. Details in [GPU setup](#gpu-setup).
+- **NVIDIA CUDA (peak performance):** on **both Windows and Linux** the installer recommends **CUDA** for NVIDIA - it fetches a self-contained CUDA runtime (no Toolkit needed on either OS), and an old driver simply falls back to Vulkan. Prefer the universal driver-only build? Choose **Vulkan** in the setup menu (or `localm setup-llama --backend vulkan`). Details in [GPU setup](#gpu-setup).
 
 Run `localm doctor` after installing to check Python, the native library, GPU driver, VRAM, and optional packages in one shot.
 
@@ -126,7 +126,7 @@ self-contained - the same tradeoff `setup.bat`/`setup.sh`'s "Shared" choice
 describes), just drop the `UV_PYTHON_INSTALL_DIR`/`UV_CACHE_DIR`/
 `--python-preference` and run the plain `uv venv --python 3.12 .venv`.
 
-The base line above works on NVIDIA, Intel, and CPU; only AMD RDNA2 users add `[gpu]` (the ROCm torch stack). `localm setup-llama` is required after a manual install to fetch the native backend (`setup.bat` does this for you). NVIDIA users who also want HuggingFace/torch models install CUDA torch separately: `uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/cu126`.
+The base line above works on NVIDIA, Intel, and CPU; only AMD RDNA2 users add `[gpu]` (the ROCm torch stack). `localm setup-llama` is required after a manual install to fetch the native backend (`setup.bat` does this for you). NVIDIA users who also want HuggingFace/torch models install CUDA torch separately - the index depends on GPU generation (Blackwell and newer need a different one than older cards), so ask localm's own detector rather than guessing: `uv pip install -p .venv $(.venv/bin/python -m localm.hwdetect torch-args cuda)` (see [docs/gpu-setup.md](docs/gpu-setup.md#huggingface-transformers-pytorch) for the full table and Windows form).
 
 A pip extra and a plugin install are two separate steps. The extra installs a plugin's heavy Python dependencies into the venv; `localm plugin install <name>` activates the plugin itself. The defined extras are:
 
@@ -294,7 +294,7 @@ localm setup-llama --from <build-dir>    # or copy your own llama.cpp build
 
 Vulkan runs on any GPU with just the vendor's normal driver; CUDA/ROCm give peak performance when their runtime is present; CPU always works. The AMD ROCm build is self-contained (it bundles its ROCm runtime via the `[gpu]` extra's `rocm-sdk` wheels). macOS/Metal is experimental. See [docs/phone.md](docs/phone.md) to reach the GUI from a phone.
 
-**NVIDIA users:** on **Windows** the installer recommends **CUDA** (peak performance) - press Enter to accept it: it fetches a self-contained CUDA runtime (no Toolkit needed), verifies the build loads, and falls back to Vulkan with a clear message if your driver is too old for the CUDA line your GPU needs (12.4+ for most GPUs; Blackwell - RTX 50-series and datacenter B100/B200 - is detected automatically and needs a newer driver, CUDA 13.3+, for its own 13.x build). Prefer the universal driver-only build with no vendor-runtime download? Choose **Vulkan** in the setup menu (or run `localm setup-llama --backend vulkan`). On **Linux**, Vulkan stays the default recommendation, but `--backend cuda` is self-contained there too now: setup fetches a build from a third-party builder plus the CUDA runtime libraries, with no Toolkit install. That path is newer and has not yet been confirmed across real NVIDIA Linux hardware, so choose it explicitly if you want to try it.
+**NVIDIA users:** on **both Windows and Linux** the installer recommends **CUDA** (peak performance) - press Enter to accept it: it fetches a self-contained CUDA runtime (no Toolkit needed - a third-party build plus the CUDA runtime libraries on Linux, the official build plus a `cudart` bundle on Windows), verifies the build loads, and falls back to Vulkan with a clear message if your driver is too old for the CUDA line your GPU needs (12.4+ for most GPUs; Blackwell - RTX 50-series and datacenter B100/B200 - is detected automatically and needs a newer driver, CUDA 13.3+, for its own 13.x build). Prefer the universal driver-only build with no vendor-runtime download? Choose **Vulkan** in the setup menu (or run `localm setup-llama --backend vulkan`).
 
 localm resolves the binary directory in order: `LLAMA_CPP_LIB` env > `binary_dir` config > the bundled runtime wheel. No absolute path is ever assumed as a default; an unprovisioned install resolves to nothing and points you at `localm setup-llama`. Before loading a model, localm checks free VRAM against the model size and warns when it will not fit, instead of crashing mid-load.
 
