@@ -98,12 +98,22 @@ opt-ws     ::= [ \t\n\r]? [ \t\n\r]? [ \t\n\r]?
 # disproportionately the reasoning ones, so the strict form is close to
 # unusable exactly where it is needed.
 #
-# THE PRELUDE COVERS BOTH THINKING DIALECTS, which is not optional: many
-# reasoning chat templates emit the opening <think> THEMSELVES, so generation
-# starts INSIDE the block and the model's first token is reasoning prose, not a
-# tag. A grammar that only accepts a literal "<think>" rejects that model's
-# every opening token. Hence think-open is itself optional - the prelude
-# matches "<think>...</think>", a bare "...</think>", or nothing at all.
+# THE OPENING "<think>" IS REQUIRED WHEN THE PRELUDE IS USED, and that is the
+# whole difference between forcing and not forcing. MEASURED 2026-08-11 on the
+# repro model: an earlier version of this grammar made the opening tag OPTIONAL,
+# to also accommodate the templates that emit "<think>" themselves so generation
+# starts inside the block. That reasoning is sound about templates and fatal
+# here - an optional opener turns the prelude into an ARBITRARY PROSE prelude,
+# because any leading text at all parses as "reasoning that has not closed yet".
+# The grammar then constrains nothing until the {0,N} bound, and 3/3 live trials
+# rambled to max_tokens and emitted NO tool call. The permissive form is strictly
+# WEAKER than plain TOOL_CALLS_ONLY, which took the same request 3/3.
+#
+# With the tag required, a model that opens one may think and must then call; a
+# model that does not open one is held to a tool call from its first token,
+# exactly as the strict grammar does. The template-pre-opened case degrades to
+# that same immediate forcing rather than to a free-text escape hatch - measured
+# to work on this model, and the safe direction to be wrong in.
 #
 # think-char is the standard match-until-close-tag idiom: any character except
 # '<', OR '<' not followed by '/', OR '</' not followed by 't'. Only the exact
@@ -136,8 +146,7 @@ opt-ws     ::= [ \t\n\r]? [ \t\n\r]? [ \t\n\r]?
 # treats an unusable forcing grammar as forcing-unavailable and says so.
 TOOL_CALLS_AFTER_THINK = r"""
 root        ::= opt-think opt-ws tool-block+ opt-ws
-opt-think   ::= (think-open think-body "</think>")?
-think-open  ::= "<think>"?
+opt-think   ::= ("<think>" think-body "</think>")?
 think-body  ::= think-char{0,1900}
 think-char  ::= [^<] | "<" [^/] | "</" [^t]
 tool-block  ::= "<tool_call>" opt-ws json-obj opt-ws "</tool_call>" opt-ws

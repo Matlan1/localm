@@ -227,10 +227,29 @@ def test_forcing_grammar_allows_thinking_but_still_requires_a_call():
     while still requiring a real tool call."""
     assert "<think>" in TOOL_CALLS_AFTER_THINK
     assert "</think>" in TOOL_CALLS_AFTER_THINK
-    # think-open optional => a bare "...</think>" prelude is accepted too.
-    assert 'think-open  ::= "<think>"?' in TOOL_CALLS_AFTER_THINK
     # tool-block+ is required, so no prelude alone can satisfy the root rule.
     assert "tool-block+" in TOOL_CALLS_AFTER_THINK
+
+
+def test_forcing_grammar_requires_the_opening_think_tag():
+    """The prelude's opening tag must NOT be optional, and this is the single
+    property that decides whether this grammar forces anything at all.
+
+    MEASURED 2026-08-11: an earlier version made it optional so that templates
+    which emit "<think>" themselves would still be accommodated. That turns the
+    prelude into an ARBITRARY PROSE prelude - any leading text parses as
+    "reasoning that has not closed yet" - so the grammar constrained nothing,
+    and 3/3 live trials on the repro model rambled to max_tokens and emitted no
+    tool call at all. It was strictly weaker than the plain strict grammar,
+    which took the same request 3/3.
+
+    Optional-opener regressions are invisible in a shape test that only greps
+    for "<think>", which is exactly what the first version of the test above
+    did, so this asserts the tag is mandatory rather than merely present."""
+    assert '("<think>" think-body "</think>")?' in TOOL_CALLS_AFTER_THINK
+    assert '"<think>"?' not in TOOL_CALLS_AFTER_THINK, (
+        "an optional opening tag lets arbitrary prose satisfy the prelude, "
+        "which defeats forcing entirely")
 
 
 def test_forcing_grammar_prelude_is_bounded_below_the_native_ceiling():
