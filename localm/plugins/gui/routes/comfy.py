@@ -12,7 +12,11 @@ no provisioning logic of their own (S2/S3 own that in localm/media/managed_comfy
                                      localm routing to it (the S1 coexistence state).
                                      Also reports "corrupt" (an incomplete install
                                      left behind by an abandoned setup attempt) vs
-                                     "installing" (a setup job genuinely still running).
+                                     "installing" (a setup job genuinely still running),
+                                     and whether an update is available/possible.
+  POST /api/comfy/update          -> dispatch `localm comfy update` as a background
+                                     JOB, moving the managed instance to the pinned
+                                     commit localm ships; returns {"job_id"}.
   POST /api/comfy/remove          -> delete the managed instance under the data dir
                                      (the shared remove_managed_comfy helper).
   POST /api/comfy/repair          -> clear an INCOMPLETE install (never a genuinely
@@ -26,6 +30,8 @@ Design: dev-notes/DESIGN-localm-managed-comfyui-2026-07-08.md (decision 8).
 """
 
 from __future__ import annotations
+
+import json
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 
@@ -82,7 +88,7 @@ def register(app: FastAPI, ctx) -> None:
             state = "corrupt"
         else:
             state = "not_installed"
-        return {
+        body = {
             "installed": installed,
             "state": state,
             "path": str(paths.root) if (installed or state == "corrupt") else None,
@@ -90,6 +96,58 @@ def register(app: FastAPI, ctx) -> None:
             "api_url": MANAGED_COMFY_API_URL,
             "target": cfg.get("comfy_target", "own"),
             "managed_active": managed_comfy_active(cfg),
+        }
+        if installed:
+            body.update(_update_status(paths.root))
+        return body
+
+    def _update_status(root) -> dict:
+        """The update-availability half of the status, so the GUI can offer Update
+        only when there is something to update TO and can say WHY when it cannot.
+
+        Deliberately CHEAP and side-effect-free: it reads the provisioning marker and
+        tests for a `.git` dir. It does NOT shell out to git - this runs on the event
+        loop on every settings-page poll, and a subprocess per poll is exactly the
+        kind of per-call cost that multiplies by the fastest caller's interval.
+
+        ``updatable`` is therefore an ADVISORY pre-flight, not the gate. The
+        authoritative refusal still lives in update_managed_comfy(), which resolves
+        HEAD with real git and returns its own honest message; this only lets the GUI
+        say so BEFORE the user starts a job that would fail minutes later. A `.git`
+        dir present but unusable still reaches that real check unchanged."""
+        from localm.media.managed_comfy_fresh import (COMFYUI_PINNED_COMMIT,
+                                                      COMFYUI_PINNED_VERSION)
+        from localm.media.managed_comfy_provision import MARKER_FILENAME
+        installed_commit = None
+        installed_version = None
+        try:
+            marker = json.loads((root / MARKER_FILENAME).read_text(encoding="utf-8"))
+            if isinstance(marker, dict):
+                c = marker.get("commit")
+                v = marker.get("comfyui_version")
+                installed_commit = c if isinstance(c, str) else None
+                installed_version = v if isinstance(v, str) else None
+        except (OSError, ValueError):
+            # An unreadable marker is not fatal: report unknown rather than guessing
+            # "up to date", which would hide a genuinely available update (rule 5).
+            pass
+
+        updatable = (root / ".git").exists()
+        return {
+            "pinned_commit": COMFYUI_PINNED_COMMIT,
+            "pinned_version": COMFYUI_PINNED_VERSION,
+            "installed_commit": installed_commit,
+            "installed_version": installed_version,
+            # None (not False) when the marker could not be read - "we do not know"
+            # is a third answer and must not be collapsed into "no update".
+            "update_available": (None if installed_commit is None
+                                 else installed_commit != COMFYUI_PINNED_COMMIT),
+            "updatable": updatable,
+            "update_blocked_reason": (
+                "" if updatable else
+                "This managed ComfyUI has no git history (it was installed via the "
+                "non-git copy fallback), so a pinned-version update is not possible. "
+                "Remove it and set it up again to move to the version localm ships."),
         }
 
     def _start_setup_job(request: Request, copy_custom_nodes: bool):
@@ -152,6 +210,48 @@ def register(app: FastAPI, ctx) -> None:
                                 + "; ".join(failed))
         job = _start_setup_job(request, copy_custom_nodes)
         return {"job_id": job.id, "cleared": [str(p) for p in removed]}
+
+    @app.post("/api/comfy/update",
+              dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
+    async def comfy_update(request: Request, reinstall_requirements: bool = False):
+        """Move localm's managed ComfyUI to the pinned commit localm ships, by running
+        the EXISTING `localm comfy update` entry point as a background job. An update
+        re-checks-out the source and can reinstall requirements, so it takes minutes
+        and must not block the request - same shape as /api/comfy/setup, streamed via
+        /api/jobs/{id}/events.
+
+        Until this route existed the update path was CLI-only: the GUI offered set up,
+        repair and remove but no way to update, so a GUI-only user could install a
+        managed ComfyUI and never move it off the pin they installed on.
+
+        ``reinstall_requirements`` forwards `--reinstall-requirements`. It is off by
+        default for the same reason the CLI defaults it off (a partial pip upgrade is
+        not exactly rollback-able, so only the git source rollback is guaranteed), but
+        it MUST be reachable from here: when a pin advances across a dependency change,
+        an update without it leaves a checkout that moved without its new deps.
+
+        Refuses (409) when nothing is installed, when an update is already running, or
+        while a setup/repair job is still in flight - never two writers on one checkout.
+        The non-git refusal is NOT duplicated here: update_managed_comfy() owns it and
+        reports it honestly through the job's own output (the GUI also pre-warns from
+        managed-status's advisory ``updatable``)."""
+        from localm.media.managed_comfy import is_managed_comfy_installed
+        if not is_managed_comfy_installed():
+            raise HTTPException(
+                409, "No managed ComfyUI is installed - nothing to update. Set one up "
+                "first.")
+        if jobs.has_running("comfy-update"):
+            raise HTTPException(409, "A ComfyUI update is already running.")
+        if jobs.has_running("comfy-setup"):
+            raise HTTPException(
+                409, "A ComfyUI setup is still running - wait for it to finish, then "
+                "update.")
+        args = ["comfy", "update"]
+        if reinstall_requirements:
+            args.append("--reinstall-requirements")
+        job = jobs.start_cli("comfy-update", args,
+                             host_label="ComfyUI update", owner=principal_id(request))
+        return {"job_id": job.id}
 
     @app.post("/api/comfy/remove",
               dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])

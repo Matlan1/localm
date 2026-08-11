@@ -1630,6 +1630,19 @@ export async function renderManagedComfyPanel(host, toggleFields) {
       save.onclick = () => saveSettingsSection("media");
       actions.appendChild(save);
     }
+    // Update: move the managed checkout to the pin localm ships. Long (a re-checkout,
+    // optionally a dependency reinstall), so it streams a job exactly like Set up.
+    // ALWAYS rendered once installed - an unreadable/unknown update status must never
+    // silently remove the only way to update (rule 5); it is disabled only for the one
+    // case where updating is genuinely impossible, and then it says why.
+    const update = el("button", "btn-secondary comfy-managed-update-btn", "Update");
+    update.type = "button";
+    if (st.updatable === false) {
+      update.disabled = true;
+      update.title = st.update_blocked_reason || "This install cannot be updated.";
+    }
+    actions.appendChild(update);
+
     const remove = el("button", "btn-secondary comfy-managed-remove-btn", "Remove");
     remove.type = "button";
     remove.onclick = () => confirmDanger(
@@ -1651,6 +1664,84 @@ export async function renderManagedComfyPanel(host, toggleFields) {
       });
     actions.appendChild(remove);
     host.appendChild(actions);
+
+    // Say WHICH version is installed and which localm ships, so "Update" is a
+    // decision rather than a mystery button. update_available is deliberately
+    // tri-state: null means the marker could not be read, which is NOT "up to date".
+    const vers = el("div", "sub comfy-managed-version");
+    if (st.update_available === true) {
+      vers.textContent = "Installed ComfyUI " + (st.installed_version || st.installed_commit || "")
+        + " - localm ships " + (st.pinned_version || "a newer pin") + ". Update to move to it.";
+    } else if (st.update_available === false) {
+      vers.textContent = "Up to date with the ComfyUI localm ships ("
+        + (st.pinned_version || "") + ").";
+    } else if (st.installed) {
+      vers.textContent = "Could not read which ComfyUI version is installed, so it is "
+        + "unknown whether an update is due. Update is safe to run either way: it rolls "
+        + "back if it fails.";
+    }
+    if (vers.textContent) host.appendChild(vers);
+
+    if (st.updatable === false) {
+      // The blocking reason as TEXT, not only a hover title - a disabled button with
+      // no visible explanation is exactly the opaque dead end this route exists to fix.
+      host.appendChild(el("div", "sub", st.update_blocked_reason));
+    }
+
+    const deps = el("label", "comfy-managed-reinstall");
+    const depsBox = el("input");
+    depsBox.type = "checkbox";
+    depsBox.className = "comfy-managed-reinstall-box";
+    deps.appendChild(depsBox);
+    deps.append(" Also reinstall ComfyUI's dependencies (needed when the new version "
+                + "changed them; slower)");
+    if (st.updatable !== false) host.appendChild(deps);
+
+    const ulog = el("pre", "comfy-managed-log");
+    ulog.style.display = "none";
+    host.appendChild(ulog);
+
+    update.onclick = async () => {
+      update.disabled = true;
+      update.textContent = "Updating...";
+      ulog.style.display = "";
+      ulog.textContent = "";
+      const resetUpdate = () => { update.disabled = false; update.textContent = "Update"; };
+      let jobId;
+      try {
+        const q = depsBox.checked ? "?reinstall_requirements=true" : "";
+        const r = await fetch("/api/comfy/update" + q,
+                              { method: "POST", headers: authHeaders() });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) {
+          toast(d.detail || "Update failed", true);
+          resetUpdate();
+          ulog.style.display = "none";
+          return;
+        }
+        jobId = d.job_id;
+      } catch (e) {
+        toast("Update failed", true);
+        resetUpdate();
+        return;
+      }
+      let last = "";
+      const end = await streamJob(jobId, (line) => {
+        ulog.textContent += line + "\n";
+        if (line && line.trim()) last = line.trim();
+        ulog.scrollTop = ulog.scrollHeight;
+      });
+      const ok = !!(end && end.status === "done");
+      // On failure show the REASON the job actually gave (the non-git refusal, a
+      // fetch error, a rollback note) instead of a generic "see the log" - that
+      // sentence is the whole point of surfacing this in the GUI at all.
+      toast(ok ? "localm's ComfyUI is up to date"
+               : (last || "Update did not finish (see the log)"), !ok);
+      // Same reasoning as Set up: never re-render over a failure log the toast just
+      // pointed at. On success re-render so the version line and pill refresh.
+      if (ok) renderManagedComfyPanel(host, toggleFields);
+      else resetUpdate();
+    };
     return;
   }
 
