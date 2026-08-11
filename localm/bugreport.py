@@ -887,6 +887,24 @@ def report_title(summary: str, what_happened: str, description: str) -> str:
     return summary.strip()[:120] or "user-reported issue"
 
 
+# The GUI route offloads save_user_report() to a real worker thread (it does
+# blocking file I/O and must not stall the event loop - diff-review-
+# discipline.md item 15), so two reports filed close together can now run
+# this function on two DIFFERENT threads at the same instant, not merely
+# interleaved on one event loop the way a synchronous handler used to
+# guarantee for free. Two hazards that were previously impossible:
+# _ring_activity() reads then deletes the shared pre_restart.log (a second
+# reader can race the first's unlink), and save_report() can open the SAME
+# same-second-timestamped filename for writing from two threads at once,
+# interleaving their content into one corrupted file instead of cleanly
+# losing one report. This lock restores the atomicity the old code had only
+# by accident of its execution model. Scoped to this function (not a
+# module-wide lock shared with report_failure's own build_report()/
+# save_report() calls): report_failure is the CLI/crash path, a separate
+# process per invocation with no new in-process concurrency from this change.
+_SAVE_REPORT_LOCK = threading.Lock()
+
+
 def save_user_report(description: str = "", *, summary: str = "",
                      what_i_expected: str = "", what_happened: str = "",
                      include_log: bool = False,
@@ -915,44 +933,48 @@ def save_user_report(description: str = "", *, summary: str = "",
     it found in a DIFFERENT process (REG-736; see live_server_hang_trace) -
     the self-pid check below only ever catches the caller's own freeze, which
     is never the CLI's own case. Returns None on a write failure (the caller
-    surfaces that rather than reporting a false success)."""
-    description = (description or "").strip()
-    what_i_expected = (what_i_expected or "").strip()
-    what_happened = (what_happened or "").strip()
-    summary = report_title(summary, what_happened, description)
-    context: dict = {"operation": "gui-bug-report"}
-    if description:
-        context["what_i_did"] = description
-    if what_i_expected:
-        context["what_i_expected"] = what_i_expected
-    if what_happened:
-        context["what_happened"] = what_happened
-    if include_log:
-        import os
-        tail = _recent_log_tail(pid=os.getpid())
-        if tail:
-            context["recent_log_tail"] = tail
-    # Always attach a hang trace captured by THIS run (independent of
-    # include_log): it only exists if the server actually froze, and it is the
-    # single most useful thing for diagnosing a "the app hung" report. Scoped to
-    # our own pid like the log tail above: an old freeze from a previous run is
-    # not this report's problem, and presenting one as the diagnosis is worse
-    # than attaching nothing (REG-542).
-    import os as _os
-    hang = _recent_hang_traces(pid=_os.getpid())
-    # extra_hang_trace covers the ``localm bug-report`` CLI's own case (REG-736):
-    # it is a separate, short-lived process whose OWN pid never froze, while the
-    # server that DID freeze is a different, still-running process - a pid-of-
-    # self match finds nothing there, so the CLI looks the live server up itself
-    # (live_server_hang_trace) and passes what it found in here instead.
-    if extra_hang_trace:
-        hang = f"{hang}\n\n{extra_hang_trace}" if hang else extra_hang_trace
-    if hang:
-        context["hang_traces"] = hang
-    if isinstance(client, dict) and client:
-        context["client"] = client
-    text = build_report(summary, context=context)
-    return save_report(text)
+    surfaces that rather than reporting a false success). Serialized on
+    ``_SAVE_REPORT_LOCK`` (see the comment above that lock) so two GUI-triggered
+    calls running on different worker threads at once cannot race the shared
+    pre_restart.log read+delete or collide on the same-second report filename."""
+    with _SAVE_REPORT_LOCK:
+        description = (description or "").strip()
+        what_i_expected = (what_i_expected or "").strip()
+        what_happened = (what_happened or "").strip()
+        summary = report_title(summary, what_happened, description)
+        context: dict = {"operation": "gui-bug-report"}
+        if description:
+            context["what_i_did"] = description
+        if what_i_expected:
+            context["what_i_expected"] = what_i_expected
+        if what_happened:
+            context["what_happened"] = what_happened
+        if include_log:
+            import os
+            tail = _recent_log_tail(pid=os.getpid())
+            if tail:
+                context["recent_log_tail"] = tail
+        # Always attach a hang trace captured by THIS run (independent of
+        # include_log): it only exists if the server actually froze, and it is the
+        # single most useful thing for diagnosing a "the app hung" report. Scoped to
+        # our own pid like the log tail above: an old freeze from a previous run is
+        # not this report's problem, and presenting one as the diagnosis is worse
+        # than attaching nothing (REG-542).
+        import os as _os
+        hang = _recent_hang_traces(pid=_os.getpid())
+        # extra_hang_trace covers the ``localm bug-report`` CLI's own case (REG-736):
+        # it is a separate, short-lived process whose OWN pid never froze, while the
+        # server that DID freeze is a different, still-running process - a pid-of-
+        # self match finds nothing there, so the CLI looks the live server up itself
+        # (live_server_hang_trace) and passes what it found in here instead.
+        if extra_hang_trace:
+            hang = f"{hang}\n\n{extra_hang_trace}" if hang else extra_hang_trace
+        if hang:
+            context["hang_traces"] = hang
+        if isinstance(client, dict) and client:
+            context["client"] = client
+        text = build_report(summary, context=context)
+        return save_report(text)
 
 
 def _truncate_body(body: str) -> str:

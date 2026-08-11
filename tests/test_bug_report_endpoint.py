@@ -38,6 +38,45 @@ def test_no_token_refused_in_open_mode(monkeypatch):
     assert r.status_code == 403
 
 
+def test_save_does_not_run_on_the_event_loop(monkeypatch):
+    """Filing a report does a synchronous log read + scrub + file write
+    (bugreport.save_user_report) - measured loop_lag=0.67s in the field,
+    stalling every concurrent request for the duration. Oracle:
+    asyncio.get_running_loop() succeeds only on the event-loop thread and
+    raises RuntimeError in a threadpool worker (same technique as
+    test_comfy_models_offloaded_638.py) - structural, no sleeps or timing, so
+    it cannot be load-sensitive or flaky."""
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
+    import asyncio
+
+    from localm import bugreport
+
+    seen: dict = {}
+    real_save = bugreport.save_user_report
+
+    def _probing_save(*a, **kw):
+        try:
+            asyncio.get_running_loop()
+            seen["on_loop"] = True      # ON the event-loop thread: the defect
+        except RuntimeError:
+            seen["on_loop"] = False     # off-loop (threadpool worker): correct
+        return real_save(*a, **kw)
+
+    monkeypatch.setattr(bugreport, "save_user_report", _probing_save)
+    app = create_app(_engine())
+    with TestClient(app) as c:
+        r = c.post(
+            "/api/bug-report",
+            json={"description": "must not stall the loop"},
+            headers={"Authorization": f"Bearer {app.state.shell_token}"},
+        )
+    assert r.status_code == 200, r.text
+    assert seen.get("on_loop") is False, (
+        "file_bug_report_ep called save_user_report ON the event loop: a slow "
+        "log digest or disk write would stall every other concurrent request")
+
+
 def test_files_a_report_with_shell_token(monkeypatch):
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)

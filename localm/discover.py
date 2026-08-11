@@ -1179,6 +1179,32 @@ _isolated_torch_unavailable = False
 # probe - roughly every 2.5s under the live VRAM meter.
 _isolated_torch_broken_warned = False
 
+# Field evidence (a real user's debug log): the child probe's stderr routinely
+# starts with a long virtualenv install-path prefix from Python's own
+# warnings.warn() formatting (``<path>:<line>: <Category>: <message>``) - on
+# its own, longer than the 200-char cap this used to be truncated to. So the
+# message body, the part that is actually actionable (e.g. "The following
+# list of GPU architectures compatible with this version of PyTorch..."),
+# never survived: measured, the fragment "The following list" appeared with
+# nothing after it dozens of times across one session. Raised generously
+# rather than truncated from either a fixed front or back: this stderr can
+# carry either a warnings.warn() message (the point comes AFTER the
+# file:line: Category: prefix) or an uncaught exception's traceback (the
+# point is the LAST line), and a truncation direction that helps one shape
+# reliably guts the other. A blind cut is also a rule-5 violation regardless
+# of direction, so any truncation that still happens beyond this generous a
+# limit is marked, never silent.
+_CHILD_STDERR_LOG_CAP = 2000
+
+
+def _capped_stderr(text: str, limit: int = _CHILD_STDERR_LOG_CAP) -> str:
+    """*text* (child-probe stderr), capped to *limit* chars for a log line.
+    Marks the cut explicitly when it actually truncates - a silently cut
+    diagnostic is the same rule-5 shape as swallowing it outright."""
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"... [truncated, {len(text) - limit} more chars]"
+
 
 class _IsolatedTorchWedged(Exception):
     """The out-of-process torch probe ran but did not finish in time, i.e. TORCH
@@ -1271,7 +1297,7 @@ def _torch_gpus_isolated() -> "Optional[list]":
         logger.debug("list_gpus: out-of-process torch probe printed nothing "
                      "(rc=%s)%s; treating as unavailable, not as 'no device'",
                      proc.returncode,
-                     f"; child said: {err[:200]}" if err else "")
+                     f"; child said: {_capped_stderr(err)}" if err else "")
         return None
     try:
         devices = json.loads(raw)
@@ -1284,14 +1310,14 @@ def _torch_gpus_isolated() -> "Optional[list]":
     except Exception as e:
         logger.debug("list_gpus: out-of-process torch probe reply unusable "
                      "(%s)%s; falling through to nvidia-smi", e,
-                     f"; child said: {err[:200]}" if err else "")
+                     f"; child said: {_capped_stderr(err)}" if err else "")
         return None
     if err:
         # The child prints its own failure cause here before answering []. That
         # is the reason the reading is missing, so it must not die with the
         # discarded stream.
         logger.debug("list_gpus: out-of-process torch probe reported: %s",
-                     err[:200])
+                     _capped_stderr(err))
     return devices
 
 
