@@ -647,10 +647,16 @@ class HTTPBackend(BaseLLMBackend):
 def make_localm_backend(model: str, port: int = 8642, *,
                         api_key: str = "", **kw) -> HTTPBackend:
     """Backend for a local ``localm serve``. The bearer key resolves to *api_key*
-    if given, else ``$LOCALM_API_KEY``, else ``"localm"`` (open-mode servers
-    accept any non-empty string). A hardcoded ``"localm"`` would 401 against a
-    ``require_auth`` server - the C1 keystone bug this resolves."""
-    key = api_key or os.environ.get("LOCALM_API_KEY") or "localm"
+    if given, else the owner key this install has configured (env var, else
+    the persisted ``auth.key`` - ``auth.get_api_key()``), else ``"localm"``
+    (open-mode servers accept any non-empty string). A hardcoded ``"localm"``
+    would 401 against a ``require_auth`` server - the C1 keystone bug this
+    resolves. Checking only ``$LOCALM_API_KEY`` and never ``auth.key`` was a
+    narrower re-open of the same bug (checkup 2026-08-11 item 12): a server
+    keyed via ``localm key generate`` (persisted to file, no env var set)
+    still 401'd every ``localcoder --no-server`` attach."""
+    from localm.auth import get_api_key
+    key = api_key or get_api_key() or "localm"
     return HTTPBackend(f"http://127.0.0.1:{port}/v1", model, api_key=key,
                        localm_server=True, **kw)
 

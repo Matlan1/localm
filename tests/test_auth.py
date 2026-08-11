@@ -635,3 +635,44 @@ def test_second_key_does_not_reseed_owner_or_session(auth, monkeypatch):
         assert not r.headers.get_list("set-cookie")   # no session seeded
         # the env owner key is untouched; no auth.key was written
         assert auth._read_key_file() is None
+
+
+# --------------------------------------------------------------------------- #
+#  resolve_bearer_token / resolve_bearer_headers precedence                   #
+#  (checkup 2026-08-11 item 12: owner key must win over an instance token     #
+#  wherever a self-call resolves its own credential - see also               #
+#  tests/test_no_untracked_authorization_header_writes.py, which enumerates  #
+#  every call site that must route through this precedence.)                 #
+# --------------------------------------------------------------------------- #
+
+def test_resolve_bearer_token_prefers_owner_key_over_instance_token(auth):
+    auth.set_api_key("owner-secret-key")
+    assert auth.resolve_bearer_token("inst-token-abc") == "owner-secret-key"
+
+
+def test_resolve_bearer_token_falls_back_to_instance_token_when_open(auth):
+    assert auth.get_api_key() is None      # open mode
+    assert auth.resolve_bearer_token("inst-token-abc") == "inst-token-abc"
+
+
+def test_resolve_bearer_token_none_when_neither_available(auth):
+    assert auth.get_api_key() is None
+    assert auth.resolve_bearer_token(None) is None
+    assert auth.resolve_bearer_token("") is None
+
+
+def test_resolve_bearer_token_env_key_also_wins(auth, monkeypatch):
+    auth.set_api_key("file-key")
+    monkeypatch.setenv("LOCALM_API_KEY", "env-key")
+    assert auth.resolve_bearer_token("inst-token-abc") == "env-key"
+
+
+def test_resolve_bearer_headers_matches_resolve_bearer_token(auth):
+    """resolve_bearer_headers is a thin wrapper - same precedence, dict shape."""
+    auth.set_api_key("owner-secret-key")
+    assert auth.resolve_bearer_headers("inst-token-abc") == {
+        "Authorization": "Bearer owner-secret-key"}
+    auth.clear_api_key()
+    assert auth.resolve_bearer_headers("inst-token-abc") == {
+        "Authorization": "Bearer inst-token-abc"}
+    assert auth.resolve_bearer_headers(None) == {}

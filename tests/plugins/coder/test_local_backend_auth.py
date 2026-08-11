@@ -27,6 +27,30 @@ class TestMakeLocalmBackendKey:
         monkeypatch.setenv("LOCALM_API_KEY", "envkey")
         assert make_localm_backend("m", port=8642, api_key="")._api_key == "envkey"
 
+    def test_reads_persisted_auth_key_file(self, monkeypatch):
+        """FAILS pre-fix: make_localm_backend read $LOCALM_API_KEY only, never
+        the persisted auth.key file, so a server keyed via `localm key
+        generate` (file, no env var) still 401'd every `localcoder
+        --no-server` attach (checkup 2026-08-11 item 12, a narrower re-open
+        of this same C1 class)."""
+        monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+        from localm import auth
+        auth.set_api_key("file-key-persisted")
+        assert make_localm_backend("m", port=8642)._api_key == "file-key-persisted"
+
+    def test_env_still_wins_over_persisted_file(self, monkeypatch):
+        from localm import auth
+        auth.set_api_key("file-key")
+        monkeypatch.setenv("LOCALM_API_KEY", "env-key")
+        assert make_localm_backend("m", port=8642)._api_key == "env-key"
+
+    def test_explicit_api_key_wins_over_persisted_file(self, monkeypatch):
+        monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+        from localm import auth
+        auth.set_api_key("file-key")
+        assert (make_localm_backend("m", port=8642, api_key="flagkey")._api_key
+               == "flagkey")
+
 
 class TestCoderCliThreadsKey:
     """The local (auto-started / --no-server) path must pass the resolved key
@@ -55,6 +79,29 @@ class TestCoderCliThreadsKey:
 
     def test_flag_overrides_env(self, monkeypatch):
         monkeypatch.setenv("LOCALM_API_KEY", "envkey")
+        captured = self._capture(monkeypatch)
+        CliRunner().invoke(ccli.main, ["--model", "m", "--no-server",
+                                       "--api-key", "flagkey", "hi"])
+        assert captured.get("api_key") == "flagkey"
+
+    def test_neither_flag_nor_env_forwards_empty_not_the_literal_default(
+            self, monkeypatch):
+        """--api-key's click default is the literal placeholder "localm"
+        (always truthy), so forwarding it as-is would short-circuit
+        make_localm_backend's own env/auth.key resolution before it ever
+        runs (checkup 2026-08-11 item 12). With nothing explicit, the CLI
+        must forward "" - make_localm_backend's own "nothing given" sentinel
+        - so ITS resolution (env, then auth.key, then "localm") actually
+        gets a chance to run."""
+        monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+        captured = self._capture(monkeypatch)
+        CliRunner().invoke(ccli.main, ["--model", "m", "--no-server", "hi"])
+        assert captured.get("api_key") == ""
+
+    def test_flag_overrides_persisted_key_file(self, monkeypatch):
+        monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+        from localm import auth
+        auth.set_api_key("file-key-persisted")
         captured = self._capture(monkeypatch)
         CliRunner().invoke(ccli.main, ["--model", "m", "--no-server",
                                        "--api-key", "flagkey", "hi"])

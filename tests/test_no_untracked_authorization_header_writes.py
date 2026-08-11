@@ -24,10 +24,11 @@ _CROSS_ORIGIN_OK). The property is "resolves through the shared precedence
 where the route needs it", not "calls one named function" - asserting the
 latter would flag these two as violations:
 
-  localm/auth.py:228,230        the canonical implementation itself
-                                 (resolve_bearer_headers).
+  localm/auth.py:251            the canonical implementation itself
+                                 (resolve_bearer_headers, wrapping the raw-
+                                 token precedence in resolve_bearer_token).
 
-  localm/cli/rag.py:392         POSTs /v1/embeddings, which IS listed in
+  localm/cli/rag.py:417         POSTs /v1/embeddings, which IS listed in
                                  http_server.py's _CROSS_ORIGIN_OK - the
                                  open-mode gate never applies, so get_api_key()
                                  alone (no instance_token fallback) is correct,
@@ -38,22 +39,29 @@ latter would flag these two as violations:
 
   localm/inference/http_engine.py:108,203
                                  HttpEngine/remote_model_status route the
-                                 `localm run`/`chat` ATTACH flow, a different
-                                 credential class entirely: the token sent is
-                                 always the discovered instance's own registry
-                                 attach token (never this process's owner
-                                 key), used for /v1/chat/completions (exempt,
-                                 same as above) and a best-effort /v1/config
-                                 capacity probe that already degrades
-                                 gracefully (try/except -> None) on a keyed
-                                 target instead of hard-failing the attach -
-                                 not the "primary function silently or hard-
-                                 breaks in the default configuration" shape
-                                 this precedence class exists to fix. Recorded
-                                 here as a known, low-severity, DIFFERENT-
-                                 command candidate rather than silently
-                                 rediscovered later; not fixed in this change
-                                 (out of scope - see the PR/commit notes).
+                                 `localm run`/`chat` ATTACH flow. These two
+                                 lines are a generic HTTP client: they send
+                                 whatever *token* the caller passes in, so
+                                 they never need to call resolve_bearer_*
+                                 themselves. RESOLVING the right token is the
+                                 CALLER's job - cli/chat.py's `run()` and
+                                 coder/cli/_main.py's `_build_backend()` now
+                                 both call auth.resolve_bearer_token(target
+                                 ["token"]) before constructing HttpEngine /
+                                 HTTPBackend, so a keyed self-attach sends the
+                                 owner key (checkup 2026-08-11 item 12 fixed
+                                 this - it was flagged here as a known,
+                                 unfixed, low-severity gap by the original
+                                 2026-08-05 credential-resolution-helper PR;
+                                 that flag turned out to be the "primary
+                                 function hard-breaks in the default
+                                 configuration" shape after all, contrary to
+                                 its own "not a hard-block" reasoning at the
+                                 time - see dev-notes/FIX-2026-08-05-
+                                 credential-resolution-helper.md for the
+                                 original, since-corrected rationale). The raw
+                                 instance token remains the correct value to
+                                 pass in for the open-mode fallback.
 
   localm/plugins/coder/backends/http.py:353
                                  (the dict literal's opening line - the
@@ -67,7 +75,7 @@ latter would flag these two as violations:
                                  Legitimately env/flag-scoped, not a self-call
                                  to THIS install.
 
-  localm/plugins/gui/cli.py:109 `_mount_remote_gui` asks a SIBLING localm
+  localm/plugins/gui/cli.py:125 `_mount_remote_gui` asks a SIBLING localm
                                  instance (found via discovery, "api" mode) to
                                  mount its own GUI, using THAT instance's own
                                  registry attach token - the route
@@ -93,13 +101,12 @@ from localm import auth as _auth
 # (relative-to-repo-root path, line number) for every reviewed site. Paths use
 # forward slashes regardless of host OS so the assertion is platform-stable.
 _REVIEWED_SITES = {
-    ("localm/auth.py", 228),
-    ("localm/auth.py", 230),
-    ("localm/cli/rag.py", 392),
+    ("localm/auth.py", 251),
+    ("localm/cli/rag.py", 417),
     ("localm/inference/http_engine.py", 108),
     ("localm/inference/http_engine.py", 203),
     ("localm/plugins/coder/backends/http.py", 353),
-    ("localm/plugins/gui/cli.py", 109),
+    ("localm/plugins/gui/cli.py", 125),
 }
 
 

@@ -691,6 +691,19 @@ def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
     # (the name moved into this submodule when cli.py became a package).
     make_localm_backend = _cli.make_localm_backend
 
+    # AUTH-ATTACH: whether the caller actually chose *api_key* (a real
+    # -k/--api-key or $LOCALM_API_KEY) rather than it sitting at its literal
+    # placeholder default "localm" - the same distinction _explicit() draws in
+    # plugins/gui/cli.py, widened to also count ENVIRONMENT (the option's own
+    # envvar) as explicit, not just COMMANDLINE. Needed below: an unset
+    # --api-key must never override an explicit user choice (hard-won rule),
+    # but it also must never be sent as-is to a keyed server, since "localm"
+    # authenticates nothing real.
+    from click.core import ParameterSource
+    _api_key_explicit = (
+        click.get_current_context().get_parameter_source("api_key")
+        != ParameterSource.DEFAULT)
+
     if provider == "openai":
         if not model:
             model = "gpt-4o"
@@ -722,8 +735,9 @@ def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
 
         # H6 phase 6: attach to the localm already running for this project dir
         # instead of starting a second server that loads its own model. This is
-        # the "one server handles chat + coder" fix - and it uses the running
-        # instance's own token, so it no longer 401s with a guessed key.
+        # the "one server handles chat + coder" fix - see the credential
+        # resolution just below (_api_key_explicit / resolve_bearer_token) for
+        # how it authenticates without a guessed key.
         attached = None
         if not (force_new or no_server):
             try:
@@ -734,11 +748,20 @@ def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
             except Exception:
                 _tgt = None
             if _tgt:
-                # Authenticate with the user's configured key (env / --api-key);
-                # an open-mode instance accepts any bearer. (The per-instance
-                # registry token as a keyless local-attach credential is a
-                # follow-up - it needs the server to accept it as a bearer.)
-                attached = HTTPBackend(_tgt["base_url"], model, api_key=api_key,
+                # Authenticate with the user's EXPLICIT key (--api-key /
+                # $LOCALM_API_KEY) when they gave one; otherwise resolve the
+                # same credential `localm run` uses for its own attach - the
+                # owner key when this install has one configured, else the
+                # discovered instance's own attach token in open mode
+                # (auth.resolve_bearer_token). Without this, an unset
+                # --api-key falls through to its literal placeholder
+                # "localm", which authenticates nothing and 401s against any
+                # keyed server (checkup 2026-08-11 item 12).
+                attach_key = api_key
+                if not _api_key_explicit:
+                    from localm.auth import resolve_bearer_token
+                    attach_key = resolve_bearer_token(_tgt.get("token")) or api_key
+                attached = HTTPBackend(_tgt["base_url"], model, api_key=attach_key,
                                        native_tools=native_tools,
                                        localm_server=True)   # discovered localm instance
                 console.print(
@@ -751,7 +774,15 @@ def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
         else:
             if no_server:
                 srv_port = port or 8642
-                backend = make_localm_backend(model, port=srv_port, api_key=api_key)
+                # api_key's click default is the literal placeholder "localm"
+                # (always truthy), so forwarding it as-is would short-circuit
+                # make_localm_backend's own env/auth.key resolution before it
+                # ever runs. Forward "" (its own "nothing explicit" sentinel)
+                # when the user gave no real key, so a server keyed via
+                # `localm key generate` (persisted to auth.key, no env var)
+                # still authenticates (checkup 2026-08-11 item 12).
+                attach_key = api_key if _api_key_explicit else ""
+                backend = make_localm_backend(model, port=srv_port, api_key=attach_key)
             else:
                 console.print("[dim]No server running. Starting one in the background...[/dim]")
                 import subprocess
@@ -852,7 +883,12 @@ def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
                         if _tgt:
                             break
                     if _tgt:
-                        backend = HTTPBackend(_tgt["base_url"], model, api_key=api_key,
+                        attach_key = api_key
+                        if not _api_key_explicit:
+                            from localm.auth import resolve_bearer_token
+                            attach_key = (resolve_bearer_token(_tgt.get("token"))
+                                         or api_key)
+                        backend = HTTPBackend(_tgt["base_url"], model, api_key=attach_key,
                                               native_tools=native_tools,
                                               localm_server=True)
                         console.print(f"[dim]connected to newly started server at {_tgt['base_url']}[/dim]")

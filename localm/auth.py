@@ -198,19 +198,45 @@ def get_api_key() -> Optional[str]:
     return _read_key_file()
 
 
-def resolve_bearer_headers(instance_token: Optional[str] = None) -> dict:
-    """The ``Authorization`` header (if any) a self-call or management client
-    should send: the owner key (env, else the persisted ``auth.key``) if one
-    is configured, else *instance_token* in OPEN (keyless) mode, else none.
+def resolve_bearer_token(instance_token: Optional[str] = None) -> Optional[str]:
+    """The bearer credential value (if any) a self-call or management client
+    should present: the owner key (env, else the persisted ``auth.key``) if
+    one is configured, else *instance_token* in OPEN (keyless) mode, else
+    None.
 
     This is the precedence every self-authenticated caller of localm's own
     HTTP surface needs and none may skip: ``_origin_guard``'s open-mode gate
     (``http_server.py``) requires proof of a local process - a key when one
     exists, or the per-instance attach token (the 0600 registry file) when it
     does not - for any unsafe method or metadata GET not listed in
-    ``_CROSS_ORIGIN_OK``. *instance_token* is used ONLY when no key is
-    configured, matching the server's own condition for requiring one at all;
-    a protected-mode server always keeps using the real key.
+    ``_CROSS_ORIGIN_OK``; and ``_enforce_request``'s key check (every gated
+    route once a key IS configured) accepts a real key ONLY - it has no
+    notion of instance tokens at all, so presenting one there always 401s.
+    *instance_token* is used ONLY when no key is configured, matching the
+    server's own condition for requiring one at all; a protected-mode server
+    always keeps using the real key.
+
+    THE single place this precedence is decided. ``resolve_bearer_headers``
+    below is a thin wrapper for callers that want a ready-to-use headers
+    dict; callers that build their own request (or, like ``HttpEngine``,
+    store the token and build the header per-call) should call this
+    directly rather than re-deriving ``get_api_key() or instance_token``
+    inline - see ``localm/inference/http_engine.py``'s ``HttpEngine``/
+    ``remote_model_status`` callers (``cli/chat.py``, ``coder/cli/_main.py``)
+    for the pattern.
+    """
+    key = get_api_key()
+    if key:
+        return key
+    return instance_token or None
+
+
+def resolve_bearer_headers(instance_token: Optional[str] = None) -> dict:
+    """The ``Authorization`` header (if any) a self-call or management client
+    should send - see ``resolve_bearer_token`` for the precedence. Returns a
+    plain ``dict`` (empty when neither credential is available) rather than
+    mutating a caller-supplied one, so every call site stays a simple
+    ``headers = resolve_bearer_headers(...)``.
 
     Hoisted out of five independent copies of this precedence: four already
     implemented it in full (``selfclient.read_activity``/``self_request``,
@@ -218,16 +244,11 @@ def resolve_bearer_headers(instance_token: Optional[str] = None) -> dict:
     (``media/comfy_client.py``'s ``_localm_unload``) implemented only the
     first line (env var, via ``os.environ`` directly rather than
     ``get_api_key()``) and had no instance_token fallback at all - fixed
-    alongside this extraction rather than ported as-is. Returns a plain
-    ``dict`` (empty when neither credential is available) rather than
-    mutating a caller-supplied one, so every call site stays a simple
-    ``headers = resolve_bearer_headers(...)``.
+    alongside this extraction rather than ported as-is.
     """
-    key = get_api_key()
-    if key:
-        return {"Authorization": f"Bearer {key}"}
-    if instance_token:
-        return {"Authorization": f"Bearer {instance_token}"}
+    token = resolve_bearer_token(instance_token)
+    if token:
+        return {"Authorization": f"Bearer {token}"}
     return {}
 
 
