@@ -30,6 +30,7 @@ revoked ADMIN/coder:full key still loses shell.
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 
@@ -80,12 +81,21 @@ def home(tmp_path, monkeypatch):
 def jobs_app(home, tmp_path):
     """The REAL jobs plugin mounted on a real app, so the create route (and the
     owner stamp it writes) is exercised for real rather than hand-constructed.
-    runner.run_job is NOT mocked here - the tests drive the real runner."""
+    runner.run_job is NOT mocked here - the tests drive the real runner.
+
+    The REAL session-login route is mounted alongside it, so the cookie tests below
+    mint their session the way a browser actually does (POST /api/session) instead
+    of hand-calling sessions.create. That matters: the mint site is half of the
+    fix, and a test that constructs the record itself would pass with that half
+    reverted.
+    """
     store_root = Path(__file__).resolve().parents[1] / "localm" / "plugins" / "builtin"
+    from localm.inference.routes import session as _routes_session
     from localm.plugins.engine import PluginManager
     app = FastAPI()
     PluginManager(app, store_root=store_root,
                   installed_root=tmp_path / "plugins").install("jobs")
+    _routes_session.register(app, None)      # register() never reads its ctx arg
     return app
 
 
@@ -124,6 +134,42 @@ def _create_shell_job(app, key, cwd) -> dict:
             "cwd": str(cwd), "schedule_kind": "interval", "schedule": 3600,
             "allow_shell": OPT_IN,
         }, headers=_h(key))
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def _login(app, key) -> str:
+    """Sign in through the REAL POST /api/session and return the session id the
+    server put in the cookie - i.e. exactly what a browser ends up holding."""
+    from localm.inference import http_server as hs
+    with TestClient(app) as c:
+        r = c.post("/api/session", json={"key": key})
+        assert r.status_code == 200, r.text
+        sid = c.cookies.get(hs.SESSION_COOKIE)
+    assert sid, "login set no session cookie"
+    return sid
+
+
+def _create_shell_job_over_cookie(app, sid, cwd) -> dict:
+    """POST a shell-opt-in coder job through the real route carrying a SESSION
+    COOKIE - the browser GUI's credential - rather than a bearer key.
+
+    Fetches the CSRF token from GET /api/session first and echoes it in
+    X-CSRF-Token, exactly as the GUI does: a cookie-authenticated state change is
+    CSRF-gated (_enforce_request), and that gate is live here. Doing it the real
+    way rather than bypassing it keeps this driving the production flow."""
+    from localm.inference import http_server as hs
+    with TestClient(app) as c:
+        c.cookies.set(hs.SESSION_COOKIE, sid)
+        state = c.get("/api/session")
+        assert state.status_code == 200, state.text
+        csrf = state.json().get("csrf")
+        assert csrf, f"no CSRF token for this session: {state.text}"
+        r = c.post("/api/jobs", json={
+            "name": "nightly", "task_kind": "coder", "prompt": "tidy up",
+            "cwd": str(cwd), "schedule_kind": "interval", "schedule": 3600,
+            "allow_shell": OPT_IN,
+        }, headers={hs.CSRF_HEADER: csrf})
     assert r.status_code == 200, r.text
     return r.json()
 
@@ -350,6 +396,252 @@ def test_the_owner_key_over_a_cookie_session_is_the_owner(home):
     sid = sessions.create(scopes={S.ADMIN}, key_hash=auth._hash_key(KEY_ONE),
                           fs_access="host")
     assert _caller_is_owner_key(_cookie_request(sid)) is True
+
+
+# --------------------------------------------------------------------------- #
+#  THE RESIDUAL: the job is created over a COOKIE SESSION minted BEFORE the     #
+#  roll. The entry's own named trigger ("GUI roll"), and the case none of the   #
+#  cookie tests above could express - each of them creates its session AFTER    #
+#  the key is already in its final state, so the frozen key_hash never goes     #
+#  stale and the value comparison alone answers correctly.                      #
+# --------------------------------------------------------------------------- #
+
+def test_owner_session_job_keeps_shell_when_the_key_rolled_after_sign_in(
+        jobs_app, tmp_path, monkeypatch):
+    """The reported chain, end to end and entirely through real routes: the owner
+    signs into the GUI under K1, rolls the key to K2 (which deliberately does NOT
+    sign the browser out), then schedules a shell job from that still-valid
+    session. The runner must keep the shell step.
+
+    Before the fix the session froze hash(K1); after the roll that matched neither
+    the new owner key nor any keystore entry, so the job was stamped as not the
+    owner's and the runner downgraded it - silently, permanently, on the owner's
+    own automation."""
+    from localm import auth
+    work = tmp_path / "proj"
+    work.mkdir()
+    runner, captured = _fake_agent_capture(monkeypatch)
+
+    auth.set_api_key(KEY_ONE)
+    sid = _login(jobs_app, KEY_ONE)          # 1. sign in under K1
+
+    new_key = auth.regenerate_key()          # 2. roll to K2
+    assert new_key != KEY_ONE and auth.get_api_key() == new_key
+
+    # The session survives the roll BY DESIGN; that is the premise, not a bug.
+    from localm import sessions
+    assert sessions.lookup(sid) is not None, \
+        "premise broken: the roll signed the browser out, so this cannot test REG-509"
+
+    job_id = _create_shell_job_over_cookie(jobs_app, sid, work)["id"]  # 3. schedule
+    assert _stored(job_id).owner_is_owner_key is True, \
+        "a job created over the owner's own session was not stamped as the owner's"
+
+    result = runner.run_job(_stored(job_id), engine=None)              # 4. tick
+    assert result["status"] == "ok"
+    assert captured["restricted"] is False, (
+        "the owner's scheduled shell job lost shell because the owner key was "
+        "rolled after the browser session was minted (REG-509, cookie path)")
+
+
+def test_scheduler_tick_keeps_shell_for_a_job_made_over_a_pre_roll_session(
+        jobs_app, tmp_path, monkeypatch):
+    """Same chain, driven through the real scheduler tick - the autonomous path
+    the finding is actually about, where no request or caller exists any more."""
+    from localm import auth
+    from localm.plugins.builtin.jobs.scheduler import JobScheduler
+    from localm.plugins.builtin.jobs.store import JobStore
+    work = tmp_path / "proj"
+    work.mkdir()
+    _runner_mod, captured = _fake_agent_capture(monkeypatch)
+
+    auth.set_api_key(KEY_ONE)
+    sid = _login(jobs_app, KEY_ONE)
+    auth.regenerate_key()
+    job_id = _create_shell_job_over_cookie(jobs_app, sid, work)["id"]
+
+    ran = JobScheduler(JobStore()).tick(now=1e9)
+
+    assert ran == [job_id]
+    assert captured["restricted"] is False
+
+
+def test_a_keystore_key_session_is_not_stamped_and_still_loses_shell(
+        jobs_app, tmp_path, monkeypatch):
+    """The load-bearing negative for the cookie path, mirroring the bearer one at
+    the top of this section.
+
+    An ADMIN-scoped KEYSTORE key can sign into the GUI too, and its session is
+    equally ADMIN-scoped - so a fix that stamped "this session holds ADMIN", or
+    that inferred the owner from the session merely EXISTING, would mark it as the
+    owner and hand a revocable credential permanent shell (LM-DA-014). The stamp
+    must come from the key VALUE proven at mint, so this session is never marked
+    and revoking the key still strips shell."""
+    from localm import auth, sessions
+    work = tmp_path / "proj"
+    work.mkdir()
+    runner, captured = _fake_agent_capture(monkeypatch)
+
+    auth.set_api_key(KEY_ONE)               # an owner key exists, but is NOT used
+    created = auth.create_key("device", [S.ADMIN, JOBS], allow_privileged=True)
+    sid = _login(jobs_app, created["key"])
+
+    assert sessions.lookup(sid)["owner_key_minted"] is False, \
+        "an ADMIN-scoped KEYSTORE key's session was stamped as owner-key-minted"
+
+    job_id = _create_shell_job_over_cookie(jobs_app, sid, work)["id"]
+    assert _stored(job_id).owner_is_owner_key is False
+
+    # Control: while the key is live the job still runs shell-capable.
+    assert runner.run_job(_stored(job_id), engine=None)["status"] == "ok"
+    assert captured["restricted"] is False
+
+    assert auth.revoke_key(created["id"]) is True
+    captured.clear()
+    assert runner.run_job(_stored(job_id), engine=None)["status"] == "ok"
+    assert captured["restricted"] is True, (
+        "a REVOKED admin-scoped keystore key kept shell through its cookie "
+        "session (LM-DA-014)")
+
+
+def test_the_owner_login_records_the_stamp_and_a_scoped_login_does_not(jobs_app):
+    """Unit-pin the mint site itself, at the real route: the recorded flag tracks
+    the KEY VALUE presented, not the scopes it happens to carry."""
+    from localm import auth, sessions
+    auth.set_api_key(KEY_ONE)
+    scoped = auth.create_key("device", [S.ADMIN, JOBS], allow_privileged=True)
+
+    owner_rec = sessions.lookup(_login(jobs_app, KEY_ONE))
+    scoped_rec = sessions.lookup(_login(jobs_app, scoped["key"]))
+
+    assert owner_rec["owner_key_minted"] is True
+    assert scoped_rec["owner_key_minted"] is False
+    # Both are ADMIN sessions, so the scope set cannot be what separates them.
+    assert S.ADMIN in owner_rec["scopes"] and S.ADMIN in scoped_rec["scopes"]
+
+
+def test_a_session_recorded_before_this_field_existed_is_not_the_owner(home):
+    """Fail closed on absence. A session minted by an older build has no
+    ``owner_key_minted`` key at all; it must read as False rather than inheriting
+    a privilege it never proved. (It still resolves correctly by key VALUE until
+    the owner rolls - that is the pre-existing behaviour, not a new grant.)"""
+    from localm import auth, sessions
+    from localm.plugins.builtin.jobs.plug import _caller_is_owner_key
+
+    auth.set_api_key(KEY_ONE)
+    sid = sessions.create(scopes={S.ADMIN}, key_hash=auth._hash_key(KEY_ONE),
+                          fs_access="host")
+    # Strip the field the way an older build's store would have it: absent.
+    raw = json.loads(sessions.sessions_file().read_text(encoding="utf-8"))
+    for rec in raw:
+        rec.pop("owner_key_minted", None)
+    sessions.sessions_file().write_text(json.dumps(raw), encoding="utf-8")
+    sessions._CACHE["mtime"] = None          # force a re-read of the edited file
+
+    assert sessions.lookup(sid)["owner_key_minted"] is False
+    # Still the owner by VALUE, because the key has not rolled yet.
+    assert _caller_is_owner_key(_cookie_request(sid)) is True
+    # ...and once it rolls, the un-stamped legacy session correctly stops matching,
+    # which is exactly the pre-fix behaviour rather than a new hole.
+    auth.regenerate_key()
+    assert _caller_is_owner_key(_cookie_request(sid)) is False
+
+
+def test_a_truthy_non_bool_in_the_store_is_not_the_owner_stamp(home):
+    """A hand-edited or corrupted store row holding a truthy STRING must not read
+    as the stamp. create() only ever writes a real bool, so anything else is not
+    something this server wrote."""
+    from localm import auth, sessions
+    from localm.plugins.builtin.jobs.plug import _caller_is_owner_key
+
+    auth.set_api_key(KEY_ONE)
+    created = auth.create_key("device", [S.ADMIN, JOBS], allow_privileged=True)
+    sid = sessions.create(scopes={S.ADMIN}, key_hash=auth._hash_key(created["key"]),
+                          fs_access="host")
+    raw = json.loads(sessions.sessions_file().read_text(encoding="utf-8"))
+    for rec in raw:
+        rec["owner_key_minted"] = "yes"
+    sessions.sessions_file().write_text(json.dumps(raw), encoding="utf-8")
+    sessions._CACHE["mtime"] = None
+
+    assert sessions.lookup(sid)["owner_key_minted"] is False
+    assert _caller_is_owner_key(_cookie_request(sid)) is False
+
+
+def test_clearing_the_owner_key_destroys_the_stamp_with_the_session(jobs_app):
+    """The design call, pinned. A key ROLL leaves sessions (and so the stamp)
+    alive on purpose - that is the whole fix. The containment path for a leaked
+    owner key is ``key clear`` / sign out everywhere, which revokes every session,
+    so the stamp can never outlive the credential that carries it."""
+    from localm import auth, sessions
+    auth.set_api_key(KEY_ONE)
+    sid = _login(jobs_app, KEY_ONE)
+    assert sessions.lookup(sid)["owner_key_minted"] is True
+
+    auth.regenerate_key()                     # a ROLL keeps it (the fix)
+    assert sessions.lookup(sid)["owner_key_minted"] is True
+
+    sessions.revoke_all()                     # what key clear / recover call
+    assert sessions.lookup(sid) is None
+
+
+def test_the_legacy_identity_relink_preserves_the_stamp(home):
+    """The owner key's identity moved to a salted KDF, and relink_key_hash
+    rewrites existing sessions to the derived value. It must carry the stamp
+    across: dropping it there would re-open REG-509 through the upgrade path."""
+    from localm import auth, sessions
+    auth.set_api_key(KEY_ONE)
+    legacy = auth._legacy_owner_identity(KEY_ONE)
+    derived = auth._hash_key(KEY_ONE)
+    sid = sessions.create(scopes={S.ADMIN}, key_hash=legacy, fs_access="host",
+                          owner_key_minted=True)
+
+    assert sessions.relink_key_hash(legacy, derived) == 1
+
+    rec = sessions.lookup(sid)
+    assert rec["key_hash"] == derived
+    assert rec["owner_key_minted"] is True
+
+
+def test_a_revoked_scoped_session_is_never_read_for_the_stamp(home, monkeypatch):
+    """The stamp is read through the same re-validation every other cookie
+    consumer uses, never a bare sessions.lookup(). So a scoped-key session whose
+    key has been revoked is rejected outright - even if its record somehow carried
+    the flag, which only a tampered store could produce."""
+    from localm import auth, sessions
+    from localm.inference.http_server import caller_minted_by_owner_key
+
+    auth.set_api_key(KEY_ONE)
+    created = auth.create_key("device", [JOBS], allow_privileged=False)
+    sid = sessions.create(scopes={JOBS}, key_hash=auth._hash_key(created["key"]),
+                          fs_access="none", owner_key_minted=True)
+    assert caller_minted_by_owner_key(_cookie_request(sid)) is True   # control
+
+    # revoke_key ALSO drops the key's sessions, which would end the test early by
+    # a different mechanism. Neutralise that so what is measured here is purely
+    # the per-request key_hash_live re-validation.
+    monkeypatch.setattr(sessions, "revoke_by_key_hash", lambda *a, **kw: 0)
+    assert auth.revoke_key(created["id"]) is True
+    assert sessions.lookup(sid) is not None, "the session was dropped, not re-validated"
+    assert caller_minted_by_owner_key(_cookie_request(sid)) is False, (
+        "a revoked scoped key's session was read for the owner stamp without "
+        "the key_hash_live re-validation")
+
+
+def test_a_bearer_caller_is_never_stamped_from_a_session(home):
+    """caller_minted_by_owner_key answers only for a cookie. A bearer caller has
+    no session, and its correct answer comes from the key value comparison."""
+    from localm import auth, sessions
+    from localm.inference.http_server import caller_minted_by_owner_key
+    auth.set_api_key(KEY_ONE)
+    sessions.create(scopes={S.ADMIN}, key_hash=auth._hash_key(KEY_ONE),
+                    fs_access="host", owner_key_minted=True)
+
+    class _BearerReq:
+        cookies: dict = {}
+        headers = {"authorization": f"Bearer {KEY_ONE}"}
+
+    assert caller_minted_by_owner_key(_BearerReq()) is False
 
 
 def test_legacy_owner_job_is_restamped_so_a_later_rotation_cannot_strip_it(

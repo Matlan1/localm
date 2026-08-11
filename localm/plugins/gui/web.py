@@ -344,14 +344,20 @@ def _set_session_cookies(response, key: str, *, secure: bool) -> None:
     the client from GET /api/session, so there is no separate CSRF cookie to set (or
     to fall out of sync with the session, the pre-rework 'missing CSRF token' bug)."""
     from localm import scopes as S, sessions
-    from localm.auth import _hash_key, fs_access_for, verify
+    from localm.auth import _hash_key, _is_owner_key, fs_access_for, verify
     from localm.inference.http_server import SESSION_COOKIE, SESSION_MAX_AGE
     held = verify(key)
     if held is None:
         return
     fs = "host" if S.ADMIN in held else fs_access_for(key, "none")
     try:
-        sid = sessions.create(scopes=held, key_hash=_hash_key(key), fs_access=fs)
+        # owner_key_minted: see sessions.create. Asked HERE, of the key actually
+        # presented, rather than assumed from the call sites (both of which happen
+        # to pass auth.get_api_key()) - so if a future caller seeds a session from
+        # a scoped key instead, this answers False rather than inheriting a
+        # privilege stamp from an assumption that has quietly stopped holding.
+        sid = sessions.create(scopes=held, key_hash=_hash_key(key), fs_access=fs,
+                              owner_key_minted=_is_owner_key(key))
     except Exception as e:
         # The session store could not be written (e.g. a corrupt/unreadable
         # sessions.json). Do NOT 500 the whole GUI shell over a convenience

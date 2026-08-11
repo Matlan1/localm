@@ -51,10 +51,19 @@ def register(app: FastAPI, ctx) -> None:
         # the durable secret never sits in a cookie jar). The scope/identity/
         # fs-access snapshot is taken now so the session stays valid across a roll.
         from localm import scopes as S, sessions
-        from localm.auth import _hash_key, fs_access_for
+        from localm.auth import _hash_key, _is_owner_key, fs_access_for
         fs = "host" if S.ADMIN in held else fs_access_for(presented, "none")
+        # Record WHETHER THE OWNER KEY minted this session, while that is still
+        # provable. key_hash freezes the key's VALUE, and an owner-key roll
+        # deliberately leaves sessions alive, so afterwards the frozen hash matches
+        # neither the new owner key nor any keystore entry - identical to a REVOKED
+        # scoped key, which is why the owner's own scheduled jobs silently lost
+        # shell (REG-509). _is_owner_key is a constant-time plaintext compare
+        # against the live owner key: a POSITIVE proof that reads no keystore, so a
+        # corrupt auth.json cannot flip it, and holding ADMIN cannot earn it.
         sid = sessions.create(scopes=held, key_hash=_hash_key(presented),
-                              fs_access=fs)
+                              fs_access=fs,
+                              owner_key_minted=_is_owner_key(presented))
         secure = request.url.scheme == "https"
         response.set_cookie(_hs.SESSION_COOKIE, sid, httponly=True,
                             secure=secure, samesite="strict", path="/",

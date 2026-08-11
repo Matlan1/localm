@@ -2158,6 +2158,34 @@ def _request_token(request) -> tuple[Optional[str], str]:
     return None, "none"
 
 
+def _valid_session(token):
+    """The session record behind a presented cookie *token*, or None if it does not
+    resolve to a session this server still honours.
+
+    THE single gate for reading anything off a cookie session. It exists so that
+    every consumer of a session attribute goes through the same re-validation
+    rather than each calling ``sessions.lookup()`` and re-deciding: a bare lookup
+    returns a record that this function would REJECT (a scoped key's session whose
+    key has since been revoked or expired), so a second reader written against
+    ``lookup`` would honour a session that auth already refuses everywhere else."""
+    if not token:
+        return None
+    from localm import sessions
+    rec = sessions.lookup(token)
+    if rec is None:
+        return None
+    if scopes.ADMIN not in set(rec.get("scopes", [])):
+        # A SCOPED-key session lives only as long as its key: re-validate the
+        # owning key against the live keystore every request, so revoking or
+        # expiring it cuts the session off (parity with the bearer path's
+        # per-request verify()). An owner/ADMIN session is exempt - decoupled
+        # from the key VALUE so an owner-key ROLL does not log the owner out.
+        from localm.auth import key_hash_live
+        if not key_hash_live(rec.get("key_hash")):
+            return None
+    return rec
+
+
 def _principal_from_token(token, source):
     """Resolve a presented credential to ``(scopes, key_hash, fs_access)`` or None.
 
@@ -2171,27 +2199,49 @@ def _principal_from_token(token, source):
     if not token:
         return None
     if source == "cookie":
-        from localm import sessions
-        rec = sessions.lookup(token)
+        rec = _valid_session(token)
         if rec is None:
             return None
-        held = set(rec.get("scopes", []))
-        if scopes.ADMIN not in held:
-            # A SCOPED-key session lives only as long as its key: re-validate the
-            # owning key against the live keystore every request, so revoking or
-            # expiring it cuts the session off (parity with the bearer path's
-            # per-request verify()). An owner/ADMIN session is exempt - decoupled
-            # from the key VALUE so an owner-key ROLL does not log the owner out.
-            from localm.auth import key_hash_live
-            if not key_hash_live(rec.get("key_hash")):
-                return None
-        return (held, rec.get("key_hash"), rec.get("fs_access", "none"))
+        return (set(rec.get("scopes", [])), rec.get("key_hash"),
+                rec.get("fs_access", "none"))
     from localm.auth import _hash_key, fs_access_for, verify
     held = verify(token)
     if held is None:
         return None
     fs = "host" if scopes.ADMIN in held else fs_access_for(token, "none")
     return held, _hash_key(token), fs
+
+
+def caller_minted_by_owner_key(request: Request) -> bool:
+    """True when this caller's COOKIE SESSION was minted by the owner key itself.
+
+    Answers the one question a frozen ``key_hash`` cannot survive an owner-key roll
+    to answer: was the credential behind this session the owner key, or a minted
+    (and therefore revocable) keystore key? ``sessions.create`` records that as a
+    POSITIVE proof at login - a constant-time plaintext compare against
+    ``auth.get_api_key()`` - because after a roll the two are indistinguishable
+    (REG-509: the owner's own scheduled jobs silently lost shell).
+
+    Deliberately narrow, and every clause of that is load-bearing:
+
+    - **False for a BEARER caller**, who has no session. That path already answers
+      correctly by comparing the presented key's value, and ``verify()`` rejects a
+      revoked or expired key first, so there is nothing here to add.
+    - **Reads through ``_valid_session``**, so a scoped-key session whose key has
+      been revoked or has expired is rejected before its record is ever consulted.
+    - **Never consults the keystore itself**, so it cannot be flipped by a
+      transient unreadable/corrupt ``auth.json``: ``_load_keystore()`` fails OPEN
+      (returns ``[]``), and a privilege answer must never be derived from that.
+    - **Never consults the scope set.** ADMIN is grantable to a keystore key, which
+      stays revocable; only the recorded key-VALUE proof counts.
+
+    This reports an attribute of an ALREADY-AUTHENTICATED session; it is not an
+    authentication step and grants nothing on its own."""
+    token, source = _request_token(request)
+    if source != "cookie":
+        return False
+    rec = _valid_session(token)
+    return bool(rec) and rec.get("owner_key_minted") is True
 
 
 def _csrf_secret(request) -> str:
