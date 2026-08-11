@@ -3533,20 +3533,68 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
         # field once allow_inf_nan=False rejects it). Replace non-finite floats in
         # the error detail so the 422 always renders. Same shape as FastAPI's
         # default handler for every other (finite) validation error.
+        # The 422 body must also stay BOUNDED. pydantic records the offending
+        # value under `input` verbatim, so a deeply-nested body puts that nesting
+        # in the error object - and `jsonable_encoder` walks it recursively. A
+        # ~2 KB body of `[[[[...]]]]` therefore raised RecursionError INSIDE this
+        # handler, so FastAPI could not build a response at all and the documented
+        # 422 became an opaque 500. Measured: a window around 961 to ~2900 levels
+        # (shallower parses and validates cleanly; deeper is refused by the JSON
+        # parser's own depth limit first), ~0.25 s of event-loop CPU per request,
+        # and a 147x latency rise on unrelated requests under four connections.
+        # Same failure the NaN note above describes, by a different route.
         import math
 
         from fastapi.encoders import jsonable_encoder
 
-        def _finite_safe(v):
+        _MAX_ERR_DEPTH = 20     # far past anything a real API request nests
+        _ELIDED = "...[nested value elided]"
+
+        def _depth_capped(v, depth: int = 0):
+            """Prune the error object BEFORE `jsonable_encoder` ever sees it.
+
+            The ORDER is the fix. Pruning afterwards cannot work, because the
+            encoder is what recurses: it would blow the stack before any depth
+            limit downstream of it got the chance to apply."""
+            if depth >= _MAX_ERR_DEPTH:
+                return _ELIDED
+            if isinstance(v, dict):
+                return {k: _depth_capped(x, depth + 1) for k, x in v.items()}
+            if isinstance(v, (list, tuple)):
+                return [_depth_capped(x, depth + 1) for x in v]
+            return v
+
+        def _finite_safe(v, depth: int = 0):
+            if depth >= _MAX_ERR_DEPTH:
+                return _ELIDED
             if isinstance(v, float) and not math.isfinite(v):
                 return repr(v)      # "nan" / "inf" / "-inf"
             if isinstance(v, dict):
-                return {k: _finite_safe(x) for k, x in v.items()}
+                return {k: _finite_safe(x, depth + 1) for k, x in v.items()}
             if isinstance(v, (list, tuple)):
-                return [_finite_safe(x) for x in v]
+                return [_finite_safe(x, depth + 1) for x in v]
             return v
 
-        safe = _finite_safe(jsonable_encoder(exc.errors()))
+        # _finite_safe deliberately still runs AFTER the encoder, unchanged: the
+        # encoder itself can PRODUCE a non-finite float (a Decimal("NaN") becomes
+        # float("nan")), so moving it before would quietly reopen the NaN 500 this
+        # handler was originally written to close. Only the DEPTH prune moves.
+        try:
+            safe = _finite_safe(jsonable_encoder(_depth_capped(exc.errors())))
+        except RecursionError:
+            # SAFETY NET, not the fix: it catches a shape the prune above cannot
+            # reach (a deeply nested object that is not a dict/list/tuple, which
+            # passes through untouched and the encoder then recurses into). It is
+            # NOT sufficient on its own - it would leave the CPU cost in place,
+            # and that cost, not the 500, is the finding. Do not delete the prune
+            # on the grounds that this catch exists. Surfaced, never silent: if
+            # this ever fires it means a shape got past the prune and is worth
+            # knowing about (AGENTS.md rule 5).
+            from localm.debuglog import logger as _dbg
+            _dbg.warning("validation error for %s was too deeply nested to "
+                         "encode even after depth-capping; returned a 422 "
+                         "without the structured detail", request.url.path)
+            safe = []
 
         def _field(err) -> str:
             # Drop the "body"/"query" container so the user sees the name they
