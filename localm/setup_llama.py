@@ -1994,6 +1994,14 @@ def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
     # or fall back with a LOUD warning (non-interactive), and always say how to
     # retry the real pick once the cause is fixed (R20 / never-override-user-selection).
     why = detail
+    # Every attempt's own cause, chosen backend first - NOT just the last one
+    # tried. The final LocalmError's *reason* is the only thing that survives
+    # into the saved bug-report file and the "Sorry - X because Y" console
+    # line (report_failure/build_report render summary+reason only; the
+    # console.print calls below are not threaded into that context). A user
+    # who explicitly picked cuda and only ever sees the final message needs to
+    # know THAT failed too, not only whatever the last fallback's problem was.
+    attempts = [(chosen, why)]
     console.print(f"[yellow]'{chosen}' backend provisioned but failed to load: {why}[/yellow]")
     console.print(f"[dim]To retry later: localm setup-llama --backend {chosen} --force[/dim]")
     interactive = (not assume_yes) and sys.stdin.isatty()
@@ -2015,21 +2023,23 @@ def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
             _try(fb, False)
         except Exception as e:
             console.print(f"[red]{fb} provisioning failed:[/red] {e}")
-            detail = str(e)
+            attempts.append((fb, str(e)))
             continue
-        ok, detail = _native_loads_ok()
+        ok, fb_detail = _native_loads_ok()
         if ok:
             console.print(f"[green]OK - {fb} runtime loads.[/green]")
             return fb
-        console.print(f"[red]{fb} provisioned but failed to load:[/red] {detail or 'unknown'}")
+        console.print(f"[red]{fb} provisioned but failed to load:[/red] {fb_detail or 'unknown'}")
+        attempts.append((fb, fb_detail or "unknown"))
     # Nothing loaded - the one genuinely stuck case. Raise a typed, reportable
     # error and let the CLI's single graceful handler say sorry + offer a bug
     # report. setup-llama describes the failure; it does not own reporting.
     from localm.bugreport import LocalmError
+    tried = "; ".join(f"{b}: {d}" for b, d in attempts)
     raise LocalmError(
         "no llama.cpp backend could be provisioned and loaded",
-        reason=(f"tried {chosen}, then vulkan and cpu - none loaded on this machine "
-                f"(last error: {detail or 'unknown'}). You can provide a local build "
+        reason=(f"none of {len(attempts)} backends loaded on this machine - {tried}. "
+                "You can provide a local build "
                 "with: localm setup-llama --from <build dir>, or see docs/gpu-setup.md."),
         context={"operation": "setup-llama", "requested_backend": chosen})
 
