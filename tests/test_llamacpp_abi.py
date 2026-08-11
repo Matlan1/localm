@@ -498,15 +498,137 @@ def test_ctx_v2_bytes_read_as_v1_would_have_been_missed_before_and_are_caught_no
     assert (layout, assumed) == (CONTEXT_PARAMS_V2, False)
 
 
-def test_ctx_layout_detection_survives_a_drifted_default():
-    """Same never-false-positive priority as the model_params fingerprint: a
-    legitimate build that later drifts some OTHER default must still resolve,
-    since ctx_type/the three-field run are the only things checked."""
+def test_ctx_layout_detection_survives_a_drift_the_fingerprint_never_READS():
+    """A drift in a field OUTSIDE the fingerprint's window must not disturb it.
+
+    NOTE WHAT THIS DOES AND DOES NOT COVER, because the gap was expensive: it
+    drifts n_ctx, which _CONTEXT_FINGERPRINT does not read at ANY offset. So
+    it can never fail on a scoring defect, and while it was the only
+    "survives a drifted default" test here, a legitimate ctx_v2 build with one
+    of the five FINGERPRINTED defaults drifted was being hard-refused with a
+    message about a field whose real value was fine. Those five fields are
+    covered by test_ctx_v2_detection_survives_a_drift_in_each_fingerprinted_
+    field and its ctx_v1 sibling below; keep both, they answer different
+    questions."""
     cp = good_ctx_v2()
     cp.n_ctx = 4096                      # unrelated drift, not part of the fingerprint
     v = verify_abi(_FakeLib(good_model(), cp))
     assert v.status == "ok"
     assert v.context_layout == CONTEXT_PARAMS_V2
+
+
+# The five fields _CONTEXT_FINGERPRINT actually reads. NOT a restatement of the
+# struct: these are exactly the offsets the scoring consumes, which is the set
+# no test drifted before.
+_CTX_FINGERPRINTED = ["ctx_type", "rope_scaling_type", "pooling_type",
+                      "attention_type", "flash_attn_type"]
+
+
+@pytest.mark.parametrize("field", _CTX_FINGERPRINTED)
+@pytest.mark.parametrize("badval", [0, 1, 2, 512])
+def test_ctx_v2_detection_survives_a_drift_in_each_fingerprinted_field(
+        field, badval):
+    """A legitimate ctx_v2 build that drifts ONE fingerprinted default must
+    still be IDENTIFIED as ctx_v2 - a determination, not the V1 fallback.
+
+    This is the scoring itself, asserted below verify_abi so a refusal that
+    comes from evaluate() (correct, for a genuine keystone drift) cannot be
+    confused with a detection failure. Before the graded ctx_type, the
+    ctx_v1 hypothesis scored a free point at offset 32 - where ctx_v2 keeps
+    n_threads_batch, never -1 - and drifting flash_attn_type tied it 4-4."""
+    cp = good_ctx_v2()
+    setattr(cp, field, badval)
+    layout, notes, assumed = _abi.detect_context_params_layout(
+        _FakeLib(good_model(), cp))
+    assert (layout, assumed) == (CONTEXT_PARAMS_V2, False), notes
+
+
+@pytest.mark.parametrize("field", [f for f in _CTX_FINGERPRINTED
+                                   if f != "rope_scaling_type"])
+@pytest.mark.parametrize("badval", [0, 1, 2, 512])
+def test_ctx_v1_detection_survives_a_drift_in_each_fingerprinted_field(
+        field, badval):
+    """The ctx_v1 side of the same property, so the fix cannot be a ctx_v2
+    special case that quietly costs ctx_v1 builds their determination.
+
+    rope_scaling_type is EXCLUDED and covered separately below: it is the one
+    offset where the two hypotheses make opposite predictions, so drifting it
+    on a ctx_v1 build is genuinely undecidable rather than merely harder."""
+    cp = good_ctx_v1()
+    setattr(cp, field, badval)
+    layout, notes, assumed = _abi.detect_context_params_layout(
+        _FakeLib(good_model(), cp))
+    assert (layout, assumed) == (CONTEXT_PARAMS_V1, False), notes
+
+
+def test_ctx_v1_with_a_drifted_rope_scaling_type_stays_inconclusive():
+    """The one genuinely ambiguous single drift, and it must NOT be resolved.
+
+    Offset 36 is ctx_v1's rope_scaling_type and ctx_v2's ctx_type, so these
+    bytes are explained equally well by "ctx_v1 whose rope_scaling_type
+    drifted to 0" and by "ctx_v2 whose flash_attn_type drifted to 0". Each
+    reading needs exactly one drift; the fingerprint must decline rather than
+    invent a winner. The V1 fallback then binds the class that happens to be
+    right, and evaluate() refuses TRUTHFULLY - the build really does have
+    rope_scaling_type = 0, which is the keystone violation the refusal names."""
+    cp = good_ctx_v1()
+    cp.rope_scaling_type = 0
+    lib = _FakeLib(good_model(), cp)
+    assert _abi.detect_context_params_layout(lib)[2] is True   # assumed
+    with pytest.raises(AbiMismatch) as ei:
+        verify_abi(lib)
+    assert "rope_scaling_type" in ei.value.reason
+
+
+def test_ctx_v2_with_a_drifted_flash_attn_type_is_not_falsely_refused():
+    """THE REGRESSION. A legitimate ctx_v2 build, one drifted default, refused.
+
+    flash_attn_type is the field evaluate() itself lists as NON-FATAL ("a
+    legitimate build changed a default - we still load, but note it"), so
+    every part of this module except the fingerprint already treated this
+    build as fine. The old binary scoring tied 4-4, went inconclusive, fell
+    back to CONTEXT_PARAMS_V1, and evaluate() then read V1's offsets over V2's
+    bytes and reported
+
+        context_params.rope_scaling_type = 0 (expected -1, ...)
+
+    about a runtime whose rope_scaling_type IS -1, telling the user to
+    re-provision or set LOCALM_SKIP_ABI_CHECK over a build that is completely
+    fine. Exactly the false refusal the module docstring calls worse than the
+    status quo, on hardware nobody here owns."""
+    cp = good_ctx_v2()
+    cp.flash_attn_type = 0
+    v = verify_abi(_FakeLib(good_model(), cp))          # must not raise
+    assert v.status == "ok", v.failures
+    assert v.context_layout == CONTEXT_PARAMS_V2
+    # Proof we read the RIGHT field rather than got lucky: the real drift is
+    # reported as the non-fatal diagnostic it is...
+    assert any("flash_attn_type" in d for d in v.diagnostics), v.diagnostics
+    # ...and the phantom one is nowhere, in the verdict or the log.
+    assert not any("rope_scaling_type" in d for d in v.diagnostics), v.diagnostics
+
+
+@pytest.mark.parametrize("field", ["rope_scaling_type", "pooling_type",
+                                   "attention_type"])
+def test_ctx_v2_keystone_drift_still_refuses_and_names_the_real_field(field):
+    """The complement, so the fix cannot have bought its silence by weakening
+    the gate: the three keystones evaluate() hard-refuses on still refuse when
+    they genuinely drift, and the message names the field that actually moved.
+
+    Pins a CONTRACT rather than guarding the regression - these three resolved
+    to ctx_v2 under the old scoring too (only flash_attn_type tied), so
+    reverting the scoring leaves this green. It is here because "stop refusing
+    legitimate builds" and "still refuse broken ones" are one requirement, and
+    a reader needs to see both asserted."""
+    cp = good_ctx_v2()
+    setattr(cp, field, 0)
+    with pytest.raises(AbiMismatch) as ei:
+        verify_abi(_FakeLib(good_model(), cp))
+    assert f"context_params.{field}" in ei.value.reason
+    # No field that is genuinely -1 may be named as a failure.
+    others = {"rope_scaling_type", "pooling_type", "attention_type"} - {field}
+    for other in others:
+        assert not any(other in f for f in ei.value.context["abi_failures"])
 
 
 @pytest.mark.parametrize("builder,want", [
@@ -782,6 +904,85 @@ def test_evaluate_cannot_discriminate_the_two_layouts():
     assert evaluate(as_v1, good_ctx()).status == "ok"
     as_v2 = _reinterpret(good_model_v1(), LlamaModelParamsV2)
     assert evaluate(as_v2, good_ctx()).status == "ok"
+
+
+def test_unknown_third_model_params_layout_is_not_caught():
+    """Pins the LIMIT of verify_abi's fail-safe on the model_params axis.
+
+    test_unknown_third_layout_still_fails_safe proves the context_params axis
+    survives a CONFIDENTLY misdetected unknown layout, because evaluate()
+    re-reads the -1 keystones at wherever the bound class puts them. It is
+    tempting to read that as a property of the module. It is not: it is a
+    property of that ONE axis, and this is its counter-example.
+
+    A hypothetical third model_params layout (one more 4-byte field inserted
+    directly before split_mode) is detected as v2 CONFIDENTLY - both signals
+    agree, so there is no contradiction to refuse on - and then sails through
+    evaluate(), because every model_params check is a RANGE check and every
+    shifted value here is still in range. The struct is bound and crossed
+    over the FFI by value. That is a silent misbind, on the axis the module
+    docstring itself calls out as causing "silent corruption or a hard crash
+    inside the GPU driver".
+
+    So this test must KEEP PASSING as written. If it ever fails because
+    verify_abi refused, someone has added a real model_params discriminator -
+    replace this deliberately (and narrow verify_abi's docstring the other
+    way), do not delete it quietly. Same treatment as
+    test_evaluate_cannot_discriminate_the_two_layouts above."""
+    v2 = _raw(good_model_v2())[:72]
+    raw3 = v2[:20] + b"\x00\x00\x00\x00" + v2[20:68]
+    assert len(raw3) == 72, "the receptacle hands back a fixed-size buffer"
+
+    fake_v3 = LlamaModelParamsV2()
+    ctypes.memmove(ctypes.byref(fake_v3), raw3, 72)
+    lib = _FakeLib(fake_v3, good_ctx())
+
+    layout, notes, contradiction, assumed = _abi.detect_model_params_layout(lib)
+    assert (layout, contradiction, assumed) == (MODEL_PARAMS_V2, None, False), (
+        f"fixture must exercise the CONFIDENT-misdetection path; got {notes}")
+
+    v = verify_abi(lib)                       # the point: it does NOT raise
+    assert v.status == "ok", v.failures
+    assert v.layout == MODEL_PARAMS_V2
+
+    # And it really is a misbind rather than a harmless relabel: the bound
+    # class reads split_mode at offset 20, where the inserted field now sits,
+    # while this build's actual split_mode has moved to 24.
+    assert fake_v3.split_mode == 0
+    assert int.from_bytes(raw3[24:28], "little", signed=True) == 1, (
+        "the real split_mode must have moved, or this pins nothing")
+
+
+def test_ctx_v2_with_a_minus_one_ctx_type_is_a_known_undetectable_misbind():
+    """The context_params axis's OWN residual - so its fail-safe is not read
+    as absolute either.
+
+    The fingerprint locates the layout by finding a non-(-1) ctx_type
+    immediately before a four-long run of -1 enums. A ctx_v2 build whose
+    ctx_type were ITSELF -1 makes that run five long, and both candidate
+    windows then fit inside it: ctx_v1 scores 5, ctx_v2 scores 4, so ctx_v1
+    wins CONFIDENTLY and wrongly, and evaluate() cannot object because every
+    keystone it reads at V1's offsets is a -1 belonging to V2's run.
+
+    Undecidable from these bytes rather than a scoring flaw - no reading of
+    the six offsets involved can locate a boundary inside a longer run - and
+    unchanged by the graded-ctx_type fix (the old binary scoring produced the
+    same 5-4). It needs ctx_type to adopt the -1 UNSPECIFIED convention its
+    four neighbours use, which is exactly the premise _CONTEXT_FINGERPRINT
+    documents as false. Pinned so the limit is visible rather than folded
+    into a blanket 'never a silent misbind'."""
+    cp = good_ctx_v2()
+    cp.ctx_type = -1
+    v = verify_abi(_FakeLib(good_model(), cp))
+    assert v.status == "ok", v.failures
+    assert v.context_layout == CONTEXT_PARAMS_V1, (
+        "if this now resolves to ctx_v2, a new signal was added - update the "
+        "fail-safe scope in verify_abi's docstring to match")
+
+    # Prove the wrong bind actually moves a field, or this pins nothing.
+    as_v1 = LlamaContextParamsV1()
+    ctypes.memmove(ctypes.byref(as_v1), ctypes.byref(cp), ctypes.sizeof(cp))
+    assert (cp.n_threads, as_v1.n_threads) == (4, 0)
 
 
 def test_evaluate_does_catch_a_misaligned_read():
