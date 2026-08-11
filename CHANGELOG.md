@@ -11,6 +11,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+### Added
+- **Settings can now update localm's own ComfyUI.** The managed-ComfyUI box
+  offered Set up, Repair and Remove but no way to update, so if you only use
+  the GUI you could install localm's ComfyUI and never move it to a newer one.
+  There is now an Update button next to Remove, which shows the version you
+  have and the version localm ships, and streams the update as it runs. A
+  tickbox next to it also reinstalls ComfyUI's dependencies, which is what you
+  want when the new version needs packages the old one did not. If your
+  ComfyUI was installed by copying rather than as a git checkout it cannot take
+  a version update, and the button now says so instead of failing part way in.
+
 ### Changed
 - **localm's own managed ComfyUI now installs v0.31.1**, up from v0.9.2. The
   pinned version had not moved since July and was roughly 21 releases behind

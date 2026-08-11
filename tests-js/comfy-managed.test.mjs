@@ -53,7 +53,7 @@ const INSTALLING = {
   api_url: "http://127.0.0.1:8189", target: "own", managed_active: false,
 };
 
-function makeFetch(calls, { installed, state, schema = SCHEMA, managedActive }) {
+function makeFetch(calls, { installed, state, schema = SCHEMA, managedActive, statusExtra }) {
   const STATES = { installed: INSTALLED, corrupt: CORRUPT, installing: INSTALLING };
   return async (url, opts = {}) => {
     const u = String(url);
@@ -68,11 +68,14 @@ function makeFetch(calls, { installed, state, schema = SCHEMA, managedActive }) 
     if (u === "/v1/comfy/status")
       return { ok: true, status: 200, json: async () => ({ alive: false, launched_by_localm: false }), text: async () => "" };
     if (u === "/api/comfy/managed-status") {
-      const body = state ? STATES[state] : (installed ? INSTALLED : NOT_INSTALLED);
+      const base = state ? STATES[state] : (installed ? INSTALLED : NOT_INSTALLED);
+      const body = { ...base, ...(statusExtra || {}) };
       return { ok: true, status: 200, text: async () => "",
                json: async () => (managedActive === undefined ? body
                  : { ...body, managed_active: managedActive }) };
     }
+    if (u.startsWith("/api/comfy/update") && method === "POST")
+      return { ok: true, status: 200, json: async () => ({ job_id: "job123" }), text: async () => "" };
     if (u === "/api/comfy/setup" && method === "POST")
       return { ok: true, status: 200, json: async () => ({ job_id: "job123" }), text: async () => "" };
     if (u === "/api/comfy/remove" && method === "POST")
@@ -287,4 +290,104 @@ test("installing -> no action button, no dead 409-bound Set-up click available",
   assert.ok(!doc.querySelector(".comfy-managed-remove-btn"), "no Remove button while installing");
   const panel = doc.querySelector(".media-comfy-box");
   assert.match(panel.textContent, /currently running/i);
+});
+
+// --------------------------------------------------------------------------- //
+//  Update: the action the GUI never had                                        //
+// --------------------------------------------------------------------------- //
+// The panel offered Set up / Repair / Remove and no Update, while the CLI had
+// `localm comfy update` all along - so a GUI-only user could install a managed
+// ComfyUI and never move it off the pin they installed on.
+
+const UPDATE_DUE = {
+  pinned_commit: "fe4195f7", pinned_version: "v0.31.1",
+  installed_commit: "8f40b43e", installed_version: "v0.9.2",
+  update_available: true, updatable: true, update_blocked_reason: "",
+};
+
+test("installed + an update available -> an Update button and the two versions render", async () => {
+  const calls = [];
+  const { window: win } = loadAppWithPages({
+    fetchImpl: makeFetch(calls, { installed: true, statusExtra: UPDATE_DUE }) });
+  await render(win);
+  const btn = win.document.querySelector(".comfy-managed-update-btn");
+  assert.ok(btn, "Update button rendered");
+  assert.equal(btn.disabled, false, "updatable install -> Update is clickable");
+  const txt = win.document.querySelector(".comfy-managed-version").textContent;
+  assert.ok(txt.includes("v0.9.2"), "says which version is installed: " + txt);
+  assert.ok(txt.includes("v0.31.1"), "says which version localm ships: " + txt);
+});
+
+test("clicking Update POSTs /api/comfy/update", async () => {
+  const calls = [];
+  const { window: win } = loadAppWithPages({
+    fetchImpl: makeFetch(calls, { installed: true, statusExtra: UPDATE_DUE }) });
+  await render(win);
+  win.document.querySelector(".comfy-managed-update-btn").onclick();
+  for (let i = 0; i < 4; i++) await new Promise((r) => setTimeout(r, 0));
+  const post = calls.find((c) => c.url.startsWith("/api/comfy/update") && c.method === "POST");
+  assert.ok(post, "Update POSTed /api/comfy/update");
+  assert.ok(!post.url.includes("reinstall_requirements"),
+            "dependencies are NOT reinstalled unless asked: " + post.url);
+});
+
+test("ticking the dependencies box forwards reinstall_requirements", async () => {
+  const calls = [];
+  const { window: win } = loadAppWithPages({
+    fetchImpl: makeFetch(calls, { installed: true, statusExtra: UPDATE_DUE }) });
+  await render(win);
+  win.document.querySelector(".comfy-managed-reinstall-box").checked = true;
+  win.document.querySelector(".comfy-managed-update-btn").onclick();
+  for (let i = 0; i < 4; i++) await new Promise((r) => setTimeout(r, 0));
+  const post = calls.find((c) => c.url.startsWith("/api/comfy/update") && c.method === "POST");
+  assert.ok(post.url.includes("reinstall_requirements=true"),
+            "the checkbox must reach the route, or a pin that changed deps leaves a "
+            + "checkout without them: " + post.url);
+});
+
+test("a non-git install -> Update is disabled and the REASON is visible text", async () => {
+  // The whole point of surfacing this in the GUI: a disabled button with the
+  // explanation only in a hover title is still an opaque dead end.
+  const reason = "This managed ComfyUI has no git history (it was installed via the "
+    + "non-git copy fallback), so a pinned-version update is not possible. Remove it "
+    + "and set it up again to move to the version localm ships.";
+  const calls = [];
+  const { window: win } = loadAppWithPages({ fetchImpl: makeFetch(calls, {
+    installed: true,
+    statusExtra: { ...UPDATE_DUE, updatable: false, update_blocked_reason: reason } }) });
+  await render(win);
+  const btn = win.document.querySelector(".comfy-managed-update-btn");
+  assert.ok(btn, "the button still renders, so the state is explained rather than absent");
+  assert.equal(btn.disabled, true, "a non-git install cannot take a pinned update");
+  assert.ok(win.document.body.textContent.includes("no git history"),
+            "the refusal must be readable ON THE PAGE, not only in a title attribute");
+  assert.ok(!win.document.querySelector(".comfy-managed-reinstall-box"),
+            "no dependencies checkbox when the update cannot run at all");
+});
+
+test("an unreadable marker -> UNKNOWN, not a silent 'up to date'", async () => {
+  const calls = [];
+  const { window: win } = loadAppWithPages({ fetchImpl: makeFetch(calls, {
+    installed: true,
+    statusExtra: { ...UPDATE_DUE, update_available: null, installed_commit: null,
+                   installed_version: null } }) });
+  await render(win);
+  const txt = win.document.querySelector(".comfy-managed-version").textContent;
+  assert.ok(txt.includes("unknown") || txt.includes("Could not read"),
+            "must not claim up-to-date when it could not look: " + txt);
+  assert.equal(win.document.querySelector(".comfy-managed-update-btn").disabled, false,
+               "unknown must still allow an update - it rolls back if it fails");
+});
+
+test("already at the shipped pin -> says up to date, Update still available", async () => {
+  const calls = [];
+  const { window: win } = loadAppWithPages({ fetchImpl: makeFetch(calls, {
+    installed: true,
+    statusExtra: { ...UPDATE_DUE, update_available: false,
+                   installed_commit: "fe4195f7", installed_version: "v0.31.1" } }) });
+  await render(win);
+  const txt = win.document.querySelector(".comfy-managed-version").textContent;
+  assert.ok(txt.includes("Up to date"), txt);
+  assert.ok(win.document.querySelector(".comfy-managed-update-btn"),
+            "still offered: re-running it re-verifies the localm patch set");
 });

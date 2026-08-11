@@ -297,3 +297,146 @@ def test_repair_never_touches_the_managed_models_folder(home, app, no_subprocess
         r = client.post("/api/comfy/repair")
     assert r.status_code == 200, r.text
     assert marker.exists(), "models must survive a repair"
+
+
+# --------------------------------------------------------------------------- #
+#  POST /api/comfy/update : the path that did not exist until now              #
+# --------------------------------------------------------------------------- #
+# Before this route, the GUI declared exactly four managed-comfy routes -
+# managed-status, setup, repair, remove - and update_managed_comfy() had exactly one
+# caller, the CLI. So a GUI-only user could INSTALL a managed ComfyUI and could never
+# UPDATE one, and the honest non-git refusal inside update_managed_comfy() was
+# unreachable from the GUI not because it was hidden but because the whole path was.
+
+def _install_managed_at(commit: str, *, git: bool = True) -> mc.ManagedComfyPaths:
+    """An installed managed ComfyUI whose marker records *commit*, optionally without
+    a .git dir (the non-git copy-fallback install, which cannot take a pinned update)."""
+    import json as _json
+    from localm.media.managed_comfy_provision import MARKER_FILENAME
+    paths = _install_managed()
+    (paths.root / MARKER_FILENAME).write_text(
+        _json.dumps({"commit": commit, "comfyui_version": "v-installed"}),
+        encoding="utf-8")
+    if git:
+        (paths.root / ".git").mkdir(parents=True, exist_ok=True)
+    return paths
+
+
+def test_update_dispatches_the_cli_job_and_does_not_block(home, app, no_subprocess):
+    _install_managed_at("oldcommit", git=True)
+    with TestClient(app) as client:
+        r = client.post("/api/comfy/update")
+    assert r.status_code == 200, r.text
+    assert r.json().get("job_id") == "job123"
+    assert len(no_subprocess) == 1, no_subprocess
+    # Dispatched to the EXISTING CLI entry point, not a re-implementation: the
+    # rollback-on-failure contract lives in update_managed_comfy() and must stay the
+    # single owner of it.
+    assert no_subprocess[0]["args"] == ["comfy", "update"], no_subprocess[0]["args"]
+    assert no_subprocess[0]["kind"] == "comfy-update"
+
+
+def test_update_forwards_reinstall_requirements(home, app, no_subprocess):
+    """Off by default (a partial pip upgrade is not exactly rollback-able), but it MUST
+    be reachable: when a pin advances across a dependency change, an update without it
+    leaves a checkout that moved without its new deps."""
+    _install_managed_at("oldcommit")
+    with TestClient(app) as client:
+        r = client.post("/api/comfy/update", params={"reinstall_requirements": "true"})
+    assert r.status_code == 200, r.text
+    assert no_subprocess[0]["args"] == ["comfy", "update", "--reinstall-requirements"]
+
+
+def test_update_defaults_to_not_reinstalling_requirements(home, app, no_subprocess):
+    _install_managed_at("oldcommit")
+    with TestClient(app) as client:
+        client.post("/api/comfy/update")
+    assert "--reinstall-requirements" not in no_subprocess[0]["args"]
+
+
+def test_update_conflicts_when_nothing_installed(home, app, no_subprocess):
+    """Nothing to update -> 409 and NO job, rather than dispatching a job that would
+    fail minutes later with the CLI's own 'nothing to update'."""
+    with TestClient(app) as client:
+        r = client.post("/api/comfy/update")
+    assert r.status_code == 409, r.text
+    assert no_subprocess == []
+
+
+def test_update_refuses_while_a_setup_is_running(home, app, no_subprocess, monkeypatch):
+    """Two writers on one checkout is the failure an update must never create."""
+    _install_managed_at("oldcommit")
+    monkeypatch.setattr(gui_jobs.JobManager, "has_running",
+                        lambda self, kind: kind == "comfy-setup")
+    with TestClient(app) as client:
+        r = client.post("/api/comfy/update")
+    assert r.status_code == 409, r.text
+    assert no_subprocess == []
+
+
+def test_update_refuses_a_second_concurrent_update(home, app, no_subprocess, monkeypatch):
+    _install_managed_at("oldcommit")
+    monkeypatch.setattr(gui_jobs.JobManager, "has_running",
+                        lambda self, kind: kind == "comfy-update")
+    with TestClient(app) as client:
+        r = client.post("/api/comfy/update")
+    assert r.status_code == 409, r.text
+    assert no_subprocess == []
+
+
+# --------------------------------------------------------------------------- #
+#  GET /api/comfy/managed-status : the update-availability half                 #
+# --------------------------------------------------------------------------- #
+
+def test_status_reports_an_available_update(home, app):
+    from localm.media.managed_comfy_fresh import COMFYUI_PINNED_COMMIT
+    _install_managed_at("a-commit-that-is-not-the-pin")
+    with TestClient(app) as client:
+        body = client.get("/api/comfy/managed-status").json()
+    assert body["update_available"] is True
+    assert body["pinned_commit"] == COMFYUI_PINNED_COMMIT
+    assert body["installed_commit"] == "a-commit-that-is-not-the-pin"
+    assert body["updatable"] is True
+    assert body["update_blocked_reason"] == ""
+
+
+def test_status_reports_up_to_date_at_the_shipped_pin(home, app):
+    from localm.media.managed_comfy_fresh import COMFYUI_PINNED_COMMIT
+    _install_managed_at(COMFYUI_PINNED_COMMIT)
+    with TestClient(app) as client:
+        body = client.get("/api/comfy/managed-status").json()
+    assert body["update_available"] is False
+
+
+def test_status_unreadable_marker_is_unknown_not_up_to_date(home, app):
+    """A marker we cannot parse must report UNKNOWN (null), never False. Collapsing
+    'could not look' into 'no update' hides a genuinely available update - the exact
+    two-outcomes-into-one shape rule 5 forbids."""
+    from localm.media.managed_comfy_provision import MARKER_FILENAME
+    paths = _install_managed()
+    (paths.root / MARKER_FILENAME).write_text("{not json at all", encoding="utf-8")
+    with TestClient(app) as client:
+        body = client.get("/api/comfy/managed-status").json()
+    assert body["update_available"] is None
+    assert body["installed_commit"] is None
+
+
+def test_status_non_git_install_is_not_updatable_and_says_why(home, app):
+    """The S2 non-git copy fallback cannot take a pinned update. update_managed_comfy()
+    refuses honestly at run time; this advisory field lets the GUI say so BEFORE the
+    user starts a job that would fail. The reason must be present, not just the flag."""
+    _install_managed_at("oldcommit", git=False)
+    with TestClient(app) as client:
+        body = client.get("/api/comfy/managed-status").json()
+    assert body["updatable"] is False
+    assert "no git history" in body["update_blocked_reason"]
+    assert "set it up again" in body["update_blocked_reason"]
+
+
+def test_status_not_installed_omits_update_fields(home, app):
+    """No install -> no update story to tell; the fields simply are not there rather
+    than carrying a misleading default."""
+    with TestClient(app) as client:
+        body = client.get("/api/comfy/managed-status").json()
+    assert body["installed"] is False
+    assert "update_available" not in body
