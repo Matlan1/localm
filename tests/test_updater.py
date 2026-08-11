@@ -759,6 +759,8 @@ def test_apply_concurrent_threads_exactly_one_proceeds_backup_has_old_content(
 
 
 def test_apply_fresh_lock_is_not_reclaimed(tmp_path, monkeypatch, sig_env):
+    """No pid recorded (an older-format lock) -> the age-only FALLBACK path;
+    fresh age -> not stale."""
     home, inst = _setup_apply_env(tmp_path, monkeypatch)
     from localm.bugreport import LocalmError
     (home / "updates" / "apply.lock").mkdir(parents=True)   # fresh - well within the stale window
@@ -771,8 +773,9 @@ def test_apply_fresh_lock_is_not_reclaimed(tmp_path, monkeypatch, sig_env):
 
 
 def test_apply_stale_lock_is_reclaimed(tmp_path, monkeypatch, sig_env):
-    """A lock left behind by a crashed process (older than the stale threshold)
-    must not strand every future update forever."""
+    """No pid recorded (an older-format lock, or a crash between mkdir and the
+    pid write) -> falls back to age. A lock older than the threshold must not
+    strand every future update forever."""
     import os
     import time as _time
     home, inst = _setup_apply_env(tmp_path, monkeypatch)
@@ -787,6 +790,53 @@ def test_apply_stale_lock_is_reclaimed(tmp_path, monkeypatch, sig_env):
     res = updater.apply(5, installed=inst, signature=sig, download_opener=op)
     assert res["applied"] is True
     assert not lock_dir.exists()   # released again once the reclaimed run finished
+
+
+def test_apply_lock_with_dead_pid_reclaimed_immediately_regardless_of_age(
+        tmp_path, monkeypatch, sig_env):
+    """Liveness, not elapsed time, is the PRIMARY staleness signal (coordinator
+    review of the first version of this fix): a lock recording a CONFIRMED-DEAD
+    pid is reclaimed right away even with the age threshold set so high it
+    would never expire on its own - proving age alone is not what decides this
+    anymore."""
+    home, inst = _setup_apply_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(updater, "_APPLY_LOCK_STALE_S", 10 ** 9)
+    op, sig = _signed_build("0.2.0", ["click"])
+
+    lock_dir = home / "updates" / "apply.lock"
+    lock_dir.mkdir(parents=True)
+    (lock_dir / "pid").write_text("0", encoding="utf-8")   # 0 is never a live pid
+
+    res = updater.apply(5, installed=inst, signature=sig, download_opener=op)
+    assert res["applied"] is True
+
+
+def test_apply_lock_with_live_pid_never_reclaimed_even_past_stale_threshold(
+        tmp_path, monkeypatch, sig_env):
+    """The property the age-only design got wrong: a legitimately long-running
+    apply (download() has no cap on total duration, only a per-socket-op
+    timeout, so a large build on a slow link can genuinely take a long time)
+    must not be treated as an orphan just because it has been running a
+    while. A lock recording the CURRENT process's own pid - unambiguously
+    alive - must never be reclaimed, even with the age threshold set so low
+    it would expire almost instantly on age alone."""
+    import os
+    import time as _time
+    home, inst = _setup_apply_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(updater, "_APPLY_LOCK_STALE_S", 0.01)
+    from localm.bugreport import LocalmError
+
+    lock_dir = home / "updates" / "apply.lock"
+    lock_dir.mkdir(parents=True)
+    (lock_dir / "pid").write_text(str(os.getpid()), encoding="utf-8")   # us - definitely alive
+    old = _time.time() - 10
+    os.utime(lock_dir, (old, old))
+
+    called = {"n": 0}
+    with pytest.raises(LocalmError, match="already being applied"):
+        updater.apply(5, installed=inst, signature="x",
+                      download_opener=lambda *a: called.__setitem__("n", called["n"] + 1))
+    assert called["n"] == 0
 
 
 def test_apply_lock_released_after_success(tmp_path, monkeypatch, sig_env):

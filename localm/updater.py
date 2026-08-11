@@ -444,14 +444,60 @@ def _updates_dir() -> Path:
     return d
 
 
-# SEC-UPDATE-RACE: how long an apply.lock may be held before it is treated as an
-# orphan from a crashed process rather than a live apply. Generous on purpose: a
-# "runtime"-class apply re-provisions the native llama.cpp binaries
-# (post_swap_command -> setup-llama), which can legitimately take several minutes
-# on a slow connection, on top of the download/signature/swap steps ahead of it. A
-# threshold shorter than the slowest real apply would steal a genuinely
-# in-progress lock and reopen the exact race this exists to close.
+# SEC-UPDATE-RACE: fallback-only threshold, used ONLY when a lock's holder PID
+# could not be determined at all (an older-format lock, or a crash in the
+# narrow window between mkdir and writing the pid file - see
+# _apply_lock_is_stale). Generous on purpose, for the same reason it always
+# was: a "runtime"-class apply re-provisions the native llama.cpp binaries
+# (post_swap_command -> setup-llama), which can legitimately take several
+# minutes on a slow connection. It is NOT the primary staleness signal - see
+# _apply_lock_is_stale for why elapsed time alone cannot be trusted for that.
 _APPLY_LOCK_STALE_S = 1800.0
+
+
+def _lock_holder_pid(lock_dir: Path):
+    """The PID recorded by whoever currently holds *lock_dir* (written by
+    _apply_lock right after it acquires the lock), or None if unrecorded /
+    unreadable - an older-format lock, or a crash in the gap between mkdir
+    and the pid write."""
+    try:
+        return int((lock_dir / "pid").read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _apply_lock_is_stale(lock_dir: Path) -> bool:
+    """Whether *lock_dir* is an ORPHAN (its holder is gone) rather than a
+    legitimately long-running apply.
+
+    An apply can hold this lock for a long time on a perfectly healthy run: it
+    covers the DOWNLOAD (download() has no cap on TOTAL duration, only a
+    per-socket-operation timeout, so a large build over a slow connection can
+    legitimately take many minutes to fully arrive), and a "runtime"-class
+    post-swap step is another real download on top of that. So elapsed time
+    SINCE ACQUISITION cannot tell "still running, slowly" apart from "crashed
+    without releasing the lock" - only whether the holder process is still
+    alive can.
+
+    Primary signal: the PID _apply_lock recorded at acquisition. If
+    instances.pid_alive() confirms it is dead, the lock is stale regardless of
+    age - reclaimed immediately rather than waiting out a timer. If the PID is
+    alive, or pid_alive cannot tell (its own conservative default - see its
+    docstring), the lock is NOT stale no matter how long it has been held:
+    never falsely steal from a process that may still be genuinely working.
+
+    Fallback ONLY when no PID was recorded at all: age against
+    _APPLY_LOCK_STALE_S is the last resort, since there is no liveness signal
+    to check in that case."""
+    from localm.instances import pid_alive
+    pid = _lock_holder_pid(lock_dir)
+    if pid is not None:
+        return not pid_alive(pid)
+    try:
+        age = time.time() - lock_dir.stat().st_mtime
+    except OSError:
+        return True   # cannot even stat it -> treat as gone, do not block forever
+    return age >= _APPLY_LOCK_STALE_S
 
 
 @contextlib.contextmanager
@@ -472,24 +518,21 @@ def _apply_lock():
 
     The SECOND caller fails FAST with a clear refusal rather than blocking: an
     apply can legitimately run for minutes, and a caller blocked that long is
-    indistinguishable from a hang. A lock held past ``_APPLY_LOCK_STALE_S`` is
-    assumed to be an orphan (the holder crashed without releasing it) and is
-    reclaimed rather than stranding every future update forever."""
+    indistinguishable from a hang. A lock whose holder is confirmed gone (see
+    :func:`_apply_lock_is_stale`) is reclaimed rather than stranding every
+    future update forever after a crash."""
+    import os
     lock_dir = _updates_dir() / "apply.lock"
     try:
         lock_dir.mkdir()
     except FileExistsError:
-        try:
-            age = time.time() - lock_dir.stat().st_mtime
-        except OSError:
-            age = _APPLY_LOCK_STALE_S + 1   # cannot stat it -> treat as gone, do not block forever
-        if age >= _APPLY_LOCK_STALE_S:
-            # Reclaim a stale lock. If we lose a race to reclaim it (someone else's
-            # mkdir wins), our own mkdir below raises FileExistsError again, and we
-            # report that exactly like a live lock - safe either way, since that
-            # means a genuinely concurrent, non-stale caller now holds it.
+        if _apply_lock_is_stale(lock_dir):
+            # Reclaim an orphaned lock. If we lose a race to reclaim it (someone
+            # else's mkdir wins first), our own mkdir below raises FileExistsError
+            # again, and we report that exactly like a live lock - safe either way,
+            # since that means a genuinely concurrent, non-stale caller now holds it.
             with contextlib.suppress(OSError):
-                lock_dir.rmdir()
+                shutil.rmtree(lock_dir)
         try:
             lock_dir.mkdir()
         except FileExistsError:
@@ -497,11 +540,19 @@ def _apply_lock():
             raise LocalmError(
                 "another update is already being applied",
                 reason="wait for it to finish, then try again")
+    # Record who holds it, so a future caller's staleness check can ask
+    # instances.pid_alive() instead of guessing from elapsed time. Best-effort:
+    # a failed write just means the next check falls back to age (see
+    # _apply_lock_is_stale) - never the reason this apply itself fails.
+    try:
+        (lock_dir / "pid").write_text(str(os.getpid()), encoding="utf-8")
+    except OSError:
+        pass
     try:
         yield
     finally:
         with contextlib.suppress(OSError):
-            lock_dir.rmdir()
+            shutil.rmtree(lock_dir)
 
 
 def _new_run_dir() -> Path:
