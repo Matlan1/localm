@@ -15,15 +15,35 @@ connection, and either
     ``https://`` URL plus a small HTML catch page, so opening ``http://`` either
     redirects automatically or at least explains itself.
 
-This is used ONLY on a TLS bind (always a network bind in practice; loopback is
-plain HTTP and never reaches here). Any setup failure falls back to a direct
-``uvicorn.run`` TLS bind (today's behaviour), so the working HTTPS path is never
-put at risk by this convenience.
+BOTH BINDS COME THROUGH HERE, INCLUDING THE PLAIN-HTTP LOOPBACK DEFAULT. The TLS
+path relays to an internal TLS uvicorn as described above; the plain-HTTP path
+runs the SAME first-byte peek (``_serve_async_plain``) so a client that wrongly
+opens a TLS connection on this HTTP port is closed cleanly at the socket layer
+instead of feeding a ClientHello into uvicorn's HTTP parser. Any setup failure
+falls back to a direct ``uvicorn.run``, so neither working path is put at risk by
+this convenience.
 
-Nothing in the server trusts ``request.client.host`` for a security decision
-(the loopback/network split is made from the configured bind host, not the peer
-address - see ``gui/web.py``), so the relayed connection appearing to uvicorn as
-``127.0.0.1`` is safe.
+**CONSEQUENCE, and it is the reason this paragraph is worth reading: the app
+never sees the client's socket.** Every accepted connection is relayed over a
+fresh internal loopback connection, so the peer uvicorn reports is PORTMUX'S OWN
+socket, owned by the server process. Any local-identity or peer-credential
+reasoning at the app layer is therefore invalid - not merely imprecise. Measured
+2026-08-11 through this entry point: the peer resolved to the SERVER'S OWN pid on
+4/4 requests from separate client processes, never to the client. A check built
+on it would answer "trusted" for every caller while appearing to ask. Evidence
+and method: ``dev-notes/PEER-CREDENTIAL-FEASIBILITY-2026-08-11.md``.
+
+That is safe for what the server actually does, because nothing trusts
+``request.client.host`` for a security decision - the loopback/network split is
+made from the configured bind host (see ``gui/web.py`` and
+``http_server.py``'s ``bind_host`` gates). It is NOT a licence to add such a
+check later.
+
+This paragraph previously said the opposite ("used ONLY on a TLS bind ... loopback
+is plain HTTP and never reaches here"). That was accurate when written and stopped
+being true when the plain-HTTP peek was added below. Kept as a note because the
+wrong version is the kind a reader CHECKS and then trusts, so the correction is
+worth more than the space it takes.
 """
 
 from __future__ import annotations
