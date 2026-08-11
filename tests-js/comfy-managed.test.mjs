@@ -391,3 +391,50 @@ test("already at the shipped pin -> says up to date, Update still available", as
   assert.ok(win.document.querySelector(".comfy-managed-update-btn"),
             "still offered: re-running it re-verifies the localm patch set");
 });
+
+test("a failed update shows the job's OWN reason as page text, not just 'update failed'", async () => {
+  // update_managed_comfy distinguishes states a user must be able to tell apart:
+  // rolled back cleanly, rolled back but the patch re-apply failed, and the rollback
+  // ITSELF failed (a genuinely mixed install). Rendering all of them as "update
+  // failed" swallows exactly the distinction that module goes to trouble to make.
+  const calls = [];
+  const { window: win } = loadAppWithPages({
+    fetchImpl: makeFetch(calls, { installed: true, statusExtra: UPDATE_DUE }) });
+  await render(win);
+  // A failing job whose output is the long, WRAPPED rollback-also-failed message.
+  runScript(win, `streamJob = (id, onLine) => {
+    onLine("Fetching ComfyUI updates ...");
+    onLine("The rollback to 8f40b43e0204 ALSO failed (fatal: bad object); the");
+    onLine("managed ComfyUI may be in a mixed state - reinstall it with");
+    onLine("'localm comfy remove' then 'localm comfy setup'.");
+    return Promise.resolve({ status: "failed" });
+  };`);
+  win.document.querySelector(".comfy-managed-update-btn").onclick();
+  for (let i = 0; i < 6; i++) await new Promise((r) => setTimeout(r, 0));
+
+  const err = win.document.querySelector(".comfy-managed-update-error");
+  assert.ok(err, "a failure must render its reason on the page");
+  // The TAIL, not just the final line: the last line alone is the fragment
+  // "'localm comfy remove' then 'localm comfy setup'." with the actual cause lost.
+  assert.ok(err.textContent.includes("ALSO failed"),
+            "the real cause must survive the console's line wrapping: " + err.textContent);
+  assert.ok(err.textContent.includes("mixed state"), err.textContent);
+});
+
+test("a retried update does not stack the previous failure's reason", async () => {
+  const calls = [];
+  const { window: win } = loadAppWithPages({
+    fetchImpl: makeFetch(calls, { installed: true, statusExtra: UPDATE_DUE }) });
+  await render(win);
+  runScript(win, `streamJob = (id, onLine) => { onLine("first failure reason"); return Promise.resolve({ status: "failed" }); };`);
+  win.document.querySelector(".comfy-managed-update-btn").onclick();
+  for (let i = 0; i < 6; i++) await new Promise((r) => setTimeout(r, 0));
+  runScript(win, `streamJob = (id, onLine) => { onLine("second failure reason"); return Promise.resolve({ status: "failed" }); };`);
+  win.document.querySelector(".comfy-managed-update-btn").onclick();
+  for (let i = 0; i < 6; i++) await new Promise((r) => setTimeout(r, 0));
+
+  const errs = win.document.querySelectorAll(".comfy-managed-update-error");
+  assert.equal(errs.length, 1, "only the CURRENT failure may be shown");
+  assert.ok(errs[0].textContent.includes("second"), errs[0].textContent);
+  assert.ok(!errs[0].textContent.includes("first"), "a stale reason must not survive");
+});
