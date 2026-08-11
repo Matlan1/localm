@@ -342,12 +342,12 @@ populateVoicePicker();
 // toggled in another terminal/tab while sitting on the chat view is reflected
 // without a reload (the view-switch path in pages.js covers navigation).
 // Registering the listener is harmless while locked; P1a is about the fetch
-// each callback fires, so each one bails while still locked (or not yet
-// resolved either way - `!== false` covers "never confirmed" the same as
-// "confirmed locked"). A real focus/storage/visibility event needs a user
-// already looking at the page, well after bootAuthProbe's one network round
-// trip has settled one way or the other in practice, but the guard costs
-// nothing and closes the same class of gap this fix exists for.
+// each callback fires. `=== false` requires bootAuthProbe to have EXPLICITLY
+// unlocked (unlockUI sets it false) - undefined (never resolved yet) and true
+// (locked) both correctly fall through and skip the call. A real focus/
+// storage/visibility event needs a user already looking at the page, well
+// after bootAuthProbe's one network round trip has settled in practice, but
+// the guard costs nothing and closes the same class of gap this fix exists for.
 window.addEventListener("focus", () => {
   if (window.__localmLocked === false) refreshPluginCommands();
 });
