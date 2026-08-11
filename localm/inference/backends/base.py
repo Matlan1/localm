@@ -71,6 +71,35 @@ class InvalidGrammarError(ValueError):
     """
 
 
+class GrammarUnsupportedError(ValueError):
+    """Raised when a grammar was requested but this backend cannot constrain
+    generation with one at all, so the request is refused instead of answered
+    with unconstrained text the caller believes is grammar-conformant.
+
+    Deliberately NOT an :class:`InvalidGrammarError`: the grammar is fine, the
+    BACKEND is the limitation. Reporting this as "Invalid grammar" would send the
+    caller to fix a grammar that has nothing wrong with it - the same
+    wrong-thing-to-fix failure already documented at the worker-fault arm in
+    ``routes/chat.py``.
+
+    Deliberately NOT an :class:`UnsupportedInputError` either, even though the
+    name fits: ``cli/chat.py``'s ``except UnsupportedInputError`` arm DISCARDS the
+    exception message and prints vision-capability guidance in its place (see the
+    ordering comment there). Inheriting from it would mean a grammar refusal could
+    surface as advice about picking a vision model. A sibling of
+    :class:`InvalidGrammarError` under ``ValueError`` keeps the recovery semantics
+    honest at every existing handler.
+
+    Why this exists: ``Engine.validate_grammar`` used to probe the backend with
+    ``getattr(backend, "validate_grammar", None)`` and no-op when it was absent.
+    Only the GGUF backend defined it, so a grammar sent to an HF-backed model was
+    never checked AND never applied when the optional ``[grammar]`` extra is
+    missing - the worker logs a warning and generates unconstrained. The client
+    got a normal 200 full of text that satisfies no grammar, with no signal that
+    the constraint had been dropped (AGENTS.md rule 5).
+    """
+
+
 class EmbedBatchTooLargeError(ValueError):
     """Raised when an ``/v1/embeddings`` request against an HF-backed model
     exceeds the configured per-request text-count or character-count cap
@@ -108,6 +137,18 @@ IMAGE_UNSUPPORTED_MESSAGE = (
 )
 
 
+# Shown to the user when a grammar is requested of a backend that cannot apply
+# one. Names both routes out, because which one applies depends on the install:
+# a GGUF model always has native grammar support, while an HF model needs the
+# optional extra that ships xgrammar.
+GRAMMAR_UNSUPPORTED_MESSAGE = (
+    "This model cannot constrain generation to a grammar, so the requested "
+    "grammar would be ignored and the reply would not match it. Use a "
+    "GGUF-format model (grammar support is built in), or install the grammar "
+    "extra for HuggingFace-format models with: pip install 'localm[grammar]'"
+)
+
+
 def messages_contain_image(messages: List[dict]) -> bool:
     """True if any message carries an ``image_url`` content part.
 
@@ -135,6 +176,49 @@ class BaseBackend(ABC):
         """True when this backend, in its current state, can actually see
         images. Default False; multimodal backends override this."""
         return False
+
+    @property
+    def supports_grammar(self) -> bool:
+        """True when this backend, in its current state, can actually constrain
+        generation to a GBNF grammar.
+
+        Default False, and the default matters: a capability answers DENY when
+        nobody declared it. The previous arrangement had no declaration at all -
+        callers probed for a ``validate_grammar`` METHOD and read its absence as
+        "nothing to validate", which is a different question and answers it in the
+        dangerous direction. A backend that cannot constrain generation then
+        produced unconstrained output that the caller had no way to distinguish
+        from a grammar-conformant answer.
+
+        A new backend inherits the safe answer for free. To offer grammar, set
+        this True; overriding :meth:`validate_grammar` on top of that is optional
+        and only buys an UP-FRONT rejection of a malformed grammar.
+        """
+        return False
+
+    def validate_grammar(self, grammar: Optional[str]) -> None:
+        """Check *grammar* against this backend before generation starts.
+
+        Base behaviour, which every backend inherits unless it overrides:
+
+        - no grammar requested: nothing to do.
+        - grammar requested and :attr:`supports_grammar` is False: raise
+          :class:`GrammarUnsupportedError`, so the request is refused with a
+          reason rather than silently answered with unconstrained text.
+        - grammar requested and the backend declares support but cannot
+          pre-parse it: no-op. Deferring to generation time is a real, chosen
+          behaviour (see ``GgufBackend.validate_grammar``'s busy-worker branch),
+          not a silent drop - the constraint IS applied, it is only the early
+          rejection of a malformed string that is skipped.
+
+        This is a concrete method rather than an optional attribute on purpose.
+        An absent method cannot say "I cannot do this"; it can only be missing,
+        and every caller has to guess what missing meant.
+        """
+        if not grammar:
+            return
+        if not self.supports_grammar:
+            raise GrammarUnsupportedError(GRAMMAR_UNSUPPORTED_MESSAGE)
 
     @abstractmethod
     def load(self) -> None:

@@ -37,7 +37,15 @@ from fastapi.security import HTTPBearer
 
 from localm import scopes
 from localm.bindhost import is_loopback_host as _is_loopback_host  # noqa: F401  (re-export for back-compat)
-from localm.inference.backends.base import ModelLoadCancelled
+from localm.inference.backends.base import (
+    EmbedBatchTooLargeError,
+    GrammarUnsupportedError,
+    ImageDecodeUnavailable,
+    InvalidGrammarError,
+    ModelLoadCancelled,
+    UnsupportedInputError,
+    VisionInputError,
+)
 from localm.inference.chat_pipeline import ChatPipeline
 from localm.inference import residency
 from localm.inference.engine import Engine
@@ -4750,6 +4758,54 @@ def _memory_used_header(ctx) -> dict:
     return {"X-Localm-Memory": blob}
 
 
+# The backend error contract, in ONE table so the two non-streaming handlers
+# cannot drift apart. Every entry is a ValueError subclass raised deliberately by
+# a backend to carry a reason the caller can act on; each maps to the status that
+# says whose problem it is.
+#
+# ORDER IS LOAD-BEARING and the table is a sequence, not a dict, for exactly that
+# reason: ImageDecodeUnavailable and VisionInputError are BOTH UnsupportedInputError
+# subclasses, so a base-class-first table would swallow them and report a missing
+# image decoder as the caller's bad input. This is the same arm-ordering hazard
+# documented in cli/chat.py's vision handling, and it has its own test.
+#
+# 501 for ImageDecodeUnavailable, not 400 and not 503: the request is fine and the
+# caller can do nothing about it, so 4xx would blame the wrong party; and the
+# missing decoder will not appear on a retry, which is what 503 would promise.
+# "Not Implemented" is exactly the permanent, server-side capability gap it is.
+_BACKEND_ERROR_STATUS: tuple = (
+    (ImageDecodeUnavailable, 501),
+    (VisionInputError, 400),
+    (UnsupportedInputError, 400),
+    (GrammarUnsupportedError, 400),
+    (InvalidGrammarError, 400),
+    (EmbedBatchTooLargeError, 413),
+)
+
+# The same classes as a plain tuple, for use as an `except` clause. Derived from
+# the table rather than written out again, so a class added to one is never
+# missing from the other - a catch listing a class the table does not map would
+# raise HTTPException(None, ...) at the moment it finally fired.
+_BACKEND_ERROR_TYPES: tuple = tuple(t for t, _ in _BACKEND_ERROR_STATUS)
+
+
+def backend_error_status(exc: BaseException) -> Optional[int]:
+    """Status for a backend error the caller can act on, or ``None`` when this is
+    not one of them.
+
+    ``None`` is the important half: it means the exception falls through to the
+    generic handler and becomes an opaque 500, which is the CORRECT outcome for a
+    genuine bug. Deliberately NOT written as ``except ValueError`` at the call
+    sites - every class above IS a ValueError, so a broad catch would also
+    swallow an unrelated ValueError from a real defect and report it to the user
+    as their own bad input (AGENTS.md rule 5, in the direction people forget).
+    """
+    for exc_type, status in _BACKEND_ERROR_STATUS:
+        if isinstance(exc, exc_type):
+            return status
+    return None
+
+
 async def _complete(
     engine: Engine,
     messages: list,
@@ -4796,6 +4852,26 @@ async def _complete(
         try:
             text = await _generate_full(engine, messages, request,
                                         timing=timing, **gen_kwargs)
+        except _BACKEND_ERROR_TYPES as e:
+            # A backend refusal the CALLER can act on (an image this vision model
+            # could not process, a grammar the deferred check finally rejected at
+            # sampler-build time, a missing image decoder). Every one of these is a
+            # ValueError, so before this arm existed they sailed past the
+            # RuntimeError catch below into the generic Exception backstop and came
+            # back as {"detail": "Internal server error"} with the reason thrown
+            # away - while the STREAMING twin of this very function delivered that
+            # same reason to the client. Same request, same failure, and only the
+            # non-streaming caller was told nothing.
+            #
+            # Raised as an HTTPException rather than rendered inline like the
+            # RuntimeError case below, because these are not generation failures
+            # that produced a partial answer: nothing was generated and the status
+            # is the honest report. The streaming path cannot match the STATUS
+            # (its role chunk, and therefore the 200 header, is already on the wire
+            # before generation starts), but it does carry the same reason and
+            # marks finish_reason="error" - so both paths tell the caller what went
+            # wrong, which is the property that was actually broken.
+            raise HTTPException(backend_error_status(e), str(e))
         except RuntimeError as e:
             # A generation FAILURE (not enough free VRAM for this prompt, a
             # conversation that outgrew n_ctx_max, a native decode error) is raised
