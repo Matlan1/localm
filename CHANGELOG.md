@@ -23,6 +23,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   a version update, and the button now says so instead of failing part way in.
 
 ### Fixed
+- **A crashed model process now says HOW it died, not just a bare number.** The
+  error used to read "worker exit -4" and leave you to look that up. On Linux and
+  macOS a negative code is the signal that killed it, so that one now reads
+  "killed by signal SIGILL" - which distinguishes an illegal instruction from a
+  segfault or a deliberate abort, and those point at different causes. On Windows
+  the well-known native fault codes are named the same way, including the one
+  produced by a clashing GPU library version. Codes that are not faults are left
+  exactly as they are rather than dressed up as one.
 - **When the model process dies from a native crash, the error now tells you what
   crashed instead of only that something did.** The message has always ended with
   "see the debug log for the native stack trace", but for the worst kind of crash
