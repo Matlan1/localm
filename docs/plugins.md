@@ -188,6 +188,56 @@ Kokoro neural TTS entirely in the browser and registers a speech provider via
 in privacy mode with no gating. The client context (`ctx`) exposes
 `registerTTS`, `toast`, `authHeaders`, and `voicesChanged`.
 
+## Exporting a coder tool
+
+A plugin can add a tool the coder agent may call. This uses a DIFFERENT
+manifest form from the rest of this document, so read this section before
+adding one.
+
+Everything above describes the ENGINE contract: `[plugin] register = "..."`,
+loaded by the plugin engine. Coder tool discovery does not read those. It walks
+the LEGACY plugin form, which requires an `entry` instead:
+
+```toml
+[plugin]
+name  = "myplugin"
+entry = "myplugin.tools:setup"     # <module>:<attr>, and it is required here
+
+[tools]
+exports = ["do_the_thing"]
+```
+
+A plugin that declares `register` and no `entry` is treated as engine-owned and
+skipped by that scan entirely, so **a `[tools] exports` block on an
+engine-contract plugin is parsed, shown in the GUI's External plugins card, and
+never registered as a coder tool.** That split is a real limitation of the
+current loader, not a convention: a plugin that wants both surfaces has to ship
+the legacy form.
+
+Each name in `exports` is looked up on the imported module. The callable takes
+the working directory as its first positional argument and everything else by
+keyword. Three optional attributes describe it to the model:
+
+| Attribute | Meaning |
+|---|---|
+| `tool_description` | One-line description; falls back to the docstring's first line |
+| `tool_params` | `{param: {"type", "description", "required"}}` |
+| `tool_destructive` | Whether it asks before running. **Defaults to `True`** |
+
+`tool_destructive` defaulting to true is deliberate: a tool that forgets to
+declare itself asks for confirmation rather than silently acting.
+
+Registered names are namespaced `plugin_<plugin>_<export>`, with hyphens in the
+plugin name converted to underscores, so an export cannot shadow a built-in.
+
+One current limit worth knowing: an exported tool cannot mark its output as
+untrusted. The built-in network tools are recognised by name rather than by a
+flag, so a plugin tool that returns fetched content is not put through the
+untrusted-content handling that `fetch_url` gets.
+
+For the built-in tools the coder already has, see the table in
+[cli.md](cli.md#built-in-tools).
+
 ## Chat pipeline hooks
 
 A plugin can intercept and transform a chat turn server-side by registering

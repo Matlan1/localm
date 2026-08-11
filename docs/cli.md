@@ -420,7 +420,7 @@ localm coder --model mymodel --verify "pytest -x"            # interactive, same
 localm coder --model mymodel --seed 1234                     # reproducible sampling
 ```
 
-The agent auto-starts `localm serve` when needed, plans with tool calls (read, write, edit, patch, shell, search, tests, image generation, Knowledge-collection search, plus tools exported by other installed plugins), asks before destructive actions, tracks a turn budget so it asks for help instead of guessing forever, and verifies its own code changes before answering. Privacy mode is the default: nothing is persisted unless you opt into `--mode log` or `--mode full`.
+The agent auto-starts `localm serve` when needed and plans with tool calls: reading and searching the project, writing and patching files, running the shell and the test suite, git, web fetch and search, image generation, Knowledge-collection search, background jobs, and delegating to sub-agents. Plus any MCP server tools, plugin-exported tools, and Agent Skills available in that project. The full list is in [Built-in tools](#built-in-tools) below. It asks before destructive actions, tracks a turn budget so it asks for help instead of guessing forever, and verifies its own code changes before answering. Privacy mode is the default: nothing is persisted unless you opt into `--mode log` or `--mode full`.
 
 ### Built-in tools
 
