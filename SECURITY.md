@@ -165,6 +165,80 @@ clients you trust.
   space (which Windows silently strips). This applies to `localm pull`, the
   same-repo vision-projector auto-attach, and `--mmproj`.
 
+## Outbound network policy
+
+localm is offline-first, and the paths that CAN reach the network run through
+one policy choke point (`netpolicy.check_url`). The full model, including the
+domain lists and the mode semantics, is in [docs/network.md](docs/network.md);
+this section states the security properties and, more importantly, their edges.
+
+- **What it covers.** The coder's and chat's web access, HuggingFace model
+  discovery, and model pulls all go through the policy. It is not only a
+  model-facing guard.
+- **What it does not cover.** Several outbound paths deliberately do not use
+  it, including bug-report upload and requests to your ComfyUI instance. Treat
+  the policy as governing the paths named above, not as a blanket statement
+  about every socket localm opens.
+- **`off` is the meaningful setting.** At the policy layer `ask` and `allow`
+  are the same thing: the only mode branch that refuses is `off`. The prompt
+  you see for `ask` comes from the coder's own confirmation step, one layer up,
+  and an auto-approve session does not show it. Do not read `ask` as a
+  guarantee that something will stop and ask.
+- **`off` has one documented exception.** An admin-only setting
+  (`update_ignore_net_policy`, off by default) lets the update check run
+  regardless. Nothing else opts out.
+- **Private-address guard.** Requests to loopback, link-local, CGNAT and
+  private ranges are refused, and the check is re-applied to the resolved
+  address rather than the name. It classifies by ADDRESS TYPE, so a service
+  reachable on a globally-routable address is not "internal" to this guard.
+  Setting `net_allow_private` true removes both the pre-flight check and the
+  pin-time re-check, not just the former.
+- **DNS-rebinding pin.** A permitted request is pinned to the address that was
+  validated, so a name cannot resolve to something else between the check and
+  the connection. The pinned session also disables environment trust, so a
+  proxy environment variable cannot route the connection somewhere the pin
+  never saw, and `.netrc` credentials are not auto-attached to a request the
+  caller never asked to authenticate. The pin applies to sessions built for
+  this purpose, not to every HTTP client in the process.
+- **Redirects.** Page fetches and model pulls re-validate each hop, so a
+  permitted URL cannot redirect its way to a refused one. That re-validation is
+  not present on every network path.
+- **Domain allow and deny lists.** These are read from config per call. If that
+  read fails, they are dropped for that call with a warning rather than failing
+  closed, so a denied host would pass.
+- **Response size.** Fetches are capped, but the cap is a default that callers
+  may raise; it is not a fixed ceiling.
+
+**What this is not.** The policy decides whether a request may be made. It says
+nothing about whether the content that comes back is trustworthy. Fetched pages
+and search snippets are untrusted input to the model, and
+[docs/network.md](docs/network.md) is explicit about that.
+
+## Transport security on a network bind
+
+- **Automatic past loopback, not before it.** A bind beyond loopback generates a
+  local certificate authority and a leaf certificate and serves HTTPS. A default
+  loopback bind is plain HTTP and generates no certificate at all, which is why
+  a normal local install has none.
+- **What the certificate covers.** The SANs are built from this host's own
+  addresses and its primary LAN address. Reaching localm over a VPN or overlay
+  network may therefore land on an address the certificate does not name.
+  Address enumeration also depends on the optional `[monitor]` extra; without
+  it, that set is empty.
+- **Regeneration.** The leaf is regenerated when it no longer covers a required
+  name, not on every address change.
+- **Key file permissions.** The private key is written with owner-only
+  permissions on POSIX. On Windows that call does no filtering, so the key
+  inherits the directory's own permissions; treat the data directory's access
+  control as the real boundary there.
+- **Trusting the CA.** Clients need the generated CA to validate the connection.
+  `GET /localm-ca.crt` serves it, and that route is deliberately public.
+- **A self-call caveat.** When the CA file is missing, localm's own internal
+  calls fall back to not verifying rather than failing.
+
+Setup, distribution to phones and browsers, and reverse-proxy alternatives are
+in [docs/tls.md](docs/tls.md).
+
 ## Software updates
 
 localm never updates itself. An update runs only when you initiate it (`localm
