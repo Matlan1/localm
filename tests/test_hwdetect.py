@@ -288,7 +288,9 @@ def test_amd_known_non_gfx103x(name, known):
 
 # ------------------------- torch_pip_args (wheel source) -------------------
 
-def test_torch_pip_args_cuda():
+def test_torch_pip_args_cuda(monkeypatch):
+    # Deterministic regardless of the test-running machine's own hardware.
+    monkeypatch.setattr(hwdetect, "_cuda_compute_capabilities", lambda: [])
     args = hwdetect.torch_pip_args("cuda", Detection(vendors=["nvidia"]))
     assert "cu126" in args and args.startswith("torch torchvision")
 

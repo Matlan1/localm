@@ -28,6 +28,7 @@ from pathlib import Path
 
 import pytest
 
+from localm import hwdetect
 from localm.media import managed_comfy as mc
 from localm.media import managed_comfy_fresh as fresh
 
@@ -46,6 +47,11 @@ def test_provision_fresh_uses_real_base_python_not_sys_executable(monkeypatch, t
 
     monkeypatch.setattr(fresh, "_run", _fake_run)
     monkeypatch.setattr(fresh, "_clone_at_commit", lambda *a, **k: (True, ""))
+    # provision_fresh computes comfy_torch_spec() regardless of install_torch,
+    # which on a real NVIDIA box would otherwise shell out to nvidia-smi via
+    # the Blackwell detection - deterministic regardless of the test-running
+    # machine's own hardware.
+    monkeypatch.setattr(hwdetect, "_cuda_compute_capabilities", lambda: [])
 
     fake_root = tmp_path / "comfyui"
     fake_paths = mc.ManagedComfyPaths(

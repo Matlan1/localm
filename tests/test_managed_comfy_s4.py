@@ -328,7 +328,15 @@ def test_provision_fresh_applies_localm_patches(home, tmp_path, monkeypatch):
     """A fresh provision against a fake ComfyUI that ships the fragile file leaves
     the managed core PATCHED (tolerant). Negative: the fake's own source is fragile
     until provisioning applies the patch."""
+    from localm import hwdetect
     from localm.media import managed_comfy_fresh as fresh
+
+    # provision_fresh computes comfy_torch_spec() BEFORE install_torch=False is
+    # consulted (it needs the spec either way), so on a real NVIDIA box this
+    # would otherwise shell out to the real nvidia-smi via the new Blackwell
+    # detection - deterministic regardless of the test-running machine's own
+    # hardware.
+    monkeypatch.setattr(hwdetect, "_cuda_compute_capabilities", lambda: [])
 
     # A minimal fake ComfyUI git repo: main.py + the fragile core file, no reqs.
     src = tmp_path / "ComfyUI"

@@ -39,9 +39,59 @@ def test_amd_gfx_family(name, expected):
 
 # ------------------------- torch_pip_args: vendors ------------------------ #
 
-def test_cuda_uses_cu126_any_os():
+def test_cuda_uses_cu126_any_os(monkeypatch):
+    # Deterministic regardless of the machine actually running this test:
+    # without mocking, this passes or fails by ambient coincidence of whether
+    # THIS box happens to have an NVIDIA GPU on it at all.
+    monkeypatch.setattr(hwdetect, "_cuda_compute_capabilities", lambda: [])
     args = hwdetect.torch_pip_args("cuda", _det("nvidia rtx 4090", ("nvidia",)))
     assert args == "torch torchvision --index-url https://download.pytorch.org/whl/cu126"
+
+
+def test_cuda_uses_blackwell_line_when_detected(monkeypatch):
+    """The bug this pins: pytorch_index_url("cuda") used to be a flat cu126
+    regardless of hardware, so a real Blackwell GPU got a wheel with no
+    kernels for it - torch loaded but warned every device was unsupported
+    and ran CPU-only. Found live, 2026-08-11, on a real 3x-Blackwell box."""
+    monkeypatch.setattr(hwdetect, "_cuda_compute_capabilities", lambda: [(12, 0)])
+    args = hwdetect.torch_pip_args("cuda", _det("nvidia rtx pro 4000 blackwell", ("nvidia",)))
+    assert args == "torch torchvision --index-url https://download.pytorch.org/whl/cu130"
+
+
+def test_cuda_uses_blackwell_line_if_any_of_several_gpus_is_blackwell(monkeypatch):
+    """A mixed box (an older card alongside a Blackwell one) must still pick
+    the line the newest card needs - the older card is expected to remain
+    covered by the broader, newer wheel's SM target list, whereas the reverse
+    (a Blackwell card on cu126) is what is actually broken."""
+    monkeypatch.setattr(hwdetect, "_cuda_compute_capabilities",
+                        lambda: [(8, 9), (12, 0)])
+    assert hwdetect.pytorch_index_url("cuda") == "https://download.pytorch.org/whl/cu130"
+
+
+def test_cuda_datacenter_blackwell_also_detected(monkeypatch):
+    """Data-center Blackwell (B100/B200) is compute capability 10.x, distinct
+    from consumer/workstation Blackwell's 12.x - _CUDA_BLACKWELL_MIN_CAP is
+    the lower bound specifically so both are covered by one threshold."""
+    monkeypatch.setattr(hwdetect, "_cuda_compute_capabilities", lambda: [(10, 0)])
+    assert hwdetect.pytorch_index_url("cuda") == "https://download.pytorch.org/whl/cu130"
+
+
+def test_cuda_pre_blackwell_stays_on_cu126(monkeypatch):
+    monkeypatch.setattr(hwdetect, "_cuda_compute_capabilities", lambda: [(9, 0)])
+    assert hwdetect.pytorch_index_url("cuda") == "https://download.pytorch.org/whl/cu126"
+
+
+def test_cuda_compute_capabilities_probe_failure_is_non_fatal(monkeypatch):
+    """nvidia-smi missing/unparseable must fall back to cu126, never raise -
+    same fail-open posture as the rest of this module."""
+    monkeypatch.setattr(hwdetect, "_run", lambda cmd: "")
+    assert hwdetect._cuda_compute_capabilities() == []
+    assert hwdetect.pytorch_index_url("cuda") == "https://download.pytorch.org/whl/cu126"
+
+
+def test_cuda_compute_capabilities_parses_multi_gpu_output(monkeypatch):
+    monkeypatch.setattr(hwdetect, "_run", lambda cmd: "8.9\n12.0\n")
+    assert hwdetect._cuda_compute_capabilities() == [(8, 9), (12, 0)]
 
 
 def test_xpu_for_intel_sycl():
