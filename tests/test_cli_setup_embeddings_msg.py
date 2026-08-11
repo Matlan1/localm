@@ -1,8 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """cli-2: `localm setup-embeddings` must not claim existing RAG collections "will
-now use semantic search" - they stay lexical (BM25) until re-indexed WITH
-embeddings and queried with --embed against a running server. Memory uses it now;
-the message must state the capability and name the RAG re-index step."""
+now use semantic search" - they stay lexical (BM25) until re-embedded. Memory uses
+it now; the message must state the capability and name the RAG re-embed step.
+
+The re-embed step itself was `rag add ... --embed` (re-reads the original source
+files) until `rag reembed <name>` existed (works from stored chunk text alone, no
+source files needed) - the message now points at the latter, the actual fix for
+the common case where a source file has moved, been deleted, or arrived only as
+an upload."""
 
 from click.testing import CliRunner
 
@@ -27,8 +32,11 @@ def test_setup_embeddings_message_scopes_the_rag_claim(monkeypatch, tmp_path):
     # The overclaim is gone: no accomplished-fact "RAG will now use semantic search".
     assert "RAG will now use semantic search" not in flat
     assert "Memory and RAG will now use semantic search" not in flat
-    # The RAG caveat + the concrete re-index step are named.
-    assert "--embed" in flat
-    assert ("lexical" in low) or ("re-index" in low) or ("re-add" in low)
+    # The RAG caveat + the concrete, no-source-files-needed re-embed step are named.
+    assert "rag reembed" in low
+    assert ("lexical" in low) or ("re-embed" in low)
+    # The stale advice (re-reading originals, which reembed's whole point is to
+    # avoid needing) must not still be there alongside the new one.
+    assert "rag add" not in low
     # Memory's capability is stated (it is the part that IS true now).
     assert "memory" in low

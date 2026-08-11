@@ -270,12 +270,31 @@ async function applyEmbeddingModel(model) {
   const log = $("kb-embed-log");
   const btn = $("kb-embed-apply");
   log.style.display = "block";
-  log.textContent = `Setting up '${model}'…\n`;
+  log.textContent = `Checking '${model}'…\n`;
   if (btn) btn.disabled = true;
   try {
-    const r = await fetch("/api/rag/embedding", {
+    // FIX3: a dry run first (no config write, no embedder reset yet - see the
+    // route's own docstring) so a switch that would drop existing collections
+    // to BM25 is confirmed BEFORE it happens, not just reported in the job
+    // log after the fact. Skipped when nothing is at risk (no collections
+    // currently have embeddings), so the common first-setup case stays one
+    // click.
+    const dry = await fetch("/api/rag/embedding", {
       method: "POST", headers: authHeaders(),
       body: JSON.stringify({ model }),
+    });
+    const dryData = await dry.json();
+    if (!dry.ok) throw new Error(dryData.detail || dry.statusText);
+    if ((dryData.collections || []).length
+        && !(await kbConfirmEmbeddingSwitch(model, dryData))) {
+      log.textContent += "Cancelled.\n";
+      return;   // declined - nothing was written
+    }
+
+    log.textContent += `Setting up '${model}'…\n`;
+    const r = await fetch("/api/rag/embedding", {
+      method: "POST", headers: authHeaders(),
+      body: JSON.stringify({ model, confirm: true }),
     });
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);
@@ -298,6 +317,34 @@ async function applyEmbeddingModel(model) {
   } finally {
     if (btn) btn.disabled = false;
   }
+}
+
+/** In-page confirm before a model switch that would invalidate existing
+ *  collections' semantic search (FIX3) - shown only when the dry-run report
+ *  names at least one. Mirrors kbConfirmReembed's shape. */
+export function kbConfirmEmbeddingSwitch(model, report) {
+  return new Promise((resolve) => {
+    openModal(`Switch to '${model}'?`, (body) => {
+      body.appendChild(el("p", "", report.note));
+      const list = el("ul", "kb-addroots");
+      for (const c of report.collections) {
+        list.appendChild(el("li", "",
+          c.name + (c.built_with ? ` (built with ${c.built_with})` : "")
+          + (c.n_chunks != null ? ` - ${c.n_chunks} chunks` : "")));
+      }
+      body.appendChild(list);
+      body.appendChild(el("p", "sub",
+        "Re-embed each one afterward (below) to restore semantic search if it "
+        + "does turn out to need it."));
+      const row = el("div", "actions");
+      const cancel = el("button", "btn-secondary", "Cancel");
+      cancel.onclick = () => { $("modal").style.display = "none"; resolve(false); };
+      const ok = el("button", "btn-secondary btn-primary", "Switch anyway");
+      ok.onclick = () => { $("modal").style.display = "none"; resolve(true); };
+      row.append(cancel, ok);
+      body.appendChild(row);
+    });
+  });
 }
 
 function offerInternalFallback() {

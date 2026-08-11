@@ -151,9 +151,9 @@ def setup_embeddings(model):
     console.print(
         f"[green]Embedding model ready:[/green] {path}{synced_note}\n"
         "Memory now retrieves semantically. Existing RAG collections stay lexical "
-        "(BM25) until re-indexed with embeddings: re-add them in the GUI, or run "
-        "`localm rag add <name> <path> --embed` and query with `--embed` against a "
-        "running server.")
+        "(BM25) until re-embedded: run `localm rag reembed <name>` for each (works "
+        "from the chunk text already stored, no original files needed), or click "
+        "'re-embed' on the Knowledge page.")
 
 
 @main.command("make-launcher")
