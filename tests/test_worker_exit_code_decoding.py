@@ -221,3 +221,32 @@ class TestRunnerReportsTheDecodedCode:
         assert not offenders, (
             "these lines use the raw exit code where a decoded one belongs:\n"
             + "\n".join(offenders))
+
+    @pytest.mark.parametrize("modname", [
+        "localm.inference.backends._hf_runner",
+        "localm.inference._embedder_runner",
+    ])
+    def test_sibling_runners_also_decode_their_exit_codes(self, modname):
+        """The same guard for the OTHER two isolated workers.
+
+        ``describe_exit_code`` was put in ``_mp_spawn`` shared rather than beside
+        ``ModelRunner`` so these two could reuse it; until they did, a user whose
+        HF or embedding worker died still got the bare number that made issues
+        1222/1223 hard to triage, while the changelog said the product decodes
+        it. One claim, three workers - so one guard covering all three.
+
+        Matches ``.exitcode`` (with the dot) rather than the bare word, so the
+        module docstrings that mention ``is_alive()``/``exitcode`` in prose are
+        not false positives - verified: both modules scan clean today, and both
+        go red when a call site is reverted to the raw attribute."""
+        import importlib
+        import inspect
+
+        src = inspect.getsource(importlib.import_module(modname))
+        offenders = [
+            line.strip() for line in src.splitlines()
+            if ".exitcode" in line and "describe_exit_code" not in line
+        ]
+        assert not offenders, (
+            f"{modname}: these lines use the raw exit code where a decoded one "
+            "belongs:\n" + "\n".join(offenders))
