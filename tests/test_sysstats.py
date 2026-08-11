@@ -48,17 +48,50 @@ def _status_aware(value, status=GPU_PROBE_OK):
     return _inner
 
 
-def test_reports_single_gpu_when_no_split_configured():
+# --- VRAM capacity/used reading (efficiency fix, mirrors the GPU-util probe
+# below) ----------------------------------------------------------------- #
+# _vram() used to call discover.vram_capacity() synchronously on every single
+# call: cheap when torch is absent, but 2-3.5s+ (up to the 15s cold-init-
+# tolerant deadline) once torch is present, because list_gpus() deliberately
+# has NO TTL cache of its own (a stale "free" reading would defeat
+# switch_engine's eviction-wait polling - see the module note above
+# discover.list_gpus). The fix moves the actual vram_capacity() call onto its
+# own single-flighted background thread, throttled to _VRAM_REFRESH_INTERVAL_S;
+# _vram() itself always returns immediately with the last completed reading
+# (or {} before the first one lands) - so every test below that exercises a
+# freshly-patched probe must WAIT for that background thread to land before
+# reading the result, the same idiom the _gpu_util tests further down already
+# use.
+
+def _reset_vram_cache(monkeypatch):
+    monkeypatch.setattr(sysstats, "_vram_last", None)
+    monkeypatch.setattr(sysstats, "_vram_last_at", None)
+    monkeypatch.setattr(sysstats, "_vram_inflight", False)
+
+
+def _wait_for_vram_cache(timeout=2.0):
+    """Poll until the background probe has landed at least once (_vram_last
+    moves off its None "never asked yet" sentinel)."""
+    deadline = time.monotonic() + timeout
+    while sysstats._vram_last is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+
+def test_reports_single_gpu_when_no_split_configured(monkeypatch):
+    _reset_vram_cache(monkeypatch)
     info = {"total": 16 * GB, "free": 4 * GB, "free_scope": FREE_SCOPE_DEVICE}
     with patch("localm.discover.vram_info", side_effect=_status_aware(info)):
+        assert _vram() == {}, "probe just started in the background, nothing cached yet"
+        _wait_for_vram_cache()
         out = _vram()
     assert out == {"vram": {"total": 16 * GB, "used": 12 * GB, "percent": 75.0}}
 
 
-def test_reports_combined_capacity_with_a_configured_split():
+def test_reports_combined_capacity_with_a_configured_split(monkeypatch):
     """AUDIT-GPU-SPLIT-1: with a configured 2-GPU split, the status bar must
     show the COMBINED total/used, not just the single main GPU's - it now
     goes through discover.vram_capacity(), not vram_info() directly."""
+    _reset_vram_cache(monkeypatch)
     from localm.config import load_config as real_load_config
     base_cfg = real_load_config()
     gpus = [
@@ -70,32 +103,172 @@ def test_reports_combined_capacity_with_a_configured_split():
     with patch("localm.discover.list_gpus", side_effect=_status_aware(gpus)), \
          patch("localm.config.load_config",
                return_value={**base_cfg, "gpu_split_indices": [0, 1]}):
+        assert _vram() == {}
+        _wait_for_vram_cache()
         out = _vram()
     assert out["vram"]["total"] == 24 * GB       # 16+8 combined, not 16 alone
     assert out["vram"]["used"] == 12 * GB        # (16-4)+(8-8) combined
     assert out["vram"]["percent"] == 50.0
 
 
-def test_empty_when_unmeasurable():
+def test_empty_when_unmeasurable(monkeypatch):
+    _reset_vram_cache(monkeypatch)
     with patch("localm.discover.vram_info", side_effect=_status_aware({})):
         assert _vram() == {}
+        _wait_for_vram_cache()
+        assert _vram() == {}
+    # A CONFIRMED empty reading ({}) must still be distinguishable, in the
+    # cache itself, from "never asked yet" (None) - see _vram_probe.
+    assert sysstats._vram_last == {}
 
 
-def test_percent_omitted_when_free_unknown():
+def test_percent_omitted_when_free_unknown(monkeypatch):
     """The registry-fallback tier reports total only (no per-process free
     reading available), so 'used'/'percent' must be omitted, not fabricated
     as 0% used."""
+    _reset_vram_cache(monkeypatch)
     with patch("localm.discover.vram_info",
                side_effect=_status_aware({"total": 16 * GB})):
+        assert _vram() == {}
+        _wait_for_vram_cache()
         out = _vram()
     assert out == {"vram": {"total": 16 * GB}}
 
 
-def test_exception_from_discover_is_swallowed_not_raised():
+def test_exception_from_discover_is_swallowed_not_raised(monkeypatch):
     """_vram() must never raise - a probe failure just omits the section
-    (matches the module's own documented 'NEVER raises' contract)."""
+    (matches the module's own documented 'NEVER raises' contract). And the
+    failure must NOT be cached as a CONFIRMED empty reading: _vram_last must
+    stay None ("could not look"), never collapse to {} ("looked, found
+    nothing") - see _vram_probe's docstring and AGENTS.md rule 5."""
+    _reset_vram_cache(monkeypatch)
     with patch("localm.discover.vram_capacity", side_effect=RuntimeError("boom")):
         assert _vram() == {}
+        deadline = time.monotonic() + 2
+        while sysstats._vram_inflight and time.monotonic() < deadline:
+            time.sleep(0.01)
+    assert sysstats._vram_last is None, (
+        "a failed probe attempt was cached as a confirmed-empty reading")
+
+
+def test_vram_probe_never_blocks_the_polling_thread(monkeypatch):
+    """A slow/wedged torch probe must never park the calling (poll) thread,
+    and concurrent polls while one probe is in flight must not start a
+    second vram_capacity() call (single-flight)."""
+    _reset_vram_cache(monkeypatch)
+    entered = threading.Event()
+    release = threading.Event()
+    calls = []
+    info = {"total": 16 * GB, "free": 4 * GB, "free_scope": FREE_SCOPE_DEVICE}
+
+    def _hanging_vram_capacity(*args, return_status=False, **kwargs):
+        calls.append(1)
+        entered.set()
+        release.wait(5)   # simulate a slow/cold-init/wedged driver
+        return (info, GPU_PROBE_OK) if return_status else info
+
+    with patch("localm.discover.vram_capacity", side_effect=_hanging_vram_capacity):
+        t0 = time.monotonic()
+        first = _vram()
+        elapsed = time.monotonic() - t0
+
+        assert first == {}, "no reading has ever landed yet -> omitted, not fabricated"
+        assert elapsed < 0.5, (
+            f"_vram() blocked the calling thread for {elapsed:.2f}s on a "
+            "hanging vram_capacity() call - the exact regression this fixes")
+        assert entered.wait(2), "background probe never started"
+
+        try:
+            for _ in range(5):
+                t0 = time.monotonic()
+                out = _vram()
+                assert time.monotonic() - t0 < 0.5
+                assert out == {}
+            assert len(calls) == 1, (
+                f"expected exactly one in-flight probe, vram_capacity was "
+                f"invoked {len(calls)} times - polls are stacking again")
+        finally:
+            release.set()
+
+        _wait_for_vram_cache()
+        assert _vram() == {"vram": {"total": 16 * GB, "used": 12 * GB, "percent": 75.0}}
+
+
+def test_vram_probe_invoked_once_across_n_stats_calls_within_cache_window(monkeypatch):
+    """REQUIRED PROOF: across many stats calls inside one cache window, the
+    expensive vram_capacity() probe must fire exactly ONCE. Asserted from
+    OUTSIDE via a plain call-count list, never by raising inside the code
+    under test - defensive code in this path catches broadly and would
+    swallow an in-body assertion (.claude/rules/diff-review-discipline.md
+    item 13)."""
+    _reset_vram_cache(monkeypatch)
+    calls = []
+    info = {"total": 16 * GB, "free": 4 * GB, "free_scope": FREE_SCOPE_DEVICE}
+
+    def _counting_vram_capacity(*args, return_status=False, **kwargs):
+        calls.append(1)
+        return (info, GPU_PROBE_OK) if return_status else info
+
+    with patch("localm.discover.vram_capacity", side_effect=_counting_vram_capacity):
+        _vram()
+        _wait_for_vram_cache()
+        expected = {"vram": {"total": 16 * GB, "used": 12 * GB, "percent": 75.0}}
+        for _ in range(10):
+            assert _vram() == expected
+    assert len(calls) == 1, (
+        f"expected exactly one probe across 10 stats calls within the cache "
+        f"window, vram_capacity was invoked {len(calls)} times - every stats "
+        f"poll is spawning its own probe again")
+
+
+def test_vram_probe_failure_does_not_overwrite_a_cached_good_reading(monkeypatch):
+    """REQUIRED PROOF: a probe failure must not be cached as a successful
+    empty result. Once a good reading is cached, a LATER probe attempt that
+    raises must leave the cache exactly as it was - never collapse a real
+    prior reading to a fabricated empty one just because this round's probe
+    errored (AGENTS.md rule 5 / diff-review-discipline.md item 3: "could not
+    look" and "nothing there" need different handling)."""
+    _reset_vram_cache(monkeypatch)
+    info = {"total": 16 * GB, "free": 4 * GB, "free_scope": FREE_SCOPE_DEVICE}
+    with patch("localm.discover.vram_info", side_effect=_status_aware(info)):
+        _vram()
+        _wait_for_vram_cache()
+    good = {"vram": {"total": 16 * GB, "used": 12 * GB, "percent": 75.0}}
+    assert sysstats._vram_last == good
+
+    # Force the cache stale so the NEXT _vram() call starts a fresh probe,
+    # and make THAT probe fail outright.
+    monkeypatch.setattr(sysstats, "_vram_last_at", 0.0)
+    with patch("localm.discover.vram_capacity", side_effect=RuntimeError("boom")):
+        assert _vram() == good, "must keep serving the last-known-good reading"
+        deadline = time.monotonic() + 2
+        while sysstats._vram_inflight and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+    assert sysstats._vram_last == good, (
+        "a failed probe attempt overwrote a previously-good cached reading "
+        "with an empty one")
+
+
+def test_vram_never_raises_and_unlatches_when_thread_creation_fails(monkeypatch):
+    """If the OS cannot spawn the probe thread at all (e.g. thread exhaustion),
+    _vram() must still never raise AND must reset the in-flight guard so a
+    later call can retry - otherwise a single failed spawn would wedge every
+    future poll into believing a probe is permanently running. Mirrors
+    _gpu_util's handling of the same failure below."""
+    _reset_vram_cache(monkeypatch)
+
+    def _broken_start(self):
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(threading.Thread, "start", _broken_start)
+
+    result = _vram()   # must not raise
+
+    assert result == {}
+    assert sysstats._vram_inflight is False, (
+        "a failed thread spawn left _vram_inflight stuck True - no later "
+        "call could ever retry")
 
 
 # --- CPU-utilisation meter (the status-bar CPU% fix) ---------------------- #

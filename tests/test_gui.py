@@ -1054,39 +1054,55 @@ class TestStatsVramTrust:
     ONLY when the reading is a FRESH, DEVICE-GLOBAL measurement. A stale or
     process-blind reading shows total alone - never a wrong used presented as live
     (AGENTS.md rule 5). Mutation check: drop either gate in _vram_reading_trusted
-    and the total-only cases below go red (used reappears)."""
+    and the total-only cases below go red (used reappears).
 
-    def _stats_vram(self, app, reading, status):
+    sysstats._vram() is throttled/single-flighted (see test_sysstats.py): the
+    real vram_capacity() call runs on a background thread and the FIRST poll
+    after a cache reset returns before it lands. So _stats_vram resets the
+    cache, polls once to kick the probe off, waits for it to land, then polls
+    again to read the now-cached reading - same wait-then-read idiom
+    test_sysstats.py's _wait_for_vram_cache uses."""
+
+    def _stats_vram(self, app, reading, status, monkeypatch):
+        from localm import sysstats
+        monkeypatch.setattr(sysstats, "_vram_last", None)
+        monkeypatch.setattr(sysstats, "_vram_last_at", None)
+        monkeypatch.setattr(sysstats, "_vram_inflight", False)
         with patch("localm.discover.list_gpus",
                    side_effect=_list_gpus_double([reading], status)):
             with TestClient(app) as client:
-                r = client.get("/api/stats")
+                r = client.get("/api/stats")           # kicks off the probe
+                assert r.status_code == 200
+                deadline = time.monotonic() + 2
+                while sysstats._vram_last is None and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                r = client.get("/api/stats")            # now served from cache
         assert r.status_code == 200
         return r.json().get("vram", {})
 
-    def test_fresh_device_reading_shows_used(self, gui_app):
+    def test_fresh_device_reading_shows_used(self, gui_app, monkeypatch):
         app, _ = gui_app
-        vram = self._stats_vram(app, _DEVICE_GPU, GPU_PROBE_OK)
+        vram = self._stats_vram(app, _DEVICE_GPU, GPU_PROBE_OK, monkeypatch)
         assert vram.get("total") == 24 * _GB
         assert vram.get("used") == 4 * _GB          # 24 - 20 GiB
         assert vram.get("percent") is not None
 
-    def test_stale_timeout_shows_total_only(self, gui_app):
+    def test_stale_timeout_shows_total_only(self, gui_app, monkeypatch):
         app, _ = gui_app
-        vram = self._stats_vram(app, _DEVICE_GPU, GPU_PROBE_TIMEOUT)
+        vram = self._stats_vram(app, _DEVICE_GPU, GPU_PROBE_TIMEOUT, monkeypatch)
         assert vram.get("total") == 24 * _GB
         assert "used" not in vram and "percent" not in vram
 
-    def test_busy_shows_total_only(self, gui_app):
+    def test_busy_shows_total_only(self, gui_app, monkeypatch):
         app, _ = gui_app
-        vram = self._stats_vram(app, _DEVICE_GPU, GPU_PROBE_BUSY)
+        vram = self._stats_vram(app, _DEVICE_GPU, GPU_PROBE_BUSY, monkeypatch)
         assert vram.get("total") == 24 * _GB
         assert "used" not in vram
 
-    def test_process_scoped_shows_total_only(self, gui_app):
+    def test_process_scoped_shows_total_only(self, gui_app, monkeypatch):
         app, _ = gui_app
         blind = {**_DEVICE_GPU, "free_scope": "process"}
-        vram = self._stats_vram(app, blind, GPU_PROBE_OK)
+        vram = self._stats_vram(app, blind, GPU_PROBE_OK, monkeypatch)
         assert vram.get("total") == 24 * _GB
         assert "used" not in vram
 

@@ -2,8 +2,10 @@
 """Best-effort live system stats for the GUI hardware monitor.
 
 Pure and NEVER raises: a probe that fails just omits its field, so the status
-bar degrades gracefully (e.g. VRAM still shows on a box without psutil). Cheap
-enough to call on a short GUI poll:
+bar degrades gracefully (e.g. VRAM still shows on a box without psutil). Safe
+to call on a short GUI poll - CPU/RAM are cheap; the two GPU-touching probes
+below run throttled and single-flighted on their own background thread so a
+slow driver/subprocess call never blocks the poll itself (see _vram/_gpu_util):
   * CPU % and RAM via psutil (the optional ``[monitor]`` extra)
   * VRAM via localm.discover.vram_capacity (combined across a configured
     multi-GPU split, else the single main GPU - torch -> nvidia-smi ->
@@ -160,19 +162,57 @@ def _vram_reading_trusted(info: dict, status) -> bool:
             and info.get("free") is not None)
 
 
-def _vram() -> dict:
-    """{"vram": {"used"?, "total", "percent"?}} - combined across a configured
-    multi-GPU split, else the single main GPU, or {} when unmeasurable.
+# VRAM enumeration is throttled/single-flighted exactly like GPU utilisation
+# below, and for a stronger reason: discover.list_gpus() deliberately carries
+# NO TTL cache of its own (see the module note above it in discover.py) -
+# switch_engine's eviction-wait loop polls it for a LIVE "free" reading, and a
+# stale value there would defeat that guard and over-evict. So the cache
+# cannot live inside list_gpus()/vram_capacity() itself; it has to sit here,
+# scoped to this one best-effort status-bar reading, leaving every other
+# caller of list_gpus()/vram_capacity() untouched. Without it, every GUI poll
+# paid the full out-of-process torch probe cost synchronously (measured
+# 2.1-3.5s typical, up to the 15s cold-init-tolerant deadline on a wedged
+# driver) on the shared plugin executor (localm.executor) - roughly one probe
+# per poll in the field, and each one occupies a worker thread that RAG/web/
+# voice/coder tool calls also depend on.
+_VRAM_REFRESH_INTERVAL_S = 10.0   # Deliberately much longer than
+                                  # _GPU_UTIL_REFRESH_INTERVAL_S: that probe is
+                                  # a cheap nvidia-smi call (<200ms), this one
+                                  # is 10-20x more expensive AND its answer
+                                  # (GPU count/capacity) changes on the
+                                  # timescale of plugging in hardware, not of a
+                                  # ~2.5s UI poll - a hot-plugged GPU still
+                                  # shows up within one refresh window, never
+                                  # permanently stale.
+
+_vram_lock = threading.Lock()
+_vram_inflight = False
+_vram_last: dict | None = None      # last COMPLETED reading. May legitimately
+                                     # be {} ("looked, found nothing"); None
+                                     # means no attempt has ever landed yet
+                                     # ("could not look" - see _vram_probe).
+                                     # Those two must stay distinguishable
+                                     # (AGENTS.md rule 5), so a FAILED attempt
+                                     # never writes into this.
+_vram_last_at: float | None = None  # monotonic time of the last COMPLETED
+                                     # attempt, success or failure - throttles
+                                     # a persistently failing probe too, not
+                                     # just successful readings (mirrors
+                                     # _gpu_util_last_at).
+
+
+def _compute_vram() -> dict:
+    """The actual vram_capacity() call and the dict-shaping around it, split
+    out of :func:`_vram` so :func:`_vram_probe` can run it on a background
+    thread. May raise - :func:`_vram_probe` is the exception boundary, the
+    same split :func:`_gpu_util_probe`/``subprocess.run`` use below.
 
     ``used``/``percent`` are included ONLY when the free reading is trustworthy
     (see :func:`_vram_reading_trusted`); a stale or process-blind reading shows
-    ``total`` alone rather than a wrong used/free, so the status bar never presents
-    a number localm cannot stand behind as current fact."""
-    try:
-        from localm.discover import vram_capacity
-        info, status = vram_capacity(return_status=True)
-    except Exception:
-        return {}
+    ``total`` alone rather than a wrong used/free, so the status bar never
+    presents a number localm cannot stand behind as current fact."""
+    from localm.discover import vram_capacity
+    info, status = vram_capacity(return_status=True)
     total = info.get("total")
     if not total:
         return {}
@@ -182,6 +222,74 @@ def _vram() -> dict:
         vram["used"] = used
         vram["percent"] = round(used / int(total) * 100, 1)
     return {"vram": vram}
+
+
+def _vram_probe() -> None:
+    """The actual (blocking) vram_capacity() call, which drives list_gpus()'s
+    out-of-process torch probe. Runs on its OWN single-flighted daemon thread,
+    started by :func:`_vram` - never call this directly.
+
+    On a genuine exception the cache is left UNTOUCHED rather than overwritten
+    with an empty reading: an error is "could not look", never "confirmed
+    nothing there" - collapsing the two is the exact bug class
+    ``.claude/rules/diff-review-discipline.md`` item 3 documents for this same
+    subsystem (list_gpus' own TIMEOUT/BUSY/INCONCLUSIVE statuses are not this
+    case - vram_capacity() already degrades those to an honest total-only or
+    last-known-good dict via :func:`_vram_reading_trusted`, so a clean return
+    here, whatever its status, IS a completed attempt worth caching). The
+    refresh-window timer still advances on a raised exception too, so a
+    persistently erroring probe backs off at the same cadence as a healthy one
+    instead of retrying on every single poll (mirrors _gpu_util_probe)."""
+    global _vram_inflight, _vram_last, _vram_last_at
+    computed = None
+    try:
+        computed = _compute_vram()
+    except Exception as e:
+        from localm.debuglog import logger
+        logger.debug("_vram: probe raised unexpectedly: %s", e)
+    with _vram_lock:
+        if computed is not None:
+            _vram_last = computed
+        _vram_last_at = time.monotonic()
+        _vram_inflight = False
+
+
+def _vram() -> dict:
+    """{"vram": {"used"?, "total", "percent"?}} - combined across a configured
+    multi-GPU split, else the single main GPU, or {} when unmeasurable or
+    before the first reading has landed.
+
+    NEVER blocks the calling (poll) thread on the underlying torch/nvidia-smi
+    probe: the actual vram_capacity() call runs single-flighted on its own
+    background thread (:func:`_vram_probe`), throttled to at most once per
+    :data:`_VRAM_REFRESH_INTERVAL_S`, and this function always returns
+    immediately with the last completed reading - omitting the section (never
+    fabricating one) until a reading has landed, the same "omit rather than
+    fabricate" contract ``_cpu_ram``/``_gpu_util`` already use in this module."""
+    global _vram_inflight
+    now = time.monotonic()
+    start_probe = False
+    with _vram_lock:
+        stale = (_vram_last_at is None
+                 or now - _vram_last_at >= _VRAM_REFRESH_INTERVAL_S)
+        if stale and not _vram_inflight:
+            _vram_inflight = True
+            start_probe = True
+        last = _vram_last
+    if start_probe:
+        try:
+            threading.Thread(target=_vram_probe, name="localm-vram-probe",
+                             daemon=True).start()
+        except Exception as e:
+            # Could not spawn the probe thread: never leave the in-flight guard
+            # stuck True with nothing left to clear it - a LATER call must be
+            # able to retry (mirrors _gpu_util() and discover.py's list_gpus()
+            # handling of the identical failure).
+            from localm.debuglog import logger
+            logger.debug("_vram: could not start probe thread: %s", e)
+            with _vram_lock:
+                _vram_inflight = False
+    return last if last is not None else {}
 
 
 _GPU_UTIL_REFRESH_INTERVAL_S = 2.0    # do not re-probe more often than the GUI polls
