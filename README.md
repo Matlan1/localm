@@ -75,7 +75,7 @@ localm serve mymodel                        # OpenAI-compatible API server
 
 - **For GGUF GPU inference:** a compiled `llama.dll` + GPU runtime DLLs. `localm setup-llama` provisions these for you (see [GPU setup](#gpu-setup)). The installer detects your hardware and chooses the backend automatically.
 
-- **NVIDIA CUDA (peak performance):** on **Windows** the installer now recommends **CUDA** for NVIDIA - it fetches a self-contained CUDA runtime, so no CUDA Toolkit is needed, and an old driver simply falls back to Vulkan. Prefer the universal driver-only build? Choose **Vulkan** in the setup menu (or `localm setup-llama --backend vulkan`). On **Linux**, Vulkan is still the default recommendation; `--backend cuda` is self-contained there too now (no Toolkit), but it is newer and not yet confirmed on real NVIDIA Linux hardware, so it is an explicit opt-in. Details in [GPU setup](#gpu-setup).
+- **NVIDIA CUDA (peak performance):** on **both Windows and Linux** the installer recommends **CUDA** for NVIDIA - it fetches a self-contained CUDA runtime (no Toolkit needed on either OS), and an old driver simply falls back to Vulkan. Prefer the universal driver-only build? Choose **Vulkan** in the setup menu (or `localm setup-llama --backend vulkan`). Details in [GPU setup](#gpu-setup).
 
 Run `localm doctor` after installing to check Python, the native library, GPU driver, VRAM, and optional packages in one shot.
 
