@@ -257,13 +257,19 @@ Scope: `keys:admin`.
 `POST /api/auth/key/clear` (scope `config:write`; CSRF-protected for
 cookie-authenticated callers) deletes the server-side owner key and signs out
 every session - the HTTP sibling of `localm key clear` and the GUI's clear
-button. `cleared` and `warnings` describe the STORED CREDENTIAL only: a full
-clear returns `{"cleared": true, "warnings": []}`, and a credential that could
-not be removed (a virus scanner or search indexer holding the file open, for
-example) returns `{"cleared": false, "warnings": [...]}` naming what survived,
-since a surviving key still grants access. Signing out browser sessions is a
-separate step and its outcome is not reflected in either field, so do not read
-`"cleared": true` as confirmation that every session was revoked.
+button. It does two things that can fail independently, and reports on both:
+removing the stored credential, and revoking every browser session. Either one
+surviving still grants access, so `{"cleared": true, "warnings": []}` is
+returned ONLY when both completed. If either could not be finished, the
+response is `{"cleared": false, "warnings": [...]}`, naming what survived: a
+credential the server could not remove (a virus scanner or search indexer
+holding the file open, for example), or `"browser sessions (some devices may
+still be signed in)"` when the session store could not be written. The labels
+are deliberately path-free.
+
+`POST /api/session/logout` reports the same way: it always clears the calling
+browser's own cookie, and carries a `warnings` entry when the server-side
+session record could not be dropped.
 
 ## Knowledge (RAG) endpoints (rag plugin)
 
