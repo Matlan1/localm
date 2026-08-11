@@ -3005,6 +3005,16 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
             except Exception:
                 pass
 
+    # The re-exec'd process must NOT auto-open a new browser tab: this is a
+    # restart, not a fresh launch, and the tab the user is already looking at
+    # shows a reconnect overlay that polls and reloads itself in place once
+    # this process is back up (models.js's server-restart handler ->
+    # onServerUnreachable() in the GUI's init.js). Opening a second tab here
+    # would strand that overlay and leave the user looking at two tabs, only
+    # one of which is watching for the server's return. plugins/gui/cli.py's
+    # browser-open step checks and consumes this flag (never leaks into a
+    # later, genuinely-fresh launch of the same process tree).
+    os.environ["LOCALM_RESTART_IN_PROGRESS"] = "1"
     os.execv(sys.executable, _restart_argv(port))
 
 
