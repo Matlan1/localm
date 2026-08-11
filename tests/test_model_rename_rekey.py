@@ -228,14 +228,19 @@ def test_remove_refuses_a_model_whose_file_a_live_engine_still_holds(
     try:
         with TestClient(app) as client:
             r = client.post("/api/models/remove", json={"model": "new-name"})
+        # The FILE first, deliberately. A status-code assertion placed ahead of
+        # it would short-circuit on a regression and report only "409 != 200",
+        # which is a statement about the guard, not about the user's data. The
+        # property being defended is that the GGUF is still there.
+        assert gguf.exists(), (
+            "the user's model file was DELETED out from under a live engine")
+        assert started == [], "the removal job must not even be started"
         assert r.status_code == 409, (
             "a file a live engine is serving must never be deletable, whatever "
             f"name the registry or the engine currently uses: {r.text}")
         assert "old-name" in r.json()["detail"], (
             "the refusal must name the key it is actually loaded under, or the "
             "user cannot work out what to unload")
-        assert gguf.exists(), "the user's model file was deleted"
-        assert started == [], "the removal job must not even be started"
         assert "new-name" in config.load_registry()
     finally:
         hs._engines.clear()
