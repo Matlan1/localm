@@ -6,7 +6,7 @@
 "use strict";
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
-import { chat } from "../app/chat.js";
+import { lsSetScoped } from "../app/chat.js";
 import { $, MIB, authHeaders, checkModelsBeforeGenerate, confirmDanger, el, fetchImageURL, jobStatusWord, streamJob, toast } from "../app/helpers.js";
 import { emptyState } from "../app/icons.js";
 import { hideStop, showStop } from "./images.js";
@@ -140,7 +140,7 @@ export async function refreshVideoHistory() {
         });
       const data2 = await r.json();
       if (r.ok) {
-        if (!chat.privacy) localStorage.setItem("localm.videoMoveDest", dest);
+        lsSetScoped("localm.videoMoveDest", dest);
         toast("Moved to " + data2.path);
         refreshVideoHistory();
       } else {
@@ -232,7 +232,7 @@ export async function refreshMusicHistory() {
         });
       const data2 = await r.json();
       if (r.ok) {
-        if (!chat.privacy) localStorage.setItem("localm.musicMoveDest", dest);
+        lsSetScoped("localm.musicMoveDest", dest);
         toast("Moved to " + data2.path);
         refreshMusicHistory();
       } else {

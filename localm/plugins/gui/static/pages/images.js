@@ -6,7 +6,7 @@
 "use strict";
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
-import { chat, renderAttachChips } from "../app/chat.js";
+import { chat, lsSetScoped, renderAttachChips } from "../app/chat.js";
 import { pickDirectory } from "../app/picker.js";
 import { $, authHeaders, cancelJob, checkModelsBeforeGenerate, confirmDanger, el, fetchImageURL, jobStatusWord, openModal, streamJob, toast } from "../app/helpers.js";
 import { emptyState } from "../app/icons.js";
@@ -167,7 +167,7 @@ export function renderImgBulkBar() {
       try { await imgApiMove(name, dest); moved++; }
       catch (e) { failed++; toast(`${name}: ${e.message}`, true); }
     }
-    if (!chat.privacy) localStorage.setItem("localm.imgMoveDest", dest);
+    lsSetScoped("localm.imgMoveDest", dest);
     toast(`Moved ${moved} image(s)` + (failed ? `, ${failed} failed` : ""));
     imgState.selected.clear();
     refreshImageHistory();
@@ -319,7 +319,7 @@ export function showImageDetail(item) {
       if (!dest) return;
       try {
         const path = await imgApiMove(item.name, dest);
-        if (!chat.privacy) localStorage.setItem("localm.imgMoveDest", dest);
+        lsSetScoped("localm.imgMoveDest", dest);
         toast("Moved to " + path);
         refreshImageHistory();
       } catch (e) {

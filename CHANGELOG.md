@@ -63,6 +63,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   for a run that changed nothing.
 
 ### Fixed
+- **A couple of dismissable UI hints (the NVIDIA/Vulkan backend hint, and
+  whether the Studio nav group is expanded) could survive turning on privacy
+  mode, unlike every other saved GUI preference.** Both were already withheld
+  from being written while privacy mode was on; they just were not cleared
+  from a browser that had them saved from before it was turned on, so
+  "privacy mode - this session only" was not quite true for those two. Fixed,
+  and every such write now goes through one shared function so this class of
+  gap cannot reopen unnoticed.
 - **A grammar that could not be applied no longer produces unconstrained text
   that looks like a normal answer.** Asking a HuggingFace-format model for
   trigger-gated ("lazy") grammar, or sending a grammar it could not compile,

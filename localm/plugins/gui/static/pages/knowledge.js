@@ -6,7 +6,7 @@
 "use strict";
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
-import { chat } from "../app/chat.js";
+import { chat, lsSetScoped } from "../app/chat.js";
 import { $, authHeaders, confirmDanger, el, jobStatusWord, openModal, streamJob, toast } from "../app/helpers.js";
 import { emptyState } from "../app/icons.js";
 import { pickPath } from "../app/picker.js";
@@ -426,10 +426,8 @@ export async function kbAddDocs(name) {
   });
   if (!paths || !paths.length) return;
   // Reopen near the last add next time (the containing folder of the first pick).
-  if (!chat.privacy) {
-    const m = paths[0].match(/^(.*)[\\/][^\\/]+[\\/]?$/);
-    localStorage.setItem("localm.kbAddPath", m ? m[1] : paths[0]);
-  }
+  const m = paths[0].match(/^(.*)[\\/][^\\/]+[\\/]?$/);
+  lsSetScoped("localm.kbAddPath", m ? m[1] : paths[0]);
   // Embeddings are opt-out here: the server defaults embed=true and degrades to
   // BM25-only when unchecked (no embedding-capable model needed). The checkbox
   // lets a user index lexical-only on purpose.

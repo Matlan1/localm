@@ -295,6 +295,29 @@ export async function refreshCtxLimit() {
   } catch (e) { /* keep default */ }
 }
 
+// LM-DA-047: privacy mode's "no traces, not even localStorage" guarantee used
+// to rest on two independently hand-maintained mechanisms - a per-call-site
+// `if (!chat.privacy) localStorage.setItem(...)` guard at every write site,
+// and helpers.js's INSTANCE_SCOPED_KEYS wipe list - with nothing checking they
+// agreed, and two keys had drifted (write-gated but never wiped). Every
+// instance-scoped write now goes through this one function instead, so the
+// write-gate decision lives in exactly one place.
+export function lsSetScoped(key, value) {
+  if (chat.privacy) return;
+  if (!INSTANCE_SCOPED_KEYS.includes(key)) {
+    // Loud, not silent (AGENTS.md rule 5): a key reaching here that is not in
+    // the wipe list is LM-DA-047's exact failure mode. Warn rather than throw
+    // so a real write still succeeds; tests-js/privacy-scoped-keys.test.mjs
+    // source-scans every lsSetScoped call site and fails before this ever
+    // ships, so this branch is a live backstop, not the primary defense.
+    console.warn(`localm: "${key}" written via lsSetScoped but missing from ` +
+      "INSTANCE_SCOPED_KEYS (helpers.js) - add it so a privacy-mode or " +
+      "instance-mismatch wipe covers it too.");
+  }
+  try { localStorage.setItem(key, value); }
+  catch (e) { /* storage full/blocked - callers already tolerate a miss */ }
+}
+
 // R34: the per-chat Web-access and Speak-aloud toggles used to reset to OFF on
 // every load, so the user had to re-enable them in every session. Reflect the
 // user's saved choice; for web, when there is no saved choice fall back to the
@@ -545,9 +568,8 @@ export const convUI = {
 };
 
 export function saveCollapsed() {
-  if (chat.privacy) return;   // folder names are conversation-derived
-  localStorage.setItem("localm.convCollapsed",
-    JSON.stringify([...convUI.collapsed]));
+  // folder names are conversation-derived, so this is instance-scoped too
+  lsSetScoped("localm.convCollapsed", JSON.stringify([...convUI.collapsed]));
 }
 
 /** Short excerpt around the first content match, or null (no match). */
