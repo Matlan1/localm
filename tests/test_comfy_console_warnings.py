@@ -284,7 +284,7 @@ class TestComfyConsoleWarningWiring:
             responses, log,
             extra_on_prompt="WARNING:root:lora key not loaded: proj_lora1\n" * 5)
 
-        with patch.object(comfy.urllib.request, "urlopen", side_effect=fake_urlopen), \
+        with patch.object(cc, "_comfy_urlopen", side_effect=fake_urlopen), \
              patch.object(comfy, "_localm_unload"):
             ok, msg = comfy.generate_image(
                 "a fox", out, seed=1, lora_name="bad.safetensors")
@@ -328,7 +328,7 @@ class TestComfyConsoleWarningWiring:
         }
         fake_urlopen = self._fake_urlopen(responses, log, extra_on_prompt="")
 
-        with patch.object(comfy.urllib.request, "urlopen", side_effect=fake_urlopen), \
+        with patch.object(cc, "_comfy_urlopen", side_effect=fake_urlopen), \
              patch.object(comfy, "_localm_unload"):
             ok, msg = comfy.generate_image("a fox", out, seed=2)
 
@@ -374,7 +374,7 @@ class TestComfyConsoleWarningWiring:
             raise AssertionError(f"unexpected url {url}")
 
         assert cc.spawned_pid("http://127.0.0.1:8188") is None
-        with patch.object(comfy.urllib.request, "urlopen", side_effect=fake_urlopen), \
+        with patch.object(cc, "_comfy_urlopen", side_effect=fake_urlopen), \
              patch.object(comfy, "_localm_unload"):
             ok, msg = comfy.generate_image("a fox", out, seed=3)
 
@@ -431,7 +431,7 @@ class TestMusicConsoleWarningWiring:
 
         with patch.object(music_comfy, "ensure_comfy", return_value=(True, "up")), \
              patch.object(music_comfy, "_localm_unload"), \
-             patch.object(music_comfy.urllib.request, "urlopen", fake), \
+             patch.object(cc, "_comfy_urlopen", fake), \
              patch.object(music_comfy.time, "sleep"):
             ok, msg = music_comfy.generate_music("synthwave", out, seed=1)
 
@@ -453,7 +453,7 @@ class TestMusicConsoleWarningWiring:
 
         with patch.object(music_comfy, "ensure_comfy", return_value=(True, "up")), \
              patch.object(music_comfy, "_localm_unload"), \
-             patch.object(music_comfy.urllib.request, "urlopen", fake), \
+             patch.object(cc, "_comfy_urlopen", fake), \
              patch.object(music_comfy.time, "sleep"):
             ok, msg = music_comfy.generate_music("synthwave", out, seed=2)
 
@@ -472,7 +472,7 @@ class TestMusicConsoleWarningWiring:
         assert cc.spawned_pid(URL) is None
         with patch.object(music_comfy, "ensure_comfy", return_value=(True, "up")), \
              patch.object(music_comfy, "_localm_unload"), \
-             patch.object(music_comfy.urllib.request, "urlopen", fake), \
+             patch.object(cc, "_comfy_urlopen", fake), \
              patch.object(music_comfy.time, "sleep"):
             ok, msg = music_comfy.generate_music("synthwave", out, seed=3)
 
@@ -532,7 +532,7 @@ class TestVideoConsoleWarningWiring:
         comfy_out = tmp_path / "comfy_out"
         with patch.object(video_comfy, "ensure_comfy", return_value=(True, "up")), \
              patch.object(video_comfy, "_localm_unload"), \
-             patch.object(video_comfy.urllib.request, "urlopen", fake), \
+             patch.object(cc, "_comfy_urlopen", fake), \
              patch.object(video_comfy.time, "sleep"), \
              patch.dict(os.environ, {"COMFY_OUTPUT_DIR": str(comfy_out)}):
             ok, msg = video_comfy.generate_video("a red fox running", out, seed=1)
@@ -557,7 +557,7 @@ class TestVideoConsoleWarningWiring:
         comfy_out = tmp_path / "comfy_out2"
         with patch.object(video_comfy, "ensure_comfy", return_value=(True, "up")), \
              patch.object(video_comfy, "_localm_unload"), \
-             patch.object(video_comfy.urllib.request, "urlopen", fake), \
+             patch.object(cc, "_comfy_urlopen", fake), \
              patch.object(video_comfy.time, "sleep"), \
              patch.dict(os.environ, {"COMFY_OUTPUT_DIR": str(comfy_out)}):
             ok, msg = video_comfy.generate_video("a red fox running", out, seed=2)
@@ -577,7 +577,7 @@ class TestVideoConsoleWarningWiring:
         comfy_out = tmp_path / "comfy_out3"
         with patch.object(video_comfy, "ensure_comfy", return_value=(True, "up")), \
              patch.object(video_comfy, "_localm_unload"), \
-             patch.object(video_comfy.urllib.request, "urlopen", fake), \
+             patch.object(cc, "_comfy_urlopen", fake), \
              patch.object(video_comfy.time, "sleep"), \
              patch.dict(os.environ, {"COMFY_OUTPUT_DIR": str(comfy_out)}):
             ok, msg = video_comfy.generate_video("a red fox running", out, seed=3)

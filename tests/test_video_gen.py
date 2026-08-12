@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from localm.media import comfy_client
 from localm.video_gen import comfy
 
 
@@ -104,7 +105,7 @@ class TestGenerateVideo:
         with patch.object(comfy, "ensure_comfy",
                           return_value=(True, "ComfyUI is running.")), \
              patch.object(comfy, "_localm_unload"), \
-             patch.object(comfy.urllib.request, "urlopen", fake), \
+             patch.object(comfy_client, "_comfy_urlopen", fake), \
              patch.object(comfy.time, "sleep"), \
              patch.dict(os.environ,
                         {"COMFY_OUTPUT_DIR": str(comfy_out)}):
@@ -127,7 +128,7 @@ class TestGenerateVideo:
         with patch.object(comfy, "ensure_comfy",
                           return_value=(True, "ComfyUI is running.")), \
              patch.object(comfy, "_localm_unload", unload_spy), \
-             patch.object(comfy.urllib.request, "urlopen", fake), \
+             patch.object(comfy_client, "_comfy_urlopen", fake), \
              patch.object(comfy.time, "sleep"), \
              patch.dict(os.environ, {"COMFY_OUTPUT_DIR": str(comfy_out)}):
             ok, msg = comfy.generate_video(

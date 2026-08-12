@@ -9,6 +9,7 @@ instrumental default, privacy sidecar suppression, and output handling.
 import json
 from unittest.mock import MagicMock, patch
 
+from localm.media import comfy_client
 from localm.music_gen import comfy
 
 
@@ -65,7 +66,7 @@ class TestGenerateMusic:
         with patch.object(comfy, "ensure_comfy",
                           return_value=(True, "ComfyUI is running.")), \
              patch.object(comfy, "_localm_unload"), \
-             patch.object(comfy.urllib.request, "urlopen", fake), \
+             patch.object(comfy_client, "_comfy_urlopen", fake), \
              patch.object(comfy.time, "sleep"):
             ok, msg = comfy.generate_music(
                 "synthwave, 80s", tmp_path / "out.flac", **kwargs)
@@ -105,7 +106,7 @@ class TestGenerateMusic:
         with patch.object(comfy, "ensure_comfy",
                           return_value=(True, "ComfyUI is running.")), \
              patch.object(comfy, "_localm_unload", unload_spy), \
-             patch.object(comfy.urllib.request, "urlopen", fake), \
+             patch.object(comfy_client, "_comfy_urlopen", fake), \
              patch.object(comfy.time, "sleep"):
             ok, msg = comfy.generate_music(
                 "synthwave, 80s", tmp_path / "out.flac",

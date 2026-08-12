@@ -39,14 +39,17 @@ class TestImageDimensions:
 
 class TestComfyAlive:
     def test_alive_when_endpoint_responds(self):
-        with patch.object(comfy.urllib.request, "urlopen") as mock_open:
+        # _comfy_alive now routes through comfy_client._comfy_urlopen (CHK-COMFY-
+        # REDIRECT), which builds its own opener and never calls the top-level
+        # urllib.request.urlopen - so that is the seam to patch, not urlopen.
+        with patch.object(comfy_client, "_comfy_urlopen") as mock_open:
             mock_open.return_value.__enter__ = MagicMock()
             mock_open.return_value.__exit__ = MagicMock(return_value=False)
             assert comfy._comfy_alive("http://127.0.0.1:8188") is True
 
     def test_dead_when_connection_refused(self):
         with patch.object(
-            comfy.urllib.request, "urlopen",
+            comfy_client, "_comfy_urlopen",
             side_effect=OSError("refused"),
         ):
             assert comfy._comfy_alive("http://127.0.0.1:8188") is False
@@ -175,7 +178,7 @@ class TestSidecarContent:
                     return m
             raise AssertionError(f"unexpected url {url}")
 
-        with patch.object(comfy.urllib.request, "urlopen", side_effect=fake_urlopen), \
+        with patch.object(comfy_client, "_comfy_urlopen", side_effect=fake_urlopen), \
              patch.object(comfy, "_localm_unload"):
             ok, msg = comfy.generate_image(
                 "a fox", out, seed=1234, guidance=3.0)
@@ -234,7 +237,7 @@ class TestRenderHeartbeat:
                     return m
             raise AssertionError(f"unexpected url {url}")
 
-        with patch.object(comfy.urllib.request, "urlopen", side_effect=fake_urlopen), \
+        with patch.object(comfy_client, "_comfy_urlopen", side_effect=fake_urlopen), \
              patch.object(comfy, "_localm_unload"), \
              patch.object(comfy, "comfy_poll_until_done", side_effect=fake_poll):
             ok, msg = comfy.generate_image(
@@ -351,7 +354,7 @@ class TestLoraNameEngineValidation:
                                  "the invalid lora_name should have been "
                                  "rejected before any submit-time call")
 
-        with patch.object(comfy.urllib.request, "urlopen", side_effect=fake_urlopen), \
+        with patch.object(comfy_client, "_comfy_urlopen", side_effect=fake_urlopen), \
              patch.object(comfy, "_localm_unload"):
             ok, msg = comfy.generate_image(
                 "a fox", out, seed=1234,

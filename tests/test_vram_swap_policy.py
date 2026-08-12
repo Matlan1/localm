@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from localm.media import comfy_client
 from localm.vram import (
     should_swap_for_media,
     resolve_swap_policy,
@@ -288,7 +289,10 @@ class TestMediaTransportSwapGate:
         def _no_comfy(*a, **k):
             raise urllib.error.URLError("no comfy")
 
-        monkeypatch.setattr(mod.urllib.request, "urlopen", _no_comfy)
+        # The transports route ComfyUI calls through comfy_client._comfy_urlopen
+        # (CHK-COMFY-REDIRECT), which builds its own opener and never calls the
+        # top-level urllib.request.urlopen - that is the seam to patch.
+        monkeypatch.setattr(comfy_client, "_comfy_urlopen", _no_comfy)
 
     def test_swap_true_unloads(self, monkeypatch, modpath, func, first_arg):
         mod = importlib.import_module(modpath)

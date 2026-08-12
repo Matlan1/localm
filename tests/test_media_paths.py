@@ -367,7 +367,9 @@ def test_upload_image_refuses_a_non_image_before_transmitting(tmp_path, monkeypa
 
     def _no_socket(*a, **k):
         raise AssertionError("a request was built for a non-image")
-    monkeypatch.setattr(cc.urllib.request, "urlopen", _no_socket)
+    # _upload_image now routes through cc._comfy_urlopen (CHK-COMFY-REDIRECT),
+    # which builds its own opener and never calls urllib.request.urlopen.
+    monkeypatch.setattr(cc, "_comfy_urlopen", _no_socket)
     monkeypatch.setattr(cc.urllib.request, "Request", _no_socket)
 
     with pytest.raises(ValueError, match="not in a format this upload supports"):
@@ -415,7 +417,7 @@ def test_upload_image_transmits_a_real_webp_end_to_end(tmp_path, monkeypatch):
         return "REQ"
 
     monkeypatch.setattr(cc.urllib.request, "Request", _fake_request)
-    monkeypatch.setattr(cc.urllib.request, "urlopen",
+    monkeypatch.setattr(cc, "_comfy_urlopen",
                         lambda req, timeout=None: _FakeResp())
 
     assert cc._upload_image(img, "http://127.0.0.1:8188") == "uploaded-ref.webp"
