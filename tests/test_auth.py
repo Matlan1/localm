@@ -322,8 +322,24 @@ def test_set_api_key_accepts_every_generated_key(auth):
     """~49% of generate_key() outputs contain an underscore and ~48% a dash, so a
     charset that allowed only "-" would reject about half of them. regenerate_key()
     feeds generate_key() straight into set_api_key(), so a mismatch here would make
-    `localm key generate` fail at random."""
-    for _ in range(200):
+    `localm key generate` fail at random.
+
+    A direct check on the charset itself removes any reliance on chance for
+    THAT specific property. The loop below stays real (real set_api_key/
+    get_api_key round trips, not mocked - see hard-won-rules.md), which is
+    what actually exercises the length/charset guards end to end; its count
+    is a statistical-confidence choice, not a correctness requirement: each
+    generated key independently has a ~49%/~48% chance of containing '_'/'-',
+    so 30 samples already puts the odds of missing either character below
+    1e-9 (0.51**30). It intentionally does NOT go anywhere near 200: each
+    call pays a real memory-hard KDF derivation via the owner-KDF path (see
+    _OWNER_KDF_KEEP in auth.py), so 200 fresh keys in a loop cost several
+    minutes on a loaded box, not because anything hangs but because that is
+    what 200 real derivations cost - see
+    dev-notes/FIX-2026-08-12-test-set-api-key-hang-preexisting.md."""
+    assert auth._KEY_CHARSET.match("-")
+    assert auth._KEY_CHARSET.match("_")
+    for _ in range(30):
         key = auth.generate_key()
         auth.set_api_key(key)                          # must never raise
         assert auth.get_api_key() == key
