@@ -689,8 +689,9 @@ def compute_devices() -> "List[tuple]":
     COMPARE IT AGAINST :data:`GGML_DEV_TYPE_CPU` / :data:`GGML_DEV_TYPE_GPU`,
     never against a literal: the enum has GROWN (IGPU was inserted AHEAD of
     ACCEL, so ACCEL is 2 on an older runtime and 3 on a newer one - see the
-    comment above those constants). Loads the library first (idempotent, which also registers the
-    backends), so this reports the devices a real model load would actually use.
+    comment above those constants). Loads the library first (idempotent, which
+    also registers the backends), so this reports the devices a real model load
+    would actually use.
 
     Returns ``[]`` when the ggml device-registry symbols are unavailable (an
     older build without ``ggml_backend_dev_*``); the caller then has no
