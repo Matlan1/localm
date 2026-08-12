@@ -85,6 +85,7 @@ class Agent(
         disabled_tools: Optional[frozenset] = None,
         restricted: bool = False,
         role: Optional[str] = None,
+        inherited_skill_tools: Optional[frozenset] = None,
         self_verify: bool = True,
         verify_cmd=None,
         verify_max_retries: int = 2,
@@ -179,6 +180,24 @@ class Agent(
         # a resume listing; kept RAW here rather than pre-truncated so a
         # future consumer wanting more than 80 chars is not stuck with less.
         self._session_title: str = ""
+
+        # --- active-skill restriction (see _activate_skill / _skill_gate_denial) --
+        # Initialised BEFORE anything can assign _last_user_request, whose property
+        # setter below bumps the sequence.
+        self._user_request_seq: int = 0
+        self._active_skill_tools: Optional[frozenset] = None  # None = no restriction
+        self._active_skill_names: list[str] = []
+        self._active_skill_seq: int = -1
+        self._skill_lock = threading.Lock()
+        # A spawned child's inheritance of the parent's live skill restriction.
+        # Held as the ALLOWLIST, not as a pre-computed disabled set: the child
+        # registers its own MCP / plugin / skill tools during this __init__, so a
+        # set computed at the spawn site would miss every one of them - the exact
+        # "capability leak dressed as an optimisation" inherited_child_kwargs
+        # warns about for roles.
+        self._inherited_skill_tools: Optional[frozenset] = (
+            frozenset(inherited_skill_tools)
+            if inherited_skill_tools is not None else None)
 
         self._messages: list[dict] = []
         self._turns: int = 0
@@ -327,6 +346,11 @@ class Agent(
         # role narrows the COMPLETE registry (see _apply_role_toolset).
         if self._role_preset is not None:
             self._apply_role_toolset()
+        # Same placement, same reason: a parent under an active skill's
+        # allowed-tools must not be able to spawn a child that escapes it (see
+        # _apply_inherited_skill_toolset).
+        if self._inherited_skill_tools is not None:
+            self._apply_inherited_skill_toolset()
 
         # After the toolset is final: tell the user, once, if their --scope does
         # not mean what they almost certainly think it means.
@@ -542,6 +566,140 @@ class Agent(
         self._mcp_docs = self._plugin_docs = self._skill_docs = ""
         self.disabled_tools = self.disabled_tools | (
             frozenset(TOOL_REGISTRY) - self._role_preset.allowed_tools)
+
+    # ------------------------------------------------------------------ #
+    #  Active-skill restriction: SKILL.md allowed-tools, hard-enforced     #
+    # ------------------------------------------------------------------ #
+
+    def _apply_inherited_skill_toolset(self) -> None:
+        """Carry a spawning parent's active skill restriction into this child.
+
+        Without it, ``allowed-tools: read_file, spawn_agent`` would be a one-line
+        bypass of the whole gate: the skill delegates, and the child - a fresh
+        Agent with no active skill - writes files the skill never declared. Same
+        shape as the scope hole and the role hole ``inherited_child_kwargs``
+        already guards against, so it is applied the same way and in the same
+        place: STRICTLY SUBTRACTIVE, a union with what is already disabled,
+        after every dynamic tool has registered.
+
+        The skill's own two tools stay reachable so a child can still read the
+        skill's bundled files (see SKILL_META_TOOLS).
+        """
+        from ..skills import SKILL_META_TOOLS
+        TOOL_REGISTRY = _agent.TOOL_REGISTRY
+        assert self._inherited_skill_tools is not None   # guarded at the call site
+        self.disabled_tools = self.disabled_tools | (
+            frozenset(TOOL_REGISTRY)
+            - self._inherited_skill_tools - SKILL_META_TOOLS)
+
+    def active_skill_tools(self) -> Optional[frozenset]:
+        """The live allowed-tools intersection, or None when nothing is active.
+
+        Public because the spawn path (tools/agents.py) has to read it off the
+        parent to hand it to a child. Expires the same way every other read does,
+        so a stale restriction from an earlier turn is never inherited.
+        """
+        with self._skill_lock:
+            self._expire_active_skill_locked()
+            return self._active_skill_tools
+
+    @property
+    def _last_user_request(self) -> str:
+        """The raw text of the most recent USER request (not a mid-run nudge).
+
+        A property, rather than a plain attribute, so the SETTER can count user
+        requests - that count is what retires an active skill's restriction (see
+        _activate_skill). loop.py assigns this at exactly the three user entry
+        points (run_task / continue_task / chat) and nowhere else, so observing
+        the assignment gives the turn boundary exactly, with no cooperation
+        needed from loop.py and no hook inside the agentic loop to keep in step.
+
+        Observing the ASSIGNMENT and not the VALUE is the point: a user who
+        repeats a request verbatim still starts a new turn, and comparing the
+        strings would silently miss it.
+        """
+        return self.__dict__.get("_last_user_request_text", "")
+
+    @_last_user_request.setter
+    def _last_user_request(self, value: str) -> None:
+        self.__dict__["_last_user_request_text"] = value
+        # getattr default: a subclass or a restored checkpoint could conceivably
+        # assign this before __init__ has run its state block.
+        self._user_request_seq = getattr(self, "_user_request_seq", 0) + 1
+
+    def _activate_skill(self, name: str, allowed_tools) -> None:
+        """Arm ``name``'s allowed-tools restriction for the rest of this turn.
+
+        THE RESTRICTION ONLY EVER NARROWS. It is intersected with any skill
+        already active, and the dispatch gate is checked on top of (never
+        instead of) ``disabled_tools``, so the tools that can actually run are
+        ``(registry - disabled_tools) & every active skill's allowed-tools``.
+        That is the same strictly-subtractive invariant roles.py states for role
+        presets, and it exists here for the same reason: a narrowing mechanism
+        that can hand capability BACK is a privilege escalation wearing the
+        clothes of a restriction.
+
+        WHY THERE IS NO RELEASE THE MODEL CAN CALL, and why a second use_skill
+        intersects rather than replaces: a SKILL.md body is UNTRUSTED content
+        (skills.py), so the threat this gate answers is a skill's own
+        instructions steering the model. Any widening the model can reach is
+        therefore a one-line bypass - "release the restriction, then write_file",
+        or "load this other skill that declares nothing, then write_file". The
+        only sound boundary is one the model cannot reach, which is the human's
+        next request: hence the sequence check below.
+
+        An absent or empty allowed-tools arms NOTHING. That is deliberate and
+        backward compatible - the field is optional in the format and most
+        skills omit it, so treating absent as deny-all would break every one of
+        them. It also closes the bypass above rather than opening it: an
+        unrestricted skill contributes no set to intersect, so loading one while
+        a restricted skill is active leaves the restriction exactly as it was.
+        """
+        allowed = frozenset(t for t in (allowed_tools or ()) if t)
+        if not allowed:
+            return
+        with self._skill_lock:
+            self._expire_active_skill_locked()
+            self._active_skill_seq = self._user_request_seq
+            self._active_skill_tools = (
+                allowed if self._active_skill_tools is None
+                else self._active_skill_tools & allowed)
+            if name not in self._active_skill_names:
+                self._active_skill_names.append(name)
+
+    def _expire_active_skill_locked(self) -> None:
+        """Drop the restriction if it belongs to an earlier user request.
+
+        Lazy rather than cleared at a turn boundary: the boundary lives in
+        loop.py's ``_loop``, and expiring on READ needs nothing there at all.
+        Caller must hold ``_skill_lock``.
+        """
+        if self._active_skill_seq != self._user_request_seq:
+            self._active_skill_tools = None
+            self._active_skill_names = []
+            self._active_skill_seq = self._user_request_seq
+
+    def _skill_gate_denial(self, tool_name: str) -> Optional[str]:
+        """The refusal message when an active skill forbids ``tool_name``, else None.
+
+        The enforcement half of ``allowed-tools``. Kept beside the state it reads
+        rather than in the dispatcher so the whole lifetime lives in one place;
+        the dispatcher owns only the branch that acts on the answer.
+        """
+        from ..skills import SKILL_META_TOOLS
+        with self._skill_lock:
+            self._expire_active_skill_locked()
+            allowed = self._active_skill_tools
+            names = ", ".join(self._active_skill_names)
+        if allowed is None or tool_name in allowed or tool_name in SKILL_META_TOOLS:
+            return None
+        return (
+            f"'{tool_name}' was not run: the active skill ({names}) declares "
+            f"allowed-tools: {', '.join(sorted(allowed))}, and nothing outside "
+            "that list may run while it is loaded. Do the task with the tools "
+            "the skill declares, or tell the user this skill cannot do what "
+            f"they asked without {tool_name}."
+        )
 
     @property
     def turns(self) -> int:

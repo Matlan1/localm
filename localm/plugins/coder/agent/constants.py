@@ -266,6 +266,13 @@ _NETWORK_TOOLS: frozenset[str] = frozenset({"fetch_url", "web_search"})
 # state, so the dispatcher injects the Agent as a hidden `_session` arg.
 _TODO_TOOLS: frozenset[str] = frozenset({"set_todos", "read_todos"})
 
+# Skill tools that write THIS session's active-skill state (skills.py), and so
+# are handed the Agent as the same hidden `_session` arg. Separate from
+# _TODO_TOOLS rather than merged into it: they are injected identically but for
+# unrelated reasons, and a single merged set would make the next reader think
+# use_skill touches the task list.
+_SKILL_STATE_TOOLS: frozenset[str] = frozenset({"use_skill"})
+
 # Fraction of estimated context window at which compaction is triggered
 _COMPACT_WARN_RATIO  = 0.70   # warn user in interactive mode
 
