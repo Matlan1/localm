@@ -236,9 +236,17 @@ detect_gpu() {
   fi
 }
 GPU="$(detect_gpu)"
-say "  Detected acceleration: $GPU"
+# NOT presented as "Detected acceleration: $GPU" here on purpose: this crude
+# pre-venv guess and the authoritative "Recommended for your hardware: $REC"
+# line further down (sourced from `python -m localm.hwdetect`, once the venv
+# exists) can legitimately disagree - leftover vendor tooling, a bare /opt/rocm
+# on a non-AMD box, or a vendor+backend vocabulary mismatch (this prints
+# "rocm", hwdetect may say "hip" or "vulkan" for the same box). Two lines
+# claiming to answer the same question, able to contradict each other, is
+# worse than one; $GPU's only remaining job is gating this Y/n prompt (and the
+# fallback below if the hwdetect probe itself fails).
 if [ "$YES" != 1 ] && [ "$GPU" != cpu ]; then
-  pick="$(ask "  Use $GPU acceleration? [Y/n] (n = CPU only): " Y)"
+  pick="$(ask "  GPU acceleration looks available ($GPU). Use it? [Y/n] (n = CPU only): " Y)"
   case "$pick" in [Nn]*) GPU=cpu ;; esac
 fi
 
@@ -341,12 +349,18 @@ uv pip install -p .venv -e ".[coder,voice,monitor]" || {
 # than aborting the whole setup over it.
 if [ ! -x .venv/bin/localm ]; then
   say "  [!] .venv/bin/localm did not get installed - retrying once ..."
-  uv pip install -p .venv -e ".[coder,voice,monitor]"
+  # || true: the retry itself failing must not abort setup here either - the
+  # STILL-missing branch right below is what reports it (loudly, with the manual
+  # fix), and the rest of this script does not depend on the entry point (see the
+  # block comment above). Without this guard, a non-zero retry under
+  # `set -euo pipefail` kills setup mid-way and that warning never prints.
+  uv pip install -p .venv -e ".[coder,voice,monitor]" || true
   if [ ! -x .venv/bin/localm ]; then
     say ""
     say "  [!!] .venv/bin/localm is STILL missing after a retry."
-    say "       The CLI (.venv/bin/localm ...) will not work until this is fixed;"
-    say "       the graphical launcher (./localm-launcher.sh) is unaffected."
+    say "       The CLI (.venv/bin/localm ...) and ./localm.sh will not work until"
+    say "       this is fixed; the graphical launcher (./localm-launcher.sh) is"
+    say "       unaffected."
     say "       Fix it yourself with:"
     say "         uv pip install -p .venv -e \".[coder,voice,monitor]\" --reinstall"
     say "       Seen specifically on a WSL2 clone under a Windows-drive mount"

@@ -92,3 +92,80 @@ def test_nvidia_checked_before_rocm_in_source():
     body = _function_body("detect_gpu")
     assert body.index("nvidia-smi") < body.index("rocminfo"), (
         "detect_gpu() must check nvidia-smi before rocminfo/rocm-smi/opt-rocm")
+
+
+# ---------------------------------------------------------------------------
+# Regression: detect_gpu()'s pre-venv guess must not be presented as its own
+# detection verdict.
+#
+# setup.sh has two things that can each claim to say what GPU acceleration is
+# in play: this bash-level detect_gpu() (runs before the venv exists, no real
+# vendor-priority policy behind it beyond the crude if/elif above) and the
+# authoritative "Recommended for your hardware: $REC" line, sourced from
+# `python -m localm.hwdetect` once the venv exists. Before this fix, setup.sh
+# ALSO printed a standalone "Detected acceleration: $GPU" line straight from
+# detect_gpu(), so a box could see two different verdicts in one run: leftover
+# ROCm tooling on a non-AMD box prints "rocm" while hwdetect says vulkan/cpu;
+# an AMD Linux box prints "rocm" while hwdetect recommends "hip" (different
+# vocabularies for the same box). $GPU's only legitimate remaining job is
+# gating the pre-venv Y/n prompt (and setup.sh's own fallback if the hwdetect
+# probe itself fails) - never standing in as a verdict on its own.
+# ---------------------------------------------------------------------------
+
+
+def _pre_venv_gpu_block() -> str:
+    src = SETUP_SH.read_text(encoding="utf-8")
+    start = src.index("# ---- detect GPU acceleration")
+    end = src.index("# ---- create the venv", start)
+    return src[start:end]
+
+
+def _run_pre_venv_gpu_block(tmp_path: Path, *, stub_names: list[str], yes: bool) -> str:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name in stub_names:
+        _make_stub(bin_dir, name)
+    # Minimal stand-ins for setup.sh's own say()/ask(), which the extracted
+    # block calls but which are defined earlier in the real script (outside
+    # this slice). ask() always echoes its default here, matching --yes mode.
+    script = (
+        'say() { printf "%s\\n" "$*"; }\n'
+        'ask() { echo "$2"; }\n'
+        f'YES={"1" if yes else "0"}\n'
+        + _pre_venv_gpu_block()
+        + '\nprintf "GPU=%s\\n" "$GPU"\n'
+    )
+    env = dict(os.environ)
+    env["PATH"] = str(bin_dir)   # isolate: no real nvidia-smi/rocminfo must leak in
+    result = subprocess.run([_bash(), "-c", script], capture_output=True,
+                            text=True, env=env, timeout=15)
+    assert result.returncode == 0, result.stderr
+    return result.stdout
+
+
+def test_pre_venv_block_never_prints_a_detection_verdict_line(tmp_path):
+    out = _run_pre_venv_gpu_block(tmp_path, stub_names=["rocminfo"], yes=True)
+    assert "Detected acceleration" not in out
+    assert "GPU=rocm" in out
+
+
+def test_pre_venv_block_gpu_var_still_correct_for_the_probe_failed_fallback(tmp_path):
+    # $GPU still has to be right even though it is no longer printed as a
+    # verdict: setup.sh's own fallback (`case "$REC" in ... *) case "$GPU"
+    # in ...`) uses it if the hwdetect probe's output is unparseable.
+    out = _run_pre_venv_gpu_block(tmp_path, stub_names=["nvidia-smi", "rocminfo"], yes=True)
+    assert "GPU=cuda" in out
+
+
+def test_authoritative_recommendation_still_sourced_from_hwdetect():
+    """Static lock-in: the one line users should trust as a verdict must stay
+    driven by python -m localm.hwdetect, not by detect_gpu()."""
+    src = SETUP_SH.read_text(encoding="utf-8")
+    assert 'Recommended for your hardware: $REC' in src
+    assert "localm.hwdetect" in src
+
+
+def test_detect_gpu_guess_not_printed_as_its_own_verdict_line_in_source():
+    """Static backstop that holds even without bash on PATH."""
+    src = SETUP_SH.read_text(encoding="utf-8")
+    assert 'say "  Detected acceleration: $GPU"' not in src
