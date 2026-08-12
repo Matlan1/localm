@@ -49,6 +49,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   page. Plugins, embedded objects and framing the app from another site are
   refused outright. Rendering an artifact still works exactly as before, and it
   remains sealed off from the rest of the app and from the network.
+- **On Linux and macOS, the files holding your browser-session records and a
+  running instance's attach token were briefly readable by other accounts on
+  the machine while being written.** Each was created with the system's default
+  permissions, filled with its contents, and only then restricted to your
+  account, so the whole payload sat unprotected for the length of the write.
+  They are now created already restricted, which closes the window rather than
+  shortening it. Windows was not affected here: on that platform the
+  restriction was always applied before the file was moved into place.
 
 ### Added
 - **A coder skill's `allowed-tools` is now enforced, not just displayed.** A

@@ -823,6 +823,93 @@ def restrict_file_perms(path: Path, *, mode: int = 0o600) -> bool:
         return False
 
 
+def atomic_write_private(path: Path, text: str) -> bool:
+    """Write *text* to *path* atomically, owner-restricted from the moment the
+    bytes first exist on disk. Returns whether the PRE-RENAME restriction
+    succeeded (see below).
+
+    Every credential-bearing file in this project is written with the same
+    temp+replace dance, and each one used to create its temp with
+    ``tmp.write_text(...)`` - so on POSIX the whole payload existed at the umask
+    default (commonly 0644) between the create and the chmod that followed it.
+
+    TWO precedents are needed and NEITHER closes both halves alone:
+
+    * ``tls._write_private`` creates via ``os.open`` with an explicit 0600, so
+      the file is never briefly at the umask default. POSIX-only: on Windows the
+      mode argument writes no ACL at all.
+    * :func:`restrict_file_perms` on the TEMP file before the rename is what
+      covers Windows, and it is the contract that function documents -
+      ``os.replace`` carries the source's ACL (and POSIX mode) onto the
+      destination, MEASURED there, so the single call covers both names. The
+      destination is retried only when the first attempt failed, so one failure
+      is not the single point of failure for the property.
+
+    The pre-rename restrict also covers the one case ``os.open`` cannot: a stale
+    ``.tmp`` left by an earlier crash is opened, not created, so its existing
+    mode survives O_CREAT.
+
+    Lives HERE, next to ``restrict_file_perms``, for that function's own stated
+    reason: one implementation so a fourth caller cannot get a weaker fourth
+    variant. FIVE call sites need this exact dance (auth.key, auth.json and the
+    owner-KDF file in auth.py; sessions.json; the instance registry entry from
+    both ``register_instance`` and ``set_mode``; the GPU coordination entry),
+    and the two details below are invisible when they are wrong, so a private
+    copy per module is five chances to lose one of them.
+
+    The RETURN VALUE is the pre-rename ``ok`` every call site used to compute
+    for itself, passed through so a caller that logs its own subsystem-named
+    warning on failure (``gpu_registry.write_entry``) keeps that signal.
+
+    Best-effort by contract, unchanged: a tightening that fails is reported by
+    ``restrict_file_perms`` (which warns) and retried, never raised. Writing a
+    credential must not become conditional on a permissions nicety.
+
+    Uses a BARE ``os.replace``, deliberately, not :func:`_replace_atomic`. That
+    helper's transient-sharing-violation retry sleeps up to ~1 s, and two of
+    these callers (``sessions._save``, reached from session_login, create_key_ep
+    and _gui_index) run ON THE ASYNCIO EVENT LOOP. Every call site here used a
+    bare ``os.replace`` before this function existed, so keeping it preserves
+    their behaviour exactly; adding the retry would be a separate change with
+    its own latency argument to make.
+
+    THE BYTES ON DISK ARE UNCHANGED by this, deliberately - a permissions fix
+    must not quietly rewrite every credential file. Do NOT "correct" this by
+    adding ``os.O_BINARY``. MEASURED on Windows: ``os.open`` without it opens in
+    TEXT mode, so ``os.write`` expands ``\\n`` to ``\\r\\n`` exactly as the
+    ``Path.write_text`` this replaced did, and the resulting file is
+    byte-identical on both platforms. Adding O_BINARY would silently switch
+    every Windows install's credential and registry files to LF on the next
+    write.
+
+    The write LOOPS because ``os.write`` is a single syscall that may consume
+    less than the whole buffer (ENOSPC after a partial write returns the short
+    count rather than raising). ``Path.write_text`` looped internally, so
+    dropping to raw ``os.write`` without this would newly allow a SILENTLY
+    truncated file - rule 5 - and a truncated keystore or session store
+    replacing a good one is the worst outcome available here. Raising leaves the
+    temp file behind and the destination untouched, which is the safe half."""
+    tmp = path.with_name(path.name + ".tmp")
+    data = text.encode("utf-8")
+    fd = os.open(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+    try:
+        written = 0
+        while written < len(data):
+            n = os.write(fd, data[written:])
+            if not n:
+                raise OSError(
+                    f"short write persisting {path.name}: {written} of "
+                    f"{len(data)} bytes accepted; the previous file is intact")
+            written += n
+    finally:
+        os.close(fd)
+    ok = restrict_file_perms(tmp)
+    os.replace(tmp, path)          # atomic on Windows + POSIX (same dir)
+    if not ok:
+        restrict_file_perms(path)
+    return ok
+
+
 # Registry and config are mutated from several places at once - the GUI server
 # threads, the `localm pull` subprocess the GUI spawns, and sync_models_dir on
 # every launch. A plain open("w")+json.dump truncates the file before writing,

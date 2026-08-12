@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import secrets
 import threading
 import time
@@ -95,20 +94,20 @@ def _save(records: list) -> None:
     ensure_dirs()
     path = sessions_file()
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(records, indent=2), encoding="utf-8")
     # Restrict the TEMP file, not the destination: it already holds the full
-    # digest payload with directory-inherited permissions, so a crash between
-    # these two lines would otherwise leave an unrestricted copy behind. Doing it
-    # here also means ONE icacls spawn instead of two, which matters because this
-    # runs on the asyncio event loop (session_login, create_key_ep, _gui_index).
-    # MEASURED: os.replace carries the source's ACL onto the destination, so the
-    # restriction survives the rename; the retry below covers the case where it
-    # did not happen at all.
-    ok = _restrict_perms(tmp)
-    os.replace(tmp, path)          # atomic on Windows + POSIX (same dir)
-    if not ok:
-        _restrict_perms(path)
+    # digest payload, so a crash between the write and the rename would
+    # otherwise leave an unrestricted copy behind. Doing it there also means ONE
+    # icacls spawn instead of two, which matters because this runs on the
+    # asyncio event loop (session_login, create_key_ep, _gui_index). MEASURED:
+    # os.replace carries the source's ACL onto the destination, so the
+    # restriction survives the rename; atomic_write_private retries the
+    # destination for the case where it did not happen at all.
+    #
+    # The shared writer also CREATES the temp at 0600 via os.open rather than
+    # write_text, which closes the residual POSIX window where the digest
+    # payload existed at the umask default between the create and the chmod.
+    from localm.config import atomic_write_private
+    atomic_write_private(path, json.dumps(records, indent=2))
     # Refresh the cache to the just-written content so the next lookup is warm and
     # never reads a torn view.
     try:
@@ -129,7 +128,16 @@ def _restrict_perms(path: Path) -> bool:
     icacls on Windows for auth.key. So on Windows the key DIGEST inherited
     BUILTIN\\Users from the data dir and was readable by any local account,
     while the PLAINTEXT next to it was not. Now shares auth.key's exact
-    implementation."""
+    implementation.
+
+    RETAINED deliberately although ``_save`` no longer calls it: this name is
+    the unit-level equivalence point that pins that fix
+    (``tests/test_auth_kdf.py`` calls it directly against ``auth._restrict_perms``
+    and asserts both the return value and the resulting ACL). ``_save`` now
+    reaches the SAME ``config.restrict_file_perms`` through
+    ``config.atomic_write_private``, so the equivalence is structural rather
+    than conventional and this one-line delegation has nothing left to drift
+    from."""
     from localm.config import restrict_file_perms
     return restrict_file_perms(path)
 
