@@ -72,6 +72,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   refused up front with a clear reason naming what is unsupported and what to
   do instead, before any of the reply is generated. GGUF models, whose sampler
   applies grammars natively, are unaffected and still support lazy grammar.
+- **"Scan for ComfyUI models" now finds models in localm's own managed
+  ComfyUI.** The managed instance's downloaded models live in a directory next
+  to the ComfyUI checkout, not inside a `models` folder under it, so the scan
+  button always looked in the wrong place there and reported nothing even with
+  real downloaded model files and a running instance serving generations. It
+  now looks in the right place for a managed install, and an ordinary external
+  ComfyUI folder still scans exactly as before.
 - **`localm update` now actually replaces the llama.cpp runtime when a release
   needs it to.** A release that ships a newer llama.cpp build was supposed to
   re-provision your runtime as part of the update, but the step that does this
