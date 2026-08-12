@@ -1002,11 +1002,19 @@ def _hanging_daemon() -> MagicMock:
     return proc
 
 
-def _fresh_pool(monkeypatch, size: int) -> None:
+def _fresh_pool(monkeypatch, size: int, waiters: "int | None" = None) -> None:
     """Replace the module-level pool with *size* fresh slots for one test.
 
     monkeypatch.setattr restores the real pool afterwards, so a test that
-    shrinks the pool cannot leak that into the next one."""
+    shrinks the pool cannot leak that into the next one.
+
+    A FRESH WAITER GATE ALWAYS, whether or not *waiters* is given: the gate is
+    module-level state exactly like the pool, and a test that failed while a
+    thread was parked in it would otherwise hand the next test a non-zero
+    starting count - which reads as a leak in code that never ran. Pass
+    *waiters* to also set the cap; leaving it None keeps the production
+    constant, so a test that does not care about the cap is not silently
+    running against a different one."""
     import queue as _queue
 
     import localm.inference.gbnf as gbnf
@@ -1016,6 +1024,23 @@ def _fresh_pool(monkeypatch, size: int) -> None:
         pool.put(gbnf._ProbeSlot())
     monkeypatch.setattr(gbnf, "_TRIGGER_PROBE_POOL_SIZE", size)
     monkeypatch.setattr(gbnf, "_PROBE_SLOTS_FREE", pool)
+    monkeypatch.setattr(gbnf, "_PROBE_WAITER_GATE", gbnf._WaiterGate())
+    if waiters is not None:
+        monkeypatch.setattr(gbnf, "_TRIGGER_PROBE_MAX_WAITERS", waiters)
+
+
+def _wait_until(predicate, timeout: float = 5.0) -> bool:
+    """Poll *predicate* to a deadline. Used instead of a bare sleep so these
+    tests synchronise on the state they actually need rather than on a guess
+    about how fast this box is today."""
+    import time
+
+    deadline = time.perf_counter() + timeout
+    while time.perf_counter() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.005)
+    return predicate()
 
 
 def test_concurrent_dangerous_patterns_do_not_serialize(monkeypatch):
@@ -1321,5 +1346,184 @@ def test_a_slot_is_returned_to_the_pool_even_when_the_probe_rejects(monkeypatch)
     assert gbnf._PROBE_SLOTS_FREE.qsize() == 2, (
         f"{2 - gbnf._PROBE_SLOTS_FREE.qsize()} slot(s) leaked after rejecting "
         "probes - the pool shrinks permanently on every rejection")
+
+
+#  Bounding the WAITERS, not just the wait
+#
+#  _TRIGGER_PROBE_SLOT_WAIT bounds how long ONE caller queues. It says nothing
+#  about how many callers may be queueing at the same time, and until
+#  _TRIGGER_PROBE_MAX_WAITERS existed nothing else did: every waiter is a thread
+#  parked on the asyncio loop's TRUE DEFAULT executor, which is shared with
+#  engine.load, embedding, token counting and the isolated-runner RPCs. So an
+#  unbounded queue here degrades work that has nothing to do with grammars.
+#
+#  These pin the cap in BOTH directions, because the easy way to get this wrong
+#  is to bound the queue by accidentally bounding throughput as well.
+
+
+def test_the_waiter_cap_leaves_room_for_the_pool_it_guards():
+    """The RELATION between the two constants, asserted instead of the literal.
+
+    A waiter cap below the pool size would refuse callers that the pool was
+    about to serve anyway, turning a queue bound into a throughput bound. Both
+    numbers are tunable and neither is wrong alone, so the arithmetic is what
+    has to be pinned - a test asserting `== 8` would pass while someone doubled
+    the pool and left the cap behind."""
+    import localm.inference.gbnf as gbnf
+
+    assert gbnf._TRIGGER_PROBE_MAX_WAITERS >= gbnf._TRIGGER_PROBE_POOL_SIZE, (
+        f"waiter cap {gbnf._TRIGGER_PROBE_MAX_WAITERS} is below pool size "
+        f"{gbnf._TRIGGER_PROBE_POOL_SIZE}: a burst the pool could absorb would "
+        "be refused while its own slots were freeing up")
+
+
+def test_a_caller_the_pool_can_serve_never_becomes_a_waiter(monkeypatch):
+    """THE CAP MUST BOUND THE QUEUE, NEVER THE THROUGHPUT.
+
+    Run with ZERO waiter permits, so any caller that consumed one would be
+    refused outright. A caller with a free slot in front of it must still be
+    served: it never queues, so it must never need a permit. This is the exact
+    regression that a naive "take a permit on entry" implementation produces,
+    and it would be invisible in the saturation test below - that one only ever
+    exercises callers that DO have to queue."""
+    import localm.inference.gbnf as gbnf
+
+    _fresh_pool(monkeypatch, 2, waiters=0)
+
+    fake_proc = MagicMock()
+    fake_proc.poll.return_value = None
+    fake_proc.stdout = MagicMock()
+    fake_proc.stdin = MagicMock()
+
+    with patch.object(gbnf, "_spawn_trigger_probe_daemon", return_value=fake_proc), \
+         patch.object(gbnf, "_readline_with_timeout", return_value="OK"):
+        verdict, reason = gbnf._probe_pattern_is_safe(r"^<served_from_a_free_slot>")
+
+    assert verdict == gbnf._PROBE_SAFE, (
+        f"a caller with a free slot was refused ({verdict}: {reason}) with the "
+        "waiter cap at 0 - it took a waiter permit it never needed, so the cap "
+        "is bounding throughput rather than the queue")
+    assert gbnf._PROBE_WAITER_GATE.waiting == 0, gbnf._PROBE_WAITER_GATE.waiting
+    assert gbnf._PROBE_SLOTS_FREE.qsize() == 2
+
+
+def test_a_full_waiter_queue_refuses_immediately_instead_of_parking_a_thread(monkeypatch):
+    """THE LOAD-BEARING ONE: the refusal must come back in microseconds, NOT
+    after _TRIGGER_PROBE_SLOT_WAIT.
+
+    Both outcomes are _PROBE_UNDETERMINED, so the verdict alone cannot tell a
+    capacity refusal from an ordinary slot-wait timeout - with no cap at all
+    this caller still ends up undetermined, just 3.0s later having held a
+    default-executor thread for the whole time. THE ELAPSED TIME IS THE
+    PROPERTY; the verdict is only the precondition. Asserted together with the
+    distinct reason string so a future refactor cannot satisfy this by making
+    both refusals identical again."""
+    import time
+
+    import localm.inference.gbnf as gbnf
+
+    # The holder's probe outlasts the slot wait, so the slot stays gone for the
+    # whole test and the waiters really do wait.
+    monkeypatch.setattr(gbnf, "_TRIGGER_PROBE_TIMEOUT", 4.0)
+    monkeypatch.setattr(gbnf, "_TRIGGER_PROBE_SPAWN_TIMEOUT", 4.0)
+    monkeypatch.setattr(gbnf, "_TRIGGER_PROBE_SLOT_WAIT", 3.0)
+    monkeypatch.setattr(gbnf, "_spawn_trigger_probe_daemon", _hanging_daemon)
+    _fresh_pool(monkeypatch, 1, waiters=2)
+
+    gate = gbnf._PROBE_WAITER_GATE
+    started = threading.Event()
+
+    def _occupy():
+        started.set()
+        gbnf._probe_pattern_is_safe(f"^<occupier_{time.time_ns()}>")
+
+    holder = threading.Thread(target=_occupy, daemon=True)
+    holder.start()
+    started.wait(timeout=5.0)
+    assert _wait_until(lambda: gbnf._PROBE_SLOTS_FREE.qsize() == 0), (
+        "the occupier never took the only slot, so nothing below is queueing")
+
+    def _park(i):
+        gbnf._probe_pattern_is_safe(f"^<waiter_{i}_{time.time_ns()}>")
+
+    parked = [threading.Thread(target=_park, args=(i,), daemon=True) for i in range(2)]
+    for t in parked:
+        t.start()
+    assert _wait_until(lambda: gate.waiting == 2), (
+        f"only {gate.waiting} of 2 callers reached the queue, so the caller "
+        "measured below is not actually arriving on a full one")
+
+    t0 = time.perf_counter()
+    verdict, reason = gbnf._probe_pattern_is_safe(f"^<over_capacity_{time.time_ns()}>")
+    elapsed = time.perf_counter() - t0
+
+    assert verdict == gbnf._PROBE_UNDETERMINED, (verdict, reason)
+    assert "queue" in reason, (
+        f"refused for capacity but reported the slot-wait reason: {reason}")
+    assert elapsed < 0.25, (
+        f"a caller arriving on a full queue took {elapsed:.3f}s to be refused; "
+        "it parked a default-executor thread for the slot wait instead of "
+        "being turned away at the gate")
+
+    for t in parked:
+        t.join(timeout=15.0)
+    holder.join(timeout=20.0)
+    assert gate.waiting == 0, (
+        f"{gate.waiting} waiter permit(s) leaked - a leaked permit is a "
+        "permanent capacity loss that refuses every later caller for a reason "
+        "that has nothing to do with load")
+
+
+def test_a_capacity_refusal_is_never_an_acceptance(monkeypatch):
+    """NOTHING UNVALIDATED GETS THROUGH, on the new refusal path too.
+
+    Deterministic: the slot and the only waiter permit are taken directly, so
+    there is no thread timing in this test at all. _spawn_trigger_probe_daemon
+    is patched to explode as a second, independent guarantee - if the gate ever
+    let this caller past, it would reach a spawn that cannot succeed rather
+    than quietly probing something.
+
+    The elapsed bound is what discriminates: without the cap this same call
+    still returns UNDETERMINED, 3.0s later, so asserting only the verdict would
+    pass with the mechanism removed."""
+    import time
+
+    import localm.inference.gbnf as gbnf
+    from localm.inference.backends.base import TriggerValidatorUnavailableError
+
+    monkeypatch.setattr(gbnf, "_TRIGGER_PROBE_SLOT_WAIT", 3.0)
+    _fresh_pool(monkeypatch, 1, waiters=1)
+
+    held = gbnf._PROBE_SLOTS_FREE.get_nowait()          # the pool is now empty
+    assert gbnf._PROBE_WAITER_GATE.try_enter(1) is True  # and the queue is full
+
+    def _must_not_spawn():
+        raise AssertionError("a capacity-refused caller reached the daemon")
+
+    pattern = f"^<capacity_refused_{time.time_ns()}>"
+    gbnf._VALIDATED_TRIGGER_PATTERNS.pop(pattern, None)
+
+    with patch.object(gbnf, "_spawn_trigger_probe_daemon", side_effect=_must_not_spawn):
+        t0 = time.perf_counter()
+        verdict, reason = gbnf._probe_pattern_is_safe(pattern)
+        elapsed = time.perf_counter() - t0
+
+        assert verdict != gbnf._PROBE_SAFE, (
+            "a pattern that was never checked was returned as SAFE")
+        assert verdict == gbnf._PROBE_UNDETERMINED, (verdict, reason)
+        assert elapsed < 0.25, (
+            f"refused after {elapsed:.3f}s - via the slot wait, not the gate")
+
+        # And the same thing through the public entry point: a refusal for
+        # capacity must raise the 503-shaped type, and must NOT be cached -
+        # caching it would reject a good pattern for the life of the process
+        # because the box was briefly busy.
+        with pytest.raises(TriggerValidatorUnavailableError):
+            gbnf.validate_trigger_patterns([pattern])
+        assert pattern not in gbnf._VALIDATED_TRIGGER_PATTERNS, (
+            "a transient capacity refusal was cached as a verdict on the pattern")
+
+    gbnf._PROBE_WAITER_GATE.leave()
+    gbnf._PROBE_SLOTS_FREE.put(held)
 
 
