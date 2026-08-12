@@ -268,7 +268,7 @@ def test_resolve_linux_cuda_asset_finds_tarball(monkeypatch):
 
     monkeypatch.setattr(sl, "_release_assets", fake_release_assets)
 
-    url, sha = sl._resolve_backend_asset("cuda", cuda_line="cuda-12")
+    url, sha, _tag = sl._resolve_backend_asset("cuda", cuda_line="cuda-12")
 
     assert url == _DUMMY_LINUX_CUDA_ASSETS[0]["browser_download_url"]
     assert sha == "dummylinuxcudasha"
@@ -289,7 +289,7 @@ def test_resolve_linux_cuda_asset_picks_cuda13_line(monkeypatch):
     monkeypatch.setattr(sl, "_latest_tag", lambda: "b9870")
     monkeypatch.setattr(sl, "_release_assets", lambda tag, repo=None: _DUMMY_LINUX_CUDA_ASSETS)
 
-    url, sha = sl._resolve_backend_asset("cuda", cuda_line="cuda-13")
+    url, sha, _tag = sl._resolve_backend_asset("cuda", cuda_line="cuda-13")
 
     assert url == _DUMMY_LINUX_CUDA_ASSETS[2]["browser_download_url"]
     assert sha == "dummylinuxcuda13sha"
@@ -305,7 +305,7 @@ def test_resolve_linux_cuda_asset_never_picks_the_sha256_sidecar(monkeypatch):
     reordered = [_DUMMY_LINUX_CUDA_ASSETS[1], _DUMMY_LINUX_CUDA_ASSETS[0]]
     monkeypatch.setattr(sl, "_release_assets", lambda tag, repo=None: reordered)
 
-    url, _ = sl._resolve_backend_asset("cuda", cuda_line="cuda-12")
+    url, _, _tag = sl._resolve_backend_asset("cuda", cuda_line="cuda-12")
 
     assert url.endswith(".tar.gz")
     assert not url.endswith(".sha256")
@@ -338,7 +338,7 @@ def test_resolve_backend_asset_windows_cuda_unaffected_by_linux_branch(monkeypat
                              "browser_download_url": "https://dummy/win-cuda.zip",
                              "digest": "sha256:wincudasha"}])
 
-    url, sha = sl._resolve_backend_asset("cuda", cuda_line="cuda-12")
+    url, sha, _tag = sl._resolve_backend_asset("cuda", cuda_line="cuda-12")
 
     assert url == "https://dummy/win-cuda.zip"
     # Called against upstream (None/default), never the Linux-CUDA third party.
@@ -358,7 +358,7 @@ def test_provision_backend_linux_cuda_fetches_binary_and_runtime_libs(monkeypatc
     # the failure this test caught once already.
     monkeypatch.setattr(sl.sys, "platform", "linux")
     monkeypatch.setattr(sl, "_resolve_backend_asset",
-                        lambda backend, cuda_line=None: ("https://dummy/linux-cuda.tar.gz", "binsha"))
+                        lambda backend, cuda_line=None, tag=None: ("https://dummy/linux-cuda.tar.gz", "binsha", "bTEST"))
     fetched = []
     monkeypatch.setattr(sl, "_fetch_verified",
                         lambda url, target, sha, what: fetched.append((url, sha)))
@@ -378,7 +378,7 @@ def test_provision_backend_linux_cuda_never_calls_windows_cuda_pair(monkeypatch,
     directly above it in the same function."""
     monkeypatch.setattr(sl.sys, "platform", "linux")
     monkeypatch.setattr(sl, "_resolve_backend_asset",
-                        lambda backend, cuda_line=None: ("https://dummy/linux-cuda.tar.gz", None))
+                        lambda backend, cuda_line=None, tag=None: ("https://dummy/linux-cuda.tar.gz", None, "bTEST"))
     monkeypatch.setattr(sl, "_fetch_verified", lambda *a, **k: None)
     monkeypatch.setattr(sl, "_fetch_cuda_runtime_libs", lambda cuda_line, target: 0)
 
@@ -398,7 +398,7 @@ def test_resolve_linux_cuda_asset_real_network(monkeypatch):
     actual asset-name convention and repo are correct right now, not just
     matching a fixture of them."""
     monkeypatch.setattr(sl, "_platform_key", lambda: "linux")
-    url, sha = sl._resolve_backend_asset("cuda", cuda_line="cuda-12")
+    url, sha, _tag = sl._resolve_backend_asset("cuda", cuda_line="cuda-12")
     assert url.startswith(f"https://github.com/{sl._CUDA_LINUX_REPO}/releases/download/")
     assert url.endswith("-cuda-x64.tar.gz")
     assert sha and len(sha) == 64   # a real sha256 hex digest

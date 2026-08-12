@@ -519,7 +519,9 @@ def test_fallback_returns_first_backend_that_loads(monkeypatch, tmp_path, result
     _stub_provision(monkeypatch)
     seq = iter(results)
     monkeypatch.setattr(sl, "_native_loads_ok", lambda: next(seq))
-    assert sl._provision_with_fallback("cuda", tmp_path, None, True) == expected_backend
+    # (backend, tag): _provision_with_fallback now also reports WHICH build the
+    # successful attempt installed, so a fallback records the fallback's tag.
+    assert sl._provision_with_fallback("cuda", tmp_path, None, True)[0] == expected_backend
 
 
 def test_nothing_loads_raises_reportable_error(monkeypatch, tmp_path):
@@ -594,7 +596,7 @@ def test_fallback_offer_accepted_provisions_vulkan(monkeypatch, tmp_path):
     monkeypatch.setattr(sl, "_native_loads_ok", lambda: next(seq))
     monkeypatch.setattr(sl.sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(sl.click, "confirm", lambda *a, **k: True)
-    assert sl._provision_with_fallback("cuda", tmp_path, None, True) == "vulkan"
+    assert sl._provision_with_fallback("cuda", tmp_path, None, True)[0] == "vulkan"
 
 
 def test_fallback_offer_declined_exits_nonzero(monkeypatch, tmp_path):
@@ -615,7 +617,7 @@ def test_fallback_noninteractive_warns_and_falls_back(monkeypatch, tmp_path, cap
     monkeypatch.setattr(sl, "_native_loads_ok", lambda: next(seq))
     monkeypatch.setattr(sl.click, "confirm",
                         lambda *a, **k: pytest.fail("must not prompt with assume_yes"))
-    out = sl._provision_with_fallback("cuda", tmp_path, None, True, assume_yes=True)
+    out, _tag = sl._provision_with_fallback("cuda", tmp_path, None, True, assume_yes=True)
     assert out == "vulkan"
     printed = capsys.readouterr().out
     assert "Non-interactive" in printed
@@ -722,7 +724,7 @@ def test_provision_backend_cuda_no_assets_uses_templated_url(monkeypatch, tmp_pa
     monkeypatch.setattr(sl, "_latest_tag", lambda: "b9999")
     monkeypatch.setattr(sl, "_resolve_cuda_pair", lambda tag, line=sl._CUDA_LINE: (None, None))
     monkeypatch.setattr(sl, "_resolve_backend_asset",
-                        lambda backend, cuda_line=sl._CUDA_LINE: ("https://templated/cuda.zip", "FALLBACK_SHA"))
+                        lambda backend, cuda_line=sl._CUDA_LINE, tag=None: ("https://templated/cuda.zip", "FALLBACK_SHA", "bTEST"))
     calls = []
     monkeypatch.setattr(sl, "_fetch_and_place",
                         lambda url, target, sha256=None: calls.append((url, sha256)))

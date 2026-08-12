@@ -145,6 +145,35 @@ CORE_FIELDS: list = [
                  "bundled runtime (auto-detected path shown); set it to point at "
                  "a custom build.",
                  group="Engine", applies=Applies.NEXT_LOAD, admin_only=True),
+    # HIDDEN: both are written by `localm setup-llama` (--tag / --rollback) and
+    # read back by doctor and the bug reporter. There is no settings-form widget
+    # for them because setting one WITHOUT re-provisioning leaves the config and
+    # the installed binaries disagreeing, which is the confusion the recorded
+    # build exists to remove - the CLI moves the pin and installs in one step.
+    #
+    # admin_only, for the same reason as binary_dir directly above though not to
+    # the same degree: the pin selects WHICH NATIVE BUILD is downloaded and then
+    # loaded in-process. It cannot name an arbitrary path or host (the repo is
+    # fixed, and the asset is checksum-verified), so it is not the planted-file
+    # escalation binary_dir is; what it can do is hold an install on a specific
+    # older upstream build, which is a downgrade a lower-privileged principal
+    # should not get to choose.
+    SettingField("llama_runtime_pin", Widget.HIDDEN, "Pinned llama.cpp build",
+                 "Release tag setup-llama installs (e.g. 'b10355'). Blank tracks "
+                 "the newest upstream release. Set with "
+                 "`localm setup-llama --tag`, not here.",
+                 group="Engine", applies=Applies.NEXT_LOAD, admin_only=True),
+    # NOT engine_managed, despite being written by the engine rather than by a
+    # user: that flag means PLUGIN STATE specifically (`plugins`,
+    # `plugins_enabled` - see test_config_plugin_state_gate.py, which pins the
+    # set), and the two flags are deliberately DISJOINT gates - admin_only also
+    # hides a value from a non-owner, engine_managed only refuses the write, so
+    # carrying both would silently narrow reads. admin_only is the correct one
+    # here and it alone satisfies the owner-gate requirement for a verbatim key.
+    SettingField("llama_runtime_history", Widget.HIDDEN, "Runtime build history",
+                 "Builds provisioned on this machine, newest last. Recorded by "
+                 "setup-llama so `--rollback` knows what to return to.",
+                 group="Engine", admin_only=True),
     SettingField("n_ctx", Widget.NUMBER, "Context window (initial)",
                  "Tokens of history the model starts with; grows on demand up to "
                  "the maximum below.",

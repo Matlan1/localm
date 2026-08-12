@@ -359,7 +359,7 @@ def test_resolve_backend_asset_resolves_sha256(monkeypatch):
     monkeypatch.setattr(sl, "_latest_tag", lambda: "b9870")
     monkeypatch.setattr(sl, "_platform_key", lambda: "win32")
 
-    url, sha = sl._resolve_backend_asset("vulkan")
+    url, sha, _tag = sl._resolve_backend_asset("vulkan")
     assert url == "https://dummy.github/releases/download/b9870/llama-vulkan.zip"
     assert sha == "dummysha256value"
 
@@ -369,7 +369,7 @@ def test_resolve_backend_asset_fallback_uses_pinned_sha256(monkeypatch):
     monkeypatch.setattr(sl, "_latest_tag", lambda: "b9870")
     monkeypatch.setattr(sl, "_platform_key", lambda: "win32")
 
-    url, sha = sl._resolve_backend_asset("vulkan")
+    url, sha, _tag = sl._resolve_backend_asset("vulkan")
     assert "llama-b9870-bin-win-vulkan-x64.zip" in url
     assert sha == "8687a8405447853ccbd6b15bd7ccda23bb79cf85dd83243401e514bd9e45ed8a"
 
@@ -381,7 +381,7 @@ def test_resolve_amd_rocm_asset_warns_when_release_lookup_fails(monkeypatch, cap
     monkeypatch.setattr(sl.sys, "platform", "win32")
     monkeypatch.setattr(sl, "_release_assets", lambda tag, repo=None: [])
 
-    url, sha = sl._resolve_backend_asset("amd-rocm")
+    url, sha, _tag = sl._resolve_backend_asset("amd-rocm")
 
     assert url == sl.DEFAULT_URL
     out = capsys.readouterr().out.lower()
@@ -401,7 +401,7 @@ def test_resolve_amd_rocm_asset_warns_when_gfx103x_asset_missing(monkeypatch, ca
     monkeypatch.setattr(sl.sys, "platform", "win32")
     monkeypatch.setattr(sl, "_release_assets", lambda tag, repo=None: dummy_assets)
 
-    url, sha = sl._resolve_backend_asset("amd-rocm")
+    url, sha, _tag = sl._resolve_backend_asset("amd-rocm")
 
     assert url == sl.DEFAULT_URL
     out = capsys.readouterr().out.lower()
@@ -418,7 +418,7 @@ def test_resolve_amd_rocm_asset_no_warning_when_release_found(monkeypatch, capsy
     monkeypatch.setattr(sl.sys, "platform", "win32")
     monkeypatch.setattr(sl, "_release_assets", lambda tag, repo=None: dummy_assets)
 
-    url, sha = sl._resolve_backend_asset("amd-rocm")
+    url, sha, _tag = sl._resolve_backend_asset("amd-rocm")
 
     assert url == "https://dummy.github/releases/download/b1307/llama-rocm.zip"
     assert sha == "dummyrocmsha"
@@ -434,7 +434,7 @@ def test_provision_backend_verifies_default_sha256(monkeypatch):
         return 1
 
     monkeypatch.setattr(sl, "_fetch_and_place", fake_fetch_and_place)
-    monkeypatch.setattr(sl, "_resolve_backend_asset", lambda backend, cuda_line=None: ("https://dummy.url", "dummysha"))
+    monkeypatch.setattr(sl, "_resolve_backend_asset", lambda backend, cuda_line=None, tag=None: ("https://dummy.url", "dummysha", "bTEST"))
 
     sl._provision_backend("vulkan", Path("dummy_target"), sha256=None, with_cudart=False)
     assert passed_sha256 == ["dummysha"]

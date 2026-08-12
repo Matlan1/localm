@@ -271,7 +271,7 @@ def test_resolve_backend_asset_cuda_line_selects_matching_asset(monkeypatch, lin
     monkeypatch.setattr(sl, "_platform_key", lambda: "win32")
     monkeypatch.setattr(sl, "_latest_tag", lambda: "b9870")
     monkeypatch.setattr(sl, "_release_assets", lambda tag: list(_BOTH_LINES_ASSETS))
-    url, _sha = sl._resolve_backend_asset("cuda", cuda_line=line)
+    url, _sha, _tag = sl._resolve_backend_asset("cuda", cuda_line=line)
     assert "cudart" not in url
     if line == "cuda-12":
         assert "12.4" in url
@@ -294,7 +294,7 @@ def test_pinned_fallback_offline_url_names_a_real_checksum_table_entry(monkeypat
     monkeypatch.setattr(sl, "_platform_key", lambda: "win32")
     monkeypatch.setattr(sl, "_latest_tag", lambda: sl._FALLBACK_TAG)
     monkeypatch.setattr(sl, "_release_assets", lambda tag: [])
-    url, sha = sl._resolve_backend_asset("cuda", cuda_line=line)
+    url, sha, _tag = sl._resolve_backend_asset("cuda", cuda_line=line)
     assert sl._FALLBACK_TAG in url
     assert expected_fragment in url
     fname = url.rsplit("/", 1)[-1]
@@ -349,7 +349,7 @@ def test_full_matrix_resolves_a_real_pair_and_never_gives_old_driver_new_line(
     monkeypatch.setattr(sl, "_platform_key", lambda: "win32")
     monkeypatch.setattr(sl, "_latest_tag", lambda: sl._FALLBACK_TAG)
     monkeypatch.setattr(sl, "_release_assets", lambda t: [])
-    url, sha = sl._resolve_backend_asset("cuda", cuda_line=info.cuda_line)
+    url, sha, _tag = sl._resolve_backend_asset("cuda", cuda_line=info.cuda_line)
     fname = url.rsplit("/", 1)[-1]
     assert fname in sl._PINNED_FALLBACK_SHA256
     assert sha is not None
