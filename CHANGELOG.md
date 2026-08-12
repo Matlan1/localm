@@ -121,6 +121,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
   repair says so plainly and fixes what it can rather than reporting success
   for a run that changed nothing.
 
+- **The Models page now shows which of your models can accept images.** localm
+  already worked this out internally - it is how an attached image gets routed
+  to a model that can read it - but nothing ever showed you, so the only way to
+  find out was to attach an image and see what happened. Models that can take
+  image input now carry a "vision" pill in the model list and in the detail
+  window. A model localm could not check, because its file is on a drive or
+  network share that is not currently reachable, simply shows no pill: it is
+  never labelled as text-only on the strength of a file nobody could open.
+
 ### Fixed
 - **Two things localm could fail at and then say nothing about are now
   reported.** If a plugin's install or first-use hook raised, the action
@@ -208,6 +217,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   looked to you as if both had run. Only the first still runs (asking for two
   at once is not supported here), but the model is now told which call was
   ignored and can ask for it again on its next turn.
+- **The Settings update check no longer says "localm is up to date" when it
+  could not work out whether it is.** localm orders release tags to decide if
+  one is newer than what you are running, and some tags cannot be ordered at
+  all - a release named `nightly`, `stable` or `release-5` has no version
+  number to compare. That produced the same "not newer" answer as a genuine
+  tie, so the GUI reported you were up to date when the honest answer was that
+  it could not tell. It now says so, and names the tag it could not read. The
+  command line already got this right, and this check also runs by itself
+  shortly after startup, so the wrong reassurance was appearing without anyone
+  asking for it.
 - **A couple of dismissable UI hints (the NVIDIA/Vulkan backend hint, and
   whether the Studio nav group is expanded) could survive turning on privacy
   mode, unlike every other saved GUI preference.** Both were already withheld

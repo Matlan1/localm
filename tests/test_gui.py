@@ -1475,6 +1475,55 @@ class TestModelEndpoints:
         assert by_name["legacy-model"]["expert_count"] is None, \
             "a legacy entry with no key at all must report None (unknown), never a false 0"
 
+    def test_models_exposes_vision_tristate(self, gui_app, tmp_path):
+        """NEW-MODEL-CAPABILITY-TAGS (vision slice): /api/models reports vision
+        as true / false / KEY ABSENT, never collapsing "checked, text-only"
+        together with "could not check".
+
+        Same discipline as expert_count above, but by PRESENCE rather than by
+        null, because this is measured from the model's files on every request:
+        a registered path on an unmounted drive yields no evidence at all, and
+        a client that rendered "not vision" from that would be claiming
+        something about a model nobody inspected."""
+        vis_dir = tmp_path / "vis"
+        vis_dir.mkdir()
+        (vis_dir / "gemma.gguf").write_bytes(b"x")
+        (vis_dir / "mmproj-gemma-f16.gguf").write_bytes(b"x")
+        # Its OWN folder: find_sibling_mmproj globs the whole parent directory,
+        # so a text-only model sharing a folder with someone else's projector
+        # would (correctly, per that function) resolve one and report vision.
+        txt_dir = tmp_path / "txt"
+        txt_dir.mkdir()
+        (txt_dir / "plain.gguf").write_bytes(b"x")
+        registry = {
+            "vision-model": {"path": str(vis_dir / "gemma.gguf"), "source": "local",
+                             "model_type": "llm"},
+            "text-model": {"path": str(txt_dir / "plain.gguf"), "source": "local",
+                           "model_type": "llm"},
+            "unreachable-model": {"path": "Z:/nonexistent/gone.gguf", "source": "local",
+                                  "model_type": "llm"},
+        }
+        app, _ = gui_app
+        with patch("localm.config.load_registry", return_value=registry):
+            with TestClient(app) as client:
+                data = client.get("/api/models").json()
+        by_name = {m["name"]: m for m in data["models"]}
+        assert by_name["vision-model"]["vision"] is True, \
+            "a GGUF with a resolvable mmproj projector is vision-capable"
+        assert by_name["text-model"]["vision"] is False, \
+            "a model we inspected and found no projector for is a confirmed false"
+        assert "vision" not in by_name["unreachable-model"], \
+            ("a path we could not inspect must OMIT the key, never send false - "
+             "false here would badge an unchecked model as confirmed text-only")
+        # The patch above is on localm.config.load_registry only. If any lookup
+        # inside the capability probe re-read the registry through the OTHER
+        # binding (localm.model_manager.load_registry, a separate attribute
+        # holding the same function object), these answers would come from the
+        # developer's REAL registry and this test would pass or fail by
+        # coincidence of what is installed. That it resolves the projector at
+        # all is what proves the snapshot is threaded all the way down.
+        assert by_name["vision-model"]["name"] == "vision-model"
+
     def test_load_unknown_model_404(self, gui_app):
         app, _ = gui_app
         with patch("localm.config.load_registry", return_value=_FAKE_REGISTRY):
@@ -2090,6 +2139,34 @@ class TestPlatformEndpoints:
         assert data["aliases"] == ["alias-a"]
         assert data["sha256"] == "ab" * 32
         assert data["active"] is True
+
+    def test_model_detail_vision_tristate(self, v1_client, tmp_path):
+        """/v1/models/{id} carries the same true / false / KEY ABSENT vision
+        tri-state as /api/models. It had NO capability field at all before, so
+        omitting on unknown also leaves an older client's payload unchanged."""
+        vis_dir = tmp_path / "vis"
+        vis_dir.mkdir()
+        (vis_dir / "gemma.gguf").write_bytes(b"x")
+        (vis_dir / "mmproj-gemma-f16.gguf").write_bytes(b"x")
+        txt_dir = tmp_path / "txt"
+        txt_dir.mkdir()
+        (txt_dir / "plain.gguf").write_bytes(b"x")
+        registry = {
+            "vision-model": {"path": str(vis_dir / "gemma.gguf"), "source": "local",
+                             "model_type": "llm"},
+            "text-model": {"path": str(txt_dir / "plain.gguf"), "source": "local",
+                           "model_type": "llm"},
+            "unreachable-model": {"path": "Z:/nonexistent/gone.gguf", "source": "local",
+                                  "model_type": "llm"},
+        }
+        with patch("localm.config.load_registry", return_value=registry):
+            vis = v1_client.get("/v1/models/vision-model").json()
+            txt = v1_client.get("/v1/models/text-model").json()
+            gone = v1_client.get("/v1/models/unreachable-model").json()
+        assert vis["vision"] is True
+        assert txt["vision"] is False
+        assert "vision" not in gone, \
+            "an uninspectable path omits the key rather than claiming text-only"
 
     def test_config_roundtrip(self, v1_client, tmp_path):
         cfg_file = tmp_path / "config.json"

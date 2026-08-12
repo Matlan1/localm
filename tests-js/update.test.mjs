@@ -49,6 +49,28 @@ test("Updates: up to date hides 'Update now'", async () => {
   assert.equal(doc.getElementById("update-apply").hidden, true);
 });
 
+test("Updates: an UNCOMPARABLE tag is reported as 'could not tell', never as up to date", async () => {
+  // IDEA part 1's second dead zone. is_newer() returns False both for a genuine
+  // tie/older release AND for a tag it could not parse at all (nightly, stable,
+  // release-5), so `newer:false` alone cannot tell those apart - and the GUI
+  // used to print "up to date" for both. The CLI already branched on
+  // `comparable` (cli/maintenance.py); a GUI user was the one left falsely
+  // reassured, including UNPROMPTED via the throttled startup auto-surface.
+  const { window } = loadAppWithPages({ fetchImpl: makeFetch([
+    ["/api/update/check", { available: true, newer: false, comparable: false,
+      current: "0.1.4", latest: "nightly" }],
+  ]) });
+  const doc = window.document;
+  doc.getElementById("update-check").click();
+  await flush();
+  const text = doc.getElementById("update-status").textContent;
+  assert.match(text, /Could not tell|unrecognized version format/);
+  assert.doesNotMatch(text, /up to date/,
+    "a tag we could not order must never be reported as up to date");
+  assert.equal(doc.getElementById("update-apply").hidden, true,
+    "nothing to apply - there is no ordered newer release");
+});
+
 test("Updates: 'Update now' POSTs apply and shows restarting", async () => {
   const calls = [];
   const { window } = loadAppWithPages({ fetchImpl: makeFetch([

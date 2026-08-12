@@ -217,6 +217,8 @@ export async function refreshModelsPage() {
     if (m.expert_count > 0) {
       nameTd.appendChild(el("span", "moe-badge moe-confirmed", MOE_LABEL.confirmed));
     }
+    const visBadge = visionBadge(m.vision);
+    if (visBadge) nameTd.appendChild(visBadge);
     if (m.active) nameTd.appendChild(el("span", "active-tag", "active"));
     // Independent of "active": a model can sit resident in VRAM without being
     // the one currently serving requests - surfaced so a background-loaded
@@ -426,8 +428,15 @@ export async function showModelDetail(name) {
     for (const [k, v] of rows) {
       const row = el("div", "log-entry");
       row.appendChild(el("span", "t", k));
-      if (k === "Type") row.appendChild(el("span", "type-badge type-" + modelType, modelType));
-      else row.appendChild(document.createTextNode(String(v)));
+      if (k === "Type") {
+        row.appendChild(el("span", "type-badge type-" + modelType, modelType));
+        // Beside the type, not as a row of its own: a "Capabilities" row would
+        // have to render SOMETHING when there is no confirmed capability, and
+        // the only honest something for an unknown is nothing at all. An
+        // absent pill says nothing either way, which is the whole contract.
+        const visBadge = visionBadge(data.vision);
+        if (visBadge) row.appendChild(visBadge);
+      } else row.appendChild(document.createTextNode(String(v)));
       body.appendChild(row);
     }
   });
@@ -460,6 +469,34 @@ export const FIT_TEXT = { "fits": "fits your VRAM", "tight": "tight fit",
 // see discover.py's _moe_signal). The label and tooltip make that distinction
 // visible; never presented as equally certain.
 const MOE_LABEL = { confirmed: "MoE", likely: "MoE?" };
+
+// Model CAPABILITY pills - what a model can DO, deliberately separate from the
+// .fit.fits/.tight/.too-big scale, which grades file SIZE against VRAM and
+// means something entirely different. Vision is the only capability with a
+// real detector today (registry.model_vision_capability, the same lookup the
+// load path uses); tool-use and reasoning are a separate, larger design item
+// and are NOT inferred here from a filename.
+const CAP_LABEL = { vision: "vision" };
+const CAP_TITLE = { vision: "Accepts image input on this install - a vision projector (mmproj) or HF vision metadata was found beside the model" };
+
+/** The vision pill for a `vision` field, or null when there must be no pill.
+ *
+ *  ONE function for the list row AND the detail modal on purpose: two separate
+ *  reads of a tri-state is two chances to write `if (v)` and collapse "checked,
+ *  text-only" together with "COULD NOT CHECK".
+ *
+ *  STRICT `=== true`, never truthiness: the server sends true / false / NO KEY
+ *  AT ALL, and the absent case means the model's files could not be inspected
+ *  (an unmounted drive, a dead UNC share), NOT that it is text-only. false and
+ *  absent both render nothing, and nothing is all they may render - a "no
+ *  vision" label on a model nobody could check is exactly the false claim the
+ *  F8 architecture/MoE badges are written to avoid. */
+function visionBadge(v) {
+  if (v !== true) return null;
+  const badge = el("span", "cap-badge cap-vision", CAP_LABEL.vision);
+  badge.title = CAP_TITLE.vision;
+  return badge;
+}
 const MOE_TITLE = { likely: "Inferred from the repo name - not confirmed by the model's own header" };
 
 export const FMT_LABEL = { gguf: "GGUF", hf: "HF" };
@@ -1098,6 +1135,26 @@ export async function updateCheck() {
       if (applyBtn) applyBtn.hidden = false;
     } else if (d.newer) {
       if (out) out.textContent = "Update " + d.latest + " is available but has no build attached.";
+      if (applyBtn) applyBtn.hidden = true;
+    } else if (d.comparable === false) {
+      // is_newer() returns False BOTH for a genuine tie/older release AND for a
+      // tag it could not parse as a version at all (nightly, stable, release-5
+      // all measured False). Without this branch the GUI printed "up to date"
+      // for the second case - a false reassurance, and pushed UNPROMPTED, since
+      // app/settings-perf.js calls this on a throttled startup check as well as
+      // on the button. Keyed like cli/maintenance.py's .get("comparable", True):
+      // strict === false, so an absent key (an older server) still means
+      // comparable and the pre-existing wording is unchanged.
+      // Wording deliberately carries NO "up to date" substring, unlike the CLI's
+      // otherwise-identical sentence ("...before assuming you are up to date").
+      // The CLI ships that inside a bold yellow warning; this is plain text in
+      // one status line, where a skimmed tail would read as the very
+      // reassurance the branch exists to withhold. It also lets the regression
+      // test assert the phrase is ABSENT outright rather than absent-except-here.
+      if (out) out.textContent = "Could not tell whether " + d.latest +
+        " is newer than your version " + d.current +
+        " (unrecognized version format) - check the release notes yourself" +
+        " before assuming there is nothing newer.";
       if (applyBtn) applyBtn.hidden = true;
     } else {
       if (out) out.textContent = "localm is up to date (running " + d.current + ").";
