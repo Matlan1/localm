@@ -68,10 +68,13 @@ def test_repeated_response_breaker_aborts(tmp_path):
     fixed = '<tool_call>\n{"name": "list_dir", "args": {"path": "."}}\n</tool_call>'
     with patch.object(agent, "_call_llm", return_value=fixed):
         result = agent.run_task("do the thing")
-    # The user got a breaker message at all. "circuit breaker" is the stable
-    # prefix EVERY breaker shares, so this says "something tripped", not which.
-    assert "circuit breaker" in result.lower()
     # WHICH breaker tripped, asserted on STATE rather than on the message text.
+    # DELIBERATELY FIRST: pytest stops at the first failure, so whichever
+    # assertion leads is the one that speaks. Leading with the prose check made
+    # a neutralised breaker report `assert 'circuit breaker' in '[max_turns=12
+    # reached]'`, which is true but is a statement about the MESSAGE and let the
+    # state line go unexercised. Leading with the state gives `assert 0 >= 4` -
+    # a statement about the breaker itself.
     #
     # This line asserted the exact run of words "repeated the same response"
     # until 2026-08-12. #1179 reworded the message to "repeated ESSENTIALLY the
@@ -82,19 +85,27 @@ def test_repeated_response_breaker_aborts(tmp_path):
     # standing trap, and re-asserting the NEW phrase would only re-arm it for
     # the next reword.
     #
-    # _repeat_response_count is incremented in exactly one place (the
-    # repeated-scaffold breaker in agent/loop.py) and is not reset by
-    # run_task, so after the call it is a precise, reword-immune record that
-    # THIS breaker fired rather than the no-tool-call escalation, which also
-    # prints "circuit breaker". Comparing against the constant rather than a
-    # literal keeps it correct if the threshold is retuned.
+    # _repeat_response_count is incremented in exactly ONE place (the
+    # repeated-scaffold breaker in agent/loop.py) and run_task does not reset
+    # it, so after the call it is a precise, reword-immune record that THIS
+    # breaker fired. That distinction is load-bearing rather than pedantic:
+    # loop.py has THREE messages beginning "[circuit breaker:" - this one, the
+    # per-tool failure streak, and the global error streak - so the prose check
+    # below cannot tell them apart and this line is the only thing that can.
+    # Comparing against the constant rather than a literal keeps it correct if
+    # the threshold is retuned.
     #
     # Deliberately NOT loose prose: an assertion weak enough to survive any
     # rewording is usually also weak enough to pass when the breaker never
     # fires at all. Both directions are fires-controlled - reword the message
-    # and this still passes; stop the breaker firing and it goes red.
+    # so neither "repeated" nor "same response" survives and this still passes;
+    # neutralise the breaker and it goes red on THIS line.
     from localm.plugins.coder.agent.constants import _REPEAT_RESPONSE_ABORT
     assert agent._repeat_response_count >= _REPEAT_RESPONSE_ABORT - 1
+    # And the user actually got a breaker message. "circuit breaker" is the
+    # stable prefix all three share, so this says "something was reported",
+    # not which - the line above is what identifies it.
+    assert "circuit breaker" in result.lower()
     # It stopped well before the turn ceiling.
     assert agent._turns < 12
 
