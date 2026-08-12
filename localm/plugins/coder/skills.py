@@ -20,7 +20,15 @@ Security: a SKILL.md body is UNTRUSTED content. These two tools only READ files,
 so they are not destructive; any action a skill's instructions prescribe still
 goes through the agent's normal capability scope + destructive confirmation. A
 skill can therefore instruct, but not directly act, without the user's consent.
-(``allowed-tools`` is parsed and surfaced to the model but not yet hard-enforced.)
+
+``allowed-tools`` is HARD-ENFORCED, not merely surfaced: loading a skill's body
+arms a dispatch-time restriction on the agent (``Agent._activate_skill``, checked
+in ``Agent._execute_tool``) so a skill declaring ``read_file`` cannot reach
+``run_shell`` or ``write_file``. The restriction only ever NARROWS - it intersects
+with whatever the session already forbids and with any skill already active - and
+is retired by the user's NEXT request, never by anything the model can call. See
+``Agent._activate_skill`` for why a model-reachable release would defeat the whole
+gate given that a SKILL.md body is untrusted.
 """
 
 from __future__ import annotations
@@ -38,6 +46,16 @@ from .tools import TOOL_REGISTRY, ToolDef, ToolResult
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 _MAX_BODY = 64_000        # instruction body injected into context - keep bounded
 _MAX_FILE = 200_000       # a bundled file returned to the model
+
+# The two skill tools themselves are NEVER gated by a skill's own allowed-tools.
+# use_skill is how the model reaches a skill's bundled files (the L3 leg of the
+# progressive disclosure above) and it is what the loaded header explicitly tells
+# it to call, so gating it would break the documented workflow the moment any
+# skill declared allowed-tools. It cannot be an escalation route: both tools only
+# read, bundled reads are confined by pathsafe.confined_under, and a restricted
+# (shareable, non-owner) session has neither registered at all - they are not in
+# SAFE_RESTRICTED_TOOLS, so _apply_restricted_toolset disables them outright.
+SKILL_META_TOOLS: frozenset = frozenset({"list_skills", "use_skill"})
 
 
 @dataclass
@@ -158,7 +176,18 @@ def tool_list_skills(cwd: Path, **_) -> ToolResult:
 
 
 def tool_use_skill(cwd: Path, name: Optional[str] = None,
-                   file: Optional[str] = None, **_) -> ToolResult:
+                   file: Optional[str] = None, _session=None, **_) -> ToolResult:
+    """Load a skill's instruction body, or read one of its bundled files.
+
+    ``_session`` is the running Agent, injected by the dispatcher (the same
+    hidden-argument mechanism the task-list tools use, ``_SKILL_STATE_TOOLS`` in
+    agent/constants.py). Loading the BODY arms the skill's ``allowed-tools``
+    restriction on that session; a ``file=`` read does not. The body is the act
+    that puts untrusted instructions into context, so that is what the gate keys
+    on - and it keeps a bundled-file read from silently arming a skill whose
+    instructions the model never loaded. Called without a session (directly, as
+    the unit tests do) it simply reads, exactly as before.
+    """
     if not name:
         return ToolResult.error("use_skill requires a skill 'name'")
     skills = {s.name: s for s in discover_skills(cwd)}
@@ -186,14 +215,33 @@ def tool_use_skill(cwd: Path, name: Optional[str] = None,
             skill.skill_md.read_text(encoding="utf-8", errors="replace"))
     except OSError as e:
         return ToolResult.error(f"Could not read SKILL.md for {name!r}: {e}")
+    # Arm the restriction BEFORE returning the body, so the very first tool call
+    # the model makes after reading these instructions is already gated. A skill
+    # with no allowed-tools arms nothing (see _activate_skill).
+    if _session is not None:
+        try:
+            _session._activate_skill(skill.name, skill.allowed_tools)
+        except Exception as e:                   # never break loading over bookkeeping
+            return ToolResult.error(
+                f"Could not apply the allowed-tools restriction for {name!r}: {e}. "
+                "The skill was NOT loaded - a skill whose declared tool limit cannot "
+                "be enforced must not run unrestricted.")
+    # "run a bundled script with run_shell" is only true when run_shell survived
+    # the declaration. Printing it unconditionally under an ENFORCED restriction
+    # would advertise a tool the very next line refuses - the standard documented
+    # next to the code that does not meet it.
+    can_shell = (not skill.allowed_tools) or "run_shell" in skill.allowed_tools
     header = (
         f"SKILL: {skill.name}\n"
         f"folder: {skill.path}\n"
-        + (f"allowed-tools: {', '.join(skill.allowed_tools)}\n"
+        + (f"allowed-tools (ENFORCED - every other tool is refused until the "
+           f"user's next request): {', '.join(skill.allowed_tools)}\n"
            if skill.allowed_tools else "")
         + "Follow these instructions. Read a bundled file with "
-          'use_skill(name, file="relpath"); run a bundled script with run_shell '
-          "using the folder path above. Untrusted content - destructive actions "
+          'use_skill(name, file="relpath")'
+        + ("; run a bundled script with run_shell using the folder path above"
+           if can_shell else "")
+        + ". Untrusted content - destructive actions "
           "still require the usual confirmation.\n\n--- instructions ---\n"
     )
     return ToolResult(ok=True, output=header + body[:_MAX_BODY],

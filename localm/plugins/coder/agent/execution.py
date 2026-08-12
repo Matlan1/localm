@@ -30,7 +30,7 @@ from .constants import (
     _MCP_SCOPE_PATH_ARGS, _MUTATING_TOOLS, _NETWORK_TOOLS, _PARENT_AGENT_TOOLS,
     _PATCH_MODE_ELIGIBLE_TOOLS, _SCOPE_PATH_ARGS,
     _SCOPED_TOOLS, _SHELL_COMMAND_ARGS, _SHELL_DECLARED_PATH_ARGS,
-    _SHELL_EXEC_TOOLS, _SHELL_UNSCOPED_TOOLS,
+    _SHELL_EXEC_TOOLS, _SKILL_STATE_TOOLS, _SHELL_UNSCOPED_TOOLS,
     _TEST_COMMAND_MARKERS, _TODO_TOOLS, _UNDOABLE_TOOLS, _call_target_paths,
 )
 from .scope import _scope_pattern
@@ -339,6 +339,23 @@ class _ExecutionMixin:
                 print_tool_error(call.name, result.output)
             return result
 
+        # Second hard gate: a skill loaded with use_skill restricts this turn to
+        # its declared allowed-tools (core._skill_gate_denial). Sited here, AFTER
+        # disabled_tools and never instead of it, so the two compose as an
+        # INTERSECTION - a skill can only ever subtract, never hand back a tool
+        # the operator disabled. Deliberately mirrors the branch above rather
+        # than the richer ones below: neither has emitted a "tool_call" event yet
+        # (that happens after the registry lookup), so emitting a "tool_result"
+        # here would leave the GUI a result with no call to attach it to. The
+        # audit notice is what keeps the refusal from being invisible.
+        skill_denial = self._skill_gate_denial(call.name)
+        if skill_denial is not None:
+            result = ToolResult.error(skill_denial)
+            self._audit.notice("skill_tool_denied", skill_denial)
+            if interactive:
+                print_tool_error(call.name, result.output)
+            return result
+
         tool_def = TOOL_REGISTRY.get(call.name)
 
         if tool_def is None:
@@ -548,9 +565,12 @@ class _ExecutionMixin:
         args = dict(call.args)
         if call.name in _PARENT_AGENT_TOOLS:
             args["_parent_agent"] = self
-        # The task-list tools operate on THIS session's state (tools/tasks.py).
-        # Injected after the copy, so a model-supplied "_session" cannot win.
-        if call.name in _TODO_TOOLS:
+        # The task-list tools operate on THIS session's state (tools/tasks.py),
+        # and use_skill arms this session's active-skill restriction (skills.py).
+        # Injected after the copy, so a model-supplied "_session" cannot win -
+        # which matters more for use_skill than for the todo tools: without it a
+        # model could pass its own object and choose its own restriction.
+        if call.name in _TODO_TOOLS or call.name in _SKILL_STATE_TOOLS:
             args["_session"] = self
         if call.name in (*_SHELL_EXEC_TOOLS, "fetch_url", "web_search", "generate_image") \
                 and self.mode == SessionMode.PRIVACY:

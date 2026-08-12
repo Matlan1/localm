@@ -203,3 +203,193 @@ def test_agent_registers_skill_tools_on_init(tmp_path, clean_registry):
     # the system prompt advertises the feature + auto-documents the tools
     assert "list_skills" in agent._system_prompt
     assert "AGENT SKILLS" in agent._system_prompt
+
+
+# --- allowed-tools is HARD-ENFORCED (REC-SKILL-TOOLS) ------------------------ #
+#
+# Every test here drives the REAL dispatch path, agent._execute_tool(ToolCall(...)),
+# not the tool functions directly: the gate lives in the dispatcher, so calling
+# tool_use_skill() by hand would prove nothing about what a model can actually
+# reach. Denials are asserted from OUTSIDE with a counting mock plus
+# assert_not_called() - never a raising side_effect, because _execute_tool wraps
+# tool_def.fn in `except Exception` and would absorb an AssertionError as an
+# ordinary tool failure, passing the test in both directions.
+
+def _tool_call(_tool: str, /, **args):
+    # positional-only: use_skill's own argument is called "name" too
+    from localm.plugins.coder.parser import ToolCall
+    return ToolCall(name=_tool, args=args, raw="", start=0, end=0)
+
+
+def _counting_tool(registry, name: str, *, destructive=False):
+    """Replace *name* in the registry with a MagicMock-backed no-op and return it."""
+    from unittest.mock import MagicMock
+    from localm.plugins.coder.tools import ToolDef, ToolResult
+    fn = MagicMock(return_value=ToolResult.success("ran", summary=name))
+    registry[name] = ToolDef(name=name, fn=fn, description="x", params={},
+                             destructive=destructive)
+    return fn
+
+
+@pytest.fixture
+def skill_agent(tmp_path, clean_registry):
+    """An Agent in *tmp_path* with two project skills:
+    ``narrow`` (allowed-tools: read_file) and ``open`` (no allowed-tools)."""
+    root = tmp_path / ".localcoder" / "skills"
+    _make_skill(root, "narrow",
+                frontmatter="name: narrow\ndescription: d\nallowed-tools: read_file\n")
+    _make_skill(root, "open", frontmatter="name: open\ndescription: d\n")
+    from localm.plugins.coder.agent import Agent
+    agent = Agent(_StubBackend(), cwd=tmp_path, auto_approve=True)
+    # A user request is what starts a turn; the restriction is retired by the NEXT
+    # one, so every test needs to be inside one to be testing the real lifetime.
+    agent._last_user_request = "do the thing"
+    return agent
+
+
+def _use(agent, name):
+    res = agent._execute_tool(_tool_call("use_skill", name=name), interactive=False)
+    assert res.ok, res.output
+    return res
+
+
+def test_skill_gate_denies_a_tool_outside_allowed_tools(skill_agent):
+    """(a) POSITIVE: the declared subset is enforced, and the tool never runs."""
+    write = _counting_tool(TOOL_REGISTRY, "write_file")
+    _use(skill_agent, "narrow")
+    res = skill_agent._execute_tool(
+        _tool_call("write_file", path="x.txt", content="hi"), interactive=False)
+    assert not res.ok
+    assert "narrow" in res.output and "read_file" in res.output
+    # The load-bearing assertion: refused, not merely reported as refused.
+    write.assert_not_called()
+
+
+def test_skill_gate_allows_a_declared_tool(skill_agent):
+    """(b) NEGATIVE: read_file still works under the same active skill."""
+    read = _counting_tool(TOOL_REGISTRY, "read_file")
+    _use(skill_agent, "narrow")
+    res = skill_agent._execute_tool(_tool_call("read_file", path="x.txt"),
+                                    interactive=False)
+    assert res.ok
+    read.assert_called_once()
+
+
+def test_skill_restriction_is_retired_by_the_next_user_request(skill_agent):
+    """(c) LIFETIME: a new USER request ends it - and nothing the model can call does.
+
+    Asserted on the ASSIGNMENT, not the value: the same request text repeated is
+    still a new turn, which is exactly the case a string comparison would miss.
+    """
+    write = _counting_tool(TOOL_REGISTRY, "write_file")
+    _use(skill_agent, "narrow")
+    assert not skill_agent._execute_tool(
+        _tool_call("write_file", path="x.txt"), interactive=False).ok
+    write.assert_not_called()
+
+    skill_agent._last_user_request = "do the thing"      # byte-identical on purpose
+    res = skill_agent._execute_tool(_tool_call("write_file", path="x.txt"),
+                                    interactive=False)
+    assert res.ok
+    write.assert_called_once()
+
+
+def test_skill_gate_intersects_with_disabled_tools_never_widens(tmp_path, clean_registry):
+    """(d) INTERSECTION: allowed by the skill AND disabled by the operator = DENIED.
+
+    The direction that matters: a skill must never hand back capability the
+    session forbids, or the restriction is a privilege escalation.
+    """
+    _make_skill(tmp_path / ".localcoder" / "skills", "narrow",
+                frontmatter="name: narrow\ndescription: d\nallowed-tools: read_file\n")
+    from localm.plugins.coder.agent import Agent
+    agent = Agent(_StubBackend(), cwd=tmp_path, auto_approve=True,
+                  disabled_tools=frozenset({"read_file"}))
+    agent._last_user_request = "go"
+    read = _counting_tool(TOOL_REGISTRY, "read_file")
+    _use(agent, "narrow")
+    res = agent._execute_tool(_tool_call("read_file", path="x.txt"), interactive=False)
+    assert not res.ok and "disabled" in res.output
+    read.assert_not_called()
+
+
+def test_absent_allowed_tools_restricts_nothing(skill_agent):
+    """A skill with no allowed-tools arms nothing - deliberate and backward
+    compatible, since the field is optional and most skills omit it."""
+    write = _counting_tool(TOOL_REGISTRY, "write_file")
+    _use(skill_agent, "open")
+    assert skill_agent._execute_tool(
+        _tool_call("write_file", path="x.txt"), interactive=False).ok
+    write.assert_called_once()
+
+
+def test_a_second_skill_can_only_narrow_further(skill_agent):
+    """Loading an UNRESTRICTED skill while a restricted one is active must not
+    widen. This is the bypass a hostile SKILL.md would reach for first: its own
+    body can tell the model to load another skill."""
+    write = _counting_tool(TOOL_REGISTRY, "write_file")
+    _use(skill_agent, "narrow")
+    _use(skill_agent, "open")            # declares nothing, so contributes nothing
+    res = skill_agent._execute_tool(_tool_call("write_file", path="x.txt"),
+                                    interactive=False)
+    assert not res.ok
+    write.assert_not_called()
+
+
+def test_two_restricted_skills_intersect(tmp_path, clean_registry):
+    """Two declarations compose to their INTERSECTION, not their union: after
+    loading both, only what BOTH declare survives."""
+    root = tmp_path / ".localcoder" / "skills"
+    _make_skill(root, "reader",
+                frontmatter="name: reader\ndescription: d\nallowed-tools: read_file, grep\n")
+    _make_skill(root, "grepper",
+                frontmatter="name: grepper\ndescription: d\nallowed-tools: grep\n")
+    from localm.plugins.coder.agent import Agent
+    agent = Agent(_StubBackend(), cwd=tmp_path, auto_approve=True)
+    agent._last_user_request = "go"
+    read = _counting_tool(TOOL_REGISTRY, "read_file")
+    grep = _counting_tool(TOOL_REGISTRY, "grep")
+    _use(agent, "reader")
+    _use(agent, "grepper")
+    assert not agent._execute_tool(_tool_call("read_file", path="x"),
+                                   interactive=False).ok
+    read.assert_not_called()
+    assert agent._execute_tool(_tool_call("grep", pattern="x"), interactive=False).ok
+    grep.assert_called_once()
+
+
+def test_use_skill_itself_is_never_gated(skill_agent):
+    """The skill tools stay reachable under any restriction: the loaded header
+    tells the model to read bundled files with use_skill(name, file=...), so
+    gating them would break the documented workflow."""
+    _use(skill_agent, "narrow")
+    res = skill_agent._execute_tool(_tool_call("list_skills"), interactive=False)
+    assert res.ok
+    res = skill_agent._execute_tool(
+        _tool_call("use_skill", name="narrow"), interactive=False)
+    assert res.ok
+
+
+def test_loaded_header_states_the_restriction_is_enforced(skill_agent):
+    """The model is told the truth about what it is holding - and is NOT told to
+    reach for run_shell when the declaration excludes it."""
+    out = _use(skill_agent, "narrow").output
+    assert "ENFORCED" in out and "read_file" in out
+    assert "run_shell" not in out
+
+
+def test_spawned_child_inherits_the_active_skill_restriction(skill_agent):
+    """A skill declaring spawn_agent must not delegate its way out of its own
+    declaration: the child is built narrowed too."""
+    from localm.plugins.coder.tools.agents import inherited_child_kwargs
+    _use(skill_agent, "narrow")
+    kwargs = inherited_child_kwargs(
+        backend=_StubBackend(), cwd=skill_agent.cwd, name="child",
+        max_turns=3, parent=skill_agent, confirm_handler=None, role=None)
+    assert kwargs["inherited_skill_tools"] == frozenset({"read_file"})
+
+    from localm.plugins.coder.agent import Agent
+    child = Agent(**kwargs)
+    assert "write_file" in child.disabled_tools     # narrowed
+    assert "read_file" not in child.disabled_tools  # but not beyond the declaration
+    assert "use_skill" not in child.disabled_tools  # bundled files stay reachable

@@ -124,6 +124,13 @@ def inherited_child_kwargs(
         mode=getattr(parent, "mode", _SessionMode.PRIVACY),
         restricted=getattr(parent, "restricted", False),
         disabled_tools=getattr(parent, "disabled_tools", frozenset()),
+        # A live SKILL.md allowed-tools restriction on the parent narrows the
+        # child too, or a skill declaring spawn_agent would delegate its way out
+        # of its own declaration. Passed as the ALLOWLIST for the same reason
+        # role is passed by name (see the paragraph above): the child must apply
+        # it after its own MCP/plugin/skill registration, not before.
+        inherited_skill_tools=(parent.active_skill_tools()
+                               if hasattr(parent, "active_skill_tools") else None),
         scope=(getattr(parent, "scope", None) if scope is _INHERIT else scope),
         # Narrows FURTHER still: the role's allowlist is subtracted from the live
         # registry on top of the inherited disabled set, never in place of it, so
