@@ -91,50 +91,123 @@ class Detection:
     source: str = ""                               # how we decided (for messaging)
     gpu_names: str = ""                            # raw adapter name(s), lowercased
 
+    # Whether the adapter enumeration actually RAN. False means the question was
+    # never answered (the tool is missing, timed out, or exited non-zero), which
+    # is NOT the same fact as "it answered and found no GPU" - see gpu_state.
+    probe_ok: bool = True
+    probe_error: str = ""                          # short reason when probe_ok is False
+
     @property
     def has_gpu(self) -> bool:
         return bool(self.vendors)
 
+    @property
+    def gpu_state(self) -> str:
+        """``"found"`` | ``"none"`` | ``"unknown"`` - the three outcomes this
+        module can genuinely distinguish, kept apart because they need different
+        responses.
 
-def _run(cmd: list) -> str:
-    """Run *cmd* and return combined stdout+stderr, or "" on any failure."""
+        ``has_gpu`` is a BOOLEAN and therefore cannot express the third: it reads
+        False both for a box with no GPU and for a box we could not ask, so every
+        caller that branches on it silently treats an unanswered probe as proof of
+        absent hardware. That collapse is the reason this property exists; prefer
+        it over ``has_gpu`` anywhere the answer is shown to a user or recorded in
+        a diagnostic.
+
+        A vendor found by a tool that DID answer (nvidia-smi / rocm-smi /
+        rocminfo on PATH) is positive proof and stays ``"found"`` even when the
+        adapter-name enumeration failed: a failed probe cannot retract evidence
+        another probe supplied.
+
+        NOT the same thing as ``discover.GPU_PROBE_OK`` / ``_TIMEOUT`` / ``_BUSY``
+        / ``_INCONCLUSIVE``, and deliberately not shared with it. That vocabulary
+        describes the RUNTIME torch/nvidia-smi device enumeration (an outcome per
+        probe attempt); this describes the INSTALL-TIME adapter-name detection (a
+        conclusion about the machine), and the two run at different moments off
+        different tools. They also cannot be unified even if someone wanted to:
+        this module is pure stdlib on purpose because ``setup.sh`` and
+        ``setup.bat`` invoke it via ``python -m localm.hwdetect``, while
+        ``discover`` imports ``localm.vram`` and ``model_manager``. The shared
+        idea is only the rule both obey - AGENTS.md rule 5, an empty result must
+        say whether anyone actually looked."""
+        if self.vendors:
+            return "found"
+        return "none" if self.probe_ok else "unknown"
+
+
+def _run_ok(cmd: list) -> "tuple[str, bool]":
+    """Run *cmd*; return (combined stdout+stderr, ran_to_completion).
+
+    The flag reports exactly one thing: the process STARTED, did not time out,
+    and exited 0. It is deliberately not a claim that the OUTPUT is trustworthy -
+    powershell in particular can exit 0 having written a cmdlet error to stderr,
+    which this function still returns as text (unchanged, long-standing
+    behaviour that ``detect``'s substring matching tolerates).
+
+    The text half is byte-identical to what ``_run`` has always returned, so this
+    is purely additive for every existing caller."""
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=8)
-        return (r.stdout or "") + (r.stderr or "")
     except Exception:
-        return ""
+        return "", False
+    return (r.stdout or "") + (r.stderr or ""), r.returncode == 0
 
 
-def _win_gpu_names() -> str:
-    """Names of the Windows display adapters (lowercased), best-effort."""
-    out = _run([
+def _run(cmd: list) -> str:
+    """Run *cmd* and return combined stdout+stderr, or "" on any failure.
+
+    A thin wrapper over ``_run_ok`` rather than a second implementation: two
+    derivations of the same subprocess result drift, and the drift lands exactly
+    on the failure path this module now has to report."""
+    return _run_ok(cmd)[0]
+
+
+def _win_gpu_names() -> "tuple[str, bool]":
+    """Names of the Windows display adapters (lowercased), best-effort, plus
+    whether either enumeration tool actually answered.
+
+    ``ok`` is True when EITHER tool ran to completion: powershell exiting 0 with
+    no adapters is a real answer ("this box has none"), so a subsequent wmic
+    failure must not downgrade it."""
+    out, ok = _run_ok([
         "powershell", "-NoProfile", "-Command",
         "Get-CimInstance Win32_VideoController | "
         "Select-Object -ExpandProperty Name",
     ])
     if not out.strip():
-        out = _run(["wmic", "path", "win32_VideoController", "get", "name"])
-    return out.lower()
+        out, wmic_ok = _run_ok(["wmic", "path", "win32_VideoController", "get", "name"])
+        ok = ok or wmic_ok
+    return out.lower(), ok
 
 
-def _linux_gpu_names() -> str:
-    """Names of Linux PCI display controllers (lowercased), best-effort."""
-    out = _run(["lspci"])
+def _linux_gpu_names() -> "tuple[str, bool]":
+    """Names of Linux PCI display controllers (lowercased), best-effort, plus
+    whether ``lspci`` actually answered (it is absent on plenty of minimal
+    installs and containers, where "no display controllers" would be a fabricated
+    answer rather than a measured one)."""
+    out, ok = _run_ok(["lspci"])
     return "\n".join(
         ln for ln in out.lower().splitlines()
         if "vga" in ln or "3d controller" in ln or "display" in ln
-    )
+    ), ok
 
 
 def detect() -> Detection:
     """Detect GPU vendors present and recommend a default llama.cpp backend.
 
     Never raises. Vendor order in the result is priority order (nvidia, amd,
-    intel) for picking a vendor-optimized backend if the user opts in."""
+    intel) for picking a vendor-optimized backend if the user opts in.
+
+    An enumeration that could not RUN is reported as such (``probe_ok`` False,
+    ``gpu_state`` "unknown") instead of being rendered as "no GPU found". The
+    recommendation is unchanged in that case - ``cpu`` remains the only safe
+    default when nothing is known - but the caller can now tell a measured
+    absence from an unanswered question, which is the difference between "this
+    box has no GPU" and "we never got to look"."""
     found: list = []
 
     if sys.platform == "win32":
-        names = _win_gpu_names()
+        names, probe_ok = _win_gpu_names()
         if "nvidia" in names or shutil.which("nvidia-smi"):
             found.append("nvidia")
         if "radeon" in names or "amd " in names or " amd" in names or shutil.which("rocm-smi"):
@@ -145,12 +218,20 @@ def detect() -> Detection:
     elif sys.platform == "darwin":
         # Apple Silicon: the GPU is integrated and driven via Metal, which the
         # official llama.cpp macos-arm64 build targets directly.
-        machine = _run(["uname", "-m"]).strip().lower()
+        machine, uname_ok = _run_ok(["uname", "-m"])
+        machine = machine.strip().lower()
         if "arm64" in machine:
             return Detection(vendors=["apple"], recommended="metal", source="apple silicon")
+        if not uname_ok:
+            # uname could not answer. Returning the "macos intel" branch here
+            # ASSERTS an Intel Mac, and on an Apple Silicon box that is both
+            # wrong and expensive: it costs the Metal recommendation. Say
+            # unknown instead - same conservative cpu default, honest label.
+            return Detection(vendors=[], recommended="cpu", source="macos, arch unknown",
+                             probe_ok=False, probe_error="uname did not run")
         return Detection(vendors=[], recommended="cpu", source="macos intel")
     else:
-        names = _linux_gpu_names()
+        names, probe_ok = _linux_gpu_names()
         if shutil.which("nvidia-smi") or "nvidia" in names:
             found.append("nvidia")
         rocm_dir = Path("/opt/rocm").is_dir()    # hygiene-ok: generic ROCm system path
@@ -164,8 +245,16 @@ def detect() -> Detection:
     # Priority order, de-duplicated.
     ordered = [v for v in VENDORS if v in found]
     recommended = "vulkan" if ordered else "cpu"
+    # probe_ok/probe_error describe THE ENUMERATION, not the conclusion: they are
+    # recorded whenever it failed, even if shutil.which (nvidia-smi / rocm-smi /
+    # rocminfo) identified a vendor anyway. gpu_state is what resolves the two
+    # into an answer, and it lets that positive proof win. Keeping the fields
+    # purely factual is what stops the next reader having to guess whether an
+    # empty probe_error means "it ran" or "it failed but we found something".
     return Detection(vendors=ordered, recommended=recommended, source=src,
-                     gpu_names=names)
+                     gpu_names=names, probe_ok=probe_ok,
+                     probe_error=("" if probe_ok
+                                  else "the display-adapter enumeration did not run"))
 
 
 def _amd_known_non_gfx103x(names: str) -> bool:
