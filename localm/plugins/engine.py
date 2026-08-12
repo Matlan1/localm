@@ -1029,7 +1029,8 @@ class PluginManager:
 
     def _invoke_hook(self, name: str, hook_name: str, **kwargs) -> None:
         """Call an optional plugin lifecycle hook if the loaded module defines it.
-        Best-effort (mirrors on_uninstall): a hook error never blocks the action."""
+        Best-effort (mirrors on_uninstall): a hook error never blocks the action,
+        but it is never SILENT either (rule 5) - see the handler below."""
         entry = self._loaded.get(name)
         if not entry:
             return
@@ -1037,8 +1038,17 @@ class PluginManager:
         if callable(hook):
             try:
                 hook(**kwargs)
-            except Exception:
-                pass
+            except Exception as e:
+                # Best-effort stays best-effort - install/first-use must not fail
+                # because a plugin's own hook raised - but swallowing it silently
+                # made on_install and on_first_use failures invisible at EVERY
+                # level. Same shape and level as the callback failure logged by
+                # PluginHost.on_startup above, and WARNING rather than debug on
+                # purpose: the always-on recent-activity ring a bug report dumps
+                # is INFO+ (_RingBufferHandler), so a debug line would reach no
+                # report. Reached from on_first_use and both install paths, each
+                # a one-shot action, so this cannot flood.
+                _log.warning("plugin %s: %s hook failed: %s", name, hook_name, e)
 
     # ---- provisioning helpers ----------------------------------------------
     def _installed_dir(self, name: str) -> Path:

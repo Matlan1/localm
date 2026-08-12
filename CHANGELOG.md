@@ -100,6 +100,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
   for a run that changed nothing.
 
 ### Fixed
+- **Two things localm could fail at and then say nothing about are now
+  reported.** If a plugin's install or first-use hook raised, the action
+  carried on and nothing was written anywhere at any level, so a plugin that
+  only half set itself up was indistinguishable from one that set itself up
+  properly. Separately, if the coder could not delete a saved session it was
+  clearing (a file held open by something else, for instance), the checkpoint
+  quietly stayed on disk, so a later `/resume` could offer you a session you
+  believed was gone. Neither is treated as a failure of the thing it was
+  attached to, so an install still installs and a finished task still
+  finishes, but both now leave a warning naming what went wrong, and a bug
+  report carries it.
 - **A couple of dismissable UI hints (the NVIDIA/Vulkan backend hint, and
   whether the Studio nav group is expanded) could survive turning on privacy
   mode, unlike every other saved GUI preference.** Both were already withheld
