@@ -12,6 +12,7 @@ import json
 from unittest.mock import MagicMock, patch
 
 from localm.image_gen import comfy as shared
+from localm.media import comfy_client
 
 
 # A Wan-shaped graph with deliberately non-template ids (mix of numeric + named).
@@ -141,7 +142,7 @@ class TestEndToEndRenumberedGraph:
         with patch.object(vcomfy, "workflow_path", return_value=wf_file), \
              patch.object(vcomfy, "ensure_comfy", return_value=(True, "up")), \
              patch.object(vcomfy, "_localm_unload"), \
-             patch.object(vcomfy.urllib.request, "urlopen", self._fake_comfy(captured)), \
+             patch.object(comfy_client, "_comfy_urlopen", self._fake_comfy(captured)), \
              patch.object(vcomfy.time, "sleep"):
             ok, msg = vcomfy.generate_video(
                 "a red fox", tmp_path / "out.mp4", negative_prompt="blurry",
@@ -201,7 +202,7 @@ class TestVideoRobustness:
         with patch.object(vcomfy, "workflow_path", return_value=wf_file), \
              patch.object(vcomfy, "ensure_comfy", return_value=(True, "up")), \
              patch.object(vcomfy, "_localm_unload"), \
-             patch.object(vcomfy.urllib.request, "urlopen", _fake_video_urlopen(captured)), \
+             patch.object(comfy_client, "_comfy_urlopen", _fake_video_urlopen(captured)), \
              patch.object(vcomfy.time, "sleep"):
             ok, msg = vcomfy.generate_video("a fox", tmp_path / "out.mp4", seed=99)
         assert ok, msg

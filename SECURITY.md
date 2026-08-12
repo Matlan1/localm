@@ -176,9 +176,15 @@ this section states the security properties and, more importantly, their edges.
   discovery, and model pulls all go through the policy. It is not only a
   model-facing guard.
 - **What it does not cover.** Several outbound paths deliberately do not use
-  it, including bug-report upload and requests to your ComfyUI instance. Treat
-  the policy as governing the paths named above, not as a blanket statement
-  about every socket localm opens.
+  it, including bug-report upload and requests to your ComfyUI instance.
+  ComfyUI has its own, narrower guards instead: a configured `comfy_api_url`
+  that targets a link-local / cloud-metadata address is refused
+  (CHK-COMFY-APIURL), and the connection itself refuses any HTTP redirect
+  outright (CHK-COMFY-REDIRECT), so a hostile or compromised ComfyUI cannot use
+  a 3xx response to steer the request elsewhere. Loopback and LAN are both
+  normal, unchecked ComfyUI deployments - treat the policy as governing the
+  paths named above, not as a blanket statement about every socket localm
+  opens.
 - **`off` is the meaningful setting.** At the policy layer `ask` and `allow`
   are the same thing: the only mode branch that refuses is `off`. The prompt
   you see for `ask` comes from the coder's own confirmation step, one layer up,

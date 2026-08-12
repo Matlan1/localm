@@ -281,6 +281,7 @@ class TestSidecarGate:
     def test_generate_image_skips_sidecar_when_disabled(self, tmp_path):
         """write_sidecar=False must leave only the image file on disk."""
         from localm.image_gen import comfy as ic
+        from localm.media import comfy_client
         out = tmp_path / "img.png"
 
         fake_history = {"p1": {"outputs": {"9": {"images": [
@@ -304,7 +305,7 @@ class TestSidecarGate:
                 return _Resp(b"{}")
             raise AssertionError(url)
 
-        with patch.object(ic.urllib.request, "urlopen", side_effect=fake_urlopen), \
+        with patch.object(comfy_client, "_comfy_urlopen", side_effect=fake_urlopen), \
              patch.object(ic, "_localm_unload"), \
              patch.dict(ic.os.environ, {"COMFY_OUTPUT_DIR": str(tmp_path / "comfy")}):
             ok, msg = ic.generate_image("a fox", out, write_sidecar=False)

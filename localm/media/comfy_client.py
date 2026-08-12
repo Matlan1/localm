@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from localm.http_ssl import verified_urlopen
 from localm.pathsafe import confined_under, is_unc_or_device_path
 
 
@@ -333,7 +334,7 @@ def comfy_object_info(api_url: str, timeout: float = 10.0) -> Optional[dict]:
     """ComfyUI's full ``/object_info`` map ``{class_type: spec}``, or None when it
     cannot be fetched or parsed (so the caller treats preflight as best-effort)."""
     try:
-        with urllib.request.urlopen(f"{api_url}/object_info", timeout=timeout) as resp:
+        with _comfy_urlopen(f"{api_url}/object_info", timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8", "replace"))
         return data if isinstance(data, dict) else None
     except Exception:
@@ -727,6 +728,34 @@ def _localm_unload(localm_url: Optional[str] = None,
         return None
 
 
+class ComfyRedirectRefused(Exception):
+    """A ComfyUI HTTP call tried to redirect and localm refused it. See
+    _RefuseRedirect (CHK-COMFY-REDIRECT)."""
+
+
+class _RefuseRedirect(urllib.request.HTTPRedirectHandler):
+    """LM-DA-045: sanitize_comfy_url (CHK-COMFY-APIURL, below) screens only the
+    CONFIGURED comfy_api_url, at resolution time. A redirect target is chosen by
+    the remote ComfyUI AFTER that check has already run, and urllib's default
+    opener follows up to 10 such redirects with no validation at all - so a
+    hostile or compromised ComfyUI (SECURITY.md: it "may be another machine,
+    over plain http") could answer any request with a 3xx straight past the
+    guard, e.g. to a cloud-metadata address. ComfyUI's HTTP API has no
+    legitimate reason to redirect, so every hop is refused outright here rather
+    than re-validated per hop (CHK-COMFY-REDIRECT)."""
+
+    def redirect_request(self, req, fp, code, msg, hdrs, newurl):
+        raise ComfyRedirectRefused(
+            f"ComfyUI tried to redirect (HTTP {code}, to {newurl!r}); refusing "
+            "- the redirect target is not policy-checked")
+
+
+def _comfy_urlopen(req_or_url, *, timeout=None):
+    """Every ComfyUI HTTP call in this module goes through this, never a bare
+    urllib.request.urlopen - see _RefuseRedirect / CHK-COMFY-REDIRECT."""
+    return verified_urlopen(req_or_url, timeout=timeout, handlers=(_RefuseRedirect,))
+
+
 _COMFY_LOOPBACK_DEFAULT = "http://127.0.0.1:8188"
 
 
@@ -833,7 +862,7 @@ def free_comfy_vram(api_url: Optional[str] = None) -> bool:
             f"{url}/free", data=body,
             headers={"Content-Type": "application/json"}, method="POST",
         )
-        with urllib.request.urlopen(req, timeout=30):
+        with _comfy_urlopen(req, timeout=30):
             return True
     except urllib.error.HTTPError as e:
         # Distinguish the documented older-build case (no /free endpoint) from a
@@ -857,7 +886,7 @@ def free_comfy_vram(api_url: Optional[str] = None) -> bool:
 def _comfy_alive(api_url: str, timeout: float = 3.0) -> bool:
     """Quick reachability probe so callers can fail fast with a clear error."""
     try:
-        with urllib.request.urlopen(f"{api_url}/system_stats", timeout=timeout):
+        with _comfy_urlopen(f"{api_url}/system_stats", timeout=timeout):
             return True
     except Exception:
         return False
@@ -2063,7 +2092,7 @@ def _upload_image(image_path: Path, api_url: str) -> str:
         headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=30) as resp:
+    with _comfy_urlopen(req, timeout=30) as resp:
         result = json.loads(resp.read().decode())
     name = result.get("name")
     if not name:
@@ -2146,7 +2175,7 @@ def clear_comfy_history(api_url: str, prompt_id: str) -> bool:
         req = urllib.request.Request(
             f"{api_url}/history", data=body,
             headers={"Content-Type": "application/json"}, method="POST")
-        with urllib.request.urlopen(req, timeout=10):
+        with _comfy_urlopen(req, timeout=10):
             return True
     except Exception:
         return False
@@ -2250,7 +2279,7 @@ def interrupt_comfy(api_url: str) -> bool:
     ok = False
     try:
         req = urllib.request.Request(f"{api_url}/interrupt", data=b"", method="POST")
-        with urllib.request.urlopen(req, timeout=10):
+        with _comfy_urlopen(req, timeout=10):
             ok = True
     except Exception:
         pass
@@ -2259,7 +2288,7 @@ def interrupt_comfy(api_url: str) -> bool:
         req = urllib.request.Request(
             f"{api_url}/queue", data=body,
             headers={"Content-Type": "application/json"}, method="POST")
-        with urllib.request.urlopen(req, timeout=10):
+        with _comfy_urlopen(req, timeout=10):
             pass
     except Exception:
         pass
@@ -2312,7 +2341,7 @@ def comfy_submit_prompt(api_url: str, workflow: dict, *, timeout: float = 10.0):
             data=json.dumps({"prompt": workflow}).encode("utf-8"),
             headers={"Content-Type": "application/json"},
         )
-        with urllib.request.urlopen(req, timeout=timeout) as response:
+        with _comfy_urlopen(req, timeout=timeout) as response:
             prompt_id = json.loads(response.read().decode("utf-8")).get("prompt_id")
         if not prompt_id:
             return SUBMIT_NO_ID, None
@@ -2368,7 +2397,7 @@ def comfy_poll_until_done(
             on_tick(time.time() - start_time)
         try:
             hist_req = urllib.request.Request(f"{api_url}/history/{prompt_id}")
-            with urllib.request.urlopen(hist_req, timeout=history_timeout) as response:
+            with _comfy_urlopen(hist_req, timeout=history_timeout) as response:
                 history = json.loads(response.read().decode("utf-8"))
             if prompt_id in history:
                 entry = history[prompt_id]
@@ -2413,5 +2442,5 @@ def comfy_fetch_output(api_url: str, info: dict, output_path: Path, *,
         "type": info.get("type", "output"),
     })
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    with urllib.request.urlopen(f"{api_url}/view?{params}", timeout=timeout) as response:
+    with _comfy_urlopen(f"{api_url}/view?{params}", timeout=timeout) as response:
         output_path.write_bytes(response.read())

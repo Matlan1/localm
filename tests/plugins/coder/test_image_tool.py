@@ -27,7 +27,10 @@ class TestFluxImageTool(unittest.TestCase):
     # preflight_models lives in the shared client and calls comfy_object_info as a
     # bare global there, so the stub must target comfy_client (the symbol's home).
     @patch("localm.media.comfy_client.comfy_object_info", return_value=None)
-    @patch("urllib.request.urlopen")
+    # comfy_client routes ComfyUI calls through its own _comfy_urlopen
+    # (CHK-COMFY-REDIRECT), which builds its own opener and never calls the
+    # top-level urllib.request.urlopen - that is the seam to patch.
+    @patch("localm.media.comfy_client._comfy_urlopen")
     @patch("urllib.request.Request")
     def test_generate_image_success(self, mock_request_cls, mock_urlopen, mock_obj_info):
         # 1. Setup the mock responses
@@ -150,7 +153,7 @@ class TestFluxImageTool(unittest.TestCase):
         self.assertIn("Invalid LoRA name", result.output)
         self.assertFalse(self.abs_output_path.exists())
 
-    @patch("urllib.request.urlopen")
+    @patch("localm.media.comfy_client._comfy_urlopen")
     def test_generate_image_connection_failure(self, mock_urlopen):
         # Force a connection refusal - the fail-fast probe catches it now
         mock_urlopen.side_effect = urllib.error.URLError("Connection refused")

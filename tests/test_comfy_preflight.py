@@ -190,7 +190,10 @@ class TestPreflight:
         assert ok and msg == ""                              # best-effort, never blocks
 
     def test_object_info_fetch_handles_network_error(self):
-        with patch.object(comfy.urllib.request, "urlopen",
+        # comfy_object_info routes through comfy_client._comfy_urlopen
+        # (CHK-COMFY-REDIRECT), which builds its own opener and never calls
+        # the top-level urllib.request.urlopen - that is the seam to patch.
+        with patch.object(comfy_client, "_comfy_urlopen",
                           side_effect=OSError("refused")):
             assert comfy.comfy_object_info("http://127.0.0.1:9") is None
 

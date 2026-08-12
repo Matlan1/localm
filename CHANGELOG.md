@@ -496,6 +496,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   instead of being refused. The private-address (SSRF) guard was never
   affected. The config is now read once per check, and a read failure now
   refuses the request outright, regardless of the environment variable.
+- **The ComfyUI connection no longer follows a redirect.** The guard that
+  keeps a configured ComfyUI address off link-local / cloud-metadata targets
+  only ever checked the address you configured, not where a response from
+  that server could redirect a request afterward - so a hostile or
+  compromised ComfyUI (which SECURITY.md already documents as possibly being
+  another machine, over plain http) could answer any of localm's requests to
+  it with a redirect straight past that guard. The connection now refuses any
+  redirect outright; ComfyUI's API never legitimately sends one.
 
 ## [0.1.5rc2] - 2026-08-08
 
