@@ -83,6 +83,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   actual next step - clear the ComfyUI folder setting and run setup again for
   the fresh, hardware-matched install - instead of leaving you stuck on a copy
   that can never succeed.
+- **An inference error sent back over the API no longer names folders on your
+  machine.** When generation fails, the reason is returned to the caller so
+  they know what happened. Some of those reasons quote a full path (a model
+  that failed to load names the file), which meant your account name and your
+  install layout travelled to whoever made the request. Paths are now replaced
+  with a short placeholder on all four generation endpoints. The reason itself,
+  the file name and any line number are kept, so nothing you need for
+  diagnosing a problem is lost.
 - **A failed generation on `/v1/completions` now tells you what went wrong.**
   If generation broke part way through (not enough free video memory for the
   prompt, a conversation that outgrew the context window), the non-streaming

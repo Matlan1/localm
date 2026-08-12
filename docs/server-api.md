@@ -94,6 +94,11 @@ A `503` is the only status here that a retry can clear on its own; the rest
 describe something about the request or the build that will fail identically
 next time.
 
+Absolute paths are redacted out of an `[inference error: ...]` body before it
+leaves the server (a model that fails to load names its file, which would
+otherwise carry the account name and install layout to the caller). The reason,
+the file name and any line number are kept - the text is redacted, not muted.
+
 An error that is neither of those - a genuine defect in the server - is a `500`
 with an opaque `{"detail": "Internal server error"}`, and its cause goes to the
 server log rather than to the client.
