@@ -39,7 +39,7 @@ from ..privacy import (
     suppress_readline_history,
     warn_external_provider,
 )
-from ..project_config import load_project_config
+from ..project_config import ProjectConfigUnreadable, load_project_config
 from ..display import (
     console,
     print_banner,
@@ -619,7 +619,21 @@ def _resolve_session_config(work_dir, model, max_turns, max_tokens, temperature,
         _os.environ.setdefault("TERM", "dumb")
 
     # Project-level config (.localcoder/config.toml) - CLI flags override
-    proj_cfg = load_project_config(work_dir)
+    try:
+        proj_cfg = load_project_config(work_dir)
+    except ProjectConfigUnreadable as e:
+        # REFUSE rather than start with the file's settings silently dropped.
+        # Two of them are safety settings: always_confirm (below) is what makes
+        # shell tools still prompt under --yes, and mode = "privacy" is what
+        # keeps a transcript off disk. Starting anyway would run the session
+        # WITHOUT protections the user believes they configured, so a typo would
+        # silently disarm them. Refusing costs one edit and is recoverable.
+        print_error(
+            f"Project config could not be read: {e}\n"
+            f"Fix the file or remove it, then run again. It is not ignored, "
+            f"because it may set 'always_confirm' or 'mode' and starting "
+            f"without them would silently drop protections you configured.")
+        sys.exit(2 if ci else 1)
     if model is None:
         model = proj_cfg.get("model")
     if max_turns is None:

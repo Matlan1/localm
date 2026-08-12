@@ -7,6 +7,7 @@ import pytest
 from pathlib import Path
 
 from localm.plugins.coder.project_config import (
+    ProjectConfigUnreadable,
     find_project_config,
     load_project_config,
 )
@@ -89,12 +90,31 @@ class TestLoadProjectConfig:
         assert cfg["max_tokens"] == 1024
         assert cfg["temperature"] == pytest.approx(0.7)
 
-    def test_returns_empty_on_invalid_toml(self, tmp_path):
+    def test_raises_on_invalid_toml_rather_than_reading_as_absent(self, tmp_path):
+        """A file that EXISTS but does not parse must not answer ``{}``.
+
+        This assertion used to demand ``{}``, which made the collapse a
+        specification: ``{}`` is byte-identical to "no project config here", and
+        the two keys it silently drops are SAFETY settings, not preferences.
+        ``always_confirm`` (the user's "prompt me before a shell command even
+        under --yes") empties at cli/_main.py:654-657, and ``mode = "privacy"``
+        is dropped at cli/_main.py:658-660 and audit.py:96-102, so a session the
+        user marked private falls through to the global coder_mode and a
+        transcript is written. A TOML typo is an extremely reachable input.
+        """
         cfg_dir = tmp_path / ".localcoder"
         cfg_dir.mkdir()
         (cfg_dir / "config.toml").write_text("this is NOT [valid toml [\n")
-        result = load_project_config(tmp_path)
-        assert result == {}
+        with pytest.raises(ProjectConfigUnreadable) as ei:
+            load_project_config(tmp_path)
+        # Actionable: the CLI is a local surface, so it may name the file.
+        assert "config.toml" in str(ei.value)
+
+    def test_absent_file_is_still_an_empty_config(self, tmp_path):
+        """The control. "No project config" must keep meaning ``{}`` and must
+        not raise, or the refusal above would be unfalsifiable: a loader that
+        raised on everything would satisfy the test above."""
+        assert load_project_config(tmp_path) == {}
 
     def test_finds_config_in_parent_dir(self, tmp_path):
         subdir = tmp_path / "deep" / "nested"
@@ -102,3 +122,63 @@ class TestLoadProjectConfig:
         self._write_cfg(tmp_path, 'model = "phi4-mini"\n')
         cfg = load_project_config(subdir)
         assert cfg["model"] == "phi4-mini"
+
+
+class TestCliRefusesAnUnreadableProjectConfig:
+    """The coder CLI must REFUSE to start rather than run with the project
+    file's settings silently dropped.
+
+    `always_confirm` is what keeps shell tools prompting under --yes, and
+    `mode = "privacy"` is what keeps a transcript off disk. Starting anyway runs
+    the session WITHOUT protections the user believes they configured, so a TOML
+    typo silently disarms them. Refusing costs one edit and is recoverable.
+    """
+
+    def _corrupt(self, tmp_path):
+        cfg_dir = tmp_path / ".localcoder"
+        cfg_dir.mkdir()
+        (cfg_dir / "config.toml").write_text(
+            'always_confirm = ["run_shell"]\nmode = "privacy"\n'
+            'this is NOT [valid toml [\n', encoding="utf-8")
+        return cfg_dir / "config.toml"
+
+    def test_cli_refuses_and_says_why(self, tmp_path, monkeypatch):
+        from click.testing import CliRunner
+
+        import localm.plugins.coder.cli as ccli
+
+        # The coder ships uninstalled and the CLI gates on that FIRST, exiting
+        # non-zero. Without this bypass the refusal assertion below passes on
+        # the wrong failure entirely (measured).
+        monkeypatch.setattr("localm.plugins.engine.PluginManager.is_active",
+                            lambda self, name: True)
+        self._corrupt(tmp_path)
+        res = CliRunner().invoke(
+            ccli.main, ["--cwd", str(tmp_path), "--model", "m", "hi"])
+
+        # The MESSAGE first, because it is the only discriminating assertion.
+        # Measured: with the fix reverted the CLI runs on and still exits
+        # non-zero, just later and for an unrelated reason ("model not found"),
+        # so `exit_code != 0` is satisfied in BOTH arms and proves nothing on
+        # its own. Only this text distinguishes "refused the config" from "died
+        # further down".
+        assert "could not be read" in res.output.lower(), (
+            "the coder did not refuse: it started with always_confirm and "
+            f"mode silently dropped. output was: {res.output!r}")
+        # Actionable: it must point at the file rather than just failing.
+        assert "config.toml" in res.output
+        assert res.exit_code != 0
+
+    def test_cli_does_not_refuse_without_a_project_config(self, tmp_path,
+                                                          monkeypatch):
+        """The control: an absent project config must NOT trip the refusal, or
+        the test above would pass on a CLI that refused to start at all."""
+        from click.testing import CliRunner
+
+        import localm.plugins.coder.cli as ccli
+
+        monkeypatch.setattr("localm.plugins.engine.PluginManager.is_active",
+                            lambda self, name: True)
+        res = CliRunner().invoke(
+            ccli.main, ["--cwd", str(tmp_path), "--model", "m", "hi"])
+        assert "could not be read" not in res.output.lower()

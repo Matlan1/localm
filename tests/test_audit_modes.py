@@ -67,6 +67,39 @@ class TestEffectiveMode:
         with patch("localm.config.load_config", side_effect=OSError("boom")):
             assert effective_mode("chat") == SessionMode.PRIVACY
 
+    def test_unreadable_project_config_means_privacy_not_the_global_mode(
+            self, tmp_path):
+        """An UNPARSEABLE .localcoder/config.toml must fail SAFE, not fall
+        through to a more permissive global mode.
+
+        The project file is the only place a user can say "this project is
+        private". When it does not parse we cannot know whether it said so, and
+        resolution used to continue to the global coder_mode - so a user whose
+        global mode is "log" gets a full transcript written for a session they
+        had marked private, with nothing said. Same direction as
+        test_config_failure_means_privacy above: a mode we cannot establish
+        resolves to the safest one.
+        """
+        cfg_dir = tmp_path / ".localcoder"
+        cfg_dir.mkdir()
+        (cfg_dir / "config.toml").write_text(
+            'mode = "privacy"\nthis is NOT [valid toml [\n', encoding="utf-8")
+        cfg = _cfg(mode="log", coder_mode="log")
+        with patch("localm.config.load_config", return_value=cfg):
+            assert effective_mode("coder", cwd=tmp_path) == SessionMode.PRIVACY
+
+            # The control: with NO config file the global mode must still be
+            # honoured, or this test would pass on a resolver that returned
+            # PRIVACY unconditionally. Remove the file rather than pointing at a
+            # sibling directory - find_project_config walks UP, so a subdir of
+            # tmp_path still finds tmp_path's own file (that cost a red here).
+            (cfg_dir / "config.toml").unlink()
+            # Self-check, so an ancestor .localcoder anywhere above the tmp tree
+            # fails loudly instead of quietly changing what this control means.
+            from localm.plugins.coder.project_config import find_project_config
+            assert find_project_config(tmp_path) is None
+            assert effective_mode("coder", cwd=tmp_path) == SessionMode.LOG
+
 
 # ------------------------------------------------------------------ #
 #  Factories + transcript                                             #
