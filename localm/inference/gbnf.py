@@ -825,7 +825,21 @@ def validate_trigger_patterns(patterns: "list[str]") -> None:
     once, and a caller that cannot get a slot within _TRIGGER_PROBE_SLOT_WAIT is
     refused outright instead of waiting behind the whole queue. So the cost of a
     flood of N distinct dangerous patterns is bounded per caller rather than
-    growing with N: see MEASUREMENT-PLACEHOLDER-FILL-BEFORE-COMMIT.
+    growing with N. MEASURED on this box, 18 concurrent adversarial patterns
+    that each hang their probe, at the production 2.0s timeout, every arm in
+    steady state (a cold slot legitimately gets _TRIGGER_PROBE_SPAWN_TIMEOUT for
+    its FIRST query, so a cold pool measures cold start and is not comparable):
+
+        pool=1, no refusals   36.13s for the last caller, 18 answered
+        pool=4, no refusals   10.02s for the last caller, 18 answered
+        pool=4, wait=5.0s      6.02s for the last caller, 12 answered + 6
+                               refused in milliseconds
+
+    pool=1 is not an approximation of the old code, it IS the old behaviour for
+    this property, and 36.13s reproduces the ruling's own 18 x 2.0s = 36s. The
+    third arm is what ships. NOTHING WAS WRONGLY ACCEPTED IN ANY ARM: all 18
+    patterns were still judged dangerous or refused outright, never passed as
+    safe - the latency was bought from serialization, not from the check.
 
     WHAT IS STILL NOT SOLVED, stated because a bound is not an absence: the
     executor hand-off above shares Python's default thread pool with other

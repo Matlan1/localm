@@ -72,6 +72,32 @@ and on the endpoint:
 `context_capacity` (the model's total context window in tokens) is reported
 only on streaming chat completions.
 
+#### How a generation failure is reported
+
+Both generation endpoints answer failures the same way on both routes and in
+both streaming modes. Which of the two shapes you get depends on WHEN the
+failure happens, not on which endpoint you called:
+
+| Failure | Reported as |
+|---|---|
+| The request is refused before generation starts (unsupported input, an undecodable image, a grammar this model cannot apply, a malformed grammar or trigger pattern) | An HTTP error status with the reason in `detail`: `400`, `501` when the server lacks an image decoder, `413` when an embedding batch is too large, `503` when the trigger-pattern validator was too busy to check your pattern |
+| Generation started and then failed (not enough free VRAM for this prompt, a conversation that outgrew the context window, a native decode error) | `200` whose text is `[inference error: <reason>]` and whose `finish_reason` is `"error"` |
+
+The second row is a `200` on purpose. A streaming response has already sent its
+headers by the time generation can fail, so a status is no longer available to
+it; the non-streaming responses match their own streaming twin rather than
+diverge from it. **`finish_reason` is the machine-readable signal - check it
+rather than the status code to detect a failed generation.** A successful
+generation never reports `"error"`.
+
+A `503` is the only status here that a retry can clear on its own; the rest
+describe something about the request or the build that will fail identically
+next time.
+
+An error that is neither of those - a genuine defect in the server - is a `500`
+with an opaque `{"detail": "Internal server error"}`, and its cause goes to the
+server log rather than to the client.
+
 When the memory plugin is active and recalls facts for a turn, the response also carries an `X-Localm-Memory` header (see [Memory endpoints](#memory-endpoints-memory-plugin)).
 
 Multimodal input uses the standard multipart content format with base64

@@ -83,6 +83,25 @@ permanent public record of what shipped and are never rewritten; the in-progress
   actual next step - clear the ComfyUI folder setting and run setup again for
   the fresh, hardware-matched install - instead of leaving you stuck on a copy
   that can never succeed.
+- **A failed generation on `/v1/completions` now tells you what went wrong.**
+  If generation broke part way through (not enough free video memory for the
+  prompt, a conversation that outgrew the context window), the non-streaming
+  form of this endpoint answered with a bare "Internal server error" and threw
+  the actual reason away, while the streaming form of the same endpoint, and
+  both forms of `/v1/chat/completions`, reported it in full. All four now
+  agree: you get the reason, and `finish_reason` is `"error"` so a program can
+  tell a failed generation from a successful one. See the API docs for the
+  whole error contract in one table.
+- **One caller sending bad grammar trigger patterns no longer holds up
+  everyone else.** Checking whether a caller-supplied trigger pattern is safe
+  to run can take a couple of seconds when the pattern is a deliberately
+  malicious one, and those checks used to happen strictly one at a time, so a
+  burst of them queued up behind each other and delayed unrelated requests.
+  Checks now run several at a time, and a request that would have to wait too
+  long is told the validator is busy (and can simply retry) instead of sitting
+  in the queue. Measured on a burst of 18 malicious patterns, the last caller
+  waited 6 seconds instead of 36. Nothing unsafe is let through to gain this:
+  a pattern that cannot be checked is refused, exactly as before.
 - **A vision model's image projector no longer lands on a graphics card you
   told localm not to use.** If you split a model across specific GPUs with
   `gpu_split_indices`, or picked one with `main_gpu_index`, the text model went
