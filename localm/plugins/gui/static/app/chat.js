@@ -30,13 +30,14 @@ export const chat = {
   // "confirmed" - a real, positive match against the connected backend's
   // instance id. Defaults to true so the FIRST paint (before refreshCtxLimit's
   // round trip lands) still renders optimistically, but refreshCtxLimit
-  // overwrites it on every call, so by the time anything acts on it the value
-  // reflects the last real answer, never a guess. Deliberately NOT true for
-  // "unknown" (an old server with no instance_id field, or a failed round
-  // trip) - unknown state may still RENDER whatever is cached (see
-  // refreshCtxLimit below), but must never be read as permission to upload.
-  // See initServerConversations, which gates re-uploading a not-yet-synced
-  // local conversation on this flag.
+  // overwrites it on EVERY path - including the two failure paths, which used
+  // to leave this default standing (below) - so by the time anything acts on
+  // it the value reflects the last real answer, never a guess. Deliberately
+  // NOT true for "unknown" (an old server with no instance_id field, or a
+  // /v1/config round trip that failed or was rejected) - unknown state may
+  // still RENDER whatever is cached (see refreshCtxLimit below), but must
+  // never be read as permission to upload. See initServerConversations, which
+  // gates re-uploading a not-yet-synced local conversation on this flag.
   instanceMatch: true,
   // The raw tri-state itself ("confirmed" | "mismatched" | "unknown"), kept
   // alongside instanceMatch so a caller that needs to tell "unknown" and
@@ -186,10 +187,45 @@ export async function maybeCompactConversation(conv) {
   }
 }
 
+let _instanceUnknownWarned = false;   // one warning per breakage, re-armed on success
+
+/** AUD-INSTANCEID residual 2: /v1/config could not be read, so this load has NO
+ *  answer about which backend is behind this origin. That is not a mismatch (we
+ *  wipe nothing) and it is emphatically not a match either, so it lands on the
+ *  same "unknown" state an older server without an instance_id produces: keep
+ *  showing whatever is cached, never authorise a write into a store we have not
+ *  identified. Loud rather than silent (AGENTS.md rule 5) - the round trip that
+ *  produced this used to be swallowed with no trace at all. */
+function markInstanceUnknown(why) {
+  chat.instanceState = "unknown";
+  chat.instanceMatch = false;
+  // The STATE is set every time; only the LINE is deduped. refreshCtxLimit is
+  // polled every 30s for the tab's whole lifetime (init.js), so an unreachable
+  // server would otherwise print two lines a minute for as long as the tab is
+  // open, and a flood is how a real warning gets ignored. Same one-per-breakage
+  // shape as _convPushWarned below, re-armed the moment a verdict lands.
+  if (_instanceUnknownWarned) return;
+  _instanceUnknownWarned = true;
+  console.warn("localm: /v1/config could not be read (" + why + ") - the " +
+    "backend instance is unconfirmed, so cached conversations are still shown " +
+    "but will not be uploaded until a future check confirms this backend");
+}
+
 export async function refreshCtxLimit() {
+  // Set once reconcileInstanceId has returned a real verdict for THIS call, so
+  // a throw from the rendering work further down (which runs only AFTER the
+  // verdict) cannot be mistaken for "we never got an answer" and downgrade a
+  // confirmed "mismatched" to "unknown" - that would re-permit rendering the
+  // foreign cache the mismatch branch exists to remove.
+  let reconciled = false;
   try {
     const r = await fetch("/v1/config", { headers: authHeaders() });
-    if (r.ok) {
+    if (!r.ok) {
+      // A resolved-but-failed round trip is NOT the "missing information" the
+      // permissive defaults were chosen for: the server answered and we still
+      // do not know who it is.
+      markInstanceUnknown("HTTP " + r.status);
+    } else {
       const cfg = await r.json();
       // Prefer the resolved ceiling (VRAM-derived under ctx_auto) over the
       // static config value - compaction should track what the model can
@@ -205,10 +241,14 @@ export async function refreshCtxLimit() {
       // "confirmed" is the only one that may upload; "mismatched" wipes the
       // instance-scoped localStorage keys AND the in-memory state a synchronous
       // boot-time read may already have loaded, then repaints so nothing
-      // foreign is ever shown or re-uploaded; "unknown" (no server info, e.g.
-      // an old server or a failed round trip) keeps whatever is already
-      // rendered - permissive about DISPLAY, never about upload.
+      // foreign is ever shown or re-uploaded; "unknown" (no server info - an
+      // old server, or a round trip that failed, which markInstanceUnknown
+      // below routes here rather than leaving the boot defaults standing)
+      // keeps whatever is already rendered - permissive about DISPLAY, never
+      // about upload.
       const instanceState = reconcileInstanceId(cfg.instance_id);
+      reconciled = true;
+      _instanceUnknownWarned = false;   // a verdict landed: re-arm the warning
       chat.instanceState = instanceState;
       chat.instanceMatch = instanceState === "confirmed";
       if (instanceState === "mismatched") {
@@ -292,7 +332,14 @@ export async function refreshCtxLimit() {
       }
       hydrateChatToggles(cfg);   // R34: reflect saved choice / global net policy
     }
-  } catch (e) { /* keep default */ }
+  } catch (e) {
+    // The rest of this function stays best-effort (a repaint that throws must
+    // not break the 30s poll), but the instance guard is not: a rejected fetch
+    // - server down, connection dropped, TLS refused - is the loudest possible
+    // "no answer", and leaving the boot defaults standing made it read as a
+    // confirmed match. Only claim it if the verdict itself never landed.
+    if (!reconciled) markInstanceUnknown(e && e.message ? e.message : String(e));
+  }
 }
 
 // LM-DA-047: privacy mode's "no traces, not even localStorage" guarantee used
@@ -1381,9 +1428,26 @@ export async function ingestSharedFiles() {
     method: "POST",
     headers: { ...authHeaders(), "Content-Type": "application/json" },
     body: JSON.stringify({ ids }),
-  }).then((r) => {
-    if (!r.ok) console.error("share-inbox clear failed (HTTP " + r.status +
-                             ") - will retry on the next share ingest");
+  }).then(async (r) => {
+    if (!r.ok) {
+      console.error("share-inbox clear failed (HTTP " + r.status +
+                    ") - will retry on the next share ingest");
+      return;
+    }
+    // A 200 is not the same as "the inbox is empty now": the endpoint deletes
+    // best-effort and reports the entries it could NOT remove (locked file,
+    // permission denied). Nothing rendered that count, so a partial failure on
+    // a privacy-adjacent store looked identical to a clean sweep from here.
+    // A server that does not report the field yields 0 and changes nothing.
+    let failed = 0;
+    try { failed = Number((await r.json()).failed) || 0; }
+    catch (e) { /* no/!JSON body: nothing more to report than the 200 above */ }
+    if (failed > 0) {
+      console.error("share-inbox clear: " + failed + " item(s) could not be " +
+                    "deleted server-side - retried on the next share ingest");
+      toast(`${failed} shared item${failed > 1 ? "s" : ""} could not be ` +
+            `cleared from the server`, true);
+    }
   }).catch((e) => {
     console.error("share-inbox clear failed: " + (e && e.message ? e.message : e));
   });

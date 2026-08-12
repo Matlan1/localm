@@ -342,6 +342,26 @@ permanent public record of what shipped and are never rewritten; the in-progress
   waits for a new file's contents to stop changing for a few seconds before
   registering it, so an in-progress copy is picked up once it actually
   finishes, not while it is still arriving.
+- **A browser that could not reach the server on startup no longer assumes it
+  is talking to the same localm it was last connected to.** The GUI checks, on
+  every load, that the server behind the address really is the one whose
+  conversations your browser has cached, because a second install reusing the
+  same address would otherwise show you the first one's chats. That check was
+  skipped entirely when the request asking who the server is did not come back
+  (it was down, still starting, or answered with an error), and the answer left
+  standing was the optimistic one used before the first check completes, so
+  cached conversations could be uploaded into an install that had never been
+  identified. A failed check is now treated as what it is - no answer - so your
+  own cached conversations still appear and nothing is deleted, but nothing is
+  uploaded until a later check confirms the server. The console says so once
+  while the server is unreachable, rather than repeating it every 30 seconds.
+- **Shared items the server could not delete are no longer reported as
+  cleared.** When you share images into localm from your phone, the app copies
+  them into the chat and then tells the server to empty its share inbox. Any
+  entry the server failed to delete (in use, or not permitted) was left out of
+  the reply's count and never shown, so a share store that still held your
+  files looked exactly like an emptied one. The GUI now tells you how many
+  items could not be cleared.
 
 ### Changed
 - **localm's own managed ComfyUI now installs v0.31.1**, up from v0.9.2. The

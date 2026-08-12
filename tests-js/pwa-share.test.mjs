@@ -43,6 +43,60 @@ test("ingestSharedFiles is a no-op (no clear) when nothing is pending", async ()
   assert.equal(clearCalled, false);
 });
 
+// The clear endpoint deletes best-effort and reports what it could NOT remove.
+// The client used to read only r.ok, so an entry that survived deletion (locked,
+// permission denied) was indistinguishable here from a clean sweep - a share
+// store the user believes is empty and is not.
+test("a partial share-inbox clear is surfaced to the user, not just to the API", async () => {
+  const fetchImpl = async (url) => {
+    if (url === "/api/share/pending") {
+      return { ok: true, status: 200, text: async () => "", json: async () => ({
+        items: [{ id: "a1", name: "photo.png", type: "image/png",
+                  data_uri: "data:image/png;base64,AAAA" },
+                { id: "a2", name: "shot.png", type: "image/png",
+                  data_uri: "data:image/png;base64,BBBB" },
+                { id: "a3", name: "pic.png", type: "image/png",
+                  data_uri: "data:image/png;base64,CCCC" }] }) };
+    }
+    if (url === "/api/share/clear") {
+      return { ok: true, status: 200, text: async () => "",
+               json: async () => ({ removed: 1, failed: 2 }) };
+    }
+    return { ok: true, status: 200, text: async () => "",
+             json: async () => ({ models: [], active: "", conversations: [], plugins: [] }) };
+  };
+  const { window: win } = loadApp({ fetchImpl });
+  await win.ingestSharedFiles();
+  await new Promise((r) => setTimeout(r, 0));
+
+  const toastEl = win.document.getElementById("toast");
+  assert.match(toastEl.textContent, /2 shared items could not be cleared/,
+    "the two entries the server could not delete must reach the user");
+  assert.ok(toastEl.className.includes("show"), "and the toast is actually visible");
+});
+
+test("a fully successful share-inbox clear stays silent (no false alarm)", async () => {
+  const fetchImpl = async (url) => {
+    if (url === "/api/share/pending") {
+      return { ok: true, status: 200, text: async () => "", json: async () => ({
+        items: [{ id: "a1", name: "photo.png", type: "image/png",
+                  data_uri: "data:image/png;base64,AAAA" }] }) };
+    }
+    if (url === "/api/share/clear") {
+      return { ok: true, status: 200, text: async () => "",
+               json: async () => ({ removed: 1, failed: 0 }) };
+    }
+    return { ok: true, status: 200, text: async () => "",
+             json: async () => ({ models: [], active: "", conversations: [], plugins: [] }) };
+  };
+  const { window: win } = loadApp({ fetchImpl });
+  await win.ingestSharedFiles();
+  await new Promise((r) => setTimeout(r, 0));
+
+  assert.ok(!/could not be cleared/.test(win.document.getElementById("toast").textContent),
+    "a clean sweep must not warn - the toast here is the image-attached one");
+});
+
 test("downloadCoderFile fetches the confined endpoint and saves with the basename", async () => {
   let fetched = null;
   const { window: win } = loadApp({
