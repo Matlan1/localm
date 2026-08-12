@@ -185,6 +185,15 @@ this section states the security properties and, more importantly, their edges.
   normal, unchecked ComfyUI deployments - treat the policy as governing the
   paths named above, not as a blanket statement about every socket localm
   opens.
+- **No redirect off HTTPS, on any of them.** Separate from the policy above and
+  narrower: every outbound client that uses localm's shared verified opener
+  (setup-llama's runtime download and its GitHub and PyPI lookups, the update
+  check and download, the issues list, the bug-report upload) refuses a redirect
+  that leaves HTTPS for a weaker scheme. Verifying the first hop's certificate
+  says nothing about the hops after it, and a redirect target is chosen by the
+  server, after any check on the URL you configured has already run. This is a
+  transport guarantee only: it says the bytes stay encrypted in transit, not
+  that the host they came from was policy-checked.
 - **`off` is the meaningful setting.** At the policy layer `ask` and `allow`
   are the same thing: the only mode branch that refuses is `off`. The prompt
   you see for `ask` comes from the coder's own confirmation step, one layer up,

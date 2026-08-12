@@ -405,20 +405,15 @@ def download(asset_id, dest, *, timeout: float = 120.0, opener=None) -> Path:
         raise LocalmError("refusing a non-HTTPS update download",
                           reason="the update endpoint must be https")
 
-    class _HttpsOnlyRedirect(urllib.request.HTTPRedirectHandler):
-        def redirect_request(self, rq, fp, code, msg, hdrs, newurl):
-            if urllib.parse.urlparse(newurl).scheme != "https":
-                raise LocalmError("the update download tried to downgrade to http",
-                                  reason=f"blocked redirect to {newurl}")
-            return super().redirect_request(rq, fp, code, msg, hdrs, newurl)
-
     # verified_urlopen (see localm/http_ssl.py): the download follows a 302 to the
     # GitHub release CDN and verifies both hops, native cert store first, certifi
-    # as fallback.
-    from localm.http_ssl import verified_urlopen
+    # as fallback. The https-only-redirect guard that used to be defined here is
+    # now http_ssl.HttpsOnlyRedirect, installed by DEFAULT for every outbound
+    # caller - this download was one of only two sites that had one.
+    from localm.http_ssl import RedirectDowngradeRefused, verified_urlopen
     req = urllib.request.Request(url, headers=headers, method="GET")
     try:
-        with verified_urlopen(req, timeout=timeout, handlers=(_HttpsOnlyRedirect,)) as resp:
+        with verified_urlopen(req, timeout=timeout) as resp:
             if not (200 <= int(resp.status) < 300):
                 raise LocalmError("the update download failed", reason=f"HTTP {resp.status}")
             dest.parent.mkdir(parents=True, exist_ok=True)
@@ -430,6 +425,12 @@ def download(asset_id, dest, *, timeout: float = 120.0, opener=None) -> Path:
                     f.write(chunk)
     except urllib.error.HTTPError as e:
         raise LocalmError("the update download failed", reason=f"HTTP {e.code}")
+    except RedirectDowngradeRefused as e:
+        # Ahead of the URLError clause below (it is a URLError subclass): a
+        # refused downgrade is a rejected attempt to serve the update in
+        # cleartext, not a network problem, and must not be reported as one.
+        raise LocalmError("the update download tried to downgrade to http",
+                          reason=str(getattr(e, "reason", e)))
     except (urllib.error.URLError, OSError) as e:
         raise LocalmError("could not download the update", reason=str(getattr(e, "reason", e)))
     return dest

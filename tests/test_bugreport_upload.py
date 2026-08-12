@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 
 from localm import bugreport
 from localm.inference.http_server import create_app
+from tests._fake_https import patch_https_transport
 
 
 # ------------------------------- config gating --------------------------- #
@@ -363,7 +364,6 @@ def test_endpoint_upload_scrubs_home_path_end_to_end(tmp_path, monkeypatch):
                         lambda: ("https://proxy.example/file", "tok"))
 
     import json
-    import urllib.request
     sent = {}
 
     class _Resp:
@@ -382,7 +382,7 @@ def test_endpoint_upload_scrubs_home_path_end_to_end(tmp_path, monkeypatch):
         sent["data"] = req.data
         return _Resp()
 
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    patch_https_transport(monkeypatch, fake_urlopen)
 
     # The home path is on the FIRST line so it also flows into the derived title.
     desc = (r"Upload broke when I ran Z:\Users\bob\localm\gui\index.html"

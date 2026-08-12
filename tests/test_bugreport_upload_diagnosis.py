@@ -12,6 +12,7 @@ import urllib.request
 import pytest
 
 from localm import bugreport
+from tests._fake_https import patch_https_transport
 
 
 @pytest.mark.parametrize("exc,expected", [
@@ -40,7 +41,7 @@ def test_classify_unwraps_urlerror_reason():
 def test_upload_report_network_error_carries_stage(monkeypatch):
     def _boom(req, timeout=None, context=None):
         raise urllib.error.URLError(socket.gaierror(11001, "getaddrinfo failed"))
-    monkeypatch.setattr(urllib.request, "urlopen", _boom)
+    patch_https_transport(monkeypatch, _boom)
     with pytest.raises(bugreport.LocalmError) as ei:
         bugreport.upload_report("t", "b", url="https://proxy.example/report")
     assert ei.value.stage == "offline_or_dns"

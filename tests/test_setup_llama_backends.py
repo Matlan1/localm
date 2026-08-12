@@ -12,6 +12,7 @@ import sys
 import pytest
 
 from localm import hwdetect, setup_llama as sl
+from tests._fake_https import patch_https_transport
 
 
 # --------------------------- hwdetect ------------------------------------- #
@@ -185,7 +186,7 @@ def test_release_assets_passes_verifying_context(monkeypatch):
         seen["context"] = context
         return _Resp()
 
-    monkeypatch.setattr(sl.urllib.request, "urlopen", fake_urlopen)
+    patch_https_transport(monkeypatch, fake_urlopen)
     sl._release_assets("btag")
     assert isinstance(seen["context"], ssl.SSLContext)
     assert seen["context"].verify_mode == ssl.CERT_REQUIRED
@@ -210,7 +211,7 @@ def test_download_passes_verifying_context(monkeypatch, tmp_path):
         seen["context"] = context
         return _Resp()
 
-    monkeypatch.setattr(sl.urllib.request, "urlopen", fake_urlopen)
+    patch_https_transport(monkeypatch, fake_urlopen)
     dest = tmp_path / "a.bin"
     sl._download("https://example/x.zip", dest)
     assert dest.read_bytes() == b"data"
@@ -261,7 +262,7 @@ def test_resolve_offline_falls_back_to_pinned_tag(monkeypatch):
     upstream URL built from the pinned fallback tag and the right backend."""
     def _boom(*a, **k):
         raise OSError("offline")
-    monkeypatch.setattr("urllib.request.urlopen", _boom)
+    patch_https_transport(monkeypatch, _boom)
 
     plat = sl._platform_key()
     # 'vulkan' exists on win/linux; on darwin use 'cpu'.
@@ -280,7 +281,7 @@ def test_release_assets_logs_the_swallowed_cause(monkeypatch, caplog):
 
     def _boom(*a, **k):
         raise OSError("simulated DNS failure")
-    monkeypatch.setattr("urllib.request.urlopen", _boom)
+    patch_https_transport(monkeypatch, _boom)
 
     with caplog.at_level(logging.DEBUG, logger="localm"):
         assets = sl._release_assets("b9870")
@@ -308,8 +309,8 @@ def test_download_stall_raises_and_restores_timeout(monkeypatch, tmp_path):
             assert restored and restored[-1] == sl._DOWNLOAD_STALL_TIMEOUT
             raise socket.timeout("timed out")
 
-    monkeypatch.setattr(sl.urllib.request, "urlopen",
-                        lambda req, timeout=None, context=None: _StallResp())
+    patch_https_transport(monkeypatch,
+                          lambda req, timeout=None, context=None: _StallResp())
 
     with pytest.raises(sl.ArtifactError, match="stalled"):
         sl._download("https://example.invalid/big.zip", tmp_path / "a.zip")
@@ -338,8 +339,8 @@ def test_download_restores_timeout_on_success(monkeypatch, tmp_path):
             self._sent = True
             return b"data"
 
-    monkeypatch.setattr(sl.urllib.request, "urlopen",
-                        lambda req, timeout=None, context=None: _OkResp())
+    patch_https_transport(monkeypatch,
+                          lambda req, timeout=None, context=None: _OkResp())
 
     sl._download("https://example.invalid/big.zip", tmp_path / "a.zip")
 
@@ -752,8 +753,8 @@ class TestDownloadTransportDiagnosis:
                     return b"x" * 1000
                 raise ConnectionResetError("connection reset by peer")
 
-        monkeypatch.setattr(sl.urllib.request, "urlopen",
-                           lambda req, timeout=None, context=None: _DropResp())
+        patch_https_transport(monkeypatch,
+                              lambda req, timeout=None, context=None: _DropResp())
         with pytest.raises(sl.ArtifactError) as exc_info:
             sl._download("https://example/big.zip", tmp_path / "a.zip")
         msg = str(exc_info.value).lower()
@@ -778,8 +779,8 @@ class TestDownloadTransportDiagnosis:
                 type(self)._sent = True
                 return b"<html>blocked</html>"
 
-        monkeypatch.setattr(sl.urllib.request, "urlopen",
-                           lambda req, timeout=None, context=None: _ShortResp())
+        patch_https_transport(monkeypatch,
+                              lambda req, timeout=None, context=None: _ShortResp())
         dl = sl._download("https://github.com/x/releases/download/y/z.zip", tmp_path / "a.zip")
         assert dl.bytes_received == len(b"<html>blocked</html>")
         assert dl.content_length == 33554432
@@ -801,8 +802,8 @@ class TestDownloadTransportDiagnosis:
                 type(self)._sent = True
                 return b"data"
 
-        monkeypatch.setattr(sl.urllib.request, "urlopen",
-                           lambda req, timeout=None, context=None: _NoGeturlResp())
+        patch_https_transport(monkeypatch,
+                              lambda req, timeout=None, context=None: _NoGeturlResp())
         dl = sl._download("https://example/x.zip", tmp_path / "a.zip")
         assert dl.final_url == "https://example/x.zip"   # fell back to the request URL
 
@@ -865,8 +866,8 @@ class TestIssue827Reproduction:
                 type(self)._sent = True
                 return body
 
-        monkeypatch.setattr(sl.urllib.request, "urlopen",
-                           lambda req, timeout=None, context=None: _CorpProxyResp())
+        patch_https_transport(monkeypatch,
+                              lambda req, timeout=None, context=None: _CorpProxyResp())
 
         url = "https://github.com/ggml-org/llama.cpp/releases/download/b10092/llama-b10092-bin-win-vulkan-x64.zip"
         with pytest.raises(sl.ArtifactError) as exc_info:
