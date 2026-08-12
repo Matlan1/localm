@@ -502,7 +502,7 @@ class TestPatchConfigEmbeddingConfirmGate:
         assert load_config().get("embedding_model") == "new-model"
 
     def test_setting_the_same_value_is_a_noop_not_gated(self, config_app, rag_home):
-        from localm.config import load_config, update_config
+        from localm.config import update_config
         update_config(lambda c: c.__setitem__("embedding_model", "same-model"))
         c = _collection(rag_home, "docs", ["alpha"], dim=768)
         c._meta["embedding_model"] = "same-model"

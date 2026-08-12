@@ -164,7 +164,7 @@ class TestSetupEmbeddingsPreSwitchConfirm:
     def test_same_model_skips_the_report(
             self, cli_runner, monkeypatch, tmp_path):
         from localm.cli.maintenance import setup_embeddings
-        from localm.config import load_config, update_config
+        from localm.config import update_config
         _stub_install(monkeypatch, tmp_path)
         update_config(lambda c: c.update({"embedding_model": "new-model"}))
         _make_affected_collection()

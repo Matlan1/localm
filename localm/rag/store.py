@@ -722,13 +722,6 @@ class Collection:
         self._vec_dim: Optional[int] = None       # dimensionality of stored vectors
         self._bm25: Optional[BM25] = None
         self.corrupt: bool = False
-        # How many lines of chunks.jsonl _load() had to skip as unparseable /
-        # wrong-shape (NEW-RAG-INDEX-WARN-SPAM residual B). 0 whenever the file
-        # is clean or absent - distinct from self.corrupt, which also covers a
-        # bad meta.json or roots map and carries no count of its own. Exposed
-        # via stats() so a caller can say "62 malformed chunk lines" instead of
-        # a generic "index damaged".
-        self.chunks_bad_lines: int = 0
         # Why semantic (vector) scoring is unavailable when it should be present.
         # None = vectors are used, or legitimately absent (no embeddings indexed).
         # A non-None string means a corrupt/stale/mismatched vectors index was
@@ -812,7 +805,6 @@ class Collection:
         # the chunks and then reconstruct a minimal docs map from their sources so
         # `rag repair` can rebuild and the next _save() self-heals meta.json.
         self.corrupt = False
-        self.chunks_bad_lines = 0
         meta_corrupt = False
         try:
             meta = json.loads((self.dir / "meta.json").read_text(encoding="utf-8"))
@@ -857,7 +849,6 @@ class Collection:
                     bad_lines += 1
                     continue
                 self._chunks.append(obj)
-            self.chunks_bad_lines = bad_lines
             if bad_lines:
                 self.corrupt = True
                 # Warn-once, same pattern and same process-scoped set as
@@ -1112,7 +1103,6 @@ class Collection:
             "has_vectors": self._has_vectors(self._chunks, self._vectors),
             "vector_degrade_reason": self.vector_degrade_reason,
             "corrupt": self.corrupt,
-            "chunks_bad_lines": self.chunks_bad_lines,
             "fingerprint": self._file_fingerprint(),
             # Cheap to include (already in memory - see vector_dim()) and lets
             # a listing-time caller compare against the currently active
@@ -2353,10 +2343,6 @@ class Collection:
             "n_chunks": len(self._chunks),
             "has_vectors": self._has_vectors(self._chunks, self._vectors),
             "corrupt": self.corrupt,
-            # Count of chunks.jsonl lines _load() had to skip (0 if none) - lets
-            # a caller say "62 malformed chunk lines" instead of a generic
-            # "index damaged" (NEW-RAG-INDEX-WARN-SPAM residual B).
-            "chunks_bad_lines": self.chunks_bad_lines,
             # Why semantic search fell back to BM25 (None when vectors are used or
             # legitimately absent); surfaced instead of silently swallowed.
             "vector_degrade_reason": self.vector_degrade_reason,
