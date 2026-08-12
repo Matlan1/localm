@@ -12,6 +12,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **The llama.cpp compatibility check now catches an upstream change that
+  redefines a VALUE, not just one that moves a field.** The check compared where
+  each field sits in memory, which cannot see a change to which values are legal
+  in it. That is exactly what happened: upstream added a new "let the build
+  decide" model-loading mode numbered -1 and made it the default, no field
+  moved, the weekly check stayed green, and localm refused to load every build
+  from that point on. The same run now also compares the legal values, and keeps
+  the two cases apart: a value upstream ADDS is reported loudly but does not
+  fail the check, while a value that CHANGES out from under something localm
+  already relies on does fail it.
 - **Settings can now check for, and apply, a newer llama.cpp runtime build.**
   Previously the only way to move to a different build was the
   `setup-llama --tag`/`--rollback` command line. There is now a Runtime update
