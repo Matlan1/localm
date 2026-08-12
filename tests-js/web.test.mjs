@@ -314,6 +314,16 @@ test("web ON: the model is nudged to follow up with fetch_url on a promising res
     "the model needs the REASON, or it has no way to judge when to follow up");
 });
 
+test("web ON: the model is told to emit exactly ONE tool call per reply", async () => {
+  // The one-call-per-message design is enforced ONLY by this sentence - there is
+  // no grammar constraint on this surface - so the wording is the mechanism, not
+  // documentation of it. Added after a fires-control found the JS suite had no
+  // test for it at all: only the Python cross-surface drift guard did, which
+  // would have let a GUI-side deletion through if that guard were ever removed.
+  const { completions } = await runChat({ web: true, rounds: [content("hello")] });
+  assert.match(systemOf(completions[0]), /ONLY ONE tool call/);
+});
+
 // ---------------------------------------------------------------------------
 //  NEW-WEBSEARCH-UX (3): one call per message is the design, but the extras
 //  used to vanish in silence. formatToolCalls renders EVERY block, so the user
@@ -365,6 +375,12 @@ test("web ON: a second tool call in one reply is reported as ignored, not silent
     "the notice must name what was ignored, not just that something was");
   assert.match(String(note.content), /Results of web_search/,
     "the notice rides on the result message, keeping user/assistant alternation");
+  // LM-DA-014: everything inside the fence is DATA the model is told not to obey.
+  // A notice that landed in there would be self-defeating - it is our instruction,
+  // not fetched content - and "present in the message" cannot tell the two apart.
+  const body = String(note.content);
+  assert.ok(body.indexOf("only the first tool call ran") > body.lastIndexOf("</untrusted_content>"),
+    "the notice must sit OUTSIDE the untrusted-content fence");
 });
 
 test("web ON: an ordinary ONE-call reply gets no ignored-call notice", async () => {

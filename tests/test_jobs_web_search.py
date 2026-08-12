@@ -292,6 +292,13 @@ class TestMultipleToolCalls:
             "the notice must name what was ignored, not just that something was"
         assert "Results of web_search" in injected, \
             "the notice rides on the result message, keeping role alternation intact"
+        # LM-DA-014: everything inside the fence is DATA the model is told not to
+        # obey. A notice that landed in there would be self-defeating - it is our
+        # instruction, not fetched content - and "present in the message" cannot
+        # tell the two positions apart.
+        assert (injected.index("only the first tool call ran")
+                > injected.rindex("</untrusted_content>")), \
+            "the notice must sit OUTSIDE the untrusted-content fence"
 
     def test_an_ordinary_single_call_run_gets_no_notice(self, home, monkeypatch):
         monkeypatch.setenv("LOCALM_NET_MODE", "allow")
