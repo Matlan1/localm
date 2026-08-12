@@ -533,6 +533,19 @@ permanent public record of what shipped and are never rewritten; the in-progress
   another machine, over plain http) could answer any of localm's requests to
   it with a redirect straight past that guard. The connection now refuses any
   redirect outright; ComfyUI's API never legitimately sends one.
+- **The GUI's HTML sanitizer is updated to a build that fixes a published
+  cross-site-scripting bypass.** localm ships DOMPurify with the GUI to clean
+  everything a model writes before the browser renders it as markdown. The
+  copy in place was 3.2.6, which falls inside the range affected by
+  CVE-2026-0540: certain text could survive sanitizing with an HTML close tag
+  intact and then run as script if the result was placed inside one of five
+  particular elements. It is now 3.4.13. Whether localm's own rendering could
+  be made to reach that case was not established in either direction, so the
+  build was replaced on the version match alone. The sanitizer is now also
+  covered by a test that reads the file localm actually ships and fails if it
+  ever falls below the fixed version. Nothing watched it before: the library
+  is vendored directly and appears in no lockfile, so no dependency scanner
+  could ever have reported it.
 
 ## [0.1.5rc2] - 2026-08-08
 
