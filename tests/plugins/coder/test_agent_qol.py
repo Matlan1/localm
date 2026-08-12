@@ -410,6 +410,53 @@ class TestCheckpoint:
         agent.clear_checkpoint()
         assert not agent._checkpoint_path.exists()
 
+    def test_clear_checkpoint_failure_is_reported(self, tmp_path, monkeypatch,
+                                                  caplog):
+        """A delete that FAILS must be surfaced (AGENTS.md rule 5). The loop used
+        to swallow it with a bare `pass`, so a checkpoint could outlive the
+        "clear" that was supposed to remove it and a later session could resume
+        from one the user believes is gone - exactly the state
+        NEW-CODER-RESUME-DESTROYS-SESSIONS was fixed to prevent.
+
+        WARNING, not debug, is part of the property: the always-on
+        recent-activity ring a bug report dumps is INFO+, so a debug line would
+        appear in no report."""
+        import logging
+
+        agent = _make_agent(tmp_path, mode=SessionMode.LOG)
+        agent._messages = [{"role": "user", "content": "x"}]
+        agent.save_checkpoint()
+        target = agent._checkpoint_path
+        assert target.exists()          # precondition: something to clear
+
+        real_unlink = Path.unlink
+        refused = []
+
+        def _refuse(self, *a, **kw):
+            # Compare Path to Path, never str to str: on Windows the two sides
+            # differ by separator and case, and an injector that silently never
+            # matches is indistinguishable from a clear that had nothing to do.
+            if self == target:
+                refused.append(self)
+                raise PermissionError(13, "Permission denied")
+            return real_unlink(self, *a, **kw)
+
+        monkeypatch.setattr(Path, "unlink", _refuse)
+        with caplog.at_level(logging.WARNING, logger="localm"):
+            agent.clear_checkpoint()    # must NOT raise into the caller
+
+        # 1. The fault fired and the data-level loss is real: assert THAT before
+        #    the log, so a dead injector cannot read as a passing guard.
+        assert refused == [target]
+        assert target.exists()
+
+        # 2. It was reported, naming the file that survived. Asserted from
+        #    OUTSIDE: the handler catches Exception broadly, so an assertion
+        #    raised inside the stand-in would be absorbed as an input.
+        warned = [r.getMessage() for r in caplog.records
+                  if r.levelno >= logging.WARNING]
+        assert any(str(target) in m for m in warned), warned
+
     def test_clean_finish_discards_checkpoint(self, tmp_path):
         agent = _make_agent(tmp_path, ["Done."], mode=SessionMode.LOG)
         agent._messages = [{"role": "user", "content": "stale"}]

@@ -482,13 +482,35 @@ class _PersistenceMixin:
         fresh start is unchanged from what this method always did; it does
         NOT reach any OTHER session's per-id checkpoint - see
         _checkpoint_path_for's docstring for why that distinction is the
-        whole point of NEW-CODER-RESUME-DESTROYS-SESSIONS)."""
+        whole point of NEW-CODER-RESUME-DESTROYS-SESSIONS).
+
+        Best-effort per path: a delete that fails is LOGGED at warning and does
+        not raise, so this returning is not by itself proof the checkpoint is
+        gone. See the handler for why it is non-fatal here but fatal in the
+        media/chat delete endpoints."""
         for p in (self._checkpoint_path, self._legacy_checkpoint_path,
                   self._legacy_home_checkpoint_path):
             try:
                 p.unlink(missing_ok=True)
-            except Exception:
-                pass
+            except Exception as e:
+                # Deliberately NOT the sibling shape: the media/chat delete
+                # endpoints let an OSError become a 500, because there the
+                # deletion IS the request's whole outcome. This is cleanup
+                # riding on OTHER work - a clean run finishing (loop.py), a
+                # fresh REPL task starting, and the tidy-up after /resume
+                # (repl.py) - and only the second of those has a caller that
+                # could report a raise. Raising would turn a completed task
+                # into a failure and take the REPL loop down after /resume.
+                # So it stays non-fatal, but it must not stay silent: a
+                # checkpoint that outlives a "clear" is exactly the state
+                # NEW-CODER-RESUME-DESTROYS-SESSIONS was fixed to prevent,
+                # because a later session can adopt one the user believes is
+                # gone. WARNING, not debug: the always-on recent-activity ring
+                # a bug report dumps is INFO+, so debug would reach no report.
+                from localm.debuglog import logger
+                logger.warning(
+                    "coder: could not clear checkpoint %s: %s; it remains on "
+                    "disk and a later session may resume from it", p, e)
 
     def load_checkpoint(self, checkpoint_id: Optional[str] = None) -> dict | None:
         """

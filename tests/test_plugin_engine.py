@@ -227,6 +227,62 @@ def test_on_install_hook_fires(env):
     assert marker.exists()              # on_install fired during install
 
 
+def test_hook_failure_is_reported_and_does_not_block_install(env, caplog):
+    """A lifecycle hook that RAISES stays best-effort (the install completes),
+    but it must not be SILENT (AGENTS.md rule 5). _invoke_hook used to swallow
+    with a bare `pass`, so an on_install / on_first_use failure was invisible at
+    every level, including debug.
+
+    WARNING is the load-bearing part of the assertion, not an incidental level:
+    the always-on recent-activity ring a bug report dumps is INFO+
+    (_RingBufferHandler in localm/debuglog.py), so a debug-level line would
+    reach no bug report and the failure would still be effectively hidden."""
+    import logging
+
+    from localm.plugins.engine import PluginManager
+    plugins = env / "plugins"
+    body = '''
+        from pathlib import Path
+        from fastapi import APIRouter
+        _r = APIRouter()
+
+        @_r.get("/api/boom/ping")
+        def ping():
+            return {"pong": True}
+
+        def register(host):
+            host.mount_router(_r)
+
+        def unregister():
+            pass
+
+        def on_install():
+            # Marker BEFORE the raise: a hook that was never called at all looks
+            # exactly like one whose failure was correctly reported, so the test
+            # has to prove the fault actually fired before reading the log.
+            (Path(__file__).parent / "on_install_ran").write_text("yes")
+            raise RuntimeError("hook exploded")
+    '''
+    _make_plugin(plugins, "boom", body)
+    mgr = PluginManager(FastAPI(), external_root=plugins, builtin_root=None)
+    mgr.discover()
+    with caplog.at_level(logging.WARNING, logger="localm.plugins"):
+        mgr.install("boom")            # must NOT propagate the hook's exception
+
+    # 1. The fault fired, and the best-effort contract survived the fix.
+    assert (plugins / "boom" / "on_install_ran").exists()
+    assert mgr.is_installed("boom") and mgr.is_enabled("boom")
+
+    # 2. It was reported: plugin, hook name and the underlying error, from
+    #    OUTSIDE the call (the handler catches Exception broadly, so an
+    #    assertion raised inside the hook would be absorbed as an input and the
+    #    test would pass in both directions).
+    warned = [r.getMessage() for r in caplog.records
+              if r.levelno >= logging.WARNING]
+    assert any("boom" in m and "on_install" in m and "hook exploded" in m
+               for m in warned), warned
+
+
 def test_install_mounts_routes_disable_unmounts(env):
     from localm.plugins.engine import PluginManager
     plugins = env / "plugins"
