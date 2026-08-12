@@ -45,7 +45,7 @@ from localm.media import managed_comfy as mc
 from localm.media import managed_comfy_provision as _prov
 from localm.media.comfy_patches import apply_patches as _apply_localm_patches
 from localm.media.managed_comfy_provision import (
-    MARKER_FILENAME, ProgressCb, ProvisionResult, _emit, _run, _tail)
+    MARKER_FILENAME, ProgressCb, ProvisionResult, _emit, _probe_pip, _run, _tail)
 
 # --------------------------------------------------------------------------- #
 #  Pinned ComfyUI (decision 4/7)                                              #
@@ -472,6 +472,21 @@ def provision_fresh(cfg: Optional[dict] = None, *, on_progress: ProgressCb = Non
                        on_progress=on_progress, timeout=300)
         if not ok or not paths.venv_python.is_file():
             return _fail(f"Could not create the managed venv: {_tail(out)}")
+
+        # 2b) Guarantee the venv actually has a working pip (NEW-MANAGED-COMFY-
+        #     VENV-MISSING-PIP): `-m venv` can report success while its own mandatory
+        #     ensurepip bootstrap silently failed - a base Python with ensurepip
+        #     stripped, or (POSIX, real_base_python() returning None) a pip-less base
+        #     venv itself created with `uv venv` and no --seed. Without this probe the
+        #     failure only surfaces two steps below as an opaque "No module named pip"
+        #     buried inside the torch install's pip transcript.
+        ok, out = _probe_pip(paths.venv_python, on_progress)
+        if not ok:
+            return _fail(
+                "The venv was created but has no working pip "
+                f"({_tail(out)}); managed ComfyUI setup cannot install anything "
+                "into it. Run 'localm doctor' to check whether venv creation is "
+                "broken on this machine.")
 
         # 3) Hardware-matched torch FIRST (so ComfyUI's unpinned torch is satisfied and
         #    pip does not overwrite it with a plain PyPI build).

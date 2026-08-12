@@ -41,6 +41,13 @@ localm comfy setup                 # provision localm's own ComfyUI - media rout
   not byte-copy your venv (venvs are not portable). You are asked before any of
   your custom nodes are copied, since a clean ComfyUI is a legitimate choice; pass
   `--copy-custom-nodes` or `--no-custom-nodes` to decide up front.
+
+  This only works when every package in your venv is resolvable from PyPI or the
+  derived PyTorch wheel index. A package that came from a private index or a local
+  wheel on your machine (e.g. some AMD driver-bundled Python packages on Windows)
+  cannot be replicated; setup fails and names the package. Clear your ComfyUI
+  folder setting (Settings -> Media, or `comfy_workdir` in config) and run `localm
+  comfy setup` again to install the fresh, hardware-matched path below instead.
 - **Fresh, hardware-matched install.** If you have no ComfyUI to copy, localm
   installs one: it clones a pinned ComfyUI version, makes a localm venv, installs
   the PyTorch build for your GPU (the same hardware detection that picks your

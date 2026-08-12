@@ -485,6 +485,20 @@ def _create_managed_venv(user_venv_python: Path, managed_venv_dir: Path,
                 on_progress=on_progress, timeout=300)
 
 
+def _probe_pip(python: Path, on_progress: ProgressCb) -> tuple[bool, str]:
+    """Confirm the venv just created at *python* actually has a working pip.
+    ``-m venv`` can report success (return code 0, the interpreter file present)
+    while its own mandatory ensurepip bootstrap silently failed - a base Python
+    with ensurepip stripped, or (POSIX, ``real_base_python()`` returning None) a
+    pip-less base venv itself created with ``uv venv`` and no ``--seed``. Without
+    this probe the failure only surfaces two steps later as an opaque "No module
+    named pip" deep inside a package install (NEW-MANAGED-COMFY-VENV-MISSING-PIP).
+    Mirrors doctor.py's own ``_check_venv_creation`` probe, same wording, so the
+    two diagnoses agree."""
+    return _run([str(python), "-m", "pip", "--version"],
+               on_progress=on_progress, timeout=60)
+
+
 def _install_freeze(managed_python: Path, freeze_lines: list, index_url: Optional[str],
                     managed_root: Path, on_progress: ProgressCb) -> tuple[bool, str]:
     """pip-install the user's exact package set into the managed venv. The freeze is
@@ -631,6 +645,19 @@ def provision_by_copy(stack: UserComfyStack, cfg: Optional[dict] = None, *,
         if not ok or not paths.venv_python.is_file():
             return _fail("error", f"Could not create the managed venv: {_tail(out)}")
 
+        # 2b) Guarantee the venv actually has a working pip (NEW-MANAGED-COMFY-
+        #     VENV-MISSING-PIP): `-m venv` can report success while its own mandatory
+        #     ensurepip bootstrap silently failed, which would otherwise only surface
+        #     two steps below as an opaque pip-transcript failure.
+        ok, out = _probe_pip(paths.venv_python, on_progress)
+        if not ok:
+            return _fail(
+                "error",
+                "The venv was created but has no working pip "
+                f"({_tail(out)}); managed ComfyUI setup cannot install anything "
+                "into it. Run 'localm doctor' to check whether venv creation is "
+                "broken on this machine.")
+
         # 3) Replicate the exact package set (incl. the same torch wheel). None means
         #    pip freeze FAILED - fail loudly, never proceed as if the venv were empty.
         freeze = read_user_freeze(stack.venv_python)
@@ -655,7 +682,11 @@ def provision_by_copy(stack: UserComfyStack, cfg: Optional[dict] = None, *,
                                  "the package came from a non-public index or a "
                                  "local wheel on your ComfyUI's machine (e.g. a "
                                  "vendor-bundled driver package) that is not "
-                                 f"available here. {_tail(out)}")
+                                 "available here. This ComfyUI cannot be replicated - "
+                                 "clear your ComfyUI folder setting (Settings -> "
+                                 "Media, or comfy_workdir in config) and run 'localm "
+                                 "comfy setup' again to install a fresh, "
+                                 f"hardware-matched ComfyUI instead. {_tail(out)}")
                 return _fail("error",
                              f"Installing the replicated packages failed: {_tail(out)}")
             n_pkgs = len(freeze)

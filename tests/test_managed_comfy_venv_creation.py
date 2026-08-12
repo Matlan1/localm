@@ -87,6 +87,62 @@ def test_provision_fresh_uses_real_base_python_not_sys_executable(monkeypatch, t
     assert venv_calls[0][0] != str(fake_renamed)
 
 
+def test_provision_fresh_fails_loudly_when_venv_has_no_pip(monkeypatch, tmp_path):
+    """NEW-MANAGED-COMFY-VENV-MISSING-PIP: `-m venv` can report success (return
+    code 0, the interpreter file present) while its own mandatory ensurepip
+    bootstrap silently failed. Without a probe right after creation, that surfaces
+    two steps later as an opaque "Installing PyTorch (...) failed: ... No module
+    named pip" - this pins that provision_fresh() instead fails IMMEDIATELY after
+    venv creation, naming the real cause, before ever attempting the torch install.
+
+    install_torch is left at its default (True) deliberately: if the probe were
+    missing, the fake _run below would receive the subsequent torch `pip install`
+    call and raise - that is what makes this a real fires-control rather than a
+    test that would pass with or without the fix."""
+    calls = []
+    fake_root = tmp_path / "comfyui"
+    venv_python = fake_root / "venv" / "Scripts" / "python.exe"
+
+    def _fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if "venv" in cmd:
+            # Must not pre-exist BEFORE this call: provision_fresh() refuses to
+            # run at all when root already exists ("already exists" guard, checked
+            # before cloning anything), so creating it up front would make the
+            # test fail for the wrong reason. Create it here instead, the moment
+            # the (fake) venv-creation step "succeeds" - a real broken run leaves
+            # exactly this: the interpreter file present, pip missing.
+            venv_python.parent.mkdir(parents=True, exist_ok=True)
+            venv_python.write_bytes(b"")
+            return True, ""
+        if "pip" in cmd and "--version" in cmd:
+            return False, "No module named pip"
+        raise AssertionError(f"unexpected call reached past the pip probe: {cmd}")
+
+    monkeypatch.setattr(fresh, "_run", _fake_run)
+    monkeypatch.setattr(fresh, "_clone_at_commit", lambda *a, **k: (True, ""))
+    monkeypatch.setattr(hwdetect, "_cuda_compute_capabilities", lambda: [])
+
+    fake_paths = mc.ManagedComfyPaths(
+        root=fake_root,
+        models_dir=tmp_path / "comfyui-models",
+        main_py=fake_root / "main.py",
+        venv_python=venv_python,
+        extra_model_paths=fake_root / "extra_model_paths.yaml",
+    )
+    monkeypatch.setattr(fresh.mc, "managed_comfy_paths", lambda: fake_paths)
+
+    result = fresh.provision_fresh(
+        cfg={}, comfyui_repo="https://example/repo.git", comfyui_commit="deadbeef",
+        custom_nodes=[])
+
+    assert result.ok is False
+    assert "no working pip" in result.message
+    assert "localm doctor" in result.message
+    install_calls = [c for c in calls if "install" in c]
+    assert install_calls == [], f"reached an install call past the probe: {install_calls}"
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows-only bug (#621)")
 class TestRealRenamedLauncherEndToEnd:
     """Builds an ACTUAL renamed-copy launcher (mirroring applaunch.py's
