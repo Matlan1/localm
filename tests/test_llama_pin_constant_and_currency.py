@@ -143,6 +143,32 @@ def test_currency_reports_a_gap_and_says_how_to_close_it(currency, monkeypatch, 
         "to remove, so the remedy must name the confirm step")
 
 
+def test_currency_does_not_call_a_lexically_larger_older_tag_newer(
+        currency, monkeypatch, capsys):
+    """THE COMPARISON ITSELF, on a value that DISCRIMINATES.
+
+    The test above cannot catch a lexical comparison and was proven not to:
+    reverting main() to `t > pin` left it green, because b99999 and b99998 are
+    both lexically AND numerically greater than the pin, so the two
+    implementations agree on that fixture. It is item 19 exactly - the fixture's
+    value space does not intersect the defect's trigger space, and the test reads
+    as covering the comparison while being structurally unable to fail on it.
+
+    A tag needs FEWER DIGITS to discriminate: 'b9999' sorts AFTER 'b10375' as a
+    string and is far older as a number. A lexical comparison reports the pin as
+    behind; the correct one reports it current."""
+    older = "b9999"
+    assert older > currency.pinned_tag(), (
+        "this fixture only discriminates while the pin has more digits than the "
+        "decoy - if that ever stops holding, pick a smaller decoy")
+    monkeypatch.setattr(currency, "upstream_tags", lambda: ([older], ""))
+
+    assert currency.main([]) == 0
+    out = capsys.readouterr().out
+    assert "OK: the pin is current" in out, out
+    assert "BEHIND" not in out
+
+
 def test_currency_skips_releases_whose_assets_are_not_uploaded_yet(currency, monkeypatch):
     """Upstream publishes a release before its ~25 archives finish uploading.
     Counting one of those as "behind" overstates the gap and would point the

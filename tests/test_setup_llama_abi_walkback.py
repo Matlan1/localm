@@ -289,7 +289,7 @@ def test_floor_never_selects_an_arbitrary_older_release(monkeypatch, home):
 def test_floor_never_moves_off_a_user_pin(monkeypatch, home, capsys):
     """A pin is an explicit choice, so moving off it is the exact override the
     project forbids. Report it and stop, naming the escape commands."""
-    (ok, tag), tried = _floor(monkeypatch, home, loads=[], pin="b300")
+    (ok, tag), tried = _floor(monkeypatch, home, loads=[(True, "")], pin="b300")
     assert (ok, tag) == (False, None)
     assert tried == [], "a pinned build must not be moved off"
     out = _flat(capsys)
@@ -303,7 +303,14 @@ def test_floor_refuses_to_go_below_itself_on_a_default_install(
     localm itself pinned and its own binding rejects - a localm bug. Saying so is
     the value of this branch: silently installing some older release instead
     would swap a bug we can fix for a runtime nobody can vouch for."""
-    (ok, tag), tried = _floor(monkeypatch, home, rejected=sl._PINNED_TAG, loads=[])
+    # A SUCCESSFUL load is supplied although the correct path never asks for
+    # one. With loads=[] a regression that wrongly proceeds dies on
+    # StopIteration inside the fixture - red, but reporting a fixture artifact
+    # instead of the property. Supplying one lets the run complete so the
+    # assertions below do the failing, and they name what actually went wrong:
+    # a build was installed that must not have been.
+    (ok, tag), tried = _floor(monkeypatch, home, rejected=sl._PINNED_TAG,
+                              loads=[(True, "")])
     assert (ok, tag) == (False, None)
     assert tried == [], "nothing below the floor may be installed"
     out = _flat(capsys)
@@ -315,7 +322,8 @@ def test_floor_refuses_when_the_install_is_not_tracking_upstream(
         monkeypatch, home, capsys):
     """Same refusal by the other route: an unpinned, non-tracking install that
     somehow rejected a DIFFERENT tag still has nothing more tested to fall to."""
-    (ok, tag), tried = _floor(monkeypatch, home, rejected="b999", loads=[])
+    (ok, tag), tried = _floor(monkeypatch, home, rejected="b999",
+                              loads=[(True, "")])
     assert (ok, tag) == (False, None) and tried == []
     assert "no more-tested build" in _flat(capsys)
 
