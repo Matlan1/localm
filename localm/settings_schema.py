@@ -159,9 +159,9 @@ CORE_FIELDS: list = [
     # older upstream build, which is a downgrade a lower-privileged principal
     # should not get to choose.
     SettingField("llama_runtime_pin", Widget.HIDDEN, "Pinned llama.cpp build",
-                 "Release tag setup-llama installs (e.g. 'b10355'). Blank tracks "
-                 "the newest upstream release. Set with "
-                 "`localm setup-llama --tag`, not here.",
+                 "Release tag setup-llama installs (e.g. 'b10355'). Blank uses "
+                 "the build localm confirmed; 'latest' tracks upstream's newest, "
+                 "untested. Set with `localm setup-llama --tag`, not here.",
                  group="Engine", applies=Applies.NEXT_LOAD, admin_only=True),
     # NOT engine_managed, despite being written by the engine rather than by a
     # user: that flag means PLUGIN STATE specifically (`plugins`,

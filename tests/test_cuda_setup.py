@@ -158,14 +158,14 @@ def test_latest_tag_falls_back_when_nothing_has_assets(monkeypatch):
     ]
     monkeypatch.setattr("urllib.request.urlopen",
                         lambda req, timeout=None, context=None: _FakeHTTP(releases))
-    assert sl._latest_tag() == sl._FALLBACK_TAG
+    assert sl._latest_tag() == sl._PINNED_TAG
 
 
 def test_latest_tag_falls_back_on_network_error(monkeypatch):
     def boom(req, timeout=None, context=None):
         raise OSError("no network")
     monkeypatch.setattr("urllib.request.urlopen", boom)
-    assert sl._latest_tag() == sl._FALLBACK_TAG
+    assert sl._latest_tag() == sl._PINNED_TAG
 
 
 def test_release_assets_does_not_scrape_body_when_assets_empty(monkeypatch):

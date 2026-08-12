@@ -309,6 +309,46 @@ jobs:
           sys.exit(1 if v.status == "mismatch" else 0)
           PY
 
+      # The step above proves the pinned build LOADS. This one proves it
+      # GENERATES, which is a different claim and the one that matters: "it loads
+      # so it will be fine" is what shipped a runtime our own gate then refused.
+      #
+      # WHAT THIS RUNNER CAN HONESTLY CONFIRM, stated so a green tick is not read
+      # as more than it is: cpu only. There is no GPU here, so vulkan, cuda, hip,
+      # sycl and metal are NOT confirmed by this job and the script says so in
+      # its own output rather than quietly passing over them. That is not a token
+      # check - the ABI/struct compatibility that actually broke is carried by
+      # one shared llama library across every backend of a release, so cpu covers
+      # exactly the failure class this exists to catch. What it does not cover is
+      # whether another backend's ggml plugin produces tokens on its hardware.
+      #
+      # ~88 MB model download, and the release CDN drops connections often enough
+      # that the script retries. A genuine FAIL exits 1 (the build is bad); "we
+      # could not measure" exits 2 and must NEVER read as a pass, which is why
+      # the two are branched on separately here rather than by `|| true`.
+      - name: Confirm the pinned build loads AND generates (cpu only on a runner)
+        shell: bash
+        run: |
+          set +e
+          python scripts/confirm_llama_runtime.py --backend cpu
+          rc=$?
+          set -e
+          if [ "$rc" = "2" ]; then
+            echo "::warning::could not measure the pinned build here (see above);"\
+                 "this is NOT a confirmation and NOT a failure of the build"
+            exit 0
+          fi
+          exit "$rc"
+
+      # Currency, so the pin cannot rot unnoticed: a pin nobody advances fails a
+      # user as surely as tracking latest does, just more slowly. Warn-only and
+      # always exit 0, exactly like comfyui-pin-check below - advancing the pin
+      # needs someone to run the confirm script against real hardware and read
+      # the result, which is a person's decision.
+      - name: Report how far the llama.cpp pin has fallen behind upstream
+        continue-on-error: true
+        run: python scripts/check_llama_pin.py
+
   # Maintenance signal for a second bundled-and-pinned dependency, same shape as
   # abi-check above but far cheaper: one GitHub API call, no clone, no prebuilt
   # download. Runs on every trigger of this workflow (no run_abi-style opt-in

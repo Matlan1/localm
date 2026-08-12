@@ -57,36 +57,40 @@ def test_provision_returns_the_tag_it_installed(monkeypatch, tmp_path, home):
     record it. Before this it returned None and the marker could only ever carry
     a version for amd-rocm."""
     monkeypatch.setattr(sl, "_platform_key", lambda: "win32")
-    monkeypatch.setattr(sl, "_latest_tag", lambda: "b10361")
     monkeypatch.setattr(sl, "_release_assets",
                         lambda tag, repo=sl._UPSTREAM_REPO: _release_listing(tag))
     monkeypatch.setattr(sl, "_fetch_verified", lambda url, target, sha, what: None)
 
-    assert sl._provision_backend("vulkan", tmp_path, None, False) == "b10361"
+    assert sl._provision_backend("vulkan", tmp_path, None, False) == sl._PINNED_TAG
 
 
-def test_recording_the_tag_costs_no_extra_release_lookup(monkeypatch, tmp_path, home):
-    """The whole design rests on the tag ALREADY being resolved by the fetch, so
-    recording it must not add a second network call. The previous code declined
-    to record a version specifically because it believed one would be needed.
+def test_recording_the_tag_costs_no_release_lookup_at_all(monkeypatch, tmp_path, home):
+    """The design rests on the tag ALREADY being known, so recording it must not
+    add a network call. It used to cost exactly one (the _latest_tag resolution
+    every provision made anyway); with the pin it costs ZERO, because a constant
+    needs no lookup. Asserting the stronger number is the point - "one" would
+    still pass if the pin were quietly re-resolved.
 
     Counted from OUTSIDE rather than asserted by raising inside the call: an
     exception raised in a stub is an input to the code under test, and anything
     that catches broadly between here and pytest would swallow it.
     """
     calls = []
+    listings = []
     monkeypatch.setattr(sl, "_platform_key", lambda: "win32")
     monkeypatch.setattr(sl, "_latest_tag",
                         lambda: (calls.append("latest"), "b10361")[1])
     monkeypatch.setattr(sl, "_release_assets",
-                        lambda tag, repo=sl._UPSTREAM_REPO: _release_listing(tag))
+                        lambda tag, repo=sl._UPSTREAM_REPO:
+                            (listings.append(tag), _release_listing(tag))[1])
     monkeypatch.setattr(sl, "_fetch_verified", lambda url, target, sha, what: None)
 
     tag = sl._provision_backend("vulkan", tmp_path, None, False)
 
-    assert tag == "b10361"
-    assert calls == ["latest"], (
-        f"exactly one release lookup per provision; got {len(calls)}")
+    assert tag == sl._PINNED_TAG
+    assert calls == [], "a default provision must not resolve upstream's newest"
+    assert listings == [sl._PINNED_TAG], (
+        f"exactly one asset listing, for the pin; got {listings}")
 
 
 def test_amd_rocm_provision_makes_no_upstream_lookup_at_all(monkeypatch, tmp_path, home):
@@ -170,9 +174,27 @@ def test_tag_for_prefers_the_pin_over_a_release_lookup(monkeypatch, home):
     assert sl._tag_for("vulkan") == "b10355"
 
 
-def test_tag_for_tracks_latest_with_no_pin(monkeypatch, home):
-    monkeypatch.setattr(sl, "_latest_tag", lambda: "b10361")
+def test_tag_for_installs_the_confirmed_pin_with_no_user_choice(monkeypatch, home):
+    """THE DEFAULT, and it makes NO NETWORK CALL. This function used to end in a
+    live release lookup, which is how a build nobody here had ever run could
+    arrive on any installed localm the moment a third party published it. The
+    _latest_tag stand-in FAILS the test if it is reached: 'the default resolves
+    to the pin' and 'the default asks nobody' are two different properties and
+    only the second one closes that hole."""
+    monkeypatch.setattr(
+        sl, "_latest_tag",
+        lambda: pytest.fail("the default path must not query upstream at all"))
     assert sl.pinned_tag() is None
+    assert sl.tracks_latest() is False
+    assert sl._tag_for("vulkan") == sl._PINNED_TAG
+
+
+def test_tag_for_tracks_latest_only_when_the_user_opted_in(monkeypatch, home):
+    """Bleeding edge stays available - it just has to be asked for."""
+    monkeypatch.setattr(sl, "_latest_tag", lambda: "b10361")
+    sl.set_pinned_tag(sl._TRACK_LATEST)
+    assert sl.tracks_latest() is True
+    assert sl.pinned_tag() is None, "the sentinel must never read as an exact tag"
     assert sl._tag_for("vulkan") == "b10361"
 
 
@@ -419,7 +441,6 @@ def test_an_unsafe_pin_STORED_IN_CONFIG_never_reaches_a_url(planted, monkeypatch
     cfg.update_config(lambda c: c.__setitem__("llama_runtime_pin", planted))
     resolved = []
     monkeypatch.setattr(sl, "_platform_key", lambda: "win32")
-    monkeypatch.setattr(sl, "_latest_tag", lambda: "b10361")
     monkeypatch.setattr(sl, "_release_assets",
                         lambda tag, repo=sl._UPSTREAM_REPO:
                             (resolved.append(tag), _release_listing(tag))[1])
@@ -427,9 +448,9 @@ def test_an_unsafe_pin_STORED_IN_CONFIG_never_reaches_a_url(planted, monkeypatch
 
     tag = sl._provision_backend("vulkan", tmp_path, None, False)
 
-    assert resolved == ["b10361"], (
+    assert resolved == [sl._PINNED_TAG], (
         f"the planted value must never be resolved against; got {resolved}")
-    assert tag == "b10361"
+    assert tag == sl._PINNED_TAG
     assert planted not in "".join(resolved)
     assert "ignoring the stored llama.cpp pin" in capsys.readouterr().out, (
         "an ignored pin must be said out loud, not silently dropped")
@@ -567,14 +588,23 @@ def test_doctor_stays_quiet_when_nothing_is_provisioned(capsys, home):
 #  END TO END through the CLI                                                  #
 # --------------------------------------------------------------------------- #
 
-def _wire_cli(monkeypatch, target, tags_seen):
+def _wire_cli(monkeypatch, target, tags_seen, latest=None):
     """Stub provisioning down to the release resolution so a CLI run exercises
     main()'s real flag handling, guard and recording without any network."""
     monkeypatch.setattr(sl, "_repo_runtime_lib", lambda: target)
     monkeypatch.setattr(sl, "_platform_key", lambda: "win32")
     monkeypatch.setattr(sl, "_lib_name", lambda: "llama.dll")
     monkeypatch.setattr(sl, "_auto_backend", lambda: "vulkan")
-    monkeypatch.setattr(sl, "_latest_tag", lambda: "b10361")
+    # FAILS rather than returning a tag unless a caller explicitly passes
+    # `latest=`. Only the `--tag latest` test opts into tracking upstream, so for
+    # every other CLI path reaching this would mean a release lookup crept back
+    # into an install that is supposed to answer from the pin - the exact
+    # regression the pin exists to prevent, and one a stubbed return value would
+    # hide by quietly satisfying the caller.
+    monkeypatch.setattr(
+        sl, "_latest_tag",
+        (lambda: latest) if latest else
+        (lambda: pytest.fail("this CLI path must not resolve upstream's newest")))
     monkeypatch.setattr(sl, "_clear_target_or_refuse", lambda t: None)
     monkeypatch.setattr(sl, "_install_runtime_wheel", lambda d: True)
     monkeypatch.setattr(sl, "_native_loads_ok", lambda: (True, ""))
@@ -657,9 +687,9 @@ def test_cli_bare_run_records_the_resolved_tag(monkeypatch, tmp_path, cli_runner
     res = cli_runner.invoke(sl.main, ["-y"])
 
     assert res.exit_code == 0, res.output
-    assert sl._provisioned_build(target) == "b10361"
+    assert sl._provisioned_build(target) == sl._PINNED_TAG
     assert [(e["backend"], e["tag"]) for e in sl.runtime_history()] == [
-        ("vulkan", "b10361")]
+        ("vulkan", sl._PINNED_TAG)]
 
 
 def _updater_argv():
@@ -711,29 +741,56 @@ def test_update_reprovision_actually_reprovisions_when_backend_matches(
     (target / "llama.dll").write_text("old")
     sl._record_provisioned_backend(target, "vulkan", build="b10300")
     tags = []
-    _wire_cli(monkeypatch, target, tags)   # _latest_tag() stubbed to "b10361"
+    _wire_cli(monkeypatch, target, tags)
 
     res = cli_runner.invoke(sl.main, _updater_argv())
 
     assert res.exit_code == 0, res.output
-    assert tags == ["b10361"], "the updater's re-invocation must resolve a release"
-    assert sl._provisioned_build(target) == "b10361", (
+    assert tags == [sl._PINNED_TAG], "the updater's re-invocation must resolve a release"
+    assert sl._provisioned_build(target) == sl._PINNED_TAG, (
         "a 'runtime'-class update must actually re-provision, not keep the old build")
 
 
-def test_cli_tag_latest_unpins_and_tracks_upstream(monkeypatch, tmp_path, cli_runner):
+def test_cli_tag_latest_opts_in_to_upstreams_newest(monkeypatch, tmp_path, cli_runner):
+    """--tag latest is now an opt-IN to bleeding edge rather than a way to clear
+    a pin, so it must both STICK as a stored choice and actually resolve
+    upstream. The stored value is checked through tracks_latest() and NOT through
+    pinned_tag(), which must stay None: the sentinel reaching pinned_tag() would
+    be interpolated into a release URL by every existing caller."""
     target = tmp_path / "rt"
     target.mkdir()
     (target / "llama.dll").write_text("old")
     tags = []
-    _wire_cli(monkeypatch, target, tags)
+    _wire_cli(monkeypatch, target, tags, latest="b10361")
     sl.set_pinned_tag("b10300")
 
     res = cli_runner.invoke(sl.main, ["--backend", "vulkan", "--tag", "latest", "-y"])
 
     assert res.exit_code == 0, res.output
-    assert sl.pinned_tag() is None
-    assert tags == ["b10361"], "unpinned, it resolves upstream's newest again"
+    assert sl.tracks_latest() is True, "the choice must stick, not just apply once"
+    assert sl.pinned_tag() is None, "the sentinel must never read as an exact tag"
+    assert tags == ["b10361"], "tracking, it resolves upstream's newest"
+    assert "NOT tested" in res.output or "has NOT tested" in res.output, (
+        "opting out of the confirmed build must say what that costs")
+
+
+def test_cli_tag_default_returns_to_the_confirmed_pin(monkeypatch, tmp_path, cli_runner):
+    """The way back, which did not need to exist before: clearing a pin used to
+    mean tracking upstream, and now means the confirmed build, so the two need
+    separate words. Without this a user who ran --tag latest once had no way to
+    return to the tested build short of naming its tag by hand."""
+    target = tmp_path / "rt"
+    target.mkdir()
+    (target / "llama.dll").write_text("old")
+    tags = []
+    _wire_cli(monkeypatch, target, tags)
+    sl.set_pinned_tag(sl._TRACK_LATEST)
+
+    res = cli_runner.invoke(sl.main, ["--backend", "vulkan", "--tag", "default", "-y"])
+
+    assert res.exit_code == 0, res.output
+    assert sl.tracks_latest() is False and sl.pinned_tag() is None
+    assert tags == [sl._PINNED_TAG], "and it installs the confirmed build"
 
 
 # --------------------------------------------------------------------------- #
@@ -750,10 +807,29 @@ def test_check_runtime_update_reports_not_installed_when_nothing_provisioned(
         "target": None, "newer": False, "pinned": None}
 
 
-def test_check_runtime_update_compares_against_latest_when_unpinned(
+def test_check_runtime_update_compares_against_the_confirmed_pin_by_default(
+        monkeypatch, tmp_path, home):
+    """The card must offer what setup-llama would actually install. If this
+    compared against upstream's newest while the command installs the pin, the
+    GUI would advertise an update that re-provisioning does not deliver - and
+    would keep advertising it forever."""
+    monkeypatch.setattr(sl, "_repo_runtime_lib", lambda: tmp_path)
+    monkeypatch.setattr(
+        sl, "_latest_tag",
+        lambda: pytest.fail("the default check must not query releases"))
+    sl._record_provisioned_backend(tmp_path, "vulkan", build="b10300")
+
+    result = sl.check_runtime_update()
+
+    assert result == {"installed": True, "backend": "vulkan", "current": "b10300",
+                      "target": sl._PINNED_TAG, "newer": True, "pinned": None}
+
+
+def test_check_runtime_update_compares_against_latest_when_tracking(
         monkeypatch, tmp_path, home):
     monkeypatch.setattr(sl, "_repo_runtime_lib", lambda: tmp_path)
     monkeypatch.setattr(sl, "_latest_tag", lambda: "b10361")
+    sl.set_pinned_tag(sl._TRACK_LATEST)
     sl._record_provisioned_backend(tmp_path, "vulkan", build="b10300")
 
     result = sl.check_runtime_update()
@@ -764,13 +840,12 @@ def test_check_runtime_update_compares_against_latest_when_unpinned(
 
 def test_check_runtime_update_reports_up_to_date_when_matching(monkeypatch, tmp_path, home):
     monkeypatch.setattr(sl, "_repo_runtime_lib", lambda: tmp_path)
-    monkeypatch.setattr(sl, "_latest_tag", lambda: "b10361")
-    sl._record_provisioned_backend(tmp_path, "vulkan", build="b10361")
+    sl._record_provisioned_backend(tmp_path, "vulkan", build=sl._PINNED_TAG)
 
     result = sl.check_runtime_update()
 
     assert result["newer"] is False
-    assert result["current"] == result["target"] == "b10361"
+    assert result["current"] == result["target"] == sl._PINNED_TAG
 
 
 def test_check_runtime_update_prefers_the_pin_over_a_release_lookup(
@@ -809,13 +884,21 @@ def test_check_runtime_update_amd_rocm_compares_against_the_fixed_tag(monkeypatc
 
 def test_check_runtime_update_never_raises_on_an_unreadable_config(monkeypatch, tmp_path):
     """pinned_tag() already degrades an unreadable config to 'no pin' rather
-    than raising; this check must inherit that, not newly break on it."""
+    than raising; this check must inherit that, not newly break on it.
+
+    tracks_latest() has to degrade the SAME way and in the SAME direction, which
+    is why it is asserted here rather than only in its own test: an unreadable
+    config that fell through to "tracking" would answer a broken read by
+    reaching for upstream's untested newest, which is the one answer that must
+    never be a fallback."""
     monkeypatch.setattr(sl, "_repo_runtime_lib", lambda: tmp_path)
-    monkeypatch.setattr(sl, "_latest_tag", lambda: "b10361")
+    monkeypatch.setattr(
+        sl, "_latest_tag",
+        lambda: pytest.fail("an unreadable config must not become 'track latest'"))
     monkeypatch.setattr(sl.config, "load_config", lambda: (_ for _ in ()).throw(OSError("nope")))
     sl._record_provisioned_backend(tmp_path, "vulkan", build="b10300")
 
     result = sl.check_runtime_update()
 
     assert result["pinned"] is None
-    assert result["target"] == "b10361"
+    assert result["target"] == sl._PINNED_TAG

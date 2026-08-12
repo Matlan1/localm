@@ -11,6 +11,34 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+### Changed
+- **localm now installs a llama.cpp build it has actually tested, instead of
+  whatever was published most recently.** Until now every `setup-llama` asked
+  GitHub for the newest llama.cpp release and installed that - on released
+  copies of localm too - so a build nobody had ever run could arrive on your
+  machine with no localm update involved, and a release that did not match this
+  code left a fresh install unable to load anything. localm now ships a specific
+  release that was downloaded, loaded and made to generate text before being
+  chosen, and installs exactly that. If you want upstream's newest anyway,
+  `localm setup-llama --tag latest` opts in and says plainly that the build is
+  untested; `--tag default` comes back. Nothing about naming an exact build with
+  `--tag b10355` or `--rollback` changes.
+- **A runtime localm's own compatibility check refuses is no longer replaced
+  with an older, less-tested one.** When that check rejects a build, setup-llama
+  now installs the tested build instead - and only if you had opted in to
+  tracking upstream. If the tested build is the one being refused, it says so,
+  names it as a fault in localm rather than in the release, and stops rather
+  than quietly reaching for something older. It previously tried up to three
+  earlier releases and kept whichever one loaded, which could leave you on a
+  build that had never been tested at all, reported as a success.
+- **Offline and rate-limited installs are checksum-verified again for every
+  backend.** When the release listing cannot be reached, setup-llama builds the
+  download URL itself; that guess was constructed from a naming convention
+  upstream has since changed, so the AMD ROCm downloads on Windows and Linux
+  resolved to filenames that no longer exist (a 404) and, being unrecognised,
+  carried no checksum. The known asset names of the shipped build are now used
+  directly, so this path names a real file and verifies it.
+
 ### Added
 - **The llama.cpp compatibility check now catches an upstream change that
   redefines a VALUE, not just one that moves a field.** The check compared where
@@ -29,17 +57,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   is available for your installed backend (honouring a pin if you have set
   one), and an Update button re-provisions it and streams progress, the same
   way the ComfyUI update panel does. A build that fails to load on your
-  machine is never kept; setup-llama's existing safety net walks back to one
-  that does.
+  machine is never kept.
 - **You can now pin the llama.cpp build localm installs, and go back to a
   previous one.** localm always fetched whichever llama.cpp release was newest
   on the day you installed, and kept no record of which one that was - so an
   upstream build that misbehaves on your hardware arrived on your next install
   with no way to name it or get away from it. `localm setup-llama --tag b10355`
   now installs exactly that build and keeps it, including through
-  `localm update`, until you run `localm setup-llama --tag latest` to track
-  upstream again. `localm setup-llama --rollback` returns to the previous build
-  you had, without needing to remember its number.
+  `localm update`, until you run `localm setup-llama --tag default` to go back
+  to the build localm ships. `localm setup-llama --rollback` returns to the
+  previous build you had, without needing to remember its number.
 - **`localm doctor` and bug reports now say which llama.cpp build is
   installed.** It was previously impossible to answer that question without
   reading library filenames and guessing. Doctor shows the build and whether it

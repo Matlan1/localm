@@ -86,7 +86,17 @@ def test_check_reports_not_installed(app):
 
 
 def test_check_reports_a_newer_build_available(app, runtime_dir, monkeypatch):
-    monkeypatch.setattr(sl, "_latest_tag", lambda: "b10361")
+    """The card offers the build setup-llama would install - which is the
+    CONFIRMED pin, not upstream's newest. If the two disagreed the GUI would
+    advertise an update that pressing the button does not deliver, and would go
+    on advertising it after every re-provision.
+
+    The _latest_tag stand-in FAILS if reached: this route runs on every card
+    render, so a release lookup creeping back here is a network call per poll as
+    well as the wrong answer."""
+    monkeypatch.setattr(
+        sl, "_latest_tag",
+        lambda: pytest.fail("the runtime card must not query upstream by default"))
     sl._record_provisioned_backend(runtime_dir, "vulkan", build="b10300")
 
     with TestClient(app) as client:
@@ -97,13 +107,12 @@ def test_check_reports_a_newer_build_available(app, runtime_dir, monkeypatch):
     assert body["installed"] is True
     assert body["backend"] == "vulkan"
     assert body["current"] == "b10300"
-    assert body["target"] == "b10361"
+    assert body["target"] == sl._PINNED_TAG
     assert body["newer"] is True
 
 
 def test_check_reports_up_to_date(app, runtime_dir, monkeypatch):
-    monkeypatch.setattr(sl, "_latest_tag", lambda: "b10361")
-    sl._record_provisioned_backend(runtime_dir, "vulkan", build="b10361")
+    sl._record_provisioned_backend(runtime_dir, "vulkan", build=sl._PINNED_TAG)
 
     with TestClient(app) as client:
         r = client.get("/api/runtime/check")

@@ -422,7 +422,7 @@ def _force_vulkan_dedicated_vram(binary_dir: Path) -> None:
 
     Verified against the ggml revision range localm actually installs, not only
     upstream master: identical ``!= nullptr`` semantics at b9870 (the offline
-    _FALLBACK_TAG), b10361, b10373, and 07132750825a (the commit the bundled
+    fallback tag of the day), b10361, b10373, and 07132750825a (the commit the bundled
     amd-rocm build ships from). A non-falsey explicit value is left exactly as the
     user set it.
 
@@ -643,9 +643,11 @@ def compute_backends_available() -> bool:
 #     b8100 .. b9870 .. master       CPU 0, GPU 1, IGPU 2, ACCEL 3, META 4
 #
 # IGPU was inserted AHEAD of ACCEL, so ACCEL is 2 on an older runtime and 3 on a
-# current one. setup_llama.py resolves /releases/latest DYNAMICALLY (falling back
-# to _FALLBACK_TAG), and a box may still have an older runtime provisioned, so
-# there is no single correct value to declare for it. This module previously
+# current one. There is no single correct value to declare for it, and pinning
+# the install did not change that: setup_llama.py installs setup_llama._PINNED_TAG
+# by default, but `--tag latest` and `--tag <any release>` are both supported, and
+# a box may still be running a runtime provisioned long ago under whatever rule
+# applied then. This module previously
 # declared GGML_DEV_TYPE_ACCEL = 2, which on any runtime since roughly b8100
 # silently means INTEGRATED GPU - a name asserting something the value does not
 # say. It was inert (every use compares against CPU), and it is removed rather

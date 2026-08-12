@@ -40,18 +40,24 @@ Backends (``--backend``), so any machine has a working out-of-the-box path:
 Sources, in order of preference:
   * ``--from <dir>``  - copy from a local llama.cpp build output (any backend).
   * ``--url <url>``   - an explicit prebuilt archive URL.
-  * ``--backend ...`` - resolve the matching upstream llama.cpp release asset
-    (``ggml-org/llama.cpp``); the latest release is used, with a pinned
-    fallback if the release lookup is unavailable.
+  * ``--backend ...`` - resolve the matching asset of the PINNED llama.cpp
+    release (``ggml-org/llama.cpp``); see below.
 
 Which BUILD, as distinct from which backend:
-  * The resolved release tag is recorded in the runtime dir's marker alongside
+  * localm installs ``_PINNED_TAG``: one upstream release we confirmed loads AND
+    generates, decided in this file. No version is ever computed while setup is
+    running, so a release published by a third party cannot change what an
+    install gets. See _PINNED_TAG's own comment for what "confirmed" covers per
+    backend, and scripts/confirm_llama_runtime.py for the check that earns it.
+  * The installed release tag is recorded in the runtime dir's marker alongside
     the backend, so ``localm doctor`` and a bug report can name the build
     instead of inferring it from library filenames.
   * ``--tag <tag>`` installs one exact release and PINS it, so later runs and
-    ``localm update``'s re-provision keep it; ``--tag latest`` clears the pin.
-    The pin lives in config (``llama_runtime_pin``) and is read by ``_tag_for``,
-    which is why the updater inherits it without knowing it exists.
+    ``localm update``'s re-provision keep it. ``--tag latest`` opts IN to
+    upstream's newest release, which localm has not confirmed; ``--tag default``
+    returns to the shipped pin. All three live in one config key
+    (``llama_runtime_pin``) read by ``_tag_for``, which is why the updater
+    inherits the choice without knowing it exists.
   * ``--rollback`` returns to the previous build recorded for this backend.
     This exists because upstream can ship a release that is broken on a given
     machine - the ``llama_context_params`` ABI shift, an asset rename, a
@@ -113,11 +119,93 @@ DEFAULT_URL_SHA256 = (
 # schemes collide; see inference/backends/llamacpp/_structs.py.)
 _ROCM_TAG = "b1307"
 
-# Upstream llama.cpp prebuilts (ggml-org/llama.cpp). We resolve the latest
-# release tag with uploaded assets at runtime; this pin is the fallback if that
-# lookup is unavailable.
+# Upstream llama.cpp prebuilts (ggml-org/llama.cpp).
 _UPSTREAM_REPO = "ggml-org/llama.cpp"
-_FALLBACK_TAG = "b9870"
+
+# THE BUILD localm INSTALLS. One constant, decided here, never computed while a
+# user is running setup.
+#
+# This used to resolve upstream's newest release with uploaded assets at RUNTIME,
+# on every install, released builds included. So a third party publishing a
+# release could break every fresh and updating install with no localm change at
+# all - which is not hypothetical: b10373 shipped a new default
+# LLAMA_LOAD_MODE_AUTO, localm's own ABI gate refused it, and a fresh
+# `setup-llama` was dead on arrival until localm was changed. Nothing about that
+# release was broken. It was simply never tested against this code, because
+# nothing tested anything before installing it.
+#
+# WHAT "CONFIRMED" MEANS HERE, and it is deliberately not "it loads": the build
+# was downloaded, loaded through localm's real loader, and made to GENERATE
+# TOKENS with a real model. "It loads so it will be fine" is what produced the
+# outage above. scripts/confirm_llama_runtime.py is that check, and the per-
+# backend record of what each pin actually rests on is _PIN_CONFIRMATION below.
+#
+# ONE CONSTANT, NOT ONE PER BACKEND, and the reason is structural rather than a
+# simplification: upstream ships ONE llama.dll for every backend of a given tag
+# (the backend lives in the separate ggml-* plugin libraries), so the struct
+# layout this gate cares about cannot differ between them. Measured, not
+# inferred - byte-identical across cpu/vulkan/cuda at b10361 (4a587d89) and at
+# b10373 (f2021c86), and re-measured at each new pin by the confirm script
+# rather than inherited. GENERATION is the part that IS backend-specific, which
+# is exactly what _PIN_CONFIRMATION records.
+#
+# STAYING CLOSE TO UPSTREAM IS PART OF THE REQUIREMENT, not an afterthought: a
+# pin nobody advances fails a user as surely as tracking latest does, just more
+# slowly. scripts/check_llama_pin.py reports how far behind this constant has
+# fallen (the same shape as the ComfyUI pin's own currency check), and
+# `--tag latest` is the escape hatch for a user who needs an upstream fix today.
+_PINNED_TAG = "b10375"
+
+# WHAT THE PIN RESTS ON, PER BACKEND. Deliberately not a boolean and deliberately
+# not a single "confirmed" flag: a confirmation job that is green because it
+# SILENTLY SKIPPED the backends it could not test would be worse than no job,
+# because it would carry the word "confirmed".
+#
+# The asymmetry is hardware, and it is not going away: a GitHub runner has no
+# GPU, so CI can honestly generate on cpu only. vulkan is confirmed on the
+# maintainer's box. cuda, sycl, hip and metal need hardware nobody here has.
+#
+# What every entry DOES rest on, including the untested ones, is the byte-
+# identity above: the ABI/struct compatibility that broke in the incident this
+# pin exists to prevent is carried by one shared llama library, so confirming it
+# once confirms it for all of them. What an untested entry does NOT rest on is
+# any evidence that THAT backend's ggml plugin produces tokens on that hardware.
+# Say which of the two you have; never round the second up to the first.
+_PIN_CONFIRMATION = {
+    "cpu": "load + generate, measured (Windows x64; devices: CPU only, which is "
+           "also the control proving the GPU column below is not vacuous)",
+    "vulkan": "load + generate, measured (Windows x64, AMD RX 6900 XT / gfx1030; "
+              "the runtime registered a Vulkan0 GPU device)",
+    "cuda": "ABI only (shared llama library); generation NOT measured - no NVIDIA hardware",
+    "sycl": "ABI only (shared llama library); generation NOT measured - no Intel GPU",
+    "hip": "ABI only (shared llama library); generation NOT measured - needs a system ROCm toolkit",
+    "metal": "ABI only (shared llama library); generation NOT measured - no Apple Silicon",
+    # Not an upstream tag at all: the lemonade-sdk build, pinned separately by
+    # _ROCM_TAG, so this table's subject (_PINNED_TAG) does not describe it and
+    # nothing here was measured against it. Stated rather than omitted, because
+    # an absent row reads as "covered like the others".
+    "amd-rocm": "out of scope for _PINNED_TAG - pinned separately as _ROCM_TAG, "
+                "whose generation was NOT measured by this pin's confirmation",
+}
+
+# Stored in the `llama_runtime_pin` config key to mean "track upstream's newest
+# release", the opt-in to bleeding edge. A SENTINEL rather than an empty value
+# because empty now means the shipped pin, which is the safe default; a user who
+# wants upstream's newest has to say so, and it stays visible in their config.
+#
+# Kept OUT of pinned_tag()'s return value on purpose. Every existing caller of
+# that function treats what it returns as an exact release tag and interpolates
+# it into a URL path segment, so letting the sentinel through would produce a
+# confident request for a release literally named "latest". tracks_latest() is
+# the second accessor instead, and _tag_for() is the only place that consults
+# both.
+_TRACK_LATEST = "latest"
+
+# The documented word for "go back to the build localm ships and confirmed".
+# Needed because `--tag latest` no longer means that: before the pin existed,
+# clearing the pin WAS how you got the default, and the default was upstream's
+# newest. Those are now two different destinations and each needs its own word.
+_TRACK_DEFAULT = "default"
 
 # Third-party Linux CUDA prebuilt (see dev-notes/ADR-0010): upstream publishes
 # no bare Linux CUDA binary itself (verified live against their releases), so
@@ -133,15 +221,62 @@ _FALLBACK_TAG = "b9870"
 # own documented carve-out), same as every other GitHub URL in this file.
 _CUDA_LINUX_REPO = "hybridgroup/llama-cpp-builder"
 
-# Pinned fallback checksums for tag b9870 and b1307 (lemonade AMD build) release
-# assets. Only consulted when the release API is unreachable or publishes no
-# `digest` - the online path reads the digest straight off the asset listing.
+# Offline checksums for the assets of the pinned builds. Only consulted when the
+# release API is unreachable or publishes no `digest` - the online path reads the
+# digest straight off the asset listing.
 #
-# The b1307 values are the API's own `digest` fields. That is not taken on
-# trust: the gfx103X asset was downloaded and hashed locally on 2026-08-05 and
-# came out byte-identical to the digest GitHub reports, which is what makes the
-# remaining thirteen usable without pulling 4.4 GB.
+# THE _PINNED_TAG ENTRIES ARE WHAT KEEP THE PIN SELF-CONTAINED. The API and the
+# download CDN are different hosts with different failure modes, so "the release
+# listing is unavailable but the download works" is a real state (an API rate
+# limit is the common way in). Without a checksum for the pinned tag, that state
+# would install the pin UNVERIFIED - a quiet downgrade of the integrity guarantee
+# in exactly the situation the pin exists to be reliable in. So the pin and its
+# digests move together: bump one, bump the other.
+#
+# THE TABLE HOLDS EXACTLY THE TAGS THIS FILE PINS, and a test enforces that. It
+# used to also carry the whole asset list of b9870, the old dynamic-resolution
+# fallback. Those entries went with _FALLBACK_TAG: nothing resolved to that tag
+# any more, nobody had ever confirmed it loads or generates under the current
+# binding, and an explicit `--tag b9870` is not special enough to deserve offline
+# checksums that `--tag <any other release>` does not get. Keeping them would
+# have been a stale pin reading as coverage, which is the exact thing
+# test_every_pinned_asset_belongs_to_a_pinned_tag exists to catch.
+#
+# The values are the API's own `digest` fields. That is not taken on trust: the
+# b1307 gfx103X asset was downloaded and hashed locally on 2026-08-05 and came
+# out byte-identical to the digest GitHub reports, which is what makes the rest
+# usable without pulling several GB.
 _PINNED_FALLBACK_SHA256 = {
+    # tag b10375 upstream assets (_PINNED_TAG). The three cudart bundles carry no
+    # tag in their names and upstream re-uploads the same file each release -
+    # verified: byte-identical digests for 12.4 and 13.3 at b9870 and at b10375.
+    "cudart-llama-bin-win-cuda-12.4-x64.zip": "8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6",
+    "cudart-llama-bin-win-cuda-13.3-x64.zip": "1462a050eb4c684921ba51dcc4cc488a036674c3e73e9945ee705b854808d03e",
+    "cudart-llama-bin-win-cuda-13.4-arm64.zip": "5a40dc7c5fa3d0a80ceeba4f16f9e8d25d87bcf1399c9233588953c43436c33c",
+    "llama-b10375-bin-android-arm64.tar.gz": "9c3816ee68ccddde5972395e15a61d9f0e744b92494b2f9eeae0a4f11cbd9ddc",
+    "llama-b10375-bin-macos-arm64.tar.gz": "ebbeed128cde32077c5b430feafe57ce20b1bca545f430ff142472014f03bcec",
+    "llama-b10375-bin-macos-x64.tar.gz": "12b4ff47c112329048e826da3fb49c674a381c2fe913311d1050f54d1f5024ab",
+    "llama-b10375-bin-ubuntu-arm64.tar.gz": "36fb8a1d1836f575db78e56a875d040ddcd19694a60b67f4cce8bb6531d872ac",
+    "llama-b10375-bin-ubuntu-openvino-2026.2.1-x64.tar.gz": "44e22331a613cab97ec4692749ba442b943c31ec9f7caafd7742504d8a39a7cd",
+    "llama-b10375-bin-ubuntu-rocm-7.14-x64.tar.gz": "712cee42f49d4ae627f621eaa352ccfcacf51547d0afc58ef4d1873c0d9d1e25",
+    "llama-b10375-bin-ubuntu-s390x.tar.gz": "600349fc3d5176421e8e2a8481e7460d10acdd56f6856cd40c2e86269857f839",
+    "llama-b10375-bin-ubuntu-sycl-fp16-x64.tar.gz": "6ca1e348d2c7c2fd4810d5ceac221792bb027aa937a8dd65bb06490853a84abb",
+    "llama-b10375-bin-ubuntu-sycl-fp32-x64.tar.gz": "b48221206882da9061e84b0c3e7365eb3ea23ff1bd40b5a82f9c138d06ac5796",
+    "llama-b10375-bin-ubuntu-vulkan-arm64.tar.gz": "d17bcd861df0b302696eca81214a0a26db368103b5f4d6f4910396a4cf5b74d4",
+    "llama-b10375-bin-ubuntu-vulkan-x64.tar.gz": "cbf7354e70f9bcda5a389e1f02e2293414d47fe525b271c3a8063327754e3ef9",
+    "llama-b10375-bin-ubuntu-x64.tar.gz": "b6a7ed005240eccd61e1af42debd75b876c639c1416bfa90985fd02618919a88",
+    "llama-b10375-bin-win-cpu-arm64.zip": "e57bfde78450effc75810898067934d1d482a76d9ce6e0ed181682bb9eb612e6",
+    "llama-b10375-bin-win-cpu-x64.zip": "c18ad6aa9cef9d119e957472d71e34eb5183848eb9c57f51647fd18692a456c7",
+    "llama-b10375-bin-win-cuda-12.4-x64.zip": "dd840b604c508b2f57f2ed467f70c711d1840c07b0d09a3bba8f6dfbd8b3da84",
+    "llama-b10375-bin-win-cuda-13.3-x64.zip": "5e352df7d32abe99427160d26069e8eedab79ae08fbfe737616c6cd62837975a",
+    "llama-b10375-bin-win-cuda-13.4-arm64.zip": "98dbcd67ae451cafce668285f233c8d664e5550b52e5017a167ecdd54fbe2759",
+    "llama-b10375-bin-win-opencl-adreno-arm64.zip": "9c388ba3adcaae8bd1d80761deb7ac3ff7de4a55714bef0322b406cf1d421bd3",
+    "llama-b10375-bin-win-openvino-2026.2.1-x64.zip": "16f8149a3792d1b56507dda3c6399c5f49dab0bfef1a69593d10e751a9d565d9",
+    "llama-b10375-bin-win-rocm-7.14-x64.zip": "46464da654280440970ea8e742d3b9294291a1bcf6adb88c5160734082250334",
+    "llama-b10375-bin-win-sycl-x64.zip": "a76acaedb824b32dd573c4376ed293df9f313ce6dea92010bec9fc7371168b78",
+    "llama-b10375-bin-win-vulkan-x64.zip": "1fef77a8b7742485c3f9f0acd16b68330ca9d5f447b73eb80d32862e4b2c7cfa",
+    "llama-b10375-ui.tar.gz": "4150e8b4b3cd24623c954d94a791f0afa80efc976555e4d6a666bce61288bcb9",
+    "llama-b10375-xcframework.zip": "904bbf9fd613ff4567bd22597d5d1391c3a88c69c327fb2ff2dd722f74231c77",
     # tag b1307 ROCm assets (llama.cpp 07132750825a, ROCm 10.1.0a20260804)
     "llama-b1307-windows-rocm-gfx103X-x64.zip": "495323bfb522f2f5297a0786d8a2bec23f57421abdb01a1a07ff3b04d9ee7f0b",
     "llama-b1307-windows-rocm-gfx110X-x64.zip": "90dfa8a2ad803cf2f6a9bc069a599a6e89aa2c0a86ea46f4469b8ecf4e340978",
@@ -157,32 +292,6 @@ _PINNED_FALLBACK_SHA256 = {
     "llama-b1307-ubuntu-rocm-gfx120X-x64.zip": "74a38230048a1081a2ebf86825c27f394de6fc5447a155ab4c8ebe81ffc3de30",
     "llama-b1307-ubuntu-rocm-gfx908-x64.zip": "9d10467e59ee05e26d21131a251077d45f41f76ceefee8de88a17222a0c8500b",
     "llama-b1307-ubuntu-rocm-gfx90a-x64.zip": "149e3d871830bf9e429c5edfa2d4d427830529a3813ad4d789925095cdd57ade",
-    # tag b9870 upstream assets
-    "cudart-llama-bin-win-cuda-12.4-x64.zip": "8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6",
-    "cudart-llama-bin-win-cuda-13.3-x64.zip": "1462a050eb4c684921ba51dcc4cc488a036674c3e73e9945ee705b854808d03e",
-    "llama-b9870-bin-android-arm64.tar.gz": "f9f8e6207ba97b6d34c98e6877c8beba23d462f08a73ace59ffb2ff5d134d26c",
-    "llama-b9870-bin-macos-arm64.tar.gz": "9384fc29bfad58a665a617f3c5e490d5ab9f1f5506383b011d912f1bcc92804a",
-    "llama-b9870-bin-macos-x64.tar.gz": "8f12b275bec2083caa13643471bd86083549659f48b2d1fad72c61e84bd5ee59",
-    "llama-b9870-bin-ubuntu-arm64.tar.gz": "227564dead2145adf388d8fe3edbee8aeeea61e53cb151d03375661885ad8b1b",
-    "llama-b9870-bin-ubuntu-openvino-2026.2.1-x64.tar.gz": "e6892a3531d70d079803075c8cfef9429a9f55510f58e39e8eb10ed84da3e18b",
-    "llama-b9870-bin-ubuntu-rocm-7.2-x64.tar.gz": "b15e673147678ec5d89002cd77316f2eca1aa006e7a23b8fef499b6d5c7e9723",
-    "llama-b9870-bin-ubuntu-s390x.tar.gz": "dbe9d21482f356fc8e058bcc35594fb59d69082444fb338f5bcf4bdb35f631e2",
-    "llama-b9870-bin-ubuntu-sycl-fp16-x64.tar.gz": "77194249f0c800c26230c1ce919e282ab59647b75f8c9fc3e3f5ed59ab711d3a",
-    "llama-b9870-bin-ubuntu-sycl-fp32-x64.tar.gz": "0abb480beb83f230678b397b93b9316b829485008819616abd6509d883ccd06a",
-    "llama-b9870-bin-ubuntu-vulkan-arm64.tar.gz": "ba444f0d50b1e3807e8fab44adeb05455fa2da04f0c97f2e40fdbb3c410b0e46",
-    "llama-b9870-bin-ubuntu-vulkan-x64.tar.gz": "e8a54099fb3e7afc48d85992ce45b5529298819da814d539a0593da61efe65c2",
-    "llama-b9870-bin-ubuntu-x64.tar.gz": "16897263ccd016dd76c72a4d9b6ee27f975dae19bf652b4855b37dffbe7d4df1",
-    "llama-b9870-bin-win-cpu-arm64.zip": "97b77bfbfd1889da5485552d0103f1e73a13b9ec4dfe924bf6d98543d225dab1",
-    "llama-b9870-bin-win-cpu-x64.zip": "71be86e7af277e9503847c6050948ecd943d5e34b941e178a8af0c161b2d9a9e",
-    "llama-b9870-bin-win-cuda-12.4-x64.zip": "10ced0b05eb1fdf47981dfe39e820a9465804b9250811f1173d935a22d336d6f",
-    "llama-b9870-bin-win-cuda-13.3-x64.zip": "864a0a80b802124b34f19d3ce4cf327a2bd5fe9d41fe2dc21f7c63a0ed561979",
-    "llama-b9870-bin-win-hip-radeon-x64.zip": "834196230bffe3847a553b680398c1438bfc85bdbab2d5061be28db5fd8648bb",
-    "llama-b9870-bin-win-opencl-adreno-arm64.zip": "5b86328a27841d1aae3c477a414782d92f8135e46f5113dbca102474ae08115e",
-    "llama-b9870-bin-win-openvino-2026.2.1-x64.zip": "802ac0c28c4096d126062644b0bcf94d4cd13c4dc7eed08f835b29164f3e6643",
-    "llama-b9870-bin-win-sycl-x64.zip": "3b96c98aacac996ece92cd532c0a1a36215f14cd01c840c097fe72812c5d0c4b",
-    "llama-b9870-bin-win-vulkan-x64.zip": "8687a8405447853ccbd6b15bd7ccda23bb79cf85dd83243401e514bd9e45ed8a",
-    "llama-b9870-ui.tar.gz": "c0f6299ff94678fe9799cd09ef6c7f2d6fae9f55b86365b8825b5fc9c93772fa",
-    "llama-b9870-xcframework.zip": "792cb6560abc2e04262b105eb9ca3d5890814f358f998adea4e28497788e59f7",
 }
 
 # Per-backend asset matcher: substrings that must appear in the release asset
@@ -204,24 +313,28 @@ _ASSET_MATCH = {
         # Upstream renamed the Windows ROCm/HIP asset at b10356 (2026-08-11,
         # PR 25775 "Add CI targets for ROCm 7.14"): "bin-win-hip-radeon-x64"
         # -> "bin-win-rocm-<version>-x64" (e.g. bin-win-rocm-7.14-x64), the
-        # same shape as the Linux asset's own versioned name. The OLD name is
-        # kept FIRST because the pinned _PINNED_FALLBACK_SHA256 entry for the
-        # frozen b9870 fallback tag is genuinely still named that way there
-        # (that tag predates the rename and its assets never change); the NEW
-        # generic fragment is what matches every live tag going forward,
-        # mirroring the Linux entry's existing "specific, then generic" shape
-        # below. Without the generic fragment this backend silently guessed a
-        # URL for a filename that no longer exists at the live tag and 404'd -
-        # caught 2026-08-11 while building the AMD ROCm-detection escalation
+        # same shape as the Linux asset's own versioned name. Without a fragment
+        # matching the new name this backend silently guessed a URL for a
+        # filename that no longer exists and 404'd - caught 2026-08-11 while
+        # building the AMD ROCm-detection escalation
         # (dev-notes/BLACKWELL-FIELD-FIXES-fix_plan.md, U5).
-        "hip":    ["bin-win-hip-radeon-x64", "bin-win-rocm"],
+        #
+        # ORDER: newest naming first, mirroring the Linux entry's "specific, then
+        # generic" shape below. The OLD name used to be first because the frozen
+        # b9870 fallback tag's pinned assets were genuinely still named that way;
+        # that tag and its entries are gone with _FALLBACK_TAG, so leading with a
+        # name upstream no longer publishes would only ever mis-resolve. It stays
+        # LAST so an explicit --tag on a pre-rename release still works.
+        "hip":    ["bin-win-rocm-7.14-x64", "bin-win-rocm", "bin-win-hip-radeon-x64"],
     },
     "linux": {
         "cpu":    ["bin-ubuntu-x64"],
         "vulkan": ["bin-ubuntu-vulkan-x64"],
         "cuda":   ["bin-ubuntu-cuda"],
         "sycl":   ["bin-ubuntu-sycl-fp16-x64", "bin-ubuntu-sycl-fp16", "bin-ubuntu-sycl"],
-        "hip":    ["bin-ubuntu-rocm-7.2-x64", "bin-ubuntu-rocm"],
+        # Same versioned-name drift as the Windows entry above: 7.2 at the old
+        # fallback tag, 7.14 at the pinned one. Newest first, generic last.
+        "hip":    ["bin-ubuntu-rocm-7.14-x64", "bin-ubuntu-rocm-7.2-x64", "bin-ubuntu-rocm"],
     },
     "darwin": {
         "cpu":    ["bin-macos-arm64", "bin-macos-x64"],
@@ -409,9 +522,30 @@ def _is_safe_tag(tag: "Optional[str]") -> bool:
     return bool(_TAG_SAFE_RE.match(tag)) and ".." not in tag
 
 
+def tracks_latest() -> bool:
+    """Whether this install has opted IN to upstream's newest release rather than
+    the confirmed build localm ships (``setup-llama --tag latest``).
+
+    Deliberately a SEPARATE accessor from pinned_tag() rather than a third
+    possible return value from it. Every caller of pinned_tag() interpolates what
+    it gets into a release URL path segment, so a sentinel leaking through there
+    would produce a confident request for a release named "latest"; keeping the
+    two apart makes that unrepresentable rather than merely unlikely.
+
+    Never raises, same contract as pinned_tag(): an unreadable config degrades to
+    "not tracking", which is the conservative answer - it means the shipped,
+    confirmed pin."""
+    try:
+        raw = config.load_config().get("llama_runtime_pin") or ""
+    except Exception:
+        return False
+    return str(raw).strip().lower() == _TRACK_LATEST
+
+
 def pinned_tag() -> "Optional[str]":
-    """The llama.cpp release tag the user has pinned, or None when the install
-    tracks upstream's newest release (the default).
+    """The exact llama.cpp release tag the user has pinned, or None when they
+    have not pinned one (the default, which installs _PINNED_TAG, and the
+    ``--tag latest`` tracking mode, which is tracks_latest()'s business).
 
     VALIDATED ON READ, not only where --tag writes it. The CLI flag is not the
     only way this value can arrive: the key is HIDDEN with no coercion branch, so
@@ -430,7 +564,7 @@ def pinned_tag() -> "Optional[str]":
     except Exception:
         return None
     raw = str(raw).strip()
-    if not raw:
+    if not raw or raw.lower() == _TRACK_LATEST:
         return None
     if not _is_safe_tag(raw):
         console.print(f"[yellow]Warning:[/yellow] ignoring the stored llama.cpp "
@@ -442,10 +576,11 @@ def pinned_tag() -> "Optional[str]":
 
 
 def set_pinned_tag(tag: "Optional[str]") -> None:
-    """Pin *tag*, or clear the pin when *tag* is falsy. Raises on a config write
-    failure: unlike recording history, a pin the user explicitly asked for must
-    never silently fail to stick (a silently-unpinned install is exactly the
-    surprise this whole unit exists to remove)."""
+    """Store the user's build choice: an exact tag, the _TRACK_LATEST sentinel,
+    or falsy to clear it back to the shipped _PINNED_TAG. Raises on a config
+    write failure: unlike recording history, a choice the user explicitly asked
+    for must never silently fail to stick (a silently-unpinned install is exactly
+    the surprise this whole area exists to remove)."""
     value = (tag or "").strip()
     config.update_config(lambda cfg: cfg.__setitem__("llama_runtime_pin", value))
 
@@ -539,22 +674,26 @@ def check_runtime_update() -> dict:
     counterpart to a real re-provision, for a "check for updates" surface (the
     GUI's runtime-update card; see localm/plugins/gui/routes/runtime.py).
 
-    The comparison target is a PIN if one is set (an install that pinned away
-    from a broken release must not be told a newer build is "available" -
-    that newer build is exactly what it pinned away from), else upstream's
-    newest release with uploaded assets (the same ``_latest_tag()`` a bare
-    ``setup-llama`` resolves against). ``amd-rocm`` compares against its fixed
-    ``_ROCM_TAG`` instead, since that build is never resolved from an upstream
-    tag at all.
+    The comparison target is whatever ``setup-llama`` would install right now,
+    which is the point - the two must never disagree, or the GUI offers an
+    update to a build the command would not install. So: an exact PIN if one is
+    set (an install that pinned away from a broken release must not be told a
+    newer build is "available" - that newer build is exactly what it pinned away
+    from), else upstream's newest when the user opted into tracking, else the
+    shipped ``_PINNED_TAG``. ``amd-rocm`` compares against its fixed
+    ``_ROCM_TAG``, since that build is never resolved from an upstream tag at all.
 
-    This target is a CANDIDATE, not a proof: whether it actually loads on this
-    machine is only established by attempting the provision - setup-llama's
-    existing ABI walk-back (``_provision_with_fallback``) is what makes the
-    build it eventually lands on the confirmed one, exactly as for every other
-    install path. This function only says whether the installed build differs
-    from the candidate; it makes the same release-listing network call a bare
-    ``setup-llama`` would (so a caller on an event loop must offload it, same
-    as ``updater.check()``), and never re-provisions anything.
+    ONLY THE TRACKING CASE MAKES A NETWORK CALL NOW. The default path answers
+    from a constant, so the GUI's runtime-update card no longer reaches GitHub on
+    every check. The offload in localm/plugins/gui/routes/runtime.py stays right
+    regardless: a tracking install still needs it, and a route cannot know which
+    kind of install it is serving.
+
+    This target is a CANDIDATE, not a proof that it loads on THIS machine: that
+    is only established by attempting the provision, which is what
+    ``_provision_with_fallback`` does on every install path. This function only
+    says whether the installed build differs from the candidate, and never
+    re-provisions anything.
 
     Returns ``{installed, backend, current, target, newer, pinned}``.
     ``installed`` is False when nothing has been provisioned yet (there is no
@@ -572,8 +711,10 @@ def check_runtime_update() -> dict:
         target = _ROCM_TAG
     elif pin:
         target = pin
-    else:
+    elif tracks_latest():
         target = _latest_tag()
+    else:
+        target = _PINNED_TAG
     newer = bool(target) and target != current
     return {"installed": True, "backend": backend, "current": current,
             "target": target, "newer": newer, "pinned": pin}
@@ -581,18 +722,28 @@ def check_runtime_update() -> dict:
 
 def _tag_for(backend: str) -> str:
     """The upstream llama.cpp release tag to provision for *backend*: the user's
-    pin when one is set, else upstream's newest release with uploaded assets.
+    exact pin when one is set, else upstream's newest if they opted into tracking
+    it, else the confirmed build localm ships (_PINNED_TAG).
 
     THE ONLY PLACE THAT DECIDES A TAG for the upstream-resolved backends, so a
-    pin cannot be honoured on one code path and ignored on another. Note it is
+    choice cannot be honoured on one code path and ignored on another. Note it is
     NOT consulted for amd-rocm, whose build comes from lemonade-sdk's own
     release numbering (_ROCM_TAG) - a different tag space entirely, in which an
     upstream bNNNNN means nothing. _pin_note_for_backend says so out loud rather
-    than letting the pin look applied."""
+    than letting the pin look applied.
+
+    THE DEFAULT BRANCH MAKES NO NETWORK CALL, and that is the substance of the
+    change rather than a side benefit: while this function ended in a live
+    release-listing lookup, what an install got was decided by whoever had
+    published most recently, on every machine, for every released localm - so a
+    build nobody here had ever run could arrive without a single localm change.
+    A constant cannot do that."""
     pin = pinned_tag()
     if pin:
         return pin
-    return _latest_tag()
+    if tracks_latest():
+        return _latest_tag()
+    return _PINNED_TAG
 
 
 def _pin_note_for_backend(backend: str) -> None:
@@ -600,13 +751,25 @@ def _pin_note_for_backend(backend: str) -> None:
     provisioned, instead of dropping it silently (AGENTS.md rule 5). Only
     amd-rocm is in that position today: its tag is lemonade-sdk's, not
     upstream's."""
+    if backend != "amd-rocm":
+        return
     pin = pinned_tag()
-    if pin and backend == "amd-rocm":
+    if pin:
         console.print(
             f"[yellow]Note:[/yellow] the pinned llama.cpp build {pin} does not "
             f"apply to the amd-rocm backend - it ships from lemonade-sdk's own "
             f"release numbering ({_ROCM_TAG}), a different tag series. The pin "
             "stays set and applies to every other backend.")
+    elif tracks_latest():
+        # Same reason, other choice: --tag latest is equally inapplicable here,
+        # and saying nothing would let a user believe this install is tracking
+        # upstream when this backend cannot.
+        console.print(
+            "[yellow]Note:[/yellow] '--tag latest' does not apply to the "
+            f"amd-rocm backend - it ships from lemonade-sdk's own release "
+            f"numbering ({_ROCM_TAG}), a different tag series, fixed by the "
+            "localm release you are running. The setting stays and applies to "
+            "every other backend.")
 
 
 def _is_wanted(f: Path) -> bool:
@@ -832,8 +995,17 @@ def _auto_backend() -> str:
 
 def _latest_tag() -> str:
     """The newest ggml-org/llama.cpp release tag that actually has its build
-    assets uploaded, or the pinned fallback if no such release can be found
-    (offline, rate-limited, etc.).
+    assets uploaded, or _PINNED_TAG if no such release can be found (offline,
+    rate-limited, etc.).
+
+    ONLY REACHED WHEN THE USER OPTED IN with ``--tag latest``. It is no longer
+    the default: see _tag_for. What it returns is by construction a build nobody
+    here has run, which is the trade that flag exists to offer.
+
+    The unavailable case falls back to _PINNED_TAG and not to some older release,
+    because the alternative is handing a user a build that is BOTH unconfirmed
+    and not what they asked for. The confirmed pin is the one thing we can offer
+    honestly when the lookup fails, and the message below says which they got.
 
     Upstream publishes a release (tag + notes) as soon as it is cut, then its CI
     matrix uploads the ~25 platform archives afterwards - which can take a while.
@@ -846,13 +1018,15 @@ def _latest_tag() -> str:
     tags = _recent_tags()
     if tags:
         return tags[0]
-    # Surface the fallback so the user knows the build may not be current (the
-    # release lookup was unreachable, or none of the recent releases has its
-    # assets uploaded yet); offer to rerun later for the latest.
+    # Surface it: the user asked to track upstream and is not getting upstream's
+    # newest, which they would otherwise discover much later as "localm installed
+    # an old build". Name what they got and why.
     console.print(f"[yellow]Could not find a ggml-org/llama.cpp release with "
-                  f"uploaded assets; using pinned llama.cpp {_FALLBACK_TAG} - "
-                  "rerun later for the latest.[/yellow]")
-    return _FALLBACK_TAG
+                  f"uploaded assets (the release lookup was unreachable, or the "
+                  f"newest releases have not finished uploading). Installing "
+                  f"localm's confirmed build {_PINNED_TAG} instead - rerun later "
+                  "for upstream's newest.[/yellow]")
+    return _PINNED_TAG
 
 
 def _recent_tags(limit: int = 10) -> list:
@@ -1009,10 +1183,38 @@ def _resolve_backend_asset(backend: str, cuda_line: Optional[str] = None,
                 sha = _PINNED_FALLBACK_SHA256.get(a.get("name", ""))
             return url, sha, tag
 
-    # Fallback: construct the canonical URL from the first matcher token.
-    stem = matchers[0]
-    ext = "zip" if plat == "win32" else "tar.gz"
-    fname = f"llama-{tag}-{stem}.{ext}"
+    # Fallback: the release listing was unavailable, so the asset name has to
+    # come from somewhere else.
+    #
+    # PREFER A REAL NAME WE ALREADY KNOW over a constructed one. For a tag this
+    # file pins, _PINNED_FALLBACK_SHA256 IS that release's asset list, so the
+    # exact filename is in hand and needs no guessing. Matchers are tried in
+    # their declared order, because that order encodes a preference the names
+    # alone do not: linux sycl lists the fp16 build first and a bare
+    # "bin-ubuntu-sycl" would also match fp32.
+    #
+    # This is not a tidy-up. The template below builds `llama-<tag>-<matcher>`,
+    # which silently stops matching whenever upstream renames an asset - and it
+    # had: b10356 renamed the Windows ROCm asset from `bin-win-hip-radeon-x64` to
+    # `bin-win-rocm-<version>-x64`, and the Linux ROCm asset at the pinned tag is
+    # `bin-ubuntu-rocm-7.14-x64.ZIP`, an extension the template cannot even
+    # express (it assumes tar.gz off win32). Both produced a confident 404 offline.
+    # Reading the name from the table fixes every such rename at once, and keeps
+    # fixing them: bump the pin and its digests, and this follows.
+    fname = ""
+    for m in matchers:
+        hits = sorted(n for n in _PINNED_FALLBACK_SHA256
+                      if n.startswith(f"llama-{tag}-") and m in n.lower()
+                      and "cudart" not in n)
+        if hits:
+            fname = hits[0]
+            break
+    if not fname:
+        # An unpinned tag (--tag <something>), so there is nothing to read and a
+        # constructed name is the only option left. Still worth attempting: it is
+        # right whenever upstream's naming has not drifted.
+        ext = "zip" if plat == "win32" else "tar.gz"
+        fname = f"llama-{tag}-{matchers[0]}.{ext}"
     guess = f"https://github.com/{_UPSTREAM_REPO}/releases/download/{tag}/{fname}"
     sha = _PINNED_FALLBACK_SHA256.get(fname)
     console.print(f"[yellow]Could not verify release asset list; using unverified URL: {guess}[/yellow]\n"
@@ -1945,11 +2147,16 @@ def _exit_provisioning_busy(e: ProvisioningBusyError) -> None:
 def _fetch_verified(url: str, target: Path, sha: Optional[str], what: str = "release asset") -> None:
     """Fetch + place an archive, WARNING honestly when no checksum is available
     to verify it. A security step that silently does not run is a hidden problem
-    (AGENTS.md rule 5): on the dynamic latest-release path the GitHub asset often
-    publishes no `digest` and the pinned-hash table rarely matches the newest
-    tag, so the provenance check would otherwise be skipped in complete silence -
-    while the CHANGELOG tells the user downloads are checksum-verified by default
-    (AUDIT-MED-19). Size + archive-shape checks still apply either way."""
+    (AGENTS.md rule 5): a GitHub asset can publish no `digest`, and the offline
+    hash table only covers the tags this file pins, so the provenance check would
+    otherwise be skipped in complete silence - while the CHANGELOG tells the user
+    downloads are checksum-verified by default (AUDIT-MED-19). Size +
+    archive-shape checks still apply either way.
+
+    Which path is exposed changed with the pin: _PINNED_TAG's own assets ARE in
+    that table, so the DEFAULT install stays verified even when the release
+    listing is unavailable. It is the `--tag latest` and arbitrary `--tag <x>`
+    paths that can land here with nothing to check against."""
     if not sha:
         console.print(
             f"[yellow]Warning: this {what} publishes no checksum, so the download's "
@@ -2415,73 +2622,104 @@ def _cuda_setup_dialogue(info: NvidiaInfo, assume_yes: bool, det=None) -> tuple:
     return "vulkan", False
 
 
-# How many older releases the ABI walk-back may try before giving up. Bounded on
-# purpose: an unbounded scan would download a runtime per iteration against a
-# genuinely broken environment, and "we tried the last few releases" is the
-# honest scope of this recovery. A real layout break is fixed by binding the
-# layout, not by walking indefinitely backwards.
-_ABI_WALKBACK_MAX = 3
+# WAS a bounded WALK over the last few upstream releases, picking whichever one
+# happened to load. It is now a FLOOR at _PINNED_TAG, and the difference is the
+# whole point rather than a tidy-up.
+#
+# A walk SELECTS A VERSION WHILE SETUP IS RUNNING, which is exactly what the pin
+# exists to stop; and it selects it on the ABI gate alone, so its destination is
+# "an older build that LOADS" - a build nobody has ever generated a token with.
+# Under a pin it also inverts: landing the user on an older, less-tested release
+# is a worse outcome than the one it was rescuing them from, and it looks like a
+# success.
+#
+# A floor has exactly ONE destination and it is a constant: the build we
+# confirmed. It cannot go anywhere a human did not decide, and it can only ever
+# move the user TOWARDS the tested build, never away from it.
+_FLOOR_TAG_DESCRIPTION = "the confirmed build localm ships"
 
 
-def _walk_back_tags(chosen: str, with_cudart: bool, rejected_tag: str,
-                    try_fn, detail: str) -> tuple:
-    """Retry *chosen* against progressively older upstream releases after our ABI
-    gate refused *rejected_tag*. Returns ``(ok, tag)``.
+def _floor_at_pinned_tag(chosen: str, with_cudart: bool, rejected_tag: str,
+                         try_fn, detail: str) -> tuple:
+    """After our own ABI gate refused *rejected_tag*, fall back to _PINNED_TAG -
+    the one build we confirmed - and only from an install that had opted OUT of
+    it. Returns ``(ok, tag)``.
 
-    Says which release it landed on AND why it is not the newest, every time -
-    a recovery the user cannot see is the failure mode this whole area keeps
-    producing. Never silent, never unbounded.
+    LOUD IN EVERY BRANCH, including the ones that do nothing. That is the point:
+    three of the four outcomes here install nothing at all, and a recovery (or a
+    refusal) the user cannot see is the failure mode this area keeps producing.
+    Each branch names the build involved, the ABI reason, and the --tag command
+    that changes it.
 
-    A PINNED build is NOT walked back from. The pin is an explicit choice and
-    moving off it is exactly the override the project forbids; the user is told
-    their pinned build does not load here and given the two commands that change
-    it. That check lives here rather than at the call site so the rule cannot be
-    bypassed by a future second caller."""
+    THE FOUR CASES, which need genuinely different answers:
+
+      * an exact USER PIN - not moved, ever. Moving off it is the override this
+        project forbids, and the user is told which commands change it. The check
+        lives here rather than at the call site so a future second caller cannot
+        bypass it.
+      * TRACKING upstream (--tag latest) - the case the floor exists for. The
+        user asked for a build nobody had confirmed, got one our gate refuses,
+        and the confirmed pin is the honest destination. Exactly one attempt: the
+        destination is a constant, so there is nothing to iterate over.
+      * ALREADY ON THE PIN - nothing to fall back TO; the floor IS what was just
+        refused. This means localm shipped a pin its own binding rejects, which
+        is a localm bug rather than an upstream one, and saying so is the whole
+        value of this branch. Silently installing some older release here would
+        replace a loud localm bug with a quiet unconfirmed runtime.
+      * the pin itself then fails to load - reported with both causes."""
     pin = pinned_tag()
     if pin:
         console.print(
             f"[red]The pinned llama.cpp build {pin} does not load on this "
             f"machine:[/red] {detail}")
         console.print("[dim]Your pin is kept, not changed. Move it with: "
-                      "localm setup-llama --rollback  (previous build), or "
-                      "localm setup-llama --tag latest  (track upstream again)"
-                      "[/dim]")
-        return False, None
-
-    candidates = [t for t in _recent_tags() if t != rejected_tag]
-    if not candidates:
-        console.print("[yellow]No older llama.cpp release is available to fall "
-                      "back to.[/yellow]")
+                      "localm setup-llama --rollback  (previous build), "
+                      "localm setup-llama --tag default  (the build localm "
+                      "ships and confirmed), or localm setup-llama --tag latest "
+                      "(track upstream).[/dim]")
         return False, None
 
     console.print(f"[yellow]llama.cpp {rejected_tag} was rejected by localm's own "
                   f"ABI check:[/yellow] {detail}")
-    console.print("[dim]This is a mismatch between that release and this build "
-                  "of localm, not a fault of your machine. Trying the previous "
-                  "release(s) so you get a runtime that works.[/dim]")
+    console.print("[dim]That is a mismatch between the release and this build of "
+                  "localm, not a fault of your machine.[/dim]")
 
-    for tag in candidates[:_ABI_WALKBACK_MAX]:
-        console.print(f"[yellow]Trying llama.cpp {tag}...[/yellow]")
-        try:
-            try_fn(chosen, with_cudart, tag)
-        except Exception as e:
-            console.print(f"[red]{tag} could not be provisioned:[/red] {e}")
-            continue
-        ok, why = _native_loads_ok()
-        if ok:
-            # State the outcome AND the reason it is not the newest: a user who
-            # is not told will report "localm installed an old runtime" as a bug.
-            console.print(f"[green]OK - llama.cpp {tag} loads on this machine.[/green]")
-            console.print(f"[dim]Installed {tag} rather than {rejected_tag}, "
-                          "because the newer release does not match this build "
-                          "of localm. Update localm and re-run "
-                          "'localm setup-llama --force' to move forward again."
-                          "[/dim]")
-            return True, tag
-        console.print(f"[red]{tag} did not load either:[/red] {why or 'unknown'}")
-    console.print(f"[yellow]None of the last {_ABI_WALKBACK_MAX} llama.cpp "
-                  "releases loaded here.[/yellow]")
-    return False, None
+    if rejected_tag == _PINNED_TAG or not tracks_latest():
+        # No floor below the floor. Do not go hunting for some older release that
+        # happens to load: that build is one nobody confirmed, and installing it
+        # would turn a localm bug we can fix into a runtime we cannot vouch for.
+        console.print(
+            f"[red]{_PINNED_TAG} is {_FLOOR_TAG_DESCRIPTION}, so there is no "
+            "more-tested build to fall back to.[/red]")
+        console.print("[dim]This means this localm and its own pinned llama.cpp "
+                      "build disagree, which is a bug in localm rather than in "
+                      "the release. Please report it. To try another build "
+                      "meanwhile: localm setup-llama --tag <release>  (for "
+                      "example --tag b10361).[/dim]")
+        return False, None
+
+    console.print(f"[yellow]Falling back to {_PINNED_TAG}, {_FLOOR_TAG_DESCRIPTION}"
+                  f".[/yellow]")
+    try:
+        try_fn(chosen, with_cudart, _PINNED_TAG)
+    except Exception as e:
+        console.print(f"[red]{_PINNED_TAG} could not be provisioned:[/red] {e}")
+        return False, None
+    ok, why = _native_loads_ok()
+    if not ok:
+        console.print(f"[red]{_PINNED_TAG} did not load either:[/red] "
+                      f"{why or 'unknown'}")
+        return False, None
+    # State the outcome AND why it is not what was asked for: a user who is not
+    # told will report "localm installed an old runtime" as a bug.
+    console.print(f"[green]OK - llama.cpp {_PINNED_TAG} loads on this machine."
+                  "[/green]")
+    console.print(f"[dim]Installed {_PINNED_TAG} rather than {rejected_tag}: you "
+                  "asked to track upstream's newest (--tag latest) and that "
+                  "release does not match this build of localm. Update localm "
+                  "and re-run 'localm setup-llama --force' to move forward "
+                  "again.[/dim]")
+    return True, _PINNED_TAG
 
 
 def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
@@ -2569,26 +2807,31 @@ def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
     # This runs BEFORE the backend fallback below, and the order is the whole
     # point. An ABI rejection means the BUILD is wrong for this code, so EVERY
     # backend from that release fails identically - field issue 1208 reports
-    # cuda, vulkan AND cpu all AbiMismatch together. Falling back by backend
-    # first therefore cannot help, burns the whole chain, and ends in "no
-    # backend could be provisioned" having also moved the user off the backend
-    # they asked for. Walking back a RELEASE addresses the actual cause.
+    # cuda, vulkan AND cpu all AbiMismatch together, and the structural reason is
+    # that one shared llama library carries the struct (see _PINNED_TAG).
+    # Falling back by backend first therefore cannot help, burns the whole chain,
+    # and ends in "no backend could be provisioned" having also moved the user
+    # off the backend they asked for. Addressing the RELEASE addresses the cause.
     #
     # Gated on an ABI rejection SPECIFICALLY, never on any load failure: "cuda
-    # will not load, the driver is too old" is about this MACHINE and an older
+    # will not load, the driver is too old" is about this MACHINE and a different
     # release cannot fix it, so that case must still reach the vulkan fallback.
     #
     # NOT written as "avoid a known-bad tag", and deliberately so. The property
     # is "never ship a runtime our gate rejects", whichever tag and whatever the
-    # cause; a hard-coded tag would be wrong the moment the binding is fixed.
-    # Once it is, the rejection stops happening and this loop simply never runs.
+    # cause; a hard-coded bad tag would be wrong the moment the binding is fixed.
+    # With the pin in place this should now be unreachable on a default install:
+    # the pinned build is one we loaded and generated with. If it fires there
+    # anyway, that is a finding about the pin, and _floor_at_pinned_tag says so
+    # rather than quietly installing something else.
     if _is_abi_rejection(detail) and used_tag[0]:
-        walked, walk_tag = _walk_back_tags(chosen, with_cudart, used_tag[0],
-                                           _try, detail)
-        if walked:
-            return chosen, walk_tag
-        # Fall through: no older release loaded either, so this is not a
-        # release-drift problem after all and the backend fallback is next.
+        floored, floor_tag = _floor_at_pinned_tag(chosen, with_cudart, used_tag[0],
+                                                  _try, detail)
+        if floored:
+            return chosen, floor_tag
+        # Fall through: the confirmed build did not load either (or there was
+        # none to fall back to), so this is not release drift after all and the
+        # backend fallback is next.
 
     # An explicit --sha256 pin means "exactly this artifact" - never silently
     # swap to a different (unpinned) build, even to recover. Report and stop.
@@ -2689,7 +2932,8 @@ def _validated_tag(raw: str) -> str:
         raise click.ClickException(
             f"{raw!r} is not a usable release tag. Use a tag as upstream "
             "publishes it, for example 'b10355' (letters, digits, dot, dash and "
-            "underscore only), or 'latest' to stop pinning.")
+            f"underscore only), or {_TRACK_DEFAULT!r} for the build localm ships "
+            f"and confirmed, or {_TRACK_LATEST!r} for upstream's newest.")
     return tag
 
 
@@ -2729,20 +2973,37 @@ def _apply_version_request(tag: Optional[str], rollback: bool, backend: str,
             "installs a build you supply. Run them separately.")
 
     if tag is not None:
-        # "latest" is the documented way OUT of a pin. Spelled as a word rather
-        # than an empty --tag so the intent is visible in shell history and in a
-        # script, and so a variable that expanded to nothing cannot silently
-        # unpin an install.
-        if tag.strip().lower() == "latest":
+        # TWO WORDS, because they name two different destinations. Before the pin
+        # existed there was only one: clearing the pin meant tracking upstream's
+        # newest, so "latest" could mean both "unpin" and "track upstream" at
+        # once. Now the unpinned default is the build localm confirmed, so a user
+        # who wants upstream's newest is asking for something the default is NOT,
+        # and reusing one word for both would silently give one of them the other.
+        #
+        # Both are spelled as words rather than an empty --tag so the intent is
+        # visible in shell history and in a script, and so a shell variable that
+        # expanded to nothing cannot silently change what an install tracks.
+        if tag.strip().lower() == _TRACK_DEFAULT:
             set_pinned_tag(None)
-            console.print("[green]Pin cleared[/green] - installs now track the "
-                          "newest upstream llama.cpp release again.")
+            console.print(f"[green]Back to localm's confirmed build[/green] "
+                          f"({_PINNED_TAG}) - the one this release was tested "
+                          "with. Re-run setup-llama --force to install it now.")
+            return
+        if tag.strip().lower() == _TRACK_LATEST:
+            set_pinned_tag(_TRACK_LATEST)
+            console.print("[yellow]Now tracking upstream's newest llama.cpp "
+                          "release.[/yellow] That build is whatever ggml-org "
+                          "published most recently and localm has NOT tested it; "
+                          "upstream has shipped releases this code cannot load. "
+                          f"Go back with: [bold]localm setup-llama --tag "
+                          f"{_TRACK_DEFAULT}[/bold] ({_PINNED_TAG}).")
             return
         wanted = _validated_tag(tag)
         set_pinned_tag(wanted)
         console.print(f"[green]Pinned[/green] llama.cpp {wanted} - setup-llama "
                       "and localm update will keep this build until you run "
-                      "[bold]localm setup-llama --tag latest[/bold].")
+                      f"[bold]localm setup-llama --tag {_TRACK_DEFAULT}[/bold] "
+                      f"(back to localm's confirmed {_PINNED_TAG}).")
         return
 
     # --rollback. The backend is the one the user named, else whatever is
@@ -2803,8 +3064,9 @@ def _apply_version_request(tag: Optional[str], rollback: bool, backend: str,
 @click.option("--tag", "tag", default=None, metavar="TAG",
               help="Install a specific llama.cpp release (e.g. 'b10355') and PIN "
                    "it, so later setup-llama runs and 'localm update' keep that "
-                   "exact build instead of moving to whatever upstream published "
-                   "since. Use 'latest' to clear the pin and track upstream again.")
+                   "exact build. Two words are special: 'latest' opts in to "
+                   "upstream's newest release, which localm has not tested, and "
+                   "'default' returns to the build localm ships and confirmed.")
 @click.option("--rollback", is_flag=True,
               help="Go back to the previous llama.cpp build recorded for this "
                    "backend and pin it. For when an upstream release turns out to "
@@ -2840,7 +3102,8 @@ def main(from_dir: Optional[str], backend: str, url: Optional[str],
       localm setup-llama --url https://.../llama-...zip
       localm setup-llama --sha256 <hex>         # pin the expected archive digest
       localm setup-llama --tag b10355           # install exactly b10355 and keep it
-      localm setup-llama --tag latest           # stop pinning, track upstream again
+      localm setup-llama --tag latest           # track upstream's newest (untested here)
+      localm setup-llama --tag default          # back to the build localm confirmed
       localm setup-llama --rollback             # back to the previous build
     """
     lib_name = _lib_name()
