@@ -121,6 +121,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
   grammar you asked for. It is now refused with a message naming which of the
   two it was and what to do instead, the loaded model stays loaded, and the
   coder carries on without trigger-based tool calls rather than failing.
+- **A flood of tool-calling requests can no longer slow down the rest of the
+  server.** Requests that use a trigger-gated ("lazy") grammar have their
+  trigger patterns safety-checked first, and each check that had to wait its
+  turn held one of the server's shared worker threads for up to five seconds.
+  How long each one waited was capped; how many could be waiting at once was
+  not, so a large enough burst tied up threads that loading a model, embedding
+  and counting tokens also need. At most twelve of those checks can now be in
+  progress or queued at a time; beyond that, a request is answered immediately
+  with the existing "the validator is busy, retry shortly" 503 instead of
+  joining the queue. Nothing is accepted without being checked, and an ordinary
+  request that does not have to wait is unaffected.
 - **A couple of dismissable UI hints (the NVIDIA/Vulkan backend hint, and
   whether the Studio nav group is expanded) could survive turning on privacy
   mode, unlike every other saved GUI preference.** Both were already withheld

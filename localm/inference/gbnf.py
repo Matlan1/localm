@@ -360,6 +360,9 @@ MAX_TRIGGER_PATTERN_BYTES = 4096
 # a slot before being refused outright. This bounds PER-CALLER latency, which is
 # what the residual actually measures - without it, concurrency alone would still
 # let a large enough flood queue unboundedly, just N/POOL_SIZE times more slowly.
+# It is only HALF of the admission control: it says nothing about how many
+# callers may be in that wait at once. See _TRIGGER_PROBE_MAX_WAITERS below for
+# the other half, which is what bounds the THREADS rather than the latency.
 #
 # Sizing: 4 concurrent probes plus a 5.0s admission wait bounds an admitted
 # caller at roughly 5.0s of queueing plus its own _TRIGGER_PROBE_TIMEOUT, against
@@ -368,6 +371,42 @@ MAX_TRIGGER_PATTERN_BYTES = 4096
 # ONE daemon alive and this pool costs nothing over the previous single daemon.
 _TRIGGER_PROBE_POOL_SIZE = 4
 _TRIGGER_PROBE_SLOT_WAIT = 5.0
+
+# HOW MANY MAY QUEUE, which is a different bound from how long each one queues.
+#
+# The two above bound each caller's own latency; NEITHER bounds the NUMBER of
+# callers sitting in that wait at once, and until this constant existed nothing
+# else did either. Both call sites (routes/chat.py's two
+# run_in_executor(None, validate_trigger_patterns, ...) calls) run this on the
+# asyncio loop's TRUE DEFAULT executor, which is SHARED with engine.load,
+# engine.embed, count_tokens, the GPU/VRAM probes and the isolated-runner RPCs -
+# and which _executor_health.py records as having no timeout or cancellation
+# mechanism, is not covered by _threadpool_timeout (that module covers the
+# separate anyio pool), and sits under a uvicorn started with no request-level
+# timeout. So an unbounded number of waiters is an unbounded number of default-
+# executor threads parked for up to _TRIGGER_PROBE_SLOT_WAIT each, taken from
+# work that has nothing to do with grammars. Capping the wait made that
+# degradation transient; capping the waiters is what makes it bounded.
+#
+# A WAITER IS ONLY A CALLER THAT ACTUALLY HAD TO QUEUE. A caller served from a
+# free slot never takes a waiter permit at all (see _probe_pattern_is_safe's
+# get_nowait fast path), so this constant cannot refuse a caller the pool could
+# have served immediately - it bounds the QUEUE, never the throughput.
+#
+# Expressed as a multiple of the pool rather than as a bare literal because the
+# RELATION is the load-bearing part and a bare number silently breaks the day
+# someone retunes the pool: it must be >= _TRIGGER_PROBE_POOL_SIZE, or a burst
+# the pool is about to absorb gets refused while slots are freeing up.
+# test_the_waiter_cap_leaves_room_for_the_pool_it_guards asserts the relation
+# rather than the value, so retuning either one cannot break it silently.
+#
+# 2x reproduces the measured behaviour of the arm that shipped rather than
+# changing it: 4 running + 8 queued = 12 admitted, which is exactly the
+# "12 answered + 6 refused in milliseconds" of the pool=4/wait=5.0 row in
+# validate_trigger_patterns's own measurement table for 18 concurrent callers.
+# The ceiling this puts on default-executor threads held by this function is
+# therefore _TRIGGER_PROBE_POOL_SIZE + _TRIGGER_PROBE_MAX_WAITERS = 12.
+_TRIGGER_PROBE_MAX_WAITERS = 2 * _TRIGGER_PROBE_POOL_SIZE
 
 
 class _ProbeSlot:
@@ -398,6 +437,55 @@ class _ProbeSlot:
 _PROBE_SLOTS_FREE: "queue.LifoQueue" = queue.LifoQueue()
 for _ in range(_TRIGGER_PROBE_POOL_SIZE):
     _PROBE_SLOTS_FREE.put(_ProbeSlot())
+
+
+class _WaiterGate:
+    """How many callers are QUEUEING for a probe slot right now, and a
+    non-blocking way to join them.
+
+    Deliberately NOT a threading.Semaphore, for one reason worth the extra
+    dozen lines: a semaphore's remaining permits are private
+    (``_value``), so the leak that this class's ``waiting`` count makes
+    directly assertable would only be observable by reading a private
+    attribute. A waiter permit that is taken and never released is a
+    permanent, silent capacity loss - the same failure mode as a leaked pool
+    slot, and it has the same tell - so being able to assert it returned to
+    zero is worth more here than reusing the stdlib primitive.
+
+    The limit is passed to try_enter rather than stored, so a test can
+    monkeypatch _TRIGGER_PROBE_MAX_WAITERS the way it already monkeypatches
+    _TRIGGER_PROBE_SLOT_WAIT and _TRIGGER_PROBE_POOL_SIZE. Storing it at
+    construction would silently ignore that patch, which is a fixture that
+    cannot express the case it exists to test.
+    """
+
+    __slots__ = ("_lock", "_waiting")
+
+    def __init__(self) -> None:
+        self._lock = _threading.Lock()
+        self._waiting = 0
+
+    @property
+    def waiting(self) -> int:
+        with self._lock:
+            return self._waiting
+
+    def try_enter(self, limit: int) -> bool:
+        """Take a waiter permit, or return False immediately. Never blocks:
+        the whole point is that a caller which cannot queue is refused now
+        rather than queued anyway."""
+        with self._lock:
+            if self._waiting >= limit:
+                return False
+            self._waiting += 1
+            return True
+
+    def leave(self) -> None:
+        with self._lock:
+            self._waiting -= 1
+
+
+_PROBE_WAITER_GATE = _WaiterGate()
 
 # The three outcomes of a probe. SAFE and UNSAFE are statements about the
 # PATTERN; UNDETERMINED is a statement about the VALIDATOR, and conflating them
@@ -662,17 +750,24 @@ def _probe_pattern_is_safe(pattern: str) -> "tuple[str, str]":
     """(verdict, reason) where verdict is _PROBE_SAFE / _PROBE_UNSAFE /
     _PROBE_UNDETERMINED. Never raises.
 
-    ADMISSION CONTROL LIVES HERE. Checking a slot out of _PROBE_SLOTS_FREE is
-    what grants the right to run a probe, and the bounded wait for one is what
-    stops a flood queueing without limit. A caller that cannot get a slot within
-    _TRIGGER_PROBE_SLOT_WAIT is refused IMMEDIATELY as _PROBE_UNDETERMINED
-    rather than waiting behind the whole queue - the residual this closes is
-    per-caller latency, so making the last caller in a flood wait 36s "but
-    correctly" would not have fixed anything.
+    ADMISSION CONTROL LIVES HERE, in TWO bounds that answer different questions
+    and are both needed. Checking a slot out of _PROBE_SLOTS_FREE is what grants
+    the right to run a probe. _TRIGGER_PROBE_SLOT_WAIT then bounds HOW LONG one
+    caller may queue for a slot: a caller that cannot get one in that time is
+    refused as _PROBE_UNDETERMINED rather than waiting behind the whole queue,
+    because the residual this closes is per-caller latency and making the last
+    caller in a flood wait 36s "but correctly" would not have fixed anything.
+    _TRIGGER_PROBE_MAX_WAITERS bounds HOW MANY may be in that queue at once, and
+    a bounded wait does not imply a bounded queue: without it an arbitrary number
+    of callers could each be correctly parked for 5s at the same time, on the
+    shared default executor other work needs. Refusing at the gate costs
+    microseconds and is the only one of the two that a caller cannot make
+    expensive.
 
     _PROBE_UNDETERMINED is NOT a verdict about the pattern and must never be
     cached as one. It says the validator could not answer: the pool was
-    saturated, or the daemon could not be spawned or reached. The request is
+    saturated, the queue for it was full, or the daemon could not be spawned or
+    reached. The request is
     still REJECTED (an unproven pattern never reaches the native sampler), but
     an identical retry a second later can legitimately succeed."""
     # Bound the pool reference ONCE and return the slot to THAT queue, never to
@@ -681,14 +776,45 @@ def _probe_pattern_is_safe(pattern: str) -> "tuple[str, str]":
     # the pool out, where a thread still in flight would otherwise hand its slot
     # back into the restored pool and quietly grow it past its own size.
     pool = _PROBE_SLOTS_FREE
+    gate = _PROBE_WAITER_GATE
     try:
-        slot = pool.get(timeout=_TRIGGER_PROBE_SLOT_WAIT)
+        # FAST PATH, and it is what keeps the waiter cap from bounding
+        # throughput: a caller the pool can serve right now never becomes a
+        # waiter, so it never consumes a permit and can never be refused for
+        # lack of one. Only a caller that would otherwise BLOCK below is
+        # counted, which is what makes the cap a bound on the QUEUE.
+        slot = pool.get_nowait()
     except queue.Empty:
-        return _PROBE_UNDETERMINED, (
-            f"the trigger-pattern validator is busy (all "
-            f"{_TRIGGER_PROBE_POOL_SIZE} probe slots in use for more than "
-            f"{_TRIGGER_PROBE_SLOT_WAIT:.1f}s); this pattern was not checked, "
-            "so it was not accepted - retry shortly")
+        if not gate.try_enter(_TRIGGER_PROBE_MAX_WAITERS):
+            # Distinct from the timeout refusal below ON PURPOSE. Both are
+            # "the validator is busy", but they say different things to an
+            # operator reading a log: this one means the QUEUE for the pool
+            # is full, i.e. the flood is wider than this server is willing to
+            # park threads for, and it is answered in microseconds. The one
+            # below means this caller did queue and its wait ran out. Folding
+            # them into one message would hide which bound was reached, and
+            # the two are retuned by different constants.
+            return _PROBE_UNDETERMINED, (
+                f"the trigger-pattern validator is busy (all "
+                f"{_TRIGGER_PROBE_POOL_SIZE} probe slots in use and the "
+                f"{_TRIGGER_PROBE_MAX_WAITERS}-caller queue for them is "
+                "full); this pattern was not checked, so it was not accepted "
+                "- retry shortly")
+        try:
+            slot = pool.get(timeout=_TRIGGER_PROBE_SLOT_WAIT)
+        except queue.Empty:
+            return _PROBE_UNDETERMINED, (
+                f"the trigger-pattern validator is busy (all "
+                f"{_TRIGGER_PROBE_POOL_SIZE} probe slots in use for more than "
+                f"{_TRIGGER_PROBE_SLOT_WAIT:.1f}s); this pattern was not checked, "
+                "so it was not accepted - retry shortly")
+        finally:
+            # The permit covers the WAIT and nothing else, so it is given back
+            # the moment this caller stops waiting - on the refusal path too.
+            # Holding it across the probe instead would make the cap bound
+            # concurrent PROBES rather than waiters, silently re-capping the
+            # pool at a second, smaller number.
+            gate.leave()
     try:
         return _probe_on_slot(slot, pattern)
     finally:
@@ -828,10 +954,12 @@ def validate_trigger_patterns(patterns: "list[str]") -> None:
     CONCURRENT CALLERS DO NOT QUEUE BEHIND EACH OTHER, which is the 2026-07-30
     ruling's residual and is why the pool above exists rather than a single
     daemon behind a single lock. Up to _TRIGGER_PROBE_POOL_SIZE probes run at
-    once, and a caller that cannot get a slot within _TRIGGER_PROBE_SLOT_WAIT is
-    refused outright instead of waiting behind the whole queue. So the cost of a
-    flood of N distinct dangerous patterns is bounded per caller rather than
-    growing with N. MEASURED on this box, 18 concurrent adversarial patterns
+    once, a caller that cannot get a slot within _TRIGGER_PROBE_SLOT_WAIT is
+    refused outright instead of waiting behind the whole queue, and no more than
+    _TRIGGER_PROBE_MAX_WAITERS may be in that wait at any moment. So the cost of
+    a flood of N distinct dangerous patterns is bounded per caller rather than
+    growing with N, and the number of threads it can occupy is bounded too rather
+    than growing with N. MEASURED on this box, 18 concurrent adversarial patterns
     that each hang their probe, at the production 2.0s timeout, every arm in
     steady state (a cold slot legitimately gets _TRIGGER_PROBE_SPAWN_TIMEOUT for
     its FIRST query, so a cold pool measures cold start and is not comparable):
@@ -871,13 +999,23 @@ def validate_trigger_patterns(patterns: "list[str]") -> None:
     is a long time to hold an HTTP request even if it beats the unbounded queue
     it replaces.
 
-    WHAT IS STILL NOT SOLVED, stated because a bound is not an absence: that same
-    default pool carries other blocking work this server offloads (engine.load,
-    embedding, token counting), so a sustained multi-connection flood still
-    occupies executor threads - and the NUMBER of waiters is not itself capped,
-    only how long each one waits. The degradation is therefore transient rather
-    than permanent, which is the part that changed; general request-concurrency
-    bounding remains a broader problem than this one fix.
+    HOW MANY THREADS THIS CAN HOLD AT ONCE, which is a different question from
+    how long each one holds one and used to have no answer: at most
+    _TRIGGER_PROBE_POOL_SIZE running plus _TRIGGER_PROBE_MAX_WAITERS queueing,
+    i.e. 12 of that shared default executor's threads. A caller arriving on a
+    full queue is refused in microseconds as _PROBE_UNDETERMINED rather than
+    parked, so a flood wider than 12 costs this server nothing per extra caller.
+    Before that cap, "bounded" described only each caller's own latency while an
+    arbitrary number of them could be parked at once, which is the shape that
+    starves the OTHER work sharing that pool (engine.load, embedding, token
+    counting) rather than starving grammar validation.
+
+    WHAT IS STILL NOT SOLVED, stated because a bound is not an absence: 12
+    threads is a bound, not zero, and it is a bound on THIS function only. The
+    same default pool carries that other blocking work with no equivalent cap of
+    its own, so general request-concurrency bounding remains a broader problem
+    than this one fix. What changed is that grammar validation can no longer be
+    the unbounded contributor to it.
 
     Each unique pattern's final verdict (from either layer) is cached for
     this process's lifetime, keyed on the exact pattern string - most real
