@@ -40,10 +40,24 @@ const FOREIGN_CONV = {
              { role: "assistant", content: "here is the reply" }],
 };
 
-function makeFetch({ instanceId, putCalls, indexConversations = [] } = {}) {
+// configStatus / configThrows exist because this fixture used to HARDCODE
+// /v1/config to {ok:true, status:200}: the value space had no room for a FAILED
+// round trip at all, so the "or a failed round trip" case named in chat.js's own
+// comments was untestable by construction and the fail-open guard below went
+// unmeasured. The two failures are kept separate deliberately - a non-ok answer
+// and a rejected fetch reach refreshCtxLimit through different paths (the
+// `if (r.ok)` branch versus the `catch`), so one of them passing proves nothing
+// about the other.
+function makeFetch({ instanceId, putCalls, indexConversations = [],
+                    configStatus = 200, configThrows = false } = {}) {
   return async (url, opts) => {
     const u = String(url);
     if (u === "/v1/config") {
+      if (configThrows) throw new TypeError("Failed to fetch");
+      if (configStatus !== 200) {
+        return { ok: false, status: configStatus, text: async () => "",
+                 json: async () => ({}) };
+      }
       return { ok: true, status: 200, text: async () => "", json: async () => (
         { effective_mode: "log", n_ctx_max: 16384, instance_id: instanceId }) };
     }
@@ -499,4 +513,120 @@ test("AUD-INSTANCEID residual 2: an UNKNOWN instance state (old server, no " +
   assert.equal(putCalls.length, 0,
     "an UNCONFIRMED (unknown) instance state must never upload a local-only " +
     "conversation to the backend's own store - only a CONFIRMED match may");
+});
+
+// --------------------------------------------------------------------------- //
+//  Residual 2, the FAILED-ROUND-TRIP half: the test above proves an old server //
+//  (answers, no instance_id) cannot authorise an upload. A /v1/config that     //
+//  never answers at all took a different path - it skipped the reconciliation  //
+//  entirely and left BOTH flags at their permissive boot defaults, so the      //
+//  guard read "confirmed" for a backend it had never heard from.               //
+// --------------------------------------------------------------------------- //
+
+// A conversation cached under a PREVIOUSLY confirmed pairing. Whether the
+// backend now behind this origin is that same one is exactly what the failed
+// round trip leaves unanswered.
+const CACHED_LOCAL_ONLY = {
+  id: "local-only-3", title: "Cached under an unverified pairing", updated_at: 1,
+  pinned: false, folder: null, branches: [], messages: [{ role: "user", content: "hi" }],
+};
+const CACHED_SEED = {
+  "localm.instanceId": "backend-a",
+  "localm.conversations": JSON.stringify([CACHED_LOCAL_ONLY]),
+};
+
+test("AUD-INSTANCEID residual 2: a NON-OK /v1/config (HTTP 500) leaves the " +
+     "instance UNCONFIRMED - the cached conversation still renders, but must " +
+     "never be uploaded to a backend that was never identified", async () => {
+  const putCalls = [];
+  const { window } = loadApp({
+    fetchImpl: makeFetch({ instanceId: "backend-a", putCalls, configStatus: 500 }),
+    seedLocalStorage: { ...CACHED_SEED },
+  });
+  runScript(window, "window.chatState = chat;");
+  await drain();
+  // Ride out pushConversation's 600ms debounce BEFORE reading putCalls: without
+  // this the assertion is vacuously true even on the unfixed code, because the
+  // upload has not been attempted yet.
+  await new Promise((r) => setTimeout(r, 900));
+
+  // The loss first, the mechanism second (a status flag is a proxy; the write
+  // into another install's data directory is the property).
+  assert.equal(putCalls.length, 0,
+    "a failed /v1/config round trip cannot authorise writing a cached " +
+    "conversation into the store of a backend whose identity was never confirmed");
+  assert.equal(window.chatState.instanceState, "unknown",
+    "a round trip that FAILED is not a confirmed match - it is no information");
+  assert.equal(window.chatState.instanceMatch, false,
+    "instanceMatch is the upload gate and must be false without a real match");
+
+  // ...and the other direction: this must not become a data-losing fail-CLOSED.
+  assert.equal(window.chatState.conversations.length, 1,
+    "nothing is wiped on a failed round trip - it is not a confirmed mismatch");
+  assert.ok(window.document.getElementById("conv-list").textContent
+    .includes("Cached under an unverified pairing"),
+    "the user's own cached conversation still renders while the server is unreachable");
+  assert.ok(window.localStorage.getItem("localm.conversations"),
+    "and it is still on disk, so a later confirmed boot can still sync it");
+});
+
+test("AUD-INSTANCEID residual 2: a THROWN /v1/config fetch (server down, the " +
+     "connection never completes) leaves the instance UNCONFIRMED too - the " +
+     "reject path reaches the guard through catch, not through if (r.ok)", async () => {
+  const putCalls = [];
+  const { window } = loadApp({
+    fetchImpl: makeFetch({ instanceId: "backend-a", putCalls, configThrows: true }),
+    seedLocalStorage: { ...CACHED_SEED },
+  });
+  runScript(window, "window.chatState = chat;");
+  await drain();
+  await new Promise((r) => setTimeout(r, 900));   // pushConversation's debounce
+
+  assert.equal(putCalls.length, 0,
+    "a rejected /v1/config cannot authorise an upload either - the catch used " +
+    "to swallow it and leave the boot defaults standing as though confirmed");
+  assert.equal(window.chatState.instanceState, "unknown");
+  assert.equal(window.chatState.instanceMatch, false);
+
+  assert.equal(window.chatState.conversations.length, 1,
+    "an unreachable server still shows the user their own cached conversations");
+  assert.ok(window.localStorage.getItem("localm.conversations"));
+});
+
+test("AUD-INSTANCEID residual 2: the unconfirmed WARNING is one per breakage, " +
+     "but the unconfirmed STATE is re-asserted on every failed poll", async () => {
+  // refreshCtxLimit is polled every 30s for the tab's whole lifetime (init.js),
+  // so the warning has to be deduped or an outage floods the console for hours.
+  // The hazard in deduping it is doing so one line too early and skipping the
+  // flags as well, which would silently restore the fail-open this unit closes.
+  const { window } = loadApp({ fetchImpl: makeFetch({ instanceId: "backend-a" }) });
+  runScript(window, `
+    window.chatState = chat;
+    window.__warns = [];
+    console.warn = (m) => window.__warns.push(String(m));
+    window.fetch = async (url) => {
+      if (String(url) === "/v1/config") return { ok: false, status: 503,
+        text: async () => "", json: async () => ({}) };
+      return { ok: true, status: 200, text: async () => "",
+        json: async () => ({ models: [], active: "", conversations: [], plugins: [] }) };
+    };
+  `);
+
+  runScript(window, "refreshCtxLimit();");
+  await drain();
+  assert.equal(window.__warns.length, 1, "the first failed poll says so once");
+  assert.equal(window.chatState.instanceMatch, false);
+
+  // Simulate the flag having drifted back to permissive between polls: the
+  // second failed poll must still put it back, warning or no warning.
+  runScript(window, `chat.instanceMatch = true; chat.instanceState = "confirmed";`);
+  runScript(window, "refreshCtxLimit();");
+  await drain();
+
+  assert.equal(window.chatState.instanceMatch, false,
+    "every failed poll re-asserts the gate - deduping the LINE must never " +
+    "dedupe the STATE, or the second poll silently re-opens the upload path");
+  assert.equal(window.chatState.instanceState, "unknown");
+  assert.equal(window.__warns.length, 1,
+    "...while the console still carries exactly one line for this outage");
 });
