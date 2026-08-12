@@ -169,10 +169,34 @@ class TestForceVulkanDedicatedVram:
         assert self._run(tmp_path, monkeypatch, platform="linux",
                          files=["libllama.so", "libggml-vulkan.so"]) is None
 
-    def test_respects_explicit_user_optout(self, tmp_path, monkeypatch):
-        # An explicit "0" must survive - never override a user's choice.
+    @pytest.mark.parametrize("preset", ["0", "false", "FALSE", "off", "no", "", " 0 "])
+    def test_optout_unsets_the_var_because_ggml_switches_on_presence(
+            self, tmp_path, monkeypatch, preset):
+        """An opt-out must reach GGML, not merely survive in os.environ.
+
+        This assertion used to be `== "0"`, which is a true statement about
+        Python and disconnected from the effect. ggml reads
+        `getenv(...) != nullptr`, so "0" disables host-visible vidmem exactly as
+        "1" does - the UMA/iGPU user this opt-out exists for got the OPPOSITE of
+        what they asked for, and the old test could never have failed on it
+        because it stopped at the Python boundary.
+
+        ABSENCE is therefore the property, and it is the only value of this
+        variable that ggml reads as "off".
+        """
         assert self._run(tmp_path, monkeypatch, platform="win32",
-                         files=["llama.dll", "ggml-vulkan.dll"], preset="0") == "0"
+                         files=["llama.dll", "ggml-vulkan.dll"],
+                         preset=preset) is None
+
+    @pytest.mark.parametrize("preset", ["1", "2", "yes", "true"])
+    def test_an_explicit_non_falsey_value_is_left_exactly_as_set(
+            self, tmp_path, monkeypatch, preset):
+        """The fix must not become "always unset when the user set anything".
+        A user who set the var to enable the guard keeps their own value
+        verbatim - we neither overwrite it with "1" nor remove it."""
+        assert self._run(tmp_path, monkeypatch, platform="win32",
+                         files=["llama.dll", "ggml-vulkan.dll"],
+                         preset=preset) == preset
 
 
 # --------------------------------------------------------------------------- #

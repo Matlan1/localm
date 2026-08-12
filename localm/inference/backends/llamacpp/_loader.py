@@ -376,6 +376,15 @@ def _register_ggml_backends(binary_dir: Path, lib: ctypes.CDLL) -> bool:
     return loaded_any
 
 
+_HOST_VIS_VAR = "GGML_VK_DISABLE_HOST_VISIBLE_VIDMEM"
+
+# Values that mean "leave host-visible video memory alone". Same vocabulary as
+# debuglog._HANG_OFF and settings_schema._FALSE, plus the empty string: `set VAR=`
+# does NOT unset a variable, so "" is a user trying to clear it - and to ggml an
+# empty string is still PRESENT, i.e. still disabled.
+_HOST_VIS_OPT_OUT = frozenset({"0", "false", "off", "no", ""})
+
+
 def _force_vulkan_dedicated_vram(binary_dir: Path) -> None:
     """On a Windows Vulkan build, keep model weights in DEDICATED VRAM.
 
@@ -393,9 +402,37 @@ def _force_vulkan_dedicated_vram(binary_dir: Path) -> None:
     Scope: only a Vulkan build (the var is ggml-vulkan-specific), only on Windows
     (the WDDM shared-memory backing is Windows-specific; on Linux/amdgpu host-visible
     VRAM is real device memory and disabling it would only add a needless staging
-    copy), and only when the user has not set the var themselves (an explicit choice
-    always wins - e.g. a true UMA/integrated GPU may legitimately prefer host-visible
-    memory). setdefault respects an existing value, including an explicit "0"."""
+    copy), and only when the user has not opted out - an explicit choice always
+    wins, e.g. a true UMA/integrated GPU may legitimately prefer host-visible
+    memory.
+
+    OPTING OUT MEANS REMOVING THE VARIABLE, NOT SETTING IT TO "0", AND THAT IS NOT
+    A STYLE CHOICE. ggml switches on PRESENCE, never on value:
+
+        const char* GGML_VK_DISABLE_HOST_VISIBLE_VIDMEM = getenv(...);
+        device->disable_host_visible_vidmem = GGML_VK_DISABLE_HOST_VISIBLE_VIDMEM != nullptr;
+
+    so "0" disables host-visible vidmem exactly as "1" does. This function used to
+    end in ``os.environ.setdefault(..., "1")`` and its docstring promised that an
+    explicit "0" would be respected. It was respected in os.environ and had the
+    OPPOSITE of the documented effect in ggml: the UMA/iGPU user this opt-out
+    exists for, setting "0" to KEEP host-visible memory, got it disabled. So a
+    falsey value is translated into the only thing ggml understands as "off",
+    which is the variable being absent. Do NOT simplify this back to setdefault.
+
+    Verified against the ggml revision range localm actually installs, not only
+    upstream master: identical ``!= nullptr`` semantics at b9870 (the offline
+    _FALLBACK_TAG), b10361, b10373, and 07132750825a (the commit the bundled
+    amd-rocm build ships from). A non-falsey explicit value is left exactly as the
+    user set it.
+
+    The pop is also verified to reach C, not just Python: measured through
+    ``ucrtbase.getenv`` (the CRT this interpreter uses - NOT ``msvcrt``, which is
+    the legacy CRT with a separate environment copy and reports nullptr for
+    everything) and ``kernel32.GetEnvironmentVariableW``. Both agree that
+    ``os.environ[VAR] = "0"`` leaves C getenv returning "0" (so ggml disables
+    host-visible vidmem) while ``os.environ.pop(VAR)`` makes it nullptr (so ggml
+    keeps it)."""
     if sys.platform != "win32":
         return
     try:
@@ -403,8 +440,18 @@ def _force_vulkan_dedicated_vram(binary_dir: Path) -> None:
                      or any(binary_dir.glob("*ggml-vulkan*")))
     except OSError:
         return
-    if is_vulkan:
-        os.environ.setdefault("GGML_VK_DISABLE_HOST_VISIBLE_VIDMEM", "1")
+    if not is_vulkan:
+        return
+    raw = os.environ.get(_HOST_VIS_VAR)
+    if raw is None:
+        os.environ[_HOST_VIS_VAR] = "1"
+    elif raw.strip().lower() in _HOST_VIS_OPT_OUT:
+        # The user asked to KEEP host-visible memory. Unsetting is the only way to
+        # say that to ggml; leaving "0" in place would silently mean the opposite.
+        os.environ.pop(_HOST_VIS_VAR, None)
+        logger.debug("%s=%r reads as an opt-out, and ggml switches on PRESENCE, "
+                     "so the variable is unset to actually keep host-visible "
+                     "video memory enabled", _HOST_VIS_VAR, raw)
 
 
 def _warn_if_not_bundled(binary_dir: Path) -> None:
