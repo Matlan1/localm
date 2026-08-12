@@ -10,7 +10,15 @@ import { loadAppWithPages, runScript } from "./harness.mjs";
 // cli/rag.py). The GUI never referenced .corrupt at all, so a user only saw
 // the unrelated "re-embed needed" badge, which says nothing about on-disk
 // damage. This adds a distinct badge in the collections table and a warning
-// line in the per-collection info modal, both pointing at 'localm rag repair'.
+// line in the per-collection info modal.
+//
+// NEW-RAG-INDEX-WARN-SPAM: the badge/warning used to just point at a CLI
+// command ("run 'localm rag repair'") - a GUI user had no button, only a
+// terminal pointer. There is now a real Repair button (class corrupt-fix) in
+// both places, and when the server can name the specific fault
+// (stats().chunks_bad_lines, set only for the chunks.jsonl case - see
+// store.py's stats()) the badge/warning name the count instead of a generic
+// "index damaged" sentence.
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
@@ -29,17 +37,36 @@ function setupTable(collections) {
   return window;
 }
 
-test("corrupt collection gets a distinct 'index damaged' badge in the table", async () => {
+test("corrupt collection gets a distinct 'index damaged' badge and a Repair button in the table", async () => {
   const window = setupTable([{ name: "kb", n_docs: 1, n_chunks: 2, has_vectors: true,
-                                vector_degrade_reason: null, corrupt: true }]);
+                                vector_degrade_reason: null, corrupt: true, chunks_bad_lines: 0 }]);
   runScript(window, "refreshKnowledgePage();");
   await tick(); await tick(); await tick();
 
   const table = window.document.getElementById("kb-table");
   const badge = table.querySelector(".corrupt-badge");
   assert.ok(badge, "a .corrupt-badge is rendered inline in the row");
+  // No chunks_bad_lines count (a meta.json/roots fault, not chunks.jsonl) ->
+  // generic wording, never a fabricated "0 malformed line(s)".
   assert.equal(badge.textContent, "index damaged");
-  assert.match(badge.title, /rag repair/);
+  assert.match(badge.title, /corrupt or malformed/);
+  const repairBtn = table.querySelector("button.corrupt-fix");
+  assert.ok(repairBtn, "a real Repair button is offered, not just a CLI pointer");
+  assert.equal(repairBtn.textContent, "repair");
+});
+
+test("a corrupt collection with a known malformed-line count names it instead of the generic wording", async () => {
+  const window = setupTable([{ name: "kb", n_docs: 1, n_chunks: 2, has_vectors: true,
+                                vector_degrade_reason: null, corrupt: true, chunks_bad_lines: 62 }]);
+  runScript(window, "refreshKnowledgePage();");
+  await tick(); await tick(); await tick();
+
+  const table = window.document.getElementById("kb-table");
+  const badge = table.querySelector(".corrupt-badge");
+  assert.ok(badge);
+  assert.equal(badge.textContent, "62 malformed line(s)");
+  assert.match(badge.title, /62 malformed chunk line\(s\)/);
+  assert.ok(table.querySelector("button.corrupt-fix"));
 });
 
 test("a healthy collection gets no corrupt badge", async () => {
@@ -76,17 +103,31 @@ function setupDetail(collData) {
   return window;
 }
 
-test("info modal shows the corrupt-index warning when the collection is corrupt", async () => {
+test("info modal shows the corrupt-index warning and a Repair button when the collection is corrupt", async () => {
   const win = setupDetail({
     name: "kb", n_docs: 1, n_chunks: 2, has_vectors: true, docs: [],
-    vector_degrade_reason: null, corrupt: true,
+    vector_degrade_reason: null, corrupt: true, chunks_bad_lines: 0,
   });
   runScript(win, 'kbInfoModal("kb");');
   await tick();
   await tick();
   const modal = win.document.getElementById("modal");
   assert.match(modal.textContent, /corrupt or malformed/);
-  assert.match(modal.textContent, /rag repair/);
+  const repairBtn = Array.from(modal.querySelectorAll("button"))
+    .find((b) => b.textContent.trim() === "Repair");
+  assert.ok(repairBtn, "a real Repair button is offered, not just a CLI pointer");
+});
+
+test("info modal names the malformed-line count when the server can give one", async () => {
+  const win = setupDetail({
+    name: "kb", n_docs: 1, n_chunks: 2, has_vectors: true, docs: [],
+    vector_degrade_reason: null, corrupt: true, chunks_bad_lines: 62,
+  });
+  runScript(win, 'kbInfoModal("kb");');
+  await tick();
+  await tick();
+  const modal = win.document.getElementById("modal");
+  assert.match(modal.textContent, /62 malformed chunk line\(s\)/);
 });
 
 test("info modal shows no corrupt warning when the collection is healthy", async () => {
