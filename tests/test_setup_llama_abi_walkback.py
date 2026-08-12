@@ -290,8 +290,8 @@ def test_floor_never_moves_off_a_user_pin(monkeypatch, home, capsys):
     """A pin is an explicit choice, so moving off it is the exact override the
     project forbids. Report it and stop, naming the escape commands."""
     (ok, tag), tried = _floor(monkeypatch, home, loads=[(True, "")], pin="b300")
-    assert (ok, tag) == (False, None)
     assert tried == [], "a pinned build must not be moved off"
+    assert (ok, tag) == (False, None)
     out = _flat(capsys)
     assert "--rollback" in out and "--tag latest" in out and "--tag default" in out
     assert sl.pinned_tag() == "b300", "and the pin itself is untouched"
@@ -311,8 +311,8 @@ def test_floor_refuses_to_go_below_itself_on_a_default_install(
     # a build was installed that must not have been.
     (ok, tag), tried = _floor(monkeypatch, home, rejected=sl._PINNED_TAG,
                               loads=[(True, "")])
-    assert (ok, tag) == (False, None)
     assert tried == [], "nothing below the floor may be installed"
+    assert (ok, tag) == (False, None)
     out = _flat(capsys)
     assert "no more-tested build" in out
     assert "bug in localm" in out, "name whose fault it is, or the user hunts theirs"
@@ -324,7 +324,8 @@ def test_floor_refuses_when_the_install_is_not_tracking_upstream(
     somehow rejected a DIFFERENT tag still has nothing more tested to fall to."""
     (ok, tag), tried = _floor(monkeypatch, home, rejected="b999",
                               loads=[(True, "")])
-    assert (ok, tag) == (False, None) and tried == []
+    assert tried == [], "nothing below the floor may be installed"
+    assert (ok, tag) == (False, None)
     assert "no more-tested build" in _flat(capsys)
 
 
