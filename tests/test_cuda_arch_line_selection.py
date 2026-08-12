@@ -383,7 +383,7 @@ def test_main_threads_blackwell_arch_into_cuda13_fetch(monkeypatch, tmp_path):
     monkeypatch.setattr(sl, "_repo_runtime_lib", lambda: target)
     seen = []
 
-    def fake_provision_backend(backend, tgt, sha256, with_cudart, cuda_line=sl._CUDA_LINE):
+    def fake_provision_backend(backend, tgt, sha256, with_cudart, cuda_line=sl._CUDA_LINE, tag=None):
         seen.append((backend, with_cudart, cuda_line))
         (tgt / sl._lib_name()).write_bytes(b"stub")
 
@@ -415,7 +415,7 @@ def test_main_threads_pre_blackwell_arch_into_cuda12_fetch(monkeypatch, tmp_path
     monkeypatch.setattr(sl, "_repo_runtime_lib", lambda: target)
     seen = []
 
-    def fake_provision_backend(backend, tgt, sha256, with_cudart, cuda_line=sl._CUDA_LINE):
+    def fake_provision_backend(backend, tgt, sha256, with_cudart, cuda_line=sl._CUDA_LINE, tag=None):
         seen.append((backend, with_cudart, cuda_line))
         (tgt / sl._lib_name()).write_bytes(b"stub")
 

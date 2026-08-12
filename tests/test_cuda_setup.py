@@ -342,7 +342,7 @@ def test_main_threads_detection_from_warn_off_profile_into_cuda_dialogue(monkeyp
     monkeypatch.setattr(sl, "_repo_runtime_lib", lambda: target)
     provisioned = []
 
-    def fake_provision_backend(backend, tgt, sha256, with_cudart, cuda_line=sl._CUDA_LINE):
+    def fake_provision_backend(backend, tgt, sha256, with_cudart, cuda_line=sl._CUDA_LINE, tag=None):
         provisioned.append(backend)
         (tgt / sl._lib_name()).write_bytes(b"stub")
 
@@ -387,7 +387,7 @@ def test_main_threads_cuda_line_detection_on_linux(monkeypatch, tmp_path):
     monkeypatch.setattr(sl, "_repo_runtime_lib", lambda: target)
     calls = []
 
-    def fake_provision_backend(backend, tgt, sha256, with_cudart, cuda_line=sl._CUDA_LINE):
+    def fake_provision_backend(backend, tgt, sha256, with_cudart, cuda_line=sl._CUDA_LINE, tag=None):
         calls.append((backend, with_cudart, cuda_line))
         (tgt / sl._lib_name()).write_bytes(b"stub")
 
@@ -497,7 +497,7 @@ def _stub_provision(monkeypatch):
     is a no-op. Lets us drive the fallback purely via _native_loads_ok."""
     lib = sl._lib_name()
 
-    def fake_provision(backend, target, sha256, with_cudart, cuda_line=sl._CUDA_LINE):
+    def fake_provision(backend, target, sha256, with_cudart, cuda_line=sl._CUDA_LINE, tag=None):
         (target / lib).write_bytes(b"x")
     monkeypatch.setattr(sl, "_provision_backend", fake_provision)
     monkeypatch.setattr(sl, "_install_runtime_wheel", lambda pkg: True)

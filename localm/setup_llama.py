@@ -795,7 +795,30 @@ def _latest_tag() -> str:
     produce a confident-looking match that 404s, because the linked file simply
     is not there yet. So we scan recent releases newest-first and use the first
     one that already has assets, skipping any still-uploading release."""
-    api = f"https://api.github.com/repos/{_UPSTREAM_REPO}/releases?per_page=10"
+    tags = _recent_tags()
+    if tags:
+        return tags[0]
+    # Surface the fallback so the user knows the build may not be current (the
+    # release lookup was unreachable, or none of the recent releases has its
+    # assets uploaded yet); offer to rerun later for the latest.
+    console.print(f"[yellow]Could not find a ggml-org/llama.cpp release with "
+                  f"uploaded assets; using pinned llama.cpp {_FALLBACK_TAG} - "
+                  "rerun later for the latest.[/yellow]")
+    return _FALLBACK_TAG
+
+
+def _recent_tags(limit: int = 10) -> list:
+    """Upstream release tags that already have their build assets uploaded,
+    NEWEST FIRST. Empty when the lookup is unavailable.
+
+    Split out of _latest_tag rather than added beside it: that function ALREADY
+    fetched ten releases and returned only the first, discarding the rest. The
+    tag walk-back needs those discarded entries, so exposing them costs ZERO
+    extra requests - the same shape as the tag that was already resolved and
+    thrown away in the record/pin unit. One list, one call, one skip rule, so
+    "which releases are candidates" cannot be answered two different ways."""
+    api = f"https://api.github.com/repos/{_UPSTREAM_REPO}/releases?per_page={int(limit)}"
+    out: list = []
     try:
         req = urllib.request.Request(api, headers={"Accept": "application/vnd.github+json",
                                                    "User-Agent": "localm-setup-llama"})
@@ -805,17 +828,14 @@ def _latest_tag() -> str:
             if rel.get("draft") or rel.get("prerelease"):
                 continue
             tag = rel.get("tag_name")
+            # The asset check is the whole point of scanning rather than taking
+            # /releases/latest: a release is published before its CI uploads the
+            # ~25 archives, so a tag with an empty assets array 404s on download.
             if isinstance(tag, str) and tag and rel.get("assets"):
-                return tag
+                out.append(tag)
     except Exception:
-        pass
-    # Surface the fallback so the user knows the build may not be current (the
-    # release lookup was unreachable, or none of the recent releases has its
-    # assets uploaded yet); offer to rerun later for the latest.
-    console.print(f"[yellow]Could not find a ggml-org/llama.cpp release with "
-                  f"uploaded assets; using pinned llama.cpp {_FALLBACK_TAG} - "
-                  "rerun later for the latest.[/yellow]")
-    return _FALLBACK_TAG
+        return []
+    return out
 
 
 def _resolve_backend_asset(backend: str, cuda_line: Optional[str] = None,
@@ -1858,7 +1878,8 @@ def _fetch_cuda_runtime_libs(cuda_line: str, target: Path) -> int:
 
 
 def _provision_backend(chosen: str, target: Path, sha256: Optional[str],
-                       with_cudart: bool, cuda_line: str = _CUDA_LINE) -> Optional[str]:
+                       with_cudart: bool, cuda_line: str = _CUDA_LINE,
+                       tag: Optional[str] = None) -> Optional[str]:
     """Resolve + fetch the prebuilt(s) for *chosen* into *target*. For CUDA with
     *with_cudart* it also fetches the matching cudart runtime bundle so the
     build is self-contained (no CUDA Toolkit needed). *cuda_line* picks which
@@ -1877,14 +1898,21 @@ def _provision_backend(chosen: str, target: Path, sha256: Optional[str],
     lookup stays exactly where it always was rather than being hoisted to the
     top of this function, which would make it run for backends that never
     needed it and would move it out from behind _resolve_backend_asset, the
-    seam every caller and test already isolates."""
+    seam every caller and test already isolates.
+
+    *tag* pins this ONE provision to a specific upstream release, overriding
+    the pin/newest resolution. It exists for the ABI walk-back, which retries
+    the SAME backend against an older release; it deliberately does NOT touch
+    the stored pin, so a walk-back is a recovery rather than a silent change
+    to what the user asked for. Ignored for amd-rocm, which has no upstream
+    tag."""
     if chosen == "cuda" and with_cudart and sys.platform == "win32":
         # Resolved here, not in _resolve_backend_asset, because this branch
         # needs the tag to PAIR the build with its matching cudart bundle - a
         # cudart from a different release is exactly the mismatch this pairing
         # exists to prevent - and only reaches _resolve_backend_asset in the
         # no-assets fallback below, to which it then hands the same tag.
-        tag = _tag_for(chosen)
+        tag = tag or _tag_for(chosen)
         build, cudart = _resolve_cuda_pair(tag, cuda_line)
         if build is None:
             # Asset listing unavailable: fall back to the templated build URL and
@@ -1941,7 +1969,7 @@ def _provision_backend(chosen: str, target: Path, sha256: Optional[str],
         # hybridgroup's repo), that propagates to _provision_with_fallback's
         # caller exactly like every other provisioning failure, which
         # offers/forces the vulkan fallback - nothing new to handle here.
-        url, fallback_sha, tag = _resolve_backend_asset("cuda", cuda_line)
+        url, fallback_sha, tag = _resolve_backend_asset("cuda", cuda_line, tag=tag)
         _fetch_verified(url, target, sha256 or fallback_sha, "CUDA build asset")
         if sha256:
             console.print("[yellow]Note:[/yellow] --sha256 pins the CUDA build only; "
@@ -1956,7 +1984,7 @@ def _provision_backend(chosen: str, target: Path, sha256: Optional[str],
     # caller produces that combination - see _cuda_setup_dialogue - but
     # forwarding cuda_line here means it never silently reverts to the
     # cuda-12 default if one ever does).
-    url, fallback_sha, tag = _resolve_backend_asset(chosen, cuda_line)
+    url, fallback_sha, tag = _resolve_backend_asset(chosen, cuda_line, tag=tag)
     _fetch_verified(url, target, sha256 or fallback_sha, "release asset")
     return tag
 
@@ -1990,6 +2018,47 @@ def _informative_error_line(text: str) -> str:
     return lines[-1].strip()
 
 
+# Exit codes the load probe uses to tell its outcomes apart STRUCTURALLY rather
+# than by matching text in a traceback. 88 predates this. 89 exists so the tag
+# walk-back can fire on an ABI rejection SPECIFICALLY and not on, say, a CUDA
+# build refusing to load because the driver is too old - those need opposite
+# responses (walk back a release vs fall back to another backend), and telling
+# them apart by grepping an exception message would depend on wording that is
+# upstream's to change, not ours.
+_PROBE_NO_BACKENDS = 88
+_PROBE_ABI_MISMATCH = 89
+
+# The prefix _native_loads_ok puts on an ABI rejection. A string WE own on both
+# ends - written here, matched by _is_abi_rejection - so it cannot drift with
+# anyone else's message. Not a substring search over a traceback.
+_ABI_REJECT_PREFIX = "the runtime does not match this build's struct layout"
+
+# load_lib() runs verify_abi and RE-RAISES (see _loader.py: `except Exception:
+# _loaded_lib = None; raise`), so AbiMismatch propagates out uncaught and can be
+# caught here. Verified by reading that call site, not assumed.
+_LOAD_PROBE_CODE = f"""\
+import sys
+from localm.inference.backends.llamacpp import _loader
+from localm.inference.backends.llamacpp._abi import AbiMismatch
+try:
+    _loader.load_lib()
+except AbiMismatch as e:
+    sys.stderr.write(str(e))
+    sys.exit({_PROBE_ABI_MISMATCH})
+sys.exit(0 if _loader.compute_backends_available() else {_PROBE_NO_BACKENDS})
+"""
+
+
+def _is_abi_rejection(detail: "Optional[str]") -> bool:
+    """Whether *detail* is _native_loads_ok reporting OUR OWN ABI gate refusing
+    the runtime, as opposed to any other load failure.
+
+    The discriminator for the tag walk-back: an ABI rejection means the BUILD is
+    wrong for this code, which a different release can fix; every other load
+    failure is about this machine, which a different release cannot."""
+    return str(detail or "").startswith(_ABI_REJECT_PREFIX)
+
+
 def _native_loads_ok() -> tuple:
     """Load-test the provisioned native library in a FRESH interpreter, exactly
     as ``localm run`` will, AND confirm it registered a compute backend. A build
@@ -2000,21 +2069,21 @@ def _native_loads_ok() -> tuple:
     the first model load with the real cause already lost. A subprocess keeps the
     setup process clean (the loader mutates the DLL/lib search path) and matches
     the real run environment. Returns (ok, last_error_line)."""
-    # Exit 88 distinguishes "loaded but no compute backend" from a load crash
-    # (non-zero with a native traceback) and a clean, computing load (0).
-    code = ("from localm.inference.backends.llamacpp import _loader; "
-            "_loader.load_lib(); "
-            "import sys; sys.exit(0 if _loader.compute_backends_available() else 88)")
     try:
-        r = subprocess.run([sys.executable, "-c", code],
+        r = subprocess.run([sys.executable, "-c", _LOAD_PROBE_CODE],
                            capture_output=True, text=True, timeout=120)
     except Exception as e:
         return False, str(e)
     if r.returncode == 0:
         return True, ""
-    if r.returncode == 88:
+    if r.returncode == _PROBE_NO_BACKENDS:
         return False, ('runtime loaded but registered no compute backends '
                        '("no backends are loaded") - this build does not fit this machine')
+    if r.returncode == _PROBE_ABI_MISMATCH:
+        # Kept behind its own prefix so callers can recognise this specific
+        # outcome without re-parsing upstream's wording - see _is_abi_rejection.
+        why = _informative_error_line((r.stderr or "").strip()) or "layout drift"
+        return False, f"{_ABI_REJECT_PREFIX}: {why}"
     detail = (r.stderr or r.stdout or "").strip()
     return False, _informative_error_line(detail)
 
@@ -2173,6 +2242,75 @@ def _cuda_setup_dialogue(info: NvidiaInfo, assume_yes: bool, det=None) -> tuple:
     return "vulkan", False
 
 
+# How many older releases the ABI walk-back may try before giving up. Bounded on
+# purpose: an unbounded scan would download a runtime per iteration against a
+# genuinely broken environment, and "we tried the last few releases" is the
+# honest scope of this recovery. A real layout break is fixed by binding the
+# layout, not by walking indefinitely backwards.
+_ABI_WALKBACK_MAX = 3
+
+
+def _walk_back_tags(chosen: str, with_cudart: bool, rejected_tag: str,
+                    try_fn, detail: str) -> tuple:
+    """Retry *chosen* against progressively older upstream releases after our ABI
+    gate refused *rejected_tag*. Returns ``(ok, tag)``.
+
+    Says which release it landed on AND why it is not the newest, every time -
+    a recovery the user cannot see is the failure mode this whole area keeps
+    producing. Never silent, never unbounded.
+
+    A PINNED build is NOT walked back from. The pin is an explicit choice and
+    moving off it is exactly the override the project forbids; the user is told
+    their pinned build does not load here and given the two commands that change
+    it. That check lives here rather than at the call site so the rule cannot be
+    bypassed by a future second caller."""
+    pin = pinned_tag()
+    if pin:
+        console.print(
+            f"[red]The pinned llama.cpp build {pin} does not load on this "
+            f"machine:[/red] {detail}")
+        console.print("[dim]Your pin is kept, not changed. Move it with: "
+                      "localm setup-llama --rollback  (previous build), or "
+                      "localm setup-llama --tag latest  (track upstream again)"
+                      "[/dim]")
+        return False, None
+
+    candidates = [t for t in _recent_tags() if t != rejected_tag]
+    if not candidates:
+        console.print("[yellow]No older llama.cpp release is available to fall "
+                      "back to.[/yellow]")
+        return False, None
+
+    console.print(f"[yellow]llama.cpp {rejected_tag} was rejected by localm's own "
+                  f"ABI check:[/yellow] {detail}")
+    console.print("[dim]This is a mismatch between that release and this build "
+                  "of localm, not a fault of your machine. Trying the previous "
+                  "release(s) so you get a runtime that works.[/dim]")
+
+    for tag in candidates[:_ABI_WALKBACK_MAX]:
+        console.print(f"[yellow]Trying llama.cpp {tag}...[/yellow]")
+        try:
+            try_fn(chosen, with_cudart, tag)
+        except Exception as e:
+            console.print(f"[red]{tag} could not be provisioned:[/red] {e}")
+            continue
+        ok, why = _native_loads_ok()
+        if ok:
+            # State the outcome AND the reason it is not the newest: a user who
+            # is not told will report "localm installed an old runtime" as a bug.
+            console.print(f"[green]OK - llama.cpp {tag} loads on this machine.[/green]")
+            console.print(f"[dim]Installed {tag} rather than {rejected_tag}, "
+                          "because the newer release does not match this build "
+                          "of localm. Update localm and re-run "
+                          "'localm setup-llama --force' to move forward again."
+                          "[/dim]")
+            return True, tag
+        console.print(f"[red]{tag} did not load either:[/red] {why or 'unknown'}")
+    console.print(f"[yellow]None of the last {_ABI_WALKBACK_MAX} llama.cpp "
+                  "releases loaded here.[/yellow]")
+    return False, None
+
+
 def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
                              with_cudart: bool, assume_yes: bool = False,
                              cuda_line: str = _CUDA_LINE) -> tuple[str, Optional[str]]:
@@ -2204,14 +2342,14 @@ def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
     # easy to forget when a new branch is added.
     used_tag: list = [None]
 
-    def _try(backend: str, cudart: bool) -> None:
+    def _try(backend: str, cudart: bool, tag: Optional[str] = None) -> None:
         _clear_target_or_refuse(target)
         # Cleared FIRST, so a failed attempt can never leave the previous
         # attempt's tag standing to be recorded against this backend.
         used_tag[0] = None
         used_tag[0] = _provision_backend(
             backend, target, sha256 if backend == chosen else None,
-            cudart, cuda_line)
+            cudart, cuda_line, tag=tag)
         if not (target / lib_name).exists():
             raise ArtifactError(f"the archive did not contain {lib_name}")
         _install_runtime_wheel(_runtime_pkg_dir())
@@ -2252,6 +2390,32 @@ def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
     if loaded:
         console.print(f"[green]OK - {chosen} runtime loads on this machine.[/green]")
         return chosen, used_tag[0]
+
+    # ---- The installer must never hand the user a runtime our OWN gate rejects.
+    #
+    # This runs BEFORE the backend fallback below, and the order is the whole
+    # point. An ABI rejection means the BUILD is wrong for this code, so EVERY
+    # backend from that release fails identically - field issue 1208 reports
+    # cuda, vulkan AND cpu all AbiMismatch together. Falling back by backend
+    # first therefore cannot help, burns the whole chain, and ends in "no
+    # backend could be provisioned" having also moved the user off the backend
+    # they asked for. Walking back a RELEASE addresses the actual cause.
+    #
+    # Gated on an ABI rejection SPECIFICALLY, never on any load failure: "cuda
+    # will not load, the driver is too old" is about this MACHINE and an older
+    # release cannot fix it, so that case must still reach the vulkan fallback.
+    #
+    # NOT written as "avoid a known-bad tag", and deliberately so. The property
+    # is "never ship a runtime our gate rejects", whichever tag and whatever the
+    # cause; a hard-coded tag would be wrong the moment the binding is fixed.
+    # Once it is, the rejection stops happening and this loop simply never runs.
+    if _is_abi_rejection(detail) and used_tag[0]:
+        walked, walk_tag = _walk_back_tags(chosen, with_cudart, used_tag[0],
+                                           _try, detail)
+        if walked:
+            return chosen, walk_tag
+        # Fall through: no older release loaded either, so this is not a
+        # release-drift problem after all and the backend fallback is next.
 
     # An explicit --sha256 pin means "exactly this artifact" - never silently
     # swap to a different (unpinned) build, even to recover. Report and stop.

@@ -753,7 +753,7 @@ class TestVulkanCpuTerminalGuidance:
     got no hint that --from/--url exist. Confirms the guidance is now there."""
 
     def test_vulkan_not_provisioned_shows_escape_hatches_and_exits(self, monkeypatch, tmp_path, capsys):
-        def fake_provision_backend(chosen, target, sha256, with_cudart, cuda_line=sl._CUDA_LINE):
+        def fake_provision_backend(chosen, target, sha256, with_cudart, cuda_line=sl._CUDA_LINE, tag=None):
             raise sl.ArtifactError("download is too small (196608 bytes < 262144 minimum): "
                                    "the response is an HTML page, not the archive.")
 
