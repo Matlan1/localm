@@ -42,6 +42,18 @@ from localm.plugins.builtin.jobs.store import Job, JobStore
 # is ever hit the loop is wedged, and we degrade (load alongside) rather than hang.
 _EVICT_TIMEOUT_S = 60.0
 
+# Shared between the log line and the job's own output note (below) so the two
+# copies cannot drift. "revoked or expired" used to be stated as fact, which is
+# FALSE for the one case this re-check cannot tell apart from those: a job whose
+# owner turns out to have been the owner key itself, rolled since creation
+# (REG-509). Hedged rather than asserted, and points at the repair path (a
+# manual run or edit as the owner - plug.py's _needs_owner_key_restamp) rather
+# than only "re-create it".
+_SHELL_DOWNGRADE_REASON = (
+    "its authorization could not be re-confirmed at run time (the owning key "
+    "may have been revoked or expired, or - if it was originally the owner "
+    "key - simply rolled since this job was created)")
+
 
 def run_job(job: Job, *, engine=None) -> dict:
     """Run *job* and return a result record. Dispatches on task_kind and never
@@ -706,10 +718,10 @@ def _run_coder(job: Job, *, engine=None) -> str:
         # run still proceeds restricted (the safe default a no-opt-in coder job
         # already gets); a downgrade is not a reason to fail the whole job.
         logger.warning(
-            "job %r (%s) opted into shell, but its owning key is no longer "
-            "authorized (revoked or expired); running RESTRICTED (no run_shell). "
-            "Re-create the job with a live key to restore shell access.",
-            job.name, job.id)
+            "job %r (%s) opted into shell, but %s; running RESTRICTED (no "
+            "run_shell). Trigger a manual run or any edit as the owner to "
+            "repair it automatically, or re-create it with a live key.",
+            job.name, job.id, _SHELL_DOWNGRADE_REASON)
 
     from localm.plugins.coder.agent import Agent
     agent = Agent(
@@ -724,10 +736,11 @@ def _run_coder(job: Job, *, engine=None) -> str:
         out = (agent.run_task(job.prompt) or "").strip()
         notes = []
         if downgraded:
-            notes.append("[jobs] This job opted into shell execution, but its "
-                         "owning key is no longer authorized (revoked or "
-                         "expired), so it ran RESTRICTED: no run_shell. "
-                         "Re-create it with a live key to restore shell access.")
+            notes.append(f"[jobs] This job opted into shell execution, but "
+                         f"{_SHELL_DOWNGRADE_REASON}, so it ran RESTRICTED: no "
+                         f"run_shell. Trigger a manual run or any edit as the "
+                         f"owner to repair it automatically, or re-create it "
+                         f"with a live key.")
         if cwd_confined and requested:
             # Same rule-5 reasoning as the shell note above, and reported the
             # same way: the run did something narrower than configured, and the
