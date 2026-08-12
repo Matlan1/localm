@@ -68,8 +68,33 @@ def test_repeated_response_breaker_aborts(tmp_path):
     fixed = '<tool_call>\n{"name": "list_dir", "args": {"path": "."}}\n</tool_call>'
     with patch.object(agent, "_call_llm", return_value=fixed):
         result = agent.run_task("do the thing")
+    # The user got a breaker message at all. "circuit breaker" is the stable
+    # prefix EVERY breaker shares, so this says "something tripped", not which.
     assert "circuit breaker" in result.lower()
-    assert "repeated essentially the same response" in result.lower()
+    # WHICH breaker tripped, asserted on STATE rather than on the message text.
+    #
+    # This line asserted the exact run of words "repeated the same response"
+    # until 2026-08-12. #1179 reworded the message to "repeated ESSENTIALLY the
+    # same response" without touching the test, and it sat red on master for
+    # weeks: ci.yml carries no pull_request or push trigger, so the full suite
+    # runs neither per PR nor per merge, and this test is in nobody's targeted
+    # selection. An exact-phrase assertion on a human-facing sentence is a
+    # standing trap, and re-asserting the NEW phrase would only re-arm it for
+    # the next reword.
+    #
+    # _repeat_response_count is incremented in exactly one place (the
+    # repeated-scaffold breaker in agent/loop.py) and is not reset by
+    # run_task, so after the call it is a precise, reword-immune record that
+    # THIS breaker fired rather than the no-tool-call escalation, which also
+    # prints "circuit breaker". Comparing against the constant rather than a
+    # literal keeps it correct if the threshold is retuned.
+    #
+    # Deliberately NOT loose prose: an assertion weak enough to survive any
+    # rewording is usually also weak enough to pass when the breaker never
+    # fires at all. Both directions are fires-controlled - reword the message
+    # and this still passes; stop the breaker firing and it goes red.
+    from localm.plugins.coder.agent.constants import _REPEAT_RESPONSE_ABORT
+    assert agent._repeat_response_count >= _REPEAT_RESPONSE_ABORT - 1
     # It stopped well before the turn ceiling.
     assert agent._turns < 12
 
