@@ -9,6 +9,7 @@ import queue
 import re
 import struct
 import threading
+import time
 from pathlib import Path
 from typing import Callable
 from typing import List
@@ -476,6 +477,31 @@ def _has_gguf_magic(path: Path) -> bool:
     return True
 
 
+# How long a file's mtime must be untouched before auto-registration treats it
+# as finished rather than still being written. An in-progress external copy
+# (Explorer, robocopy, a browser download, an `scp`) keeps touching mtime on
+# every write, so a file whose mtime is this fresh cannot yet be trusted to be
+# complete - even though it may already have passed the magic+size floor above
+# (R45: a mid-copy of a *valid* GGUF can clear that floor long before the copy
+# finishes, since the floor only needs ~1KiB to have landed). This is a
+# best-effort quiet-period heuristic, not a lock: a copy that itself pauses for
+# longer than this window (e.g. a stalled network share) would be read as
+# settled mid-transfer. sync_models_dir runs on every launch and every
+# `models list`, so a file that fails this check simply gets picked up on a
+# later call once writes have stopped - no retry loop or sleep needed here.
+_GGUF_SETTLE_SECONDS = 5.0
+
+
+def _gguf_recently_written(path: Path) -> bool:
+    """True when *path*'s mtime is within ``_GGUF_SETTLE_SECONDS`` of now, i.e.
+    it may still be mid-copy. An unreadable file is treated as NOT recently
+    written so it falls through to whatever check runs next (fails safe: this
+    function only ever defers registration, never blocks it outright)."""
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return False
+    return (time.time() - mtime) < _mm._GGUF_SETTLE_SECONDS
 
 
 def _gguf_first_parts(d: Path, max_depth: int = 3) -> List[Path]:

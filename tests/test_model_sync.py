@@ -7,11 +7,20 @@ reappear, prune deletion with a registry backup, the all-missing guardrail, and
 that external (out-of-folder) models are never pruned.
 """
 
+import os
+import time
 from unittest.mock import MagicMock
 
 import pytest
 
 from localm import model_manager as mm
+
+
+def _backdate(path, seconds=60):
+    """Set *path*'s mtime `seconds` in the past, so it reads as settled (not
+    mid-copy) regardless of how fast the test itself runs."""
+    old = time.time() - seconds
+    os.utime(path, (old, old))
 
 
 @pytest.fixture()
@@ -54,8 +63,9 @@ def _managed_entry(models_dir, name, exists=True):
 class TestRegisterLooseFiles:
     def test_loose_gguf_is_registered(self, fake_registry):
         store, models_dir, _ = fake_registry
-        (models_dir / "fresh.gguf").write_bytes(
-            b"GGUF\x03\x00\x00\x00" + b"w" * 2048)   # magic + past the size floor
+        f = models_dir / "fresh.gguf"
+        f.write_bytes(b"GGUF\x03\x00\x00\x00" + b"w" * 2048)   # magic + past the size floor
+        _backdate(f)   # settled (not mid-copy) - see TestSettlePeriod for that case
         result = mm.sync_models_dir(prune=False)
         assert result.added == 1
         assert any(e["path"].endswith("fresh.gguf") for e in store.values())
@@ -66,17 +76,51 @@ class TestRegisterLooseFiles:
         # and could crash a later load. Only real GGUFs (magic b"GGUF" plus a
         # plausible size) register; a header-only stub with the magic is skipped.
         store, models_dir, _ = fake_registry
-        (models_dir / "foreign.gguf").write_bytes(b"this is not a model")
-        (models_dir / "empty.gguf").write_bytes(b"")
-        (models_dir / "stub.gguf").write_bytes(b"GGUF\x03\x00\x00\x00")
-        (models_dir / "real.gguf").write_bytes(
-            b"GGUF\x03\x00\x00\x00" + b"d" * 2048)   # magic + past the size floor
+        foreign = models_dir / "foreign.gguf"
+        empty = models_dir / "empty.gguf"
+        stub = models_dir / "stub.gguf"
+        real = models_dir / "real.gguf"
+        foreign.write_bytes(b"this is not a model")
+        empty.write_bytes(b"")
+        stub.write_bytes(b"GGUF\x03\x00\x00\x00")
+        real.write_bytes(b"GGUF\x03\x00\x00\x00" + b"d" * 2048)   # magic + past the floor
+        for f in (foreign, empty, stub, real):
+            _backdate(f)   # isolate this test to the magic/floor check, not settling
         result = mm.sync_models_dir(prune=False)
         assert result.added == 1                              # only real.gguf
         names = [e["path"] for e in store.values()]
         assert any(p.endswith("real.gguf") for p in names)
         assert not any(p.endswith("foreign.gguf") or p.endswith("empty.gguf")
                        or p.endswith("stub.gguf") for p in names)
+
+
+class TestSettlePeriod:
+    """R45: a mid-copy of a *valid* GGUF clears the magic+size floor long
+    before the copy finishes (the floor only needs ~1KiB to have landed), so
+    sync_models_dir must not auto-register it until its mtime has gone quiet."""
+
+    def test_freshly_written_gguf_is_not_registered_yet(self, fake_registry):
+        store, models_dir, _ = fake_registry
+        f = models_dir / "copying.gguf"
+        f.write_bytes(b"GGUF\x03\x00\x00\x00" + b"c" * 2048)   # magic + past the floor
+        # mtime is "now" - written this instant, exactly like the tail end of
+        # an in-progress copy. Must NOT register on this call.
+        result = mm.sync_models_dir(prune=False)
+        assert result.added == 0
+        assert not store
+
+    def test_same_file_registers_once_it_has_settled(self, fake_registry):
+        store, models_dir, _ = fake_registry
+        f = models_dir / "copying.gguf"
+        f.write_bytes(b"GGUF\x03\x00\x00\x00" + b"c" * 2048)
+        first = mm.sync_models_dir(prune=False)
+        assert first.added == 0                # still looks mid-copy
+        assert not store
+
+        _backdate(f)                            # simulate the copy going quiet
+        second = mm.sync_models_dir(prune=False)
+        assert second.added == 1
+        assert any(e["path"].endswith("copying.gguf") for e in store.values())
 
 
 class TestMissingFlagging:
