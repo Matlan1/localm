@@ -75,3 +75,55 @@ class TestComputeToolDiff:
         diff = compute_tool_diff(
             "write_file", {"path": "new.py", "content": "a\nb\n"}, "")
         assert "+a" in diff and "+b" in diff
+
+
+class TestUnreadableOldContentIsNotANewFile:
+    """A file that EXISTS but cannot be READ must not look like a new file.
+
+    `print_diff_preview`'s contract reads "" as "the file doesn't exist yet", so
+    collapsing the two makes an overwrite of a real file render as a pure
+    addition with nothing deleted - at the exact moment the user is asked to
+    approve the write.
+    """
+
+    def test_new_file_is_an_honest_empty(self, tmp_path):
+        from localm.plugins.coder.diffutil import read_old_content_checked
+        content, readable = read_old_content_checked(tmp_path, "brand_new.py")
+        assert (content, readable) == ("", True)
+
+    def test_existing_unreadable_file_reports_not_readable(self, tmp_path):
+        from pathlib import Path
+
+        from localm.plugins.coder.diffutil import read_old_content_checked
+
+        target = tmp_path / "real.py"
+        target.write_text("line one\nline two\n", encoding="utf-8")
+
+        real_read = Path.read_text
+
+        def flaky(self, *a, **kw):
+            if self.name == "real.py":
+                raise OSError(13, "Permission denied")
+            return real_read(self, *a, **kw)
+
+        import pytest as _pytest
+        mp = _pytest.MonkeyPatch()
+        try:
+            mp.setattr(Path, "read_text", flaky)
+            content, readable = read_old_content_checked(tmp_path, "real.py")
+        finally:
+            mp.undo()
+
+        assert readable is False, (
+            "an existing file we could not read reported as readable; the "
+            "approval diff would show the overwrite as a pure addition")
+        assert content == ""
+
+    def test_readable_file_reports_readable(self, tmp_path):
+        """The control: a normal file must stay readable, or the flag would be
+        useless (always False would satisfy the test above)."""
+        from localm.plugins.coder.diffutil import read_old_content_checked
+        (tmp_path / "ok.py").write_text("x = 1\n", encoding="utf-8")
+        content, readable = read_old_content_checked(tmp_path, "ok.py")
+        assert readable is True
+        assert content == "x = 1\n"
