@@ -847,14 +847,37 @@ def validate_trigger_patterns(patterns: "list[str]") -> None:
     patterns were still judged dangerous or refused outright, never passed as
     safe - the latency was bought from serialization, not from the check.
 
-    WHAT IS STILL NOT SOLVED, stated because a bound is not an absence: the
-    executor hand-off above shares Python's default thread pool with other
-    blocking work this server offloads (engine.load, embedding, token counting),
-    so a sustained multi-connection flood still occupies executor threads. It is
-    now BOUNDED - each such thread is released within
-    _TRIGGER_PROBE_SLOT_WAIT plus one probe timeout, rather than however long the
-    queue ahead of it happened to be - but general request-concurrency bounding
-    remains a broader problem than this one fix.
+    NOTHING OUTSIDE THIS FUNCTION BOUNDS IT, so the numbers here are the only
+    ones there are. Checked rather than assumed: this runs on the asyncio loop's
+    TRUE DEFAULT executor (`run_in_executor(None, ...)`), which is NOT one of the
+    ~21 sites covered by _threadpool_timeout.run_in_threadpool_bounded, that
+    module covers the separate anyio pool; _executor_health.py states plainly
+    that the default pool "has no timeout/cancellation mechanism as of this
+    writing"; and uvicorn is started with no request-level timeout. So the
+    worst case one caller can see is the sum of the waits below, and it used to
+    have no ceiling at all:
+
+        _TRIGGER_PROBE_SLOT_WAIT        5.0s   waiting for a slot
+      + _TRIGGER_PROBE_SPAWN_TIMEOUT   10.0s   joining an in-flight pre-warm
+                                               that never finishes
+      + _TRIGGER_PROBE_SPAWN_TIMEOUT   10.0s   first query on the daemon it
+                                               then spawns itself
+                                     = 25.0s   absolute worst case, per caller
+
+    That path is pre-existing (PR #943's join-rather-than-duplicate-spawn) and
+    needs all three worst cases at once; the ordinary bad-pattern cost is
+    _TRIGGER_PROBE_TIMEOUT, and the ordinary flood cost is measured above. It is
+    quoted anyway because "bounded" is worth nothing without the number, and 25s
+    is a long time to hold an HTTP request even if it beats the unbounded queue
+    it replaces.
+
+    WHAT IS STILL NOT SOLVED, stated because a bound is not an absence: that same
+    default pool carries other blocking work this server offloads (engine.load,
+    embedding, token counting), so a sustained multi-connection flood still
+    occupies executor threads - and the NUMBER of waiters is not itself capped,
+    only how long each one waits. The degradation is therefore transient rather
+    than permanent, which is the part that changed; general request-concurrency
+    bounding remains a broader problem than this one fix.
 
     Each unique pattern's final verdict (from either layer) is cached for
     this process's lifetime, keyed on the exact pattern string - most real
