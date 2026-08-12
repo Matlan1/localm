@@ -133,6 +133,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   unnamed request always prefers your one configured embedder rather than
   whichever chat model you happen to be using at the time. A request that
   explicitly asks for "localm" still gets "localm" back unchanged.
+- **Copying a model file into the models folder while the copy was still
+  running could get it registered and loaded before the copy finished.** The
+  existing checks already refused a non-GGUF file or an empty placeholder, but
+  a real GGUF header appearing early in an in-progress copy was enough to pass
+  them, well before the rest of the file existed on disk. localm now also
+  waits for a new file's contents to stop changing for a few seconds before
+  registering it, so an in-progress copy is picked up once it actually
+  finishes, not while it is still arriving.
 
 ### Changed
 - **localm's own managed ComfyUI now installs v0.31.1**, up from v0.9.2. The

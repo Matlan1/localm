@@ -27,7 +27,9 @@ Skills are something you provide; localm ships no built-in catalog. Write your
 own (just a `SKILL.md` plus any helper files), or get one from a colleague or a
 public repo. To install a skill, drop its folder into the global skills dir
 (reusable everywhere) or a project's `.localcoder/skills/`; to share one, copy
-the folder out. Review any skill from an unknown source first (see [Security](#security)).
+the folder out. To remove a skill, delete its folder - there is no separate
+uninstall step and no CLI or GUI skill manager, since skills are file-based
+only. Review any skill from an unknown source first (see [Security](#security)).
 
 ## The `SKILL.md` format
 
