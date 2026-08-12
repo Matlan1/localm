@@ -348,10 +348,42 @@ export function artifactLang(codeEl) {
   return null;
 }
 
+/** Stamp this document's CSP nonce onto every <script> in artifact *code* that
+ *  does not already carry one.
+ *
+ *  MEASURED, and it is why this exists: a srcdoc document INHERITS the embedding
+ *  document's CSP, and its own <meta> CSP cannot loosen what the inherited
+ *  policy forbids. Once the shell's policy enforces `script-src 'self'
+ *  'nonce-X'`, an artifact's inline <script> is BLOCKED - proven against a real
+ *  browser, with the same iframe carrying the parent nonce running fine, so the
+ *  nonce is the only variable. Without this the artifacts canvas renders markup
+ *  but nothing interactive ever runs.
+ *
+ *  This does not widen what an artifact may do. The frame is
+ *  sandbox="allow-scripts" with NO allow-same-origin, so it is an opaque origin
+ *  that cannot touch this app's origin, cookies or storage, and the meta CSP
+ *  below still denies it all network. The sandbox is the boundary; the inherited
+ *  policy was only ever collateral damage. Artifact scripts were always meant to
+ *  execute - that is the whole feature.
+ *
+ *  Deliberately a targeted rewrite of the <script> OPEN TAG rather than a
+ *  DOMParser round trip: the caller's three shapes (bare SVG, full document,
+ *  fragment) are spliced as strings, and re-serializing a full document through
+ *  a parser would move nodes and could defeat the R41-D4 ordering guarantee
+ *  below. A <script that is not a real tag is not valid HTML source anyway. */
+function stampArtifactNonce(code) {
+  const n = window.__LOCALM_CSP_NONCE__;
+  if (!n) return code;                       // no enforcing policy in play
+  return String(code).replace(
+    /<script\b(?![^>]*\bnonce=)([^>]*)>/gi,
+    '<script nonce="' + n + '"$1>');
+}
+
 /** Build the iframe srcdoc for an artifact, injecting a strict CSP that blocks
  *  network access. Inline script/style are allowed (the artifact runs), data:
  *  images are allowed, everything else is denied. */
 export function artifactSrcdoc(code, lang) {
+  code = stampArtifactNonce(code);
   const csp = '<meta http-equiv="Content-Security-Policy" content="'
     + "default-src 'none'; img-src data: blob:; media-src data: blob:; "
     + "style-src 'unsafe-inline'; script-src 'unsafe-inline'; font-src data:;\">";

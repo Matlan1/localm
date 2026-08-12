@@ -7,7 +7,24 @@
      runs HERE, before any (possibly wedged) cached app module executes, so it is
      the one recovery path a bad SW/cache cannot break. This is the manual escape
      hatch for "the app is acting weird after an update / on revisit". -->
-<script>
+<script nonce="__LOCALM_CSP_NONCE__">
+// Publish this document's CSP nonce for the artifact canvas, which renders
+// model-authored HTML in a srcdoc iframe. A srcdoc document INHERITS this
+// document's CSP (measured), and its own <meta> CSP cannot loosen what the
+// inherited policy forbids, so its inline scripts need THIS nonce to run at
+// all. Read via the .nonce IDL property, never the attribute: browsers hide
+// the attribute value from CSSOM precisely so an injection cannot exfiltrate
+// it with an attribute selector, and reading .nonce keeps that protection.
+(function () {
+  var n = (document.currentScript && document.currentScript.nonce) || "";
+  // An UNSUBSTITUTED shell (a jsdom unit test loading this file, or opening it
+  // straight off disk) still carries the literal placeholder, which is not a
+  // nonce and must never be treated as one. Matched on a SUBSTRING on purpose:
+  // spelling the placeholder out in full here would make the server's own
+  // replace() rewrite this line too, so the guard would compare the real nonce
+  // against itself and always conclude "unsubstituted".
+  window.__LOCALM_CSP_NONCE__ = n.indexOf("LOCALM_CSP_NONCE") === -1 ? n : "";
+})();
 (function () {
   try {
     if (location.search.indexOf("localm_reset=1") === -1) return;
@@ -992,7 +1009,7 @@
 <script type="module" src="/app/main.js"></script>
 <!-- type="module" so this runs AFTER app/main.js has loaded and attached the app
      API to window (module scripts execute in order, after classic + parsing). -->
-<script type="module">
+<script type="module" nonce="__LOCALM_CSP_NONCE__">
 /* PWA: register the service worker, show which server we are connected to, and
    wire an "Install as app" button when the browser offers the install prompt. */
 (function () {

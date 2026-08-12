@@ -39,6 +39,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
   carried no checksum. The known asset names of the shipped build are now used
   directly, so this path names a real file and verifies it.
 
+### Security
+- **The GUI's Content-Security-Policy now actually blocks, instead of only
+  reporting.** It shipped in report-only mode, which never stops anything, so
+  the HTML sanitiser was the only thing standing between a malicious model reply
+  and script execution in the app - if it were ever bypassed, nothing was behind
+  it. The policy now enforces: scripts must come from localm itself and carry a
+  one-time-per-page marker, so injected script cannot run even if it reaches the
+  page. Plugins, embedded objects and framing the app from another site are
+  refused outright. Rendering an artifact still works exactly as before, and it
+  remains sealed off from the rest of the app and from the network.
+
 ### Added
 - **The llama.cpp compatibility check now catches an upstream change that
   redefines a VALUE, not just one that moves a field.** The check compared where

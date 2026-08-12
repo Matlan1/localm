@@ -4006,14 +4006,21 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
     # path is already XSS-safe via DOMPurify (see dev-notes/SECURITY-xss-render-
     # review-2026-06-23.md); the gap it found was no Content-Security-Policy
     # backstop on the GUI shell. nosniff is enforced everywhere (blocks MIME-sniff
-    # into executable HTML). The CSP ships REPORT-ONLY: it never blocks (so it
-    # cannot break the inline shell-token script, TTS CDN/HF fetches, the sandboxed
-    # artifact iframe, workers) but documents the intended policy and surfaces
-    # violations before a later flip to enforcing (which needs a nonce on the
-    # inline shell script).
-    _CSP_REPORT_ONLY = (
-        "default-src 'self'; "
-        "script-src 'self'; "
+    # into executable HTML). The CSP now ENFORCES (R41 D1): until it did,
+    # DOMPurify was the SOLE enforcing XSS barrier on the shell, so a sanitizer
+    # bypass had nothing behind it.
+    #
+    # script-src carries a PER-REQUEST nonce rather than 'unsafe-inline', so the
+    # shell's own inline scripts run and an injected one cannot. Adding
+    # 'unsafe-inline' alongside would be pointless as well as wrong: a policy
+    # containing a nonce makes browsers IGNORE 'unsafe-inline' entirely.
+    # style-src DELIBERATELY keeps 'unsafe-inline' - the GUI sets inline style
+    # attributes throughout, style injection is not script execution, and closing
+    # it would mean rewriting every one. The remaining directives are unchanged
+    # from the report-only policy and were each confirmed against a live GUI.
+    _CSP_PREFIX = "default-src 'self'; script-src 'self' 'nonce-"
+    _CSP_SUFFIX = (
+        "'; "
         "style-src 'self' 'unsafe-inline'; "
         "img-src 'self' data: blob:; "
         "font-src 'self' data:; "
@@ -4028,10 +4035,17 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
 
     @app.middleware("http")
     async def _security_headers(request, call_next):
+        # The nonce is minted BEFORE call_next, not after, because the shell
+        # route has to stamp this exact value onto its inline <script> tags while
+        # it builds the body - so the value must already exist when the handler
+        # runs. Setting the header afterwards from a value the handler never saw
+        # would ship a nonce matching nothing and white-screen the GUI.
+        nonce = secrets.token_urlsafe(16)
+        request.state.csp_nonce = nonce
         resp = await call_next(request)
         resp.headers.setdefault("X-Content-Type-Options", "nosniff")
         resp.headers.setdefault(
-            "Content-Security-Policy-Report-Only", _CSP_REPORT_ONLY)
+            "Content-Security-Policy", _CSP_PREFIX + nonce + _CSP_SUFFIX)
         return resp
 
     # API-surface disclosure guard. FastAPI's built-in docs (/docs, /redoc,

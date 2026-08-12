@@ -58,7 +58,21 @@ class _RevalidatingStatic(StaticFiles):
         return resp
 
 
-def _index_html_with_shell_token(token: str) -> str:
+# The literal that every inline <script> in index.html carries in place of a
+# real nonce. Substituted per request by _index_html_with_shell_token below.
+#
+# A PLACEHOLDER rather than server-side parsing of our own HTML, for the same
+# reason /sw.js substitutes its CACHE digest instead of anyone hand-bumping it:
+# a regex over <script> tags would have to tell an inline block from a src= one
+# and would silently miss a newly added block, and a missed block is a white
+# screen once the policy enforces. With a placeholder the failure is impossible
+# to introduce silently - a new inline script without it is caught by
+# test_security_headers.py's mechanical nonce-coverage check, which parses the
+# SERVED body rather than trusting this substitution.
+CSP_NONCE_PLACEHOLDER = "__LOCALM_CSP_NONCE__"
+
+
+def _index_html_with_shell_token(token: str, nonce: str = "") -> str:
     """The SPA shell, optionally seeding the per-process open-mode *token* (the
     shell token) as a JS global so a loopback launch can still perform management
     when no API key is configured. The protected-mode API key is NOT injected
@@ -66,13 +80,22 @@ def _index_html_with_shell_token(token: str) -> str:
     reaches page JS / localStorage. An empty *token* injects nothing.
 
     The token is embedded only in same-origin HTML served to a trusted loopback
-    client and is a short-lived per-process secret, not the durable API key."""
+    client and is a short-lived per-process secret, not the durable API key.
+
+    *nonce* is this request's CSP nonce (see http_server's _security_headers).
+    Every inline <script> in the shell, including the injected token snippet,
+    must carry it or the enforcing Content-Security-Policy blocks it."""
     html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    # json.dumps escapes quotes/backslashes; also escape "<" so neither value can
+    # break out of the <script> element (defence in depth). The nonce is
+    # CSPRNG-urlsafe so it has no metacharacters, but it is quoted into an HTML
+    # attribute, so it goes through the same escaping rather than being trusted
+    # for its shape.
+    safe_nonce = json.dumps(nonce).replace("<", "\\u003c")[1:-1]
+    html = html.replace(CSP_NONCE_PLACEHOLDER, safe_nonce)
     if not token:
         return html
-    # json.dumps escapes quotes/backslashes; also escape "<" so the value can
-    # never break out of the <script> element (defence in depth).
-    snippet = ("<script>window.__LOCALM_SHELL_TOKEN__="
+    snippet = ('<script nonce="' + safe_nonce + '">window.__LOCALM_SHELL_TOKEN__='
                + json.dumps(token).replace("<", "\\u003c")
                + ";</script>")
     lower = html.lower()
@@ -780,6 +803,12 @@ def attach_gui(
         loopback = _is_loopback_host(
             getattr(request.app.state, "bind_host", "127.0.0.1"))
         key = auth.get_api_key() or ""
+        # This request's CSP nonce, minted by http_server's _security_headers
+        # before it called us. Defaults to empty for a standalone mount that has
+        # no such middleware (a test calling attach_gui() on a bare FastAPI()) -
+        # that app serves no CSP header either, so the two cannot disagree: the
+        # nonce and the header it must match are minted at the same single site.
+        nonce = getattr(request.state, "csp_nonce", "")
         # The shell must never be served stale: it carries the per-request shell
         # token and references the current assets, so always revalidate (a new
         # app.js / index.html is then picked up without the user clearing caches).
@@ -855,8 +884,10 @@ def attach_gui(
             # user visits, regardless of "cors_origins") would receive the
             # real management credential in plain HTML.
             token = getattr(request.app.state, "shell_token", "") or ""
-            return HTMLResponse(_index_html_with_shell_token(token), headers=headers)
-        return HTMLResponse(_index_html_with_shell_token(""), headers=headers)
+            return HTMLResponse(
+                _index_html_with_shell_token(token, nonce), headers=headers)
+        return HTMLResponse(
+            _index_html_with_shell_token("", nonce), headers=headers)
 
     @app.get("/sw.js", include_in_schema=False)
     async def _service_worker(request: Request):
