@@ -762,6 +762,27 @@
               <div id="update-status" class="sub" hidden></div>
             </section>
 
+            <!-- Runtime update: the NATIVE llama.cpp binaries `localm setup-llama`
+                 provisions, separate from the Python source tree above. Always
+                 shown (this is local disk state, not a proxy capability) - the
+                 check itself reports "nothing installed yet" when setup has never
+                 run. Apply streams a job (a download + native load-test), same
+                 shape as the managed-ComfyUI update panel. -->
+            <section class="card settings-section" id="sec-runtime-update" data-group="system" data-sec-label="Runtime update">
+              <div class="card-head"><span class="ic cat-ic cat-slate" data-icon="download"></span>
+                <div class="card-head-text"><h3>Runtime update</h3></div></div>
+              <div class="sub">Check for a newer llama.cpp runtime build for your installed
+              backend. You always start it - it never re-provisions on its own. A build that
+              fails to load on this machine is never kept: setup-llama walks back to an older
+              one that does.</div>
+              <div class="actions">
+                <button class="btn-secondary" id="runtime-update-check">Check for runtime update</button>
+                <button class="btn-primary" id="runtime-update-apply" hidden>Update runtime</button>
+              </div>
+              <div id="runtime-update-status" class="sub" hidden></div>
+              <pre id="runtime-update-log" class="comfy-managed-log" style="display:none"></pre>
+            </section>
+
             <section class="card settings-section" id="sec-issues" data-group="system" data-sec-label="Issues" hidden>
               <div class="card-head"><span class="ic cat-ic cat-slate" data-icon="book"></span>
                 <div class="card-head-text"><h3>Issues</h3></div></div>
