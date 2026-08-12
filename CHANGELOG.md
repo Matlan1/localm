@@ -629,6 +629,19 @@ permanent public record of what shipped and are never rewritten; the in-progress
   missing or unreadable, and every device then has to trust the new one. The
   page now says which case is which, and documents deleting `<LOCALM_HOME>/tls/`
   to rebuild both from scratch, which was not written down anywhere.
+- **The GUI's math renderer is updated off a published advisory.** localm ships
+  KaTeX with the GUI to render LaTeX in replies. The copy in place was 0.16.11,
+  which falls inside the range affected by CVE-2025-23207: `\htmlData` did not
+  validate attribute names, so crafted math could emit an attribute it should
+  not have. localm was not exposed to it in practice, because the one place it
+  renders math already turns off KaTeX's trusted-input mode, which is the
+  workaround the advisory itself names; the build was replaced because running a
+  known-affected version and relying on a setting to stay put is not a position
+  worth keeping. It is now 0.18.4, which also carries an upstream fix for
+  prototype pollution in KaTeX's own options handling. Math rendering is
+  unchanged, and the three KaTeX files localm ships are now covered by a test
+  that reads them, fails below the fixed version, and fails if they ever come
+  from different releases.
 
 ## [0.1.5rc2] - 2026-08-08
 
