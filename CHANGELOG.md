@@ -164,6 +164,23 @@ permanent public record of what shipped and are never rewritten; the in-progress
   moment they are created, before anything is written into them. On Windows
   this matters most: files there inherit the folder's permissions, which
   commonly include read access for all local users.
+- **`localm doctor` no longer reports "No GPU detected" when what actually
+  happened is that it could not find out.** If the installed llama.cpp runtime
+  failed to load while being probed (a graphics driver too old for it is the
+  usual cause), doctor gave the same answer as a machine with no graphics card
+  at all, and told you to run `localm setup-llama` to install a backend that
+  was already installed. The reason the probe gave was collected and then
+  thrown away. Doctor now reports that case as its own result, prints the
+  reason, and says plainly that this is not a statement about your hardware.
+  A machine that genuinely has no GPU is unaffected.
+- **Hardware detection can now tell "this machine has no GPU" apart from "the
+  detection could not run".** The tools it shells out to (the Windows display
+  adapter query, `lspci` on Linux, `uname` on macOS) are missing or blocked
+  often enough to matter, and a tool that never answered used to produce the
+  same empty result as a tool that answered "nothing here" - including on
+  macOS, where a failed check reported an Intel Mac and so passed over the
+  Metal recommendation. Detection is still advisory and still falls back to the
+  same safe default; it just no longer states a finding it did not make.
 - **A couple of dismissable UI hints (the NVIDIA/Vulkan backend hint, and
   whether the Studio nav group is expanded) could survive turning on privacy
   mode, unlike every other saved GUI preference.** Both were already withheld

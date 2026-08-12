@@ -637,9 +637,20 @@ def _check_gpu_verdict(find_binary_dir, lib_healthy: bool, smi_or_torch_gpu: boo
     # _GPU_PROBE_CODE captures the exception that stopped it. Reading it is what
     # separates "the runtime says there is no GPU" from "the runtime could not be
     # asked", which used to be the same verdict here (see the branch below).
-    # First line only, the _check_gpu_driver idiom: a repr of a native loader
-    # error can carry a whole traceback, and a wrapped verdict is a hidden one.
-    probe_error = ((probe.get("error") or "") if probe else "").strip()
+    # str() because this crosses a subprocess/JSON boundary and doctor's whole
+    # contract is that it cannot crash; splitlines()[0] because a repr of a native
+    # loader error can carry a whole traceback, and a wrapped verdict is a hidden
+    # one (the _check_gpu_driver idiom).
+    probe_error = str((probe.get("error") or "") if probe else "").strip()
+    if probe_error:
+        # Logged HERE rather than inside the verdict branch below, so a captured
+        # reason is never dropped on the paths that return earlier. The live one:
+        # compute_backends_available() succeeds and compute_devices() then raises,
+        # which leaves loaded True, devices empty and an error set - step (2)
+        # correctly reports the backend marker and returns, and before this line
+        # that reason went nowhere at all.
+        from localm.debuglog import logger as _dbg
+        _dbg.debug("doctor: GPU device probe reported an error: %s", probe_error)
     probe_error = probe_error.splitlines()[0] if probe_error else ""
 
     # Each verdict is a SHORT primary line (the pass/fail phrase never wraps, so
@@ -689,15 +700,10 @@ def _check_gpu_verdict(find_binary_dir, lib_healthy: bool, smi_or_torch_gpu: boo
     #      Deliberately ABOVE the smi_or_torch_gpu early return: a card those
     #      tools CAN see plus a runtime that will not load is the case most worth
     #      naming, and returning early there would swallow it entirely.
+    # No user-facing line points at the debug log above: `doctor` takes no --debug
+    # flag (checked - it is a bare @main.command()), so promising one would be an
+    # unverified claim on the very path that exists to stop making them.
     if probe_error:
-        from localm.debuglog import logger as _dbg
-        # The console line is truncated to stay unwrapped; keep the whole repr for
-        # triage. No user-facing line points at this: `doctor` takes no --debug
-        # flag (checked - it is a bare @main.command()), so promising a log file
-        # would be a second unverified claim on a path that exists to stop making
-        # unverified claims.
-        _dbg.debug("doctor: GPU device probe raised, verdict is indeterminate: %s",
-                   (probe.get("error") or "") if probe else "")
         console.print(f"  {_WARN_SYM}  GPU: could not be determined{tag} - the runtime probe failed")
         console.print(f"       [dim]{probe_error}[/dim]")
         # No provisioning advice here on purpose. The runtime IS provisioned, and
