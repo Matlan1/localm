@@ -183,30 +183,34 @@ test("RESTART: a 403 with NO shell token is NOT swept into the shell recovery", 
     "no shell token means this is some other 403, not a stale open-mode shell");
 });
 
-test("RESTART: a CSRF-mode 403 still takes the #399 CSRF self-heal, not this one", async () => {
-  // Negative control for the other direction: the two recovery paths must not
-  // capture each other's cases. A session request sends X-CSRF-Token and no
-  // bearer, so it must reach refreshCsrf()/retry and never the shell recovery.
-  const seen = [];
-  const fetchImpl = async (url) => {
-    seen.push(String(url));
-    if (String(url).includes("/api/session")) {
-      return { ok: true, status: 200, json: async () => ({ csrf: "fresh-token" }), text: async () => "" };
-    }
-    return { ok: false, status: 403, json: async () => ({}), text: async () => "" };
-  };
-  const { window } = loadApp({ fetchImpl, shellToken: SHELL });
+test("RESTART: sentShellToken tells the two credential modes apart - it is what " +
+     "keeps this recovery off every other kind of 403", async () => {
+  // The predicate, asserted directly, because that is the only thing here that
+  // CAN fail. An end-to-end "a session-mode 403 takes the CSRF self-heal
+  // instead" test was written first and then dropped: the CSRF branch of the
+  // fetch wrapper RETURNS its retried response, the shell branch is an `else`,
+  // AND authHeaders never emits both credentials - so the outcome is guaranteed
+  // three times over and no single realistic mutation could turn that test red.
+  // It would have read as coverage of the interaction while being structurally
+  // incapable of detecting a regression in it. (The invariant it was really
+  // leaning on - a session drops the shell bearer - is already pinned by "S3:
+  // once a session exists, authHeaders drops the shell-token bearer" in
+  // keygate.test.mjs.)
+  const { window } = loadApp({ fetchImpl: allOk, shellToken: SHELL });
   await tick();
-  runScript(window, "_shellRecoveryStarted = false;");
-  window.sessionStorage.removeItem("localm.shellReset");
-  window.__LOCALM_CSRF__ = "stale-token";     // a session exists -> CSRF mode
 
-  await window.fetch("/api/models/load", { method: "POST", headers: window.authHeaders() });
-  await tick();
-  assert.ok(seen.some((u) => u.includes("/api/session")),
-    "the CSRF self-heal refreshed the token");
-  assert.equal(window.sessionStorage.getItem("localm.shellReset"), null,
-    "and the shell-token recovery did NOT fire for a session-mode 403");
+  window.__LOCALM_CSRF__ = "";                       // open mode
+  assert.equal(window.sentShellToken(window.authHeaders()), true,
+    "an open-mode request carries the shell bearer, so a 403 on it IS the stale-token case");
+
+  window.__LOCALM_CSRF__ = "a-session-token";         // session mode
+  assert.equal(window.sentShellToken(window.authHeaders()), false,
+    "a session request sends X-CSRF-Token and no bearer - never route it here");
+
+  assert.equal(window.sentShellToken({ Authorization: "Bearer somebody-elses-token" }), false,
+    "matching the VALUE, not just the presence of a bearer, keeps this off a " +
+    "hand-built Authorization header that has nothing to do with the shell token");
+  assert.equal(window.sentShellToken(null), false, "no headers at all is not a shell request");
 });
 
 // Driving the reconnect poll. Two mechanics, both forced on us by the
