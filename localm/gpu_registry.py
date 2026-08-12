@@ -146,15 +146,19 @@ def write_entry(directory, *, instance_id: str, pid: int, port: Optional[int],
         path = entry_path(d, instance_id)
         tmp = path.with_name(path.name + ".tmp")
         tmp.write_text(json.dumps(entry, indent=2), encoding="utf-8")
-        try:
-            os.chmod(tmp, 0o600)
-        except OSError as e:
-            # 0600 on the token-bearing entry is best-effort hardening; chmod is
-            # EXPECTED to no-op/fail on Windows and some filesystems. The entry is
-            # still written; degrade with a debug log, not a silent pass (module
-            # header: "logged, never silenced (RULE 5)").
-            logger.debug("gpu_registry: could not chmod 0600 %s: %s", tmp, e)
+        # The entry carries the coordination token (LM-DA-044/LM-DA-027): same
+        # Windows-aware restriction as instances.register_instance, not a bare
+        # POSIX-only chmod (a documented no-op on Windows - config.py:768-769).
+        # Restrict the TEMP file (os.replace carries its ACL onto the
+        # destination); retry on the destination only if that first attempt
+        # failed.
+        from localm.config import restrict_file_perms
+        ok = restrict_file_perms(tmp)
+        if not ok:
+            logger.debug("gpu_registry: could not restrict perms on %s", tmp)
         os.replace(tmp, path)   # atomic on Windows + POSIX
+        if not ok:
+            restrict_file_perms(path)
         return path
     except OSError as e:
         logger.debug("gpu_registry: failed to write entry for %s: %s", instance_id, e)
