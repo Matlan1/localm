@@ -178,6 +178,23 @@ GRAMMAR_UNSUPPORTED_MESSAGE = (
 )
 
 
+# Shown when a LAZY grammar is requested of a backend that can constrain generation
+# but cannot do it lazily. Deliberately distinct from GRAMMAR_UNSUPPORTED_MESSAGE
+# above: that one says "this model cannot constrain generation at all" and sends the
+# reader to install the grammar extra, which is the wrong advice here - the extra may
+# already be installed and plain (non-lazy) grammar may work perfectly. Naming the
+# lazy mode specifically is what lets the caller pick the recovery that actually
+# applies, which is the same wrong-thing-to-fix reasoning that kept
+# GrammarUnsupportedError separate from InvalidGrammarError.
+GRAMMAR_LAZY_UNSUPPORTED_MESSAGE = (
+    "This model cannot apply a LAZY grammar (one that leaves generation "
+    "unconstrained until a trigger pattern matches, then enforces the grammar "
+    "from there), so the requested grammar would be ignored and the reply would "
+    "not match it. Use a GGUF-format model, whose native sampler implements lazy "
+    "grammars, or resend without grammar_lazy to constrain the whole reply."
+)
+
+
 def messages_contain_image(messages: List[dict]) -> bool:
     """True if any message carries an ``image_url`` content part.
 
@@ -225,7 +242,7 @@ class BaseBackend(ABC):
         """
         return False
 
-    def validate_grammar(self, grammar: Optional[str]) -> None:
+    def validate_grammar(self, grammar: Optional[str], *, lazy: bool = False) -> None:
         """Check *grammar* against this backend before generation starts.
 
         Base behaviour, which every backend inherits unless it overrides:
@@ -243,6 +260,26 @@ class BaseBackend(ABC):
         This is a concrete method rather than an optional attribute on purpose.
         An absent method cannot say "I cannot do this"; it can only be missing,
         and every caller has to guess what missing meant.
+
+        *lazy* says the caller asked for LAZY semantics (unconstrained until a
+        trigger pattern matches, grammar enforced from there). The base
+        deliberately does NOT consult a lazy capability flag, and there is
+        deliberately no ``supports_lazy_grammar`` alongside
+        :attr:`supports_grammar`. A backend can only answer that honestly if it
+        can probe its own lazy support cheaply and safely; MEASURED 2026-08-12,
+        the GGUF backend cannot. ``_api.has_lazy_grammar()`` RAISES RuntimeError
+        rather than returning False when no runtime is provisioned, and when one
+        IS provisioned it answers only by loading llama.dll into the calling
+        process - which in the server parent is the documented doomed
+        combination that the whole spawn-worker isolation exists to avoid (see
+        ``_loader.native_lib_loaded``). A flag GGUF had to fill in anyway would
+        report "supported" on a build nobody probed, and a claimed capability
+        invites callers to trust it (``coder/agent/context.py`` already trusts
+        ``supports_grammar`` exactly that way), which is worse than the gap it
+        would paper over. So only a backend that can PROVE it cannot do lazy
+        overrides this and refuses - see ``HFBackend.validate_grammar``, whose
+        answer rests on a static fact about xgrammar rather than on a probe.
+        Evidence: ``dev-notes/lazy-grammar-silent-unconstrained-2026-08-12.md``.
         """
         if not grammar:
             return

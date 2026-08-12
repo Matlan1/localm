@@ -80,8 +80,14 @@ dispatch thread is blocked on ``req_q.get()`` or forwarding chunks):
     ("ok", value)              - success (value shape depends on command;
                                   "load" returns {supports_images, can_embed})
     ("error", message[, kind]) - a clean, expected failure; kind is an
-                                  optional typed-exception tag (e.g.
-                                  "UnsupportedInputError")
+                                  optional typed-exception tag, re-raised as that
+                                  type by the parent. Recognised tags:
+                                  "UnsupportedInputError",
+                                  "GrammarUnsupportedError",
+                                  "InvalidGrammarError". An UNTAGGED error becomes
+                                  a RuntimeError, which callers read as "the
+                                  isolated worker faulted" (503), so anything the
+                                  CALLER can fix needs a tag
     ("chunk", text)            - one streamed token (chat_stream only)
     ("done", {"finish_reason": "stop"|"length"}) - end of one chat_stream,
                                   whether it ran to completion, hit a genuine
@@ -292,7 +298,11 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
                                        # exception, never a blocking modal dialog.
 
     from localm.inference.backends._hf_worker import HFWorker
-    from localm.inference.backends.base import UnsupportedInputError
+    from localm.inference.backends.base import (
+        GrammarUnsupportedError,
+        InvalidGrammarError,
+        UnsupportedInputError,
+    )
 
     stream_cancel_event = threading.Event()
     # The seq of the stream currently being dispatched, as told to us by the
@@ -384,6 +394,18 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
                 # GgufWorker's chat_stream distinguishes InvalidGrammarError
                 # from a genuine native fault.
                 resp_q.put(("error", str(e), "UnsupportedInputError"))
+            except GrammarUnsupportedError as e:
+                # Same shape: _grammar_processor now REFUSES a grammar it cannot
+                # apply instead of returning None and generating unconstrained
+                # text (NEW-LAZY-GRAMMAR-SILENT-UNCONSTRAINED). Raised during
+                # setup, before a single token, so the model is untouched - it
+                # must not fall through to the worker-killing arm below.
+                resp_q.put(("error", str(e), "GrammarUnsupportedError"))
+            except InvalidGrammarError as e:
+                # A grammar xgrammar could not compile. The caller's input is the
+                # problem, not this worker, so keep serving and let the parent
+                # re-raise the typed error the routes already map to a 400.
+                resp_q.put(("error", str(e), "InvalidGrammarError"))
             # Any OTHER uncaught fault (a torch/CUDA crash inside
             # model.generate(), a tokenizer failure mid-stream) propagates
             # OUT of this whole function, uncaught, on purpose: the model is
@@ -776,6 +798,20 @@ class HFRunner:
                         if tag == "UnsupportedInputError":
                             from localm.inference.backends.base import UnsupportedInputError
                             raise UnsupportedInputError(msg)
+                        # Re-raise the TYPE, not a bare RuntimeError: the routes
+                        # map GrammarUnsupportedError and InvalidGrammarError to a
+                        # 400 naming the real problem, while a RuntimeError from
+                        # this generator means "the isolated worker faulted" and
+                        # is reported as a 503. Collapsing a caller's bad grammar
+                        # into the worker-fault arm would tell them to fix the
+                        # wrong thing - the same mislabelling routes/chat.py's own
+                        # worker-fault comment was written to correct.
+                        if tag == "GrammarUnsupportedError":
+                            from localm.inference.backends.base import GrammarUnsupportedError
+                            raise GrammarUnsupportedError(msg)
+                        if tag == "InvalidGrammarError":
+                            from localm.inference.backends.base import InvalidGrammarError
+                            raise InvalidGrammarError(msg)
                         raise RuntimeError(msg)
                     else:
                         raise RuntimeError(f"Unexpected response during generation: {result!r}")

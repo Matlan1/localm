@@ -63,6 +63,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
   for a run that changed nothing.
 
 ### Fixed
+- **A grammar that could not be applied no longer produces unconstrained text
+  that looks like a normal answer.** Asking a HuggingFace-format model for
+  trigger-gated ("lazy") grammar, or sending a grammar it could not compile,
+  used to drop the constraint and reply with an ordinary 200 the caller had no
+  way to tell from a grammar-conformant one; the only trace was a log line
+  inside a background process, which nobody sees. Such a request is now
+  refused up front with a clear reason naming what is unsupported and what to
+  do instead, before any of the reply is generated. GGUF models, whose sampler
+  applies grammars natively, are unaffected and still support lazy grammar.
 - **`localm update` now actually replaces the llama.cpp runtime when a release
   needs it to.** A release that ships a newer llama.cpp build was supposed to
   re-provision your runtime as part of the update, but the step that does this

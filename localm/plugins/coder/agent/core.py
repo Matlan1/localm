@@ -200,6 +200,14 @@ class Agent(
         # about what is actually loaded server-side but that fact does not
         # change again mid-session.
         self._grammar_confirmed_unsupported: bool = False
+        # The NARROWER sibling of the flag above, latched when the server refused
+        # the LAZY (trigger-gated) form specifically. Kept separate because a
+        # backend that cannot enforce a grammar from a trigger may still enforce
+        # one from the first token, so this must NOT disable the forced rung -
+        # see context._disable_grammar_on_unsupported. Declared here rather than
+        # sprung into existence by the first getattr, so both latches are visible
+        # in one place to anyone reading what state a session carries.
+        self._lazy_grammar_confirmed_unsupported: bool = False
         # Per-run: False when the LAST _loop failed (max_turns, a circuit breaker,
         # a stop). _loop re-arms it to True at the start of every run, so one bad
         # turn in a multi-turn session (REPL / GUI) does not mislabel every later

@@ -297,12 +297,26 @@ def _grammar_processor(grammar: Optional[str], tokenizer, model):
     *grammar* is a GBNF/EBNF string with a ``root`` rule - see
     ``localm.inference.gbnf`` for ready-made JSON / tool-call grammars.
 
-    Returns a one-element ``LogitsProcessorList`` or ``None``. ``None`` means
-    "generate unconstrained": either no grammar was requested, or xgrammar is
-    not installed / could not compile the grammar - in which case we warn and
-    proceed rather than fail the request (soft-degrade). A FRESH processor is
-    built per call because the underlying grammar matcher is stateful.
+    Returns a one-element ``LogitsProcessorList``, or ``None`` when no grammar was
+    requested at all. It NEVER returns ``None`` to mean "I gave up on the grammar":
+    a grammar that cannot be applied RAISES.
+
+    That is the fix for NEW-LAZY-GRAMMAR-SILENT-UNCONSTRAINED. Both failure arms
+    below used to log and return ``None``, so generation ran UNCONSTRAINED while the
+    caller got a normal 200 it could not tell from a grammar-conformant answer - and
+    the log line never reaches the caller, because this whole module runs in the
+    isolated worker CHILD. "Soft-degrade" was the wrong contract for a constraint
+    the caller explicitly asked for (AGENTS.md rule 5).
+
+    Both raises are marshalled back as CLEAN refusals by ``_hf_runner``'s tagged
+    error envelope, so neither kills the worker or leaves the model in an unknown
+    state. A FRESH processor is built per call because the matcher is stateful.
     """
+    from .base import (
+        GRAMMAR_UNSUPPORTED_MESSAGE,
+        GrammarUnsupportedError,
+        InvalidGrammarError,
+    )
     if not grammar:
         return None
     try:
@@ -310,22 +324,26 @@ def _grammar_processor(grammar: Optional[str], tokenizer, model):
         from xgrammar.contrib.hf import LogitsProcessor
         from transformers import LogitsProcessorList
     except ImportError:
-        # logger.warning, not console.print - see _SafeGrammarProcessor's
-        # identical note above for why (this runs in the isolated child too).
-        logger.warning(
-            "a grammar was requested but the [grammar] extra is not "
-            "installed (pip install 'localm[gpu,grammar]'); generating "
-            "without constraint")
-        return None
+        # Normally unreachable: HFBackend.supports_grammar is False without the
+        # extra, so the up-front check in the chat routes already refused this
+        # request (#1215). Reaching it anyway means the parent's check was
+        # bypassed or the install changed under a live worker - so raise the same
+        # error that check would have, rather than quietly generating text that
+        # ignores the grammar.
+        raise GrammarUnsupportedError(GRAMMAR_UNSUPPORTED_MESSAGE)
     try:
         vocab = getattr(getattr(model, "config", None), "vocab_size", None)
         info = xgr.TokenizerInfo.from_huggingface(tokenizer, vocab_size=vocab)
         compiled = xgr.GrammarCompiler(info).compile_grammar(grammar)
         return LogitsProcessorList([_SafeGrammarProcessor(LogitsProcessor(compiled))])
     except Exception as e:   # malformed grammar, tokenizer mismatch, etc.
-        logger.warning("grammar ignored (%s: %s); generating without "
-                       "constraint", type(e).__name__, e)
-        return None
+        # Mirrors the GGUF backend exactly: llama.py raises InvalidGrammarError when
+        # the native GBNF parser rejects a grammar (a NULL sampler), which the route
+        # turns into a clean 400 naming the grammar as the thing to fix. A grammar
+        # xgrammar cannot compile is the same event on the other backend, so it gets
+        # the same answer instead of a silent unconstrained 200.
+        raise InvalidGrammarError(
+            f"grammar could not be compiled ({type(e).__name__}: {e})") from e
 
 
 class _CancelCriteria:
@@ -845,15 +863,25 @@ class HFWorker:
         seed: Optional[int] = None,
         cancel_event: Optional[threading.Event] = None,
     ) -> Iterator[str]:
-        # xgrammar has no trigger/lazy mode: a lazy request must not silently
-        # become a STRICT constraint (a strict grammar stalls thinking models),
-        # so drop the grammar with a trace and generate unconstrained - the
-        # same soft-degrade contract as everywhere else on this backend.
+        # xgrammar has no trigger/lazy mode, and a lazy request must not silently
+        # become a STRICT constraint either (a strict grammar stalls thinking
+        # models). Both remaining options - drop it, or enforce it strictly - give
+        # the caller something other than what it asked for, so REFUSE instead.
+        #
+        # This used to drop the grammar behind a DEBUG line, described at the time
+        # as "the same soft-degrade contract as everywhere else on this backend".
+        # That contract is what NEW-LAZY-GRAMMAR-SILENT-UNCONSTRAINED was filed
+        # against: a caller that asked for constrained output got unconstrained
+        # output and a 200, and DEBUG in an isolated worker child reaches nobody.
+        #
+        # Normally unreachable - HFBackend refuses lazy in validate_grammar (a
+        # clean 400 before either response is committed) AND again in chat_stream
+        # before the runner is touched. This is the third line of defence, for a
+        # caller driving HFWorker directly; _hf_runner marshals it back as a clean
+        # refusal rather than a worker-killing fault.
         if grammar and grammar_lazy:
-            from localm.debuglog import logger as _dbg
-            _dbg.debug("lazy grammar is not supported on the HF backend; "
-                       "generating unconstrained")
-            grammar = None
+            from .base import GRAMMAR_LAZY_UNSUPPORTED_MESSAGE, GrammarUnsupportedError
+            raise GrammarUnsupportedError(GRAMMAR_LAZY_UNSUPPORTED_MESSAGE)
         # Refuse images on a text-only checkpoint instead of silently dropping
         # them (a processor-less model would otherwise ignore the picture and
         # answer from the text alone). Checked before importing transformers so
