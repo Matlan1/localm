@@ -105,7 +105,7 @@ def test_verified_urlopen_falls_back_to_certifi_on_cert_failure(monkeypatch):
             raise _cert_error()
         return _Resp(200, b"ok-via-certifi")
 
-    patch_https_transport(monkeypatch, fake_urlopen)
+    seen = patch_https_transport(monkeypatch, fake_urlopen)
     req = urllib.request.Request("https://example.com/")
     with http_ssl.verified_urlopen(req, timeout=5) as r:
         assert r.read() == b"ok-via-certifi"
@@ -113,6 +113,11 @@ def test_verified_urlopen_falls_back_to_certifi_on_cert_failure(monkeypatch):
     assert contexts[0].verify_mode == ssl.CERT_REQUIRED
     assert contexts[1].verify_mode == ssl.CERT_REQUIRED
     assert contexts[1].get_ca_certs(), "the fallback must actually be certifi-backed"
+    # seen["handlers"] is the SECOND build_opener call, so this says the redirect
+    # guard is on the RETRY opener too. Worth asserting separately: this is the
+    # path a fresh Windows box actually takes, and installing the guard per
+    # attempt rather than once is a refactor that would leave exactly it bare.
+    assert http_ssl.HttpsOnlyRedirect in seen["handlers"]
 
 
 def test_verified_urlopen_never_downgrades_to_unverified_when_certifi_missing(monkeypatch):
