@@ -27,6 +27,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
   want when the new version needs packages the old one did not. If your
   ComfyUI was installed by copying rather than as a git checkout it cannot take
   a version update, and the button now says so instead of failing part way in.
+- **The Knowledge page can now repair a damaged collection itself.** A
+  collection with a corrupt or malformed index used to only tell you to run
+  `localm rag repair` in a terminal. There is now a Repair button in the
+  collections table and in a collection's info panel, and the damage message
+  names what's actually wrong (for example how many chunk lines are
+  unreadable) instead of a generic "index damaged". A document you added by
+  uploading it from your device has no copy on the server to rebuild from, so
+  repair says so plainly and fixes what it can rather than reporting success
+  for a run that changed nothing.
 
 ### Fixed
 - **A vision model's image projector no longer lands on a graphics card you

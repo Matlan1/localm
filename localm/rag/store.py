@@ -992,6 +992,27 @@ class Collection:
         # The reader above is fixed independently, so files written before this
         # still load; this stops NEW ones being produced. See localm/jsonl.py.
         self._atomic_write("chunks.jsonl", dumps_lines(self._chunks))
+        # This call just rewrote BOTH meta.json (above, from self._meta) and
+        # chunks.jsonl (from self._chunks) verbatim from this instance's own
+        # in-memory state, which _load()'s three self.corrupt sites already
+        # require to be well-formed before it is ever placed in self._meta /
+        # self._chunks: a corrupt meta.json is replaced with a clean
+        # {name, docs} dict (and 'roots' is reset the same way in
+        # _record_roots) before it can be re-written, and a malformed
+        # chunks.jsonl line is dropped, never appended to self._chunks, so
+        # dumps_lines(self._chunks) can never reproduce one. So whatever
+        # on-disk corruption made THIS load flag self.corrupt / count
+        # self.chunks_bad_lines is resolved by construction the moment this
+        # write lands - clear both here, not just where _load() sets them.
+        # Without this, a repair (add_paths(force=True) -> this _save()) left
+        # the CACHED corrupt/chunks_bad_lines stale at their pre-repair values
+        # forever: peek_stats()'s fingerprint check still matches (it is taken
+        # from what THIS call just wrote), so the GUI's "needs repair" badge
+        # and the CLI's corrupt marker never cleared even though the fault was
+        # actually fixed (NEW-RAG-INDEX-WARN-SPAM, caught in manual GUI
+        # verification - click Repair, and the badge did not go away).
+        self.corrupt = False
+        self.chunks_bad_lines = 0
         # The fate of a REJECTED vectors.json is decided FIRST, before anything
         # below writes or unlinks that filename. Setting it aside from inside only
         # one branch loses the bytes on every other one, and the branch it lived in

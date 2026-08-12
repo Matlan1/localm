@@ -299,12 +299,32 @@ def test_malformed_chunks_jsonl_count_surfaces_in_stats(base, docs):
 
     # A real _save() (unlike the backfill above) rewrites chunks.jsonl from
     # self._chunks, which never held the malformed lines - so it self-heals
-    # the file and the count correctly drops to 0 on the NEXT fresh load.
+    # the file and the count correctly drops to 0.
     reloaded._save()
+    assert reloaded.stats()["chunks_bad_lines"] == 0, (
+        "_save() rewrites chunks.jsonl from the valid chunks only, so THIS "
+        "instance's own corrupt/chunks_bad_lines must clear immediately - "
+        "not just on a later fresh reload. Caught live: a repair "
+        "(add_paths(force=True) -> this same _save()) left the CACHED "
+        "corrupt/chunks_bad_lines stale forever, because peek_stats()'s "
+        "fingerprint check still matched what THIS save just wrote, so the "
+        "GUI badge and CLI marker never cleared even though the fault was "
+        "fixed - see _save()'s own reset and its why-comment")
+    assert reloaded.stats()["corrupt"] is False
     assert Collection("kb", base=base).stats()["chunks_bad_lines"] == 0, (
         "a real _save() rewrites chunks.jsonl from the valid chunks only, "
         "so the malformed lines are gone from disk and must not still be "
         "counted on the next load")
+
+    # THE actual bug shape: peek_stats() (what the GUI list/repair-button
+    # renders from) must ALSO see the healed state right after this save -
+    # not require an intervening fresh Collection() construction, which a
+    # cache is supposed to make unnecessary in the first place.
+    peeked_after_heal = Collection.peek_stats("kb", base=base)
+    assert peeked_after_heal is not None, (
+        "fingerprint must still match what _save() just wrote")
+    assert peeked_after_heal["chunks_bad_lines"] == 0
+    assert peeked_after_heal["corrupt"] is False
 
 
 def test_fingerprint_survives_a_real_noop_save(base, docs):
