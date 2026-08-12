@@ -24,6 +24,7 @@ from .collection_lock import CollectionLockedError
 from .extract import (EXTRACTABLE_SUFFIXES, ExtractError, classify_format,
                       extract_bytes, extract_text, sniff_text_format)
 from .store import (Collection, check_collection_name, collection_names,
+                    collection_provenance_note, collection_provenance_report,
                     delete_collection, rag_dir)
 
 __all__ = [
@@ -36,6 +37,8 @@ __all__ = [
     "chunk_text",
     "classify_format",
     "collection_names",
+    "collection_provenance_note",
+    "collection_provenance_report",
     "delete_collection",
     "extract_bytes",
     "extract_text",

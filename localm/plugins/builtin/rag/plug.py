@@ -345,56 +345,6 @@ def _collection_dim_report(target_dim: int) -> dict:
     return {"degrades": degrades, "unknown": unknown, "unaffected": unaffected}
 
 
-def _collection_provenance_report() -> list:
-    """Every collection that currently has vectors, with its recorded 'built
-    with' model (``Collection.embedding_model()``, None if never recorded -
-    see FIX4) and chunk count. The pre-switch, NEW-model-dimension-free sibling
-    of ``_collection_dim_report``: that function needs the CANDIDATE model's
-    own dimension to say which collections will actually degrade, and getting
-    that means resolving and loading the candidate - exactly the step
-    ``rag_embedding_set`` must not take before the caller confirms (a
-    ``resolve_embedding_model_path``/``get_embedder`` call there is a real
-    fetch/VRAM-load, not a free probe, and there is no static dim table for an
-    arbitrary registered model or GGUF path).
-
-    So this reports what CAN be known for free from disk alone: which
-    collections have semantic search today, and what they were built with.
-    Deliberately not a verdict on whether a given collection's dimension will
-    actually change - only reembed()/add_paths() recording ``embedding_model``
-    know that for certain, and only once the new model has actually been
-    loaded and measured. Honest under-claiming (AGENTS rule 5: never assert a
-    dimension nobody has measured) rather than a confident but fabricated
-    per-collection verdict.
-
-    Best-effort per collection, same as ``_collection_dim_report``: one that
-    fails to even construct is still named, with the failure NOTED (not
-    silently dropped from the count) - but unlike that function, this one's
-    return value is serialized straight into an HTTP response body (the
-    dry-run JSON), not just read internally for a name to log. So the
-    exception's own text is logged server-side only, never placed in the
-    field this function returns - the raw message can carry a filesystem
-    path or other implementation detail (CWE-209), and reaching the response
-    is exactly the leak _collection_dim_report never had because its own
-    'reason' string is only ever read for logging, never re-serialized."""
-    from localm.rag import Collection, collection_names
-    out: list = []
-    for name in collection_names():
-        try:
-            coll = Collection(name)
-            stats = coll.stats()
-        except Exception as e:
-            logger.warning("rag: %r could not be read for the embedding-switch "
-                           "impact preview (%s: %s)", name, type(e).__name__, e)
-            out.append({"name": name, "built_with": None, "n_chunks": None,
-                        "reason": "could not be read"})
-            continue
-        if not stats.get("has_vectors"):
-            continue
-        out.append({"name": name, "built_with": coll.embedding_model(),
-                    "n_chunks": stats["n_chunks"]})
-    return out
-
-
 def _require_jobs(request: Request):
     """The background job manager.
 
@@ -1027,10 +977,13 @@ async def rag_embedding_set(req: EmbeddingModelRequest, request: Request):
 
     Two-step by *confirm* (NEW-RAG-DIM-NO-REEMBED item 3). Without it (the
     default), this is a DRY RUN: no config write, no embedder reset, no job -
-    just ``_collection_provenance_report()``'s honest "these collections have
-    semantic search today and may be invalidated" answered synchronously and
-    fast (see that function's docstring for why it does not, and cannot
-    cheaply, assert the NEW dimension). With ``confirm: true``, this makes the
+    just ``localm.rag.collection_provenance_report()``'s honest "these
+    collections have semantic search today and may be invalidated" answered
+    synchronously and fast (see that function's docstring for why it does
+    not, and cannot cheaply, assert the NEW dimension). The same report backs
+    the identical dry-run/confirm gate on ``PATCH /v1/config`` and
+    ``localm setup-embeddings``, the other two writers of this key. With
+    ``confirm: true``, this makes the
     switch exactly as before this change. The caller (the GUI) is expected to
     show the dry-run report, let the user confirm, and only then re-POST with
     ``confirm: true`` - so the warning lands BEFORE the switch takes effect,
@@ -1060,17 +1013,9 @@ async def rag_embedding_set(req: EmbeddingModelRequest, request: Request):
             "The rag scope alone is not enough.")
 
     if not req.confirm:
-        affected = _collection_provenance_report()
-        if affected:
-            note = (
-                f"Switching to '{model}' may invalidate the semantic search of "
-                f"{len(affected)} existing collection(s) until they are "
-                "re-embedded. The exact impact cannot be confirmed until the "
-                "new model is loaded and tested - re-embed after switching if "
-                "any of them drop to BM25/lexical-only.")
-        else:
-            note = (f"No existing collection currently has embeddings, so "
-                     f"switching to '{model}' has nothing to invalidate.")
+        from localm.rag import collection_provenance_note, collection_provenance_report
+        affected = collection_provenance_report()
+        note = collection_provenance_note(model, affected)
         return {"needs_confirm": True, "model": model,
                 "collections": affected, "note": note}
 

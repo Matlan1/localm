@@ -416,6 +416,147 @@ class TestEmbeddingSetConfirmGate:
 
 
 # --------------------------------------------------------------------------- #
+#  NEW-RAG-DIM-NO-REEMBED (2026-08-12 follow-up): PATCH /v1/config is the     #
+#  OTHER GUI writer of embedding_model (the Settings page's editable field),  #
+#  and it used to switch with no impact preview at all. It now shares         #
+#  collection_provenance_report()/_note() (relocated to localm/rag/store.py   #
+#  so this core route can reach them) with the RAG picker above. Unlike that  #
+#  always-two-step route, PATCH /v1/config is a generic multi-key settings    #
+#  save, so it only gates on a REAL value change with something to lose -     #
+#  a no-op or nothing-at-risk write must still complete in one round trip.    #
+# --------------------------------------------------------------------------- #
+
+CONFIG_OWNER_KEY = "owner-admin-key-rag-dim-no-reembed"
+
+
+def _owner_headers():
+    return {"Authorization": f"Bearer {CONFIG_OWNER_KEY}"}
+
+
+@pytest.fixture
+def config_app(rag_home, monkeypatch):
+    """A real core app (PATCH /v1/config included), sharing rag_home's
+    monkeypatched HOME_DIR/Path.home so collection_names()/Collection(name)
+    resolve into the same directory the TestClient's requests operate
+    against. An owner API key (mirrors test_config_admin_gating.py's
+    app_env): a bare TestClient supplies no GUI shell token, and an actual
+    config WRITE (unlike the dry-run/needs_confirm response, which never
+    reaches update_config()) requires either that or an owner key."""
+    monkeypatch.setenv("LOCALM_API_KEY", CONFIG_OWNER_KEY)
+    from localm.inference.http_server import create_app
+    return create_app(None)
+
+
+class TestPatchConfigEmbeddingConfirmGate:
+    def test_change_with_affected_collections_needs_confirm_and_does_not_write(
+            self, config_app, rag_home):
+        c = _collection(rag_home, "docs", ["alpha", "beta"], dim=768)
+        c._meta["embedding_model"] = "old-model"
+        c._save()
+        from localm.config import load_config
+        before = load_config().get("embedding_model")
+
+        from fastapi.testclient import TestClient
+        with TestClient(config_app) as client:
+            r = client.patch("/v1/config", headers=_owner_headers(),
+                             json={"embedding_model": "new-model"})
+
+        assert r.status_code == 200, r.text
+        data = r.json()
+        assert data["needs_confirm"] is True
+        assert data["model"] == "new-model"
+        assert data["collections"] == [
+            {"name": "docs", "built_with": "old-model", "n_chunks": 2}]
+        assert "may invalidate" in data["note"]
+        assert load_config().get("embedding_model") == before, \
+            "an unconfirmed PATCH must not write embedding_model"
+
+    def test_confirm_true_actually_writes(self, config_app, rag_home):
+        _collection(rag_home, "docs", ["alpha"], dim=768)
+
+        from fastapi.testclient import TestClient
+        with TestClient(config_app) as client:
+            r = client.patch(
+                "/v1/config", headers=_owner_headers(),
+                json={"embedding_model": "new-model", "confirm": True})
+
+        assert r.status_code == 200, r.text
+        assert "needs_confirm" not in r.json()
+        from localm.config import load_config
+        assert load_config().get("embedding_model") == "new-model"
+
+    def test_no_affected_collections_writes_directly_no_gate(
+            self, config_app, rag_home):
+        # Nothing has embeddings yet - nothing at risk, so a plain PATCH (no
+        # confirm) must still write in one round trip, same as before this
+        # change. The gate exists to warn about real risk, not to add
+        # friction to every embedding_model write.
+        from fastapi.testclient import TestClient
+        with TestClient(config_app) as client:
+            r = client.patch("/v1/config", headers=_owner_headers(),
+                             json={"embedding_model": "new-model"})
+
+        assert r.status_code == 200, r.text
+        assert "needs_confirm" not in r.json()
+        from localm.config import load_config
+        assert load_config().get("embedding_model") == "new-model"
+
+    def test_setting_the_same_value_is_a_noop_not_gated(self, config_app, rag_home):
+        from localm.config import load_config, update_config
+        update_config(lambda c: c.__setitem__("embedding_model", "same-model"))
+        c = _collection(rag_home, "docs", ["alpha"], dim=768)
+        c._meta["embedding_model"] = "same-model"
+        c._save()
+
+        from fastapi.testclient import TestClient
+        with TestClient(config_app) as client:
+            r = client.patch("/v1/config", headers=_owner_headers(),
+                             json={"embedding_model": "same-model"})
+
+        assert r.status_code == 200, r.text
+        assert "needs_confirm" not in r.json()
+
+    def test_other_fields_in_the_same_batch_land_together_once_confirmed(
+            self, config_app, rag_home):
+        # A Settings-page save can bundle unrelated fields with the
+        # embedding_model change (one Save button per section). The confirm
+        # gate must not silently drop them once the user proceeds.
+        c = _collection(rag_home, "docs", ["alpha"], dim=768)
+        c._meta["embedding_model"] = "old-model"
+        c._save()
+
+        from fastapi.testclient import TestClient
+        with TestClient(config_app) as client:
+            dry = client.patch(
+                "/v1/config", headers=_owner_headers(),
+                json={"embedding_model": "new-model", "net_allow": ["x.com"]})
+            assert dry.json()["needs_confirm"] is True
+
+            r = client.patch(
+                "/v1/config", headers=_owner_headers(),
+                json={"embedding_model": "new-model", "net_allow": ["x.com"],
+                      "confirm": True})
+
+        assert r.status_code == 200, r.text
+        from localm.config import load_config
+        cfg = load_config()
+        assert cfg.get("embedding_model") == "new-model"
+        assert cfg.get("net_allow") == ["x.com"]
+
+    def test_confirm_key_itself_is_never_persisted_as_a_config_key(
+            self, config_app, rag_home):
+        from fastapi.testclient import TestClient
+        with TestClient(config_app) as client:
+            r = client.patch(
+                "/v1/config", headers=_owner_headers(),
+                json={"embedding_model": "new-model", "confirm": True})
+
+        assert r.status_code == 200, r.text
+        from localm.config import load_config
+        assert "confirm" not in load_config()
+
+
+# --------------------------------------------------------------------------- #
 #  #1078 post-merge review: the ONE-SHOT job-log warning above (deliberately  #
 #  cheap - it loads and test-embeds the NEW model, which is only worth it     #
 #  once, at switch time) never touched the PERSISTENT list/detail badge,      #

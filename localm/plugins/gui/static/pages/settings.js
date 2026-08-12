@@ -7,7 +7,7 @@
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { pickDirectory, pickFile } from "../app/picker.js";
-import { $, authHeaders, confirmDanger, el, streamJob, toast } from "../app/helpers.js";
+import { $, authHeaders, confirmDanger, el, openModal, streamJob, toast } from "../app/helpers.js";
 import { emptyState } from "../app/icons.js";
 import { applyServerTtsConfig, browserVoiceOverride, caps, clearBrowserVoiceOverride } from "../app/settings-perf.js";
 
@@ -987,7 +987,45 @@ export function buildSettingsNav() {
   if (target) showSettingsGroup(target);
 }
 
-/** Save just one section: PATCH only the keys whose controls live in it. */
+/** In-page confirm before a PATCH /v1/config that would switch embedding_model
+ *  and invalidate existing collections' semantic search - mirrors
+ *  knowledge.js's kbConfirmEmbeddingSwitch for the RAG picker's identical gate
+ *  (NEW-RAG-DIM-NO-REEMBED: PATCH /v1/config is the second writer of this
+ *  key and needed the same pre-switch warning). */
+function confirmEmbeddingModelSwitch(model, report) {
+  return new Promise((resolve) => {
+    openModal(`Switch embedding model to '${model}'?`, (body) => {
+      body.appendChild(el("p", "", report.note));
+      const list = el("ul", "");
+      for (const c of report.collections || []) {
+        list.appendChild(el("li", "",
+          c.name + (c.built_with ? ` (built with ${c.built_with})` : "")
+          + (c.n_chunks != null ? ` - ${c.n_chunks} chunks` : "")));
+      }
+      body.appendChild(list);
+      body.appendChild(el("p", "sub",
+        "Re-embed each one afterward on the Knowledge page to restore semantic "
+        + "search if it does turn out to need it."));
+      const row = el("div", "actions");
+      const cancel = el("button", "btn-secondary", "Cancel");
+      cancel.onclick = () => { $("modal").style.display = "none"; resolve(false); };
+      const ok = el("button", "btn-secondary btn-primary", "Switch anyway");
+      ok.onclick = () => { $("modal").style.display = "none"; resolve(true); };
+      row.append(cancel, ok);
+      body.appendChild(row);
+    });
+  });
+}
+
+/** Save just one section: PATCH only the keys whose controls live in it.
+ *
+ *  NEW-RAG-DIM-NO-REEMBED: when the section's updates include an
+ *  embedding_model change that would invalidate existing RAG collections,
+ *  PATCH /v1/config answers with a needs_confirm dry-run report instead of
+ *  writing (no config write happened yet). Show it, and only if the user
+ *  proceeds, re-PATCH the exact same body plus confirm:true - so the whole
+ *  section's edits (not just embedding_model) land together, same as the
+ *  single-step case, once confirmed. */
 export async function saveSettingsSection(secId) {
   const panel = $("settings-sec-" + secId);
   if (!panel) return;
@@ -999,11 +1037,20 @@ export async function saveSettingsSection(secId) {
     updates[field.key] = value;
   }
   if (!Object.keys(updates).length) { toast("Nothing changed"); return; }
-  const r = await fetch("/v1/config", {
+  let r = await fetch("/v1/config", {
     method: "PATCH", headers: authHeaders(),
     body: JSON.stringify(updates),
   });
-  const data = await r.json().catch(() => ({}));
+  let data = await r.json().catch(() => ({}));
+  if (r.ok && data.needs_confirm) {
+    const proceed = await confirmEmbeddingModelSwitch(data.model, data);
+    if (!proceed) { toast("Cancelled"); return; }
+    r = await fetch("/v1/config", {
+      method: "PATCH", headers: authHeaders(),
+      body: JSON.stringify({ ...updates, confirm: true }),
+    });
+    data = await r.json().catch(() => ({}));
+  }
   if (r.ok) {
     toast("Saved - engine values apply on the next model load");
     refreshSettingsPage();   // re-render to reflect server-normalized values
