@@ -29,6 +29,24 @@ permanent public record of what shipped and are never rewritten; the in-progress
   a version update, and the button now says so instead of failing part way in.
 
 ### Fixed
+- **A server that asks for an API key no longer loads any of your data before
+  you have entered one.** Opening a link that pointed straight at a page
+  (`?view=models`, `?view=settings`, a shared image, or simply returning to the
+  tab you were last on) started that page's requests immediately, racing the
+  key check instead of waiting for it. On a server that requires a key those
+  requests went out before the key prompt appeared. They now wait until the key
+  has actually been accepted. Nothing changes once you are signed in, and a
+  link you followed still takes you to the right page afterwards.
+- **The GUI recovers by itself when the server is restarted underneath it.** On
+  a normal local setup the page is trusted using a pass that is issued fresh
+  every time the server starts, so a page left open across a restart was still
+  holding the old one. Everything kept looking fine while every button quietly
+  did nothing, with no message explaining why, and the only way out was knowing
+  to reload by hand. The page now notices, refreshes itself once, and carries
+  on; if that still does not work it says so plainly instead of pretending to
+  work. Restarting from Settings also waits for the new server to actually be
+  up before reconnecting, rather than reconnecting to the one that is shutting
+  down.
 - **A vision model's image projector no longer lands on a graphics card you
   told localm not to use.** If you split a model across specific GPUs with
   `gpu_split_indices`, or picked one with `main_gpu_index`, the text model went

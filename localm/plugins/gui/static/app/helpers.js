@@ -129,6 +129,26 @@ export function authHeaders(extra = {}) {
   return h;
 }
 
+/** True when *headers* is a request header set WE built (authHeaders above) that
+ *  carries the OPEN-MODE shell token as its credential.
+ *
+ *  The two auth modes are mutually exclusive by construction in authHeaders: a
+ *  session sends `X-CSRF-Token` and deliberately NO bearer, open mode sends the
+ *  shell bearer and has no CSRF token to send. So an Authorization header equal
+ *  to our own shell token identifies an open-mode request exactly, and comparing
+ *  the VALUE (not merely the presence of a bearer) keeps this from firing on some
+ *  other caller's hand-built Authorization header.
+ *
+ *  Used by the 403 handler in init.js to tell "this process rotated the shell
+ *  token out from under us" apart from every other reason a request can 403. */
+export function sentShellToken(headers) {
+  if (!SHELL_TOKEN || !headers) return false;
+  const auth = headers instanceof Headers
+    ? headers.get("Authorization")
+    : (typeof headers === "object" ? headers["Authorization"] : null);
+  return auth === "Bearer " + SHELL_TOKEN;
+}
+
 // Fetch the CSRF token for the current session and stash it for authHeaders().
 // The token is an HMAC of the session computed server-side, so it is always in
 // lockstep with the session cookie - there is no separate cookie to fall out of
