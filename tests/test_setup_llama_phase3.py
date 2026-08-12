@@ -157,7 +157,7 @@ def wired(tmp_path, monkeypatch):
     # so we treat the load as successful here. The fallback path itself is
     # covered explicitly in test_cuda_setup.py.
     monkeypatch.setattr(setup_llama, "_native_loads_ok", lambda: (True, ""))
-    monkeypatch.setattr(setup_llama, "_resolve_backend_asset", lambda backend, cuda_line=None: ("https://dummy.url", None))
+    monkeypatch.setattr(setup_llama, "_resolve_backend_asset", lambda backend, cuda_line=None, tag=None: ("https://dummy.url", None, "bTEST"))
     # Pretend we are on Windows so the default-URL download path is taken even
     # when the test host is not win32.
     monkeypatch.setattr(setup_llama.sys, "platform", "win32")

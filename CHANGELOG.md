@@ -12,6 +12,22 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **You can now pin the llama.cpp build localm installs, and go back to a
+  previous one.** localm always fetched whichever llama.cpp release was newest
+  on the day you installed, and kept no record of which one that was - so an
+  upstream build that misbehaves on your hardware arrived on your next install
+  with no way to name it or get away from it. `localm setup-llama --tag b10355`
+  now installs exactly that build and keeps it, including through
+  `localm update`, until you run `localm setup-llama --tag latest` to track
+  upstream again. `localm setup-llama --rollback` returns to the previous build
+  you had, without needing to remember its number.
+- **`localm doctor` and bug reports now say which llama.cpp build is
+  installed.** It was previously impossible to answer that question without
+  reading library filenames and guessing. Doctor shows the build and whether it
+  is pinned, and warns if a pin has been set but not yet installed; a bug report
+  carries the same detail. Installs made before this change say "not recorded"
+  rather than guessing a version - re-running `localm setup-llama --force`
+  records it.
 - **Settings now shows which backend is actually installed, not just what
   would be picked fresh.** The Runtime & GPU section only ever showed the
   recommended default; Live tuning now shows what your install is really

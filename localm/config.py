@@ -179,6 +179,21 @@ CONFIG_FILE = HOME_DIR / "config.json"
 # here reaches every existing install (see save_config / _user_delta).
 DEFAULT_CONFIG: dict = {
     "binary_dir": None,    # None = auto-detect (runtime wheel, then legacy dirs)
+    # Which llama.cpp release `setup-llama` provisions. Empty = track upstream's
+    # newest release with uploaded assets (the historical behaviour); a tag such
+    # as "b10355" pins that exact build until the user clears it. A pin exists
+    # because upstream can ship a build that is broken on a given box - three
+    # times in one week - and without it there is no way to say "that build is
+    # bad here, give me the previous one". Read by setup_llama._tag_for(), so
+    # `localm update`'s re-provision inherits it with no extra plumbing.
+    "llama_runtime_pin": "",
+    # Append-only log of the runtime builds actually provisioned on this box,
+    # newest LAST: [{"backend": ..., "tag": ..., "at": <epoch>}, ...]. It is what
+    # makes `setup-llama --rollback` possible without the user having to remember
+    # a tag number. Capped (see setup_llama._RUNTIME_HISTORY_MAX); state rather
+    # than preference, but kept here because LOCALM_HOME outlives the venv the
+    # runtime itself is installed into.
+    "llama_runtime_history": [],
     "n_ctx": 4096,         # initial context window (grows on demand)
     "n_ctx_max": 16384,    # ceiling the window may grow to (0 = unlimited)
     "n_ctx_grow": 4096,    # growth step - window expands in multiples of this

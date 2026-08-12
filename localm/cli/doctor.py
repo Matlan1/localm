@@ -558,6 +558,47 @@ def _provisioned_backend_name(find_binary_dir) -> Optional[str]:
         return None
 
 
+def _check_runtime_build(find_binary_dir) -> None:
+    """Print WHICH llama.cpp build is provisioned, and whether it is pinned.
+
+    Its own line rather than a suffix on the llama.dll line: the build is the
+    first thing anyone needs when an upstream release breaks a machine, and
+    triage previously had to infer it from versioned library filenames. Silent
+    when nothing is provisioned at all - _check_llama_lib has already said so
+    and repeating it adds noise to a report people read under stress.
+
+    An unrecorded build is stated as unrecorded, never guessed: installs that
+    predate tag recording exist and will keep existing."""
+    if not find_binary_dir():
+        return
+    try:
+        from localm.setup_llama import installed_build, pinned_tag
+        build = installed_build()
+        pin = pinned_tag()
+    except Exception as e:
+        console.print(f"  {_WARN_SYM}  could not read the llama.cpp build "
+                      f"[dim]({e})[/dim]")
+        return
+    if build:
+        console.print(f"  {_OK_SYM}  llama.cpp build: {build}")
+    else:
+        console.print(f"  {_WARN_SYM}  llama.cpp build not recorded - this "
+                      "install predates build recording")
+        console.print("     [dim]'localm setup-llama --force' records it; "
+                      "until then a bug report cannot say which build this "
+                      "is[/dim]")
+    if pin and build and pin != build:
+        # The pin and the disk disagree, which is a real state worth naming: a
+        # pin was set but never provisioned through (setup-llama not re-run, or
+        # it fell back to another backend). Saying only "pinned to X" here would
+        # assert something the filesystem contradicts.
+        console.print(f"  {_WARN_SYM}  pinned to {pin} but {build} is installed"
+                      " - run 'localm setup-llama --force' to apply the pin")
+    elif pin:
+        console.print(f"     [dim]pinned to {pin}; 'localm setup-llama --tag "
+                      "latest' resumes tracking upstream[/dim]")
+
+
 def _probe_gpu_devices() -> Optional[dict]:
     """Load the provisioned runtime in a subprocess and enumerate the ggml
     compute devices it registers - the ground truth for whether localm runs
@@ -886,6 +927,9 @@ def doctor():
 
     _check_python()
     lib_healthy = _check_llama_lib(find_binary_dir)
+    # Immediately after the lib line and BEFORE the ABI check, because "which
+    # build" is the first question an ABI mismatch or a native crash raises.
+    _check_runtime_build(find_binary_dir)
     # native ABI self-check only when a healthy lib is present.
     if lib_healthy:
         _check_native_abi()

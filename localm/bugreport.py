@@ -220,6 +220,32 @@ def collect_diagnostics(context: Optional[dict] = None) -> dict:
         # report is still useful without them.
         pass
 
+    # WHICH llama.cpp build is installed, and whether the user has pinned one.
+    # Separately guarded from the library listing above so one failing does not
+    # cost the other. This is the field triage previously had to INFER from
+    # versioned library filenames (libllama.so.0.0.NNNNN) when an upstream build
+    # broke a machine - a guess, and an ambiguous one between adjacent builds.
+    # Recorded at provision time by setup_llama, so it is a lookup, not a probe.
+    try:
+        from localm import setup_llama
+        build = setup_llama.installed_build()
+        backend = setup_llama.installed_backend()
+        if backend:
+            diag["native_runtime_backend"] = backend
+        # "not recorded" rather than omitting the field: an install predating
+        # tag recording is a real, distinguishable state, and a reader needs to
+        # tell it apart from a field that failed to collect.
+        diag["native_runtime_build"] = build or "not recorded"
+        pin = setup_llama.pinned_tag()
+        if pin:
+            diag["native_runtime_pin"] = pin
+    except Exception:
+        # Best-effort: the marker/config may be unreadable, or setup_llama may
+        # fail to import on a broken install. Omitting these fields costs a
+        # detail; raising here would cost the whole report, and this code runs
+        # ON the failure path.
+        pass
+
     # Caller-supplied context (chosen backend, the operation, etc.).
     for k in ("operation", "backend", "requested_backend", "with_cudart"):
         if k in context:
@@ -655,6 +681,9 @@ def build_report(summary: str, reason: str = "",
         "nvidia_compute_capability": "GPU compute capability",
         "nvidia_cuda_line": "Selected CUDA line",
         "native_runtime_provisioned": "Native runtime provisioned",
+        "native_runtime_backend": "Native runtime backend",
+        "native_runtime_build": "Native runtime build",
+        "native_runtime_pin": "Native runtime pinned to",
         "native_libs": "Native libraries", "operation": "Operation",
         "backend": "Backend (effective)", "requested_backend": "Backend (requested)",
         "with_cudart": "Fetched CUDA runtime bundle",

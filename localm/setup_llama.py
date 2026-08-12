@@ -44,6 +44,19 @@ Sources, in order of preference:
     (``ggml-org/llama.cpp``); the latest release is used, with a pinned
     fallback if the release lookup is unavailable.
 
+Which BUILD, as distinct from which backend:
+  * The resolved release tag is recorded in the runtime dir's marker alongside
+    the backend, so ``localm doctor`` and a bug report can name the build
+    instead of inferring it from library filenames.
+  * ``--tag <tag>`` installs one exact release and PINS it, so later runs and
+    ``localm update``'s re-provision keep it; ``--tag latest`` clears the pin.
+    The pin lives in config (``llama_runtime_pin``) and is read by ``_tag_for``,
+    which is why the updater inherits it without knowing it exists.
+  * ``--rollback`` returns to the previous build recorded for this backend.
+    This exists because upstream can ship a release that is broken on a given
+    machine - the ``llama_context_params`` ABI shift, an asset rename, a
+    backend-specific fault - and until now there was no way to step off it.
+
 After placing the files it installs the runtime wheel editable so the loader can
 import it.
 """
@@ -59,6 +72,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import urllib.request
 import zipfile
 from dataclasses import dataclass
@@ -356,6 +370,148 @@ def installed_backend() -> "Optional[str]":
     return _provisioned_backend(_repo_runtime_lib())
 
 
+def installed_build() -> "Optional[str]":
+    """The llama.cpp release tag actually provisioned on this box right now, or
+    None when nothing is provisioned or the marker predates tag recording.
+
+    Public, read-only, and deliberately the exact shape of installed_backend()
+    above (PR #1236's pattern) rather than a second mechanism: doctor and the
+    bug reporter need "which build is on disk", and inferring it from library
+    filenames - which is what triage had to do for the b10360/b10361 question -
+    is a guess, not a lookup.
+
+    None is NORMAL and every caller must render it as "not recorded" rather than
+    guessing a version. See _provisioned_build."""
+    return _provisioned_build(_repo_runtime_lib())
+
+
+# How many past provisions to remember. Rollback only ever needs the previous
+# DISTINCT tag, but keeping a short run of them means a user who rolled back and
+# then re-pinned can still see where they have been, and it bounds a config key
+# that would otherwise grow without limit on a box that re-provisions often.
+_RUNTIME_HISTORY_MAX = 20
+
+
+def pinned_tag() -> "Optional[str]":
+    """The llama.cpp release tag the user has pinned, or None when the install
+    tracks upstream's newest release (the default).
+
+    Never raises: a pin is read on the provisioning path, and an unreadable
+    config must degrade to "no pin" rather than break setup entirely."""
+    try:
+        raw = config.load_config().get("llama_runtime_pin") or ""
+    except Exception:
+        return None
+    raw = str(raw).strip()
+    return raw or None
+
+
+def set_pinned_tag(tag: "Optional[str]") -> None:
+    """Pin *tag*, or clear the pin when *tag* is falsy. Raises on a config write
+    failure: unlike recording history, a pin the user explicitly asked for must
+    never silently fail to stick (a silently-unpinned install is exactly the
+    surprise this whole unit exists to remove)."""
+    value = (tag or "").strip()
+    config.update_config(lambda cfg: cfg.__setitem__("llama_runtime_pin", value))
+
+
+def _record_runtime_history(backend: str, tag: "Optional[str]") -> None:
+    """Append a successful provision to the rollback history. Best-effort by
+    design - the provision itself already succeeded, so failing to journal it
+    must not turn a working install into an error - but a failure is LOGGED
+    rather than swallowed, because the visible symptom otherwise is a --rollback
+    that cannot find a build the user knows they had.
+
+    A repeat of the newest entry is collapsed rather than appended, so
+    re-running setup-llama on the same build does not push the previous distinct
+    tag out of a bounded list and quietly destroy the rollback target."""
+    if not tag:
+        # Nothing to roll back TO. A tagless provision (--from, --url, an
+        # unrecorded backend) is a real event, but it cannot name a build, and
+        # journalling it as an entry with no tag would let --rollback offer a
+        # target it cannot install.
+        return
+    entry = {"backend": backend, "tag": tag, "at": int(time.time())}
+
+    def _mutate(cfg: dict) -> None:
+        hist = cfg.get("llama_runtime_history")
+        hist = list(hist) if isinstance(hist, list) else []
+        if hist and isinstance(hist[-1], dict) and \
+                hist[-1].get("backend") == backend and hist[-1].get("tag") == tag:
+            hist[-1] = entry
+        else:
+            hist.append(entry)
+        cfg["llama_runtime_history"] = hist[-_RUNTIME_HISTORY_MAX:]
+
+    try:
+        config.update_config(_mutate)
+    except Exception as e:
+        logger.debug("could not record the runtime history entry %r: %s", entry, e)
+
+
+def runtime_history() -> list:
+    """The recorded provisions, oldest first. Filtered to well-formed entries so
+    a hand-edited config cannot make --rollback offer a nonsense target."""
+    try:
+        raw = config.load_config().get("llama_runtime_history")
+    except Exception:
+        return []
+    if not isinstance(raw, list):
+        return []
+    return [e for e in raw
+            if isinstance(e, dict) and str(e.get("tag") or "").strip()]
+
+
+def previous_tag(backend: str) -> "Optional[str]":
+    """The most recent recorded tag for *backend* that is NOT the one currently
+    installed - i.e. what --rollback goes back to. None when there is no such
+    build to return to.
+
+    Compared against the MARKER (what is actually on disk), not against the
+    newest history entry, so a rollback still works after a history write failed
+    or after the runtime dir was re-provisioned by something that did not
+    journal. The marker is the ground truth for "what is installed"; history is
+    only the list of candidates."""
+    current = installed_build()
+    for entry in reversed(runtime_history()):
+        if entry.get("backend") != backend:
+            continue
+        tag = str(entry.get("tag")).strip()
+        if tag and tag != current:
+            return tag
+    return None
+
+
+def _tag_for(backend: str) -> str:
+    """The upstream llama.cpp release tag to provision for *backend*: the user's
+    pin when one is set, else upstream's newest release with uploaded assets.
+
+    THE ONLY PLACE THAT DECIDES A TAG for the upstream-resolved backends, so a
+    pin cannot be honoured on one code path and ignored on another. Note it is
+    NOT consulted for amd-rocm, whose build comes from lemonade-sdk's own
+    release numbering (_ROCM_TAG) - a different tag space entirely, in which an
+    upstream bNNNNN means nothing. _pin_note_for_backend says so out loud rather
+    than letting the pin look applied."""
+    pin = pinned_tag()
+    if pin:
+        return pin
+    return _latest_tag()
+
+
+def _pin_note_for_backend(backend: str) -> None:
+    """Say plainly when a pin the user set does not apply to the backend being
+    provisioned, instead of dropping it silently (AGENTS.md rule 5). Only
+    amd-rocm is in that position today: its tag is lemonade-sdk's, not
+    upstream's."""
+    pin = pinned_tag()
+    if pin and backend == "amd-rocm":
+        console.print(
+            f"[yellow]Note:[/yellow] the pinned llama.cpp build {pin} does not "
+            f"apply to the amd-rocm backend - it ships from lemonade-sdk's own "
+            f"release numbering ({_ROCM_TAG}), a different tag series. The pin "
+            "stays set and applies to every other backend.")
+
+
 def _is_wanted(f: Path) -> bool:
     """Whether to copy *f*: the loadable library, its ggml deps, and the runtime
     libraries - matched by platform-appropriate naming (incl. versioned .so.N).
@@ -613,8 +769,10 @@ def _latest_tag() -> str:
     return _FALLBACK_TAG
 
 
-def _resolve_backend_asset(backend: str, cuda_line: Optional[str] = None) -> tuple[str, Optional[str]]:
-    """Resolve a backend name to a (url, sha256_digest) pair.
+def _resolve_backend_asset(backend: str, cuda_line: Optional[str] = None,
+                           tag: Optional[str] = None
+                           ) -> tuple[str, Optional[str], Optional[str]]:
+    """Resolve a backend name to a (url, sha256_digest, tag) triple.
 
     If the release listing is available, resolves it dynamically and gets the
     sha256 from the digest field. If offline, falls back to the templated guess
@@ -626,7 +784,24 @@ def _resolve_backend_asset(backend: str, cuda_line: Optional[str] = None) -> tup
     matcher list. Defaults to _CUDA_LINE (None resolved below, not bound as a
     literal default - _CUDA_LINE is defined later in this module, after this
     function).
-    """
+
+    *tag* lets a caller that has ALREADY resolved one (the Windows CUDA branch,
+    which needs it to pair the build with its cudart bundle) pass it in rather
+    than resolve a second time. When omitted this resolves its own through
+    _tag_for - pin, else upstream's newest.
+
+    THE THIRD ELEMENT IS WHY THIS RETURNS A TRIPLE: the tag is what the marker
+    has to record, and this is the function that decides it. Returning it is
+    what lets the caller record the installed build with NO extra lookup. The
+    two alternatives are both worse - re-resolving in the caller doubles the
+    network call this whole design exists to avoid, and parsing the tag back
+    out of the returned URL is a second derivation of a value already in hand
+    that would diverge on the templated-guess path below, where the URL is
+    CONSTRUCTED rather than read from the release listing.
+
+    It is None for amd-rocm, whose build comes from lemonade-sdk's own release
+    numbering (_ROCM_TAG) rather than an upstream tag; the caller supplies that
+    constant itself."""
     cuda_line = cuda_line or _CUDA_LINE
     if backend == "amd-rocm":
         if sys.platform != "win32":
@@ -643,7 +818,7 @@ def _resolve_backend_asset(backend: str, cuda_line: Optional[str] = None) -> tup
                 sha = digest.split("sha256:")[-1].strip() if digest and "sha256:" in digest else None
                 if not sha:
                     sha = DEFAULT_URL_SHA256
-                return url, sha
+                return url, sha, None
         # Surface the fallback so the user knows the build may not be current
         # (the lemonade-sdk release lookup was unreachable, or this release is
         # missing the expected gfx103X asset); mirrors the visible-fallback
@@ -652,7 +827,7 @@ def _resolve_backend_asset(backend: str, cuda_line: Optional[str] = None) -> tup
         console.print("[yellow]Could not find a lemonade-sdk/llamacpp-rocm release asset "
                       f"for {tag}; using pinned amd-rocm build - rerun later for the "
                       "latest.[/yellow]")
-        return DEFAULT_URL, DEFAULT_URL_SHA256
+        return DEFAULT_URL, DEFAULT_URL_SHA256, None
 
     if backend == "cuda" and _platform_key() == "linux":
         # Upstream (ggml-org/llama.cpp) publishes no bare Linux CUDA binary at
@@ -669,7 +844,7 @@ def _resolve_backend_asset(backend: str, cuda_line: Optional[str] = None) -> tup
         # cuda-13 one ("...-cuda-13-x64.tar.gz") - verified live, real bytes
         # downloaded for the cuda-12 one (dev-notes/ADR-0010).
         suffix = "-cuda-13-x64.tar.gz" if cuda_line == "cuda-13" else "-cuda-x64.tar.gz"
-        tag = _latest_tag()
+        tag = tag or _tag_for(backend)
         assets = _release_assets(tag, repo=_CUDA_LINUX_REPO)
         for a in assets:
             name = str(a.get("name", "")).lower()
@@ -677,7 +852,7 @@ def _resolve_backend_asset(backend: str, cuda_line: Optional[str] = None) -> tup
                 url = a["browser_download_url"]
                 digest = a.get("digest")
                 sha = digest.split("sha256:")[-1].strip() if digest and "sha256:" in digest else None
-                return url, sha
+                return url, sha, tag
         # Genuinely unresolvable (hybridgroup has not built that exact
         # upstream tag yet - a real, occasionally-expected lag for a third
         # party, not an error to paper over): raise click.ClickException,
@@ -704,7 +879,7 @@ def _resolve_backend_asset(backend: str, cuda_line: Optional[str] = None) -> tup
             f"backend {backend!r} is not available on this platform "
             f"({plat}). Available: {avail or 'none'}.")
 
-    tag = _latest_tag()
+    tag = tag or _tag_for(backend)
     assets = _release_assets(tag)
     for a in assets:
         name = str(a.get("name", "")).lower()
@@ -715,7 +890,7 @@ def _resolve_backend_asset(backend: str, cuda_line: Optional[str] = None) -> tup
             sha = digest.split("sha256:")[-1].strip() if digest and "sha256:" in digest else None
             if not sha:
                 sha = _PINNED_FALLBACK_SHA256.get(a.get("name", ""))
-            return url, sha
+            return url, sha, tag
 
     # Fallback: construct the canonical URL from the first matcher token.
     stem = matchers[0]
@@ -725,7 +900,7 @@ def _resolve_backend_asset(backend: str, cuda_line: Optional[str] = None) -> tup
     sha = _PINNED_FALLBACK_SHA256.get(fname)
     console.print(f"[yellow]Could not verify release asset list; using unverified URL: {guess}[/yellow]\n"
                   "[yellow]If download fails, pass --from <build dir> or --url <archive>.[/yellow]")
-    return guess, sha
+    return guess, sha, tag
 
 
 def _resolve_backend_url(backend: str, cuda_line: Optional[str] = None) -> str:
@@ -739,7 +914,7 @@ def _resolve_backend_url(backend: str, cuda_line: Optional[str] = None) -> str:
     line-aware so it cannot silently drift back to a hardcoded cuda-12 default
     if something starts calling it again.
     Raises ``click.ClickException`` if the backend is not available here."""
-    url, _sha = _resolve_backend_asset(backend, cuda_line)
+    url, _sha, _tag = _resolve_backend_asset(backend, cuda_line)
     return url
 
 
@@ -1634,25 +1809,43 @@ def _fetch_cuda_runtime_libs(cuda_line: str, target: Path) -> int:
 
 
 def _provision_backend(chosen: str, target: Path, sha256: Optional[str],
-                       with_cudart: bool, cuda_line: str = _CUDA_LINE) -> None:
+                       with_cudart: bool, cuda_line: str = _CUDA_LINE) -> Optional[str]:
     """Resolve + fetch the prebuilt(s) for *chosen* into *target*. For CUDA with
     *with_cudart* it also fetches the matching cudart runtime bundle so the
     build is self-contained (no CUDA Toolkit needed). *cuda_line* picks which
     upstream CUDA asset line to fetch ('cuda-12' or 'cuda-13' - see
     NvidiaInfo.cuda_line); it is ignored for every other backend. Raises on a
-    fatal error."""
+    fatal error.
+
+    RETURNS the release tag this provision used, so the caller can record which
+    build is now on disk, or None when there is no upstream tag to report
+    (amd-rocm ships from lemonade-sdk's own numbering, which the caller already
+    has as _ROCM_TAG).
+
+    Every branch already resolved a tag and threw it away, which is the whole
+    reason the marker could only ever record a version for amd-rocm. Each now
+    keeps it, so recording the build costs NO extra network call - and the
+    lookup stays exactly where it always was rather than being hoisted to the
+    top of this function, which would make it run for backends that never
+    needed it and would move it out from behind _resolve_backend_asset, the
+    seam every caller and test already isolates."""
     if chosen == "cuda" and with_cudart and sys.platform == "win32":
-        tag = _latest_tag()
+        # Resolved here, not in _resolve_backend_asset, because this branch
+        # needs the tag to PAIR the build with its matching cudart bundle - a
+        # cudart from a different release is exactly the mismatch this pairing
+        # exists to prevent - and only reaches _resolve_backend_asset in the
+        # no-assets fallback below, to which it then hands the same tag.
+        tag = _tag_for(chosen)
         build, cudart = _resolve_cuda_pair(tag, cuda_line)
         if build is None:
             # Asset listing unavailable: fall back to the templated build URL and
             # warn that the runtime bundle could not be resolved automatically.
             console.print("[yellow]Could not resolve CUDA assets; fetching build only.[/yellow]\n"
                           "[yellow]If it fails to load, use --backend vulkan or install CUDA Toolkit.[/yellow]")
-            url, fallback_sha = _resolve_backend_asset("cuda", cuda_line)
+            url, fallback_sha, _t = _resolve_backend_asset("cuda", cuda_line, tag=tag)
             _fetch_verified(url, target, sha256 or fallback_sha, "CUDA build asset")
-            return
-        
+            return tag
+
         # Resolve build sha256
         build_digest = build.get("digest")
         build_sha = build_digest.split("sha256:")[-1].strip() if build_digest and "sha256:" in build_digest else None
@@ -1679,7 +1872,7 @@ def _provision_backend(chosen: str, target: Path, sha256: Optional[str],
             _fetch_and_place(cudart["browser_download_url"], target, cudart_sha)
         else:
             console.print("[yellow]No cudart bundle found; CUDA Toolkit may be required.[/yellow]")
-        return
+        return tag
     if chosen == "cuda" and with_cudart and sys.platform not in ("win32", "darwin"):
         # sys.platform, not _platform_key(): matches this function's OWN
         # existing style two lines up (the win32 cudart branch), rather than
@@ -1699,7 +1892,7 @@ def _provision_backend(chosen: str, target: Path, sha256: Optional[str],
         # hybridgroup's repo), that propagates to _provision_with_fallback's
         # caller exactly like every other provisioning failure, which
         # offers/forces the vulkan fallback - nothing new to handle here.
-        url, fallback_sha = _resolve_backend_asset("cuda", cuda_line)
+        url, fallback_sha, tag = _resolve_backend_asset("cuda", cuda_line)
         _fetch_verified(url, target, sha256 or fallback_sha, "CUDA build asset")
         if sha256:
             console.print("[yellow]Note:[/yellow] --sha256 pins the CUDA build only; "
@@ -1708,14 +1901,15 @@ def _provision_backend(chosen: str, target: Path, sha256: Optional[str],
         n = _fetch_cuda_runtime_libs(cuda_line, target)
         console.print(f"[dim]CUDA runtime:[/dim] {n} librar{'y' if n == 1 else 'ies'} "
                       "fetched from PyPI - no CUDA Toolkit install needed")
-        return
+        return tag
     # Every other backend is a single archive resolved from the chosen name.
     # Also reached for chosen == "cuda" with with_cudart False (no current
     # caller produces that combination - see _cuda_setup_dialogue - but
     # forwarding cuda_line here means it never silently reverts to the
     # cuda-12 default if one ever does).
-    url, fallback_sha = _resolve_backend_asset(chosen, cuda_line)
+    url, fallback_sha, tag = _resolve_backend_asset(chosen, cuda_line)
     _fetch_verified(url, target, sha256 or fallback_sha, "release asset")
+    return tag
 
 
 _EXC_HEADER_RE = re.compile(
@@ -1932,13 +2126,20 @@ def _cuda_setup_dialogue(info: NvidiaInfo, assume_yes: bool, det=None) -> tuple:
 
 def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
                              with_cudart: bool, assume_yes: bool = False,
-                             cuda_line: str = _CUDA_LINE) -> str:
+                             cuda_line: str = _CUDA_LINE) -> tuple[str, Optional[str]]:
     """Provision *chosen* and prove it loads. If it does not load, NEVER swap the
     user's pick silently (the never-override rule): inform WHY, then OFFER the
     universal Vulkan build when interactive (or fall back with a LOUD warning when
     *assume_yes* / no tty), and always say how to retry the chosen backend with
-    --force. Returns the backend that ended up working. Exits non-zero if the user
-    declines the fallback, or if NOTHING loads (a genuine environment fault).
+    --force. Exits non-zero if the user declines the fallback, or if NOTHING
+    loads (a genuine environment fault).
+
+    Returns ``(backend, tag)``: the backend that ended up working AND the release
+    tag it was provisioned from (None when that backend has no upstream tag).
+    The tag belongs to the attempt that SUCCEEDED, which is why it is returned
+    from here and not recomputed by the caller - on a cuda-to-vulkan fallback
+    the installed build is vulkan's, and a caller re-deriving it would record
+    the tag of the backend that failed.
 
     *cuda_line* is the CUDA asset line to fetch when *chosen* is 'cuda' (see
     NvidiaInfo.cuda_line); irrelevant otherwise.
@@ -1948,10 +2149,20 @@ def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
     report rather than paper over with a different backend."""
     lib_name = _lib_name()
 
+    # The tag of the attempt currently in flight. _try writes it; the success
+    # paths below read it. A list rather than a rebound local because _try is a
+    # closure and Python would otherwise need a `nonlocal` declaration that is
+    # easy to forget when a new branch is added.
+    used_tag: list = [None]
+
     def _try(backend: str, cudart: bool) -> None:
         _clear_target_or_refuse(target)
-        _provision_backend(backend, target, sha256 if backend == chosen else None,
-                           cudart, cuda_line)
+        # Cleared FIRST, so a failed attempt can never leave the previous
+        # attempt's tag standing to be recorded against this backend.
+        used_tag[0] = None
+        used_tag[0] = _provision_backend(
+            backend, target, sha256 if backend == chosen else None,
+            cudart, cuda_line)
         if not (target / lib_name).exists():
             raise ArtifactError(f"the archive did not contain {lib_name}")
         _install_runtime_wheel(_runtime_pkg_dir())
@@ -1991,7 +2202,7 @@ def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
     loaded, detail = (_native_loads_ok() if provisioned else (False, "not provisioned"))
     if loaded:
         console.print(f"[green]OK - {chosen} runtime loads on this machine.[/green]")
-        return chosen
+        return chosen, used_tag[0]
 
     # An explicit --sha256 pin means "exactly this artifact" - never silently
     # swap to a different (unpinned) build, even to recover. Report and stop.
@@ -2066,7 +2277,7 @@ def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
         ok, fb_detail = _native_loads_ok()
         if ok:
             console.print(f"[green]OK - {fb} runtime loads.[/green]")
-            return fb
+            return fb, used_tag[0]
         console.print(f"[red]{fb} provisioned but failed to load:[/red] {fb_detail or 'unknown'}")
         attempts.append((fb, fb_detail or "unknown"))
     # Nothing loaded - the one genuinely stuck case. Raise a typed, reportable
@@ -2080,6 +2291,100 @@ def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
                 "You can provide a local build "
                 "with: localm setup-llama --from <build dir>, or see docs/gpu-setup.md."),
         context={"operation": "setup-llama", "requested_backend": chosen})
+
+
+# A release tag is interpolated straight into a GitHub API path and a download
+# URL, so it is validated as a PATH SEGMENT, not merely as "looks like a tag":
+# a value carrying '/', '..', '?' or '#' would silently retarget the request at
+# a different endpoint. Deliberately broader than upstream's own bNNNNN shape so
+# a future tag scheme is not refused by a cosmetic rule - the check is about
+# what is safe to put in a URL, which is the part that must never be relaxed.
+_TAG_SAFE_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
+
+
+def _validated_tag(raw: str) -> str:
+    """*raw* as a usable release tag, or a ClickException naming the problem."""
+    tag = (raw or "").strip()
+    if not _TAG_SAFE_RE.match(tag) or ".." in tag:
+        raise click.ClickException(
+            f"{raw!r} is not a usable release tag. Use a tag as upstream "
+            "publishes it, for example 'b10355' (letters, digits, dot, dash and "
+            "underscore only), or 'latest' to stop pinning.")
+    return tag
+
+
+def _apply_version_request(tag: Optional[str], rollback: bool, backend: str,
+                           from_dir: Optional[str], url: Optional[str]) -> None:
+    """Act on --tag / --rollback BEFORE any provisioning: validate them, resolve
+    what --rollback means, and move the pin.
+
+    The pin is written FIRST, so the rest of main() provisions through the
+    normal _tag_for() path with no special-casing - one code path decides a tag
+    whether it came from a flag or from a pin set weeks ago. That is also what
+    makes the pin apply to `localm update`, which re-invokes this command with
+    nothing but --backend (see _apply_update.post_swap_command).
+
+    Anything this cannot honour is REFUSED with a reason rather than ignored: a
+    silently-dropped --tag would leave the user believing a build is pinned when
+    it is not, which is worse than the drift the pin exists to stop."""
+    # `tag is None` (the flag was not passed) is deliberately distinguished from
+    # `tag == ""` (it was passed empty, e.g. a shell variable that expanded to
+    # nothing). Treating the empty string as "no request" would DROP a request
+    # the user made, which is the exact failure this function exists to prevent;
+    # it falls through to _validated_tag and is refused with a reason.
+    if tag is not None and rollback:
+        raise click.ClickException(
+            "--tag and --rollback both choose a build; pass only one. "
+            "--rollback goes to the previous recorded build, --tag names one.")
+    if tag is None and not rollback:
+        return
+    if from_dir or url:
+        # --from/--url install an artifact this command did not resolve from a
+        # release, so there is no tag to record or pin. Refusing beats accepting
+        # a flag that could not take effect.
+        which = "--from" if from_dir else "--url"
+        raise click.ClickException(
+            f"{'--tag' if tag is not None else '--rollback'} selects an upstream "
+            f"llama.cpp release, so it cannot be combined with {which}, which "
+            "installs a build you supply. Run them separately.")
+
+    if tag is not None:
+        # "latest" is the documented way OUT of a pin. Spelled as a word rather
+        # than an empty --tag so the intent is visible in shell history and in a
+        # script, and so a variable that expanded to nothing cannot silently
+        # unpin an install.
+        if tag.strip().lower() == "latest":
+            set_pinned_tag(None)
+            console.print("[green]Pin cleared[/green] - installs now track the "
+                          "newest upstream llama.cpp release again.")
+            return
+        wanted = _validated_tag(tag)
+        set_pinned_tag(wanted)
+        console.print(f"[green]Pinned[/green] llama.cpp {wanted} - setup-llama "
+                      "and localm update will keep this build until you run "
+                      "[bold]localm setup-llama --tag latest[/bold].")
+        return
+
+    # --rollback. The backend is the one the user named, else whatever is
+    # installed: history is per-backend, because a cuda tag and a vulkan tag are
+    # different builds even when the tag string matches.
+    which = backend.lower() if backend and backend.lower() != "auto" else installed_backend()
+    if not which:
+        raise click.ClickException(
+            "--rollback needs to know which backend to roll back, and nothing is "
+            "recorded as installed on this machine. Name it explicitly, for "
+            "example: localm setup-llama --rollback --backend vulkan")
+    prev = previous_tag(which)
+    if not prev:
+        current = installed_build()
+        have = f" The build installed now is {current}." if current else ""
+        raise click.ClickException(
+            f"no earlier llama.cpp build is recorded for the {which} backend, so "
+            f"there is nothing to roll back to.{have} Install a specific build "
+            "instead, for example: localm setup-llama --tag b10355")
+    set_pinned_tag(prev)
+    console.print(f"[green]Rolling back[/green] the {which} runtime to llama.cpp "
+                  f"{prev}, and pinning it.")
 
 
 @click.command("setup-llama", context_settings={"help_option_names": ["-h", "--help"]})
@@ -2101,12 +2406,23 @@ def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
                    "download is refused unless its digest matches (opt-in "
                    "integrity pin).")
 @click.option("--force", is_flag=True, help="Re-provision even if binaries are already present.")
+@click.option("--tag", "tag", default=None, metavar="TAG",
+              help="Install a specific llama.cpp release (e.g. 'b10355') and PIN "
+                   "it, so later setup-llama runs and 'localm update' keep that "
+                   "exact build instead of moving to whatever upstream published "
+                   "since. Use 'latest' to clear the pin and track upstream again.")
+@click.option("--rollback", is_flag=True,
+              help="Go back to the previous llama.cpp build recorded for this "
+                   "backend and pin it. For when an upstream release turns out to "
+                   "be broken on your hardware. See 'localm doctor' for what is "
+                   "installed now.")
 @click.option("--yes", "-y", "assume_yes", is_flag=True,
               help="Non-interactive: accept the recommended action at every prompt "
                    "(e.g. fetch the self-contained CUDA runtime). Used by the "
                    "one-click installer and for scripted setups.")
 def main(from_dir: Optional[str], backend: str, url: Optional[str],
-         sha256: Optional[str], force: bool, assume_yes: bool) -> None:
+         sha256: Optional[str], force: bool, tag: Optional[str],
+         rollback: bool, assume_yes: bool) -> None:
     """Download or copy the native llama.cpp binaries into localm's own venv.
 
     The chosen backend is load-tested after provisioning. If it cannot load on
@@ -2114,6 +2430,11 @@ def main(from_dir: Optional[str], backend: str, url: Optional[str],
     silently: setup explains why and (interactively) offers the universal Vulkan
     build instead, or - in a non-interactive install - falls back with a loud
     warning and tells you how to retry your backend once the cause is fixed.
+
+    By default the newest upstream llama.cpp release is used, which means an
+    upstream build that is broken on your hardware arrives on your next install.
+    --tag pins one exact build and --rollback returns to the previous one; both
+    stick, including across 'localm update'.
 
     \b
       localm setup-llama                        # auto-detect GPU, fetch the right prebuilt
@@ -2124,9 +2445,21 @@ def main(from_dir: Optional[str], backend: str, url: Optional[str],
       localm setup-llama --from /path/to/llama.cpp/build/bin
       localm setup-llama --url https://.../llama-...zip
       localm setup-llama --sha256 <hex>         # pin the expected archive digest
+      localm setup-llama --tag b10355           # install exactly b10355 and keep it
+      localm setup-llama --tag latest           # stop pinning, track upstream again
+      localm setup-llama --rollback             # back to the previous build
     """
     lib_name = _lib_name()
     target = _repo_runtime_lib()
+    _apply_version_request(tag, rollback, backend, from_dir, url)
+    # A version request is inherently a re-provision: the guard below compares
+    # BACKENDS, and the whole point here is to change the BUILD while the
+    # backend stays the same. Without this an explicit --tag/--rollback on an
+    # already-provisioned box would print "Already provisioned" and change
+    # nothing, having just moved the pin - the worst outcome available, because
+    # the config and the disk would then disagree with no sign of it.
+    if tag is not None or rollback:
+        force = True
     target.mkdir(parents=True, exist_ok=True)
 
     already = (target / lib_name).exists()
@@ -2141,7 +2474,12 @@ def main(from_dir: Optional[str], backend: str, url: Optional[str],
         want = backend.lower()
         have = _provisioned_backend(target)
         if want == "auto" or (have is not None and have == want):
-            label = f" ({have})" if have else ""
+            # Name the BUILD as well as the backend when it is recorded: "which
+            # llama.cpp is on this box" was previously unanswerable without
+            # inspecting library filenames, which is exactly how a field report
+            # ended up guessing between two candidate builds.
+            build = _provisioned_build(target) if have else None
+            label = f" ({have} {build})" if build else (f" ({have})" if have else "")
             console.print(f"[green]Already provisioned[/green]{label} at {target}")
             if not assume_yes and sys.stdin and sys.stdin.isatty() and click.confirm("Do you want to re-download/replace them?", default=False):
                 force = True
@@ -2168,23 +2506,29 @@ def main(from_dir: Optional[str], backend: str, url: Optional[str],
             # known (see _provisioned_build), so a real b1288 -> b1307 upgrade
             # can finally say so.
             #
-            # Still amd-rocm only: the upstream backends resolve their tag with
-            # _latest_tag(), a NETWORK CALL, and a message does not get to make
-            # one just to decorate itself. For them - and for any marker written
-            # before the tag was recorded - have_build is None and the wording
-            # falls back to naming the target alone, which stays honest about
-            # not knowing what is installed rather than guessing.
-            have_build = _provisioned_build(target) if want == "amd-rocm" else None
-            if have_build and have_build != _ROCM_TAG:
+            # The INSTALLED build is now recorded for every tag-based backend,
+            # not only amd-rocm, so naming it here no longer needs a network
+            # call - it is read from the marker. What still cannot be named for
+            # free is the build we are about to install: only amd-rocm knows
+            # that without a lookup (_ROCM_TAG is a constant), so only amd-rocm
+            # gets the "X -> Y" arrow. The others say which build is being
+            # replaced and stop there, which is honest rather than guessing.
+            #
+            # A marker written before tag recording existed still reads back
+            # None, and that case keeps its original wording.
+            have_build = _provisioned_build(target)
+            if want == "amd-rocm" and have_build and have_build != _ROCM_TAG:
                 console.print(f"[yellow]Upgrading the {have} build: "
                               f"{have_build} -> {_ROCM_TAG}.[/yellow]")
             elif have_build:
                 console.print(f"[yellow]Re-downloading the {have} build "
                               f"({have_build}).[/yellow]")
             else:
-                tag = f" ({_ROCM_TAG})" if want == "amd-rocm" else ""
+                # NOT named `tag`: that is this command's --tag parameter, and
+                # rebinding it here would silently shadow the user's request.
+                tag_label = f" ({_ROCM_TAG})" if want == "amd-rocm" else ""
                 console.print(
-                    f"[yellow]Re-downloading the {have} build{tag}.[/yellow]")
+                    f"[yellow]Re-downloading the {have} build{tag_label}.[/yellow]")
         else:
             console.print(f"[yellow]Replacing {have} build with {want}.[/yellow]")
 
@@ -2285,16 +2629,24 @@ def main(from_dir: Optional[str], backend: str, url: Optional[str],
             info = nvidia_preflight()
             cuda_line = info.cuda_line
             chosen, with_cudart = _cuda_setup_dialogue(info, assume_yes, det)
-        result = _provision_with_fallback(chosen, target, sha256, with_cudart,
-                                          assume_yes, cuda_line)
-        # Record the build tag ONLY for amd-rocm, whose tag is a pinned constant
-        # already in hand. The upstream backends resolve theirs through
+        _pin_note_for_backend(chosen)
+        result, used_tag = _provision_with_fallback(chosen, target, sha256,
+                                                    with_cudart, assume_yes,
+                                                    cuda_line)
+        # Record the build tag for EVERY backend now, not only amd-rocm. The old
+        # restriction rested on "the upstream backends resolve theirs through
         # _latest_tag(), a NETWORK CALL, and recording a version is not worth
-        # making one - a call made "just to check" is still a call. Those keep
-        # writing a one-token marker, which _provisioned_build reads back as None
-        # and every reader is required to handle.
-        _record_provisioned_backend(
-            target, result, build=_ROCM_TAG if result == "amd-rocm" else None)
+        # making one". The premise was that the tag was not in hand; it was -
+        # the fetch had already resolved it and simply discarded it.
+        # _provision_with_fallback now returns the tag of the attempt that
+        # SUCCEEDED, so this costs no additional lookup and, on a fallback,
+        # records the build actually installed rather than the one that failed.
+        #
+        # amd-rocm still supplies _ROCM_TAG from the constant, because its build
+        # is not resolved from an upstream tag at all (used_tag is None for it).
+        build = _ROCM_TAG if result == "amd-rocm" else used_tag
+        _record_provisioned_backend(target, result, build=build)
+        _record_runtime_history(result, build)
 
     _verify()
 

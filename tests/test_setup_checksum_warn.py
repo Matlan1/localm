@@ -17,7 +17,7 @@ from localm import setup_llama
 
 def test_provision_warns_when_asset_has_no_checksum(monkeypatch, capsys):
     monkeypatch.setattr(setup_llama, "_resolve_backend_asset",
-                        lambda backend, cuda_line=None: ("http://example/vulkan.zip", None))
+                        lambda backend, cuda_line=None, tag=None: ("http://example/vulkan.zip", None, "bTEST"))
     placed = {}
     monkeypatch.setattr(setup_llama, "_fetch_and_place",
                         lambda url, target, sha: placed.update(sha=sha))
@@ -32,7 +32,7 @@ def test_provision_warns_when_asset_has_no_checksum(monkeypatch, capsys):
 
 def test_provision_does_not_warn_when_checksum_present(monkeypatch, capsys):
     monkeypatch.setattr(setup_llama, "_resolve_backend_asset",
-                        lambda backend, cuda_line=None: ("http://example/vulkan.zip", "a" * 64))
+                        lambda backend, cuda_line=None, tag=None: ("http://example/vulkan.zip", "a" * 64, "bTEST"))
     monkeypatch.setattr(setup_llama, "_fetch_and_place",
                         lambda url, target, sha: None)
 
@@ -45,7 +45,7 @@ def test_provision_does_not_warn_when_checksum_present(monkeypatch, capsys):
 def test_explicit_sha_overrides_missing_asset_checksum(monkeypatch, capsys):
     """--sha256 provides the verification even when the asset publishes none."""
     monkeypatch.setattr(setup_llama, "_resolve_backend_asset",
-                        lambda backend, cuda_line=None: ("http://example/vulkan.zip", None))
+                        lambda backend, cuda_line=None, tag=None: ("http://example/vulkan.zip", None, "bTEST"))
     placed = {}
     monkeypatch.setattr(setup_llama, "_fetch_and_place",
                         lambda url, target, sha: placed.update(sha=sha))

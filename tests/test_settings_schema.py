@@ -312,7 +312,20 @@ def test_admin_only_keys_lists_the_owner_only_settings():
         # (a real kill switch everywhere else) - same trust-widening class as
         # update_allow_prerelease right above it, kept on its own line for the
         # same reason (see the "make the update check obey net policy" unit).
-        | {"update_ignore_net_policy"})
+        | {"update_ignore_net_policy"}
+        # llama_runtime_pin decides WHICH NATIVE BUILD setup-llama downloads and
+        # the server then loads in-process - the closest relative in this set is
+        # update_allow_prerelease ("which builds get installed"), one step nearer
+        # the metal. It is NOT binary_dir's planted-file escalation: the repo is
+        # fixed and the asset is checksum-verified, so it cannot name an
+        # arbitrary path or host. What it CAN do is hold an install on a chosen
+        # older upstream build, and a downgrade to a known-bad or known-vulnerable
+        # runtime is not a lower-privileged principal's call. llama_runtime_history
+        # rides along because it is what --rollback reads: a writable history is a
+        # writable choice of downgrade target, so gating one without the other
+        # would leave the decision reachable through the back door. Own line, per
+        # the additive-resolution note above.
+        | {"llama_runtime_pin", "llama_runtime_history"})
 
 
 def test_outbound_endpoint_keys_are_owner_only():
