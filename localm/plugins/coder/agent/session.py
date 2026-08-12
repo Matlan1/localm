@@ -247,9 +247,15 @@ class _SessionMixin:
         # lesson. _had_any_failure is _loop's session-level record; the second term
         # keeps the answer right when _last_run_ok is set outside _loop, where a
         # not-ok current state is itself the failure.
-        had_failure = (
-            (self._had_any_failure or not self._last_run_ok)
-            and not self._user_stopped)
+        # The user-stop guard scopes to that SECOND term ONLY. _user_stopped is
+        # per-run exactly like _last_run_ok, so the pair describes THIS run, while
+        # _had_any_failure already excludes stops at the point it is written
+        # (_loop's finally). Spread over the whole disjunction the guard read "the
+        # last run was stopped, so forget every earlier failure too", and a genuine
+        # max_turns or circuit-breaker failure followed by a stopped run lost its
+        # lesson - the same #594 loss this trigger exists to prevent.
+        had_failure = self._had_any_failure or (
+            not self._last_run_ok and not self._user_stopped)
         if not changed and not had_failure:
             return
         if self.on_event is not None:

@@ -559,10 +559,20 @@ class _LoopMixin:
         finally:
             # Fold this run's outcome into the session-level flag before the
             # per-run one is re-armed by the next run. One place, so every
-            # failure path (max_turns, either circuit breaker, a stop) is
-            # captured and a future one cannot forget to - the close-time
-            # episodic reflection depends on this not being lost.
-            if not self._last_run_ok:
+            # failure path (max_turns, either circuit breaker) is captured and
+            # a future one cannot forget to - the close-time episodic
+            # reflection depends on this not being lost.
+            # A USER STOP IS EXCLUDED, and the exclusion belongs HERE, not only
+            # at the close-time trigger (REG-594 residual). _last_run_ok and
+            # _user_stopped are both per-run and re-armed above; _had_any_failure
+            # is session-level and cleared only by reset(). So folding a stop in
+            # here armed the trigger PERMANENTLY: one declined "keep going?" and
+            # every later clean, no-file-change turn still paid the CLI's
+            # synchronous, 30s-capped reflection at quit, because the trigger's
+            # own guard could only see whether the LAST run was stopped. A stop
+            # is the user asking to leave, not a lesson, so it must never enter
+            # the session record in the first place.
+            if not self._last_run_ok and not self._user_stopped:
                 self._had_any_failure = True
 
         return final_response

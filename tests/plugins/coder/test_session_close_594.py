@@ -220,6 +220,102 @@ def test_loop_marks_a_user_stop_and_not_a_max_turns_failure(home, tmp_path):
     assert len(backend2.calls) == 1, "a max_turns failure must still reflect"
 
 
+class _StopFirstRunThenAnswerBackend(_StopMidRunBackend):
+    """Run 1 is stopped mid-generation; every later run answers cleanly with no
+    tool call. Inherits the parent's contract that ``calls`` records ONLY the
+    close-time reflection (max_tokens=1024), so an ordinary turn stays invisible
+    to it and the assertion below is about the reflection alone.
+
+    The clean answers differ from each other on purpose: an identical repeat
+    would trip the repeat-response circuit breaker, which sets _last_run_ok=False
+    and would arm the trigger for a reason that has nothing to do with the stop.
+    """
+
+    def __init__(self, agent_box):
+        super().__init__(agent_box)
+        self.stops_left = 1
+        self.answers = 0
+
+    def chat(self, messages, **kw):
+        if kw.get("max_tokens") == 1024:        # the close-time reflection call
+            return super().chat(messages, **kw)
+        if self.stops_left > 0:
+            self.stops_left -= 1
+            return super().chat(messages, **kw)  # requests stop, keeps the partial
+        self.answers += 1
+        return f"had a look, nothing to change (note {self.answers})"
+
+
+def test_one_stopped_run_does_not_arm_reflection_for_the_rest_of_the_session(
+        home, tmp_path):
+    """THE REG-594 RESIDUAL. One stopped run must not arm the close-time
+    reflection permanently.
+
+    _had_any_failure is SESSION-level and cleared only by reset(), while the
+    trigger's user-stop guard reads the PER-RUN _user_stopped, which the very
+    next run re-arms to False. So a stop folded into _had_any_failure outlived
+    every later run: a clean, no-file-change turn afterwards still made the CLI
+    pay the synchronous, 30s-capped 1024-token reflection at quit.
+
+    Drives the REAL loop for both runs. The defect lives in _loop's finally, so
+    hand-set flags cannot see it.
+    """
+    box: dict = {}
+    backend = _StopFirstRunThenAnswerBackend(box)
+    agent = _agent(tmp_path, backend=backend)
+    box["agent"] = agent
+
+    agent.run_task("start something")             # run 1: stopped mid-generation
+    assert agent._user_stopped is True
+    assert agent._last_run_ok is False
+
+    agent.continue_task("now a small question")   # run 2: clean, writes nothing
+    assert agent._user_stopped is False, "the per-run flag must re-arm"
+    assert agent._last_run_ok is True, (
+        "run 2 must COMPLETE - if a breaker tripped it, this test would go green "
+        "or red for a reason unrelated to the stop")
+    assert agent.changed_files() == [], "this session must write no files"
+
+    agent.close()
+
+    assert backend.calls == [], (
+        "a stopped EARLIER run left the close-time reflection armed: after a "
+        "clean session the user still waits on a 1024-token inference at quit")
+    assert agent._episode_store.all() == []
+
+
+def test_a_stop_after_a_genuine_failure_still_keeps_that_lesson(home, tmp_path):
+    """The mirror, and what stops the fix over-reaching: a run that GENUINELY
+    failed keeps its lesson even when the user stops the NEXT one.
+
+    The user-stop guard belongs on the per-run term only. Spread over the whole
+    disjunction it read "the last run was stopped, so forget every earlier
+    failure too", which drops exactly the lesson #594 exists to keep.
+    """
+    box: dict = {}
+    backend = _StopMidRunBackend(box)
+    agent = _agent(tmp_path, backend=backend, max_turns=0)
+    box["agent"] = agent
+    agent._episode_task = "fix the failing import"
+
+    agent.run_task("do something")        # max_turns=0: a genuine failure
+    assert agent._last_run_ok is False
+    assert agent._user_stopped is False, "max_turns is not a user stop"
+    assert agent._had_any_failure is True, "the session-level record must hold it"
+
+    agent.max_turns = 3                   # let the next run actually reach the model
+    agent.continue_task("carry on then")  # run 2: the user stops it
+    assert agent._user_stopped is True
+    assert agent._last_run_ok is False
+
+    agent.close()
+
+    assert len(backend.calls) == 1, (
+        "the earlier genuine failure lost its lesson because the LAST run "
+        "happened to be a user stop")
+    assert len(agent._episode_store.all()) == 1
+
+
 # --------------------------------------------------------------------------- #
 #  (b) The event loop: closing a session must not block it                     #
 # --------------------------------------------------------------------------- #
