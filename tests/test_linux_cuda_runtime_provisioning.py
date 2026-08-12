@@ -259,7 +259,10 @@ _DUMMY_LINUX_CUDA_ASSETS = [
 
 def test_resolve_linux_cuda_asset_finds_tarball(monkeypatch):
     monkeypatch.setattr(sl, "_platform_key", lambda: "linux")
-    monkeypatch.setattr(sl, "_latest_tag", lambda: "b9870")
+    monkeypatch.setattr(
+        sl, "_latest_tag",
+        lambda: pytest.fail("the Linux CUDA branch must resolve the pin, "
+                            "not upstream's newest"))
     seen = {}
 
     def fake_release_assets(tag, repo=None):
@@ -277,7 +280,7 @@ def test_resolve_linux_cuda_asset_finds_tarball(monkeypatch):
     # publishes nothing here, and not a prefixed tag scheme (that was the
     # self-built mechanism's own naming, now parked, not this one's).
     assert seen["repo"] == sl._CUDA_LINUX_REPO
-    assert seen["tag"] == "b9870"
+    assert seen["tag"] == sl._PINNED_TAG
 
 
 def test_resolve_linux_cuda_asset_picks_cuda13_line(monkeypatch):
@@ -286,7 +289,10 @@ def test_resolve_linux_cuda_asset_picks_cuda13_line(monkeypatch):
     ("-cuda-13-x64.tar.gz") - a Blackwell GPU (NvidiaInfo.cuda_line ==
     'cuda-13') must get the cuda-13 asset, never the cuda-12 default."""
     monkeypatch.setattr(sl, "_platform_key", lambda: "linux")
-    monkeypatch.setattr(sl, "_latest_tag", lambda: "b9870")
+    monkeypatch.setattr(
+        sl, "_latest_tag",
+        lambda: pytest.fail("the Linux CUDA branch must resolve the pin, "
+                            "not upstream's newest"))
     monkeypatch.setattr(sl, "_release_assets", lambda tag, repo=None: _DUMMY_LINUX_CUDA_ASSETS)
 
     url, sha, _tag = sl._resolve_backend_asset("cuda", cuda_line="cuda-13")
@@ -300,7 +306,10 @@ def test_resolve_linux_cuda_asset_never_picks_the_sha256_sidecar(monkeypatch):
     it must never be mistaken for the tarball itself (which would then get
     "extracted" as an archive and fail confusingly downstream)."""
     monkeypatch.setattr(sl, "_platform_key", lambda: "linux")
-    monkeypatch.setattr(sl, "_latest_tag", lambda: "b9870")
+    monkeypatch.setattr(
+        sl, "_latest_tag",
+        lambda: pytest.fail("the Linux CUDA branch must resolve the pin, "
+                            "not upstream's newest"))
     # Sidecar listed FIRST, so a naive "first match" would pick it.
     reordered = [_DUMMY_LINUX_CUDA_ASSETS[1], _DUMMY_LINUX_CUDA_ASSETS[0]]
     monkeypatch.setattr(sl, "_release_assets", lambda tag, repo=None: reordered)
@@ -318,10 +327,13 @@ def test_resolve_linux_cuda_asset_raises_when_not_yet_built(monkeypatch):
     fallback, never construct a guessed URL (a guessed URL against a third
     party's naming is even less trustworthy than one against upstream's)."""
     monkeypatch.setattr(sl, "_platform_key", lambda: "linux")
-    monkeypatch.setattr(sl, "_latest_tag", lambda: "b9999")
     monkeypatch.setattr(sl, "_release_assets", lambda tag, repo=None: [])
 
-    with pytest.raises(click.ClickException, match="b9999"):
+    # Matched on the PIN rather than a stubbed tag: the message has to name the
+    # build that was actually looked for, and under the pin that is _PINNED_TAG.
+    # A stale literal here would still "match" a message about a different tag
+    # only by accident.
+    with pytest.raises(click.ClickException, match=sl._PINNED_TAG):
         sl._resolve_backend_asset("cuda")
 
 
@@ -330,7 +342,10 @@ def test_resolve_backend_asset_windows_cuda_unaffected_by_linux_branch(monkeypat
     the EXISTING Windows cuda path, which has its own resolver
     (_resolve_cuda_pair, exercised in test_cuda_setup.py) predating this."""
     monkeypatch.setattr(sl, "_platform_key", lambda: "win32")
-    monkeypatch.setattr(sl, "_latest_tag", lambda: "b9870")
+    monkeypatch.setattr(
+        sl, "_latest_tag",
+        lambda: pytest.fail("the Linux CUDA branch must resolve the pin, "
+                            "not upstream's newest"))
     calls = []
     monkeypatch.setattr(sl, "_release_assets",
                         lambda tag, repo=None: calls.append(repo) or [
