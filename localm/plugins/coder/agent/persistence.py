@@ -493,14 +493,17 @@ class _PersistenceMixin:
             try:
                 p.unlink(missing_ok=True)
             except Exception as e:
-                # Deliberately NOT the sibling shape: the media/chat delete
-                # endpoints let an OSError become a 500, because there the
-                # deletion IS the request's whole outcome. This is cleanup
-                # riding on OTHER work - a clean run finishing (loop.py), a
-                # fresh REPL task starting, and the tidy-up after /resume
-                # (repl.py) - and only the second of those has a caller that
-                # could report a raise. Raising would turn a completed task
-                # into a failure and take the REPL loop down after /resume.
+                # Deliberately NOT the sibling shape: the chat and media delete
+                # endpoints (builtin/chat/plug.py conversation_delete, and
+                # image/music/video) call unlink() bare inside the route, so an
+                # OSError becomes a 500 - correct there, because the deletion IS
+                # the request's whole outcome. Here it is cleanup riding on
+                # OTHER work, so raising would MISREPORT that work: loop.py
+                # clears on a CLEAN finish, where a raise turns a task that
+                # fully succeeded into a failure, and repl.py's /resume clear
+                # runs inside _handle_command, which the REPL loop does NOT wrap
+                # in a try, so a raise there ends the session outright.
+                #
                 # So it stays non-fatal, but it must not stay silent: a
                 # checkpoint that outlives a "clear" is exactly the state
                 # NEW-CODER-RESUME-DESTROYS-SESSIONS was fixed to prevent,
