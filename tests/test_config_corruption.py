@@ -68,3 +68,96 @@ def test_update_config_non_dict_does_not_crash_and_persists(cfg_home):
     import json
     assert json.loads(p.read_text())["port"] == 9191
     assert (cfg_home / "config.json.bak").exists()  # old (bad) file preserved
+
+
+class TestUnreadableConfigIsRefusedNotOverwritten:
+    """An UNREADABLE config/registry is not the same as an absent one.
+
+    `_read_json` returns the caller's default for both, which is right for the
+    read-only consumers (auth, netpolicy, netname, updater all fail safe on
+    defaults). It is wrong for a read-modify-write: update_config would merge
+    that default, and `_user_delta` would then persist ONLY the key just set,
+    replacing every setting the user had while the caller reported success.
+
+    These assert on the FILE before the exception, and catch by hand rather
+    than with `pytest.raises`, deliberately: as a context manager `pytest.raises`
+    fails at the end of its `with` block, so a regression reports "DID NOT RAISE
+    ConfigUnreadable" and never reaches the file check. That is a proxy, and a
+    proxy invites adjusting the assertion. Catching by hand lets the data
+    assertion speak first, so a regression reports that the user's config was
+    destroyed - which cannot be talked away. (Measured: the first version of
+    these tests used `pytest.raises` and reported exactly the useless message.)
+
+    Distinct from the valid-JSON-wrong-shape case above, which is deliberately
+    still tolerated: a JSON string or list holds nothing recoverable, whereas an
+    unreadable file may be hiding settings that still exist.
+    """
+
+    def test_update_config_refuses_and_leaves_the_file_alone(self, cfg_home):
+        p = cfg_home / "config.json"
+        cfg.update_config(lambda c: c.update({
+            "net_mode": "off", "llama_runtime_pin": "b1288"}))
+        p.write_text("{ this is not json", encoding="utf-8")
+        (cfg_home / "config.json.bak").write_text("{ nor this", encoding="utf-8")
+        corrupt = p.read_bytes()
+
+        raised = None
+        try:
+            cfg.update_config(lambda c: c.__setitem__("embedding_model", "x"))
+        except cfg.ConfigUnreadable as e:
+            raised = e
+
+        assert p.read_bytes() == corrupt, (
+            "an unreadable config.json was OVERWRITTEN; every user setting "
+            "(including net_mode and llama_runtime_pin) would be gone")
+        assert raised is not None, "update_config did not refuse"
+        # Names the file so it is actionable, never the path: this message can
+        # reach an HTTP error body via inference/routes/config.py.
+        assert "config.json" in str(raised)
+        assert str(cfg_home) not in str(raised)
+
+    def test_update_registry_refuses_and_leaves_the_file_alone(self, cfg_home):
+        """Worse than config: update_registry writes the WHOLE dict, so one
+        registration over an unreadable registry leaves only that model."""
+        p = cfg_home / "registry.json"
+        cfg.update_registry(lambda r: r.__setitem__("a", {"path": "a.gguf"}))
+        p.write_text("{ not json", encoding="utf-8")
+        corrupt = p.read_bytes()
+
+        raised = None
+        try:
+            cfg.update_registry(lambda r: r.__setitem__("b", {"path": "b.gguf"}))
+        except cfg.ConfigUnreadable as e:
+            raised = e
+
+        assert p.read_bytes() == corrupt, (
+            "an unreadable registry.json was OVERWRITTEN; every registered "
+            "model but the one just added would be gone")
+        assert raised is not None, "update_registry did not refuse"
+
+    def test_absent_config_still_writes(self, cfg_home):
+        """The control: first run must be unaffected, or the refusal would be
+        unfalsifiable (a fix that refused everything would pass the tests above)."""
+        p = cfg_home / "config.json"
+        assert not p.is_file()
+        cfg.update_config(lambda c: c.__setitem__("port", 9191))
+        import json
+        assert json.loads(p.read_text(encoding="utf-8"))["port"] == 9191
+
+    def test_recovered_from_bak_still_writes(self, cfg_home):
+        """The second control: an unreadable PRIMARY whose .bak reads fine is a
+        SUCCESSFUL read of real data, so it must not refuse."""
+        import json
+        p = cfg_home / "config.json"
+        p.write_text(json.dumps({"net_mode": "off"}), encoding="utf-8")
+        cfg.update_config(lambda c: c.__setitem__("port", 9393))   # rotates .bak
+        p.write_text("{ corrupt", encoding="utf-8")
+
+        cfg.update_config(lambda c: c.__setitem__("n_ctx", 8192))
+
+        got = json.loads(p.read_text(encoding="utf-8"))
+        # 8192, not the 4096 DEFAULT: _user_delta drops a value equal to the
+        # default, so asserting on the default would assert on something that
+        # can never appear in the file.
+        assert got["n_ctx"] == 8192
+        assert got["net_mode"] == "off", "the .bak's real settings were lost"
