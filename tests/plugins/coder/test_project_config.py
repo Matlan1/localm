@@ -156,12 +156,18 @@ class TestCliRefusesAnUnreadableProjectConfig:
         res = CliRunner().invoke(
             ccli.main, ["--cwd", str(tmp_path), "--model", "m", "hi"])
 
-        assert res.exit_code != 0, (
-            "the coder started with always_confirm and mode silently dropped")
-        out = res.output.lower()
-        assert "config" in out and "could not be read" in out
+        # The MESSAGE first, because it is the only discriminating assertion.
+        # Measured: with the fix reverted the CLI runs on and still exits
+        # non-zero, just later and for an unrelated reason ("model not found"),
+        # so `exit_code != 0` is satisfied in BOTH arms and proves nothing on
+        # its own. Only this text distinguishes "refused the config" from "died
+        # further down".
+        assert "could not be read" in res.output.lower(), (
+            "the coder did not refuse: it started with always_confirm and "
+            f"mode silently dropped. output was: {res.output!r}")
         # Actionable: it must point at the file rather than just failing.
         assert "config.toml" in res.output
+        assert res.exit_code != 0
 
     def test_cli_does_not_refuse_without_a_project_config(self, tmp_path,
                                                           monkeypatch):
