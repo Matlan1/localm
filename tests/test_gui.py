@@ -2858,6 +2858,95 @@ class TestPromptLibrary:
                               json={"system": "x"}).status_code == 400
 
 
+class TestPromptLibraryUnreadable:
+    """A prompts.json that EXISTS but cannot be read must never be treated as an
+    empty library.
+
+    Every writer here does read-modify-write, so starting from {} makes the next
+    save replace the WHOLE library with the single entry being written. These
+    assert on the FILE before the status code deliberately: the status code is a
+    proxy, the file is the property, and a failure that reads "personas were
+    destroyed" cannot be talked away as an assertion needing a tweak.
+    """
+
+    def _seed(self, client):
+        client.put("/api/prompts/Editor", json={"system": "Edit."})
+        client.put("/api/prompts/Poet", json={"system": "Rhyme."})
+
+    def test_corrupt_library_is_refused_not_silently_replaced(
+            self, persist_app, tmp_path):
+        app, _ = persist_app
+        pf = tmp_path / ".localm" / "prompts.json"
+        with TestClient(app) as client:
+            self._seed(client)
+            truncated = pf.read_text(encoding="utf-8")[:12]
+            pf.write_text(truncated, encoding="utf-8")   # e.g. killed mid-write
+
+            r = client.put("/api/prompts/Newbie", json={"system": "hi"})
+
+            assert pf.read_text(encoding="utf-8") == truncated, (
+                "an unreadable prompt library was OVERWRITTEN instead of "
+                "refused; every saved persona would be gone")
+            assert r.status_code == 500
+            assert client.get("/api/prompts").status_code == 500
+            assert client.delete("/api/prompts/Editor").status_code == 500
+
+    def test_transient_read_error_does_not_destroy_intact_personas(
+            self, persist_app, tmp_path, monkeypatch):
+        """The sharp case: the file is INTACT and only the READ failed (an AV or
+        backup agent's share-lock, a permission blip). Nothing was lost until we
+        overwrote it, which is what makes this worse than the corrupt case."""
+        app, _ = persist_app
+        pf = tmp_path / ".localm" / "prompts.json"
+        with TestClient(app) as client:
+            self._seed(client)
+            intact = json.loads(pf.read_text(encoding="utf-8"))
+
+            real_read = Path.read_text
+
+            def flaky(self, *a, **kw):
+                if self.name == "prompts.json":
+                    raise OSError(13, "Permission denied")
+                return real_read(self, *a, **kw)
+
+            monkeypatch.setattr(Path, "read_text", flaky)
+            r = client.put("/api/prompts/Newbie", json={"system": "hi"})
+            monkeypatch.undo()
+
+            assert json.loads(pf.read_text(encoding="utf-8")) == intact, (
+                "personas that were INTACT on disk were destroyed by a "
+                "transient read error")
+            assert r.status_code == 500
+
+    def test_json_that_is_not_an_object_is_refused(self, persist_app, tmp_path):
+        """Well-formed JSON that is not a library still parses cleanly."""
+        app, _ = persist_app
+        pf = tmp_path / ".localm" / "prompts.json"
+        pf.parent.mkdir(parents=True, exist_ok=True)
+        pf.write_text('["not", "a", "library"]', encoding="utf-8")
+        with TestClient(app) as client:
+            assert client.get("/api/prompts").status_code == 500
+            assert client.put("/api/prompts/Newbie",
+                              json={"system": "hi"}).status_code == 500
+            assert pf.read_text(encoding="utf-8") == '["not", "a", "library"]'
+
+    def test_absent_library_is_still_an_empty_library(self, persist_app,
+                                                      tmp_path):
+        """The control. 'No file' must keep meaning 'no personas' and stay
+        writable, or the refusal above would be unfalsifiable: a fix that 500s
+        on everything would pass every test in this class."""
+        app, _ = persist_app
+        pf = tmp_path / ".localm" / "prompts.json"
+        with TestClient(app) as client:
+            assert not pf.is_file()
+            assert client.get("/api/prompts").json() == {"prompts": []}
+            assert client.put("/api/prompts/Editor",
+                              json={"system": "Edit."}).status_code == 200
+            assert pf.is_file()
+            assert [p["name"] for p in
+                    client.get("/api/prompts").json()["prompts"]] == ["Editor"]
+
+
 class TestChatPlugin:
     """Chat-as-plugin-#0 specifics: first-run auto-provisioning, the protected
     refusal of disable/uninstall, and scope gating. The persistence behaviour

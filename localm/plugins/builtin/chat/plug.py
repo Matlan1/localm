@@ -233,14 +233,55 @@ def _check_prompt_name(name: str) -> str:
     return name
 
 
+class _PromptsUnreadable(Exception):
+    """prompts.json EXISTS but could not be read or parsed."""
+
+
 def _load_prompts() -> dict:
+    """The persona library, or ``{}`` when the user genuinely has none.
+
+    Raises _PromptsUnreadable when the file EXISTS but cannot be read or
+    parsed. Collapsing that case into ``{}`` (which this used to do) is not a
+    cosmetic loss: every writer below does read-modify-write, so the next save
+    replaced the WHOLE library with the single entry being written. The sharp
+    case is not corruption but a transient OSError (an AV or backup agent's
+    share-lock, a permission blip), where the personas on disk are INTACT and
+    were destroyed anyway while the route answered {"status": "saved"} - a step
+    that failed reporting success (AGENTS.md rule 5). Mirrors conversation_get's
+    absent-vs-unreadable branch above, which this path was the odd one out on.
+    """
     prompts_file = _prompts_file()
-    if prompts_file.is_file():
-        try:
-            return json.loads(prompts_file.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            return {}
-    return {}
+    if not prompts_file.is_file():
+        return {}                       # genuinely absent: an empty library
+    try:
+        data = json.loads(prompts_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise _PromptsUnreadable(str(e)) from e
+    if not isinstance(data, dict):
+        # Well-formed JSON that is not an object (a list, a bare string) parses
+        # cleanly and is still not a library. Treating it as one would TypeError
+        # on the next write, so refuse it with the same honesty as a parse error.
+        raise _PromptsUnreadable("prompts.json is not a JSON object")
+    return data
+
+
+def _prompts_or_refuse() -> dict:
+    """``_load_prompts()``, turning an unreadable library into a 500 that
+    REFUSES the request.
+
+    No caller may reach _save_prompts on a failed load: that write is the
+    destructive half this branch exists to prevent, and refusing is recoverable
+    where overwriting is not. The HTTP message is path-free because this is a
+    network surface (the clear_api_key disclosure split); the concrete reason
+    goes to the log."""
+    try:
+        return _load_prompts()
+    except _PromptsUnreadable as e:
+        from localm.debuglog import logger
+        logger.warning(
+            "prompts.json exists but could not be read (%s); refusing the "
+            "request rather than overwriting the persona library", e)
+        raise HTTPException(500, "Prompt library is unreadable")
 
 
 def _save_prompts(data: dict) -> None:
@@ -254,7 +295,7 @@ def _save_prompts(data: dict) -> None:
 
 @_router.get("/api/prompts")
 async def prompts_list():
-    data = _load_prompts()
+    data = _prompts_or_refuse()
     return {"prompts": [
         {"name": name, **entry} for name, entry in sorted(data.items())
     ]}
@@ -263,7 +304,7 @@ async def prompts_list():
 @_router.put("/api/prompts/{name}")
 async def prompt_upsert(name: str, req: PromptUpsert):
     name = _check_prompt_name(name)
-    data = _load_prompts()
+    data = _prompts_or_refuse()
     data[name] = {"system": req.system, "params": req.params}
     _save_prompts(data)
     return {"status": "saved", "name": name}
@@ -272,7 +313,7 @@ async def prompt_upsert(name: str, req: PromptUpsert):
 @_router.delete("/api/prompts/{name}")
 async def prompt_delete(name: str):
     name = _check_prompt_name(name)
-    data = _load_prompts()
+    data = _prompts_or_refuse()
     if name not in data:
         raise HTTPException(404, f"No such persona: {name}")
     del data[name]
