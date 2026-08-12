@@ -300,6 +300,83 @@ test("R36: when web rounds run out the model is forced to answer, not left mid-s
 });
 
 // ---------------------------------------------------------------------------
+//  NEW-WEBSEARCH-UX (1): search returns SNIPPETS, so the model must be told to
+//  read a promising result before answering. Without this it answers from the
+//  search engine's summary and never opens the page.
+// ---------------------------------------------------------------------------
+
+test("web ON: the model is nudged to follow up with fetch_url on a promising result", async () => {
+  const { completions } = await runChat({ web: true, rounds: [content("hello")] });
+  const sys = systemOf(completions[0]);
+  assert.match(sys, /follow up with fetch_url/i,
+    "the prompt states the capability but never tells the model to USE it");
+  assert.match(sys, /snippets, not page text/i,
+    "the model needs the REASON, or it has no way to judge when to follow up");
+});
+
+// ---------------------------------------------------------------------------
+//  NEW-WEBSEARCH-UX (3): one call per message is the design, but the extras
+//  used to vanish in silence. formatToolCalls renders EVERY block, so the user
+//  watched two lookups happen when only one did.
+// ---------------------------------------------------------------------------
+
+const twoCalls = content(
+  '<tool_call>{"name": "web_search", "args": {"query": "weather"}}</tool_call>\n' +
+  '<tool_call>{"name": "fetch_url", "args": {"url": "https://example.com/b"}}</tool_call>');
+
+test("parseWebCalls: a single call is ONE call - the bare-JSON layer must not re-count it", () => {
+  const { window: w } = loadApp();
+  // The JSON inside a wrapper/fence IS also a bare top-level object. If the
+  // last-resort layer ran unconditionally, every ordinary reply would look
+  // like two calls and the model would be told, every turn, that a second call
+  // it never made had been ignored.
+  assert.equal(w.parseWebCalls('<tool_call>{"name": "web_search", "args": {"query": "x"}}</tool_call>').length, 1);
+  assert.equal(w.parseWebCalls('```json\n{"name": "web_search", "args": {"query": "x"}}\n```').length, 1);
+  assert.equal(w.parseWebCalls('{"name": "web_search", "args": {"query": "x"}}').length, 1);
+  assert.equal(w.parseWebCalls("plain prose, no call at all").length, 0);
+});
+
+test("parseWebCalls: two calls are both reported, and parseWebCall still returns only the first", () => {
+  const { window: w } = loadApp();
+  const text = '<tool_call>{"name": "web_search", "args": {"query": "a"}}</tool_call>' +
+               '<tool_call>{"name": "fetch_url", "args": {"url": "https://e/"}}</tool_call>';
+  const all = w.parseWebCalls(text);
+  assert.equal(all.length, 2);
+  assert.equal(all[0].name, "web_search");
+  assert.equal(all[1].name, "fetch_url");
+  eq(w.parseWebCall(text), { name: "web_search", args: { query: "a" } });
+  // limit stops the scan early without changing which call comes first
+  assert.equal(w.parseWebCalls(text, 1).length, 1);
+});
+
+test("web ON: a second tool call in one reply is reported as ignored, not silently dropped", async () => {
+  const { conv, calls } = await runChat({
+    web: true,
+    rounds: [twoCalls, content("It is sunny. Source: https://example.com/")],
+  });
+  assert.equal(calls.filter((c) => c.url === "/api/web/search").length, 1,
+    "the first call ran");
+  assert.equal(calls.filter((c) => c.url === "/api/web/fetch").length, 0,
+    "the second call did NOT run - one call per message is the retained design");
+  const note = conv.messages.find(
+    (m) => m.web && /only the first tool call ran/.test(String(m.content)));
+  assert.ok(note, "the model was never told its second call was ignored");
+  assert.match(String(note.content), /fetch_url/,
+    "the notice must name what was ignored, not just that something was");
+  assert.match(String(note.content), /Results of web_search/,
+    "the notice rides on the result message, keeping user/assistant alternation");
+});
+
+test("web ON: an ordinary ONE-call reply gets no ignored-call notice", async () => {
+  const { conv } = await runChat({
+    web: true,
+    rounds: [searchCall("weather"), content("It is sunny.")],
+  });
+  assert.ok(!conv.messages.some((m) => /only the first tool call ran/.test(String(m.content))),
+    "a single call must never be reported as though a second was dropped");
+});
+
+// ---------------------------------------------------------------------------
 //  WEB-ask: net_mode=ask must APPROVE each model-initiated web request
 // ---------------------------------------------------------------------------
 

@@ -30,7 +30,7 @@ import pytest
 
 from localm._log_digest import _LOG_LINE_RE
 from localm.plugins.builtin.jobs.webtool import (
-    _strip_think, _top_level_objects, parse_web_call)
+    _strip_think, _top_level_objects, parse_web_call, parse_web_calls)
 from localm.plugins.coder.tools.files import (
     _WS_FALLBACK_MAX_TEXT, _WS_FALLBACK_MAX_TOKENS, _resolve_edit)
 
@@ -85,6 +85,33 @@ def test_parse_web_call_is_bounded_on_hostile_model_output(name, make_witness):
     reachable by whatever a poisoned page persuaded the model to emit."""
     _, elapsed = _timed(parse_web_call, make_witness())
     assert elapsed < BUDGET, f"parse_web_call took {elapsed:.2f}s on {name}"
+
+
+@pytest.mark.parametrize("name, make_witness", [
+    ("think_openers", lambda: "<r >" * 8_000),
+    ("wrap_spaces", lambda: "<tool_call>" + " " * 4_000),
+    ("unmatched_braces", lambda: "{" * 16_000),
+    ("fence_tabs", lambda: "```" + "\t" * 50_000),
+    ("wrap_openers", lambda: "<|tool_call>" * 5_000),
+])
+def test_parse_web_calls_is_bounded_when_a_real_call_precedes_the_hostile_tail(
+        name, make_witness):
+    """The witnesses above are all reached through ``parse_web_call``, which stops
+    at the FIRST call - so on input that contains one, the scan ends before the
+    hostile tail is ever examined.
+
+    ``run_chat_with_web`` now asks for ``limit=2``: it runs the first call and
+    needs to know whether ANY further call followed. That deliberately keeps
+    scanning past the first hit, so a valid call FOLLOWED BY a hostile tail is a
+    path the limit=1 bound above cannot speak for - it is a different input shape
+    reaching the same quantifiers. Reads on raw model output, same as its
+    neighbour, so the same budget applies.
+    """
+    valid = '<tool_call>{"name": "web_search", "args": {"query": "x"}}</tool_call>'
+    calls, elapsed = _timed(parse_web_calls, valid + make_witness(), 2)
+    assert elapsed < BUDGET, f"parse_web_calls took {elapsed:.2f}s on {name}"
+    assert calls and calls[0]["name"] == "web_search", \
+        "the bound must not have cost us the real call that precedes the junk"
 
 
 @pytest.mark.parametrize("text, expected", [
