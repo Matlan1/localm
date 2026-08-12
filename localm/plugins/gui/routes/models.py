@@ -130,6 +130,7 @@ def register(app: FastAPI, ctx) -> None:
         # same "no filter" sentinel the sibling routes use (q="", model="").
         from localm.config import load_registry
         from localm.model_manager import _entry_path
+        from localm.model_manager import model_vision_capability as _mvc
         registry = load_registry()
         current = active_model()
         # Fetched ONCE, off the event loop, before the row loop below (not per
@@ -173,6 +174,17 @@ def register(app: FastAPI, ctx) -> None:
             sizes: dict = {}
             mtimes: dict = {}
             resolved: dict = {}
+            # Keyed by NAME, not by path: two aliases can share one path but
+            # model_vision_capability() is looked up per registered name (a
+            # recorded mmproj lives on the entry, not on the file).
+            vision: dict = {}
+            # ONE projector listing per FOLDER for this request, not per row.
+            # Models overwhelmingly share a directory, and the sibling scan
+            # globs it - so uncached, listing N models costs N globs of an
+            # N-entry directory. Measured all-in-one-folder: 0.53 ms/row at 10
+            # models against 1.53 ms/row at 200. Scoped to this call, so adding
+            # a projector to a folder shows up on the next refresh.
+            vision_dirs: dict = {}
             # The per-row resolve() has exactly ONE consumer: the embedder
             # identity comparison below. So it is skipped entirely when no
             # embedder is loaded, rather than spent and dropped. That is not
@@ -189,6 +201,21 @@ def register(app: FastAPI, ctx) -> None:
                     emb_resolved = None
             for _n, _e, _m, ep in rows:
                 p = Path(ep)
+                # In THIS hop, never on the loop: model_vision_capability()
+                # stats the path, may glob the folder for an mmproj sibling,
+                # and may read a small JSON - the same blocking-syscall class
+                # as everything else here, for the same registry-supplied path.
+                #
+                # Deliberately NOT short-circuited on "the stat below failed".
+                # That guard would be right nearly always and wrong in one
+                # case: an entry with a RECORDED, present projector answers
+                # True even when the model file itself is unreachable, and the
+                # primitive orders it that way on purpose. Re-deriving the
+                # answer here from a cheaper signal would make this route
+                # disagree with the load path in exactly the case the tri-state
+                # exists for. The cost is a couple of extra stats on a row that
+                # is already unreachable; the correctness is worth more.
+                vision[_n] = _mvc(_n, reg=registry, dir_cache=vision_dirs)
                 # ONE stat() for both size and mtime (the previous size-only form
                 # called p.is_file() - itself a stat - then p.stat() again on a
                 # hit). mtime is recorded for a directory too (an HF model dir),
@@ -208,10 +235,10 @@ def register(app: FastAPI, ctx) -> None:
                     resolved[ep] = p.resolve()
                 except (OSError, ValueError):
                     resolved[ep] = None
-            return sizes, mtimes, resolved, emb_resolved
+            return sizes, mtimes, resolved, emb_resolved, vision
 
-        sizes, mtimes, resolved_paths, emb_resolved = await loop.run_in_executor(
-            get_plugin_executor(), _probe_rows)
+        sizes, mtimes, resolved_paths, emb_resolved, vision_caps = \
+            await loop.run_in_executor(get_plugin_executor(), _probe_rows)
 
         models = []
         for name, entry, mtype, epath in rows:
@@ -228,7 +255,7 @@ def register(app: FastAPI, ctx) -> None:
             if not loaded and emb_resolved is not None:
                 row_resolved = resolved_paths.get(epath)
                 loaded = row_resolved is not None and emb_resolved == row_resolved
-            models.append({
+            row_out = {
                 "name": name,
                 "source": str(entry.get("source", "")),
                 "size_bytes": size,
@@ -248,7 +275,21 @@ def register(app: FastAPI, ctx) -> None:
                 # MoE model as confirmed-dense the moment something trusted it.
                 "architecture": entry.get("architecture"),
                 "expert_count": entry.get("expert_count"),
-            })
+            }
+            # Vision capability, same tri-state discipline as expert_count
+            # above but expressed by PRESENCE rather than by null, because
+            # unlike architecture/expert_count this is not a stored field: it
+            # is measured from the model's own files on every request, and a
+            # model whose path is on an unmounted drive or a dead UNC share
+            # yields no evidence at all. true / false / KEY ABSENT, so a client
+            # can render a pill for true, nothing for false, and nothing (with
+            # no negative text) for unknown. Absent rather than null also keeps
+            # the exact pre-existing payload shape for an old client, the same
+            # way active_gpu_split below does.
+            _vis = vision_caps.get(name)
+            if _vis is not None:
+                row_out["vision"] = _vis
+            models.append(row_out)
         out = {"models": models, "active": current}
         # The multi-GPU split distribution the ACTIVE model's load actually
         # applied (GgufBackend.applied_gpu_split - auto free-VRAM-proportional,

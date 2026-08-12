@@ -100,6 +100,16 @@ def register(app: FastAPI, ctx) -> None:
         path = epath if epath is not None else ""
         p = Path(path)
         size = None
+        # Tri-state; None -> the key is omitted below. It stays None for a
+        # PATHLESS entry (nothing to inspect), and also for the VIRTUAL startup
+        # entry synthesised above, which is by definition absent from
+        # ``registry`` - so the lookup finds no record and correctly answers
+        # "unknown". Do NOT "fix" that by splicing the virtual entry into the
+        # registry view: it carries no model_type, so it would miss the llm
+        # gate and come back as a confident False for a model whose projector
+        # nobody looked for - the precise collapse this tri-state exists to
+        # prevent. No pill is the right answer for a row we cannot check.
+        vision = None
         # Only stat/walk a REAL path. An empty path (a virtual startup entry, or a
         # malformed registry row) makes Path("") resolve to "." -> the server's CWD,
         # whose is_dir() is True and rglob("*") walks the entire working tree: an
@@ -123,15 +133,23 @@ def register(app: FastAPI, ctx) -> None:
                     pass
                 return None
 
+            # Both blocking probes in ONE executor hop. model_vision_capability
+            # stats the same registry-supplied path, may glob its folder for an
+            # mmproj sibling and may read a small JSON, so it is the same
+            # unbounded-syscall class as _measure and must not run on the loop.
+            def _probe() -> tuple:
+                from localm.model_manager import model_vision_capability
+                return _measure(), model_vision_capability(model_id, reg=registry)
+
             loop = asyncio.get_running_loop()
-            size = await loop.run_in_executor(get_plugin_executor(), _measure)
+            size, vision = await loop.run_in_executor(get_plugin_executor(), _probe)
         aliases = sorted(
             n for n, e in registry.items()
             # Skip a malformed sibling: a non-dict entry's .get would AttributeError,
             # so one corrupt sibling must not crash a healthy model's detail lookup.
             if isinstance(e, dict) and e.get("path") == path and n != model_id
         )
-        return {
+        out = {
             "id": model_id,
             "object": "model",
             "owned_by": "localm",
@@ -148,6 +166,14 @@ def register(app: FastAPI, ctx) -> None:
             "loaded": model_id in _hs._engines and _hs._engines[model_id].loaded,
             "model_type": entry.get("model_type", "llm"),
         }
+        # true / false / KEY ABSENT. Absent means "could not inspect the
+        # model's files", which is NOT the same claim as false and must not be
+        # rendered as one - see model_vision_capability's docstring. Omitting
+        # rather than sending null also leaves the payload byte-identical for
+        # any client predating this field.
+        if vision is not None:
+            out["vision"] = vision
+        return out
 
     @app.post("/v1/models/unload",
               dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])

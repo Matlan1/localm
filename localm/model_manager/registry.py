@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shutil
+import stat as _stat
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -333,7 +334,8 @@ def unregistered_model_error(name) -> Optional[str]:
             "accepted here: only a command-line run may name a model by path.")
 
 
-def get_model_info(name: str, *, allow_direct_path: bool = False):
+def get_model_info(name: str, *, allow_direct_path: bool = False,
+                   reg: Optional[dict] = None):
     """Like get_model_path(), but returns (path, display_hint) or None.
 
     display_hint is a human-readable name when the original arg was an Ollama
@@ -359,8 +361,12 @@ def get_model_info(name: str, *, allow_direct_path: bool = False):
     server's own --model default. Anything reachable over HTTP or MCP keeps the
     default, and enforces registry membership on top (see http_server's
     registration check, jobs' _check_model_name, and MCPEngines.resolve_model).
+    ``reg`` lets a caller that has ALREADY loaded the registry pass its own
+    snapshot instead of forcing another file read. Same lookup either way; it
+    exists so a multi-model caller reads registry.json once and every answer it
+    gets describes ONE state of that file rather than a mix of several.
     """
-    reg = _mm.load_registry()
+    reg = _mm.load_registry() if reg is None else reg
     if name in reg:
         epath = _entry_path(reg[name])   # None for a malformed entry -> fall through
         if epath is not None:
@@ -421,7 +427,7 @@ def _pick_mmproj_candidate(model_stem: str, names: List[str]) -> Optional[str]:
     return matches[0] if len(matches) == 1 else None
 
 
-def find_sibling_mmproj(model_path) -> Optional[Path]:
+def find_sibling_mmproj(model_path, *, dir_cache: Optional[dict] = None) -> Optional[Path]:
     """Auto-detect a vision projector (mmproj) GGUF sitting next to a GGUF model.
 
     Vision GGUFs ship a separate 'mmproj' projector file in the same folder
@@ -429,12 +435,40 @@ def find_sibling_mmproj(model_path) -> Optional[Path]:
     it up lets a GUI/registry load get vision without a CLI --mmproj flag (VIS-1).
     Only a GGUF model qualifies and the model file itself is excluded. Returns the
     single candidate, or None when there are none, or the choice is ambiguous
-    (>1 with no clear stem match) - we never silently load the wrong projector."""
+    (>1 with no clear stem match) - we never silently load the wrong projector.
+
+    ``dir_cache`` is a caller-owned dict memoising the per-DIRECTORY projector
+    listing for the duration of ONE operation. A single load asks about one
+    model and does not need it; /api/models asks about every registered model,
+    and models overwhelmingly live in one folder, so without it each row globs
+    a directory whose size grows with the number of rows. MEASURED on this box,
+    all models in one folder: 0.53 ms/row at 10 models but 1.53 ms/row at 200
+    (305 ms total) - quadratic, and the listing is identical every time.
+
+    Deliberately caller-owned and NOT a module-level cache: this reads a
+    directory a user can add a projector to at any moment, and a process-lifetime
+    cache would keep saying "no vision" until restart. Scoped to one request, the
+    staleness window is the request."""
     p = Path(model_path)
-    if p.suffix.lower() != ".gguf" or not p.parent.is_dir():
+    if p.suffix.lower() != ".gguf":
         return None
-    cands = [f for f in p.parent.glob("*.gguf")
-             if f.name != p.name and "mmproj" in f.name.lower()]
+    parent = p.parent
+    if dir_cache is None:
+        if not parent.is_dir():
+            return None
+        pool = [f for f in parent.glob("*.gguf") if "mmproj" in f.name.lower()]
+    else:
+        key = str(parent)
+        if key not in dir_cache:
+            dir_cache[key] = ([f for f in parent.glob("*.gguf")
+                               if "mmproj" in f.name.lower()]
+                              if parent.is_dir() else [])
+        pool = dir_cache[key]
+    # The model file itself is excluded HERE rather than in the listing above,
+    # because the listing is shared by every model in the folder and only this
+    # step is per-model. A standalone mmproj entry is its own row, and it must
+    # not resolve itself as its own projector.
+    cands = [f for f in pool if f.name != p.name]
     if not cands:
         return None
     by_name = {f.name: f for f in cands}
@@ -444,7 +478,9 @@ def find_sibling_mmproj(model_path) -> Optional[Path]:
 
 
 
-def get_model_mmproj(name: str, *, allow_direct_path: bool = False) -> Optional[str]:
+def get_model_mmproj(name: str, *, allow_direct_path: bool = False,
+                     reg: Optional[dict] = None,
+                     dir_cache: Optional[dict] = None) -> Optional[str]:
     """The mmproj (vision projector) path for a model, if one is known.
 
     Priority: an explicit 'mmproj' recorded in the registry entry, else a sibling
@@ -458,8 +494,14 @@ def get_model_mmproj(name: str, *, allow_direct_path: bool = False) -> Optional[
     glob a directory named by an unregistered, caller-supplied path. Those two
     alerts share this root cause; unlike the jobs/MCP sinks they were not shown to
     have their own remote entry point, and are fixed here by identity, not because
-    a remote chain was demonstrated for them."""
-    reg = _mm.load_registry()
+    a remote chain was demonstrated for them.
+
+    ``reg`` is the same caller-supplied registry snapshot get_model_info takes,
+    and is threaded down to it so BOTH lookups here describe one state of
+    registry.json rather than two reads a moment apart. ``dir_cache`` is passed
+    straight to find_sibling_mmproj - see its docstring for why it is
+    caller-owned and per-operation."""
+    reg = _mm.load_registry() if reg is None else reg
     entry = reg.get(name) if isinstance(reg, dict) else None
     # Through the choke point, not a raw read: the recorded projector is a stored
     # path from the same hand-editable file as ``path``, and it goes to the same
@@ -475,10 +517,10 @@ def get_model_mmproj(name: str, *, allow_direct_path: bool = False) -> Optional[
             return str(mmp)
         # Recorded but gone: fall through to auto-detect rather than handing the
         # backend a dead path that would just fail the mtmd load.
-    info = get_model_info(name, allow_direct_path=allow_direct_path)
+    info = get_model_info(name, allow_direct_path=allow_direct_path, reg=reg)
     if info is None:
         return None
-    sib = find_sibling_mmproj(info[0])
+    sib = find_sibling_mmproj(info[0], dir_cache=dir_cache)
     return str(sib) if sib else None
 
 
@@ -544,33 +586,144 @@ def _looks_like_vision_gguf_name(repo_id: str, filename: str) -> bool:
     return "minicpm-v" in ident or "minicpmv" in ident
 
 
+def model_vision_capability(name: str, *, reg: Optional[dict] = None,
+                            dir_cache: Optional[dict] = None) -> Optional[bool]:
+    """Whether ONE registered model can accept image INPUT - as a TRI-STATE.
+
+    ``True``  the loader can genuinely put an image through this model.
+    ``False`` we inspected the model's own files and it cannot.
+    ``None``  we COULD NOT INSPECT them, so we do not know.
+
+    The third state is the whole point, and it is the same discipline as
+    F8-PERSIST-ARCH-AND-EXPERT-COUNT's ``expert_count``: every answer here is
+    read from the model's files at call time, so an entry whose path sits on an
+    unmounted drive or an unreachable UNC share produces no evidence at all. The
+    positive-membership list below cannot express that - a name simply does not
+    appear, which is byte-identical to a genuine text-only model - so a caller
+    that renders "not vision" from a bare absence is making a claim about a
+    model nobody checked. Callers must render nothing for ``None``, and in
+    particular no NEGATIVE text.
+
+    Both qualifying paths are the SAME lookups the actual load path uses, not a
+    static-metadata guess: a HuggingFace-format directory with vision metadata,
+    or a chat model whose mmproj (vision projector) ``get_model_mmproj()``
+    resolves - an explicitly recorded projector, or one auto-detected sitting
+    beside the model file. A standalone mmproj or an embedding entry is not
+    itself a model to switch to, hence the model_type gate.
+
+    ORDERING IS LOAD-BEARING: a resolved projector returns True BEFORE the
+    reachability probe, because ``get_model_mmproj`` can succeed from a recorded
+    projector alone. That keeps ``vision_capable_models()``'s True set exactly
+    what it was - ``None`` only ever replaces a former, possibly-wrong False.
+
+    Does disk I/O (stat, glob, a small JSON read), so callers on an event loop
+    must run it in an executor.
+
+    ``reg`` is a registry snapshot the caller has already loaded. It is threaded
+    all the way down into get_model_mmproj/get_model_info rather than used only
+    for the top-level lookup: without that, this function would answer from the
+    caller's snapshot AND from a fresh read of registry.json in the same call,
+    which is two states of one file and, for a test that patches only one of the
+    two load_registry bindings, a result decided by the developer's real
+    registry.
+    """
+    reg = _mm.load_registry() if reg is None else reg
+    info = reg.get(name) if isinstance(reg, dict) else None
+    epath = _entry_path(info)   # malformed entry (a str entry's .get would
+    if epath is None:           # raise AttributeError, not caught below)
+        return None             # -> nothing to inspect, so: unknown
+    try:
+        p = Path(epath)
+        # ONE stat, answering both the is-it-a-directory and the is-it-reachable
+        # questions. Path.is_dir() + Path.is_file() would be two, and MEASURED
+        # on this box a stat of a dead UNC share costs 5 to 8 SECONDS apiece in
+        # the Windows SMB redirector - and /api/models runs this per row.
+        try:
+            st = os.stat(p)
+        except (OSError, ValueError) as e:
+            # A failed stat is the REACHABILITY ANSWER, not an error to hide,
+            # so it is recorded and execution CONTINUES. That continuing is the
+            # whole point of catching here rather than leaving it to the outer
+            # handler: the outer one would abandon the call and return None,
+            # which for an entry carrying a RECORDED projector would turn a
+            # True into an unknown and quietly shrink vision_capable_models()'s
+            # routing set. Measured by deleting this clause - the OSError tests
+            # below stay green (the outer net produces the same None), and
+            # test_recorded_projector_wins_over_an_unreachable_model_path is
+            # what goes red.
+            #
+            # Traced because "unknown" alone does not say WHY, and a removed
+            # USB drive and a permission denial want different user actions.
+            logger.debug("vision capability probe failed for %r (%s): %s",
+                         name, type(e).__name__, e)
+            st = None
+        if st is not None and _stat.S_ISDIR(st.st_mode):
+            return _hf_is_vision(p)
+        if st is None and not _entry_path(info, "mmproj"):
+            # Unreachable AND no projector recorded on the entry. get_model_mmproj
+            # cannot answer anything but None in that state: its only two sources
+            # are that recorded path (absent here) and a sibling scan, which needs
+            # get_model_info to resolve the model, which needs p.exists(). So this
+            # skips its probes rather than pre-empting its answer, and spares an
+            # unreachable row two more multi-second timeouts.
+            return None
+        if (_entry_path(info, "model_type") == "llm"
+                and get_model_mmproj(name, reg=reg, dir_cache=dir_cache)):
+            return True
+        # Everything from here answers NO, and that is only honest if we could
+        # actually look. An unmounted drive makes the stat fail (st is None),
+        # and a path that is neither a directory nor a REGULAR FILE was never a
+        # model to inspect - neither was read, so both are "unknown", NOT
+        # "text-only". This is the one place the two are separated; collapse
+        # them and every badge downstream becomes a claim about a model nobody
+        # opened.
+        if st is None or not _stat.S_ISREG(st.st_mode):
+            return None
+        return False
+    except (OSError, ValueError, TypeError) as e:
+        # The backstop for the probes the stat guard above does NOT cover:
+        # _hf_is_vision reading config.json, and get_model_mmproj's exists()
+        # and directory glob. Any of them can raise on a path that came out of
+        # registry.json rather than from this process.
+        #
+        # MEASURED, and it is why this is not decorative: pathlib swallows only
+        # the SUBSET of OSErrors it deems "not found"-ish, and a dead UNC share
+        # produced WinError 64 out of a plain Path probe on this box - so these
+        # can raise rather than merely return False. Unguarded, one such entry
+        # took out the whole caller: the /api/models row loop (where every
+        # neighbouring syscall is already wrapped exactly like this) and
+        # vision_capable_models(), which has always probed operator-supplied
+        # paths unguarded.
+        #
+        # An interrupted inspection is precisely "we do not know", so it
+        # returns None rather than the False the try block would have reached -
+        # False would be a claim about a model this call demonstrably failed to
+        # read. Not silent: the tri-state IS the surfaced signal, and this
+        # records the cause.
+        logger.debug("vision capability probe failed for %r (%s): %s",
+                     name, type(e).__name__, e)
+        return None
+
+
 def vision_capable_models() -> List[str]:
     """Registered model names that can accept image INPUT on THIS install.
 
-    Two independent ways a model qualifies: a HuggingFace-format directory with
-    vision metadata, or a GGUF chat model carrying a mmproj (vision projector)
-    that get_model_mmproj() resolves - the SAME lookup the actual load path
-    uses (an explicitly recorded mmproj, or one auto-detected sitting next to
-    the model file). A name listed here is one the loader can genuinely put an
-    image through, not a guess from static metadata alone; a standalone mmproj
-    or embedding entry is not itself a model to switch to and is excluded via
-    the model_type gate. Used to ROUTE an image to a model already known to be
-    vision-capable instead of dead-ending."""
-    out: List[str] = []
-    for name, info in _mm.load_registry().items():
-        epath = _entry_path(info)   # skip malformed entries (a str entry's .get
-        if epath is None:           # would raise AttributeError, not caught below)
-            continue
-        try:
-            p = Path(epath)
-        except (TypeError, ValueError):
-            continue
-        if p.is_dir():
-            if _hf_is_vision(p):
-                out.append(name)
-        elif _entry_path(info, "model_type") == "llm" and get_model_mmproj(name):
-            out.append(name)
-    return sorted(out)
+    A name listed here is one the loader can genuinely put an image through.
+    Used to ROUTE an image to a model already known to be vision-capable
+    instead of dead-ending, so it is deliberately POSITIVE-MEMBERSHIP ONLY:
+    absence from this list means "not known to be vision-capable" and must
+    never be read as "confirmed text-only". Use model_vision_capability() when
+    you need to tell those two apart (a GUI badge does; routing does not).
+
+    The registry is loaded ONCE and threaded into every per-name call rather
+    than re-read per model."""
+    reg = _mm.load_registry()
+    if not isinstance(reg, dict):
+        return []
+    dir_cache: dict = {}   # one directory listing per folder, not per model
+    return sorted(n for n in reg
+                  if model_vision_capability(n, reg=reg,
+                                             dir_cache=dir_cache) is True)
 
 
 

@@ -2023,6 +2023,18 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
    border + a "?" in the label + a title tooltip, so it never reads as equally
    certain as a confirmed badge (see discover.py's _moe_signal). */
 .moe-badge.moe-likely { border: 1px dashed var(--border); }
+/* Model CAPABILITY pills - what a model can DO. Its OWN palette (--accent),
+   deliberately not the .fit.fits/.tight/.too-big green/yellow/red scale, which
+   is a SIZE-against-VRAM verdict and would read as one here; and not a --cat-*
+   hue either, since all seven are spoken for by .type-badge's MODEL_TYPES.
+   Only ever rendered for a CONFIRMED capability - there is no "no vision"
+   variant, because an absent pill has to cover both "checked, text-only" and
+   "could not check" (see models.js visionBadge). */
+.cap-badge {
+  font-size: 10.5px; font-weight: 600; padding: 1px 7px; border-radius: 9px;
+  letter-spacing: 0.02em; white-space: nowrap; flex: 0 0 auto;
+}
+.cap-badge.cap-vision { background: var(--accent-soft); color: var(--accent); }
 .param-count { font-family: var(--mono); font-size: 12px; color: var(--text-dim); white-space: nowrap; }
 .moe-legend { margin: 2px 0 8px; }
 /* non-blocking "no HF runtime" hint under the toggles */
