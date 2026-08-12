@@ -118,6 +118,34 @@ def test_backfill_writes_correct_detail_including_docs(base, docs):
     assert peeked == {**eager_stats, "docs": eager_docs}
 
 
+def test_backfill_of_a_malformed_collection_carries_the_bad_line_count(base, docs):
+    """NEW-RAG-INDEX-WARN-SPAM residual B, the backfill path specifically:
+    chunks_bad_lines has to reach the cache load_and_maybe_backfill writes,
+    not just the one _save() writes - a collection that is corrupt AND was
+    only ever listed (never re-saved) is exactly the case this method exists
+    for. load_and_maybe_backfill only ever rewrites meta.json's cache block,
+    never chunks.jsonl, so the count it derives must describe the file as it
+    actually is on disk, not a self-healed copy."""
+    coll = Collection("kb", base=base).create()
+    coll.add_paths([docs], embed_fn=_embed3)
+    chunks_path = base / "kb" / "chunks.jsonl"
+    with chunks_path.open("a", encoding="utf-8") as f:
+        f.write("\nnot json at all")
+    _strip_cache(base, "kb")
+    eager = Collection("kb", base=base).stats()
+    assert eager["chunks_bad_lines"] == 1, "fixture precondition"
+
+    backfilled = Collection.load_and_maybe_backfill("kb", base=base)
+    assert backfilled.stats() == eager
+    assert backfilled.stats()["chunks_bad_lines"] == 1
+
+    peeked = Collection.peek_stats("kb", base=base)
+    assert peeked == eager
+    assert peeked["chunks_bad_lines"] == 1
+    assert chunks_path.read_text(encoding="utf-8").count("not json at all") == 1, (
+        "the backfill must never have rewritten chunks.jsonl")
+
+
 def test_backfilled_cache_is_never_trusted_after_hand_corruption(base, docs):
     """The negative direction from test_rag_peek_stats.py, applied specifically
     to a backfilled cache (not a _save()-written one): once the backfill has

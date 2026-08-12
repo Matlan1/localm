@@ -815,3 +815,55 @@ def test_rag_embedding_status_endpoint(monkeypatch):
     monkeypatch.setattr(emb, "loaded_dim", lambda: 384)
     out2 = asyncio.run(plug.rag_embedding_status(req))
     assert out2["status"] == "ready" and out2["installed"] is True and out2["dim"] == 384
+
+
+# ---------------------------------------------------------------------------
+#  NEW-RAG-INDEX-WARN-SPAM residual C: `rag repair` on a collection with no
+#  rebuildable (non-upload) documents. Real Collection + real CLI command, not
+#  the reg589 test files' mocked _FakeColl - the point here is the ACTUAL
+#  upload:<name> vs server-path distinction, which a fake documents() list
+#  cannot exercise.
+# ---------------------------------------------------------------------------
+
+class TestCliRepairUploadOnlySources:
+    def test_all_upload_collection_refuses_instead_of_a_noop(self, cli_runner):
+        from localm.cli import main
+        coll = Collection("kb").create()
+        coll.add_uploads([{"filename": "notes.txt", "data": b"upload only content"}])
+
+        r = cli_runner.invoke(main, ["rag", "repair", "kb", "--yes"])
+        assert r.exit_code == 0, r.output
+        assert "upload" in r.output.lower()
+        assert "repaired" not in r.output.lower(), (
+            "must not print a success line for a run that touched nothing")
+        # Untouched: still the one uploaded doc.
+        assert Collection("kb").stats()["n_docs"] == 1
+
+    def test_mixed_collection_repairs_the_file_and_names_the_upload(
+            self, cli_runner, tmp_path):
+        from localm.cli import main
+        docs = tmp_path / "docs"
+        docs.mkdir()
+        (docs / "a.txt").write_text("alpha content about turbines", encoding="utf-8")
+        coll = Collection("kb").create()
+        coll.add_paths([docs])
+        coll.add_uploads([{"filename": "notes.txt", "data": b"upload only content"}])
+
+        r = cli_runner.invoke(main, ["rag", "repair", "kb", "--yes"])
+        assert r.exit_code == 0, r.output
+        assert "1 uploaded document" in r.output
+        assert "repaired" in r.output.lower()
+        # Both documents survive - the upload-only one was left as-is, not dropped.
+        assert Collection("kb").stats()["n_docs"] == 2
+
+    def test_corrupt_and_all_upload_names_both_facts(self, cli_runner):
+        from localm.cli import main
+        coll = Collection("kb").create()
+        coll.add_uploads([{"filename": "notes.txt", "data": b"upload only content"}])
+        with (coll.dir / "chunks.jsonl").open("a", encoding="utf-8") as f:
+            f.write("\nnot json")
+
+        r = cli_runner.invoke(main, ["rag", "repair", "kb", "--yes"])
+        assert r.exit_code == 0, r.output
+        low = r.output.lower()
+        assert "corrupt" in low and "upload" in low

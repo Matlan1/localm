@@ -86,6 +86,7 @@ def test_freshly_created_empty_collection(base):
     assert stats["n_chunks"] == 0
     assert stats["has_vectors"] is False
     assert stats["corrupt"] is False
+    assert stats["chunks_bad_lines"] == 0
     assert stats["vector_degrade_reason"] is None
 
 
@@ -261,6 +262,49 @@ def test_hand_edited_chunks_jsonl_after_save_is_never_trusted(base, docs):
 
     assert Collection.peek_stats("kb", base=base) is None
     assert Collection("kb", base=base).stats()["n_chunks"] == 4
+
+
+def test_malformed_chunks_jsonl_count_surfaces_in_stats(base, docs):
+    """NEW-RAG-INDEX-WARN-SPAM residual B: the malformed-line COUNT must reach
+    stats() (not just the boolean 'corrupt'), so a caller can say "62 malformed
+    chunk line(s)" instead of a generic "index damaged". Two bad lines hand-
+    appended: one that is not valid JSON at all, one that is valid JSON but the
+    wrong shape (no "text" field) - both are the two ways _load() counts a line
+    as bad."""
+    coll = Collection("kb", base=base).create()
+    coll.add_paths([docs], embed_fn=_embed3)   # 3 real chunks
+
+    chunks_path = base / "kb" / "chunks.jsonl"
+    with chunks_path.open("a", encoding="utf-8") as f:
+        f.write("\nnot json at all")
+        f.write("\n" + json.dumps({"source": "x", "pos": 0}))   # missing "text"
+
+    reloaded = Collection("kb", base=base)
+    stats = reloaded.stats()
+    assert stats["chunks_bad_lines"] == 2
+    assert stats["corrupt"] is True
+    assert stats["n_chunks"] == 3, "malformed lines are skipped, never counted as chunks"
+
+    # The count must also survive into the cache load_and_maybe_backfill writes,
+    # exactly like every other stats() field - it only writes meta.json's cache
+    # block (never rewrites chunks.jsonl), so this reads the count from the
+    # SAME still-malformed file, not a self-healed one.
+    backfilled = Collection.load_and_maybe_backfill("kb", base=base)
+    assert backfilled.stats() == stats
+    assert backfilled.stats()["chunks_bad_lines"] == 2
+    peeked = Collection.peek_stats("kb", base=base)
+    assert peeked == stats, (
+        "the backfilled cache must be byte-identical to the eager reload")
+    assert peeked["chunks_bad_lines"] == 2
+
+    # A real _save() (unlike the backfill above) rewrites chunks.jsonl from
+    # self._chunks, which never held the malformed lines - so it self-heals
+    # the file and the count correctly drops to 0 on the NEXT fresh load.
+    reloaded._save()
+    assert Collection("kb", base=base).stats()["chunks_bad_lines"] == 0, (
+        "a real _save() rewrites chunks.jsonl from the valid chunks only, "
+        "so the malformed lines are gone from disk and must not still be "
+        "counted on the next load")
 
 
 def test_fingerprint_survives_a_real_noop_save(base, docs):

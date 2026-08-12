@@ -119,18 +119,35 @@ export async function refreshKnowledgePage() {
       retrievalTd.appendChild(badge);
     }
     // c.corrupt covers three distinct on-disk faults (a corrupt meta.json, a
-    // malformed line in chunks.jsonl, or an unreconstructable roots map) - the
-    // wording below is true of all three rather than naming one. Separate from
-    // needsReembed: a corrupt index needs 'localm rag repair', not re-embed.
+    // malformed line in chunks.jsonl, or an unreconstructable roots map) -
+    // only the chunks.jsonl case carries a count (c.chunks_bad_lines), so the
+    // badge names it when it can and falls back to the generic wording for
+    // the other two rather than claiming "0 malformed lines" for a fault it
+    // cannot count (NEW-RAG-INDEX-WARN-SPAM residual B). Separate from
+    // needsReembed: a corrupt index needs Repair, not re-embed.
     if (c.corrupt) {
-      const badge = el("span", "corrupt-badge", "index damaged");
-      badge.title = "Part of this collection's index is corrupt or malformed "
-        + "on disk. Run 'localm rag repair' to fix it.";
+      const badge = el("span", "corrupt-badge",
+        c.chunks_bad_lines > 0
+          ? `${c.chunks_bad_lines} malformed line(s)`
+          : "index damaged");
+      badge.title = (c.chunks_bad_lines > 0
+        ? `${c.chunks_bad_lines} malformed chunk line(s) in this collection's index. `
+        : "Part of this collection's index is corrupt or malformed on disk. ")
+        + "Click Repair to fix it.";
       retrievalTd.appendChild(badge);
     }
     tr.appendChild(retrievalTd);
     const actions = el("td");
     actions.style.textAlign = "right";
+
+    if (c.corrupt) {
+      const repair = el("button", "corrupt-fix", "repair");
+      repair.title = "Rebuild this collection's index from its indexed "
+        + "files. Documents added by upload cannot be rebuilt this way (there "
+        + "is no server-side copy) and are left as-is.";
+      repair.onclick = () => kbRepairCollection(c.name);
+      actions.appendChild(repair);
+    }
 
     const add = el("button", "", "add docs");
     add.onclick = () => kbAddDocs(c.name);
@@ -545,6 +562,66 @@ export function kbConfirmReembed(name) {
   });
 }
 
+/** Rebuild a damaged collection's index from its indexed server-side files
+ *  (POST .../repair) - the GUI answer to the "index damaged" badge / info
+ *  modal warning. Mirrors kbReembedCollection's log/streamJob shape.
+ *
+ *  Two-step like applyEmbeddingModel: POST once with no body: the route
+ *  itself decides (from whether an embedder is actually available and
+ *  whether this collection currently has vectors) if repairing would drop
+ *  existing embeddings, and if so answers `needs_confirm` with the exact
+ *  reason instead of starting a job - shown here, then re-posted with
+ *  `confirm: true`. Never guessed client-side, so this stays correct however
+ *  many collections/embedder states exist. */
+function kbConfirmRepair(name, detail) {
+  return new Promise((resolve) => {
+    openModal(`Repair '${name}'?`, (body) => {
+      body.appendChild(el("p", "", detail));
+      const row = el("div", "actions");
+      const cancel = el("button", "btn-secondary", "Cancel");
+      cancel.onclick = () => { $("modal").style.display = "none"; resolve(false); };
+      const ok = el("button", "btn-secondary btn-primary", "Repair anyway");
+      ok.onclick = () => { $("modal").style.display = "none"; resolve(true); };
+      row.append(cancel, ok);
+      body.appendChild(row);
+    });
+  });
+}
+
+export async function kbRepairCollection(name) {
+  const log = $("kb-log");
+  log.style.display = "block";
+  log.textContent = `Repairing '${name}'…\n`;
+  try {
+    const post = (body) => fetch(
+      `/api/rag/collections/${encodeURIComponent(name)}/repair`,
+      { method: "POST", headers: authHeaders(), body: JSON.stringify(body) });
+    let r = await post({});
+    let data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.detail || r.statusText);
+    if (data.needs_confirm) {
+      if (!(await kbConfirmRepair(name, data.detail))) {
+        log.textContent += "Cancelled.\n";
+        return;
+      }
+      r = await post({ confirm: true });
+      data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.detail || r.statusText);
+    }
+    const end = await streamJob(data.job_id, (line) => {
+      log.textContent += line + "\n";
+      log.scrollTop = log.scrollHeight;
+    });
+    toast(end.status === "done" ? "Repair finished"
+                                : "Repair " + jobStatusWord(end.status),
+          end.status !== "done");
+    refreshKnowledgePage();
+  } catch (e) {
+    log.textContent += "failed: " + e.message + "\n";
+    toast("Repair failed: " + e.message, true);
+  }
+}
+
 /** In-page confirm (window.confirm is suppressed in some PWAs) asking whether to
  *  add the out-of-whitelist folders to the allowed list and continue. */
 export function kbConfirmAddRoots(folders) {
@@ -697,13 +774,20 @@ export async function kbInfoModal(name) {
                         : "lexical retrieval (BM25)")));
     // Surface on-disk index damage (meta.json, chunks.jsonl, or the roots map -
     // see store.py's three self.corrupt = True sites) rather than only via the
-    // CLI's "(corrupt index ...)" listing marker (AGENTS rule 5).
+    // CLI's "(corrupt index ...)" listing marker (AGENTS rule 5). Names the
+    // malformed-line count when the server can (chunks.jsonl only - see the
+    // table badge above), falls back to generic wording for the other two.
     if (data.corrupt) {
       const warn = el("div", "sub",
-        "⚠ Part of this collection's index is corrupt or malformed on disk. "
-        + "Run 'localm rag repair' to fix it.");
+        "⚠ " + (data.chunks_bad_lines > 0
+          ? `${data.chunks_bad_lines} malformed chunk line(s) in this collection's index.`
+          : "Part of this collection's index is corrupt or malformed on disk."));
       warn.style.color = "var(--red)";
       body.appendChild(warn);
+      const repair = el("button", "btn-secondary btn-danger", "Repair");
+      repair.style.marginTop = "4px";
+      repair.onclick = () => kbRepairCollection(name);
+      body.appendChild(repair);
     }
     // Surface a degraded semantic index instead of silently answering lexically
     // (AGENTS rule 5). The server sets this when vectors are corrupt/stale/mismatched.
