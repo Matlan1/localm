@@ -78,7 +78,10 @@ def _neutralise_fake_pointers():
 
 def _mock_native_api() -> MagicMock:
     """A fully-wired mock api module: prefill (KV-reuse path) plus decode
-    loop, all succeeding by default."""
+    loop, all succeeding by default. llama_model_chat_template=None (used
+    only by the vision path's own _apply_model_template call) takes the
+    plain ChatML fallback instead of exercising the Jinja-template C-array
+    machinery, which is not what these tests are about."""
     mock_api = MagicMock()
     mock_api.has_memory_api.return_value = True
     mock_api.llama_get_memory.return_value = 333
@@ -87,7 +90,20 @@ def _mock_native_api() -> MagicMock:
     mock_api.llama_batch_init.side_effect = fake_batch_init
     mock_api.llama_sampler_sample.return_value = 42
     mock_api.llama_sampler_free = MagicMock()
+    mock_api.llama_model_chat_template.return_value = None
     return mock_api
+
+
+def _bare_llama_vision() -> LlamaCpp:
+    """_bare_llama() plus a mocked mtmd handle, for _generate_image."""
+    llm = _bare_llama()
+    llm._mtmd = MagicMock()
+    llm._mtmd.marker = "<image>"
+    llm._mtmd.eval_into.return_value = 3   # pos after prefill
+    return llm
+
+
+_VISION_MESSAGES = [{"role": "user", "content": [{"type": "text", "text": "describe"}]}]
 
 
 def _messages(records) -> str:
@@ -107,7 +123,7 @@ class TestLlamaCppGenerateBoundaryLogging:
         with patch("localm.inference.backends.llamacpp.llama.api", mock_api), \
              patch("localm.inference.backends.llamacpp.llama._build_sampler",
                    return_value=999), \
-             caplog.at_level(logging.INFO, logger="localm"):
+             caplog.at_level(logging.DEBUG, logger="localm"):
             tokens = list(llm._generate(
                 prompt_tokens=[1, 2, 3], max_new_tokens=6,
                 temperature=0.8, top_k=40, top_p=0.95, repeat_penalty=1.1))
@@ -121,11 +137,21 @@ class TestLlamaCppGenerateBoundaryLogging:
         assert "gguf generate: prefill complete" in joined
         assert "kv_reuse=True" in joined
         assert "gguf generate: entering decode loop" in joined
-        # Interval=2 over 6 tokens -> checkpoints at 2, 4 and 6.
-        assert sum("gguf generate: decode progress" in m for m in msgs) == 3
         assert "gguf generate: complete, 6 token(s)" in joined
         assert "finish_reason=length" in joined
         assert "aborted" not in joined
+
+        # Decode progress is coarse (interval=2 over 6 tokens -> checkpoints
+        # at 2, 4, 6) AND specifically DEBUG, not INFO - the ring buffer's
+        # fixed 400-record budget is shared with everything else the server
+        # logs, so only the boundary markers are affordable at INFO.
+        progress = [r for r in caplog.records
+                    if "gguf generate: decode progress" in r.getMessage()]
+        assert len(progress) == 3
+        assert all(r.levelname == "DEBUG" for r in progress)
+        boundaries = [r for r in caplog.records
+                      if "gguf generate: decode progress" not in r.getMessage()]
+        assert boundaries and all(r.levelname == "INFO" for r in boundaries)
 
         # Order matters: a reader must be able to tell WHERE a silent death
         # would have landed from the sequence, not just presence.
@@ -179,6 +205,95 @@ class TestLlamaCppGenerateBoundaryLogging:
         assert ("gguf generate: aborted (cancelled) during decode, "
                 "1 token(s) generated") in joined
         assert "gguf generate: complete" not in joined
+
+
+class TestLlamaCppGenerateImageBoundaryLogging:
+    """Same scheme, same three cases, for the OTHER live generation path in
+    this file (_generate_image) - see the module docstring on _generate_image
+    itself for why this path needed covering too: the real crash log this
+    whole change was validated against was a vision-model load, so leaving
+    _generate_image dark would have reproduced the exact gap being fixed."""
+
+    def test_normal_generation_logs_all_boundaries_in_order(self, monkeypatch, caplog):
+        monkeypatch.setattr(llama_mod, "_DECODE_PROGRESS_INTERVAL", 2)
+        llm = _bare_llama_vision()
+        llm._tokenizer.is_eog.return_value = False
+        mock_api = _mock_native_api()
+
+        with patch("localm.inference.backends.llamacpp.llama.api", mock_api), \
+             patch("localm.inference.backends.llamacpp.llama._build_sampler",
+                   return_value=999), \
+             caplog.at_level(logging.DEBUG, logger="localm"):
+            tokens = list(llm._generate_image(
+                _VISION_MESSAGES, max_new_tokens=6,
+                temperature=0.8, top_k=40, top_p=0.95, repeat_penalty=1.1))
+
+        assert tokens == [42] * 6
+        assert llm.last_finish_reason == "length"
+
+        msgs = [r.getMessage() for r in caplog.records]
+        joined = "\n".join(msgs)
+        assert "gguf generate (vision): prefill starting" in joined
+        assert "gguf generate (vision): prefill complete" in joined
+        assert "0 image(s)" in joined   # _VISION_MESSAGES carries no image_url part
+        assert "gguf generate (vision): entering decode loop" in joined
+        assert "gguf generate (vision): complete, 6 token(s)" in joined
+        assert "finish_reason=length" in joined
+        assert "aborted" not in joined
+
+        progress = [r for r in caplog.records
+                    if "gguf generate (vision): decode progress" in r.getMessage()]
+        assert len(progress) == 3
+        assert all(r.levelname == "DEBUG" for r in progress)
+        boundaries = [r for r in caplog.records
+                      if "gguf generate (vision): decode progress" not in r.getMessage()
+                      and "gguf generate (vision)" in r.getMessage()]
+        assert boundaries and all(r.levelname == "INFO" for r in boundaries)
+
+        order = [i for i, m in enumerate(msgs) if any(
+            key in m for key in ("prefill starting", "prefill complete",
+                                  "entering decode loop", "generate (vision): complete"))]
+        assert order == sorted(order)
+
+    def test_prefill_failure_logs_start_but_not_complete_then_aborts(self, caplog):
+        llm = _bare_llama_vision()
+        llm._mtmd.eval_into.side_effect = RuntimeError("mtmd eval failed")
+        mock_api = _mock_native_api()
+
+        with patch("localm.inference.backends.llamacpp.llama.api", mock_api), \
+             caplog.at_level(logging.INFO, logger="localm"):
+            with pytest.raises(RuntimeError, match="mtmd eval failed"):
+                list(llm._generate_image(
+                    _VISION_MESSAGES, max_new_tokens=6,
+                    temperature=0.8, top_k=40, top_p=0.95, repeat_penalty=1.1))
+
+        joined = _messages(caplog.records)
+        assert "gguf generate (vision): prefill starting" in joined
+        assert "gguf generate (vision): prefill complete" not in joined
+        assert "gguf generate (vision): entering decode loop" not in joined
+        assert ("gguf generate (vision): aborted (exception) during prefill, "
+                "0 token(s) generated") in joined
+
+    def test_cancellation_mid_decode_logs_aborted_with_partial_count(self, caplog):
+        llm = _bare_llama_vision()
+        llm._tokenizer.is_eog.return_value = False
+        mock_api = _mock_native_api()
+
+        with patch("localm.inference.backends.llamacpp.llama.api", mock_api), \
+             patch("localm.inference.backends.llamacpp.llama._build_sampler",
+                   return_value=999), \
+             caplog.at_level(logging.INFO, logger="localm"):
+            gen = llm._generate_image(
+                _VISION_MESSAGES, max_new_tokens=50,
+                temperature=0.8, top_k=40, top_p=0.95, repeat_penalty=1.1)
+            assert next(gen) == 42
+            assert next(gen) == 42
+            gen.close()
+
+        joined = _messages(caplog.records)
+        assert ("gguf generate (vision): aborted (cancelled) during decode, "
+                "1 token(s) generated") in joined
+        assert "gguf generate (vision): complete" not in joined
 
 
 # ---------------------------------------------------------------------------
@@ -239,7 +354,7 @@ class TestModelRunnerChatStreamBoundaryLogging:
             kwargs=dict(tokens=["a", "b", "c", "d"]), daemon=True)
         child.start()
         try:
-            with caplog.at_level(logging.INFO, logger="localm"):
+            with caplog.at_level(logging.DEBUG, logger="localm"):
                 out = list(r.chat_stream(messages=[]))
         finally:
             stop.set()
@@ -250,10 +365,19 @@ class TestModelRunnerChatStreamBoundaryLogging:
         joined = "\n".join(msgs)
         assert "gguf worker: prefill complete, first response after" in joined
         assert "kind=chunk" in joined
-        # Interval=2 over 4 chunks -> checkpoints at 2 and 4.
-        assert sum("gguf worker: decode progress" in m for m in msgs) == 2
         assert ("gguf worker: generation complete, 4 token(s), "
                 "finish_reason=stop") in joined
+
+        # Decode progress is coarse (interval=2 over 4 chunks -> checkpoints
+        # at 2 and 4) AND specifically DEBUG, not INFO - see
+        # _STREAM_PROGRESS_INTERVAL for the ring-buffer-budget reasoning.
+        progress = [r for r in caplog.records
+                    if "gguf worker: decode progress" in r.getMessage()]
+        assert len(progress) == 2
+        assert all(r.levelname == "DEBUG" for r in progress)
+        boundaries = [r for r in caplog.records
+                      if "gguf worker: decode progress" not in r.getMessage()]
+        assert boundaries and all(r.levelname == "INFO" for r in boundaries)
 
     def test_worker_death_before_any_response_reports_prefill_phase(self, caplog):
         r = _make_runner()

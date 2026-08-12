@@ -571,8 +571,14 @@ _PREFILL_CHUNK = 2048
 # Coarse decode-progress heartbeat: every N generated tokens, never per token
 # (a per-token line would flood the shared debug log and the bug-report
 # digest's benign-record budget - see debuglog.py's ring-buffer docstring).
-# 50 gives several checkpoints even on a short reply while keeping a stalled
-# or crashed generation localized to within ~50 tokens of decode time.
+# Logged at DEBUG, not INFO - unlike the boundary markers (prefill start/
+# complete, decode entered, complete/aborted), this one recurs every N tokens
+# for the life of a generation, and the always-on ring buffer is a fixed 400
+# records shared with everything else the server logs; an INFO line here
+# would be spent forever, evicting unrelated diagnostics. It still reaches
+# the shared debug-log file once --debug is on. 50 gives several checkpoints
+# even on a short reply while keeping a stalled or crashed generation
+# localized to within ~50 tokens of decode time.
 _DECODE_PROGRESS_INTERVAL = 50
 
 
@@ -1467,11 +1473,22 @@ class LlamaCpp:
                                 if batch is not None:
                                     api.llama_batch_free(batch)
                         # Coarse heartbeat, OUTSIDE the lock above (never add
-                        # work to a native-call-holding region) - see
-                        # _DECODE_PROGRESS_INTERVAL for why this is not per-token.
+                        # work to a native-call-holding region). DEBUG, not
+                        # INFO: the file-side ring-buffer precedent this whole
+                        # scheme follows (discover.py) is explicit that INFO is
+                        # for a decision made once per call, not a recurring
+                        # tick - the always-on ring buffer holds 400 records
+                        # SHARED across everything the server logs, and an
+                        # INFO line here is spent on every generation forever.
+                        # Only the phase BOUNDARIES (prefill start/complete,
+                        # decode entered, complete/aborted - roughly four per
+                        # generation) are affordable at that level; this one
+                        # still reaches the shared debug-log file once --debug
+                        # is on, which is where a stalled-vs-hung decode is
+                        # actually diagnosed.
                         if (tokens_generated
                                 and tokens_generated % _DECODE_PROGRESS_INTERVAL == 0):
-                            logger.info(
+                            logger.debug(
                                 "gguf generate: decode progress, %d token(s) in %.2fs",
                                 tokens_generated, time.monotonic() - _decode_t0)
                     else:
@@ -1539,66 +1556,96 @@ class LlamaCpp:
         The image+text prompt is evaluated into the KV cache by mtmd (CPU clip);
         sampling then continues exactly like the text loop. Grammar is not applied
         on the image path. mtmd fills the KV from scratch, so the text KV-reuse
-        cache is invalidated afterwards."""
+        cache is invalidated afterwards.
+
+        BOUNDARY LOGGING (dev-notes/generation-path-logging-instrumentation-
+        2026-08-12.md): same scheme as _generate (prefill start/complete,
+        decode entered, complete/aborted with phase and token count) - this
+        is the OTHER live generation path in this file, and the crash log
+        that motivated the scheme was a vision-model load, so leaving this
+        path uninstrumented would have reproduced the exact gap being fixed.
+        The "vision" tag on every line distinguishes it from _generate's in a
+        shared debug log. Structural note: this method's own comment above
+        (kept verbatim below) explicitly warns against restructuring its
+        _ctx()/dedup_native_stderr usage - re-entered per native call here,
+        unlike _generate's single contiguous scope. This change does not
+        touch that: the try/except/finally widens to cover prefill as well
+        as decode (matching _generate's restructuring for the SAME reason -
+        an exception during eval_into must not look identical to a hang -
+        see _generate's own note on this), but every `with _ctx():` block
+        keeps its exact original position and entry count."""
         with self._inference_lock:
             if not self._model_ptr or getattr(self, "_mtmd", None) is None:
                 raise RuntimeError("vision is not available on this model")
 
-            text_messages, images = self._messages_with_markers(
-                messages, self._mtmd.marker)
-            prompt, fallback_reason = _apply_model_template(self._model_ptr, text_messages)
-            if fallback_reason:
-                self.chat_template_fallback_reason = fallback_reason
-            bos_markers = ("<bos>", "<s>", "﻿")
-            add_special = not any(prompt.startswith(m) for m in bos_markers)
-
-            # Stays on _quiet_stderr rather than _generate()'s dedup_native_stderr
-            # (see the why-comment there): below, _ctx() is entered once for the
-            # mtmd prefill AND AGAIN INSIDE THE PER-TOKEN LOOP (the llama_decode
-            # call further down), never hoisted to one contiguous scope the way
-            # _generate() was restructured to do. dedup_native_stderr spins up a
-            # background reader thread per entry - re-entering it per token would
-            # both reset its dedup grouping on every token (defeating it) and pay
-            # real thread-creation cost per token, exactly the anti-pattern
-            # dedup_native_stderr's own docstring warns against. Widening this
-            # path needs the same per-call-not-per-token restructuring _generate()
-            # got in #443 first; doing it as a side effect here risks regressing
-            # a working vision-generation path for a log-formatting fix.
-            _ctx = _quiet_stderr if not self._verbose else contextlib.nullcontext
-            self.last_finish_reason = "stop"
-            with self._gen_lock:
-                if self._stop.is_set() or self._ctx_ptr is None:
-                    return
-                with _ctx():
-                    # Clear any prior turn's KV so the mtmd prefill from position 0 is
-                    # valid on a reused context, then evaluate the image+text prompt.
-                    self._reset_kv_for_image()
-                    from .mtmd import MtmdGpuEncodeFailed
-                    try:
-                        pos = self._mtmd.eval_into(self._ctx_ptr, prompt, images,
-                                                   add_special=add_special)
-                    except MtmdGpuEncodeFailed:
-                        # The projector runs on the GPU now; a GPU encode that fails
-                        # mid-flight (the documented gfx1030 / RDNA2 hipBLAS BF16
-                        # case) is worth exactly one CPU retry before the request
-                        # fails. The KV must be reset again first: the failed
-                        # evaluation already wrote into it. Rebuilding is latched in
-                        # the MtmdContext, so this costs one retry per model load,
-                        # not one per image.
-                        if not self._mtmd.retry_on_cpu():
-                            raise
-                        self._reset_kv_for_image()
-                        pos = self._mtmd.eval_into(self._ctx_ptr, prompt, images,
-                                                   add_special=add_special)
-
-            sampler = _build_sampler(
-                vocab=self._tokenizer._vocab,
-                temperature=temperature, top_k=top_k, top_p=top_p,
-                repeat_penalty=repeat_penalty,
-                seed=self._seed if seed is None else (seed & 0xFFFFFFFF),
-                grammar=None,
-            )
+            from localm.debuglog import logger
+            logger.info("gguf generate (vision): prefill starting")
+            _t0 = time.monotonic()
+            tokens_generated = 0
+            in_decode = False
+            sampler = None
             try:
+                text_messages, images = self._messages_with_markers(
+                    messages, self._mtmd.marker)
+                prompt, fallback_reason = _apply_model_template(self._model_ptr, text_messages)
+                if fallback_reason:
+                    self.chat_template_fallback_reason = fallback_reason
+                bos_markers = ("<bos>", "<s>", "﻿")
+                add_special = not any(prompt.startswith(m) for m in bos_markers)
+
+                # Stays on _quiet_stderr rather than _generate()'s dedup_native_stderr
+                # (see the why-comment there): below, _ctx() is entered once for the
+                # mtmd prefill AND AGAIN INSIDE THE PER-TOKEN LOOP (the llama_decode
+                # call further down), never hoisted to one contiguous scope the way
+                # _generate() was restructured to do. dedup_native_stderr spins up a
+                # background reader thread per entry - re-entering it per token would
+                # both reset its dedup grouping on every token (defeating it) and pay
+                # real thread-creation cost per token, exactly the anti-pattern
+                # dedup_native_stderr's own docstring warns against. Widening this
+                # path needs the same per-call-not-per-token restructuring _generate()
+                # got in #443 first; doing it as a side effect here risks regressing
+                # a working vision-generation path for a log-formatting fix.
+                _ctx = _quiet_stderr if not self._verbose else contextlib.nullcontext
+                self.last_finish_reason = "stop"
+                with self._gen_lock:
+                    if self._stop.is_set() or self._ctx_ptr is None:
+                        return
+                    with _ctx():
+                        # Clear any prior turn's KV so the mtmd prefill from position 0 is
+                        # valid on a reused context, then evaluate the image+text prompt.
+                        self._reset_kv_for_image()
+                        from .mtmd import MtmdGpuEncodeFailed
+                        try:
+                            pos = self._mtmd.eval_into(self._ctx_ptr, prompt, images,
+                                                       add_special=add_special)
+                        except MtmdGpuEncodeFailed:
+                            # The projector runs on the GPU now; a GPU encode that fails
+                            # mid-flight (the documented gfx1030 / RDNA2 hipBLAS BF16
+                            # case) is worth exactly one CPU retry before the request
+                            # fails. The KV must be reset again first: the failed
+                            # evaluation already wrote into it. Rebuilding is latched in
+                            # the MtmdContext, so this costs one retry per model load,
+                            # not one per image.
+                            if not self._mtmd.retry_on_cpu():
+                                raise
+                            self._reset_kv_for_image()
+                            pos = self._mtmd.eval_into(self._ctx_ptr, prompt, images,
+                                                       add_special=add_special)
+
+                logger.info(
+                    "gguf generate (vision): prefill complete in %.2fs, "
+                    "%d image(s)", time.monotonic() - _t0, len(images))
+
+                sampler = _build_sampler(
+                    vocab=self._tokenizer._vocab,
+                    temperature=temperature, top_k=top_k, top_p=top_p,
+                    repeat_penalty=repeat_penalty,
+                    seed=self._seed if seed is None else (seed & 0xFFFFFFFF),
+                    grammar=None,
+                )
+                in_decode = True
+                logger.info("gguf generate (vision): entering decode loop")
+                _decode_t0 = time.monotonic()
                 for _ in range(max_new_tokens):
                     with self._gen_lock:
                         if self._stop.is_set() or self._ctx_ptr is None:
@@ -1624,10 +1671,35 @@ class LlamaCpp:
                             break
                         api.llama_batch_free(batch)
                         pos += 1
+                        tokens_generated += 1
+                    # Coarse heartbeat - DEBUG not INFO, see _DECODE_PROGRESS_INTERVAL.
+                    if (tokens_generated
+                            and tokens_generated % _DECODE_PROGRESS_INTERVAL == 0):
+                        logger.debug(
+                            "gguf generate (vision): decode progress, %d "
+                            "token(s) in %.2fs",
+                            tokens_generated, time.monotonic() - _decode_t0)
                 else:
                     self.last_finish_reason = "length"
+                logger.info(
+                    "gguf generate (vision): complete, %d token(s) in %.2fs, "
+                    "finish_reason=%s", tokens_generated,
+                    time.monotonic() - _decode_t0, self.last_finish_reason)
+            except GeneratorExit:
+                logger.info(
+                    "gguf generate (vision): aborted (cancelled) during %s, "
+                    "%d token(s) generated",
+                    "decode" if in_decode else "prefill", tokens_generated)
+                raise
+            except Exception:
+                logger.info(
+                    "gguf generate (vision): aborted (exception) during %s, "
+                    "%d token(s) generated",
+                    "decode" if in_decode else "prefill", tokens_generated)
+                raise
             finally:
-                api.llama_sampler_free(sampler)
+                if sampler is not None:
+                    api.llama_sampler_free(sampler)
 
     def _fit_generation_budget(self, n_prompt: int, max_new_tokens: int) -> int:
         """

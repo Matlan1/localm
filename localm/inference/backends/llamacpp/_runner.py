@@ -494,9 +494,19 @@ _SIMPLE_CMD_TIMEOUT = 30.0
 # shared import). Counts "chunk" envelopes actually RECEIVED rather than
 # tokens the child claims to have generated, so it stays correct even if the
 # two processes' native counters ever drift (a stolen/duplicated envelope,
-# for instance). See dev-notes/generation-path-logging-instrumentation-
-# 2026-08-12.md for why this reaches the always-on ring buffer even without
-# --debug, unlike the child-side equivalent.
+# for instance).
+#
+# Logged at DEBUG, not INFO, unlike this method's other new markers (first
+# response, generation complete/cancelled, the death-phase report): those
+# fire at most once or twice per generation, but this one recurs every N
+# chunks for the life of a stream, and the always-on ring buffer is a FIXED
+# 400 records SHARED with everything else the server logs - an INFO line
+# here would be spent on every generation forever, evicting unrelated
+# diagnostics a bug report needs. See dev-notes/generation-path-logging-
+# instrumentation-2026-08-12.md for the reasoning. At DEBUG this still
+# reaches the shared debug-log file once --debug is on (this process's own
+# FileHandler, attached whenever the server itself was launched with
+# --debug), as a cross-check against llama.py's own decode-progress line.
 _STREAM_PROGRESS_INTERVAL = 50
 
 
@@ -826,12 +836,14 @@ class ModelRunner:
         BOUNDARY LOGGING (dev-notes/generation-path-logging-instrumentation-
         2026-08-12.md): unlike llama.py's own boundary markers (which only
         reach a bug report once --debug is on, since they run inside the
-        isolated child), everything logged here runs in THIS process, where
-        ``install_ring_buffer()`` already ran at CLI startup - so it reaches
-        the always-on ring buffer unconditionally. Built entirely from
-        envelopes this method already receives: no new IPC, no protocol
-        change. In particular the worker-died branch below now says WHICH
-        PHASE the child was in (no response ever received vs N chunks
+        isolated child), the INFO-level lines here run in THIS process, where
+        ``install_ring_buffer()`` already ran at CLI startup - so they reach
+        the always-on ring buffer unconditionally (the one DEBUG-level line,
+        decode progress, does not - see ``_STREAM_PROGRESS_INTERVAL``: it
+        recurs too often for the ring's fixed 400-record budget). Built
+        entirely from envelopes this method already receives: no new IPC, no
+        protocol change. In particular the worker-died branch below now says
+        WHICH PHASE the child was in (no response ever received vs N chunks
         already streamed) - the question a bare exit code cannot answer."""
         from localm.debuglog import logger
         first_budget = first_chunk_timeout or FIRST_TOKEN_TIMEOUT_DEFAULT
@@ -926,7 +938,7 @@ class ModelRunner:
                         chunks_received += 1
                         # Coarse heartbeat - see _STREAM_PROGRESS_INTERVAL.
                         if chunks_received % _STREAM_PROGRESS_INTERVAL == 0:
-                            logger.info(
+                            logger.debug(
                                 "gguf worker: decode progress, %d token(s) "
                                 "received", chunks_received)
                         yield result[1]
