@@ -178,6 +178,13 @@ def register(app: FastAPI, ctx) -> None:
             # model_vision_capability() is looked up per registered name (a
             # recorded mmproj lives on the entry, not on the file).
             vision: dict = {}
+            # ONE projector listing per FOLDER for this request, not per row.
+            # Models overwhelmingly share a directory, and the sibling scan
+            # globs it - so uncached, listing N models costs N globs of an
+            # N-entry directory. Measured all-in-one-folder: 0.53 ms/row at 10
+            # models against 1.53 ms/row at 200. Scoped to this call, so adding
+            # a projector to a folder shows up on the next refresh.
+            vision_dirs: dict = {}
             # The per-row resolve() has exactly ONE consumer: the embedder
             # identity comparison below. So it is skipped entirely when no
             # embedder is loaded, rather than spent and dropped. That is not
@@ -208,7 +215,7 @@ def register(app: FastAPI, ctx) -> None:
                 # disagree with the load path in exactly the case the tri-state
                 # exists for. The cost is a couple of extra stats on a row that
                 # is already unreachable; the correctness is worth more.
-                vision[_n] = _mvc(_n, reg=registry)
+                vision[_n] = _mvc(_n, reg=registry, dir_cache=vision_dirs)
                 # ONE stat() for both size and mtime (the previous size-only form
                 # called p.is_file() - itself a stat - then p.stat() again on a
                 # hit). mtime is recorded for a directory too (an HF model dir),

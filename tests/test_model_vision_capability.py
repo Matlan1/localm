@@ -14,6 +14,7 @@ of the thing under test: the answer comes from stat/glob/JSON reads, so mocking
 those out would test the mock.
 """
 import json
+from pathlib import Path
 
 import pytest
 
@@ -232,6 +233,72 @@ def test_vision_capable_models_reads_the_registry_once(models, monkeypatch):
     monkeypatch.setattr(mm, "load_registry", counting)
     vision_capable_models()
     assert len(calls) == 1, f"registry.json read {len(calls)} times for one listing"
+
+
+@pytest.fixture
+def one_folder(tmp_path):
+    """Two models and one projector sharing ONE folder - the normal shape of a
+    models directory, and the shape the dir_cache exists for."""
+    d = tmp_path / "models"
+    d.mkdir()
+    (d / "gemma.gguf").write_bytes(b"x")
+    (d / "mmproj-gemma-f16.gguf").write_bytes(b"x")
+    (d / "llama.gguf").write_bytes(b"x")
+    return d, {
+        "gemma": {"path": str(d / "gemma.gguf"), "source": "local", "model_type": "llm"},
+        "llama": {"path": str(d / "llama.gguf"), "source": "local", "model_type": "llm"},
+        # Registered as an llm on purpose, so it does NOT short-circuit on the
+        # model_type gate and actually reaches the sibling scan. That is the
+        # branch where caching the folder listing could let a projector resolve
+        # ITSELF as its own projector.
+        "the-projector": {"path": str(d / "mmproj-gemma-f16.gguf"), "source": "local",
+                          "model_type": "llm"},
+    }
+
+
+def test_dir_cache_changes_the_cost_not_the_answer(one_folder):
+    """The cache is an optimisation, so the ONLY thing that may differ is time.
+    Asserted against the uncached answers rather than against hand-written
+    expectations, so this cannot drift away from what the real path returns."""
+    _d, reg = one_folder
+    uncached = {n: model_vision_capability(n, reg=reg) for n in reg}
+    cache: dict = {}
+    cached = {n: model_vision_capability(n, reg=reg, dir_cache=cache) for n in reg}
+    assert cached == uncached
+    # And pin what those answers actually ARE, so "identical" cannot be
+    # identical-and-both-wrong: only gemma matches the projector by stem.
+    assert uncached["gemma"] is True
+    assert uncached["the-projector"] is False, \
+        "a projector must never resolve ITSELF as its own projector"
+
+
+def test_dir_cache_lists_each_folder_once(one_folder, monkeypatch):
+    """Asserted from OUTSIDE with a counting spy, not by timing: a wall-clock
+    assertion on a shared box measures the box. Three models in one folder must
+    produce ONE listing, or the quadratic this exists to remove is still there."""
+    _d, reg = one_folder
+    globbed = []
+    real_glob = Path.glob
+
+    def counting(self, pattern, *a, **kw):
+        globbed.append(str(self))
+        return real_glob(self, pattern, *a, **kw)
+
+    monkeypatch.setattr(Path, "glob", counting)
+
+    for n in reg:
+        model_vision_capability(n, reg=reg, dir_cache={})
+    per_call = len(globbed)
+    assert per_call == len(reg), \
+        "control: a fresh cache per call must glob once per model"
+
+    globbed.clear()
+    shared: dict = {}
+    for n in reg:
+        model_vision_capability(n, reg=reg, dir_cache=shared)
+    assert len(globbed) == 1, \
+        f"one shared folder must be listed once, not {len(globbed)} times"
+    assert len(set(globbed)) == 1
 
 
 def test_probe_failure_is_logged_not_silent(models, raising_stat, caplog):
