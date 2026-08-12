@@ -419,5 +419,32 @@ def post_swap_command(klass: str, backend: Optional[str] = None) -> Optional[lis
         # resolution), which then mis-invokes and rolls the whole update back. Always
         # re-invoke through the current interpreter, matching every other
         # self-invocation site (setup_llama.py, applaunch.py, http_server.py, ...).
-        return [sys.executable, "-m", "localm", "setup-llama", "--backend", backend or "vulkan"]
+        #
+        # --force: `classify()` only ever escalates to "runtime" class when the
+        # release manifest DECLARES the native binaries need re-provisioning
+        # (updater.classify's docstring: "taken from the release manifest's
+        # needs, never auto-detected"). Without --force, setup-llama's own
+        # "already provisioned" guard short-circuits on ANY already-present
+        # library and returns immediately - so this class re-provisioned
+        # NOTHING and the update still reported success (NEW-UPDATE-RUNTIME-
+        # CLASS-IS-A-NO-OP). --force is safe to add unconditionally: a runtime
+        # already in use (a loaded model's DLL) is refused by setup-llama's own
+        # _clear_target_or_refuse BEFORE anything is deleted (RuntimeInUseError
+        # -> a non-zero exit), which this function's caller (updater.apply)
+        # already treats as a post-swap failure and rolls back the CODE swap -
+        # the existing rollback path was already correct, it just never used
+        # to be exercised because the re-provision never used to be attempted.
+        #
+        # --yes: this argv is run as a detached subprocess with no one watching
+        # its stdin (updater.apply's `run(cmd)` inherits the caller's stdin,
+        # which may be a real console the user is not looking at - they are
+        # watching the browser's "Downloading and applying..." status). Without
+        # --yes, --force newly reaches code paths that used to be unreachable
+        # while the "already provisioned" guard always returned first - notably
+        # _cuda_setup_dialogue's "Continue with CUDA anyway?" click.confirm(),
+        # which is gated on assume_yes alone (not on an isatty check) and would
+        # otherwise hang the update indefinitely waiting on input nothing will
+        # ever supply.
+        return [sys.executable, "-m", "localm", "setup-llama",
+                "--backend", backend or "vulkan", "--force", "--yes"]
     return None

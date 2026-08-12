@@ -672,44 +672,53 @@ def _updater_argv():
 
 
 def test_update_reprovision_honours_the_pin(monkeypatch, tmp_path, cli_runner):
-    """The updater re-invokes setup-llama with only --backend, so the pin is only
-    real if that bare invocation reads it. Driven with the updater's OWN argv."""
+    """The updater re-invokes setup-llama with --backend --force --yes (see
+    _apply_update.post_swap_command), so the pin is only real if that
+    invocation reads it. Driven with the updater's OWN argv."""
     target = tmp_path / "rt"
     target.mkdir()
     tags = []
     _wire_cli(monkeypatch, target, tags)
-    # A cuda install being re-provisioned onto vulkan: backends differ, so the
-    # guard does not short-circuit and this genuinely re-fetches.
+    # A cuda install being re-provisioned onto vulkan: backends differ, so this
+    # would genuinely re-fetch even without --force - the pin is the property
+    # under test here, not the force behaviour (see the sibling test above).
     (target / "llama.dll").write_text("old")
     sl._record_provisioned_backend(target, "cuda", build="b10200")
     sl.set_pinned_tag("b10355")
 
-    res = cli_runner.invoke(sl.main, [*_updater_argv(), "-y"])
+    res = cli_runner.invoke(sl.main, _updater_argv())
 
     assert res.exit_code == 0, res.output
     assert tags == ["b10355"], "the pinned build, not upstream's newest"
     assert sl._provisioned_build(target) == "b10355"
 
 
-def test_update_leaves_an_already_provisioned_build_alone(monkeypatch, tmp_path, cli_runner):
-    """The other half of the same guarantee: when the backend already matches,
-    the updater's bare invocation short-circuits and must NOT quietly move the
-    install to whatever upstream published since. Without a recorded build this
-    was unobservable - the very gap this unit closes."""
+def test_update_reprovision_actually_reprovisions_when_backend_matches(
+        monkeypatch, tmp_path, cli_runner):
+    """NEW-UPDATE-RUNTIME-CLASS-IS-A-NO-OP, closed: `updater.classify()` only ever
+    escalates to "runtime" class when the release manifest DECLARES the native
+    binaries need re-provisioning, so once the updater's re-invocation runs at
+    all, it must actually replace the build - not silently keep whatever is
+    already on disk just because the backend string happens to match. Before
+    _apply_update.post_swap_command carried --force, setup-llama's own
+    "already provisioned, same backend" guard short-circuited this exact
+    invocation and returned immediately: the update reported success having
+    changed nothing on disk. Driven with the updater's OWN argv, like its
+    pin-honouring sibling above, so a future change to what flags the updater
+    passes is caught here too."""
     target = tmp_path / "rt"
     target.mkdir()
     (target / "llama.dll").write_text("old")
     sl._record_provisioned_backend(target, "vulkan", build="b10300")
     tags = []
-    _wire_cli(monkeypatch, target, tags)
+    _wire_cli(monkeypatch, target, tags)   # _latest_tag() stubbed to "b10361"
 
-    res = cli_runner.invoke(sl.main, [*_updater_argv(), "-y"])
+    res = cli_runner.invoke(sl.main, _updater_argv())
 
     assert res.exit_code == 0, res.output
-    assert tags == [], "no release lookup: nothing needed re-provisioning"
-    assert sl._provisioned_build(target) == "b10300", (
-        "an update must never move the installed build on its own")
-    assert "b10300" in res.output, "and it says which build it kept"
+    assert tags == ["b10361"], "the updater's re-invocation must resolve a release"
+    assert sl._provisioned_build(target) == "b10361", (
+        "a 'runtime'-class update must actually re-provision, not keep the old build")
 
 
 def test_cli_tag_latest_unpins_and_tracks_upstream(monkeypatch, tmp_path, cli_runner):

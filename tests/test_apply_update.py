@@ -262,7 +262,19 @@ def test_post_swap_command_runtime_uses_absolute_interpreter_not_bare_localm():
     cmd = au.post_swap_command("runtime", backend="cuda")
     assert cmd[0] == sys.executable
     assert cmd[1:3] == ["-m", "localm"]
-    assert cmd[3:] == ["setup-llama", "--backend", "cuda"]
+    assert cmd[3:] == ["setup-llama", "--backend", "cuda", "--force", "--yes"]
+
+
+def test_post_swap_command_runtime_forces_and_never_prompts():
+    """NEW-UPDATE-RUNTIME-CLASS-IS-A-NO-OP: without --force, setup-llama's own
+    "already provisioned" guard short-circuits on any already-present library, so
+    a "runtime"-class update re-provisioned nothing and still reported success.
+    --yes must ALSO be present: this argv is run with no one watching its stdin,
+    and --force alone would newly reach _cuda_setup_dialogue's click.confirm(),
+    which is gated on assume_yes only (not on isatty) and would hang forever."""
+    cmd = au.post_swap_command("runtime", backend="vulkan")
+    assert "--force" in cmd
+    assert "--yes" in cmd
 
 
 def test_bare_localm_argv_on_the_launcher_exe_fails_with_exit_2(tmp_path):
