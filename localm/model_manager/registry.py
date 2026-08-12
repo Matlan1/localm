@@ -609,10 +609,19 @@ def model_vision_capability(name: str, *, reg: Optional[dict] = None) -> Optiona
         try:
             st = os.stat(p)
         except (OSError, ValueError) as e:
-            # A failed stat is the REACHABILITY answer, not an error to hide:
-            # it is what turns into "unknown" below. Still traced, because
-            # "unknown" alone does not say WHY, and the removed-USB-drive case
-            # and the permission-denied case want different user actions.
+            # A failed stat is the REACHABILITY ANSWER, not an error to hide,
+            # so it is recorded and execution CONTINUES. That continuing is the
+            # whole point of catching here rather than leaving it to the outer
+            # handler: the outer one would abandon the call and return None,
+            # which for an entry carrying a RECORDED projector would turn a
+            # True into an unknown and quietly shrink vision_capable_models()'s
+            # routing set. Measured by deleting this clause - the OSError tests
+            # below stay green (the outer net produces the same None), and
+            # test_recorded_projector_wins_over_an_unreachable_model_path is
+            # what goes red.
+            #
+            # Traced because "unknown" alone does not say WHY, and a removed
+            # USB drive and a permission denial want different user actions.
             logger.debug("vision capability probe failed for %r (%s): %s",
                          name, type(e).__name__, e)
             st = None
