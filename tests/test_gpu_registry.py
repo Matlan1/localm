@@ -97,13 +97,24 @@ class TestRegistryReadWrite:
 
     def test_write_entry_failure_is_best_effort(self, tmp_path, monkeypatch):
         """A write failure must never raise into the caller - it returns None
-        instead (RULE 5: logged, never a crash in the caller's request path)."""
+        instead (RULE 5: logged, never a crash in the caller's request path).
+
+        The fault is injected at ``config.atomic_write_private``, the writer
+        this function delegates to. It used to be injected at
+        ``pathlib.Path.write_text``, which write_entry called directly; once the
+        create moved to ``os.open`` inside the shared writer that patch stopped
+        intercepting anything, and a fault injector that silently fails to fire
+        is indistinguishable from a guard that correctly found nothing to
+        refuse. The ``is None`` assertion is itself the proof the injection
+        took: without it the function returns the written path.
+        """
         d = tmp_path / "reg"
 
         def boom(*a, **k):
             raise OSError("disk full")
 
-        monkeypatch.setattr("pathlib.Path.write_text", boom)
+        import localm.config as cfg
+        monkeypatch.setattr(cfg, "atomic_write_private", boom)
         result = gpu_registry.write_entry(
             d, instance_id="iid3", pid=1, port=1, host="h", scheme="http",
             model=None, vram_estimate_bytes=None, gpu_index=0, coordination_token="t")

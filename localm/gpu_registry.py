@@ -144,21 +144,22 @@ def write_entry(directory, *, instance_id: str, pid: int, port: Optional[int],
             "coordination_token": coordination_token,
         }
         path = entry_path(d, instance_id)
-        tmp = path.with_name(path.name + ".tmp")
-        tmp.write_text(json.dumps(entry, indent=2), encoding="utf-8")
         # The entry carries the coordination token (LM-DA-044/LM-DA-027): same
         # Windows-aware restriction as instances.register_instance, not a bare
-        # POSIX-only chmod (a documented no-op on Windows - config.py:768-769).
-        # Restrict the TEMP file (os.replace carries its ACL onto the
-        # destination); retry on the destination only if that first attempt
-        # failed.
-        from localm.config import restrict_file_perms
-        ok = restrict_file_perms(tmp)
+        # POSIX-only chmod (a documented no-op on Windows). The shared writer
+        # restricts the TEMP file (os.replace carries its ACL onto the
+        # destination), retries the destination only if that first attempt
+        # failed, and creates the temp at 0600 so the token is never at the
+        # umask default on POSIX.
+        from localm.config import atomic_write_private
+        ok = atomic_write_private(path, json.dumps(entry, indent=2))
         if not ok:
-            logger.debug("gpu_registry: could not restrict perms on %s", tmp)
-        os.replace(tmp, path)   # atomic on Windows + POSIX
-        if not ok:
-            restrict_file_perms(path)
+            # Reported with this subsystem's own name on top of the warning
+            # restrict_file_perms already emits, so a gpu-coordination bug
+            # report says which writer hit it. Not fatal: the retry on the
+            # destination has already run by here.
+            logger.debug("gpu_registry: could not restrict perms on the temp "
+                         "file for %s", path)
         return path
     except OSError as e:
         logger.debug("gpu_registry: failed to write entry for %s: %s", instance_id, e)

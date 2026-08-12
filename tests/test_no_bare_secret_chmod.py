@@ -29,8 +29,8 @@ If you land a new site here, EITHER route it through
 below with a review comment proving the file carries no secret - never widen
 the scan to stop noticing it.
 
-  localm/bugreport.py:887   ``save_report``'s ``path.chmod(0o600)`` on the
-                             saved bug-report markdown. Reviewed: the module
+  localm/bugreport.py::save_report   its ``path.chmod(0o600)`` on the saved
+                             bug-report markdown. Reviewed: the module
                              docstring and the site's own why-comment both
                              state the report deliberately carries NO secrets
                              (no API key, env, config secrets, or chat
@@ -39,6 +39,18 @@ the scan to stop noticing it.
                              protection, so a Windows no-op degrades it to
                              "as readable as anything else in the data dir",
                              not to "a leaked secret".
+
+THE ALLOWLIST IS KEYED ON THE ENCLOSING FUNCTION, NOT ON A LINE NUMBER, and
+that is load-bearing rather than cosmetic. It was keyed on a line when it was
+written (``localm/bugreport.py``, 887) and it DETACHED: bugreport.py grew, the
+byte-identical call and its why-comment moved to line 962, and this test went
+RED ON MASTER reporting an "unreviewed" site that was the reviewed one all
+along. A pin that reports a defect every time an unrelated edit lands above it
+is a pin people learn to re-type, and re-typing it is how a genuinely new
+fourth site would get waved through on the assumption that it had drifted too.
+Same discipline the CodeQL dispositions in this repo already use for the same
+reason. A function RENAME still detaches, which is correct - that is a change
+worth re-reading the review comment for.
 """
 
 from __future__ import annotations
@@ -48,12 +60,35 @@ import pathlib
 
 from localm import config as _config
 
-# (relative-to-repo-root path, line number) for every reviewed non-secret
-# chmod(..., 0o600) site. Paths use forward slashes regardless of host OS so
-# the assertion is platform-stable.
+# (relative-to-repo-root path, enclosing qualname) for every reviewed
+# non-secret chmod(..., 0o600) site. Paths use forward slashes regardless of
+# host OS so the assertion is platform-stable.
 _REVIEWED_SITES = {
-    ("localm/bugreport.py", 887),
+    ("localm/bugreport.py", "save_report"),
 }
+
+
+def _enclosing_qualnames(tree: ast.AST):
+    """Map every ``ast.Call`` in *tree* to the dotted name of the def/class it
+    sits inside (``"<module>"`` for a call at module level).
+
+    ``ast.walk`` alone cannot answer this: it flattens the tree, so a node
+    knows its own line but not its owner."""
+    found: list[tuple[ast.Call, str]] = []
+
+    def visit(node: ast.AST, prefix: str) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                  ast.ClassDef)):
+                visit(child, f"{prefix}.{child.name}"
+                      if prefix != "<module>" else child.name)
+                continue
+            if isinstance(child, ast.Call):
+                found.append((child, prefix))
+            visit(child, prefix)
+
+    visit(tree, "<module>")
+    return found
 
 
 def _bare_chmod_0600_sites(root: pathlib.Path):
@@ -61,7 +96,10 @@ def _bare_chmod_0600_sites(root: pathlib.Path):
     literal ``0o600`` - positional or keyword (``mode=0o600``). AST, not grep,
     so a comment or docstring mentioning ``0o600`` is never mistaken for a
     call, and a call passing a *variable* (e.g. ``restrict_file_perms``'s own
-    ``os.chmod(path, mode)``) is never mistaken for the literal."""
+    ``os.chmod(path, mode)``) is never mistaken for the literal.
+
+    Reported as (path, enclosing qualname) - see the module docstring for why
+    not (path, line)."""
     hits = []
     for path in sorted(root.rglob("*.py")):
         try:
@@ -69,14 +107,12 @@ def _bare_chmod_0600_sites(root: pathlib.Path):
         except (SyntaxError, UnicodeDecodeError):
             continue
         rel = path.relative_to(root.parent).as_posix()
-        for node in ast.walk(tree):
-            if not (isinstance(node, ast.Call)
-                    and isinstance(node.func, ast.Attribute)
-                    and node.func.attr == "chmod"):
+        for node, qualname in _enclosing_qualnames(tree):
+            if not isinstance(node.func, ast.Attribute) or node.func.attr != "chmod":
                 continue
             args = list(node.args) + [kw.value for kw in node.keywords]
             if any(isinstance(a, ast.Constant) and a.value == 0o600 for a in args):
-                hits.append((rel, node.lineno))
+                hits.append((rel, qualname))
     return hits
 
 
@@ -132,6 +168,48 @@ def test_a_different_mode_or_a_variable_is_not_flagged():
             and any(isinstance(a, ast.Constant) and a.value == 0o600
                     for a in list(n.args) + [kw.value for kw in n.keywords])]
     assert hits == []
+
+
+def test_the_scan_reports_the_enclosing_function_and_survives_a_line_shift(
+        tmp_path):
+    """Fires-control for the REAL scanner, and the regression guard for the
+    detachment described in the module docstring.
+
+    The three planted tests above re-apply the predicate by hand, so they are
+    blind to a change in ``_bare_chmod_0600_sites`` itself - they would stay
+    green if it stopped scanning entirely. This one drives the actual function.
+
+    The second half is the point: padding the file shifts every line and must
+    not change the reported sites. Against the previous line-keyed scanner this
+    assertion fails, which is exactly what happened on master.
+    """
+    root = tmp_path / "localm"
+    root.mkdir()
+    body = (
+        "import os\n"
+        "\n"
+        "def outer():\n"
+        "    path.chmod(0o600)\n"
+        "\n"
+        "class C:\n"
+        "    def meth(self):\n"
+        "        os.chmod(path, mode=0o600)\n"
+        "\n"
+        "path.chmod(0o600)\n"
+        "path.chmod(0o700)\n"          # a different mode is not this finding
+        "os.chmod(path, mode)\n"       # a variable mode is not a literal
+    )
+    expected = {("localm/x.py", "outer"),
+                ("localm/x.py", "C.meth"),
+                ("localm/x.py", "<module>")}
+
+    (root / "x.py").write_text(body, encoding="utf-8")
+    assert set(_bare_chmod_0600_sites(root)) == expected
+
+    (root / "x.py").write_text("# pad\n" * 40 + body, encoding="utf-8")
+    assert set(_bare_chmod_0600_sites(root)) == expected, (
+        "an unrelated edit above the call changed the reported site, so every "
+        "reviewed entry detaches the next time its file grows")
 
 
 # --------------------------------------------------------------------------- #

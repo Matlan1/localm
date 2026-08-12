@@ -174,18 +174,16 @@ def register_instance(home: Path, *, instance_id: str, port: int, host: str,
         "token": token,
     }
     path = registry_path(home, instance_id)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(entry, indent=2), encoding="utf-8")
     # The entry carries the per-instance attach token (LM-DA-044/LM-DA-027):
     # restrict it the same Windows-aware way as auth.key, so the token is not
     # readable by another local account on Windows the way a bare chmod would
-    # leave it. Restrict the TEMP file (os.replace carries its ACL onto the
-    # destination); retry on the destination only if that first attempt failed.
-    from localm.config import restrict_file_perms
-    ok = restrict_file_perms(tmp)
-    os.replace(tmp, path)   # atomic on Windows + POSIX
-    if not ok:
-        restrict_file_perms(path)
+    # leave it. atomic_write_private restricts the TEMP file (os.replace carries
+    # its ACL onto the destination) and retries the destination only if that
+    # first attempt failed, and it CREATES the temp at 0600 via os.open rather
+    # than write_text, closing the residual POSIX window where the token existed
+    # at the umask default between the create and the chmod.
+    from localm.config import atomic_write_private
+    atomic_write_private(path, json.dumps(entry, indent=2))
     return path
 
 
@@ -213,15 +211,11 @@ def set_mode(home: Path, instance_id: str, mode: str) -> bool:
         return False
     entry.pop("_path", None)
     entry["mode"] = mode
-    tmp = path.with_name(path.name + ".tmp")
     try:
-        tmp.write_text(json.dumps(entry, indent=2), encoding="utf-8")
-        # Same token-bearing file as register_instance above; same treatment.
-        from localm.config import restrict_file_perms
-        ok = restrict_file_perms(tmp)
-        os.replace(tmp, path)
-        if not ok:
-            restrict_file_perms(path)
+        # Same token-bearing file as register_instance above; same treatment,
+        # including the create-at-0600 that closes the POSIX window.
+        from localm.config import atomic_write_private
+        atomic_write_private(path, json.dumps(entry, indent=2))
         return True
     except OSError:
         return False

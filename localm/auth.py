@@ -426,11 +426,17 @@ def _restrict_perms(path: Path) -> bool:
     The implementation moved to ``config.restrict_file_perms`` so sessions.json
     and jobs.json (which hold the key DIGEST) get the identical treatment as
     auth.key (which holds the PLAINTEXT); they previously did not on Windows.
-    Kept as a name here because it is referenced throughout this module.
+
+    RETAINED although ``_atomic_write_private`` no longer calls it (that moved
+    to ``config.atomic_write_private``, which calls ``restrict_file_perms``
+    itself): this name is the unit-level equivalence point that pins the fix.
+    ``tests/test_auth_kdf.py`` calls it directly against
+    ``sessions._restrict_perms`` and asserts both return the same value and
+    produce the same ACL. Same reasoning as the note on that sibling.
 
     The bool is PASSED THROUGH rather than discarded so a caller doing the atomic
     temp+replace dance can restrict the temp file and retry on the destination
-    only when the first attempt failed - the contract sessions.py already relies
+    only when the first attempt failed - the contract the shared writer relies
     on. Dropping it here made that pattern silently degrade to always retrying."""
     from localm.config import restrict_file_perms
     return restrict_file_perms(path)
@@ -438,69 +444,24 @@ def _restrict_perms(path: Path) -> bool:
 
 def _atomic_write_private(path: Path, text: str) -> None:
     """Write *text* to *path* atomically, owner-restricted from the moment the
-    bytes first exist on disk.
+    bytes first exist on disk. See ``config.atomic_write_private`` for the full
+    reasoning, the two precedents it composes, and the two details that are
+    invisible when they are wrong (do NOT add ``os.O_BINARY``; keep the write
+    loop).
 
-    Every credential file in this module used to be written as
-    ``tmp.write_text(...)`` then ``os.replace`` then ``_restrict_perms(path)``,
-    which leaves the WHOLE payload readable at the umask default (POSIX) or the
-    inherited ACL (Windows, commonly ``BUILTIN\\Users`` read) for the entire
-    write. Restricting only the destination closes the window after the fact,
-    not during it.
+    The implementation moved there once the same dance was needed by
+    sessions.json, the instance registry entry and the GPU coordination entry
+    as well as this module's three credential files - one implementation so a
+    sixth caller cannot get a weaker sixth variant, the same reason
+    ``_restrict_perms`` above delegates rather than reimplementing.
 
-    TWO precedents are needed here and neither closes both halves alone:
-
-    * ``tls._write_private`` creates via ``os.open`` with an explicit 0600, so
-      the file is never briefly at the umask default. That is POSIX-only: on
-      Windows the mode argument writes no ACL at all.
-    * ``restrict_file_perms`` on the TEMP file before the rename is what covers
-      Windows, and it is the contract that function documents - ``os.replace``
-      carries the source's ACL (and POSIX mode) onto the destination, MEASURED
-      there, so the single call covers both names. The destination is retried
-      only when the first attempt failed, so one failure is not the single
-      point of failure for the property.
-
-    The pre-rename restrict also covers the one case ``os.open`` cannot: a
-    stale ``.tmp`` left by an earlier crash is opened, not created, so its
-    existing mode survives O_CREAT.
-
-    Best-effort by contract, unchanged: a tightening that fails is reported by
-    ``restrict_file_perms`` (which warns) and retried, never raised. Writing a
-    credential must not become conditional on a permissions nicety.
-
-    THE BYTES ON DISK ARE UNCHANGED by this, deliberately - a permissions fix
-    must not quietly rewrite every credential file. Do NOT "correct" this by
-    adding ``os.O_BINARY``. MEASURED on this Windows box: ``os.open`` without
-    it opens in TEXT mode, so ``os.write`` expands ``\\n`` to ``\\r\\n`` exactly
-    as the ``Path.write_text`` this replaced did, and the resulting file is
-    byte-identical on both platforms. Adding O_BINARY would silently switch
-    every Windows install's ``auth.key``, ``auth.json`` and owner-KDF file to
-    LF on the next write.
-
-    The write loops because ``os.write`` is a single syscall that may consume
-    less than the whole buffer (ENOSPC after a partial write returns the short
-    count rather than raising). ``Path.write_text`` looped internally, so
-    dropping to raw ``os.write`` without this would newly allow a SILENTLY
-    truncated credential file - rule 5 - and a truncated keystore replacing a
-    good one is the worst outcome available here. Raising leaves the temp file
-    behind and the destination untouched, which is the safe half."""
-    tmp = path.with_name(path.name + ".tmp")
-    data = text.encode("utf-8")
-    fd = os.open(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
-    try:
-        written = 0
-        while written < len(data):
-            n = os.write(fd, data[written:])
-            if not n:
-                raise OSError(
-                    f"short write persisting {path.name}: {written} of "
-                    f"{len(data)} bytes accepted; the previous file is intact")
-            written += n
-    finally:
-        os.close(fd)
-    ok = _restrict_perms(path=tmp)
-    os.replace(tmp, path)          # atomic on Windows + POSIX (same dir)
-    if not ok:
-        _restrict_perms(path=path)
+    Kept as a name here because it is referenced throughout this module and by
+    ``tests/test_auth_secret_write_perms.py``. The bool the shared writer
+    returns is deliberately dropped: no caller in this module logs a
+    subsystem-named warning of its own, and reporting the failed tightening is
+    already ``restrict_file_perms``'s job."""
+    from localm.config import atomic_write_private
+    atomic_write_private(path, text)
 
 
 # --------------------------------------------------------------------------- #
