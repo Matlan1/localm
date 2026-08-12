@@ -284,6 +284,55 @@ def test_the_derived_identity_survives_a_restart(auth):
 
 
 # --------------------------------------------------------------------------- #
+#  (c2) set_api_key's OWN call to the KDF is NOT memoised (unlike verify()),   #
+#       so its cost is bounded by _OWNER_KDF_KEEP, not by "once per process"   #
+# --------------------------------------------------------------------------- #
+#  MEASURED 2026-08-12: tests/test_auth.py::test_set_api_key_accepts_every_
+#  generated_key (200x set_api_key with a fresh random key each time) took
+#  ~345s on a loaded box before this fix, because _owner_kdf_record_for
+#  re-verifies EVERY kept historical record with a FULL scrypt derivation
+#  before minting a new one - and a genuinely new key can never match any of
+#  them, so that work is wasted on every single call once the kept-records
+#  list saturates. _OWNER_KDF_KEEP was 8 (up to 9 derivations/call, ~1.7-2s
+#  on this box); cut to 3 for exactly this reason. See
+#  dev-notes/FIX-2026-08-12-test-set-api-key-hang-preexisting.md.
+
+def test_owner_kdf_keep_is_small_enough_to_stay_fast(auth):
+    """Pins the actual fix: the constant that bounds how many full scrypt
+    derivations a single set_api_key call can burn re-verifying stale,
+    guaranteed-not-to-match records before minting a new one. A wall-clock
+    assertion would be flaky on a busy shared box (see test-slot-policy.md);
+    this constant IS the bound, so assert it directly."""
+    assert auth._OWNER_KDF_KEEP <= 4, (
+        f"_OWNER_KDF_KEEP={auth._OWNER_KDF_KEEP} lets a single set_api_key "
+        "call burn that many extra full scrypt derivations against kept "
+        "stale records before minting - keep it small (see the constant's "
+        "own comment in auth.py)")
+
+
+def test_set_api_key_scan_cost_is_bounded_by_owner_kdf_keep(auth, monkeypatch):
+    """The mechanism the constant above bounds, pinned directly by COUNTING
+    scrypt calls (deterministic - no wall clock): a single set_api_key call
+    for a genuinely new key must never run the KDF more than once per KEPT
+    record plus once to mint, regardless of how many historical records the
+    install has accumulated in total."""
+    # Saturate the kept-records list with distinct keys first, then measure
+    # ONE MORE call - the worst case, where every kept record is a guaranteed
+    # miss for the new key.
+    for i in range(auth._OWNER_KDF_KEEP + 5):
+        auth.set_api_key(f"distinct-key-{i}-aaaaaaaa")
+    calls = _counting_derive(auth, monkeypatch)
+
+    auth.set_api_key("one-more-new-key-bbbbbbbb")
+
+    assert len(calls) <= auth._OWNER_KDF_KEEP + 1, (
+        f"a single set_api_key call ran the KDF {len(calls)} times; expected "
+        f"at most {auth._OWNER_KDF_KEEP + 1} (one check per kept record, all "
+        "misses, plus one mint) - _owner_kdf_record_for is scanning more than "
+        "the kept records")
+
+
+# --------------------------------------------------------------------------- #
 #  (d) a wrong key still fails once the cache is warm                          #
 # --------------------------------------------------------------------------- #
 

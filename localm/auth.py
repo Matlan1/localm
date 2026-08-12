@@ -294,10 +294,19 @@ def set_api_key(key: Optional[str]) -> None:
     _restrict_perms(path)
     # The key changed, so any memoised derivation for the OLD one is stale.
     _forget_cached_digests()
-    # Derive at SET time, not on the per-request verify path: this is the one
-    # moment we are allowed to spend ~100ms on a memory-hard KDF. Doing it here
-    # also means the salt is on disk before anything can stamp an identity with
-    # it. Best-effort: a failure costs a derivation on first use, not access.
+    # Derive at SET time, not on the per-request verify path: this is the
+    # moment we are allowed to spend real time on a memory-hard KDF, and it
+    # also means the salt is on disk before anything can stamp an identity
+    # with it. NOT just one ~100ms derivation, though: _owner_digest first
+    # re-verifies every KEPT historical record (_OWNER_KDF_KEEP) before
+    # minting a new one, so a caller that sets the key repeatedly (an admin
+    # route, a rotation loop, tests/test_auth.py's own 200x charset test)
+    # pays that on every call, in whatever thread called it - MEASURED
+    # 2026-08-12 at up to 9 full derivations (~1.7-2s on a loaded box) before
+    # _OWNER_KDF_KEEP was cut from 8 to 3 for exactly this reason (see
+    # dev-notes/FIX-2026-08-12-test-set-api-key-hang-preexisting.md). Still
+    # best-effort regardless: a failure costs a derivation on first use, not
+    # access.
     try:
         _owner_digest(key)
     except Exception as e:
@@ -500,7 +509,18 @@ _ALG_KDF = "scrypt"
 # the file again; a rotation), and the SAME key must always derive the SAME digest
 # or job ownership and session identity would flip underneath the user. Keeping a
 # few records makes that stable; the cap stops the file growing without bound.
-_OWNER_KDF_KEEP = 8
+#
+# It is ALSO the direct bound on how many full scrypt derivations a single
+# set_api_key call can burn: _owner_kdf_record_for re-verifies EVERY kept
+# record (a real derivation each, there is no cheap way to rule one out - see
+# _memo_key's docstring on why a fast index was rejected here) before minting
+# a new one. MEASURED 2026-08-12: at the original value of 8, a saturated
+# records list made every set_api_key call run up to 9 full derivations
+# (~1.7-2s on a loaded box, not the ~100ms its call site used to budget for) -
+# see dev-notes/FIX-2026-08-12-test-set-api-key-hang-preexisting.md. 3 is the
+# smallest value with headroom above the 2-key scenario described above (an
+# env-var override alternating with the persisted file).
+_OWNER_KDF_KEEP = 3
 
 
 def owner_kdf_file() -> Path:
@@ -674,8 +694,13 @@ def _owner_kdf_record_for(key: str, records: list) -> Optional[dict]:
 
     Verifies with EACH record's OWN stored parameters, which is what lets the cost
     parameters be raised later without invalidating a key derived under the old
-    ones. Only ever called for a key already known to be the owner key, so the
-    number of derivations here is bounded by _OWNER_KDF_KEEP, once per process."""
+    ones. Only ever called for a key already known to be the owner key.
+
+    NOT "once per process": that only holds on the verify() path (_hash_key
+    memoises the result - see _digest_cache). set_api_key calls this again on
+    EVERY set, uncached, so a caller that sets the key repeatedly (an admin
+    route, a rotation loop, a test) pays a full scrypt derivation per kept
+    record, per call. _OWNER_KDF_KEEP is the actual bound on that cost."""
     for r in records:
         if r.get("alg") != _ALG_KDF:
             continue
