@@ -7,7 +7,7 @@
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { iconEl } from "./icons.js";
-import { COMPACT_KEEP, addMessageRow, chat, chatParams, compactConversation, currentConv, maybeCompactConversation, msgImages, msgText, newConversation, noteLabel, renderAttachChips, renderChat, renderConvList, saveConversations, stripUserImages } from "./chat.js";
+import { COMPACT_KEEP, addMessageRow, chat, chatParams, compactConversation, currentConv, lsSetScoped, maybeCompactConversation, msgImages, msgText, newConversation, noteLabel, renderAttachChips, renderChat, renderConvList, saveConversations, stripUserImages } from "./chat.js";
 import { $, GIB, authHeaders, autoGrow, confirmDanger, el, formatToolCalls, nearBottom, openModal, readSSE, renderMarkdown, stripThink, toast } from "./helpers.js";
 import { modelCache, modelSelect } from "./models-sidebar.js";
 import { execChatCommand, handleSlashSubmit } from "./slash.js";
@@ -135,9 +135,7 @@ export function setupBackendHintDismiss() {
   btn.onclick = () => {
     const hint = $("perf-backend-hint");
     if (hint) hint.hidden = true;
-    if (!chat.privacy) {
-      try { localStorage.setItem(BACKEND_HINT_DISMISSED_KEY, "1"); } catch (e) { /* ignore */ }
-    }
+    lsSetScoped(BACKEND_HINT_DISMISSED_KEY, "1");
   };
 }
 
@@ -1063,7 +1061,7 @@ export function renderStudioGroup(slot, studio) {
     const nowOpen = children.style.display === "none";
     children.style.display = nowOpen ? "block" : "none";
     parent.classList.toggle("open", nowOpen);
-    if (!chat.privacy) localStorage.setItem("localm.studioOpen", nowOpen ? "1" : "0");
+    lsSetScoped("localm.studioOpen", nowOpen ? "1" : "0");
   };
   for (const p of kids) {
     children.appendChild(_navButton(
@@ -1989,10 +1987,10 @@ $("chat-messages").addEventListener("scroll", () => {
 // R34: persist the Web-access and Speak-aloud toggles so they survive a reload
 // (privacy mode leaves no trace). hydrateChatToggles restores them on boot.
 $("p-web").addEventListener("change", () => {
-  if (!chat.privacy) { try { localStorage.setItem("localm.webAccess", $("p-web").checked ? "1" : "0"); } catch (e) { /* storage full/blocked */ } }
+  lsSetScoped("localm.webAccess", $("p-web").checked ? "1" : "0");
 });
 $("p-speak").addEventListener("change", () => {
-  if (!chat.privacy) { try { localStorage.setItem("localm.speakAloud", $("p-speak").checked ? "1" : "0"); } catch (e) { /* storage full/blocked */ } }
+  lsSetScoped("localm.speakAloud", $("p-speak").checked ? "1" : "0");
 });
 // The brain toggle drives the server-side memory_enabled config (single-user), so
 // injection is decided server-side and applies to every client. Persisted via

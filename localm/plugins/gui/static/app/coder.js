@@ -6,7 +6,7 @@
 "use strict";
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
-import { addMessageRow, chat } from "./chat.js";
+import { addMessageRow, lsSetScoped } from "./chat.js";
 import { $, authHeaders, autoGrow, el, nearBottom, openModal, readSSE, renderMarkdown, toast } from "./helpers.js";
 import { modelCache, refreshModels } from "./models-sidebar.js";
 import { pickDirectory } from "./picker.js";
@@ -546,7 +546,7 @@ export async function startCoderSession(opts = {}) {
     });
     if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
     const info = await r.json();
-    if (!chat.privacy) localStorage.setItem("localm.coderCwd", cwd);
+    lsSetScoped("localm.coderCwd", cwd);
     // A resumed session replays its restored recap from the server; a fresh one
     // has no history to replay (CODER-2).
     registerSession(info, { replay: !!info.resumed });
@@ -766,7 +766,7 @@ $("setup-browse").onclick = async () => {
     $("setup-cwd").value = dir;
     // Gate on privacy like the other coderCwd write (REC-CODER-CWD-LEAK): do not
     // persist the absolute project path to localStorage in privacy mode.
-    if (!chat.privacy) localStorage.setItem("localm.coderCwd", dir);
+    lsSetScoped("localm.coderCwd", dir);
     refreshResumable();   // setting .value does not fire 'input' (CODER-2)
   }
 };

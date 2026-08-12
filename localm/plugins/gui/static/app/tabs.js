@@ -4,7 +4,7 @@
 "use strict";
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
-import { chat } from "./chat.js";
+import { lsSetScoped } from "./chat.js";
 import { $ } from "./helpers.js";
 
 // Kernel pages are always present; plugin views (coder, images, music, video,
@@ -46,7 +46,7 @@ export function showView(name) {
   }
   _applyActiveClasses(name);
   // Remembered across reloads - but never in privacy mode (no traces).
-  if (!chat.privacy) localStorage.setItem("localm.activeView", name);
+  lsSetScoped("localm.activeView", name);
   // On a phone the sidebar is an off-canvas drawer; navigating closes it.
   closeNav();
   // Lazy page refreshes live in pages.js

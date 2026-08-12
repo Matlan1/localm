@@ -6,7 +6,7 @@
 "use strict";
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
-import { chat } from "./chat.js";
+import { lsSetScoped } from "./chat.js";
 import { $, GIB, authHeaders, el, fmtDuration, instanceCacheTrusted, openModal, streamJob, toast } from "./helpers.js";
 import { refreshPerfEstimate } from "./settings-perf.js";
 
@@ -682,9 +682,7 @@ export function dismissInstallGate() {
   if (gate) gate.style.display = "none";
   const app = $("app");
   if (app) app.style.display = "";
-  if (!chat.privacy) {
-    try { localStorage.setItem("localm.onboarded", "1"); } catch (e) { /* ignore */ }
-  }
+  lsSetScoped("localm.onboarded", "1");
 }
 
 // Let a late-arriving `beforeinstallprompt` (Chrome fires it after engagement)

@@ -35,6 +35,15 @@ export function readStoredJSON(key, fallback) {
 // instance id (served on /v1/config) does not match this origin's last-confirmed
 // one. (localm.theme, localm.logoStyle, and the TTS voice picks are genuine
 // device/browser preferences and are deliberately NOT in this list.)
+//
+// LM-DA-047: this list also doubles as the privacy-mode wipe list (chat.js's
+// refreshCtxLimit) - both wipes must cover every key ANY call site writes only
+// outside privacy mode, or a trace written before privacy mode was turned on
+// survives it. Every such write goes through chat.js's lsSetScoped(key, value),
+// which warns loudly (not silently) if `key` is missing here, and
+// tests-js/privacy-scoped-keys.test.mjs source-scans every lsSetScoped call
+// site and fails if one is missing - so the two lists (this one, and the set
+// of actual write-gated call sites) cannot drift apart unnoticed again.
 export const INSTANCE_SCOPED_KEYS = [
   "localm.conversations",
   "localm.activeView",
@@ -47,6 +56,8 @@ export const INSTANCE_SCOPED_KEYS = [
   "localm.onboarded",
   "localm.webAccess",
   "localm.speakAloud",
+  "localm.studioOpen",
+  "localm.backendHintDismissed",
 ];
 
 const INSTANCE_ID_KEY = "localm.instanceId";
