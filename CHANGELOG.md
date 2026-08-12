@@ -66,6 +66,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
   of localm with no update on our side, so it is worth updating even if yours
   works today. If you already worked around it by pinning an older build with
   `localm setup-llama --tag <build>`, you can go back to the default.
+- **A server that asks for an API key no longer loads any of your data before
+  you have entered one.** Opening a link that pointed straight at a page
   (`?view=models`, `?view=settings`, a shared image, or simply returning to the
   tab you were last on) started that page's requests immediately, racing the
   key check instead of waiting for it. On a server that requires a key those
