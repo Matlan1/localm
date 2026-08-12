@@ -573,6 +573,56 @@ def test_cli_bare_run_records_the_resolved_tag(monkeypatch, tmp_path, cli_runner
         ("vulkan", "b10361")]
 
 
+def _updater_argv():
+    """The exact flags `localm update` re-provisions with, read from the updater
+    rather than retyped here - a copy would keep passing if the real command
+    changed, which is precisely the drift these two tests exist to catch."""
+    from localm._apply_update import post_swap_command
+    argv = post_swap_command("runtime", backend="vulkan")
+    return argv[argv.index("setup-llama") + 1:]
+
+
+def test_update_reprovision_honours_the_pin(monkeypatch, tmp_path, cli_runner):
+    """The updater re-invokes setup-llama with only --backend, so the pin is only
+    real if that bare invocation reads it. Driven with the updater's OWN argv."""
+    target = tmp_path / "rt"
+    target.mkdir()
+    tags = []
+    _wire_cli(monkeypatch, target, tags)
+    # A cuda install being re-provisioned onto vulkan: backends differ, so the
+    # guard does not short-circuit and this genuinely re-fetches.
+    (target / "llama.dll").write_text("old")
+    sl._record_provisioned_backend(target, "cuda", build="b10200")
+    sl.set_pinned_tag("b10355")
+
+    res = cli_runner.invoke(sl.main, [*_updater_argv(), "-y"])
+
+    assert res.exit_code == 0, res.output
+    assert tags == ["b10355"], "the pinned build, not upstream's newest"
+    assert sl._provisioned_build(target) == "b10355"
+
+
+def test_update_leaves_an_already_provisioned_build_alone(monkeypatch, tmp_path, cli_runner):
+    """The other half of the same guarantee: when the backend already matches,
+    the updater's bare invocation short-circuits and must NOT quietly move the
+    install to whatever upstream published since. Without a recorded build this
+    was unobservable - the very gap this unit closes."""
+    target = tmp_path / "rt"
+    target.mkdir()
+    (target / "llama.dll").write_text("old")
+    sl._record_provisioned_backend(target, "vulkan", build="b10300")
+    tags = []
+    _wire_cli(monkeypatch, target, tags)
+
+    res = cli_runner.invoke(sl.main, [*_updater_argv(), "-y"])
+
+    assert res.exit_code == 0, res.output
+    assert tags == [], "no release lookup: nothing needed re-provisioning"
+    assert sl._provisioned_build(target) == "b10300", (
+        "an update must never move the installed build on its own")
+    assert "b10300" in res.output, "and it says which build it kept"
+
+
 def test_cli_tag_latest_unpins_and_tracks_upstream(monkeypatch, tmp_path, cli_runner):
     target = tmp_path / "rt"
     target.mkdir()
