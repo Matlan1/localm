@@ -175,9 +175,19 @@ const PAGE_SCRIPTS = [
  * the config-save click handler, ...) and rely on helpers from app.js, so they
  * run AFTER app.js. Their top-level `$("...").onclick = ...` wiring runs against
  * the real index.html elements.
+ *
+ * Takes the SAME options as loadApp and forwards all of them. `url` and
+ * `seedLocalStorage` matter here in a way they do not for loadApp alone: the
+ * boot deep-link/restore path in init.js is driven by the query string
+ * (`?view=`, `?shared=`, `?pull=`) and by localStorage (`localm.activeView` +
+ * `localm.instanceId`), and it ends in showView() -> window.onViewShown, which
+ * ONLY pages/dispatch.js installs. So a test of that path has to load the page
+ * scripts AND be able to seed its trigger - with `loadApp` alone the fetches it
+ * is meant to observe are unreachable in two independent ways (no trigger, and
+ * no onViewShown to fire), which is fixture blindness, not a passing test.
  */
-export function loadAppWithPages({ fetchImpl, url } = {}) {
-  const { dom, window } = loadApp({ fetchImpl, url });
+export function loadAppWithPages(opts = {}) {
+  const { dom, window } = loadApp(opts);
   for (const name of PAGE_SCRIPTS) {
     runScript(window, readClassic(`pages/${name}.js`));
   }

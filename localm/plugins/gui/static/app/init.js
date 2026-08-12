@@ -324,6 +324,109 @@ window.bootAuthProbe = bootAuthProbe;
   setInterval(refreshCtxLimit, 30000);
   reattachSessions();
   reattachActivity();   // ADR-0008 U4: cross-session/cross-tab background operations
+
+  // Deep links + restore (P1a, second half). Every branch below ends in
+  // showView(), and tabs.js's showView calls window.onViewShown(name) ->
+  // pages/dispatch.js, which fires authenticated /api and /v1 reads for
+  // whichever page it lands on (models -> refreshModelsPage; settings ->
+  // refreshSettingsPage + refreshUploadsList + refreshPerfEstimate; images/
+  // music/video -> warmComfyStatus + history). The `?shared=` branch fetches
+  // /api/share/pending and the `?pull=` branch POSTs the redeem endpoint
+  // directly.
+  //
+  // This block used to sit at the TOP LEVEL, below this IIFE, each branch
+  // wrapped in `setTimeout(..., 0)` and guarded on `window.__localmLocked`.
+  // Both halves of that were ineffective, in the same way the first half of
+  // P1a was: a 0 ms timer is a MACROTASK queued during module evaluation, so
+  // it runs BEFORE bootAuthProbe()'s `await fetch(...)` resolves - at which
+  // point the flag is still `undefined`, because it is only ever assigned by
+  // lockUI()/unlockUI()/onServerUnreachable() further down this same async
+  // chain. `undefined` fails OPEN in BOTH polarities that were used
+  // (`if (window.__localmLocked) return;` did not return; `if
+  // (!window.__localmLocked) showView(...)` proceeded), so a keyless (401)
+  // client fired the whole page's authenticated reads before the key gate
+  // ever showed. No prior state was needed: `/?view=models` alone reached it,
+  // from any link or hidden iframe pointing at the local server - the same
+  // threat model SEC-PULL-CONFIRM names below.
+  //
+  // Running here instead is a SEQUENCING fix: `authed` above is a resolved
+  // network answer, not a flag that may not be set yet. A bare `=== false`
+  // flip would NOT have worked - the timer still precedes unlockUI(), so it
+  // would have dropped the restore on every healthy authed boot instead.
+  // The guards are gone rather than kept as defence in depth: reaching this
+  // line already proves bootAuthProbe() returned true and unlockUI() ran, so
+  // a re-check here would be provably dead code implying a protection this
+  // block no longer needs. The `setTimeout(..., 0)` wrappers are gone with
+  // them - they existed only to let pages/*.js install window.onViewShown and
+  // the #pull-start handler first, and awaiting the boot probe's round trip
+  // already orders this after the entire module graph has evaluated.
+  const params = new URLSearchParams(location.search);
+  const pullSpec = params.get("pull");      // from `localm gui --pull SPEC`
+  const pullToken = params.get("pull_token");  // spec-bound one-time grant, see below
+  const viewParam = params.get("view");
+  const sharedTo = params.get("shared");    // from the PWA share target (phone)
+  if (sharedTo) {
+    // A phone shared image(s) into localm: land on chat and ingest them.
+    history.replaceState(null, "", location.pathname);
+    showView("chat");
+    ingestSharedFiles();
+  } else if (pullSpec || viewParam) {
+    // Strip the query so a reload doesn't restart the download.
+    history.replaceState(null, "", location.pathname);
+    showView(VIEWS.includes(viewParam) ? viewParam : "models");
+    if (pullSpec) {
+      const specInput = $("pull-spec");
+      if (specInput) {
+        specInput.value = pullSpec;
+        // SEC-PULL-CONFIRM: a `?pull=` query param can be put on ANY link, or
+        // in a hidden iframe on any site the user visits while localm is
+        // running locally - the page has no way to tell that apart from
+        // `localm gui --pull` opening its own tab. Never start a real
+        // download from a URL alone.
+        //
+        // `localm gui --pull` mints a single-use, spec-bound secret
+        // server-side (mint_pull_grant, web.py) and passes it as
+        // `pull_token` so ITS OWN deep link can redeem it here and
+        // auto-start with zero clicks - unattended launches keep working.
+        // A forged link cannot know that secret, so the redeem call below
+        // 403s and we fall back to an explicit human confirmation instead.
+        // window.confirm is a native browser-chrome dialog a page cannot
+        // script past, auto-dismiss, or hide, so that fallback holds even
+        // from an invisible iframe.
+        let authorized = false;
+        if (pullToken) {
+          try {
+            const r = await fetch("/api/models/pull-token/redeem", {
+              method: "POST", headers: authHeaders(),
+              body: JSON.stringify({ spec: pullSpec, token: pullToken }),
+            });
+            authorized = r.ok;
+          } catch (e) { authorized = false; }
+        }
+        if (authorized || confirm(
+          `Download model "${pullSpec}"?\n\n` +
+          "A link or page just asked localm to start this download. Only " +
+          "continue if you started this yourself (e.g. via " +
+          '"localm gui --pull").')) {
+          $("pull-start").click();   // kick off the pull with progress
+        }
+      }
+    }
+  } else {
+    // Restore the last active page (set in non-privacy mode only). Gated on
+    // _instanceTrusted (AUD-INSTANCEID, see helpers.js instanceCacheTrusted) -
+    // which is a PRESENCE check only (some instance id was confirmed for this
+    // origin at some point), not yet a confirmed match with the backend THIS
+    // load is talking to; that confirmation is an async round trip
+    // (refreshCtxLimit -> reconcileInstanceId, chat.js) that may not have
+    // resolved yet. So this restore is optimistic: correct for the common
+    // case (the same backend as last time), and self-corrects via chat.js's
+    // mismatch branch (showView("chat")) once the round trip confirms
+    // otherwise - never trust this read as a real per-backend confirmation on
+    // its own.
+    const savedView = _instanceTrusted ? localStorage.getItem("localm.activeView") : null;
+    if (savedView && savedView !== "chat") showView(savedView);
+  }
 })();
 // Reveal toggles on the API-key inputs (AUTH-2): the in-page gate and the
 // Settings key field, so the user can confirm the key they typed. Pure DOM
@@ -379,87 +482,7 @@ if (chat.conversations.length) {
   renderConvList();
 }
 renderChat();
-// reattachSessions()/reattachActivity() moved into the authed IIFE above
-// (P1a) - they fetch authenticated state and used to run here, unguarded,
-// before bootAuthProbe() had resolved.
-// Deep links + restore. Deferred a tick so pages.js has installed
-// window.onViewShown and the #pull-start handler. Skipped while the hard auth
-// gate is locked (nothing of the app should activate behind the onboarding).
-{
-  const params = new URLSearchParams(location.search);
-  const pullSpec = params.get("pull");      // from `localm gui --pull SPEC`
-  const pullToken = params.get("pull_token");  // spec-bound one-time grant, see below
-  const viewParam = params.get("view");
-  const sharedTo = params.get("shared");    // from the PWA share target (phone)
-  if (sharedTo) {
-    // A phone shared image(s) into localm: land on chat and ingest them.
-    history.replaceState(null, "", location.pathname);
-    setTimeout(() => {
-      if (window.__localmLocked) return;
-      showView("chat");
-      ingestSharedFiles();
-    }, 0);
-  } else if (pullSpec || viewParam) {
-    // Strip the query so a reload doesn't restart the download.
-    history.replaceState(null, "", location.pathname);
-    setTimeout(async () => {
-      if (window.__localmLocked) return;
-      showView(VIEWS.includes(viewParam) ? viewParam : "models");
-      if (pullSpec) {
-        const specInput = $("pull-spec");
-        if (specInput) {
-          specInput.value = pullSpec;
-          // SEC-PULL-CONFIRM: a `?pull=` query param can be put on ANY link, or
-          // in a hidden iframe on any site the user visits while localm is
-          // running locally - the page has no way to tell that apart from
-          // `localm gui --pull` opening its own tab. Never start a real
-          // download from a URL alone.
-          //
-          // `localm gui --pull` mints a single-use, spec-bound secret
-          // server-side (mint_pull_grant, web.py) and passes it as
-          // `pull_token` so ITS OWN deep link can redeem it here and
-          // auto-start with zero clicks - unattended launches keep working.
-          // A forged link cannot know that secret, so the redeem call below
-          // 403s and we fall back to an explicit human confirmation instead.
-          // window.confirm is a native browser-chrome dialog a page cannot
-          // script past, auto-dismiss, or hide, so that fallback holds even
-          // from an invisible iframe.
-          let authorized = false;
-          if (pullToken) {
-            try {
-              const r = await fetch("/api/models/pull-token/redeem", {
-                method: "POST", headers: authHeaders(),
-                body: JSON.stringify({ spec: pullSpec, token: pullToken }),
-              });
-              authorized = r.ok;
-            } catch (e) { authorized = false; }
-          }
-          if (authorized || confirm(
-            `Download model "${pullSpec}"?\n\n` +
-            "A link or page just asked localm to start this download. Only " +
-            "continue if you started this yourself (e.g. via " +
-            '"localm gui --pull").')) {
-            $("pull-start").click();   // kick off the pull with progress
-          }
-        }
-      }
-    }, 0);
-  } else {
-    // Restore the last active page (set in non-privacy mode only). Gated on
-    // _instanceTrusted (AUD-INSTANCEID, see helpers.js instanceCacheTrusted) -
-    // which is a PRESENCE check only (some instance id was confirmed for this
-    // origin at some point), not yet a confirmed match with the backend THIS
-    // load is talking to; that confirmation is an async round trip
-    // (refreshCtxLimit -> reconcileInstanceId, chat.js) that has not resolved
-    // yet at this synchronous point. So this restore is optimistic: correct
-    // for the common case (the same backend as last time), and self-corrects
-    // via chat.js's mismatch branch (showView("chat")) once the round trip
-    // confirms otherwise - never trust this read as a real per-backend
-    // confirmation on its own.
-    const savedView = _instanceTrusted ? localStorage.getItem("localm.activeView") : null;
-    if (savedView && savedView !== "chat") {
-      setTimeout(() => { if (!window.__localmLocked) showView(savedView); }, 0);
-    }
-  }
-}
+// reattachSessions()/reattachActivity() and the deep-link/restore block both
+// moved into the authed IIFE above (P1a) - they fetch authenticated state and
+// used to run here, unguarded in practice, before bootAuthProbe() resolved.
 

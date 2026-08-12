@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { loadApp } from "./harness.mjs";
+import { loadApp, loadAppWithPages } from "./harness.mjs";
 
 // NET-1: over a network bind the SPA boots without a key (the loopback key is
 // never auto-seeded to remote clients). The boot must show an IN-PAGE key gate
@@ -314,5 +314,79 @@ test("P1a: an authenticated (200) boot still fires the normal boot-time /api " +
     assert.ok(calls.some((u) => u.startsWith(path)),
       `authed boot still fires ${path} (not gated away entirely)`);
   }
+  assert.equal(window.__localmLocked, false, "sanity check: this boot is unlocked");
+});
+
+// P1a, SECOND HALF. The three boot-restore branches (`?shared=`, `?pull=`/
+// `?view=`, and the saved-view fallback) stayed at the top level of init.js
+// after the first half shipped, each wrapped in `setTimeout(..., 0)` and
+// guarded on `window.__localmLocked`. A 0 ms timer is a MACROTASK queued during
+// module evaluation, so it runs BEFORE bootAuthProbe's `await fetch(...)`
+// resolves - the flag is still `undefined` there, and `undefined` fails OPEN in
+// both polarities that were used. So a keyless client reached showView(), which
+// calls window.onViewShown -> pages/dispatch.js -> the whole page's
+// authenticated reads, before the key gate ever appeared.
+//
+// These use loadAppWithPages, not loadApp, ON PURPOSE. The existing P1a test
+// above cannot fail on any of this in TWO independent ways: loadApp injects
+// only app/*, so window.onViewShown is undefined and a firing showView() issues
+// zero fetches; and it seeds no query string and no localStorage, so none of
+// the three branches is even reachable. A fixture whose value space cannot
+// intersect the defect's trigger space reads as covered while being unable to
+// go red.
+const keylessCounting = (calls) => async (url) => {
+  calls.push(String(url));
+  return {
+    ok: false, status: 401,
+    json: async () => ({ detail: "Missing or invalid API key" }),
+    text: async () => "Missing or invalid API key",
+  };
+};
+
+for (const [label, opts] of [
+  ["?view=models (no prior state at all - any link or hidden iframe reaches this)",
+   { url: "http://localhost:8642/?view=models" }],
+  ["?view=settings (fires the config schema, uploads list and VRAM estimate)",
+   { url: "http://localhost:8642/?view=settings" }],
+  ["?shared=1 (the PWA share target - ingestSharedFiles reads /api/share/pending)",
+   { url: "http://localhost:8642/?shared=1" }],
+  ["a saved view restored for a returning browser with a trusted instance id",
+   { seedLocalStorage: { "localm.instanceId": "inst-abc", "localm.activeView": "settings" } }],
+]) {
+  test(`P1a: a keyless (401) boot with ${label} still fires ONLY the auth probe`, async () => {
+    const calls = [];
+    const { window } = loadAppWithPages({ fetchImpl: keylessCounting(calls), ...opts });
+    await tick(); await tick();
+
+    assert.deepEqual(calls, ["/api/models"],
+      "the boot deep-link/restore path must not reach showView() -> onViewShown " +
+      "-> the page's authenticated /api and /v1 reads until bootAuthProbe has " +
+      "confirmed this client is authed; exactly the one probe may fire");
+    assert.equal(window.__localmLocked, true, "sanity check: this boot is locked");
+    const gate = window.document.getElementById("key-gate");
+    assert.notEqual(gate.style.display, "none", "sanity check: the key gate is showing");
+  });
+}
+
+test("P1a: an AUTHED boot still restores ?view=settings - the fix must sequence " +
+     "the restore behind the probe, not drop it", async () => {
+  // The trap this pins: flipping the guards to `window.__localmLocked === false`
+  // would pass every locked case above and silently break the healthy one, since
+  // the 0 ms timer still precedes unlockUI() and the flag is `undefined` then
+  // too. Only moving the block behind the awaited `authed` satisfies both.
+  const calls = [];
+  const fetchImpl = async (url) => {
+    calls.push(String(url));
+    return { ok: true, status: 200, text: async () => "",
+             json: async () => ({ models: [], active: "", items: [], conversations: [] }) };
+  };
+  const { window } = loadAppWithPages({ fetchImpl, url: "http://localhost:8642/?view=settings" });
+  await tick(); await tick();
+
+  // Assert on a URL ONLY the settings page fetches. Matching "/api/models"
+  // would prove nothing here: bootAuthProbe fetches it, and so does the 30 s
+  // poll, so it is present whether or not the restore ran.
+  assert.ok(calls.some((u) => u.startsWith("/api/uploads")),
+    "the settings view was actually entered (refreshUploadsList ran)");
   assert.equal(window.__localmLocked, false, "sanity check: this boot is unlocked");
 });
