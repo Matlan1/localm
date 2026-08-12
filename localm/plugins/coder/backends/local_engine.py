@@ -35,7 +35,6 @@ class LocalEngineBackend(BaseLLMBackend):
 
     def __init__(self, model_path: str, *, device: str = "cpu",
                  n_gpu_layers: int = 0, display_name=None) -> None:
-        from localm.inference.backends.gguf import GgufBackend
         from localm.inference.engine import Engine, model_display_name
         # Engine.__init__ -> create_backend validates the path is a GGUF/HF model
         # (raises ValueError otherwise) but does not load it.
@@ -46,21 +45,27 @@ class LocalEngineBackend(BaseLLMBackend):
         # supports_grammar (BaseLLMBackend) gates whether callers (context.py's
         # tool-call forcing and JSON-summary compaction) trust this backend to
         # actually enforce a GBNF grammar it is handed, rather than silently
-        # generating unconstrained. Only true for the GGUF case: GgufBackend's
-        # native sampler either enforces the grammar or raises
-        # InvalidGrammarError up front (gbnf.py's check_grammar_structure +
-        # llama_sampler_init_grammar's NULL-on-parse-failure contract) - it
-        # only falls back to unconstrained generation as a rare defence-in-
-        # depth safety net for a genuinely grammar-less native build (see
-        # GgufBackend.chat_stream's _grammar_unsupported latch), not as a
-        # routine path. HFBackend's grammar support is a DELIBERATE, ROUTINE
-        # soft-degrade instead (_hf_worker.py's _grammar_processor silently
-        # drops the grammar and warns whenever the optional `[grammar]` extra
-        # is not installed or compilation fails) - that is correct design for
-        # HFBackend on its own, but it means a caller handed grammar=... has
-        # no reliable signal it was actually applied, so it does not meet the
-        # bar this flag exists to promise and must stay False.
-        self.supports_grammar = isinstance(self._engine._backend, GgufBackend)
+        # generating unconstrained.
+        #
+        # Deferred to the Engine's own capability property (engine.py's
+        # supports_grammar -> backend.supports_grammar) instead of hardcoding
+        # "only GgufBackend" - that used to be correct because HFBackend's
+        # grammar support was a DELIBERATE, ROUTINE soft-degrade (the worker
+        # silently dropped the grammar and warned whenever the optional
+        # `[grammar]` extra was missing or failed to compile), so a caller
+        # handed grammar=... had no reliable signal it was actually applied.
+        # #1215 changed that: HFBackend.supports_grammar (hf.py) is now True
+        # only when xgrammar is actually importable, and the worker drops
+        # only a LAZY grammar - a FORCED one (the non-lazy form this flag
+        # gates for rung 2 of the no-tool-call escalation ladder) still goes
+        # through the grammar processor and is honoured. Reading the
+        # underlying backend's own honest answer means an HF-backed reviewer
+        # model with the extra installed gets forcing too, instead of being
+        # permanently denied it by a class check that predates that fix.
+        # GgufBackend still reports True unconditionally (llama.cpp applies a
+        # GBNF grammar natively, no optional dependency involved), so this
+        # changes nothing for the common case.
+        self.supports_grammar = self._engine.supports_grammar
 
     def _ensure_loaded(self) -> None:
         if not self._loaded:

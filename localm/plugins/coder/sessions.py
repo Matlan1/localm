@@ -50,6 +50,13 @@ def _confirm_timeout() -> Optional[float]:
 # the final event always carries the full text).
 _QUEUE_MAX = 10_000
 
+# How long a session may sit with no activity (no message, no token, no tool
+# call/result) before SessionManager.reap_idle() closes it. Generous on
+# purpose: this is cleanup for a session the user is never coming back to (a
+# closed tab, a killed browser), not a working-session timeout - a real user
+# mid-conversation pushes an event and resets the clock long before this.
+_IDLE_REAP_SECONDS = 24 * 3600
+
 
 @dataclass
 class _PendingConfirm:
@@ -89,6 +96,12 @@ class CoderSession:
         self.id = uuid.uuid4().hex[:12]
         self.cwd = cwd
         self.created_at = time.time()
+        # Bumped on every _push() (a user message, a token, a tool call/result -
+        # anything happening in this session). SessionManager.reap_idle() reads
+        # this to find a session the user abandoned without DELETE (a closed
+        # tab, a killed browser) - otherwise close()'s "session ended" audit
+        # record is never written for it at all.
+        self.last_activity_at = self.created_at
         # Caller identity that created this session (None = the owner). Set by the
         # /api/coder route so a scoped key can only see/steer the sessions IT made,
         # not the owner's full-capability sessions (session isolation).
@@ -181,6 +194,7 @@ class CoderSession:
 
     def _push(self, event: dict) -> None:
         """Enqueue an event, dropping the oldest when the queue is full."""
+        self.last_activity_at = time.time()
         self.history.append(event)
         if len(self.history) > _QUEUE_MAX:
             del self.history[: _QUEUE_MAX // 10]
@@ -541,6 +555,7 @@ class SessionManager:
         """Session summaries. The owner sees all; a scoped caller (is_owner=False)
         sees only the sessions matching its *principal* - so a handed-out key
         cannot enumerate the owner's sessions."""
+        self.reap_idle()
         with self._lock:
             sessions = list(self._sessions.values())
         if not is_owner:
@@ -553,6 +568,35 @@ class SessionManager:
         if session is not None:
             session.close()
         return session
+
+    def reap_idle(self, *, max_idle_s: float = _IDLE_REAP_SECONDS,
+                 now: Optional[float] = None) -> list[str]:
+        """Close and remove sessions that have been idle (no ``_push()``
+        activity, and not BUSY) for more than *max_idle_s*. Returns the ids
+        reaped.
+
+        A GUI session the user abandons without an explicit DELETE (a closed
+        tab, a killed server) otherwise never triggers close() - and with it,
+        never writes the "session ended" audit record (audit.py) a normally-
+        ended session gets. Called opportunistically from list() rather than
+        run on a background timer: the GUI already polls the session list
+        regularly to render the sidebar, so this needs no new thread or
+        shutdown hook to own.
+
+        A BUSY session is never reaped regardless of *last_activity_at* - a
+        long-running task (a big verify, a slow model) is still very much
+        alive even though it has not pushed a NEW event recently at the exact
+        moment this runs; only send_message()'s own "started"/"queued" gate
+        and close() itself decide when a busy session actually ends."""
+        now = time.time() if now is None else now
+        with self._lock:
+            idle_ids = [s.id for s in self._sessions.values()
+                       if not s.busy and (now - s.last_activity_at) > max_idle_s]
+        reaped = []
+        for session_id in idle_ids:
+            if self.remove(session_id) is not None:
+                reaped.append(session_id)
+        return reaped
 
     def close_all(self) -> None:
         with self._lock:
