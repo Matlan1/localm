@@ -43,6 +43,7 @@ from localm.inference.backends.base import (
     ImageDecodeUnavailable,
     InvalidGrammarError,
     ModelLoadCancelled,
+    TriggerValidatorUnavailableError,
     UnsupportedInputError,
     VisionInputError,
 )
@@ -4453,7 +4454,7 @@ async def _stream_sse(
 
     if gen_error is not None:
         err_chunk = ChatChunk.token(
-            f"\n[inference error: {gen_error}]", model_id, chunk_id, ts)
+            inference_error_text(gen_error), model_id, chunk_id, ts)
         yield f"data: {err_chunk.model_dump_json()}\n\n"
 
     streamed = "".join(completion_parts)
@@ -4593,7 +4594,7 @@ async def _stream_sse_completion(
         err = {
             "id": chunk_id, "object": "text_completion.chunk",
             "created": ts, "model": model_id,
-            "choices": [{"text": f"\n[inference error: {gen_error}]",
+            "choices": [{"text": inference_error_text(gen_error),
                          "index": 0, "finish_reason": None}],
         }
         yield f"data: {json.dumps(err)}\n\n"
@@ -4766,8 +4767,17 @@ def _memory_used_header(ctx) -> dict:
 # ORDER IS LOAD-BEARING and the table is a sequence, not a dict, for exactly that
 # reason: ImageDecodeUnavailable and VisionInputError are BOTH UnsupportedInputError
 # subclasses, so a base-class-first table would swallow them and report a missing
-# image decoder as the caller's bad input. This is the same arm-ordering hazard
-# documented in cli/chat.py's vision handling, and it has its own test.
+# image decoder as the caller's bad input. TriggerValidatorUnavailableError sits
+# above InvalidGrammarError for the same reason: it IS one, and listed after its
+# parent it would answer 400 - blaming the caller's pattern for a validator that
+# was too busy to look at it. This is the same arm-ordering hazard documented in
+# cli/chat.py's vision handling, and it has its own test.
+#
+# 503 for TriggerValidatorUnavailableError, and this is the one entry in the table
+# that is not permanent: everything else here describes a request or a build that
+# will fail identically on a retry, while a saturated probe pool clears on its own
+# within seconds. "Service Unavailable" is the only status that says "try again"
+# rather than "change something".
 #
 # 501 for ImageDecodeUnavailable, not 400 and not 503: the request is fine and the
 # caller can do nothing about it, so 4xx would blame the wrong party; and the
@@ -4778,6 +4788,7 @@ _BACKEND_ERROR_STATUS: tuple = (
     (VisionInputError, 400),
     (UnsupportedInputError, 400),
     (GrammarUnsupportedError, 400),
+    (TriggerValidatorUnavailableError, 503),
     (InvalidGrammarError, 400),
     (EmbedBatchTooLargeError, 413),
 )
@@ -4804,6 +4815,32 @@ def backend_error_status(exc: BaseException) -> Optional[int]:
         if isinstance(exc, exc_type):
             return status
     return None
+
+
+def inference_error_text(exc: BaseException) -> str:
+    """The `[inference error: ...]` body a FAILED generation is rendered as, on
+    every one of the four generation paths.
+
+    ONE implementation for all four deliberately. The string was written out
+    four times, and a fact stated in four places diverges - which is exactly
+    what this unit was sent to fix on the status side, so repeating the mistake
+    on the text side would be perverse.
+
+    THE PATHS ARE SCRUBBED, and that is not decoration. A mid-generation
+    RuntimeError is not always a tidy "not enough free VRAM" sentence: the GGUF
+    loader raises `Failed to load model: <absolute path>` with a native stderr
+    tail appended, and an auto-reload inside chat_stream can surface exactly
+    that here. Handing a client the machine's directory layout is the
+    disclosure `pathscrub` exists for, and `bugreport.py` already names
+    scrub_paths as the rule for a response to a lower-privileged caller.
+
+    scrub_paths REDACTS, it does not mute (AGENTS.md rule 5): the reason, the
+    file name and the line number survive, only the leading directories are
+    replaced. A caller still learns what failed - which is the whole point of
+    the error contract - without learning where this machine keeps its files.
+    """
+    from localm.pathscrub import scrub_paths
+    return f"\n[inference error: {scrub_paths(str(exc))}]"
 
 
 async def _complete(
@@ -4884,7 +4921,7 @@ async def _complete(
             from localm.debuglog import logger as _dbg
             _dbg.exception("non-streaming generation failed")
             gen_error = e
-            text = f"\n[inference error: {e}]"
+            text = inference_error_text(e)
         gen_end = time.perf_counter()
     first_token_at = timing.get("first_token_at")
 

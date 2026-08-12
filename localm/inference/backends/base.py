@@ -71,6 +71,35 @@ class InvalidGrammarError(ValueError):
     """
 
 
+class TriggerValidatorUnavailableError(InvalidGrammarError):
+    """Raised when a lazy-grammar trigger pattern could not be CHECKED - the
+    validator's probe pool was saturated, or its daemon could not be spawned or
+    reached - as opposed to the pattern having been checked and found unsafe.
+
+    The distinction is not cosmetic. ``gbnf.validate_trigger_patterns`` caches a
+    verdict per pattern for the whole process lifetime, so recording "I could
+    not ask" against a pattern would reject that pattern permanently for a
+    reason that had nothing to do with it: one busy second poisoning a
+    legitimate integration until restart. This type is what lets the caller keep
+    the two apart, and it is deliberately NOT cached.
+
+    The request is still refused either way - a pattern that was not PROVEN safe
+    must never reach the native sampler (see gbnf.py's module comment for what
+    an unvalidated pattern can do there). What changes is the status: this maps
+    to 503, because a saturated validator is a condition on THIS side of the
+    wire that a retry can clear, while a genuine ``InvalidGrammarError`` is a
+    400 the caller must fix.
+
+    A SUBCLASS of ``InvalidGrammarError``, following the same reasoning as
+    ``VisionInputError`` under ``UnsupportedInputError`` above: every existing
+    ``except InvalidGrammarError`` arm keeps catching it, so no call site can
+    silently start letting it escape as an opaque 500. Sites that want the
+    sharper answer catch this first - and ``_BACKEND_ERROR_STATUS`` lists it
+    BEFORE its parent for exactly that reason (that table's order is
+    load-bearing and has its own test).
+    """
+
+
 class GrammarUnsupportedError(ValueError):
     """Raised when a grammar was requested but this backend cannot constrain
     generation with one at all, so the request is refused instead of answered
