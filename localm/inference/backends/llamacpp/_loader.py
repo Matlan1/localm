@@ -424,7 +424,15 @@ def _force_vulkan_dedicated_vram(binary_dir: Path) -> None:
     upstream master: identical ``!= nullptr`` semantics at b9870 (the offline
     _FALLBACK_TAG), b10361, b10373, and 07132750825a (the commit the bundled
     amd-rocm build ships from). A non-falsey explicit value is left exactly as the
-    user set it."""
+    user set it.
+
+    The pop is also verified to reach C, not just Python: measured through
+    ``ucrtbase.getenv`` (the CRT this interpreter uses - NOT ``msvcrt``, which is
+    the legacy CRT with a separate environment copy and reports nullptr for
+    everything) and ``kernel32.GetEnvironmentVariableW``. Both agree that
+    ``os.environ[VAR] = "0"`` leaves C getenv returning "0" (so ggml disables
+    host-visible vidmem) while ``os.environ.pop(VAR)`` makes it nullptr (so ggml
+    keeps it)."""
     if sys.platform != "win32":
         return
     try:
