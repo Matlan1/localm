@@ -212,6 +212,38 @@ def test_refusal_is_a_urlerror_so_every_caller_reports_it(hops):
     assert "downgrade" in str(exc_info.value.reason).lower()
 
 
+def test_setup_llama_download_refuses_and_says_why(hops, tmp_path):
+    """The sharpest call site, end to end, at the layer where the consequence
+    lands rather than at the guard.
+
+    Everything above proves http_ssl refuses and that the handler is installed.
+    Neither can see what setup_llama does with the refusal - and its generic
+    OSError branch, which RedirectDowngradeRefused would otherwise reach (a
+    URLError IS an OSError), tells the user this "looks like a dropped or flaky
+    connection" and to retry. Retrying an attempt to hand localm a native
+    library over cleartext is the opposite of the right advice.
+
+    Asserted on the DATA first: whether a file was written is the property, the
+    message is the proxy. A runner stops at the first failing assertion, so this
+    order decides whether a regression reports the loss or reports a string."""
+    from localm import setup_llama as sl
+
+    a, b, _c = hops
+    a.redirect_to = f"{b.base_url}/llama-runtime.zip"
+    dest = tmp_path / "runtime.zip"
+
+    with pytest.raises(sl.ArtifactError) as exc_info:
+        sl._download(f"{a.base_url}/releases/download/x/llama-runtime.zip", dest)
+
+    assert b.hit_paths == [], "the cleartext hop was dialed for a native library"
+    assert not dest.exists() or dest.read_bytes() != _HOPB_BYTES, (
+        "hop B's bytes were written to disk")
+    msg = str(exc_info.value).lower()
+    assert "off https" in msg and "cleartext" in msg
+    assert "flaky" not in msg, (
+        "reported as a transient network fault - the advice would be to retry")
+
+
 def test_a_plain_http_caller_is_not_broken_by_the_guard(hops):
     """The rule is DOWNGRADE, not https-only. A caller that started on plain
     http (a user-configured http endpoint) has no confidentiality to lose, and
