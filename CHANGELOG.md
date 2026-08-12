@@ -72,6 +72,27 @@ permanent public record of what shipped and are never rewritten; the in-progress
   refused up front with a clear reason naming what is unsupported and what to
   do instead, before any of the reply is generated. GGUF models, whose sampler
   applies grammars natively, are unaffected and still support lazy grammar.
+- **On Windows, the TLS certificate's private keys and a couple of internal
+  coordination files were not restricted to your account the way other
+  credential files (the API key, session data) already were.** The permission
+  call they used only worked on POSIX systems and was a silent no-op on
+  Windows, so these files were left as readable as whatever the data
+  directory's own location happened to allow - normally fine, but wider than
+  intended on a machine another local account can also sign into. They are now
+  locked down the same Windows-aware way every other credential file in localm
+  is.
+- **A restored, rotated, or long-expired TLS certificate authority is no
+  longer served past the point where a browser or app would actually trust
+  it.** The check that decides whether to keep using the existing server
+  certificate compared certificate-authority names, and localm always mints
+  every one with the identical name - so it could not tell a genuinely
+  different certificate authority (restored from a backup, or replaced after
+  its own roughly ten-year life) from the one already on disk, and could keep
+  serving a certificate chain that no longer verifies, with nothing in the log
+  to explain why connections started failing. The check now verifies the
+  actual signature and the certificate authority's own expiry, and a
+  certificate authority nearing the end of its life is renewed together with
+  the certificate it signs, not on its own.
 - **"Scan for ComfyUI models" now finds models in localm's own managed
   ComfyUI.** The managed instance's downloaded models live in a directory next
   to the ComfyUI checkout, not inside a `models` folder under it, so the scan
