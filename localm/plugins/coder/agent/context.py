@@ -775,6 +775,11 @@ ws     ::= [ \t\n\r]*
             return None
         if getattr(self, "_grammar_confirmed_unsupported", False):
             return None
+        # A server that refused the LAZY form specifically (see
+        # _disable_grammar_on_unsupported) can still honour the FORCED one, so
+        # this latch gates only the lazy branch below rather than the whole method.
+        if not forced and getattr(self, "_lazy_grammar_confirmed_unsupported", False):
+            return None
         try:
             from localm.config import load_config
             if not load_config().get("coder_tool_grammar", True):
@@ -821,11 +826,36 @@ ws     ::= [ \t\n\r]*
         entirely, restoring the pre-#1215 unconstrained behaviour but openly
         recorded instead of silently swallowed by the server.
 
+        A LAZY-specific refusal is handled separately and more narrowly. A server
+        that cannot apply a grammar LAZILY may still apply one strictly (an HF
+        backend with the ``[grammar]`` extra is exactly that: xgrammar has no
+        trigger mode, but it constrains fine from the first token). Latching the
+        blanket flag there would throw away the FORCED rung - the one that exists
+        to rescue a turn that produced no tool call at all - on a backend that can
+        still serve it. So the lazy refusal latches only the lazy form, leaving
+        ``can_force_tool_calls()`` true.
+
         Matched on the exact refusal message rather than on exception type:
         CoderServerError also wraps InvalidGrammarError (OUR OWN grammar
         failing to parse), which is a real internal bug and must NOT be
-        silently swallowed the same way."""
-        from localm.inference.backends.base import GRAMMAR_UNSUPPORTED_MESSAGE
+        silently swallowed the same way. The lazy message is tested BEFORE the
+        general one and the two are asserted mutually non-containing, so a
+        substring overlap can never route a lazy refusal into the blanket latch."""
+        from localm.inference.backends.base import (
+            GRAMMAR_LAZY_UNSUPPORTED_MESSAGE,
+            GRAMMAR_UNSUPPORTED_MESSAGE,
+        )
+        if GRAMMAR_LAZY_UNSUPPORTED_MESSAGE in str(e):
+            if getattr(self, "_lazy_grammar_confirmed_unsupported", False):
+                return False   # already disabled; a repeat means something else is wrong
+            self._lazy_grammar_confirmed_unsupported = True
+            self._audit.notice(
+                "lazy_grammar_unsupported",
+                "the server rejected a LAZY tool-call grammar request - the "
+                "loaded backend cannot enforce a grammar from a trigger; "
+                "continuing without trigger-gated tool-call sampling for the "
+                "rest of this session (forced tool-call grammar is unaffected)")
+            return True
         if getattr(self, "_grammar_confirmed_unsupported", False):
             return False   # already disabled; a repeat means something else is wrong
         if GRAMMAR_UNSUPPORTED_MESSAGE not in str(e):

@@ -221,7 +221,7 @@ def register(app: FastAPI, ctx) -> None:
                     # llama.cpp's native GBNF parser into a real stack overflow -
                     # this rejects that shape before any of it reaches the parser.
                     check_grammar_structure(req.grammar)
-                    engine.validate_grammar(req.grammar)
+                    engine.validate_grammar(req.grammar, lazy=bool(req.grammar_lazy))
                 except GrammarUnsupportedError as e:
                     # The backend cannot apply a grammar AT ALL (a HuggingFace
                     # model without the [grammar] extra). Refusing here is the
@@ -592,7 +592,7 @@ def register(app: FastAPI, ctx) -> None:
                     # llama.cpp's native GBNF parser into a real stack overflow -
                     # this rejects that shape before any of it reaches the parser.
                     check_grammar_structure(req.grammar)
-                    engine.validate_grammar(req.grammar)
+                    engine.validate_grammar(req.grammar, lazy=bool(req.grammar_lazy))
                 except GrammarUnsupportedError as e:
                     # Same capability refusal as /v1/chat/completions above, for
                     # the same reason: without it a grammar request against a

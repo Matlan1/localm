@@ -247,6 +247,37 @@ class HFBackend(BaseBackend):
             # too, so the honest answer is the same one it would produce.
             return False
 
+    def validate_grammar(self, grammar: Optional[str], *, lazy: bool = False) -> None:
+        """Refuse a LAZY grammar up front; defer everything else to the base.
+
+        xgrammar - which IS this backend's grammar support, see
+        :attr:`supports_grammar` - has no lazy/trigger mode at all. Its compiled
+        matcher masks logits from the first token or not at all, so there is
+        nothing to feed a trigger pattern to. That is a static fact about the
+        library, not about the checkpoint, the install or the worker, so it is
+        knowable HERE, in the parent, with no probe and no side effect. That is
+        exactly what the GGUF backend cannot do for its own lazy support (see
+        ``BaseBackend.validate_grammar`` for the measurement), which is why this
+        refusal lives at the one site that can prove its answer.
+
+        Refusing beats the alternative it replaces. The worker used to drop the
+        grammar and generate UNCONSTRAINED text behind a DEBUG line, so a caller
+        that asked for constrained output got a normal 200 it could not tell from
+        a grammar-conformant answer. Raising here happens before a byte of either
+        the streaming or the non-streaming response is committed, so both paths
+        get the identical status and the identical reason.
+
+        NOT folded into the ``supports_grammar`` denial in the base: this backend
+        may well support plain grammar (with the extra installed), and telling the
+        caller to install an extra they already have would send them to fix the
+        wrong thing. ``GRAMMAR_LAZY_UNSUPPORTED_MESSAGE`` names the lazy mode and
+        offers the two recoveries that actually apply.
+        """
+        from .base import GRAMMAR_LAZY_UNSUPPORTED_MESSAGE, GrammarUnsupportedError
+        super().validate_grammar(grammar, lazy=lazy)
+        if grammar and lazy:
+            raise GrammarUnsupportedError(GRAMMAR_LAZY_UNSUPPORTED_MESSAGE)
+
     # ------------------------------------------------------------------ #
     #  Load / unload                                                       #
     # ------------------------------------------------------------------ #
@@ -477,6 +508,18 @@ class HFBackend(BaseBackend):
         # not self.loaded, so this fires correctly pre-load too.
         if messages_contain_image(messages) and not self.supports_images:
             raise UnsupportedInputError(IMAGE_UNSUPPORTED_MESSAGE)
+        # Same guarantee, same reason, for a LAZY grammar this backend cannot
+        # apply: xgrammar has no trigger mode, so honouring the request is
+        # impossible and the worker would otherwise generate UNCONSTRAINED text
+        # behind a DEBUG line (NEW-LAZY-GRAMMAR-SILENT-UNCONSTRAINED). Placed here,
+        # beside the image check and BEFORE the loaded-state gate and the runner,
+        # so ANY caller is refused - including one that never went through the
+        # chat routes' up-front validate_grammar, and one whose model is not loaded
+        # yet. validate_grammar remains the path that turns this into a clean 400
+        # before either response is committed; this is the backend-level backstop.
+        if grammar and grammar_lazy:
+            from .base import GRAMMAR_LAZY_UNSUPPORTED_MESSAGE, GrammarUnsupportedError
+            raise GrammarUnsupportedError(GRAMMAR_LAZY_UNSUPPORTED_MESSAGE)
         if self._runner is None or not self.loaded:
             raise RuntimeError("Model not loaded - call load() first")
         # Mirrors GgufBackend.chat_stream: the isolated worker computes a

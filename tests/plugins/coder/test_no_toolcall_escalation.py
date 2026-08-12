@@ -433,3 +433,65 @@ def test_identity_line_states_capability_not_deployment(tmp_path, model_name):
     prompt = build_system_prompt(tmp_path, model_name=model_name)
     assert "fully offline" not in prompt
     assert "your own machine" in prompt or "user's own machine" in prompt
+
+
+# --------------------------------------------------------------------------- #
+#  The server can refuse the LAZY form specifically - degrade NARROWLY         #
+#  (NEW-LAZY-GRAMMAR-SILENT-UNCONSTRAINED)                                     #
+# --------------------------------------------------------------------------- #
+
+def test_lazy_grammar_unsupported_400_degrades_instead_of_crashing(tmp_path):
+    """A lazy-grammar refusal must be recognised, not propagated.
+
+    The lazy fix introduced a SECOND refusal message. _disable_grammar_on_unsupported
+    matches on the exact message string, so a message it does not know returns False
+    and the CoderServerError propagates - crashing the whole task. Every ordinary
+    tool-call turn sends grammar_lazy=True, so against an HF-backed server that
+    would be the FIRST turn, every time.
+    """
+    from localm.inference.backends.base import GRAMMAR_LAZY_UNSUPPORTED_MESSAGE
+    from localm.plugins.coder.backends.http import CoderServerError
+
+    agent = _make_agent(tmp_path)
+    calls = []
+
+    def _chat(messages, **kw):
+        calls.append(kw)
+        if len(calls) == 1:
+            raise CoderServerError(
+                "HTTP 400 error from http://x/v1/chat/completions: "
+                + GRAMMAR_LAZY_UNSUPPORTED_MESSAGE)
+        return "ok"
+
+    agent.backend.chat = _chat
+    result = agent._call_llm([{"role": "user", "content": "hi"}], interactive=False)
+
+    assert result == "ok"
+    assert len(calls) == 2
+    assert "grammar_lazy" in calls[0]       # the failed attempt asked for lazy
+    assert "grammar" not in calls[1]        # the retry omits the grammar entirely
+    assert _notice_kinds(agent).count("lazy_grammar_unsupported") == 1
+
+
+def test_lazy_refusal_leaves_the_forced_grammar_available(tmp_path):
+    """The narrow half, and the reason this is not just reusing the blanket latch.
+
+    A server that cannot enforce a grammar from a TRIGGER may still enforce one from
+    the first token (an HF backend with the [grammar] extra is exactly that). The
+    forced rung is what rescues a turn that produced no tool call at all, so
+    discarding it on a lazy-only refusal would remove the recovery on a backend that
+    can still serve it. Contrast test_grammar_unsupported_disables_forcing_too,
+    where the server refused grammar OUTRIGHT and forcing correctly goes away.
+    """
+    agent = _make_agent(tmp_path)
+    agent._lazy_grammar_confirmed_unsupported = True
+
+    assert agent.can_force_tool_calls() is True
+    # An ordinary (non-forced) turn no longer asks for the lazy grammar...
+    assert "grammar_lazy" not in agent._llm_kwargs()
+    assert "grammar" not in agent._llm_kwargs()
+    # ...but the forced rung still binds a grammar from the first token.
+    agent._force_tool_grammar = True
+    forced_kw = agent._llm_kwargs()
+    assert "grammar" in forced_kw
+    assert "grammar_lazy" not in forced_kw

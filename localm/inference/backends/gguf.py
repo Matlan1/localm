@@ -563,11 +563,26 @@ class GgufBackend(VramSizingMixin, BaseBackend):
     # because the answer is fixed for every GGUF model and every install.
     supports_grammar: bool = True
 
-    def validate_grammar(self, grammar: Optional[str]) -> None:
+    def validate_grammar(self, grammar: Optional[str], *, lazy: bool = False) -> None:
         """Raise :class:`InvalidGrammarError` for a malformed GBNF string, up front,
         so a bad grammar is a clean 400 rather than a native fault that would latch
         _grammar_unsupported and silently strip grammar from later requests. No-op
-        when not loaded (no vocab to parse against) or when *grammar* is empty."""
+        when not loaded (no vocab to parse against) or when *grammar* is empty.
+
+        *lazy* is ACCEPTED AND IGNORED, and both halves are deliberate. Accepted
+        because the chat routes now pass it by keyword on every grammar request:
+        without it in this signature, overriding the base method would turn every
+        GGUF grammar request into a TypeError. Ignored because this backend has no
+        honest answer to give from here. ``_api.has_lazy_grammar()`` is the only
+        probe available and it cannot be called in the server parent (it raises
+        RuntimeError when no runtime is provisioned, and loads llama.dll into this
+        process when one is - see ``BaseBackend.validate_grammar`` for the
+        measurement). A GGUF build lacking the native lazy export therefore still
+        drops the grammar at generation time behind a DEBUG line in
+        ``llamacpp/llama.py``; that gap is OPEN and tracked in
+        ``dev-notes/lazy-grammar-silent-unconstrained-2026-08-12.md``. Answering
+        "supported" here to look complete would be the worse of the two, because a
+        capability claim is something callers act on."""
         if grammar and self.loaded and self._runner is not None:   # property, see count_tokens
             try:
                 self._runner.check_grammar(grammar)

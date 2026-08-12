@@ -403,13 +403,18 @@ class Engine:
         grammar. See ``BaseBackend.supports_grammar`` for why the default denies."""
         return getattr(self._backend, "supports_grammar", False)
 
-    def validate_grammar(self, grammar: Optional[str]) -> None:
+    def validate_grammar(self, grammar: Optional[str], *, lazy: bool = False) -> None:
         """Up-front grammar validation, delegated to the backend.
 
         Raises :class:`GrammarUnsupportedError` when the backend cannot apply a
-        grammar at all, and :class:`InvalidGrammarError` when it can but this
-        grammar will not parse. Either way the request path turns it into a clean
-        4xx instead of generating text that silently ignores the constraint.
+        grammar at all - or, with *lazy*, cannot apply it LAZILY - and
+        :class:`InvalidGrammarError` when it can but this grammar will not parse.
+        Either way the request path turns it into a clean 4xx instead of
+        generating text that silently ignores the constraint.
+
+        *lazy* is forwarded rather than interpreted here: only the backend knows
+        whether it can honour trigger-gated enforcement, and only some backends
+        can answer that honestly at all (see ``BaseBackend.validate_grammar``).
 
         Called unconditionally, NOT probed with ``getattr``. It used to be:
 
@@ -425,7 +430,7 @@ class Engine:
         nothing anywhere telling the caller the grammar had been ignored. The
         method now lives on ``BaseBackend`` and denies by default, so an absent
         capability answers the question it was actually asked."""
-        self._backend.validate_grammar(grammar)
+        self._backend.validate_grammar(grammar, lazy=lazy)
 
     def chat_stream(
         self,
