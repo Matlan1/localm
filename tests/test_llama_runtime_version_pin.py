@@ -734,3 +734,88 @@ def test_cli_tag_latest_unpins_and_tracks_upstream(monkeypatch, tmp_path, cli_ru
     assert res.exit_code == 0, res.output
     assert sl.pinned_tag() is None
     assert tags == ["b10361"], "unpinned, it resolves upstream's newest again"
+
+
+# --------------------------------------------------------------------------- #
+#  CHECK - the read-only "is a different build available" surface             #
+# --------------------------------------------------------------------------- #
+
+def test_check_runtime_update_reports_not_installed_when_nothing_provisioned(
+        monkeypatch, tmp_path):
+    """No marker at all means no runtime has ever been provisioned - that is
+    initial setup's job, not an update, and must not be reported as one."""
+    monkeypatch.setattr(sl, "_repo_runtime_lib", lambda: tmp_path)
+    assert sl.check_runtime_update() == {
+        "installed": False, "backend": None, "current": None,
+        "target": None, "newer": False, "pinned": None}
+
+
+def test_check_runtime_update_compares_against_latest_when_unpinned(
+        monkeypatch, tmp_path, home):
+    monkeypatch.setattr(sl, "_repo_runtime_lib", lambda: tmp_path)
+    monkeypatch.setattr(sl, "_latest_tag", lambda: "b10361")
+    sl._record_provisioned_backend(tmp_path, "vulkan", build="b10300")
+
+    result = sl.check_runtime_update()
+
+    assert result == {"installed": True, "backend": "vulkan", "current": "b10300",
+                      "target": "b10361", "newer": True, "pinned": None}
+
+
+def test_check_runtime_update_reports_up_to_date_when_matching(monkeypatch, tmp_path, home):
+    monkeypatch.setattr(sl, "_repo_runtime_lib", lambda: tmp_path)
+    monkeypatch.setattr(sl, "_latest_tag", lambda: "b10361")
+    sl._record_provisioned_backend(tmp_path, "vulkan", build="b10361")
+
+    result = sl.check_runtime_update()
+
+    assert result["newer"] is False
+    assert result["current"] == result["target"] == "b10361"
+
+
+def test_check_runtime_update_prefers_the_pin_over_a_release_lookup(
+        monkeypatch, tmp_path, home):
+    """A build pinned away from a broken release must never be told THAT
+    release is "available" again - the pin, not upstream's newest, is the
+    correct comparison target. No release lookup should even happen: an
+    install that pinned specifically because the network/API was unreliable
+    must still get an honest check."""
+    monkeypatch.setattr(sl, "_repo_runtime_lib", lambda: tmp_path)
+    monkeypatch.setattr(sl, "_latest_tag",
+                        lambda: pytest.fail("a pinned install must not query releases"))
+    sl._record_provisioned_backend(tmp_path, "vulkan", build="b10300")
+    sl.set_pinned_tag("b10355")
+
+    result = sl.check_runtime_update()
+
+    assert result == {"installed": True, "backend": "vulkan", "current": "b10300",
+                      "target": "b10355", "newer": True, "pinned": "b10355"}
+
+
+def test_check_runtime_update_amd_rocm_compares_against_the_fixed_tag(monkeypatch, tmp_path):
+    """amd-rocm's build is fixed by the localm release (_ROCM_TAG), never
+    resolved from an upstream release listing - the check must not query one
+    for this backend either."""
+    monkeypatch.setattr(sl, "_repo_runtime_lib", lambda: tmp_path)
+    monkeypatch.setattr(sl, "_latest_tag",
+                        lambda: pytest.fail("amd-rocm must not query releases"))
+    sl._record_provisioned_backend(tmp_path, "amd-rocm", build="b1288")
+
+    result = sl.check_runtime_update()
+
+    assert result["target"] == sl._ROCM_TAG
+    assert result["newer"] is True
+
+
+def test_check_runtime_update_never_raises_on_an_unreadable_config(monkeypatch, tmp_path):
+    """pinned_tag() already degrades an unreadable config to 'no pin' rather
+    than raising; this check must inherit that, not newly break on it."""
+    monkeypatch.setattr(sl, "_repo_runtime_lib", lambda: tmp_path)
+    monkeypatch.setattr(sl, "_latest_tag", lambda: "b10361")
+    monkeypatch.setattr(sl.config, "load_config", lambda: (_ for _ in ()).throw(OSError("nope")))
+    sl._record_provisioned_backend(tmp_path, "vulkan", build="b10300")
+
+    result = sl.check_runtime_update()
+
+    assert result["pinned"] is None
+    assert result["target"] == "b10361"

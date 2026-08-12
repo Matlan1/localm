@@ -533,6 +533,52 @@ def previous_tag(backend: str) -> "Optional[str]":
     return None
 
 
+def check_runtime_update() -> dict:
+    """Compare the installed llama.cpp runtime against what ``setup-llama``
+    would install right now, without provisioning anything: the read-only
+    counterpart to a real re-provision, for a "check for updates" surface (the
+    GUI's runtime-update card; see localm/plugins/gui/routes/runtime.py).
+
+    The comparison target is a PIN if one is set (an install that pinned away
+    from a broken release must not be told a newer build is "available" -
+    that newer build is exactly what it pinned away from), else upstream's
+    newest release with uploaded assets (the same ``_latest_tag()`` a bare
+    ``setup-llama`` resolves against). ``amd-rocm`` compares against its fixed
+    ``_ROCM_TAG`` instead, since that build is never resolved from an upstream
+    tag at all.
+
+    This target is a CANDIDATE, not a proof: whether it actually loads on this
+    machine is only established by attempting the provision - setup-llama's
+    existing ABI walk-back (``_provision_with_fallback``) is what makes the
+    build it eventually lands on the confirmed one, exactly as for every other
+    install path. This function only says whether the installed build differs
+    from the candidate; it makes the same release-listing network call a bare
+    ``setup-llama`` would (so a caller on an event loop must offload it, same
+    as ``updater.check()``), and never re-provisions anything.
+
+    Returns ``{installed, backend, current, target, newer, pinned}``.
+    ``installed`` is False when nothing has been provisioned yet (there is no
+    "update" for a runtime that was never set up - that is initial setup, a
+    different action). Never raises: an unreadable pin/marker degrades to the
+    safe "nothing to report" shape rather than breaking the check (mirrors
+    ``pinned_tag()``'s own never-raises contract)."""
+    backend = installed_backend()
+    if not backend:
+        return {"installed": False, "backend": None, "current": None,
+                "target": None, "newer": False, "pinned": None}
+    current = installed_build()
+    pin = pinned_tag()
+    if backend == "amd-rocm":
+        target = _ROCM_TAG
+    elif pin:
+        target = pin
+    else:
+        target = _latest_tag()
+    newer = bool(target) and target != current
+    return {"installed": True, "backend": backend, "current": current,
+            "target": target, "newer": newer, "pinned": pin}
+
+
 def _tag_for(backend: str) -> str:
     """The upstream llama.cpp release tag to provision for *backend*: the user's
     pin when one is set, else upstream's newest release with uploaded assets.
