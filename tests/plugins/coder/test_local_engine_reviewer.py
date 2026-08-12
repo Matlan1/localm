@@ -55,33 +55,24 @@ def test_local_backend_loads_only_once(monkeypatch):
     eng.load.assert_called_once()                  # not reloaded on the 2nd call
 
 
-def test_local_backend_supports_grammar_true_for_gguf(monkeypatch):
-    """LocalEngineBackend must not claim grammar support it cannot back: true
-    only when the underlying engine actually picked GgufBackend, whose native
-    sampler enforces a GBNF grammar or raises up front (never a routine
-    silent drop) - see the constructor's own comment for why HFBackend's
-    best-effort xgrammar path does not meet that bar."""
-    from localm.inference.backends.gguf import GgufBackend
+def test_local_backend_supports_grammar_mirrors_the_engine(monkeypatch):
+    """NEW-CODER-NO-TOOLCALL-SILENT residual: LocalEngineBackend must not
+    compute its own guess at grammar support from the backend's TYPE (the old
+    isinstance(engine._backend, GgufBackend) check) - it defers entirely to
+    Engine.supports_grammar (engine.py), which is the honest, install-derived
+    answer from the actual backend: GgufBackend always True, HFBackend since
+    #1215 True only when xgrammar is importable. A stale isinstance check
+    would deny an HF-backed reviewer model forcing even when it can genuinely
+    honour a grammar - see the constructor's own comment for the full story.
+    Both booleans are exercised so a hardcoded-False regression (the old
+    behaviour) shows up as a mismatch on the True case."""
     from localm.plugins.coder.backends.local_engine import LocalEngineBackend
 
-    fake_engine = _patched_engine(monkeypatch, [])
-    fake_engine._backend = MagicMock(spec=GgufBackend)
-    b = LocalEngineBackend("/models/mini.gguf")
-    assert b.supports_grammar is True
-
-
-def test_local_backend_supports_grammar_false_for_hf(monkeypatch):
-    """The HF backend's grammar path is a deliberate, ROUTINE soft-degrade
-    (silently generates unconstrained whenever the optional [grammar] extra
-    is missing), so LocalEngineBackend must not promise callers it will be
-    enforced."""
-    from localm.inference.backends.hf import HFBackend
-    from localm.plugins.coder.backends.local_engine import LocalEngineBackend
-
-    fake_engine = _patched_engine(monkeypatch, [])
-    fake_engine._backend = MagicMock(spec=HFBackend)
-    b = LocalEngineBackend("/models/some-hf-dir")
-    assert b.supports_grammar is False
+    for expected in (True, False):
+        fake_engine = _patched_engine(monkeypatch, [])
+        fake_engine.supports_grammar = expected
+        b = LocalEngineBackend("/models/mini.gguf")
+        assert b.supports_grammar is expected
 
 
 # --------------------------------------------------------------------------- #

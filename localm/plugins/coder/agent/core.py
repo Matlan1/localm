@@ -192,6 +192,14 @@ class Agent(
         self._repeat_response_count: int = 0   # consecutive near-identical responses
         self._recent_finals: list[str] = []    # bounded history the breaker compares against
         self._compact_warned: bool = False
+        # Sticky, session-wide: latched True once the SERVER has authoritatively
+        # refused a grammar-bearing request (see context._disable_grammar_on_
+        # unsupported). Distinct from _force_tool_grammar, which is a one-shot
+        # per-turn flag the escalation ladder sets/clears - this one never
+        # re-arms, because the backend's declared supports_grammar can be wrong
+        # about what is actually loaded server-side but that fact does not
+        # change again mid-session.
+        self._grammar_confirmed_unsupported: bool = False
         # Per-run: False when the LAST _loop failed (max_turns, a circuit breaker,
         # a stop). _loop re-arms it to True at the start of every run, so one bad
         # turn in a multi-turn session (REPL / GUI) does not mislabel every later

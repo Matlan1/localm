@@ -335,6 +335,92 @@ def test_repetitive_tool_work_does_not_trip_the_breaker(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+#  The server can refuse a grammar outright (#1215) - degrade, don't crash     #
+# --------------------------------------------------------------------------- #
+
+def test_grammar_unsupported_400_degrades_instead_of_crashing(tmp_path):
+    """NEW-CODER-NO-TOOLCALL-SILENT residual: HTTPBackend advertises
+    supports_grammar=True for ANY localm server (it cannot know which backend
+    is actually loaded server-side - see http.py). #1215 turned a grammar
+    request against an incapable backend into a hard 400
+    (GrammarUnsupportedError) instead of a silent unconstrained 200, so the
+    FIRST grammar-bearing turn against such a server used to crash the whole
+    task with an unhandled CoderServerError. It must instead disable grammar
+    for the rest of the session and retry the same turn unconstrained."""
+    from localm.inference.backends.base import GRAMMAR_UNSUPPORTED_MESSAGE
+    from localm.plugins.coder.backends.http import CoderServerError
+
+    agent = _make_agent(tmp_path)
+    calls = []
+
+    def _chat(messages, **kw):
+        calls.append(kw)
+        if len(calls) == 1:
+            raise CoderServerError(
+                "HTTP 400 error from http://x/v1/chat/completions: "
+                + GRAMMAR_UNSUPPORTED_MESSAGE)
+        return "ok"
+
+    agent.backend.chat = _chat
+    result = agent._call_llm([{"role": "user", "content": "hi"}], interactive=False)
+
+    assert result == "ok"
+    assert len(calls) == 2
+    assert "grammar" in calls[0]            # the failed attempt DID carry one
+    assert "grammar" not in calls[1]        # the retry omits it
+    assert agent._grammar_confirmed_unsupported is True
+    assert _notice_kinds(agent).count("grammar_unsupported") == 1
+
+
+def test_grammar_unsupported_disables_forcing_too(tmp_path):
+    """Once the server has authoritatively refused, the forced (rung-2)
+    grammar must not be offered either - can_force_tool_calls() must report
+    False so the escalation ladder reports failed enforcement instead of
+    trying (and failing the same way) again."""
+    agent = _make_agent(tmp_path)
+    agent._grammar_confirmed_unsupported = True
+    assert agent.can_force_tool_calls() is False
+    assert "grammar" not in agent._llm_kwargs()
+
+
+def test_unrelated_server_error_still_propagates(tmp_path):
+    """Only the grammar-unsupported refusal is swallowed. Any other server
+    error must still surface - a broad catch here would silently retry a
+    genuinely broken request forever."""
+    from localm.plugins.coder.backends.http import CoderServerError
+
+    agent = _make_agent(tmp_path)
+
+    def _chat(messages, **kw):
+        raise CoderServerError(
+            "HTTP 500 error from http://x/v1/chat/completions: boom")
+
+    agent.backend.chat = _chat
+    with pytest.raises(CoderServerError, match="boom"):
+        agent._call_llm([{"role": "user", "content": "hi"}], interactive=False)
+    assert agent._grammar_confirmed_unsupported is False
+
+
+def test_invalid_grammar_is_not_treated_as_unsupported(tmp_path):
+    """A malformed grammar (OUR OWN bug - the bundled TOOL_CALLS_* grammar
+    failing to parse) is a different failure than a capability gap and must
+    not be silently swallowed the same way."""
+    from localm.plugins.coder.backends.http import CoderServerError
+
+    agent = _make_agent(tmp_path)
+
+    def _chat(messages, **kw):
+        raise CoderServerError(
+            "HTTP 400 error from http://x/v1/chat/completions: "
+            "Invalid grammar: unexpected token")
+
+    agent.backend.chat = _chat
+    with pytest.raises(CoderServerError, match="Invalid grammar"):
+        agent._call_llm([{"role": "user", "content": "hi"}], interactive=False)
+    assert agent._grammar_confirmed_unsupported is False
+
+
+# --------------------------------------------------------------------------- #
 #  The prompt no longer hands the model an excuse                              #
 # --------------------------------------------------------------------------- #
 

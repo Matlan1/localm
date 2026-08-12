@@ -773,6 +773,8 @@ ws     ::= [ \t\n\r]*
         instead."""
         if not getattr(self.backend, "supports_grammar", False):
             return None
+        if getattr(self, "_grammar_confirmed_unsupported", False):
+            return None
         try:
             from localm.config import load_config
             if not load_config().get("coder_tool_grammar", True):
@@ -791,6 +793,51 @@ ws     ::= [ \t\n\r]*
         builds nothing and mutates nothing, so a caller may ask before deciding
         whether the rung exists without that question having a side effect."""
         return self._tool_call_grammar(forced=True) is not None
+
+    def _disable_grammar_on_unsupported(self, e: Exception) -> bool:
+        """React to a ``CoderServerError`` caused by the SERVER refusing a
+        grammar-bearing request outright. True when the caller should retry
+        the same turn immediately (now unconstrained); False when *e* is
+        unrelated and must propagate.
+
+        HTTPBackend advertises ``supports_grammar=True`` for ANY localm
+        server (see http.py) because it has no way to know which backend is
+        actually loaded server-side - a GGUF model always honours a grammar,
+        an HF model only when the optional ``[grammar]`` extra is installed.
+        Before #1215 a request against an incapable backend was silently
+        answered unconstrained with a 200; #1215 made that an honest 400
+        (GrammarUnsupportedError) instead. That is correct on the server's
+        side, but it means the FIRST grammar-bearing call this Agent makes
+        against such a server - which could be an ordinary turn's lazy
+        tool-call grammar, not only the rung-2 forced one - now crashes the
+        whole task instead of degrading.
+
+        Trust the server's authoritative answer over our own backend's
+        advertised flag from here on: latch ``_grammar_confirmed_unsupported``
+        so ``_tool_call_grammar`` stops offering ANY grammar (lazy or forced)
+        for the rest of this Agent's life, clear a one-shot forcing attempt in
+        flight, and notice it (AGENTS.md rule 5 - this must not go silent).
+        The caller retries the same turn, which now omits the grammar kwarg
+        entirely, restoring the pre-#1215 unconstrained behaviour but openly
+        recorded instead of silently swallowed by the server.
+
+        Matched on the exact refusal message rather than on exception type:
+        CoderServerError also wraps InvalidGrammarError (OUR OWN grammar
+        failing to parse), which is a real internal bug and must NOT be
+        silently swallowed the same way."""
+        from localm.inference.backends.base import GRAMMAR_UNSUPPORTED_MESSAGE
+        if getattr(self, "_grammar_confirmed_unsupported", False):
+            return False   # already disabled; a repeat means something else is wrong
+        if GRAMMAR_UNSUPPORTED_MESSAGE not in str(e):
+            return False
+        self._grammar_confirmed_unsupported = True
+        self._force_tool_grammar = False
+        self._audit.notice(
+            "grammar_unsupported",
+            "the server rejected a tool-call grammar request - the loaded "
+            "backend cannot honour one; continuing without constrained "
+            "tool-call sampling for the rest of this session")
+        return True
 
     def _llm_kwargs(self) -> dict:
         """gen_kwargs for an LLM call, adding the tool-call grammar when enabled
@@ -870,7 +917,7 @@ ws     ::= [ \t\n\r]*
         return full
 
     def _call_llm(self, messages: list[dict], interactive: bool) -> str:
-        from ..backends.http import CoderAuthError
+        from ..backends.http import CoderAuthError, CoderServerError
         first_attempt = True
         while True:
             try:
@@ -940,6 +987,12 @@ ws     ::= [ \t\n\r]*
                         raise
                 self.backend._api_key = new_key
                 print_info("Retrying with new API key...")
+            except CoderServerError as e:
+                if not self._disable_grammar_on_unsupported(e):
+                    raise
+                # Retry the same turn immediately - _llm_kwargs() now omits
+                # the grammar, so this is not the same request that just
+                # failed.
 
     def _accumulate_usage(self) -> None:
         """Pull token counts from the backend's last call and add to the session total."""
