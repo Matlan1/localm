@@ -21,6 +21,16 @@ specifically (rescuing the original #765 fresh-Windows case). These tests lock i
 that ordering, that a non-certificate failure never triggers the fallback, and that
 a certificate failure surviving both attempts is never silently swallowed.
 (setup-llama's own two call sites are guarded in tests/test_setup_llama_backends.py.)
+
+They also lock the WIRING of the redirect guard - that HttpsOnlyRedirect is
+installed even when the caller passes no handlers, and that a caller's own
+redirect policy replaces it rather than joining it. What the guard DOES is
+proven over real sockets in tests/test_https_downgrade_redirect.py; asserting it
+here would only re-test the class, not the fact that anything installs it.
+
+NOTE THE SEAM: verified_urlopen no longer calls urllib.request.urlopen (it has to
+build an opener to install a handler), so patching urlopen no longer intercepts
+anything and lets the real network through. Use patch_https_transport.
 """
 from __future__ import annotations
 
