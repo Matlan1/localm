@@ -155,9 +155,35 @@ def rag_repair(collection, embed, url, yes):
         else:
             console.print(f"[yellow]'{collection}' has no indexed documents.[/yellow]")
         return
+    # An `upload:<name>` doc has no server-side source - the uploaded bytes are
+    # never retained (add_uploads' own docstring) - so add_paths silently drops
+    # it (Path('upload:x').is_file() is always False) and repair would touch
+    # nothing for it. A collection built ENTIRELY from uploads used to get a
+    # "repaired: 0 re-indexed, 0 added" success line as if something had been
+    # fixed (NEW-RAG-INDEX-WARN-SPAM residual C) - refuse honestly instead, and
+    # a MIXED collection proceeds on what it can rebuild and says what it can't.
+    repairable = [p for p in paths if not p.startswith("upload:")]
+    upload_only = len(paths) - len(repairable)
+    if not repairable:
+        if coll.corrupt:
+            console.print(
+                f"[yellow]'{collection}' index is corrupt, but every document "
+                "here was added via upload and has no server-side source to "
+                "rebuild from - repair cannot fix it. Re-upload the affected "
+                "file(s) instead.[/yellow]")
+        else:
+            console.print(
+                f"[yellow]'{collection}' has no server-side document sources "
+                "to repair (every document here was added via upload).[/yellow]")
+        return
+    paths = repairable
     if coll.corrupt:
         console.print(f"[yellow]'{collection}' index was corrupt; rebuilding "
                       f"from {len(paths)} source(s).[/yellow]")
+    if upload_only:
+        console.print(
+            f"[yellow]{upload_only} uploaded document(s) in '{collection}' have "
+            "no server-side source and will be left as-is.[/yellow]")
     # A repair is force=True on every doc: without --embed, every re-indexed
     # chunk gets NO vector, silently dropping a collection that currently has
     # semantic search back to BM25-only (this is exactly the bug behind

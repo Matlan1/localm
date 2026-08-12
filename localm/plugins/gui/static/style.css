@@ -1427,6 +1427,10 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
 /* The reindex button when it is the fix for a .retrieval-badge row. */
 .data-table button.warn { color: var(--yellow); border-color: var(--yellow); }
 .data-table button.warn:hover { color: #fff; background: var(--yellow); border-color: var(--yellow); }
+/* The repair button when it is the fix for a .corrupt-badge row - red to
+   match that badge's stronger severity, same shape as .warn for .retrieval-badge. */
+.data-table button.corrupt-fix { color: var(--red); border-color: var(--red); }
+.data-table button.corrupt-fix:hover { color: #fff; background: var(--red); border-color: var(--red); }
 
 /* image generation */
 

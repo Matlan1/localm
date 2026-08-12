@@ -722,6 +722,13 @@ class Collection:
         self._vec_dim: Optional[int] = None       # dimensionality of stored vectors
         self._bm25: Optional[BM25] = None
         self.corrupt: bool = False
+        # How many lines of chunks.jsonl _load() had to skip as unparseable /
+        # wrong-shape (NEW-RAG-INDEX-WARN-SPAM residual B). 0 whenever the file
+        # is clean or absent - distinct from self.corrupt, which also covers a
+        # bad meta.json or roots map and carries no count of its own. Exposed
+        # via stats() so a caller can say "62 malformed chunk lines" instead of
+        # a generic "index damaged".
+        self.chunks_bad_lines: int = 0
         # Why semantic (vector) scoring is unavailable when it should be present.
         # None = vectors are used, or legitimately absent (no embeddings indexed).
         # A non-None string means a corrupt/stale/mismatched vectors index was
@@ -805,6 +812,7 @@ class Collection:
         # the chunks and then reconstruct a minimal docs map from their sources so
         # `rag repair` can rebuild and the next _save() self-heals meta.json.
         self.corrupt = False
+        self.chunks_bad_lines = 0
         meta_corrupt = False
         try:
             meta = json.loads((self.dir / "meta.json").read_text(encoding="utf-8"))
@@ -849,6 +857,7 @@ class Collection:
                     bad_lines += 1
                     continue
                 self._chunks.append(obj)
+            self.chunks_bad_lines = bad_lines
             if bad_lines:
                 self.corrupt = True
                 # Warn-once, same pattern and same process-scoped set as
@@ -983,6 +992,27 @@ class Collection:
         # The reader above is fixed independently, so files written before this
         # still load; this stops NEW ones being produced. See localm/jsonl.py.
         self._atomic_write("chunks.jsonl", dumps_lines(self._chunks))
+        # This call just rewrote BOTH meta.json (above, from self._meta) and
+        # chunks.jsonl (from self._chunks) verbatim from this instance's own
+        # in-memory state, which _load()'s three self.corrupt sites already
+        # require to be well-formed before it is ever placed in self._meta /
+        # self._chunks: a corrupt meta.json is replaced with a clean
+        # {name, docs} dict (and 'roots' is reset the same way in
+        # _record_roots) before it can be re-written, and a malformed
+        # chunks.jsonl line is dropped, never appended to self._chunks, so
+        # dumps_lines(self._chunks) can never reproduce one. So whatever
+        # on-disk corruption made THIS load flag self.corrupt / count
+        # self.chunks_bad_lines is resolved by construction the moment this
+        # write lands - clear both here, not just where _load() sets them.
+        # Without this, a repair (add_paths(force=True) -> this _save()) left
+        # the CACHED corrupt/chunks_bad_lines stale at their pre-repair values
+        # forever: peek_stats()'s fingerprint check still matches (it is taken
+        # from what THIS call just wrote), so the GUI's "needs repair" badge
+        # and the CLI's corrupt marker never cleared even though the fault was
+        # actually fixed (NEW-RAG-INDEX-WARN-SPAM, caught in manual GUI
+        # verification - click Repair, and the badge did not go away).
+        self.corrupt = False
+        self.chunks_bad_lines = 0
         # The fate of a REJECTED vectors.json is decided FIRST, before anything
         # below writes or unlinks that filename. Setting it aside from inside only
         # one branch loses the bytes on every other one, and the branch it lived in
@@ -1103,6 +1133,7 @@ class Collection:
             "has_vectors": self._has_vectors(self._chunks, self._vectors),
             "vector_degrade_reason": self.vector_degrade_reason,
             "corrupt": self.corrupt,
+            "chunks_bad_lines": self.chunks_bad_lines,
             "fingerprint": self._file_fingerprint(),
             # Cheap to include (already in memory - see vector_dim()) and lets
             # a listing-time caller compare against the currently active
@@ -2343,6 +2374,10 @@ class Collection:
             "n_chunks": len(self._chunks),
             "has_vectors": self._has_vectors(self._chunks, self._vectors),
             "corrupt": self.corrupt,
+            # Count of chunks.jsonl lines _load() had to skip (0 if none) - lets
+            # a caller say "62 malformed chunk lines" instead of a generic
+            # "index damaged" (NEW-RAG-INDEX-WARN-SPAM residual B).
+            "chunks_bad_lines": self.chunks_bad_lines,
             # Why semantic search fell back to BM25 (None when vectors are used or
             # legitimately absent); surfaced instead of silently swallowed.
             "vector_degrade_reason": self.vector_degrade_reason,
@@ -2473,6 +2508,11 @@ class Collection:
             "n_chunks": cache["n_chunks"],
             "has_vectors": bool(cache.get("has_vectors")),
             "corrupt": bool(cache.get("corrupt")),
+            # 0 on a cache written before this field existed - same
+            # graceful-degrade as vector_dim below, not a migration. A stale
+            # 0 alongside corrupt=True just means the caller falls back to
+            # generic "index damaged" wording instead of naming a count.
+            "chunks_bad_lines": cache.get("chunks_bad_lines", 0),
             "vector_degrade_reason": cache.get("vector_degrade_reason"),
             # Absent on a cache written before this field existed - the
             # collection falls back to the cold load-and-backfill path below

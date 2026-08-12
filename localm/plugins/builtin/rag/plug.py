@@ -10,6 +10,7 @@ Routes (mounted by the engine, auto-scoped to the ``rag`` capability):
   POST   /api/rag/collections/{name}/upload    - index uploaded device files (job)
   POST   /api/rag/collections/{name}/query     - retrieve top-k chunks
   POST   /api/rag/collections/{name}/remove-doc - drop one doc
+  POST   /api/rag/collections/{name}/repair    - rebuild a damaged index (job)
   POST   /api/rag/extract                       - attachment -> text (in memory)
 
 Collections are explicit user data - indexing writes to <data dir>/rag/ in every
@@ -112,6 +113,17 @@ class EmbeddingModelRequest(BaseModel):
     # False (default): report what switching MIGHT invalidate and stop there -
     # no config write, no embedder reset. True: actually make the switch. See
     # rag_embedding_set's docstring for why this two-step split exists.
+    confirm: bool = False
+
+
+class RagRepairRequest(BaseModel):
+    # Try to recompute embeddings while repairing (default: yes, matching the
+    # CLI's own no-silent-data-loss stance - see rag_repair's docstring). If no
+    # embedder is actually available, or this is False, and the collection
+    # currently has vectors, repairing would drop it to lexical-only; that
+    # case needs `confirm` (mirrors cli/rag.py's --embed / --yes / the
+    # non-interactive confirm prompt it guards).
+    embed: bool = True
     confirm: bool = False
 
 
@@ -913,6 +925,103 @@ async def rag_reembed(name: str, request: Request):
 
     from localm.inference.http_server import principal_id
     job = jobs.start_fn("rag-reembed", _run, owner=principal_id(request))
+    return {"job_id": job.id}
+
+
+@_router.post("/api/rag/collections/{name}/repair")
+async def rag_repair(name: str, req: RagRepairRequest, request: Request):
+    """The GUI's answer to a "needs repair" badge: re-index every rebuildable
+    document in *name*, exactly like ``localm rag repair`` (add with
+    force=True from ``coll.documents()``). Job-backed and collection-locked
+    the same way as add/upload/reembed - ``coll.add_paths`` takes both locks
+    itself.
+
+    Two things the CLI already gets right that this mirrors rather than
+    reinvents (NEW-RAG-INDEX-WARN-SPAM):
+
+    Embeddings-loss guard (cli/rag.py:163-178). Repairing without embeddings
+    REMOVES them for every re-indexed document. *embed* defaults True so the
+    common case (an embedder is loaded) never loses anything silently; when
+    that would still drop existing vectors (no embedder available, or *embed*
+    is False, and the collection currently has vectors), this returns a
+    ``needs_confirm`` dry-run response instead of starting a job - the GUI
+    shows it and re-POSTs with ``confirm: true``, the same two-step shape
+    ``rag_embedding_set`` already uses for its own data-risk confirmation.
+
+    Upload-only documents cannot be rebuilt (residual C). The uploaded BYTES
+    are never retained (see ``add_uploads``'s docstring), so an
+    ``upload:<name>`` key has no source to re-extract from - add_paths()
+    silently drops it (``Path('upload:x').is_file()`` is always False). A
+    collection with NO rebuildable document at all is refused up front with an
+    honest reason, instead of running a job that reports "0 re-indexed" as if
+    it had fixed something; a MIXED collection proceeds on what it can rebuild
+    and the job log names how many upload-only documents were left untouched.
+    """
+    coll = _get_collection(name)
+    docs = coll.documents()
+    if not docs:
+        detail = (f"'{name}' index is corrupt and has no indexed documents to "
+                   "rebuild from." if coll.corrupt else
+                   f"'{name}' has no indexed documents.")
+        raise HTTPException(400, detail)
+    repairable = [d for d in docs if not d.startswith("upload:")]
+    upload_only = len(docs) - len(repairable)
+    if not repairable:
+        raise HTTPException(
+            400,
+            f"Every document in '{name}' was added via upload, so localm has "
+            "no server-side copy to rebuild from - repair cannot fix it here. "
+            "Re-upload the affected file(s) to restore them.")
+
+    self_embed, self_classify, self_describe = _self_services(request)
+    embed_fn = self_embed if req.embed else None
+    would_lose_embeddings = embed_fn is None and bool(coll.stats().get("has_vectors"))
+    if would_lose_embeddings and not req.confirm:
+        return {
+            "needs_confirm": True,
+            "detail": (
+                f"'{name}' currently has semantic (hybrid) search. Repairing "
+                + ("without an embedding model available " if req.embed
+                   else "without embeddings ")
+                + "will remove the existing embeddings for every re-indexed "
+                  "document (it goes back to BM25/lexical-only until "
+                  "re-embedded)."),
+        }
+
+    jobs = _require_jobs(request)
+    model_name = None
+    if embed_fn is not None:
+        from localm.config import load_config
+        from localm.inference.embedder import DEFAULT_EMBEDDING_MODEL
+        model_name = str(load_config().get("embedding_model")
+                          or DEFAULT_EMBEDDING_MODEL).strip()
+
+    def _run(job):
+        from localm.rag import CollectionLockedError
+        if upload_only:
+            job.push({"type": "line", "text": (
+                f"{upload_only} document(s) here were added via upload and "
+                "have no server-side source - they cannot be rebuilt and are "
+                "left as-is.")})
+        try:
+            result = coll.add_paths(
+                repairable, force=True, embed_fn=embed_fn,
+                classify_fn=self_classify, describe_image_fn=self_describe,
+                model_name=model_name, on_progress=_job_progress(job))
+        except (ValueError, CollectionLockedError) as e:
+            job.push({"type": "line", "text": f"error: {e}"})
+            return False
+        job.mark_outcome("done")
+        summary = (f"repaired: {result['updated']} re-indexed, "
+                   f"{result['added']} added - {result['chunks']} chunks total")
+        job.push({"type": "line", "text": summary})
+        for f in result["failed"][:10]:
+            job.push({"type": "line",
+                      "text": f"  failed: {f['path']}: {f['error']}"})
+        return True
+
+    from localm.inference.http_server import principal_id
+    job = jobs.start_fn("rag-repair", _run, owner=principal_id(request))
     return {"job_id": job.id}
 
 
