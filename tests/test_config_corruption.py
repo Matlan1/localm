@@ -79,9 +79,14 @@ class TestUnreadableConfigIsRefusedNotOverwritten:
     that default, and `_user_delta` would then persist ONLY the key just set,
     replacing every setting the user had while the caller reported success.
 
-    These assert on the FILE before the exception type: the file is the
-    property, the exception is a proxy, and a failure that reads "the config was
-    overwritten" cannot be mistaken for an assertion needing a tweak.
+    These assert on the FILE before the exception, and catch by hand rather
+    than with `pytest.raises`, deliberately: as a context manager `pytest.raises`
+    fails at the end of its `with` block, so a regression reports "DID NOT RAISE
+    ConfigUnreadable" and never reaches the file check. That is a proxy, and a
+    proxy invites adjusting the assertion. Catching by hand lets the data
+    assertion speak first, so a regression reports that the user's config was
+    destroyed - which cannot be talked away. (Measured: the first version of
+    these tests used `pytest.raises` and reported exactly the useless message.)
 
     Distinct from the valid-JSON-wrong-shape case above, which is deliberately
     still tolerated: a JSON string or list holds nothing recoverable, whereas an
@@ -96,16 +101,20 @@ class TestUnreadableConfigIsRefusedNotOverwritten:
         (cfg_home / "config.json.bak").write_text("{ nor this", encoding="utf-8")
         corrupt = p.read_bytes()
 
-        with pytest.raises(cfg.ConfigUnreadable) as ei:
+        raised = None
+        try:
             cfg.update_config(lambda c: c.__setitem__("embedding_model", "x"))
+        except cfg.ConfigUnreadable as e:
+            raised = e
 
         assert p.read_bytes() == corrupt, (
             "an unreadable config.json was OVERWRITTEN; every user setting "
             "(including net_mode and llama_runtime_pin) would be gone")
+        assert raised is not None, "update_config did not refuse"
         # Names the file so it is actionable, never the path: this message can
         # reach an HTTP error body via inference/routes/config.py.
-        assert "config.json" in str(ei.value)
-        assert str(cfg_home) not in str(ei.value)
+        assert "config.json" in str(raised)
+        assert str(cfg_home) not in str(raised)
 
     def test_update_registry_refuses_and_leaves_the_file_alone(self, cfg_home):
         """Worse than config: update_registry writes the WHOLE dict, so one
@@ -115,10 +124,16 @@ class TestUnreadableConfigIsRefusedNotOverwritten:
         p.write_text("{ not json", encoding="utf-8")
         corrupt = p.read_bytes()
 
-        with pytest.raises(cfg.ConfigUnreadable):
+        raised = None
+        try:
             cfg.update_registry(lambda r: r.__setitem__("b", {"path": "b.gguf"}))
+        except cfg.ConfigUnreadable as e:
+            raised = e
 
-        assert p.read_bytes() == corrupt, "an unreadable registry was overwritten"
+        assert p.read_bytes() == corrupt, (
+            "an unreadable registry.json was OVERWRITTEN; every registered "
+            "model but the one just added would be gone")
+        assert raised is not None, "update_registry did not refuse"
 
     def test_absent_config_still_writes(self, cfg_home):
         """The control: first run must be unaffected, or the refusal would be
