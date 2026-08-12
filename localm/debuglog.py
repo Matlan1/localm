@@ -136,6 +136,24 @@ def uvicorn_log_level() -> str:
 #  in this buffer even when --debug is on. Nothing here is written to disk on   #
 #  its own; it only leaves the machine if the user files AND sends a report,    #
 #  which they review and edit first.                                           #
+#                                                                              #
+#  PROCESS-LOCAL, NOT WHOLE-APP. install_ring_buffer() (below) is called once,  #
+#  at CLI startup, in the SERVER/parent process only. An isolated worker child  #
+#  (multiprocessing "spawn" - llamacpp/_runner.py, _hf_runner.py, etc.) is a    #
+#  fresh interpreter that never runs that call, so this buffer does not exist   #
+#  there: an INFO-level logger.info(...) inside a child is a genuine NO-OP      #
+#  unless the child has ALSO run attach_child_logging() (which requires --debug #
+#  already on - see that function below) - it never reaches THIS buffer either  #
+#  way, since a spawned child cannot share this module's in-memory state with   #
+#  its parent. INFO alone does not guarantee "reaches a bug report"; it only    #
+#  does so for code that executes in the process that called install_ring_     #
+#  buffer(). A child-side breadcrumb needs an explicit relay over its own IPC   #
+#  (an extra envelope back to the parent, which then logs it itself) to land    #
+#  here - verified empirically 2026-08-12, see dev-notes/generation-path-       #
+#  logging-instrumentation-2026-08-12.md for the measurement and the design     #
+#  this constraint forced (llamacpp/_runner.py's ModelRunner.chat_stream logs   #
+#  its own parent-side markers rather than assuming the child's INFO calls      #
+#  would surface here).                                                        #
 # --------------------------------------------------------------------------- #
 
 _RING_CAPACITY = 400
