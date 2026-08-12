@@ -468,6 +468,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
   made it in. The limit is now much higher, and a message rare enough to
   still exceed it is now marked as cut short instead of stopping without a
   word.
+- **`setup.sh` could misreport an NVIDIA machine as ROCm.** Its pre-venv
+  hardware guess checked for leftover ROCm tooling (`rocminfo`/`rocm-smi`/a
+  bare `/opt/rocm`) before ever checking `nvidia-smi`, so a box with real
+  NVIDIA hardware but some ROCm tooling still on PATH (a shared ML rig, a
+  base image bundling both vendor stacks) was detected as ROCm. `nvidia-smi`
+  is now checked first, matching the same vendor priority the authoritative
+  hardware recommendation already used. That guess also no longer prints
+  itself as a standalone "Detected acceleration" verdict, since it could
+  disagree with the real recommendation sourced from `python -m
+  localm.hwdetect` a few lines later; it now only gates the pre-venv "use GPU
+  acceleration?" prompt.
 
 ## [0.1.5rc2] - 2026-08-08
 
