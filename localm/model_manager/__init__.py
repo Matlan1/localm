@@ -37,11 +37,13 @@ from ..config import (
 from ._shared import PROGRESS_SENTINEL, _emit_outcome, _emit_progress, _verify_digest, console
 from .gguf import (
     _GGUF_MIN_BYTES,
+    _GGUF_SETTLE_SECONDS,
     _HASH_BLOCK_BYTES,
     _HASH_PROGRESS_MIN_BYTES,
     _HASH_READAHEAD_BLOCKS,
     _HASH_THREAD_MIN_BYTES,
     _gguf_first_parts,
+    _gguf_recently_written,
     _iter_file_blocks,
     _has_gguf_magic,
     _hash_with_progress,
@@ -138,7 +140,7 @@ __all__ = [
     "_HASH_THREAD_MIN_BYTES", "_iter_file_blocks",
     "_hash_with_progress", "_has_gguf_magic",
     "_gguf_first_parts", "_GGUF_MIN_BYTES", "gguf_embedding_signal", "gguf_is_mmproj",
-    "gguf_registry_metadata",
+    "gguf_registry_metadata", "_GGUF_SETTLE_SECONDS", "_gguf_recently_written",
     # registry
     "MODEL_SHORTCUTS", "_SHORTCUT_SIZES", "resolve_spec", "get_model_path",
     "get_model_info", "find_sibling_mmproj", "get_model_mmproj", "_hf_is_vision",

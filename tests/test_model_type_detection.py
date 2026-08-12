@@ -17,7 +17,9 @@ change is real):
 """
 
 import json
+import os
 import struct
+import time
 from pathlib import Path
 
 import pytest
@@ -26,6 +28,16 @@ from localm import model_manager as mm
 from localm.model_manager import gguf as _gguf_mod
 from localm.model_manager.gguf import gguf_embedding_signal, gguf_is_mmproj
 from localm.model_manager.pull import _hf_pipeline_tag_to_type
+
+
+def _backdate(path, seconds=60):
+    """Set path's mtime `seconds` in the past, so sync_models_dir's R45
+    settle check (localm.model_manager.gguf._gguf_recently_written) reads it
+    as settled rather than possibly still mid-copy - these tests are about
+    type detection, not the settle window, and would otherwise flake on the
+    write-then-immediately-sync timing."""
+    old = time.time() - seconds
+    os.utime(path, (old, old))
 
 
 @pytest.fixture
@@ -457,6 +469,7 @@ def test_add_local_full_gguf_llama_architecture_still_llm(tmp_path, isolated_hom
 def test_sync_models_dir_discovers_embedding_gguf(isolated_home):
     dest = isolated_home / "models" / "auto-embed.gguf"
     dest.write_bytes(_build_gguf_bytes("nomic-bert"))
+    _backdate(dest)
     result = mm.sync_models_dir()
     assert result.added == 1
     assert mm.load_registry()["auto-embed"]["model_type"] == "embedding"
@@ -589,6 +602,7 @@ def test_add_local_gguf_clip_architecture_is_mmproj(tmp_path, isolated_home):
 def test_sync_models_dir_discovers_mmproj_gguf(isolated_home):
     dest = isolated_home / "models" / "mmproj-gemma-3-4b-it-f16.gguf"
     dest.write_bytes(_build_gguf_bytes("clip"))
+    _backdate(dest)
     result = mm.sync_models_dir()
     assert result.added == 1
     assert mm.load_registry()["mmproj-gemma-3-4b-it-f16"]["model_type"] == "mmproj"

@@ -26,6 +26,7 @@ from ._shared import console
 from .gguf import _SPLIT_GGUF_RE
 from .gguf import _gguf_first_parts
 from .gguf import _has_gguf_magic
+from .gguf import _gguf_recently_written
 from .gguf import first_split_part
 from .gguf import split_gguf_parts
 from .gguf import gguf_embedding_signal
@@ -1303,6 +1304,9 @@ def sync_models_dir(prune: Optional[bool] = None) -> ModelSyncResult:
     Scans ``MODELS_DIR`` for models that aren't registered yet - loose GGUF
     files (split GGUFs are registered by their first part) and HuggingFace
     directories (any subfolder containing ``config.json``) - and registers them.
+    A loose GGUF whose mtime is too fresh (may still be mid-copy) is skipped
+    for this call and picked up on a later one, once it has been quiet for a
+    bit - see ``_gguf_recently_written``.
 
     Registry entries whose file has gone missing are, by default, **flagged**
     (``"missing": true``) rather than deleted, so a temporarily-unavailable model
@@ -1365,6 +1369,17 @@ def sync_models_dir(prune: Optional[bool] = None) -> ModelSyncResult:
                 if not _has_gguf_magic(child):
                     logger.debug("skipping %s: not a GGUF (bad/missing magic)",
                                  child.name)
+                    continue
+                # A file can clear the magic+size floor above while still being
+                # actively copied (R45: the floor only needs ~1KiB to have
+                # landed). Defer registration until its mtime has been quiet for
+                # a bit - the next sync_models_dir call (every launch / `models
+                # list`) picks it up once the copy has actually finished.
+                if _gguf_recently_written(child):
+                    logger.debug(
+                        "skipping %s: modified within the last few seconds, "
+                        "may still be mid-copy (will retry on the next sync)",
+                        child.name)
                     continue
                 mtype, gmeta = _detect_local_model_type(child, is_gguf=True, is_hf=False)
                 _mm._register(_unique_registry_name(reg, child.stem), child,
