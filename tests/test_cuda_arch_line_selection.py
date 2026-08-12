@@ -290,12 +290,16 @@ def test_pinned_fallback_offline_url_names_a_real_checksum_table_entry(monkeypat
     inside _resolve_backend_asset), the guessed filename for EITHER line must
     still be a REAL key in the pinned checksum table - i.e. this is a
     selection bug fix, not something that needs a new asset upstream doesn't
-    have."""
+    have.
+
+    Re-pointed from the old _FALLBACK_TAG to _PINNED_TAG when the dynamic
+    resolution was replaced by the pin, which STRENGTHENS it: the tag it now
+    covers is the one a default install actually resolves, and no _latest_tag
+    monkeypatch is needed because the default path makes no network call at all."""
     monkeypatch.setattr(sl, "_platform_key", lambda: "win32")
-    monkeypatch.setattr(sl, "_latest_tag", lambda: sl._FALLBACK_TAG)
     monkeypatch.setattr(sl, "_release_assets", lambda tag: [])
     url, sha, _tag = sl._resolve_backend_asset("cuda", cuda_line=line)
-    assert sl._FALLBACK_TAG in url
+    assert sl._PINNED_TAG in url
     assert expected_fragment in url
     fname = url.rsplit("/", 1)[-1]
     assert fname in sl._PINNED_FALLBACK_SHA256, (
@@ -307,7 +311,7 @@ def test_both_pinned_cuda_lines_share_the_same_upstream_tag():
     """Confirms the exact premise of this fix: both build lines - and both
     matching cudart bundles - are already pinned for the SAME upstream tag,
     so this was always a selection problem, never a missing-asset one."""
-    tag = sl._FALLBACK_TAG
+    tag = sl._PINNED_TAG
     for line, ver in (("cuda-12", "12.4"), ("cuda-13", "13.3")):
         build_name = f"llama-{tag}-bin-win-cuda-{ver}-x64.zip"
         cudart_name = f"cudart-llama-bin-win-cuda-{ver}-x64.zip"
@@ -344,10 +348,9 @@ def test_full_matrix_resolves_a_real_pair_and_never_gives_old_driver_new_line(
     assert info.driver_ok is expect_driver_ok
 
     # Whatever line the architecture needs, a build+cudart pair for it exists
-    # in the REAL pinned checksum table for the fallback tag (the selection
+    # in the REAL pinned checksum table for the PINNED tag (the selection
     # is always resolvable, never a dead end).
     monkeypatch.setattr(sl, "_platform_key", lambda: "win32")
-    monkeypatch.setattr(sl, "_latest_tag", lambda: sl._FALLBACK_TAG)
     monkeypatch.setattr(sl, "_release_assets", lambda t: [])
     url, sha, _tag = sl._resolve_backend_asset("cuda", cuda_line=info.cuda_line)
     fname = url.rsplit("/", 1)[-1]

@@ -267,7 +267,7 @@ def test_resolve_offline_falls_back_to_pinned_tag(monkeypatch):
     # 'vulkan' exists on win/linux; on darwin use 'cpu'.
     backend = "vulkan" if plat in ("win32", "linux") else "cpu"
     url = sl._resolve_backend_url(backend)
-    assert sl._FALLBACK_TAG in url
+    assert sl._PINNED_TAG in url
     assert backend.replace("amd-rocm", "rocm") in url or "macos" in url
     assert url.startswith(f"https://github.com/{sl._UPSTREAM_REPO}/releases/download/")
 
@@ -365,13 +365,74 @@ def test_resolve_backend_asset_resolves_sha256(monkeypatch):
 
 
 def test_resolve_backend_asset_fallback_uses_pinned_sha256(monkeypatch):
+    """A DEFAULT install stays checksum-verified when the release listing is
+    unavailable. The API and the download CDN are different hosts, so "the
+    listing is unreachable but the download works" is a real state (a rate limit
+    is the usual way in) - and it is precisely the state in which shipping an
+    unverified binary would be least acceptable."""
     monkeypatch.setattr(sl, "_release_assets", lambda tag, repo=None: [])
-    monkeypatch.setattr(sl, "_latest_tag", lambda: "b9870")
     monkeypatch.setattr(sl, "_platform_key", lambda: "win32")
 
     url, sha, _tag = sl._resolve_backend_asset("vulkan")
-    assert "llama-b9870-bin-win-vulkan-x64.zip" in url
-    assert sha == "8687a8405447853ccbd6b15bd7ccda23bb79cf85dd83243401e514bd9e45ed8a"
+    fname = f"llama-{sl._PINNED_TAG}-bin-win-vulkan-x64.zip"
+    assert fname in url
+    assert sha == sl._PINNED_FALLBACK_SHA256[fname]
+    assert sha, "the pin must ship a checksum, or the offline path is unverified"
+
+
+@pytest.mark.parametrize("plat, backend", [
+    ("win32", "cpu"), ("win32", "vulkan"), ("win32", "sycl"), ("win32", "hip"),
+    ("linux", "cpu"), ("linux", "vulkan"), ("linux", "sycl"), ("linux", "hip"),
+    ("darwin", "cpu"), ("darwin", "metal"),
+])
+def test_offline_resolution_names_a_real_pinned_asset_for_every_backend(
+        monkeypatch, plat, backend):
+    """WITH THE LISTING UNAVAILABLE, every backend must still resolve to a
+    filename the pinned table actually has - i.e. to a real asset of the pinned
+    release, with a checksum.
+
+    This is the test that catches an upstream RENAME, which is not hypothetical:
+    the Windows ROCm asset went from `bin-win-hip-radeon-x64` to
+    `bin-win-rocm-7.14-x64` at b10356, and the Linux one is
+    `bin-ubuntu-rocm-7.14-x64.ZIP` - a .zip off win32, which the old templated
+    guess could not express at all. Both silently produced a 404 URL with no
+    checksum. Driven per (platform, backend) rather than for one representative,
+    because a rename hits exactly one cell of that grid.
+
+    linux/cuda is excluded deliberately: upstream publishes no bare Linux CUDA
+    asset, so it resolves against a third party entirely (ADR-0010)."""
+    monkeypatch.setattr(sl, "_platform_key", lambda: plat)
+    monkeypatch.setattr(sl, "_release_assets", lambda tag, repo=None: [])
+
+    url, sha, tag = sl._resolve_backend_asset(backend)
+
+    fname = url.rsplit("/", 1)[-1]
+    assert tag == sl._PINNED_TAG
+    assert fname in sl._PINNED_FALLBACK_SHA256, (
+        f"{plat}/{backend} offline resolved to {fname!r}, which is not an asset "
+        f"of the pinned release {sl._PINNED_TAG}")
+    assert sha == sl._PINNED_FALLBACK_SHA256[fname]
+
+
+def test_every_pinned_asset_belongs_to_a_pinned_tag():
+    """The offline table looks assets up by FILENAME, so an entry for a tag
+    nothing installs can never be hit - while its presence reads as coverage for
+    a build that is actually unsupported. That is how the table came to carry the
+    entire asset list of b9870 long after anything resolved to it.
+
+    Enforced generally rather than for ROCm alone (the narrower version of this
+    check missed the other twenty-odd stale entries sitting beside it), so
+    bumping the pin without refreshing the digests fails here."""
+    known = {sl._PINNED_TAG, sl._ROCM_TAG}
+    stale = [k for k in sl._PINNED_FALLBACK_SHA256
+             # cudart bundles carry no tag in their names - upstream re-uploads
+             # the same file every release (byte-identical digests measured at
+             # b9870 and b10375), so they are legitimately tag-free.
+             if not k.startswith("cudart-")
+             and not any(f"-{t}-" in k or k.startswith(f"llama-{t}-") for t in known)]
+    assert not stale, (
+        f"pinned assets for a tag localm does not pin ({', '.join(sorted(known))}): "
+        f"{stale}")
 
 
 def test_resolve_amd_rocm_asset_warns_when_release_lookup_fails(monkeypatch, capsys):
@@ -850,13 +911,14 @@ def test_every_rocm_pin_matches_the_current_tag():
     # Match the lemonade-sdk naming (`-rocm-gfx<target>-`) specifically. A bare
     # "rocm" substring also catches upstream's own ggml-org asset
     # `llama-<tag>-bin-ubuntu-rocm-7.2-x64.tar.gz`, which is pinned against
-    # _FALLBACK_TAG and has nothing to do with _ROCM_TAG.
+    # _PINNED_TAG and has nothing to do with _ROCM_TAG.
     rocm = [k for k in sl._PINNED_FALLBACK_SHA256 if "-rocm-gfx" in k]
     assert rocm, "the pinned table should still carry the lemonade ROCm assets"
     stale = [k for k in rocm if sl._ROCM_TAG not in k]
     assert not stale, f"pinned ROCm assets for a tag other than {sl._ROCM_TAG}: {stale}"
-    # And the upstream ROCm asset must still track _FALLBACK_TAG, so this test
-    # cannot be satisfied by simply deleting entries.
+    # And upstream's OWN rocm assets must track _PINNED_TAG, so this test cannot
+    # be satisfied by simply deleting entries.
     upstream_rocm = [k for k in sl._PINNED_FALLBACK_SHA256
                      if "rocm" in k and "-rocm-gfx" not in k]
-    assert all(sl._FALLBACK_TAG in k for k in upstream_rocm), upstream_rocm
+    assert upstream_rocm, "upstream's own rocm assets should be pinned too"
+    assert all(sl._PINNED_TAG in k for k in upstream_rocm), upstream_rocm

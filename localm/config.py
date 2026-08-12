@@ -179,13 +179,18 @@ CONFIG_FILE = HOME_DIR / "config.json"
 # here reaches every existing install (see save_config / _user_delta).
 DEFAULT_CONFIG: dict = {
     "binary_dir": None,    # None = auto-detect (runtime wheel, then legacy dirs)
-    # Which llama.cpp release `setup-llama` provisions. Empty = track upstream's
-    # newest release with uploaded assets (the historical behaviour); a tag such
-    # as "b10355" pins that exact build until the user clears it. A pin exists
-    # because upstream can ship a build that is broken on a given box - three
-    # times in one week - and without it there is no way to say "that build is
-    # bad here, give me the previous one". Read by setup_llama._tag_for(), so
-    # `localm update`'s re-provision inherits it with no extra plumbing.
+    # Which llama.cpp release `setup-llama` provisions. Empty = the build localm
+    # ships and confirmed (setup_llama._PINNED_TAG); the literal "latest" opts in
+    # to whatever upstream published most recently, which localm has not tested;
+    # a tag such as "b10355" pins that exact build until the user changes it.
+    #
+    # Empty MEANT "track upstream's newest" until 2026-08-12, and that is why the
+    # key exists at all: upstream can ship a build that is broken on a given box
+    # (three times in one week), and there was no way to say "that build is bad
+    # here, give me another one". The default is now the tested build, so the key
+    # is what OPTS OUT of it rather than what rescues you from it. Read by
+    # setup_llama._tag_for()/tracks_latest(), so `localm update`'s re-provision
+    # inherits the choice with no extra plumbing.
     "llama_runtime_pin": "",
     # Append-only log of the runtime builds actually provisioned on this box,
     # newest LAST: [{"backend": ..., "tag": ..., "at": <epoch>}, ...]. It is what

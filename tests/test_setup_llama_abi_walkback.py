@@ -1,21 +1,35 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """The installer must never hand the user a runtime our OWN ABI gate rejects.
 
-`_latest_tag()` resolves upstream's newest release at RUNTIME, so localm can be
-handed a build it refuses to load without any localm change at all - upstream
+An install used to resolve upstream's newest release at RUNTIME, so localm could
+be handed a build it refuses to load without any localm change at all - upstream
 publishes, and the next `setup-llama` on any installed version picks it up. That
-happened three times in one week.
+happened three times in one week. The default is now `_PINNED_TAG`, a build
+confirmed to load AND generate, so that path only exists for a user who opted in
+with `--tag latest`.
 
 This is a SAFETY NET, not the remedy. The remedy is binding the new struct
-layout. Nothing here names a specific tag, and none of it should: the property
-is "never ship a runtime our gate rejects", whichever tag and whatever the cause.
-Once a layout is bound, the rejection stops and this code simply never runs.
+layout. NOTHING HERE NAMES A TAG NUMBER, and none of it should - for two reasons
+now. The property is "never ship a runtime our gate rejects", whichever tag and
+whatever the cause; and a test keyed on a tag number stops being able to fail the
+moment the pin moves, which it is meant to do often. Tests reference
+`sl._PINNED_TAG`, never its value.
 
-Why the walk is over TAGS and not backends: an ABI rejection means the BUILD is
-wrong for this code, so every backend from that release fails identically (field
-issue 1208 reports cuda, vulkan AND cpu all AbiMismatch together). The existing
-backend fallback cannot help, and running it first would move the user off the
-backend they asked for to fix something that was never the backend's fault.
+WHAT CHANGED WITH THE PIN, since these tests were reshaped rather than written
+fresh: the recovery WAS a bounded WALK that tried up to three older releases and
+kept whichever loaded. That selects a version while setup is running - the thing
+the pin exists to stop - and its destination was "an older build that LOADS",
+which is a build nobody has generated a token with. It is now a FLOOR: exactly
+one destination, `_PINNED_TAG`, reachable only from a tracking install, and loud
+in every branch including the three that install nothing.
+
+Why the recovery is over TAGS and not backends: an ABI rejection means the BUILD
+is wrong for this code, so every backend from that release fails identically
+(field issue 1208 reports cuda, vulkan AND cpu all AbiMismatch together, and the
+structural reason is that one shared llama library carries the struct). The
+existing backend fallback cannot help, and running it first would move the user
+off the backend they asked for to fix something that was never the backend's
+fault.
 """
 
 from __future__ import annotations
@@ -212,22 +226,28 @@ def test_latest_tag_still_takes_the_newest_usable_release(monkeypatch):
     assert sl._latest_tag() == "b297"
 
 
-def test_latest_tag_falls_back_when_nothing_is_usable(monkeypatch, capsys):
+def test_latest_tag_falls_back_to_the_confirmed_pin_when_nothing_is_usable(
+        monkeypatch, capsys):
+    """The unavailable case hands back the CONFIRMED build, not some older one.
+    A user who asked to track upstream and cannot reach it is better served by
+    the build we tested than by an arbitrary release nobody has run."""
     monkeypatch.setattr(sl, "_recent_tags", lambda *a, **k: [])
-    assert sl._latest_tag() == sl._FALLBACK_TAG
+    assert sl._latest_tag() == sl._PINNED_TAG
     assert "rerun later" in _flat(capsys), "the fallback must be visible"
 
 
 # --------------------------------------------------------------------------- #
-#  The walk-back                                                                #
+#  The floor (was: the walk-back)                                              #
+#                                                                              #
+#  Every test below names sl._PINNED_TAG rather than a literal tag. A test      #
+#  keyed on a tag NUMBER stops being able to fail the moment the pin is bumped, #
+#  and the pin is meant to be bumped often.                                     #
 # --------------------------------------------------------------------------- #
 
-def _walk(monkeypatch, home, *, recent, loads, rejected="b300", pin=None):
-    """Drive _walk_back_tags with a recorded try/load sequence.
+def _floor(monkeypatch, home, *, loads, rejected="b300", pin=None, tracking=False):
+    """Drive _floor_at_pinned_tag with a recorded try/load sequence.
     Returns (result, tags_tried)."""
-    if pin:
-        sl.set_pinned_tag(pin)
-    monkeypatch.setattr(sl, "_recent_tags", lambda *a, **k: list(recent))
+    sl.set_pinned_tag(pin if pin else (sl._TRACK_LATEST if tracking else None))
     tried: list = []
 
     def try_fn(backend, cudart, tag=None):
@@ -235,68 +255,105 @@ def _walk(monkeypatch, home, *, recent, loads, rejected="b300", pin=None):
 
     seq = iter(loads)
     monkeypatch.setattr(sl, "_native_loads_ok", lambda: next(seq))
-    got = sl._walk_back_tags("vulkan", False, rejected, try_fn, "layout drift")
+    got = sl._floor_at_pinned_tag("vulkan", False, rejected, try_fn, "layout drift")
     return got, tried
 
 
-def test_walk_back_installs_the_first_older_release_that_loads(monkeypatch, home, capsys):
-    (ok, tag), tried = _walk(monkeypatch, home,
-                             recent=["b300", "b299", "b298"],
-                             loads=[(False, "still wrong"), (True, "")])
-    assert (ok, tag) == (True, "b298")
-    assert tried == ["b299", "b298"], "oldest-last, and the rejected tag skipped"
+def test_floor_installs_the_confirmed_pin_when_tracking_upstream(
+        monkeypatch, home, capsys):
+    """The case the floor exists for: the user opted into upstream's newest, our
+    gate refused it, and the destination is the ONE build we confirmed."""
+    (ok, tag), tried = _floor(monkeypatch, home, tracking=True,
+                              loads=[(True, "")])
+    assert (ok, tag) == (True, sl._PINNED_TAG)
+    assert tried == [sl._PINNED_TAG], "one destination, and it is the constant"
     out = _flat(capsys)
-    assert "b298" in out and "b300" in out, "say which build, and instead of what"
+    assert sl._PINNED_TAG in out and "b300" in out, "say which build, and instead of what"
     assert "does not match this build of localm" in out, "say WHY it is not the newest"
 
 
-def test_walk_back_is_bounded(monkeypatch, home):
-    """An unbounded scan would download a runtime per iteration against a
-    genuinely broken environment."""
-    recent = [f"b{300 - i}" for i in range(12)]
-    (ok, _tag), tried = _walk(monkeypatch, home, recent=recent,
-                              loads=[(False, "no")] * 12)
-    assert ok is False
-    assert len(tried) == sl._ABI_WALKBACK_MAX, tried
+def test_floor_never_selects_an_arbitrary_older_release(monkeypatch, home):
+    """The whole reshape in one assertion. The predecessor walked up to three
+    OTHER releases, choosing at setup time whichever happened to load - a version
+    decided while setup ran, on the ABI gate alone, landing the user on a build
+    nobody had generated a token with. The floor has exactly one destination and
+    it is a constant, so it cannot reach a release a human did not choose."""
+    called: list = []
+    monkeypatch.setattr(sl, "_recent_tags",
+                        lambda *a, **k: called.append("recent") or ["b299", "b298"])
+    (ok, tag), tried = _floor(monkeypatch, home, tracking=True, loads=[(True, "")])
+    assert tried == [sl._PINNED_TAG]
+    assert called == [], "the release listing must not even be consulted"
 
 
-def test_walk_back_never_moves_off_a_user_pin(monkeypatch, home, capsys):
-    """A pin is an explicit choice, so walking off it is the exact override the
-    project forbids. Report it and stop, naming both escape commands."""
-    (ok, tag), tried = _walk(monkeypatch, home, recent=["b300", "b299"],
-                             loads=[], pin="b300")
+def test_floor_never_moves_off_a_user_pin(monkeypatch, home, capsys):
+    """A pin is an explicit choice, so moving off it is the exact override the
+    project forbids. Report it and stop, naming the escape commands."""
+    (ok, tag), tried = _floor(monkeypatch, home, loads=[], pin="b300")
     assert (ok, tag) == (False, None)
-    assert tried == [], "a pinned build must not be walked back from"
+    assert tried == [], "a pinned build must not be moved off"
     out = _flat(capsys)
-    assert "--rollback" in out and "--tag latest" in out
+    assert "--rollback" in out and "--tag latest" in out and "--tag default" in out
     assert sl.pinned_tag() == "b300", "and the pin itself is untouched"
 
 
-def test_walk_back_reports_when_no_older_release_exists(monkeypatch, home, capsys):
-    (ok, _t), tried = _walk(monkeypatch, home, recent=["b300"], loads=[])
-    assert ok is False and tried == []
-    assert "No older llama.cpp release" in _flat(capsys)
+def test_floor_refuses_to_go_below_itself_on_a_default_install(
+        monkeypatch, home, capsys):
+    """A DEFAULT install that gets an ABI rejection has been handed a build
+    localm itself pinned and its own binding rejects - a localm bug. Saying so is
+    the value of this branch: silently installing some older release instead
+    would swap a bug we can fix for a runtime nobody can vouch for."""
+    (ok, tag), tried = _floor(monkeypatch, home, rejected=sl._PINNED_TAG, loads=[])
+    assert (ok, tag) == (False, None)
+    assert tried == [], "nothing below the floor may be installed"
+    out = _flat(capsys)
+    assert "no more-tested build" in out
+    assert "bug in localm" in out, "name whose fault it is, or the user hunts theirs"
 
 
-def test_walk_back_survives_a_provision_error_and_keeps_going(monkeypatch, home):
-    """One release failing to download must not end the recovery."""
-    sl.set_pinned_tag(None)
-    monkeypatch.setattr(sl, "_recent_tags", lambda *a, **k: ["b300", "b299", "b298"])
+def test_floor_refuses_when_the_install_is_not_tracking_upstream(
+        monkeypatch, home, capsys):
+    """Same refusal by the other route: an unpinned, non-tracking install that
+    somehow rejected a DIFFERENT tag still has nothing more tested to fall to."""
+    (ok, tag), tried = _floor(monkeypatch, home, rejected="b999", loads=[])
+    assert (ok, tag) == (False, None) and tried == []
+    assert "no more-tested build" in _flat(capsys)
+
+
+def test_floor_reports_a_provision_error_rather_than_hunting_elsewhere(
+        monkeypatch, home, capsys):
+    """If the confirmed build cannot be fetched, that is the end of the recovery.
+    The predecessor moved on to the next candidate here; there is no next
+    candidate now, and inventing one would be the dynamic selection this
+    replaced."""
+    sl.set_pinned_tag(sl._TRACK_LATEST)
     tried: list = []
 
     def try_fn(backend, cudart, tag=None):
         tried.append(tag)
-        if tag == "b299":
-            raise OSError("404")
+        raise OSError("404")
 
     monkeypatch.setattr(sl, "_native_loads_ok", lambda: (True, ""))
-    ok, tag = sl._walk_back_tags("vulkan", False, "b300", try_fn, "drift")
-    assert (ok, tag) == (True, "b298")
-    assert tried == ["b299", "b298"]
+    ok, tag = sl._floor_at_pinned_tag("vulkan", False, "b300", try_fn, "drift")
+    assert (ok, tag) == (False, None)
+    assert tried == [sl._PINNED_TAG]
+    assert "could not be provisioned" in _flat(capsys)
+
+
+def test_floor_reports_when_the_confirmed_build_itself_will_not_load(
+        monkeypatch, home, capsys):
+    """Both causes said out loud: the release we refused, and the fact that the
+    build we vouch for did not load here either."""
+    (ok, tag), tried = _floor(monkeypatch, home, tracking=True,
+                              loads=[(False, "still wrong")])
+    assert (ok, tag) == (False, None)
+    assert tried == [sl._PINNED_TAG]
+    out = _flat(capsys)
+    assert "did not load either" in out and "still wrong" in out
 
 
 # --------------------------------------------------------------------------- #
-#  Wiring: the walk-back runs, and runs BEFORE the backend fallback             #
+#  Wiring: the floor runs, and runs BEFORE the backend fallback                 #
 # --------------------------------------------------------------------------- #
 
 def _wire(monkeypatch, tmp_path, loads):
@@ -319,21 +376,22 @@ def _wire(monkeypatch, tmp_path, loads):
     return provisioned
 
 
-def test_an_abi_rejection_walks_tags_and_keeps_the_users_backend(
+def test_an_abi_rejection_floors_at_the_pin_and_keeps_the_users_backend(
         monkeypatch, tmp_path, home):
-    """The property, end to end: the user asked for cuda, the newest release is
-    refused by our gate, and they end on cuda from an older release - NOT on
-    vulkan. Walking backends first would have swapped their pick to fix
-    something that was never the backend's fault."""
+    """The property, end to end: the user tracks upstream, asked for cuda, the
+    newest release is refused by our gate, and they end on cuda from the
+    CONFIRMED build - NOT on vulkan. Falling back by backend first would have
+    swapped their pick to fix something that was never the backend's fault."""
     abi = f"{sl._ABI_REJECT_PREFIX}: load_mode = -1"
     provisioned = _wire(monkeypatch, tmp_path, [(False, abi), (True, "")])
+    sl.set_pinned_tag(sl._TRACK_LATEST)
 
     backend, tag = sl._provision_with_fallback("cuda", tmp_path, None, True,
                                                assume_yes=True)
 
-    assert backend == "cuda", "the user's backend must survive a tag walk-back"
-    assert tag == "b299"
-    assert provisioned == [("cuda", None), ("cuda", "b299")]
+    assert backend == "cuda", "the user's backend must survive the floor"
+    assert tag == sl._PINNED_TAG
+    assert provisioned == [("cuda", None), ("cuda", sl._PINNED_TAG)]
     assert all(b == "cuda" for b, _ in provisioned), "no backend fallback ran"
 
 
@@ -350,19 +408,38 @@ def test_a_non_abi_failure_still_falls_back_by_backend(monkeypatch, tmp_path, ho
 
     assert backend == "vulkan"
     assert [b for b, _ in provisioned] == ["cuda", "vulkan"]
-    assert all(t is None for _b, t in provisioned), "no tag walk-back was attempted"
+    assert all(t is None for _b, t in provisioned), "no tag floor was attempted"
 
 
-def test_walk_back_failing_still_reaches_the_backend_fallback(
+def test_the_floor_failing_still_reaches_the_backend_fallback(
         monkeypatch, tmp_path, home):
-    """If no older release loads either, it was not release drift after all, so
-    the existing recovery must still get its turn rather than being swallowed."""
+    """If the confirmed build does not load either, it was not release drift
+    after all, so the existing recovery must still get its turn rather than
+    being swallowed."""
     abi = f"{sl._ABI_REJECT_PREFIX}: load_mode = -1"
     provisioned = _wire(monkeypatch, tmp_path,
                         [(False, abi), (False, abi), (True, "")])
+    sl.set_pinned_tag(sl._TRACK_LATEST)
 
     backend, _tag = sl._provision_with_fallback("cuda", tmp_path, None, True,
                                                 assume_yes=True)
 
     assert backend == "vulkan"
     assert [b for b, _ in provisioned] == ["cuda", "cuda", "vulkan"]
+
+
+def test_a_default_install_reaches_the_backend_fallback_without_a_tag_retry(
+        monkeypatch, tmp_path, home):
+    """The default install's shape end to end: an ABI rejection is reported, no
+    second tag is installed (there is nothing more tested to install), and the
+    ordinary backend fallback still runs so the user is not simply stuck."""
+    abi = f"{sl._ABI_REJECT_PREFIX}: load_mode = -1"
+    provisioned = _wire(monkeypatch, tmp_path, [(False, abi), (True, "")])
+    sl.set_pinned_tag(None)
+
+    backend, _tag = sl._provision_with_fallback("cuda", tmp_path, None, True,
+                                                assume_yes=True)
+
+    assert backend == "vulkan"
+    assert [b for b, _ in provisioned] == ["cuda", "vulkan"]
+    assert all(t is None for _b, t in provisioned), "no second tag was installed"
