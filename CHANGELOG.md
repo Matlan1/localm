@@ -12,6 +12,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Settings can now check for, and apply, a newer llama.cpp runtime build.**
+  Previously the only way to move to a different build was the
+  `setup-llama --tag`/`--rollback` command line. There is now a Runtime update
+  card next to the ordinary Updates card: it reports whether a different build
+  is available for your installed backend (honouring a pin if you have set
+  one), and an Update button re-provisions it and streams progress, the same
+  way the ComfyUI update panel does. A build that fails to load on your
+  machine is never kept; setup-llama's existing safety net walks back to one
+  that does.
 - **You can now pin the llama.cpp build localm installs, and go back to a
   previous one.** localm always fetched whichever llama.cpp release was newest
   on the day you installed, and kept no record of which one that was - so an
@@ -54,6 +63,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   for a run that changed nothing.
 
 ### Fixed
+- **`localm update` now actually replaces the llama.cpp runtime when a release
+  needs it to.** A release that ships a newer llama.cpp build was supposed to
+  re-provision your runtime as part of the update, but the step that does this
+  always found the old binaries already in place and skipped re-provisioning
+  entirely, silently keeping the outdated build while still reporting the
+  update as successful.
 - **localm no longer installs a llama.cpp runtime it then refuses to load.** A
   fresh `localm setup-llama` fetches the newest upstream build, and from build
   b10373 onward localm rejected what it had just installed with "incompatible
