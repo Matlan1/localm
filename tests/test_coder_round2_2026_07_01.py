@@ -69,7 +69,7 @@ def test_repeated_response_breaker_aborts(tmp_path):
     with patch.object(agent, "_call_llm", return_value=fixed):
         result = agent.run_task("do the thing")
     assert "circuit breaker" in result.lower()
-    assert "repeated the same response" in result.lower()
+    assert "repeated essentially the same response" in result.lower()
     # It stopped well before the turn ceiling.
     assert agent._turns < 12
 
