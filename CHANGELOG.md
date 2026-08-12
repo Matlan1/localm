@@ -111,6 +111,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   attached to, so an install still installs and a finished task still
   finishes, but both now leave a warning naming what went wrong, and a bug
   report carries it.
+- **The last case where a requested grammar was quietly ignored is closed: a
+  GGUF model now refuses the request instead of answering without the
+  grammar.** Asking for a "lazy" grammar (one that lets the model write freely
+  until a trigger appears, then enforces the grammar from there) still fell
+  through to unconstrained generation in one place - on a llama.cpp runtime too
+  old to have the feature, or if the trigger patterns were left out. The reply
+  came back as an ordinary success, so nothing told you it did not follow the
+  grammar you asked for. It is now refused with a message naming which of the
+  two it was and what to do instead, the loaded model stays loaded, and the
+  coder carries on without trigger-based tool calls rather than failing.
 - **A couple of dismissable UI hints (the NVIDIA/Vulkan backend hint, and
   whether the Studio nav group is expanded) could survive turning on privacy
   mode, unlike every other saved GUI preference.** Both were already withheld

@@ -577,12 +577,18 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         probe available and it cannot be called in the server parent (it raises
         RuntimeError when no runtime is provisioned, and loads llama.dll into this
         process when one is - see ``BaseBackend.validate_grammar`` for the
-        measurement). A GGUF build lacking the native lazy export therefore still
-        drops the grammar at generation time behind a DEBUG line in
-        ``llamacpp/llama.py``; that gap is OPEN and tracked in
-        ``dev-notes/lazy-grammar-silent-unconstrained-2026-08-12.md``. Answering
-        "supported" here to look complete would be the worse of the two, because a
-        capability claim is something callers act on."""
+        measurement). Answering "supported" here to look complete would be the
+        worse of the two, because a capability claim is something callers act on.
+
+        What silence here costs is now only EARLINESS. A GGUF build lacking the
+        native lazy export used to DROP the grammar at generation time behind a
+        DEBUG line and answer with unconstrained text; ``_build_sampler`` in
+        ``llamacpp/llama.py`` now RAISES :class:`GrammarUnsupportedError` there
+        instead, and ``_runner.py`` carries that type across the worker IPC as a
+        tagged envelope, so the caller gets the same clean 400 it would have got
+        from an up-front check - one request later, and never a reply that
+        silently does not match the grammar. Evidence:
+        ``dev-notes/lazy-grammar-silent-unconstrained-2026-08-12.md``."""
         if grammar and self.loaded and self._runner is not None:   # property, see count_tokens
             try:
                 self._runner.check_grammar(grammar)

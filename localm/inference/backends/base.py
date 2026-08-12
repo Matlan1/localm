@@ -195,6 +195,25 @@ GRAMMAR_LAZY_UNSUPPORTED_MESSAGE = (
 )
 
 
+# Shown when a LAZY grammar is requested with NO trigger patterns. Deliberately a
+# THIRD message rather than a reuse of GRAMMAR_LAZY_UNSUPPORTED_MESSAGE above,
+# because the two need OPPOSITE recoveries and one of them is not the caller's to
+# make: this one is fixed by supplying grammar_triggers, that one only by dropping
+# grammar_lazy or changing model. Reusing the other string would also be actively
+# harmful, not merely imprecise - ``coder/agent/context.py`` latches
+# ``_lazy_grammar_confirmed_unsupported`` on a SUBSTRING match against it, so a
+# caller that simply forgot its triggers would permanently disable trigger-gated
+# tool-call sampling for the rest of that session, blaming the backend for its own
+# omission. Kept mutually non-containing with both other messages (asserted in
+# tests/test_lazy_grammar.py) so no substring overlap can re-open that route.
+GRAMMAR_LAZY_NO_TRIGGERS_MESSAGE = (
+    "A lazy grammar was requested with no trigger patterns, so nothing could ever "
+    "switch the grammar on and the reply would not match it. Send grammar_triggers "
+    "alongside grammar_lazy, or resend without grammar_lazy to constrain the whole "
+    "reply."
+)
+
+
 def messages_contain_image(messages: List[dict]) -> bool:
     """True if any message carries an ``image_url`` content part.
 
@@ -279,7 +298,16 @@ class BaseBackend(ABC):
         would paper over. So only a backend that can PROVE it cannot do lazy
         overrides this and refuses - see ``HFBackend.validate_grammar``, whose
         answer rests on a static fact about xgrammar rather than on a probe.
-        Evidence: ``dev-notes/lazy-grammar-silent-unconstrained-2026-08-12.md``.
+
+        Staying silent HERE no longer costs honesty, only earliness. GGUF's
+        sampler build now RAISES :class:`GrammarUnsupportedError` when it cannot
+        apply the lazy grammar, instead of dropping it and generating
+        unconstrained text (see ``llamacpp/llama.py``'s ``_build_sampler``), and
+        that type survives the worker IPC as a tagged envelope, so the caller
+        still gets a 400 naming the real problem - one request later than an
+        up-front check would have, and never a reply that quietly does not match
+        the grammar. Evidence:
+        ``dev-notes/lazy-grammar-silent-unconstrained-2026-08-12.md``.
         """
         if not grammar:
             return
