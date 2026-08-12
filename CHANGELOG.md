@@ -583,6 +583,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   ever falls below the fixed version. Nothing watched it before: the library
   is vendored directly and appears in no lockfile, so no dependency scanner
   could ever have reported it.
+- **Stopping the coder once no longer makes every later exit pause to think.**
+  Stopping a task (or answering no to "Keep going?") was recorded as a failed
+  session and never unrecorded, so from then on quitting `localm coder` waited
+  on the model while it wrote a lesson about the session - even when everything
+  after the stop went fine and nothing was changed. Stopping is you asking to
+  leave, not a failure, so it no longer counts as one. A task that genuinely
+  failed still records its lesson, including when you stop the next one.
 
 ## [0.1.5rc2] - 2026-08-08
 
