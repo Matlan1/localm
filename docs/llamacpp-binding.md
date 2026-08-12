@@ -211,6 +211,42 @@ A mid-struct reorder/insert exits non-zero; a purely trailing addition is a note
 `--ref latest` and also provisions the real cpu prebuilt to run `verify_abi`
 against the actual binary.
 
+### Enum domains
+
+Layout and domain are different questions, and the layout half is structurally
+blind to the other. An offset check reads WHERE a field sits; it cannot see
+WHICH VALUES are legal in it. Upstream added `LLAMA_LOAD_MODE_AUTO = -1` between
+b10361 and b10373 and made it the new default, so `llama_model_default_params()`
+started returning -1 into a field whose offset had not moved by one byte.
+localm's `_VALID_LOAD_MODES` did not list -1, so localm refused every build from
+b10373 on while the weekly layout gate stayed green the whole time. It was not
+broken; it was answering an adjacent question. **"Passes the ABI gate" is
+therefore not the definition of a confirmed build.**
+
+So the same run also diffs the DOMAIN of every enum localm binds, listed in
+`_ENUM_BINDINGS`. Member values are read live out of the localm module that owns
+them, never restated in the script, so the verifier compares against the same
+constants the runtime uses. The two outcomes are deliberately distinct:
+
+| upstream change | outcome | why |
+|---|---|---|
+| a NEW member localm does not bind | reported loudly, exit code unchanged | additive on its own. Hard-failing here would train people to widen localm's accept-sets to silence the gate, destroying the misaligned-read tripwire that reads them |
+| a CHANGED VALUE for a member localm binds | non-zero exit | a number localm passes or accepts has changed meaning |
+
+Two more cases it keeps apart, because a bare "the enum is not in this header"
+cannot tell them apart: if the struct FIELD that uses the enum is also absent,
+the header simply predates the feature and it is skipped (b9870 has neither
+`llama_model_params.load_mode` nor `enum llama_load_mode`); if the field is
+present and the enum is not, the domain is UNVERIFIED and that fails. A member
+localm binds which the header lacks is a note rather than a failure, because the
+pinned v2 ref b10360 legitimately predates `AUTO`.
+
+The additive report is the b10373 detector, and it has a limit worth stating: a
+new member is only dangerous once it becomes the DEFAULT, and a header cannot
+show that (`llama.h` declares `llama_model_default_params` and never defines
+it). On seeing that report, bind the member and then re-probe a real build's
+`llama_*_default_params()`.
+
 ### Bumping the bundled build
 
 When you change the prebuilt localm fetches (`DEFAULT_URL` or the pinned tag):
@@ -222,7 +258,11 @@ When you change the prebuilt localm fetches (`DEFAULT_URL` or the pinned tag):
    currently-shipped builds, not all - see `LlamaContextParamsV1`/`V2` above for
    the pattern) and re-probe a real build; update the `_abi` anchors only if a
    keystone moved;
-3. bump the relevant entry in `LLAMA_ABI_REFS` in `scripts/check_llama_abi.py`.
+3. if it reports a NEW enum member, bind it (and add it to `_ENUM_BINDINGS`),
+   then re-probe a real build's `llama_*_default_params()` - the header cannot
+   tell you whether the new member became the default, which is the half that
+   caused the b10373 outage;
+4. bump the relevant entry in `LLAMA_ABI_REFS` in `scripts/check_llama_abi.py`.
 
 ## API Bindings (`_api.py`)
 
