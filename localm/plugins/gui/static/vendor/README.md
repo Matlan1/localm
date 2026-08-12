@@ -26,14 +26,37 @@ the toolchain noticed, because there was nothing that could.
 
 ## What replaces the missing signal
 
-`tests-js/vendor-dompurify.test.mjs` loads the real `purify.min.js` bytes and
-asserts both a version floor and the actual security behaviour. It is the only
-thing in the repo that reads a vendored file, and it runs under `npm test`.
+`tests-js/vendor-dompurify.test.mjs` and `tests-js/vendor-katex.test.mjs` load
+the real vendored bytes and assert both a version floor and the actual security
+behaviour. They are the only things in the repo that read a vendored file, and
+they run under `npm test`.
 
 DOMPurify matters most because it is the sole enforcing XSS barrier on the main
-shell (the shell's CSP is still report-only), so it gets the version floor. The
-other libraries here have no such guard yet. Until they do, check them by hand
-when you touch this directory.
+shell (the shell's CSP is still report-only). KaTeX has its own guard for the
+same reason DOMPurify does: it sat on 0.16.11 for the whole affected range of
+CVE-2025-23207 / GHSA-cg87-wmx4-v546 and nothing noticed.
+
+`marked`, `highlight.js` and `jsQR` still have no guard. Until they do, check
+them by hand when you touch this directory.
+
+### Two things the KaTeX guard had to do differently
+
+**Not every library carries a version.** `katex.min.js` exposes a runtime
+`katex.version`, but `auto-render.min.js` and `katex.min.css` carry no version
+string at all, and none of the three has a banner comment. Those two are pinned
+by recorded content hash instead, which is the only thing that can say which
+upstream build they came from. `jsQR.min.js` has the same problem in a worse
+form (no version string and no upstream minified artefact to hash against).
+
+**A content hash must be taken over CRLF-normalised bytes.** This repo has
+`core.autocrlf=true` and no `.gitattributes` rule covering this directory, so
+any vendored file containing a newline is checked out with different bytes than
+the blob git stores. Measured: `katex.min.css` is 23335 B in git and 23336 B in
+a Windows working tree; `jsQR.min.js` 130469 vs 130470; `highlight.min.js`
+121727 vs 122939. Only `katex.min.js` and `auto-render.min.js` contain no
+newline at all, so only those two hash identically either way. A raw-byte hash
+would pass on one platform and fail on the other, and the failure would read as
+a corrupted vendor drop rather than a line-ending artefact.
 
 ## Re-vendoring
 
@@ -48,6 +71,28 @@ tar -xzf dompurify-<version>.tgz
 cp package/dist/purify.min.js localm/plugins/gui/static/vendor/purify.min.js
 npm test                              # the vendor guard runs here
 ```
+
+KaTeX is three files that MUST move together, from one release. A half-bump
+renders visibly broken: 0.18.0's one breaking change prefixed the structural CSS
+classes (`base` became `katex-base`, and likewise `strut` and `sizing`), so a new
+`katex.min.js` beside an old `katex.min.css` produces unstyled math while every
+assertion about the file you did replace still passes. `vendor-katex.test.mjs`
+checks that pairing directly.
+
+```
+npm pack katex@<version>
+tar -xzf katex-<version>.tgz
+cp package/dist/katex.min.js            localm/plugins/gui/static/vendor/katex.min.js
+cp package/dist/katex.min.css           localm/plugins/gui/static/vendor/katex.min.css
+cp package/dist/contrib/auto-render.min.js \
+                        localm/plugins/gui/static/vendor/auto-render.min.js
+npm test    # then update VENDORED_VERSION + PINNED in tests-js/vendor-katex.test.mjs
+```
+
+Check `package/dist/fonts/` against `vendor/fonts/` when you bump KaTeX. All 20
+woff2 files were byte-identical between 0.16.11 and 0.18.4, so that directory has
+not needed to move so far, but the CSS references them by name and a font
+revision would.
 
 You do not need to touch the service worker. `sw.js`'s `CACHE` constant is a
 content digest computed per request over every cacheable asset under
