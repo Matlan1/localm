@@ -117,7 +117,19 @@ class Detection:
         A vendor found by a tool that DID answer (nvidia-smi / rocm-smi /
         rocminfo on PATH) is positive proof and stays ``"found"`` even when the
         adapter-name enumeration failed: a failed probe cannot retract evidence
-        another probe supplied."""
+        another probe supplied.
+
+        NOT the same thing as ``discover.GPU_PROBE_OK`` / ``_TIMEOUT`` / ``_BUSY``
+        / ``_INCONCLUSIVE``, and deliberately not shared with it. That vocabulary
+        describes the RUNTIME torch/nvidia-smi device enumeration (an outcome per
+        probe attempt); this describes the INSTALL-TIME adapter-name detection (a
+        conclusion about the machine), and the two run at different moments off
+        different tools. They also cannot be unified even if someone wanted to:
+        this module is pure stdlib on purpose because ``setup.sh`` and
+        ``setup.bat`` invoke it via ``python -m localm.hwdetect``, while
+        ``discover`` imports ``localm.vram`` and ``model_manager``. The shared
+        idea is only the rule both obey - AGENTS.md rule 5, an empty result must
+        say whether anyone actually looked."""
         if self.vendors:
             return "found"
         return "none" if self.probe_ok else "unknown"
