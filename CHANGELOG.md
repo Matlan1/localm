@@ -652,6 +652,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   unchanged, and the three KaTeX files localm ships are now covered by a test
   that reads them, fails below the fixed version, and fails if they ever come
   from different releases.
+- **A bug report now says when it could not collect your debug log, instead of
+  leaving the section out as though there was nothing to report.** A report
+  attaches the log from the run it is about. If that file could not be read, or
+  no log for that run could be found, the report simply had no log section, and
+  that looks exactly like a run that logged nothing worth reporting. The report
+  now says which of those happened and why (for example "permission denied"),
+  so a missing log is visible rather than being mistaken for a clean one. The
+  reason is the operating system's own short message: it never includes the
+  file's location or your account name, and a log that was read normally and
+  had nothing notable in it still adds nothing to the report.
 
 ## [0.1.5rc2] - 2026-08-08
 

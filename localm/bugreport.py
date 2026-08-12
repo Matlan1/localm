@@ -477,6 +477,83 @@ def _find_run_log(home=None, pid=None):
     return next((p for p in logs if not p.name.endswith(cur)), None)
 
 
+# Why the log digest came back empty, when it did. An empty digest used to mean
+# THREE unrelated things at once - no log file matched this run's pid, the file
+# was found but could not be read, or the run genuinely logged nothing notable -
+# and all three rendered as the same thing in the report: no log section at all.
+# The first two are FAILURES to collect and the third is a clean result, so a
+# report was silently missing the one artifact the maintainer needs while looking
+# complete (AGENTS.md rule 5: a step that failed must not report success). These
+# are the reasons a caller can attach so the report SAYS which happened.
+_LOG_UNAVAILABLE_NO_FILE = "no log file was found for that run"
+
+
+def _log_failure_reason(exc: BaseException) -> str:
+    """A one-line, PATH-FREE description of why reading the log failed, safe to
+    put in a share-intended report.
+
+    MEASURED, and it is the whole reason this helper exists rather than an
+    inline f-string: the obvious formattings leak the user's home directory and
+    therefore their username, which AGENTS.md rules 1 and 2 forbid in anything
+    this module emits.
+
+        str(exc)      "[Errno 13] Permission denied: " + the FULL absolute path
+                      of the log file, which is under the user's home dir and so
+                      contains their account name.                          LEAKS
+        exc.filename  that same absolute path.                              LEAKS
+        repr(exc)     "PermissionError(13, 'Permission denied')" - safe for
+                      OSError ONLY, because its __repr__ drops the filename,
+                      while a ValueError("boom " + path) reprs with the path
+                      intact.
+
+    So the reason is built from the exception CLASS NAME plus ``strerror`` - the
+    OS's own errno text ("Permission denied"), which carries no path and is
+    absent on non-OSError, where the class name alone is all we say. A detail
+    containing a path separator is dropped outright rather than trusted: that
+    makes a leak UNREPRESENTABLE instead of relying on strerror happening never
+    to contain one. _scrub_secrets is a further backstop for the home-path form.
+    """
+    name = type(exc).__name__
+    detail = getattr(exc, "strerror", None)
+    if not isinstance(detail, str):
+        detail = ""
+    detail = detail.strip()
+    # Structural guard, not a scrubber: anything path-shaped is discarded whole.
+    if any(sep in detail for sep in ("/", "\\")):
+        detail = ""
+    reason = f"{name}: {detail}" if detail else name
+    return _scrub_secrets(reason)[:200]
+
+
+def _recent_log_tail_result(home=None, pid=None, max_chars: int = 6000) -> tuple:
+    """``(digest, unavailable_reason)`` - the digest _recent_log_tail returns,
+    plus WHY it is empty when it is empty.
+
+    Exactly one of the two is ever non-empty. An empty reason alongside an empty
+    digest is the honest third case: the log WAS collected and simply held
+    nothing notable, which needs no line in the report. Never raises."""
+    try:
+        chosen = _find_run_log(home, pid)
+        if chosen is None:
+            return "", _LOG_UNAVAILABLE_NO_FILE
+        raw = chosen.read_text(encoding="utf-8", errors="replace")
+        truncated = len(raw) > _LOG_TAIL_READ_BYTES
+        if truncated:
+            raw = raw[-_LOG_TAIL_READ_BYTES:]
+        from localm._log_digest import build_digest
+        # start_tainted=truncated: a truncated tail can start mid-way through
+        # a debug_content_enabled() write with no header of its own (#961
+        # follow-up) - build_digest must not trust whatever it finds first.
+        return _scrub_secrets(
+            build_digest(raw, max_chars=max_chars, start_tainted=truncated)), ""
+    except Exception as e:
+        # Still swallowed - collecting a log is best effort and must never break
+        # the report it is attached to. What changed is that the caller is now
+        # TOLD, instead of an unreadable log being indistinguishable from a
+        # clean one.
+        return "", f"the log file could not be read ({_log_failure_reason(e)})"
+
+
 def _recent_log_tail(home=None, pid=None, max_chars: int = 6000) -> str:
     """A digest of the crashed run's OWN log, matched by the pid embedded in the
     log filename (localm_<date>_<time>_<pid>.log): EVERY warning/error (with its
@@ -487,23 +564,12 @@ def _recent_log_tail(home=None, pid=None, max_chars: int = 6000) -> str:
     was filed (#617); this survives that regardless of how long the session ran
     afterward. Chat content (a raw model reply, a memory-embed snippet, a web-tool
     query) is dropped by build_digest before this ever sees it, whatever the
-    content itself says (#961). Home paths are scrubbed. Never raises."""
-    try:
-        chosen = _find_run_log(home, pid)
-        if chosen is None:
-            return ""
-        raw = chosen.read_text(encoding="utf-8", errors="replace")
-        truncated = len(raw) > _LOG_TAIL_READ_BYTES
-        if truncated:
-            raw = raw[-_LOG_TAIL_READ_BYTES:]
-        from localm._log_digest import build_digest
-        # start_tainted=truncated: a truncated tail can start mid-way through
-        # a debug_content_enabled() write with no header of its own (#961
-        # follow-up) - build_digest must not trust whatever it finds first.
-        return _scrub_secrets(
-            build_digest(raw, max_chars=max_chars, start_tainted=truncated))
-    except Exception:
-        return ""
+    content itself says (#961). Home paths are scrubbed. Never raises.
+
+    Returns only the digest. A caller that renders a REPORT wants
+    _recent_log_tail_result instead, so it can say why an empty digest is
+    empty."""
+    return _recent_log_tail_result(home, pid, max_chars)[0]
 
 
 # A hang trace older than this cannot plausibly belong to the run being reported,
@@ -753,6 +819,15 @@ def build_report(summary: str, reason: str = "",
     tail = ctx.get("recent_log_tail")
     if tail:
         parts += ["", "## Recent log (tail)", "```", _scrub_home(str(tail))[:4000], "```"]
+    elif ctx.get("log_unavailable"):
+        # Say the log could not be COLLECTED rather than rendering nothing. An
+        # omitted section is indistinguishable from a clean run, so triage reads
+        # a failed collection as "the log had nothing in it" and stops looking
+        # (AGENTS.md rule 5). The reason is built path-free at its source - see
+        # _log_failure_reason - and scrubbed again here like every other
+        # context-supplied string.
+        parts += ["", "## Recent log (tail)",
+                  f"(not collected: {_scrub_secrets(str(ctx['log_unavailable']))[:200]})"]
     hang = ctx.get("hang_traces")
     if hang:
         parts += ["", "## Server hang trace (event-loop stall)",
@@ -980,9 +1055,14 @@ def save_user_report(description: str = "", *, summary: str = "",
             context["what_happened"] = what_happened
         if include_log:
             import os
-            tail = _recent_log_tail(pid=os.getpid())
+            # The reason matters only when the user ASKED for the log: with
+            # include_log false there is nothing to explain, and a "not
+            # collected" line would misreport an opt-out as a failure.
+            tail, log_unavailable = _recent_log_tail_result(pid=os.getpid())
             if tail:
                 context["recent_log_tail"] = tail
+            elif log_unavailable:
+                context["log_unavailable"] = log_unavailable
         # Always attach a hang trace captured by THIS run (independent of
         # include_log): it only exists if the server actually froze, and it is the
         # single most useful thing for diagnosing a "the app hung" report. Scoped to
@@ -1832,9 +1912,14 @@ def _report_one_crash_marker(d, marker, home, interactive: bool):
             ctx["native_trace"] = trace[:4000]
         # Attach the crashed run's own log tail (matched by pid) so the report is
         # actionable even with no native trace (window-close / OS-kill leave none).
-        tail = _recent_log_tail(home, pid=info.get("pid"))
+        tail, log_unavailable = _recent_log_tail_result(home, pid=info.get("pid"))
         if tail:
             ctx["recent_log_tail"] = tail
+        elif log_unavailable:
+            # A crash report with no native trace and no log is the contentless
+            # case BUG-1 was about; saying WHY the log is missing is the
+            # difference between an actionable report and a dead end.
+            ctx["log_unavailable"] = log_unavailable
         # If the watchdog captured a freeze before the run was force-killed, attach
         # its stacks too: a hang the user force-quit is exactly this recovery path.
         # The CRASHED run's freeze, matched by its pid like the log tail above -
