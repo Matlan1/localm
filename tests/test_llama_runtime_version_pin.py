@@ -247,6 +247,23 @@ def test_history_collapses_a_repeat_instead_of_appending(home):
     assert tags == ["b10300", "b10361"]
 
 
+def test_a_failed_history_write_is_reported_not_only_logged(monkeypatch, capsys, home):
+    """A silent journal failure resurfaces much later as --rollback's "nothing to
+    roll back to", which reads identically to "you have only ever had this
+    build". Two different situations, one message - so say it when it happens.
+    Still not fatal: the install itself succeeded."""
+    def boom(mutator):
+        raise OSError("config is read-only")
+
+    monkeypatch.setattr(cfg, "update_config", boom)
+
+    sl._record_runtime_history("vulkan", "b10361")   # must not raise
+
+    out = capsys.readouterr().out
+    assert "could not record it for rollback" in out
+    assert "b10361" in out and "read-only" in out, "name the build and the cause"
+
+
 def test_history_ignores_a_tagless_provision(home):
     """A --from/--url install has no tag, so journalling it would let --rollback
     offer a target it cannot install."""

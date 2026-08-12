@@ -447,6 +447,17 @@ def _record_runtime_history(backend: str, tag: "Optional[str]") -> None:
         config.update_config(_mutate)
     except Exception as e:
         logger.debug("could not record the runtime history entry %r: %s", entry, e)
+        # Visible, not only in the debug log: without this the failure shows up
+        # much later as "no earlier build is recorded ... nothing to roll back
+        # to", which collapses two different situations into one message - "you
+        # have only ever had this build" and "we could not write down that you
+        # had another one". Said here, at the moment it happens, the user can
+        # act on it; said later by --rollback, it is indistinguishable from
+        # normal. Still not fatal: the install itself succeeded.
+        console.print(f"[yellow]Warning:[/yellow] installed {backend} {tag}, but "
+                      f"could not record it for rollback ({e}). "
+                      "[bold]localm setup-llama --rollback[/bold] will not offer "
+                      "this build later.")
 
 
 def runtime_history() -> list:
