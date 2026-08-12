@@ -975,6 +975,10 @@
   </div>
 </div>
 
+<!-- Hand-vendored upstream dist builds, byte-exact, with NO package.json entry -
+     so no dependency scanner can see them and a CVE in one produces no alert.
+     See vendor/README.md before re-vendoring; tests-js/vendor-dompurify.test.mjs
+     is the version/behaviour guard that stands in for the missing tooling. -->
 <script src="/vendor/marked.min.js"></script>
 <script src="/vendor/purify.min.js"></script>
 <script src="/vendor/highlight.min.js"></script>
