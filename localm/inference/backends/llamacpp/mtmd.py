@@ -118,6 +118,94 @@ def _encode_threads() -> int:
     return max(1, n - 1)
 
 
+_MTMD_DEVICE_ENV = "MTMD_BACKEND_DEVICE"
+
+
+def _resolve_backend_device_name(gpu_index: int) -> Optional[str]:
+    """The ggml device NAME (e.g. ``"Vulkan1"``) to pin the projector to for
+    llama.cpp GPU-list index *gpu_index*, or None when localm cannot determine it
+    UNAMBIGUOUSLY - in which case the caller leaves ``MTMD_BACKEND_DEVICE`` unset
+    and clip keeps today's behaviour (the first GPU-type device).
+
+    WHY THIS EXISTS: ``mtmd_context_params`` has no device field, so the only
+    selector is the process environment variable ``MTMD_BACKEND_DEVICE``, read in
+    clip_ctx's constructor (upstream ``tools/mtmd/clip.cpp:184-195`` at b10361).
+    Unset, clip takes ``ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_GPU)``
+    unconditionally, with zero awareness of tensor_split or main_gpu - which is how
+    a field capture showed ``CLIP using Vulkan0 backend`` while the configured split
+    ran the text model on devices 1 and 2, parking ~857 MiB of projector weights and
+    a 248 MiB compute buffer on the one card the user had excluded.
+
+    THE INDEX SPACE, AND WHY THE TYPE CHECK BELOW IS THE WHOLE GUARD. *gpu_index*
+    is ``mp.main_gpu``, which indexes llama.cpp's OWN ``model->devices``, whereas
+    ``compute_devices()`` reports ggml's FULL registry. Those two sequences are NOT
+    interchangeable: ``llama_prepare_model_devices`` (upstream ``src/llama.cpp``
+    :149-296) hoists RPC devices to the front, deduplicates GPUs by device_id,
+    SKIPS ACCEL and META entirely, and admits iGPUs only when no discrete GPU was
+    found (and then at most one). Read against the shipped runtime, two of those
+    cannot arise here and one can:
+
+    * RPC devices need an explicit ``ggml_backend_rpc_add_server(endpoint)``
+      (``ggml-rpc.cpp:1949-1951``); localm never calls it, so merely shipping
+      ggml-rpc registers no device.
+    * ggml-vulkan already dedups one physical GPU seen under two drivers, by
+      deviceUUID/deviceLUID (``ggml-vulkan.cpp:7446-7470``), so a device_id
+      duplicate cannot reach the registry from a single-backend build.
+    * An INTEGRATED GPU can and routinely does: ggml-vulkan enumerates it
+      (``:7444``) and types it ``GGML_BACKEND_DEVICE_TYPE_IGPU`` (``:17878``),
+      while llama.cpp drops it whenever any discrete GPU exists. On a laptop, or
+      any desktop with iGPU-bearing silicon, the registry therefore contains a
+      device llama.cpp's list does not - and every index past it is wrong.
+
+    So: refuse unless EVERY non-CPU device is a plain ``GPU``. Under that condition
+    the two sequences are provably identical and ``non_cpu[gpu_index]`` is exact,
+    not assumed. Refusing costs today's behaviour; guessing would move ~1 GB onto a
+    card chosen by arithmetic nobody could check.
+
+    Index 0 returns None deliberately rather than resolving to the same device:
+    clip's own default already picks it, so there is nothing to correct and no
+    reason to spend the risk. That keeps every default install byte-identical."""
+    from localm.debuglog import logger
+    if gpu_index <= 0:
+        return None      # already clip's default; nothing to change
+    try:
+        from . import _loader
+        devices = _loader.compute_devices()
+    except Exception as e:      # noqa: BLE001 - a probe failure must not lose vision
+        logger.info(
+            "mtmd: could not read the ggml device registry (%s); leaving the "
+            "vision projector on the default GPU device", type(e).__name__)
+        return None
+
+    non_cpu = [(name, dev_type) for (name, dev_type) in devices
+               if dev_type != _loader.GGML_DEV_TYPE_CPU]
+    reason: Optional[str] = None
+    if not non_cpu:
+        reason = "the runtime registers no GPU device"
+    elif any(t != _loader.GGML_DEV_TYPE_GPU for _, t in non_cpu):
+        # The iGPU/ACCEL case above: llama.cpp's device list is a filtered
+        # subsequence of this one, so the index cannot be mapped by position.
+        reason = ("the device registry mixes device types (%s), so localm cannot "
+                  "map a device index to a name unambiguously"
+                  % ", ".join(f"{n}:type{t}" for n, t in non_cpu))
+    elif gpu_index >= len(non_cpu):
+        reason = (f"device index {gpu_index} is out of range "
+                  f"({len(non_cpu)} GPU device(s) registered)")
+    elif not non_cpu[gpu_index][0]:
+        reason = f"device index {gpu_index} reported an empty name"
+    if reason is not None:
+        # Rule 5, surface the decision: the user asked for a non-default device
+        # and the projector is NOT going there. INFO so the always-on ring buffer
+        # carries it into a bug report (matching implicit_split_capacity's
+        # decision-logging contract), rather than a WARNING the user cannot act on.
+        logger.info(
+            "mtmd: leaving the vision projector on the default GPU device "
+            "(device 0) rather than the configured device %d - %s",
+            gpu_index, reason)
+        return None
+    return non_cpu[gpu_index][0]
+
+
 def _load_lib() -> ctypes.CDLL:
     """Load mtmd.dll from the same runtime dir as llama.dll and bind the minimal
     API surface. Cached. The llama/ggml deps must already be loaded (they are - the
@@ -262,10 +350,24 @@ class MtmdContext:
     # conservative default - it means "do not suggest a CPU retry".
     on_gpu: bool = False
 
-    def __init__(self, mmproj_path: str, model_ptr: int) -> None:
+    # Same reason as the two defaults above: __init__ always sets it, and 0 is the
+    # conservative value - it means "the device clip would have picked anyway", so
+    # an instance built without __init__ pins nothing.
+    _gpu_index: int = 0
+
+    def __init__(self, mmproj_path: str, model_ptr: int,
+                 gpu_index: int = 0) -> None:
         self._m = _load_lib()
         self._mmproj_path = mmproj_path
         self._model_ptr = model_ptr
+        # The text model's resolved primary device (llama_model_params.main_gpu,
+        # after discover.apply_main_gpu/apply_gpu_split have validated it and
+        # forced it inside any configured split). Used to keep the projector off a
+        # device the user's configuration excluded - see _resolve_backend_device_name.
+        try:
+            self._gpu_index = int(gpu_index)
+        except (TypeError, ValueError):
+            self._gpu_index = 0
         self.on_gpu = True
         self._ctx = self._open(use_gpu=True)
         if not self._ctx:
@@ -315,7 +417,15 @@ class MtmdContext:
         the host) and matters enormously on the CPU one: mtmd's own default is a
         flat 4 regardless of the machine, so a 12-thread box was using a third of
         itself. ``LOCALM_MTMD_CPU=1`` is an escape hatch for a build/GPU where the
-        GPU encode is broken in a way that only shows up mid-encode."""
+        GPU encode is broken in a way that only shows up mid-encode.
+
+        DEVICE PLACEMENT is not a params field at all - clip reads the process
+        environment variable ``MTMD_BACKEND_DEVICE`` instead - so it is set around
+        THIS CALL ONLY and restored in a ``finally``. Scoped that tightly for three
+        reasons: it is process-global state that would otherwise leak into every
+        later library call; clip gates the read on ``use_gpu``, so the CPU attempt
+        and :meth:`retry_on_cpu` would never consult it anyway; and an already-set
+        value belongs to the USER and is never overwritten (see below)."""
         if use_gpu and os.environ.get("LOCALM_MTMD_CPU"):
             return None
         params = self._m.mtmd_context_params_default()
@@ -323,8 +433,33 @@ class MtmdContext:
         buf[0] = 1 if use_gpu else 0
         ctypes.cast(ctypes.byref(params, 4),
                     ctypes.POINTER(ctypes.c_int32))[0] = _encode_threads()
-        return self._m.mtmd_init_from_file(
-            self._mmproj_path.encode("utf-8"), self._model_ptr, params)
+
+        # An explicitly exported MTMD_BACKEND_DEVICE is the user's own choice and
+        # outranks anything derived from config: defer to it, never silently
+        # correct it (never-override-user-selection). Only resolve at all on the
+        # GPU attempt, the one path clip reads the variable on.
+        device_name = None
+        if use_gpu and not os.environ.get(_MTMD_DEVICE_ENV):
+            device_name = _resolve_backend_device_name(self._gpu_index)
+        if device_name is not None:
+            from localm.debuglog import logger
+            # Rule 5, surface the decision: WHICH device the projector landed on is
+            # exactly what the field capture could not answer. INFO reaches the
+            # always-on ring buffer, so a bug report carries it without --debug.
+            logger.info(
+                "mtmd: pinning the vision projector to ggml device %r (the text "
+                "model's configured primary device %d) via %s",
+                device_name, self._gpu_index, _MTMD_DEVICE_ENV)
+            os.environ[_MTMD_DEVICE_ENV] = device_name
+        try:
+            return self._m.mtmd_init_from_file(
+                self._mmproj_path.encode("utf-8"), self._model_ptr, params)
+        finally:
+            # Only ever unset what THIS call set: the branch above does not run
+            # when the variable already had a value, so there is nothing to
+            # restore and a user's own export is never clobbered.
+            if device_name is not None:
+                os.environ.pop(_MTMD_DEVICE_ENV, None)
 
     def retry_on_cpu(self) -> bool:
         """Rebuild this context on the CPU after a GPU encode failed at RUNTIME.
