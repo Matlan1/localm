@@ -165,9 +165,9 @@ def _resolve_backend_device_name(gpu_index: int) -> Optional[str]:
     Index 0 returns None deliberately rather than resolving to the same device:
     clip's own default already picks it, so there is nothing to correct and no
     reason to spend the risk. That keeps every default install byte-identical."""
-    from localm.debuglog import logger
     if gpu_index <= 0:
         return None      # already clip's default; nothing to change
+    from localm.debuglog import logger
     try:
         from . import _loader
         devices = _loader.compute_devices()
@@ -367,6 +367,16 @@ class MtmdContext:
         try:
             self._gpu_index = int(gpu_index)
         except (TypeError, ValueError):
+            # Unreachable from the one production caller (llama.py passes an int
+            # derived from mp.main_gpu), so this is a programming error, not a
+            # runtime condition. Degrade to 0 (= leave clip's own choice alone)
+            # rather than costing the user vision over a placement hint - but say
+            # so, because a silently-swallowed bad input is exactly what AGENTS.md
+            # rule 5 forbids.
+            from localm.debuglog import logger
+            logger.warning(
+                "mtmd: ignoring an unusable projector device index %r; the vision "
+                "projector will use the default GPU device", gpu_index)
             self._gpu_index = 0
         self.on_gpu = True
         self._ctx = self._open(use_gpu=True)
@@ -425,7 +435,14 @@ class MtmdContext:
         reasons: it is process-global state that would otherwise leak into every
         later library call; clip gates the read on ``use_gpu``, so the CPU attempt
         and :meth:`retry_on_cpu` would never consult it anyway; and an already-set
-        value belongs to the USER and is never overwritten (see below)."""
+        value belongs to the USER and is never overwritten (see below).
+
+        That set/restore is NOT serialised, and does not need to be only because
+        the projector is loaded once, inline, during a model load in a worker that
+        is doing nothing else at the time. Two concurrent ``_open`` calls in ONE
+        process would race on the variable (the second's restore could drop the
+        first's value); if a caller is ever added that loads two mmprojs at once,
+        this needs a lock."""
         if use_gpu and os.environ.get("LOCALM_MTMD_CPU"):
             return None
         params = self._m.mtmd_context_params_default()
@@ -438,8 +455,14 @@ class MtmdContext:
         # outranks anything derived from config: defer to it, never silently
         # correct it (never-override-user-selection). Only resolve at all on the
         # GPU attempt, the one path clip reads the variable on.
+        #
+        # PRESENCE, not truthiness: an exported-but-EMPTY value is still the user's
+        # variable, and it is not equivalent to unset for clip either (it takes the
+        # getenv branch, fails to init by that name and warns). Testing membership
+        # also makes the pop below provably safe - we only ever set the key when it
+        # was absent, so unsetting it cannot delete a value somebody else owned.
         device_name = None
-        if use_gpu and not os.environ.get(_MTMD_DEVICE_ENV):
+        if use_gpu and _MTMD_DEVICE_ENV not in os.environ:
             device_name = _resolve_backend_device_name(self._gpu_index)
         if device_name is not None:
             from localm.debuglog import logger

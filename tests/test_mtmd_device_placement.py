@@ -237,6 +237,19 @@ class TestOpenSetsTheEnvironment:
         assert lib.seen_env == "Vulkan0"                       # not overridden
         assert os.environ[mtmd_mod._MTMD_DEVICE_ENV] == "Vulkan0"   # not deleted
 
+    def test_an_exported_empty_value_is_still_the_users(self, monkeypatch):
+        """An exported-but-empty MTMD_BACKEND_DEVICE is the user's variable, and it
+        is NOT equivalent to unset for clip (it takes the getenv branch, fails to
+        init by that name, warns, and falls back). Deferring on PRESENCE rather
+        than truthiness is also what makes the cleanup provably safe: localm only
+        ever sets the key when it was absent, so it can never delete this."""
+        _devices(monkeypatch, [("CPU", CPU), ("Vulkan0", GPU), ("Vulkan1", GPU)])
+        monkeypatch.setenv(mtmd_mod._MTMD_DEVICE_ENV, "")
+        lib = _FakeLib()
+        _ctx(lib, 1)._open(use_gpu=True)
+        assert lib.seen_env == ""                                   # not overridden
+        assert mtmd_mod._MTMD_DEVICE_ENV in os.environ              # not deleted
+
     def test_localm_mtmd_cpu_escape_hatch_still_short_circuits(self, monkeypatch):
         """The pre-existing opt-out must keep skipping the GPU attempt entirely,
         env resolution included."""
@@ -246,6 +259,61 @@ class TestOpenSetsTheEnvironment:
         assert _ctx(lib, 1)._open(use_gpu=True) is None
         assert lib.calls == 0
         assert mtmd_mod._MTMD_DEVICE_ENV not in os.environ
+
+
+class TestConstructorAppliesItInTime:
+    """Every test above sets ``_gpu_index`` by hand, so none of them can catch the
+    constructor setting it too LATE - after ``_open`` has already run. This drives
+    the real ``__init__``."""
+
+    def _fake_lib_class(self, lib):
+        lib.mtmd_support_vision = lambda ctx: True
+        lib.mtmd_default_marker = lambda: b"<__media__>"
+        return lib
+
+    def test_real_init_pins_before_the_gpu_open(self, monkeypatch):
+        _devices(monkeypatch, [("CPU", CPU), ("Vulkan0", GPU), ("Vulkan1", GPU)])
+        lib = self._fake_lib_class(_FakeLib())
+        monkeypatch.setattr(mtmd_mod, "_load_lib", lambda: lib)
+        # Skip the ABI probe: it needs a live native context, and the layout is a
+        # property of the LIBRARY that this test has no stake in.
+        monkeypatch.setattr(mtmd_mod, "_input_text_class", mtmd_mod._MtmdInputTextV2)
+
+        ctx = mtmd_mod.MtmdContext("/fake/mmproj.gguf", 0xBEEF, gpu_index=1)
+
+        assert ctx.on_gpu is True
+        assert lib.seen_env == "Vulkan1", (
+            "the constructor must set _gpu_index BEFORE _open runs; "
+            f"the native call saw {lib.seen_env!r}")
+        assert mtmd_mod._MTMD_DEVICE_ENV not in os.environ
+
+    def test_real_init_with_default_index_pins_nothing(self, monkeypatch):
+        _devices(monkeypatch, [("CPU", CPU), ("Vulkan0", GPU), ("Vulkan1", GPU)])
+        lib = self._fake_lib_class(_FakeLib())
+        monkeypatch.setattr(mtmd_mod, "_load_lib", lambda: lib)
+        monkeypatch.setattr(mtmd_mod, "_input_text_class", mtmd_mod._MtmdInputTextV2)
+
+        mtmd_mod.MtmdContext("/fake/mmproj.gguf", 0xBEEF)
+
+        assert lib.seen_env is None
+
+    def test_unusable_index_warns_and_keeps_vision(self, monkeypatch, caplog):
+        """A bad index must not cost the user vision, and must not be silent
+        either (rule 5). Unreachable from llama.py, which passes an int derived
+        from mp.main_gpu, so this pins the contract rather than a live path."""
+        _devices(monkeypatch, [("CPU", CPU), ("Vulkan0", GPU), ("Vulkan1", GPU)])
+        lib = self._fake_lib_class(_FakeLib())
+        monkeypatch.setattr(mtmd_mod, "_load_lib", lambda: lib)
+        monkeypatch.setattr(mtmd_mod, "_input_text_class", mtmd_mod._MtmdInputTextV2)
+
+        with caplog.at_level("WARNING", logger="localm"):
+            ctx = mtmd_mod.MtmdContext(
+                "/fake/mmproj.gguf", 0xBEEF, gpu_index="not-a-device")
+
+        assert ctx.on_gpu is True                 # vision survived
+        assert lib.seen_env is None               # fell back to clip's own choice
+        assert any("unusable projector device index" in r.getMessage()
+                   for r in caplog.records), "the bad index was swallowed silently"
 
 
 class TestLlamaCppPassesTheResolvedDevice:
