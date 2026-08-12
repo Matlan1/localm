@@ -98,14 +98,35 @@ llama_seq_id  = ctypes.c_int32   # sequence id
 # enum llama_load_mode  (V2 builds only - lemonade b1307 / upstream >= b10105)
 #
 # Replaces V1's separate use_mmap / use_mlock / use_direct_io booleans with a
-# single enum. Values read from llama.h at 07132750825a.
+# single enum. Values read from llama.h at 07132750825a, then re-read at b10373
+# for the AUTO addition below.
+#
+# AUTO IS NEGATIVE AND THAT IS NOT A MISREAD. Upstream added it between b10361
+# and b10373 and made it the new default, so `llama_model_default_params()` on a
+# current build returns -1 where an older one returned 1 (MMAP). MEASURED on the
+# real prebuilt Windows Vulkan runtimes, load_lib() called directly in-process:
+#
+#     b10361   split_mode=1  load_mode= 1  main_gpu=0
+#     b10373   split_mode=1  load_mode=-1  main_gpu=0
+#
+# The NEIGHBOURS are what prove this is a value change rather than a layout
+# shift: split_mode@20 and main_gpu@28 read identically and correctly on both
+# builds, and a shifted struct corrupts its neighbours. The header confirms it
+# independently - llama_model_params has 16 fields at BOTH tags, an identical
+# field list, so there is no V3 layout and nothing to re-bind.
+LLAMA_LOAD_MODE_AUTO       = -1  # let the build decide from device capabilities
 LLAMA_LOAD_MODE_NONE       = 0   # no special loading mode (i.e. no mmap)
-LLAMA_LOAD_MODE_MMAP       = 1   # memory map the model (the native default)
+LLAMA_LOAD_MODE_MMAP       = 1   # memory map the model (older builds' default)
 LLAMA_LOAD_MODE_MLOCK      = 2   # keep in RAM, no swap/compress
 LLAMA_LOAD_MODE_MMAP_MLOCK = 3   # both
 LLAMA_LOAD_MODE_DIRECT_IO  = 4   # direct I/O where available
 
+# This tuple MIRRORS llama.h's enumerators. It is not a policy knob and not a
+# tolerance - widening it to silence a refusal would destroy the misaligned-read
+# tripwire that reads it (see _abi.py's evaluate). AUTO is here because upstream
+# defines it, which is the only reason any value belongs here.
 _VALID_LOAD_MODES = (
+    LLAMA_LOAD_MODE_AUTO,
     LLAMA_LOAD_MODE_NONE,
     LLAMA_LOAD_MODE_MMAP,
     LLAMA_LOAD_MODE_MLOCK,
@@ -292,6 +313,16 @@ def get_use_mmap(mp) -> bool:
 
     DIRECT_IO is deliberately NOT mmap: upstream documents it as taking
     precedence over mmap, and V1 carried it as its own separate flag.
+
+    AUTO reports False, and that is a KNOWN IMPRECISION rather than an answer:
+    under LLAMA_LOAD_MODE_AUTO the build picks at load time from device
+    capabilities, so whether the weights end up mapped is not knowable from the
+    params at all, and a bool cannot say "undetermined". Left as-is deliberately
+    - every localm call site writes an explicit mode through set_use_mmap before
+    any read, so AUTO does not reach here in practice (there is no production
+    caller of this function today; only tests). Anyone who DOES start calling it
+    on unmodified default params on a b10373-or-newer build must not read False
+    as "mmap is off".
     """
     if isinstance(mp, LlamaModelParamsV2):
         return mp.load_mode in (LLAMA_LOAD_MODE_MMAP, LLAMA_LOAD_MODE_MMAP_MLOCK)
