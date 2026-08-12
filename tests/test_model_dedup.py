@@ -5,12 +5,21 @@ Tests for duplicate model detection, aliasing, and alias-aware removal.
 Two-tier identity: resolved path first, stored sha256 second.
 """
 
+import os
+import time
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
 from localm import model_manager as mm
+
+
+def _backdate(path, seconds=60):
+    """Set path's mtime `seconds` in the past, so sync_models_dir's R45
+    settle check reads it as settled rather than possibly still mid-copy."""
+    old = time.time() - seconds
+    os.utime(path, (old, old))
 
 
 @pytest.fixture()
@@ -253,6 +262,7 @@ class TestAddLocalDedup:
         store["first"] = {"path": str(gone.resolve()), "source": "local"}
         moved = models_dir / "m.gguf"
         moved.write_bytes(b"GGUF" + b"\x00" * 2048)     # the moved file, now in MODELS_DIR
+        _backdate(moved)   # the crash happened a while ago, not mid-copy right now
 
         result = mm.sync_models_dir(prune=False)
 
