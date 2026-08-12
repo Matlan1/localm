@@ -200,3 +200,164 @@ def test_native_gpu_devices_none_when_daemon_cannot_answer(monkeypatch):
     from localm.inference.backends.llamacpp import _loader
     monkeypatch.setattr(_loader, "gpu_devices_isolated", lambda: None)
     assert discover.native_gpu_devices() is None
+
+
+# ------------------------------------------------------------------ #
+#  llama.cpp's OWN device list (discover._llama_visible_devices)      #
+# ------------------------------------------------------------------ #
+#
+# native_device_inventory numbers EVERY non-CPU registry device. llama.cpp
+# indexes main_gpu / tensor_split into model->devices, which is built by
+# llama_prepare_model_devices (src/llama.cpp, read at b10361) as: RPC devices
+# hoisted to the front, then GPU-type devices in registry order deduped by
+# device_id, then at most ONE integrated GPU and only when no discrete GPU was
+# found; CPU and ACCEL are skipped and META aborts fatally. So on a box with a
+# discrete card beside integrated graphics the two numberings diverge, and a
+# configured split can name cards the user never chose.
+#
+# NONE OF THIS IS REPRODUCIBLE ON THIS PROJECT'S DEV BOX, which has one
+# discrete GPU and no iGPU (compute_devices() -> [("ROCm0", 1), ("CPU", 0)]).
+# These are synthetic inventories against a construction read from upstream
+# source, which is why the single-GPU and CPU-last shapes below are pinned
+# too: they are the arrangement that IS observed here.
+
+# The ggml device-type enum has GROWN: IGPU was inserted AHEAD of ACCEL, so the
+# value 2 means ACCEL on a runtime around b6000 and INTEGRATED GPU on anything
+# since roughly b8100. Only CPU=0 and GPU=1 have held at every tag sampled, so
+# the code allowlists GPU rather than excluding the others by value, and these
+# tests deliberately do NOT name 2 as one member or the other - a non-GPU type
+# is dropped either way, which is the property under test.
+_TYPE_GPU = 1
+_TYPE_NOT_GPU = 2
+
+
+def _native(monkeypatch, raw):
+    """Drive the REAL native_gpu_devices() over a synthetic raw inventory.
+
+    Deliberately not a direct _llama_visible_devices() call: the derivation was
+    extracted into a helper, and a test that only exercises the helper is blind
+    to whether native_gpu_devices actually applies it. These go through the
+    public function so reverting the wiring goes red."""
+    from localm import discover
+    from localm.inference.backends.llamacpp import _loader
+    monkeypatch.setattr(_loader, "gpu_devices_isolated", lambda: raw)
+    return discover.native_gpu_devices()
+
+
+def test_igpu_before_a_discrete_gpu_shifts_every_index(monkeypatch):
+    """THE case that bites: an iGPU enumerating FIRST. llama.cpp drops it (a
+    discrete GPU exists), so its model->devices is [discrete] and the discrete
+    card is device 0 - while the raw inventory calls it device 1. A user who
+    picked "1" from the old selector was naming a device the loader has none of."""
+    got = _native(monkeypatch, [
+        {"index": 0, "name": "Vulkan0", "description": "Intel UHD Graphics",
+         "type": _TYPE_NOT_GPU, "free": 2 * GB, "total": 4 * GB},
+        {"index": 1, "name": "Vulkan1", "description": "NVIDIA RTX 4090",
+         "type": _TYPE_GPU, "free": 20 * GB, "total": 24 * GB},
+    ])
+    assert got == [{"index": 0, "name": "NVIDIA RTX 4090",
+                    "total": 24 * GB, "free": 20 * GB, "type": _TYPE_GPU}]
+
+
+def test_igpu_after_a_discrete_gpu_is_still_dropped(monkeypatch):
+    """Same drop when the iGPU enumerates SECOND. Here the surviving index
+    happens to be unchanged, so this case cannot show a renumber - it is here
+    to prove the DROP is unconditional and not an artifact of ordering."""
+    got = _native(monkeypatch, [
+        {"index": 0, "name": "Vulkan0", "description": "NVIDIA RTX 4090",
+         "type": _TYPE_GPU, "free": 20 * GB, "total": 24 * GB},
+        {"index": 1, "name": "Vulkan1", "description": "Intel UHD Graphics",
+         "type": _TYPE_NOT_GPU, "free": 2 * GB, "total": 4 * GB},
+    ])
+    assert [d["index"] for d in got] == [0]
+    assert [d["name"] for d in got] == ["NVIDIA RTX 4090"]
+
+
+def test_second_discrete_card_becomes_reachable_across_an_igpu(monkeypatch):
+    """An iGPU BETWEEN two discrete cards. The second card is raw index 2, an
+    index llama.cpp's two-entry device list cannot address at all - so a split
+    of [0, 2] silently lost a card. It is device 1 after the derivation, and a
+    split across both is expressible."""
+    got = _native(monkeypatch, [
+        {"index": 0, "name": "Vulkan0", "description": "RTX 4090",
+         "type": _TYPE_GPU, "free": 20 * GB, "total": 24 * GB},
+        {"index": 1, "name": "Vulkan1", "description": "Intel UHD Graphics",
+         "type": _TYPE_NOT_GPU, "free": 2 * GB, "total": 4 * GB},
+        {"index": 2, "name": "Vulkan2", "description": "RTX 3090",
+         "type": _TYPE_GPU, "free": 18 * GB, "total": 24 * GB},
+    ])
+    assert [(d["index"], d["name"]) for d in got] == [
+        (0, "RTX 4090"), (1, "RTX 3090")]
+
+
+def test_igpu_only_box_is_left_exactly_as_it_was(monkeypatch):
+    """NO REGRESSION on the commonest affected machine. With no discrete GPU,
+    llama.cpp falls back to the single integrated one as device 0, which is
+    what this inventory already numbers 0 - the two agree and a load works
+    today. Returning [] here would hide a working device behind a "no GPU"
+    reading, which is a worse bug than the one being fixed."""
+    raw = [{"index": 0, "name": "Vulkan0", "description": "Intel Iris Xe",
+            "type": _TYPE_NOT_GPU, "free": 6 * GB, "total": 8 * GB}]
+    assert _native(monkeypatch, raw) == [
+        {"index": 0, "name": "Intel Iris Xe", "total": 8 * GB,
+         "free": 6 * GB, "type": _TYPE_NOT_GPU}]
+
+
+def test_device_with_no_reported_type_is_not_assumed_discrete(monkeypatch):
+    """The probe omits "type" when the registry did not report an int. Such a
+    device must fail the allowlist rather than be assumed a discrete GPU - but
+    with no GPU-type device present at all the list is still returned intact,
+    per the iGPU-only rule above."""
+    got = _native(monkeypatch, [
+        {"index": 0, "name": "Vulkan0", "description": "mystery",
+         "free": 1 * GB, "total": 2 * GB},
+    ])
+    assert [d["index"] for d in got] == [0]
+    assert "type" not in got[0]
+
+
+def test_untyped_device_beside_a_discrete_gpu_is_dropped(monkeypatch):
+    """The discriminating half of the case above: once a GPU-type device DOES
+    exist, an untyped one is excluded rather than counted. Without this the
+    previous test passes on code that simply never filters."""
+    got = _native(monkeypatch, [
+        {"index": 0, "name": "Vulkan0", "description": "mystery",
+         "free": 1 * GB, "total": 2 * GB},
+        {"index": 1, "name": "Vulkan1", "description": "RTX 4090",
+         "type": _TYPE_GPU, "free": 20 * GB, "total": 24 * GB},
+    ])
+    assert [(d["index"], d["name"]) for d in got] == [(0, "RTX 4090")]
+
+
+def test_all_discrete_multi_gpu_is_untouched(monkeypatch):
+    """The ordinary multi-GPU board: every device is a discrete GPU, so the
+    derivation is the identity and a configured [0, 1] keeps meaning what it
+    always did. Guards against "fixing" the divergence by renumbering boxes
+    that were never diverged."""
+    got = _native(monkeypatch, [
+        {"index": 0, "name": "Vulkan0", "description": "RTX 4090",
+         "type": _TYPE_GPU, "free": 20 * GB, "total": 24 * GB},
+        {"index": 1, "name": "Vulkan1", "description": "RTX 3090",
+         "type": _TYPE_GPU, "free": 18 * GB, "total": 24 * GB},
+    ])
+    assert [(d["index"], d["name"]) for d in got] == [
+        (0, "RTX 4090"), (1, "RTX 3090")]
+
+
+def test_dev_box_single_discrete_gpu_shape_is_unchanged(monkeypatch):
+    """Pinned to the shape actually MEASURED on this project's dev box, where
+    compute_devices() reports [("ROCm0", 1), ("CPU", 0)] - the GPU FIRST and
+    the CPU LAST, which is the opposite of the instinctive fixture. The CPU is
+    already excluded upstream of here by native_device_inventory."""
+    assert _native(monkeypatch, [
+        {"index": 0, "name": "ROCm0",
+         "description": "AMD Radeon RX 6900 XT", "type": _TYPE_GPU,
+         "free": 15 * GB, "total": 16 * GB},
+    ]) == [{"index": 0, "name": "AMD Radeon RX 6900 XT",
+            "total": 16 * GB, "free": 15 * GB, "type": _TYPE_GPU}]
+
+
+def test_empty_inventory_stays_empty(monkeypatch):
+    """An empty list is a real answer (the runtime registers no non-CPU
+    device) and must not become None, which means "could not look"."""
+    assert _native(monkeypatch, []) == []
