@@ -53,8 +53,15 @@ if 8642 was busy - use the address it prints). Under the hood:
   hostname, so the same cert works however a device reaches you.
 - The certificate is reused across restarts, and it is regenerated as it nears
   expiry (about 30 days before) or when its addresses/names change. The CA is
-  reused even then, so a device you trusted once stays trusted after your address
-  changes.
+  reused for those regenerations, so a device you trusted once stays trusted
+  after your address changes.
+- The CA itself is replaced only when it cannot be reused: it has reached its own
+  expiry (it is issued for about 10 years), or `ca.crt`/`ca.key` are missing or
+  unreadable. localm mints a fresh CA in those cases, and every device that
+  trusted the old one has to repeat the trust step below.
+- If certificates ever get into a state you cannot explain, stop localm, delete
+  `<LOCALM_HOME>/tls/`, and start it again. The CA and the certificate are both
+  rebuilt from scratch, so every device has to trust the new CA afterwards.
 - The CA private key never leaves your machine.
 
 ### The one-time "trust this certificate" step
@@ -84,7 +91,8 @@ makes clearing it one tap:
    - **Windows (system store, for Chrome / Edge):** import `localm-ca.crt` into
      "Trusted Root Certification Authorities" for the current user.
 
-After trusting it once: no more warning, and the PWA installs normally. On a plain
+After trusting it once: no more warning, and the PWA installs normally (until the
+CA is replaced, as above). On a plain
 loopback `localm gui` (127.0.0.1, HTTP) there is no certificate and no trust step at
 all - this only applies to a network (phone/LAN) bind over HTTPS.
 

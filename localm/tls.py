@@ -8,8 +8,12 @@ long-lived CA whose certificate the user installs ONCE per device (one tap),
 plus a short-lived leaf certificate that the server actually presents.
 
 Installing the CA removes the browser's "not secure" warning and lets the PWA
-install. Because the CA is REUSED whenever the leaf is regenerated, a device
-trusted once stays trusted even if this machine's LAN IP later changes.
+install. Because the CA is REUSED when the leaf is regenerated, a device trusted
+once stays trusted even if this machine's LAN IP later changes. That reuse is
+not unconditional: ``_load_or_make_ca`` mints a NEW CA when the old one has
+reached its own expiry or its files are missing/unreadable, and every device
+then has to trust the new one. Say "when", never "whenever" - the unconditional
+version of this sentence is what made ``docs/tls.md`` wrong.
 
 This is the same model as Caddy's ``tls internal`` and mkcert. The CA and leaf
 private keys are stored as unencrypted PEM under ``<LOCALM_HOME>/tls/`` (uvicorn
@@ -637,9 +641,15 @@ def ensure_cert(
     Generates a local CA once (persisted, reused across regenerations) and a
     leaf certificate covering the loopback, LAN, Tailscale, and hostname SANs
     (plus any *hostnames* / *ips* the caller supplies). Reuses an existing leaf
-    when it still covers every required SAN, is issued by the current CA, and is
-    not near expiry; otherwise regenerates the leaf while reusing the CA so a
-    device that trusted localm once stays trusted.
+    when it still covers every required SAN, chains to the CA now on disk, and
+    neither it nor that CA is near expiry; otherwise regenerates the leaf,
+    normally reusing the CA so a device that trusted localm once stays trusted.
+
+    The CA survives an ordinary leaf regeneration, but NOT unconditionally:
+    ``_load_or_make_ca`` reuses it only while it is unexpired and its files are
+    readable, and mints a fresh one otherwise. A new CA means every device
+    repeats the one-time trust step, which is why the distinction is worth
+    stating here rather than leaving a reader to infer "always".
     """
     home = Path(home)
     _lock_down_dir(tls_dir(home))
