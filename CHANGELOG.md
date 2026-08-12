@@ -590,6 +590,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   after the stop went fine and nothing was changed. Stopping is you asking to
   leave, not a failure, so it no longer counts as one. A task that genuinely
   failed still records its lesson, including when you stop the next one.
+- **The TLS documentation no longer promises that a device you trusted stays
+  trusted forever.** `docs/tls.md` stated that the local certificate authority
+  is always kept when the server certificate is regenerated. That is true when
+  your addresses change or the certificate nears expiry, but localm does mint a
+  fresh authority if the old one reaches its own expiry or if its files go
+  missing or unreadable, and every device then has to trust the new one. The
+  page now says which case is which, and documents deleting `<LOCALM_HOME>/tls/`
+  to rebuild both from scratch, which was not written down anywhere.
 
 ## [0.1.5rc2] - 2026-08-08
 
