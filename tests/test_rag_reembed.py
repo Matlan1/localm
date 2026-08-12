@@ -476,3 +476,126 @@ def test_reembed_after_a_mismatch_lets_the_add_succeed(tmp_path):
     assert final._vec_dim == 32
     assert len(final._chunks) >= 2
     assert final.vector_degrade_reason is None
+
+
+# --------------------------------------------------------------------------- #
+#  The maintainer's acceptance criterion, bound to the REAL ingest path         #
+# --------------------------------------------------------------------------- #
+#  Everything above builds its collection by assigning _chunks/_vectors directly via
+#  _collection(), which is a fine unit shortcut but can never take the value the
+#  criterion is actually about: a collection produced by the real upload path,
+#  whose source bytes were never on disk at all. `rag repair --embed` is
+#  structurally unable to rebuild that one, so it is the case the whole feature
+#  exists for, and no test drove it end to end as far as a correct QUERY.
+_TOPICS = ["zebra", "quasar", "tugboat", "marzipan"]
+
+
+def _topic_embedder(dim, fail_after=-1):
+    """An embedder that genuinely DISCRIMINATES: one axis per topic word.
+
+    _embedder() above hashes the text into a single repeated value, so every
+    vector is a scalar multiple of every other and cosine cannot tell any two
+    chunks apart. That is harmless where only the DIMENSION is under test, but a
+    query assertion written against it would pass no matter which chunk came
+    back. Here the retrieved chunk is the property, so the embedding has to be
+    able to be wrong.
+    """
+    seen = {"n": 0}
+
+    def embed(texts):
+        out = []
+        for t in texts:
+            seen["n"] += 1
+            if 0 <= fail_after < seen["n"]:
+                raise RuntimeError("embedder died")
+            v = [0.0] * dim
+            for i, w in enumerate(_TOPICS):
+                if w in t.lower():
+                    v[i % dim] = 1.0
+            if not any(v):
+                v[dim - 1] = 1.0
+            out.append(v)
+        return out
+
+    return embed
+
+
+def _uploads_only(tmp_path, dim=384, model="bge-small-en-v1.5"):
+    """A collection built ENTIRELY from uploads: no source file ever exists."""
+    coll = Collection("eng", base=tmp_path).create()
+    coll.add_uploads(
+        [{"filename": "a.txt", "data": b"the zebra grazes on the open plain"},
+         {"filename": "b.txt", "data": b"a quasar is an extremely luminous galactic nucleus"},
+         {"filename": "c.txt", "data": b"the tugboat hauled the barge upriver"}],
+        embed_fn=_topic_embedder(dim), model_name=model)
+    return Collection("eng", base=tmp_path)
+
+
+def test_an_uploads_only_collection_survives_a_model_switch_end_to_end(tmp_path):
+    """After switching the embedding model, a collection built entirely from
+    uploads whose source files never existed can be re-embedded in place and
+    QUERIED CORRECTLY, without the user deleting anything."""
+    coll = _uploads_only(tmp_path)
+    assert coll._vec_dim == 384
+    n_chunks = len(coll._chunks)
+    assert not list(tmp_path.rglob("*.txt")), "no source file may exist on disk"
+
+    # The refusal is correct (mixed dimensions mis-score every query) and must
+    # stay actionable rather than telling anyone to delete their data.
+    with pytest.raises(ValueError) as ei:
+        coll.add_uploads([{"filename": "d.txt", "data": b"marzipan is made of almonds"}],
+                         embed_fn=_topic_embedder(1024))
+    assert "localm rag reembed eng" in str(ei.value)
+    assert len(Collection("eng", base=tmp_path)._chunks) == n_chunks, "the refusal lost chunks"
+
+    Collection("eng", base=tmp_path).reembed(
+        embed_fn=_topic_embedder(1024), model_name="Qwen3-Embedding-0.6B")
+
+    after = Collection("eng", base=tmp_path)
+    # Assert on the DATA before the dimension: if a re-embed ever loses content,
+    # that is the finding, and a bare dimension assertion would report it as a
+    # number instead (which invites adjusting the number).
+    assert len(after._chunks) == n_chunks, "re-embed lost chunks"
+    assert len(after.documents()) == 3, "re-embed lost documents"
+    assert after._vec_dim == 1024
+    assert after.vector_degrade_reason is None
+    assert after.embedding_model() == "Qwen3-Embedding-0.6B"
+
+    # Queried CORRECTLY. A re-embed that produced a loadable but WRONG index
+    # satisfies every assertion above and fails only here.
+    hits = after.query("quasar", k=1, embed_fn=_topic_embedder(1024))
+    assert hits and "quasar" in hits[0]["text"].lower(), f"wrong chunk retrieved: {hits}"
+
+    # And the add that was refused now goes through.
+    after.add_uploads([{"filename": "d.txt", "data": b"marzipan is made of almonds"}],
+                      embed_fn=_topic_embedder(1024), model_name="Qwen3-Embedding-0.6B")
+    final = Collection("eng", base=tmp_path)
+    assert final.vector_degrade_reason is None
+    hits = final.query("marzipan", k=1, embed_fn=_topic_embedder(1024))
+    assert hits and "marzipan" in hits[0]["text"].lower()
+
+
+def test_a_failed_reembed_leaves_the_index_intact_across_MULTIPLE_batches(tmp_path):
+    """The multi-batch case, which the single-batch test above cannot express.
+
+    test_a_failed_reembed_leaves_the_previous_index_intact embeds 4 chunks at the
+    default batch of 32, so the whole run is ONE embed_fn call: the embedder
+    raises INSIDE it, before any result is ever appended. A write-as-you-go
+    implementation would therefore never reach a write, and that test stays green
+    against it - measured, by reverting reembed to save inside the loop. Only a
+    failure in a LATER batch, after an earlier one has already succeeded, can tell
+    the two apart, and that is exactly the shape that leaves a half-written
+    mixed-dimension index behind.
+    """
+    coll = _uploads_only(tmp_path)
+    vf = tmp_path / "eng" / "vectors.json"
+    before = vf.read_text(encoding="utf-8")
+
+    with pytest.raises(RuntimeError):
+        coll.reembed(embed_fn=_topic_embedder(1024, fail_after=1), batch=1,
+                     model_name="Qwen3-Embedding-0.6B")
+
+    assert vf.read_text(encoding="utf-8") == before, "a failed re-embed rewrote the index"
+    reloaded = Collection("eng", base=tmp_path)
+    assert reloaded._vec_dim == 384, "the collection was left at a half-written dimension"
+    assert reloaded.vector_degrade_reason is None
