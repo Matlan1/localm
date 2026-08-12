@@ -337,23 +337,42 @@ def test_a_second_skill_can_only_narrow_further(skill_agent):
 
 
 def test_two_restricted_skills_intersect(tmp_path, clean_registry):
-    """Two declarations compose to their INTERSECTION, not their union: after
-    loading both, only what BOTH declare survives."""
+    """Two declarations compose to their INTERSECTION, not their union.
+
+    The second skill declares a tool the first did NOT, which is the only shape
+    that tells intersect apart from last-one-wins. Chosen deliberately after a
+    fires-control: an earlier version made the second set a SUBSET of the first,
+    where both implementations give the identical answer, so the test passed with
+    the intersection replaced by a plain assignment.
+
+    That distinction is the security property, not a nicety. Last-one-wins is a
+    one-line bypass of the entire gate, because a skill body is untrusted content
+    and can simply tell the model to load a second, more permissive skill.
+    """
     root = tmp_path / ".localcoder" / "skills"
     _make_skill(root, "reader",
                 frontmatter="name: reader\ndescription: d\nallowed-tools: read_file, grep\n")
-    _make_skill(root, "grepper",
-                frontmatter="name: grepper\ndescription: d\nallowed-tools: grep\n")
+    _make_skill(root, "writer",
+                frontmatter="name: writer\ndescription: d\nallowed-tools: write_file, grep\n")
     from localm.plugins.coder.agent import Agent
     agent = Agent(_StubBackend(), cwd=tmp_path, auto_approve=True)
     agent._last_user_request = "go"
     read = _counting_tool(TOOL_REGISTRY, "read_file")
+    write = _counting_tool(TOOL_REGISTRY, "write_file")
     grep = _counting_tool(TOOL_REGISTRY, "grep")
     _use(agent, "reader")
-    _use(agent, "grepper")
+    _use(agent, "writer")
+    # write_file is in the SECOND skill's list and not the first: under
+    # last-one-wins it would now be permitted. It must not be.
+    assert not agent._execute_tool(_tool_call("write_file", path="x"),
+                                   interactive=False).ok
+    write.assert_not_called()
+    # read_file is in the FIRST and not the second: dropped, as intersection says.
     assert not agent._execute_tool(_tool_call("read_file", path="x"),
                                    interactive=False).ok
     read.assert_not_called()
+    # grep is in BOTH, so it survives - proving the intersection is not simply
+    # emptying the set, which would satisfy the two assertions above on its own.
     assert agent._execute_tool(_tool_call("grep", pattern="x"), interactive=False).ok
     grep.assert_called_once()
 
