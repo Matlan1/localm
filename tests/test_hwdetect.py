@@ -33,15 +33,132 @@ def test_run_combines_stdout_and_stderr(monkeypatch):
     class R:
         stdout = "out"
         stderr = "err"
+        returncode = 0
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: R())
     assert hwdetect._run(["x"]) == "outerr"
+
+
+def test_run_ok_is_false_on_missing_tool(monkeypatch):
+    def boom(*a, **k):
+        raise FileNotFoundError("no such tool")
+    monkeypatch.setattr(subprocess, "run", boom)
+    assert hwdetect._run_ok(["nonexistent-tool"]) == ("", False)
+
+
+def test_run_ok_is_false_on_nonzero_exit(monkeypatch):
+    """A tool that ran and FAILED did not answer the question either. Its output
+    is still returned unchanged (long-standing behaviour detect() tolerates); only
+    the flag records that it cannot be read as an answer."""
+    class R:
+        stdout = "some error text"
+        stderr = ""
+        returncode = 1
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: R())
+    assert hwdetect._run_ok(["x"]) == ("some error text", False)
+
+
+def test_run_ok_is_true_on_clean_exit_with_no_output(monkeypatch):
+    """The load-bearing case: exit 0 with nothing to say IS an answer ("this box
+    has no display adapters"), and must not read as a failed probe."""
+    class R:
+        stdout = ""
+        stderr = ""
+        returncode = 0
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: R())
+    assert hwdetect._run_ok(["x"]) == ("", True)
+
+
+# ------------- the three-state result: found / none / unknown -------------
+#
+# has_gpu is a BOOLEAN and so cannot express "we could not ask": it is False both
+# for a box with no GPU and for a box whose enumeration never ran. Every caller
+# branching on it therefore treated an unanswered probe as proof of absence.
+# gpu_state is the discriminator; these tests pin that the two inputs which used
+# to be indistinguishable now produce DIFFERENT values.
+
+def test_probe_that_ran_and_found_nothing_is_none(monkeypatch):
+    monkeypatch.setattr(hwdetect.sys, "platform", "win32")
+    monkeypatch.setattr(hwdetect, "_win_gpu_names",
+                        lambda: ("microsoft basic display adapter", True))
+    monkeypatch.setattr(hwdetect.shutil, "which", lambda n: None)
+    d = hwdetect.detect()
+    assert d.vendors == []
+    assert d.gpu_state == "none"
+    assert d.probe_ok is True
+    assert d.probe_error == ""
+
+
+def test_probe_that_could_not_run_is_unknown_not_none(monkeypatch):
+    """Same empty vendor list, opposite epistemic state."""
+    monkeypatch.setattr(hwdetect.sys, "platform", "win32")
+    monkeypatch.setattr(hwdetect, "_win_gpu_names", lambda: ("", False))
+    monkeypatch.setattr(hwdetect.shutil, "which", lambda n: None)
+    d = hwdetect.detect()
+    assert d.vendors == []
+    assert d.gpu_state == "unknown"
+    assert d.probe_ok is False
+    assert d.probe_error, "a failed probe must record WHY, not just that it failed"
+    # Unchanged and deliberately so: the recommendation stays conservative and
+    # has_gpu stays False. This unit makes the state VISIBLE, it does not turn a
+    # best-effort probe into a hard failure or into a positive claim.
+    assert d.has_gpu is False
+    assert d.recommended == "cpu"
+
+
+def test_linux_probe_that_could_not_run_is_unknown(monkeypatch):
+    """lspci is absent on plenty of minimal installs and containers, where
+    "no display controllers" would be fabricated rather than measured."""
+    monkeypatch.setattr(hwdetect.sys, "platform", "linux")
+    monkeypatch.setattr(hwdetect, "_linux_gpu_names", lambda: ("", False))
+    monkeypatch.setattr(hwdetect.shutil, "which", lambda n: None)
+    monkeypatch.setattr(hwdetect.Path, "is_dir", lambda self: False)
+    d = hwdetect.detect()
+    assert d.gpu_state == "unknown"
+
+
+def test_vendor_found_by_smi_stays_found_despite_a_failed_enumeration(monkeypatch):
+    """A failed probe cannot RETRACT evidence another probe supplied: nvidia-smi
+    on PATH is positive proof even when the adapter enumeration did not run.
+    probe_ok stays factual (the enumeration really did fail); gpu_state resolves
+    the two into the answer."""
+    monkeypatch.setattr(hwdetect.sys, "platform", "win32")
+    monkeypatch.setattr(hwdetect, "_win_gpu_names", lambda: ("", False))
+    monkeypatch.setattr(hwdetect.shutil, "which",
+                        lambda n: "C:/w/nvidia-smi.exe" if n == "nvidia-smi" else None)
+    d = hwdetect.detect()
+    assert d.vendors == ["nvidia"]
+    assert d.gpu_state == "found"
+    assert d.probe_ok is False
+
+
+def test_macos_uname_failure_is_unknown_not_intel(monkeypatch):
+    """detect() used to return source="macos intel" whenever uname produced
+    anything other than arm64 - INCLUDING when uname did not run at all. On an
+    Apple Silicon box that asserts the wrong architecture and costs the Metal
+    recommendation."""
+    monkeypatch.setattr(hwdetect.sys, "platform", "darwin")
+    monkeypatch.setattr(hwdetect, "_run_ok", lambda cmd: ("", False))
+    d = hwdetect.detect()
+    assert d.gpu_state == "unknown"
+    assert "intel" not in d.source
+    assert d.recommended == "cpu"       # still conservative, just not mislabelled
+
+
+def test_macos_intel_still_reports_none_when_uname_answered(monkeypatch):
+    """The guard on the test above: a real Intel Mac is a MEASURED negative and
+    must keep saying so."""
+    monkeypatch.setattr(hwdetect.sys, "platform", "darwin")
+    monkeypatch.setattr(hwdetect, "_run_ok", lambda cmd: ("x86_64\n", True))
+    d = hwdetect.detect()
+    assert d.gpu_state == "none"
+    assert d.source == "macos intel"
 
 
 # --------------------------- detect(): win32 ---------------------------
 
 def _win(monkeypatch, names, which=lambda n: None):
     monkeypatch.setattr(hwdetect.sys, "platform", "win32")
-    monkeypatch.setattr(hwdetect, "_win_gpu_names", lambda: names.lower())
+    monkeypatch.setattr(hwdetect, "_win_gpu_names", lambda: (names.lower(), True))
     monkeypatch.setattr(hwdetect.shutil, "which", which)
 
 
@@ -98,7 +215,7 @@ def test_detect_win_mixed_signal_sources(monkeypatch):
 
 def test_detect_macos_arm64_is_metal(monkeypatch):
     monkeypatch.setattr(hwdetect.sys, "platform", "darwin")
-    monkeypatch.setattr(hwdetect, "_run", lambda cmd: "arm64\n")
+    monkeypatch.setattr(hwdetect, "_run_ok", lambda cmd: ("arm64\n", True))
     d = hwdetect.detect()
     assert d.vendors == ["apple"]
     assert d.recommended == "metal"
@@ -106,7 +223,7 @@ def test_detect_macos_arm64_is_metal(monkeypatch):
 
 def test_detect_macos_intel_is_cpu(monkeypatch):
     monkeypatch.setattr(hwdetect.sys, "platform", "darwin")
-    monkeypatch.setattr(hwdetect, "_run", lambda cmd: "x86_64\n")
+    monkeypatch.setattr(hwdetect, "_run_ok", lambda cmd: ("x86_64\n", True))
     d = hwdetect.detect()
     assert d.vendors == []
     assert d.recommended == "cpu"
@@ -116,7 +233,7 @@ def test_detect_macos_intel_is_cpu(monkeypatch):
 
 def test_detect_linux_nvidia_via_smi(monkeypatch):
     monkeypatch.setattr(hwdetect.sys, "platform", "linux")
-    monkeypatch.setattr(hwdetect, "_linux_gpu_names", lambda: "")
+    monkeypatch.setattr(hwdetect, "_linux_gpu_names", lambda: ("", True))
     monkeypatch.setattr(hwdetect.shutil, "which",
                         lambda n: "/usr/bin/nvidia-smi" if n == "nvidia-smi" else None)
     # Pin /opt/rocm absent: the detector treats that dir as an AMD signal, and the
@@ -129,7 +246,7 @@ def test_detect_linux_nvidia_via_smi(monkeypatch):
 
 def test_detect_linux_amd_via_rocminfo(monkeypatch):
     monkeypatch.setattr(hwdetect.sys, "platform", "linux")
-    monkeypatch.setattr(hwdetect, "_linux_gpu_names", lambda: "")
+    monkeypatch.setattr(hwdetect, "_linux_gpu_names", lambda: ("", True))
     monkeypatch.setattr(hwdetect.shutil, "which",
                         lambda n: "/usr/bin/rocminfo" if n == "rocminfo" else None)
     monkeypatch.setattr(hwdetect.Path, "is_dir", lambda self: False)  # isolate the rocminfo signal
@@ -138,7 +255,7 @@ def test_detect_linux_amd_via_rocminfo(monkeypatch):
 
 def test_detect_linux_no_gpu_is_cpu(monkeypatch):
     monkeypatch.setattr(hwdetect.sys, "platform", "linux")
-    monkeypatch.setattr(hwdetect, "_linux_gpu_names", lambda: "")
+    monkeypatch.setattr(hwdetect, "_linux_gpu_names", lambda: ("", True))
     monkeypatch.setattr(hwdetect.shutil, "which", lambda n: None)
     # Guard against a real /opt/rocm on the test host skewing the result.
     monkeypatch.setattr(hwdetect.Path, "is_dir", lambda self: False)
@@ -151,7 +268,7 @@ def test_detect_never_raises_even_with_dead_probes(monkeypatch):
     # All probes return nothing/raise-internally; detect() must still yield a
     # valid Detection, never propagate.
     monkeypatch.setattr(hwdetect.sys, "platform", "win32")
-    monkeypatch.setattr(hwdetect, "_win_gpu_names", lambda: "")
+    monkeypatch.setattr(hwdetect, "_win_gpu_names", lambda: ("", True))
     monkeypatch.setattr(hwdetect.shutil, "which", lambda n: None)
     d = hwdetect.detect()
     assert isinstance(d, Detection)

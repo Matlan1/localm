@@ -624,6 +624,9 @@ def _check_gpu_verdict(find_binary_dir, lib_healthy: bool, smi_or_torch_gpu: boo
       3) failing that, the smi/torch signal already printed above, hedged: a GPU
          they see is positive proof, their silence is not.
 
+    A probe that RAN AND RAISED is none of those: it is a third outcome, reported
+    as its own verdict between (2) and (3) - see the ``probe_error`` branch.
+
     "CPU mode only" is emitted only for a genuine cpu build, a runtime that loads
     with no GPU device, or a truly indeterminate no-signal case - never from the
     mere absence of the vendor CLIs the default GPU path never needs."""
@@ -631,6 +634,13 @@ def _check_gpu_verdict(find_binary_dir, lib_healthy: bool, smi_or_torch_gpu: boo
     probe = _probe_gpu_devices() if lib_healthy else None
     loaded = bool(probe.get("loaded")) if probe else False
     devices = (probe.get("devices") or []) if probe else []
+    # _GPU_PROBE_CODE captures the exception that stopped it. Reading it is what
+    # separates "the runtime says there is no GPU" from "the runtime could not be
+    # asked", which used to be the same verdict here (see the branch below).
+    # First line only, the _check_gpu_driver idiom: a repr of a native loader
+    # error can carry a whole traceback, and a wrapped verdict is a hidden one.
+    probe_error = ((probe.get("error") or "") if probe else "").strip()
+    probe_error = probe_error.splitlines()[0] if probe_error else ""
 
     # Each verdict is a SHORT primary line (the pass/fail phrase never wraps, so
     # a narrow terminal cannot split "CPU mode only" across a line break and mask
@@ -665,6 +675,37 @@ def _check_gpu_verdict(find_binary_dir, lib_healthy: bool, smi_or_torch_gpu: boo
     if marker_trustworthy and backend == "cpu":
         console.print(f"  {_WARN_SYM}  GPU: 'cpu' backend provisioned - CPU mode only")
         console.print("       [dim]run 'localm setup-llama --backend vulkan' to enable GPU[/dim]")
+        return
+
+    # (2b) The probe RAN AND FAILED. Not "no GPU" - "we could not find out", and
+    #      the runtime being unable to load is itself the fault to report. It
+    #      reached (3) before this branch existed, so a driver too old for the
+    #      provisioned Vulkan build rendered as "No GPU detected ... run 'localm
+    #      setup-llama'": hardware the user has, described as absent, plus advice
+    #      to provision a backend that IS provisioned, while the captured reason
+    #      was discarded. Same split _check_abi makes for its own probe and
+    #      _check_gpu_driver makes for absent-vs-present-and-failing.
+    #
+    #      Deliberately ABOVE the smi_or_torch_gpu early return: a card those
+    #      tools CAN see plus a runtime that will not load is the case most worth
+    #      naming, and returning early there would swallow it entirely.
+    if probe_error:
+        from localm.debuglog import logger as _dbg
+        # The console line is truncated to stay unwrapped; keep the whole repr for
+        # triage. No user-facing line points at this: `doctor` takes no --debug
+        # flag (checked - it is a bare @main.command()), so promising a log file
+        # would be a second unverified claim on a path that exists to stop making
+        # unverified claims.
+        _dbg.debug("doctor: GPU device probe raised, verdict is indeterminate: %s",
+                   (probe.get("error") or "") if probe else "")
+        console.print(f"  {_WARN_SYM}  GPU: could not be determined{tag} - the runtime probe failed")
+        console.print(f"       [dim]{probe_error}[/dim]")
+        # No provisioning advice here on purpose. The runtime IS provisioned, and
+        # _check_llama_lib / _check_native_abi have already run and already say
+        # what to do about a runtime that will not load - repeating it adds noise
+        # to a report people read under stress (the _check_runtime_build idiom).
+        console.print("       [dim]the runtime is installed but did not load, so this is not "
+                      "a statement about your hardware[/dim]")
         return
 
     # (3) No trustworthy runtime signal. A GPU seen by smi/torch is positive

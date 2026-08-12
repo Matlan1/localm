@@ -291,6 +291,106 @@ def test_accel_only_device_is_not_labelled_gpu(cli_runner, tmp_path, monkeypatch
 
 
 # --------------------------------------------------------------------------- #
+#  (2b) The probe RAN AND FAILED: indeterminate, not "no GPU" (H1)             #
+# --------------------------------------------------------------------------- #
+
+# Short and unbroken on purpose: the reason is printed on an indented dim line,
+# and rich wraps a non-tty console at 80 columns, so a long sentinel could fail
+# this test by being FOLDED rather than by being absent.
+_PROBE_SENTINEL = "VKPROBE-SENTINEL-9271"
+
+
+def test_failed_probe_reports_the_reason_not_no_gpu(cli_runner, tmp_path, monkeypatch):
+    """The probe ran and RAISED (the shape of a driver too old for the provisioned
+    Vulkan build). That is "could not determine", not "no hardware".
+
+    Before H1 the captured error was collected by _GPU_PROBE_CODE and read by
+    nobody, so this fell through to step (3) and rendered as "No GPU detected
+    (nvidia-smi / rocm-smi / torch) - CPU mode only" plus advice to run
+    'localm setup-llama' to PROVISION a backend that is already provisioned."""
+    bindir = _healthy_bindir(tmp_path, backend="vulkan")
+    monkeypatch.setattr(cli, "find_binary_dir", lambda: bindir)
+    _blind_probes(monkeypatch)
+    _no_op_abi(monkeypatch)
+    _stub_probe(monkeypatch, {
+        "loaded": False,
+        "devices": [],
+        "error": f"OSError('{_PROBE_SENTINEL}')",
+    })
+
+    out = cli_runner.invoke(cli.doctor, []).output
+    # The captured reason reaches the user.
+    assert _PROBE_SENTINEL in out
+    assert "could not be determined" in out
+    # ... and none of the three false claims the old path made.
+    assert "No GPU detected" not in out
+    assert "CPU mode only" not in out
+    # The step-(3) provisioning advice specifically. Asserted on this phrase
+    # rather than the bare substring "setup-llama": _check_runtime_build
+    # legitimately prints 'localm setup-llama --force' in this same run when the
+    # build tag is unrecorded, and a bare-substring assertion would have been
+    # red for that unrelated, correct line.
+    assert "to provision one" not in out
+    assert "used for inference" not in out          # no false GPU success either
+
+
+def test_failed_probe_is_reported_even_when_torch_sees_a_gpu(
+    cli_runner, tmp_path, monkeypatch
+):
+    """A card torch CAN see plus a runtime that will not load is the case most
+    worth naming: the user has a GPU and localm cannot use it. Step (3) returns
+    early on smi_or_torch_gpu, so a probe-failure verdict placed after it would
+    be swallowed in exactly this scenario - hence the branch sits ABOVE it."""
+    bindir = _healthy_bindir(tmp_path, backend="vulkan")
+    monkeypatch.setattr(cli, "find_binary_dir", lambda: bindir)
+    _no_smi(monkeypatch)
+    _install_torch(monkeypatch, ["RTX 4090"])
+    _no_op_abi(monkeypatch)
+    _stub_probe(monkeypatch, {
+        "loaded": False, "devices": [], "error": f"OSError('{_PROBE_SENTINEL}')",
+    })
+
+    out = cli_runner.invoke(cli.doctor, []).output
+    assert _PROBE_SENTINEL in out
+    assert "could not be determined" in out
+
+
+def test_probe_error_is_truncated_to_one_line(cli_runner, tmp_path, monkeypatch):
+    """A native loader error repr can carry a whole traceback. The verdict line
+    must stay readable, so only the first line is printed - a wrapped verdict is
+    a hidden one (the same reason the primary lines are kept short)."""
+    bindir = _healthy_bindir(tmp_path, backend="vulkan")
+    monkeypatch.setattr(cli, "find_binary_dir", lambda: bindir)
+    _blind_probes(monkeypatch)
+    _no_op_abi(monkeypatch)
+    _stub_probe(monkeypatch, {
+        "loaded": False,
+        "devices": [],
+        "error": f"{_PROBE_SENTINEL}\nSECONDLINE-8814\nTHIRDLINE-8815",
+    })
+
+    out = cli_runner.invoke(cli.doctor, []).output
+    assert _PROBE_SENTINEL in out
+    assert "SECONDLINE-8814" not in out
+
+
+def test_probe_that_cleanly_reports_no_gpu_is_unchanged(cli_runner, tmp_path, monkeypatch):
+    """The guard on the branch above: a probe that ran, did NOT raise, and simply
+    reported the runtime does not compute is a MEASURED negative, not an
+    indeterminate one. It must keep the honest CPU-only verdict rather than being
+    swept into "could not be determined" by an over-broad condition."""
+    bindir = _healthy_bindir(tmp_path, backend="vulkan")
+    monkeypatch.setattr(cli, "find_binary_dir", lambda: bindir)
+    _blind_probes(monkeypatch)
+    _no_op_abi(monkeypatch)
+    _stub_probe(monkeypatch, {"loaded": False, "devices": [], "error": ""})
+
+    out = cli_runner.invoke(cli.doctor, []).output
+    assert "could not be determined" not in out
+    assert "CPU mode only" in out
+
+
+# --------------------------------------------------------------------------- #
 #  (3) No-runtime fallback: smi/torch, hedged - and never a false GPU claim    #
 # --------------------------------------------------------------------------- #
 
