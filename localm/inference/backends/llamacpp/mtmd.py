@@ -141,9 +141,12 @@ def _resolve_backend_device_name(gpu_index: int) -> Optional[str]:
     ``compute_devices()`` reports ggml's FULL registry. Those two sequences are NOT
     interchangeable: ``llama_prepare_model_devices`` (upstream ``src/llama.cpp``
     :149-296) hoists RPC devices to the front, deduplicates GPUs by device_id,
-    SKIPS ACCEL and META entirely, and admits iGPUs only when no discrete GPU was
-    found (and then at most one). Read against the shipped runtime, two of those
-    cannot arise here and one can:
+    SKIPS ACCEL entirely, and admits iGPUs only when no discrete GPU was found
+    (and then at most one). A META device is not skipped but ``GGML_ABORT``s the
+    load outright, so it can never reach that list either - stated precisely
+    because "skipped" and "aborts" are the same OUTCOME here and very different
+    MECHANISMS, and this docstring is the justification for the guard below.
+    Read against the shipped runtime, two of those cannot arise here and one can:
 
     * RPC devices need an explicit ``ggml_backend_rpc_add_server(endpoint)``
       (``ggml-rpc.cpp:1949-1951``); localm never calls it, so merely shipping
