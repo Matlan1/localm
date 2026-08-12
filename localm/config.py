@@ -944,16 +944,45 @@ def _atomic_write_json(path: Path, data) -> None:
         raise
 
 
+class ConfigUnreadable(RuntimeError):
+    """A config/registry file EXISTS but could not be read, so a
+    read-modify-write must not proceed (it would persist defaults over the
+    user's real settings). Raised by update_config / update_registry only."""
+
+
 def _read_json(path: Path, default):
     """Read JSON from *path*, falling back to its .bak then *default* on any
     corruption - a damaged file must never take the whole app down."""
+    return _read_json_checked(path, default)[0]
+
+
+def _read_json_checked(path: Path, default):
+    """``(value, read_ok)``. ``read_ok`` is False ONLY when a file was PRESENT
+    and no candidate (neither *path* nor its ``.bak``) could be read - the one
+    state in which the returned *default* is indistinguishable from a genuinely
+    absent file.
+
+    Read-only consumers want that fallback and keep calling _read_json: a
+    damaged file must never take the whole app down, and they fail safe on
+    defaults (auth, netpolicy, netname and updater all rely on this). A
+    read-modify-write MUST NOT, because writing the default back is what
+    silently replaces every setting the user had - see update_config /
+    update_registry, which refuse on ``read_ok`` False (AGENTS.md rule 5: a
+    step that fails must never report success).
+
+    Note the asymmetry: a file that PARSES but holds the wrong shape (a JSON
+    string, a list) is read_ok True and keeps its documented fall-back-to-
+    defaults behaviour, because nothing recoverable was stored in it. Only an
+    unreadable file can be hiding settings that still exist."""
+    saw_file = False
     for candidate in (path, path.with_name(path.name + ".bak")):
         if not candidate.is_file():
             continue
+        saw_file = True
         for attempt in range(_REPLACE_RETRIES):
             try:
                 with open(candidate, encoding="utf-8") as f:
-                    return json.load(f)
+                    return json.load(f), True
             except PermissionError as e:
                 # TRANSIENT on Windows: a concurrent atomic replace (another
                 # process, or antivirus/indexer) has the file locked for a
@@ -982,7 +1011,7 @@ def _read_json(path: Path, default):
                 print(f"[localm] {candidate.name} is unreadable ({e}); "
                       "falling back.", file=sys.stderr)
             break
-    return default() if callable(default) else default
+    return (default() if callable(default) else default), not saw_file
 
 
 def instance_id() -> str:
@@ -1348,7 +1377,24 @@ def update_config(mutator: Callable[[dict], None]) -> dict:
     ensure_dirs()
     with _io_lock, _cross_process_lock(CONFIG_FILE):
         cfg = copy.deepcopy(DEFAULT_CONFIG)   # deep: see load_config (nested dicts)
-        stored = _read_json(CONFIG_FILE, {})
+        stored, read_ok = _read_json_checked(CONFIG_FILE, {})
+        if not read_ok:
+            # The file EXISTS and could not be read, so `stored` is {} - the same
+            # value a genuinely absent config produces. Merging that leaves cfg ==
+            # DEFAULT_CONFIG, and _user_delta would then reduce the write to ONLY
+            # the key this mutator set, replacing every setting the user has with
+            # defaults while the caller reports success. Two of those are silent
+            # security downgrades rather than lost preferences: net_mode reverts
+            # to "ask" (outbound prompting returns for someone who chose "off")
+            # and llama_runtime_pin reverts to "" (a deliberate pin away from a
+            # bad upstream build, plus the llama_runtime_history that
+            # `setup-llama --rollback` reads). Refusing is recoverable; the
+            # overwrite is not. Names the FILE, never the path: this can surface
+            # in an HTTP error body (inference/routes/config.py).
+            raise ConfigUnreadable(
+                f"{CONFIG_FILE.name} exists but could not be read, so saving "
+                f"would replace every setting in it with defaults; refused. "
+                f"Fix or remove {CONFIG_FILE.name} (a .bak may hold a good copy).")
         _merge_stored_config(cfg, stored)
         mutator(cfg)
         # The mutator and the return value see the full merged dict; only the
@@ -1386,7 +1432,17 @@ def update_registry(mutator: Callable[[dict], None]) -> dict:
     design, not a read-modify-write, so it needs no lock beyond the atomic
     write it already has.)"""
     with _io_lock, _cross_process_lock(REGISTRY_FILE):
-        reg = _read_json(REGISTRY_FILE, {})
+        reg, read_ok = _read_json_checked(REGISTRY_FILE, {})
+        if not read_ok:
+            # Same refusal as update_config, and the loss here is worse: this
+            # writes the WHOLE dict rather than a delta, so an unreadable
+            # registry plus one registration leaves a registry.json holding that
+            # single model and nothing else. The registry is not reconstructible
+            # from anything else on disk.
+            raise ConfigUnreadable(
+                f"{REGISTRY_FILE.name} exists but could not be read, so saving "
+                f"would drop every model registered in it; refused. Fix or "
+                f"remove {REGISTRY_FILE.name} (a .bak may hold a good copy).")
         if not isinstance(reg, dict):
             reg = {}
         mutator(reg)
