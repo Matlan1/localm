@@ -107,17 +107,20 @@ def _host_matches(host: str, pattern: str) -> bool:
 
 
 def _config() -> dict:
+    """Best-effort config read for callers OTHER than check_url.
+
+    check_url reads the config itself, once, up front, and refuses outright
+    on a read failure (LM-DA-046) - it must never reach this fallback. The
+    remaining callers are _resolve_pinned (net_allow_private) and web_search
+    (net_search_url); neither reads net_deny/net_allow, so an unreadable
+    config here only means those two settings fall back to their safe
+    defaults (False / unset) for this call - never a dropped deny list."""
     try:
         from localm.config import load_config
         return load_config()
     except Exception as exc:
-        # Surface, do not silence: an unreadable config drops the explicit
-        # net_allow / net_deny lists (a denied host would then pass). The
-        # SSRF / private-IP guard is unaffected because net_allow_private
-        # defaults to False on this empty dict, so loopback/metadata stays blocked.
-        logger.warning("netpolicy: could not load config (%s); "
-                       "net_allow / net_deny lists are not enforced this call "
-                       "(loopback/private SSRF guard still active)", exc)
+        logger.warning("netpolicy: could not load config (%s); using "
+                       "defaults for this call", exc)
         return {}
 
 
@@ -128,8 +131,32 @@ def check_url(url: str) -> None:
 
     Checks, in order: mode, malformed-authority, scheme, deny list, allow list,
     resolved-IP class.
+
+    Reads the config exactly ONCE, up front (LM-DA-046): net_mode and the
+    net_deny/net_allow lists must come from the same snapshot, so a read
+    failure has exactly one outcome - refuse - no matter what LOCALM_NET_MODE
+    says. Resolving mode and lists from two separate reads (as network_mode()
+    and the old _config() helper did) let an env override reach past a
+    transient config-read failure and silently drop the user's explicit deny
+    list while still letting the request through.
     """
-    if network_mode() == "off":
+    env = os.environ.get(NET_MODE_ENV_VAR, "").strip().lower()
+    try:
+        from localm.config import load_config
+        cfg = load_config()
+    except Exception as exc:
+        logger.warning(
+            "netpolicy: could not load config (%s); refusing this request "
+            "(fail-safe) rather than resolving net_mode and net_deny/"
+            "net_allow from different reads", exc)
+        raise NetworkPolicyError(
+            "Network policy configuration could not be read; refusing this "
+            "request as a precaution. Retry once the config is readable.")
+
+    mode = env if env in NET_MODES else str(cfg.get("net_mode", "ask")).strip().lower()
+    if mode not in NET_MODES:
+        mode = "ask"
+    if mode == "off":
         raise NetworkPolicyError(
             "Network access is disabled (net_mode=off). Enable it with:  "
             "localm config net_mode ask")
@@ -159,7 +186,6 @@ def check_url(url: str) -> None:
     if not host:
         raise NetworkPolicyError(f"URL has no host: {url}")
 
-    cfg = _config()
     deny = _domain_list(cfg.get("net_deny"))
     for pattern in deny:
         if _host_matches(host, pattern):

@@ -486,6 +486,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   disagree with the real recommendation sourced from `python -m
   localm.hwdetect` a few lines later; it now only gates the pre-venv "use GPU
   acceleration?" prompt.
+- **The network policy's domain deny list could be silently skipped by a
+  config-read failure, in one narrow configuration.** Checking whether a
+  request is allowed read the config twice, once to resolve the mode and
+  once for the `net_deny`/`net_allow` lists; each read handled a failure on
+  its own. With `LOCALM_NET_MODE` set in the environment, the mode check
+  short-circuited before the config was ever touched, so a config that
+  failed to read at the wrong moment fell through with an empty deny list
+  instead of being refused. The private-address (SSRF) guard was never
+  affected. The config is now read once per check, and a read failure now
+  refuses the request outright, regardless of the environment variable.
 
 ## [0.1.5rc2] - 2026-08-08
 

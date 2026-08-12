@@ -182,6 +182,23 @@ class TestCheckUrl:
         monkeypatch.setattr("socket.getaddrinfo", boom)
         check_url("https://does-not-exist.example/")   # fetch will fail later
 
+    def test_config_read_failure_refuses_regardless_of_env_mode(self, monkeypatch):
+        # LM-DA-046: net_mode and net_deny/net_allow must come from ONE config
+        # read. Before the fix, LOCALM_NET_MODE=allow short-circuited the mode
+        # check before the config was ever touched, so a config-read failure
+        # resolved to an empty net_deny/net_allow instead of a refusal - a host
+        # the owner explicitly denied would have been let straight through.
+        monkeypatch.setenv("LOCALM_NET_MODE", "allow")
+        monkeypatch.setattr(
+            "socket.getaddrinfo",
+            lambda host, port, *a, **k: [(2, 1, 6, "", ("93.184.216.34", 0))])
+
+        def boom():
+            raise OSError("config unreadable")
+        monkeypatch.setattr("localm.config.load_config", boom)
+        with pytest.raises(NetworkPolicyError):
+            check_url("https://denied.example/")
+
 
 # ------------------------------------------------------------------ #
 #  safe_fetch: redirects re-validated, size caps                      #
