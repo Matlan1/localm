@@ -8,7 +8,7 @@
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { chat, convUI, ingestSharedFiles, initServerConversations, refreshCtxLimit, renderChat, renderConvList } from "./chat.js";
 import { populateSetupModels, reattachSessions } from "./coder.js";
-import { $, authHeaders, el, instanceCacheTrusted, refreshCsrf } from "./helpers.js";
+import { $, authHeaders, el, instanceCacheTrusted, refreshCsrf, sentShellToken } from "./helpers.js";
 import { syncLogoStyleFromConfig } from "./logo.js";
 import { addRevealToggle, applyInstallGateUI, dismissInstallGate, isIOSSafari, reattachActivity, refreshModels, shouldShowInstallGate, showInstallGate, showKeyGate, startHwStats, startQrScan, stopQrScan, submitKeyGate } from "./models-sidebar.js";
 import { loadClientPlugins, onVoicePick, populateVoicePicker, refreshKbSelect, refreshMemory, refreshPersonas, refreshPluginCommands, refreshVoiceStatus, setupPerfCard } from "./settings-perf.js";
@@ -40,6 +40,16 @@ window.fetch = async function (input, init) {
           return await _rawFetch(input, { ...init, headers: h2 });
         }
       }
+    }
+    // Open-mode counterpart (NEW-RESTART-DEAD-BUTTONS). The self-heal above can
+    // NEVER fire in open (keyless loopback) mode: it is gated on `sent`, the
+    // X-CSRF-Token WE sent, and open mode has no CSRF token at all -
+    // routes/session.py returns csrf="" while no key is configured, so
+    // authHeaders() sends the shell-token bearer instead. That left the one
+    // credential open mode actually uses with no recovery path of any kind.
+    else if (res.status === 403 && sentShellToken(hdrs)) {
+      const url = typeof input === "string" ? input : (input && input.url) || "";
+      if (url.startsWith("/") || url.startsWith(location.origin)) onShellTokenRejected();
     }
   } catch (e) { /* fall through with the original response */ }
   return res;
@@ -137,6 +147,77 @@ export async function resetClientState() {
 }
 window.resetClientState = resetClientState;
 
+// --- open-mode shell-token recovery (NEW-RESTART-DEAD-BUTTONS) -------------
+// In open (keyless loopback) mode the GUI's ONLY management credential is the
+// per-process shell token: http_server.py mints it with secrets.token_urlsafe
+// at startup ("per-process so it dies on restart") and web.py bakes THAT
+// process's value into the index.html it serves. helpers.js reads it into a
+// module-scope const at load, so it can only ever change by loading a new
+// document. A page that outlives the process which served it therefore holds a
+// dead credential and has no way to refresh it in place.
+//
+// This is not a write-only problem. The open-mode gate in http_server.py
+// requires that bearer for every unsafe method AND every /api|/v1 metadata GET
+// (everything except /api/session and /v1/models*), so a stale token 403s
+// essentially the whole shell at once - which is what "every button is dead
+// after a restart" actually is. Two known ways to end up holding one:
+//   - the reconnect poll reloads on the first HTTP answer it gets, and the OLD
+//     process keeps answering for the whole unload + wait_for_vram_release
+//     window before it re-execs, so that reload can be served by the process
+//     that is about to disappear (see onServerUnreachable below, which now
+//     waits to observe a down first);
+//   - sw.js falls a navigation back to the PRECACHED "/" whenever the network
+//     throws, which is exactly the case during the re-exec gap - and that
+//     cached copy carries whatever token was live when the worker installed.
+//
+// The only source of a live token is a fresh document from the CURRENT process,
+// so the recovery is: drop the service worker and its caches (otherwise the
+// reload can be served the same stale shell straight back out of the cache),
+// then reload. A one-shot sessionStorage guard bounds it exactly like the
+// AUTH-1b self-heal above, so it can never loop: if a freshly served document
+// still has its token rejected then staleness is not the cause, and we SAY so
+// rather than reload again or - as before this fix - unlock a shell whose every
+// call fails, with nothing on screen to explain it.
+export function showShellStaleOverlay() {
+  let ov = $("shell-stale-overlay");
+  if (!ov) {
+    ov = el("div", "reconnect-overlay");
+    ov.id = "shell-stale-overlay";
+    const panel = el("div", "reconnect-panel");
+    panel.appendChild(el("div", "reconnect-msg",
+      "This page was served by an earlier run of the LocaLM server, so it can "
+      + "no longer make changes. Reloading will reconnect it."));
+    const again = el("button", "reconnect-reset", "Reload");
+    again.type = "button";
+    again.onclick = () => location.reload();
+    panel.appendChild(again);
+    ov.appendChild(panel);
+    document.body.appendChild(ov);
+  }
+  ov.style.display = "flex";
+}
+window.showShellStaleOverlay = showShellStaleOverlay;
+
+export let _shellRecoveryStarted = false;
+export async function onShellTokenRejected() {
+  // A stale token 403s many in-flight calls at once; recover for the first.
+  if (_shellRecoveryStarted) return;
+  _shellRecoveryStarted = true;
+  let alreadyTried = false;
+  try { alreadyTried = sessionStorage.getItem("localm.shellReset") === "1"; }
+  catch (e) { /* sessionStorage unavailable in some private modes */ }
+  if (alreadyTried) { showShellStaleOverlay(); return; }
+  // A 403 proves the server ANSWERED, but during a restart the process that
+  // answered may be on its way out. Confirm it is still reachable before
+  // reloading, so a reload aimed into the re-exec gap lands on our own
+  // reconnect overlay (which retries) instead of the browser's error page.
+  if (!(await serverReachable())) { onServerUnreachable({ sawDown: true }); return; }
+  try { sessionStorage.setItem("localm.shellReset", "1"); } catch (e) { /* ignore */ }
+  await resetServiceWorkerAndCaches();
+  location.reload();
+}
+window.onShellTokenRejected = onShellTokenRejected;
+
 // Server-unreachable lock (AUTH-1b): the server is DOWN, NOT an auth failure.
 // Show a distinct "reconnecting" overlay and auto-retry instead of the key gate,
 // so a dead server is not mistaken for a bad key and re-entered in a loop. When
@@ -208,7 +289,32 @@ export async function serverReachable() {
 }
 window.serverReachable = serverReachable;
 
-export function onServerUnreachable() {
+// How many consecutive REACHABLE polls to accept as "the server came back"
+// when we never actually observed it go down. Only reached on the restart path
+// below; see the sawDown note there for why it is bounded rather than infinite.
+const _UP_POLLS_WITHOUT_DOWN = 3;   // ~9s at the 3s poll interval
+
+// *sawDown* records whether the caller has already OBSERVED the server
+// unreachable. bootAuthProbe has (a thrown fetch is why it calls this), so it
+// passes true and keeps the original behaviour: reload on the first poll that
+// answers. The Settings "Restart server" button has NOT - it calls this
+// optimistically right after POSTing the restart, while the server is still up.
+//
+// That distinction matters because _do_restart unloads the engines and waits on
+// wait_for_vram_release BEFORE it re-execs, so the OLD process keeps answering
+// for seconds after the POST. Reloading on the first answer therefore hands the
+// browser a document from the process that is about to disappear, whose shell
+// token dies with it - one of the two ways a page ends up holding a dead
+// credential (see onShellTokenRejected above). So on that path, wait until we
+// have seen it actually go down before treating an answer as the NEW process.
+//
+// BOUNDED, deliberately: the re-exec gap can be shorter than one 3s poll, so a
+// fast restart can come back without us ever catching it down. Waiting forever
+// for a transition we may have missed would strand the user on the overlay -
+// strictly worse than the bug being fixed. After _UP_POLLS_WITHOUT_DOWN answers
+// we reload anyway, which is exactly today's behaviour; if that reload does land
+// on the doomed process, the shell-token recovery catches it.
+export function onServerUnreachable(opts) {
   window.__localmLocked = true;
   const app = $("app");
   if (app) app.style.display = "none";
@@ -216,8 +322,11 @@ export function onServerUnreachable() {
   if (gate) gate.style.display = "none";   // a connectivity problem, not a key one
   showReconnectOverlay();
   if (_reconnectTimer) return;
+  let downSeen = !!(opts && opts.sawDown);
+  let upPolls = 0;
   _reconnectTimer = setInterval(async () => {
-    if (!(await serverReachable())) return;   // still down - keep waiting
+    if (!(await serverReachable())) { downSeen = true; return; }   // still down - keep waiting
+    if (!downSeen && ++upPolls < _UP_POLLS_WITHOUT_DOWN) return;    // may be the OLD process
     clearInterval(_reconnectTimer);
     _reconnectTimer = null;
     location.reload();                         // back up -> clean boot handles 200/401
@@ -241,7 +350,21 @@ export async function bootAuthProbe() {
     // as "needs auth" (the recoverable key gate), NOT a dead server.
     status = (await serverReachable()) ? 401 : 0;
   }
-  if (status === 0) { onServerUnreachable(); return false; }
+  if (status === 0) { onServerUnreachable({ sawDown: true }); return false; }
+  // A 403 on the boot probe is the open-mode stale-shell-token case
+  // (NEW-RESTART-DEAD-BUTTONS): in open mode the gate in http_server.py demands
+  // the per-process shell bearer for this very GET, so a page served by an
+  // earlier process fails it. This used to fall through to unlockUI() below and
+  // reveal a shell whose every subsequent call 403s, with nothing on screen
+  // saying why - the dead-buttons report. Recover instead, and never report
+  // authed. Scoped to the case we can actually diagnose: only when we HAVE a
+  // shell token, i.e. we really are the open-mode client this describes. A 403
+  // without one is some other condition and keeps its existing handling rather
+  // than being swept into this recovery.
+  if (status === 403 && sentShellToken(authHeaders())) {
+    await onShellTokenRejected();
+    return false;
+  }
   if (status === 401) {
     // A SUCCESSFUL login (marker set by submitKeyGate / the Settings key save)
     // that still boots 401 means the cached shell, not the key, is wedged ->
@@ -261,6 +384,11 @@ export async function bootAuthProbe() {
   try {
     sessionStorage.removeItem("localm.loginOk");
     sessionStorage.removeItem("localm.swReset");
+    // Same for the shell-token guard: this boot's credential works, so a LATER
+    // restart in the same tab must get its own recovery attempt. Leaving it set
+    // would make the second restart of a session skip straight to the "reload
+    // by hand" overlay having never retried.
+    sessionStorage.removeItem("localm.shellReset");
   } catch (e) { /* sessionStorage may be unavailable in some private modes */ }
   unlockUI();
   return true;

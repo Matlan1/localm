@@ -716,6 +716,18 @@ export async function refreshModels() {
       showKeyGate("This LocaLM server requires an API key.");
       return;
     }
+    if (r.status === 403) {
+      // Open mode, stale per-process shell token (NEW-RESTART-DEAD-BUTTONS):
+      // this page was served by an earlier run of the server, so the bearer it
+      // carries is no longer the live one and the open-mode gate refuses it.
+      // The recovery itself is central (onShellTokenRejected, driven by the
+      // fetch wrapper in init.js, which has already been handed this same 403);
+      // all that is owed here is a status line that names the real cause. The
+      // generic branch below would say "models unavailable (HTTP 403)", which
+      // reads as a server fault rather than a page that needs reloading.
+      setStatus("err", "page out of date - reload to reconnect");
+      return;
+    }
     if (!r.ok) {
       // A non-401 error (500, 503, ...) returns a body with no `models` array
       // (e.g. FastAPI's {"detail": ...}); the empty-list fallback below would
