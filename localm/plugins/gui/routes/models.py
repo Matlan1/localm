@@ -516,9 +516,13 @@ def register(app: FastAPI, ctx) -> None:
         controls silently vanished on a slow driver (AGENTS.md rule 5).
 
         ``index_space`` (present only as ``"native"``) says the ``gpus``
-        indices are the NATIVE runtime's own device order rather than
-        list_gpus()'s torch/nvidia-smi numbering - see the vulkan branch
-        below; the client labels the numbering accordingly."""
+        indices are the ones a MODEL LOAD consumes rather than list_gpus()'s
+        torch/nvidia-smi numbering - see the vulkan branch below; the client
+        labels the numbering accordingly. Note that is llama.cpp's own device
+        list, NOT the raw ggml registry order: integrated GPUs and
+        accelerators are dropped and the rest renumbered before they get here
+        (discover._llama_visible_devices), because these numbers are written
+        straight into main_gpu_index / gpu_split_indices."""
         from localm.config import load_config
         from localm.discover import GPU_PROBE_OK
         cfg = load_config()

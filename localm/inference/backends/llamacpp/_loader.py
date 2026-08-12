@@ -766,6 +766,14 @@ def native_device_inventory() -> "Optional[list]":
     and refuses otherwise). A caller that does NOT check is relying on a
     coincidence. See dev-notes/mmproj-device-placement-2026-08-12.md.
 
+    FOR A CONFIGURED ``gpu_split_indices`` / ``main_gpu_index``, DO NOT MAP AN
+    INDEX FROM THIS LIST AT ALL: use :func:`localm.discover.native_gpu_devices`,
+    which derives llama.cpp's device list from this inventory and renumbers into
+    it, so the whole question is settled once instead of at each call site. Those
+    two settings are enumerated, written and read back exclusively in that
+    derived space (the GUI selectors, ``resolve_auto_split_ratios`` and
+    ``implicit_split_capacity`` all go through it).
+
     ``description`` is the human device name when
     the build exposes ``ggml_backend_dev_description`` (ggml-vulkan's terse
     ``name`` is "Vulkan<n>"), else "". ``free``/``total`` are

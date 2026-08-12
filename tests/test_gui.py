@@ -1270,6 +1270,40 @@ class TestGpusEndpointNativeIndexSpace:
         assert data["gpus"] == torch_view
         assert "index_space" not in data
 
+    def test_selector_offers_llama_cpps_devices_not_the_raw_registry(self, gui_app):
+        """END TO END through the REAL derivation, from the probe daemon's raw
+        inventory out to the JSON the selector renders.
+
+        Every other test in this class patches native_gpu_devices itself, so
+        none of them can see whether the numbers the GUI offers are the ones
+        the loader will consume - which is the entire defect. This one patches
+        the DAEMON instead and lets discover._llama_visible_devices run for
+        real: llama.cpp drops an integrated GPU whenever a discrete card
+        exists, so a box enumerating iGPU-then-discrete must be offered ONE
+        device numbered 0, not two numbered 0 and 1. Offering index 1 here is
+        what let a user tick a card the loader has no device for."""
+        app, _ = gui_app
+        raw = [
+            {"index": 0, "name": "Vulkan0", "description": "Intel UHD Graphics",
+             "type": 2, "free": 2 * 1024 ** 3, "total": 4 * 1024 ** 3},
+            {"index": 1, "name": "Vulkan1", "description": "NVIDIA RTX 4090",
+             "type": 1, "free": 20 * 1024 ** 3, "total": 24 * 1024 ** 3},
+        ]
+        with patch("localm.discover._native_backend_has_vulkan", return_value=True), \
+             patch("localm.inference.backends.llamacpp._loader.gpu_devices_isolated",
+                   return_value=raw), \
+             patch("localm.discover.list_gpus", new=probe_double([])), \
+             patch("localm.config.load_config",
+                   return_value={"main_gpu_index": None,
+                                 "gpu_split_indices": None}):
+            with TestClient(app) as client:
+                r = client.get("/api/gpus")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["index_space"] == "native"
+        assert [(g["index"], g["name"]) for g in data["gpus"]] == [
+            (0, "NVIDIA RTX 4090")]
+
     def test_non_vulkan_build_never_touches_the_daemon(self, gui_app):
         """CUDA/HIP/CPU builds keep the exact pre-existing behavior, and the
         native enumeration (a daemon spawn) is never even attempted."""

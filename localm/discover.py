@@ -1617,6 +1617,65 @@ def _native_backend_has_vulkan() -> bool:
         return False
 
 
+def _llama_visible_devices(devices: list) -> list:
+    """The subset of a native non-CPU device inventory that llama.cpp will
+    actually place layers on, RENUMBERED into the index space ``mp.main_gpu``
+    and ``mp.tensor_split`` consume - i.e. what a configured ``main_gpu_index``
+    / ``gpu_split_indices`` has to be expressed in to name the card the user
+    meant.
+
+    THE TWO SEQUENCES ARE NOT THE SAME, which is the defect this exists to
+    close. ``_loader.native_device_inventory`` is a faithful registry
+    inventory: it numbers EVERY non-CPU device in raw
+    ``ggml_backend_dev_get`` order. Measured against upstream
+    ``llama_prepare_model_devices`` (``src/llama.cpp`` at b10361),
+    ``model->devices`` is instead built as:
+
+        RPC-backed devices, hoisted to the FRONT
+        + GPU-type devices in registry order, deduplicated by device_id
+        + at most ONE integrated GPU, and ONLY when no discrete GPU was found
+        CPU and ACCEL devices are SKIPPED; META aborts fatally
+
+    So on a box with a discrete card beside integrated graphics - an ordinary
+    laptop, or any desktop CPU with an iGPU - the inventory carries a device
+    llama.cpp's list does not. If the iGPU enumerates first, EVERY index is
+    off by one, and a user who ticked "device 0 and device 1" splits across
+    cards they never chose or names an index the loader has no device for.
+
+    RPC hoisting and device_id dedup cannot arise here, so neither is
+    emulated: ``ggml_backend_rpc_add_server`` is never called anywhere in this
+    project (so the RPC backend registers zero devices even though its library
+    ships and loads), and ggml-vulkan already dedups one physical GPU seen
+    under two drivers by ``deviceUUID``/``deviceLUID`` before it reaches the
+    registry, on a build that provisions one GPU backend at a time.
+
+    ALLOWLIST ``GPU`` RATHER THAN EXCLUDING THE OTHERS BY VALUE, for the same
+    reason ``implicit_split_capacity`` does: the enum has GROWN (IGPU was
+    inserted AHEAD of ACCEL, so the value 2 means ACCEL on a runtime around
+    b6000 and INTEGRATED GPU on anything since roughly b8100), and this module
+    cannot know which llama.cpp is provisioned. ``CPU`` 0 and ``GPU`` 1 have
+    held at every tag sampled, so an allowlist is version-independent where a
+    denylist is not. A device whose type the probe did not report fails the
+    filter rather than being assumed discrete.
+
+    WHEN NO GPU-TYPE DEVICE IS PRESENT THE LIST IS RETURNED UNCHANGED, and
+    that is deliberate rather than an oversight. An iGPU-only box (a very
+    common laptop) has llama.cpp fall back to its single integrated GPU as
+    device 0, which is exactly what this inventory already numbers 0 - the two
+    agree today and a load works. Returning an empty list there would hide a
+    working device behind a "no GPU here" reading, trading a loud bug for a
+    silent one on hardware that was never affected. It cannot be resolved more
+    precisely than this because identifying an IGPU device POSITIVELY needs
+    the unstable enum value above, so this branch declines to guess and leaves
+    behaviour exactly as it was."""
+    from localm.inference.backends.llamacpp._loader import GGML_DEV_TYPE_GPU
+    gpus = [d for d in devices
+            if isinstance(d, dict) and d.get("type") == GGML_DEV_TYPE_GPU]
+    if not gpus:
+        return list(devices)
+    return [{**d, "index": i} for i, d in enumerate(gpus)]
+
+
 def native_gpu_devices() -> Optional[list]:
     """Selector-shaped devices from the ACTIVE native runtime's OWN registry,
     read crash-isolated (the probe daemon - ``_loader.gpu_devices_isolated``):
@@ -1624,11 +1683,23 @@ def native_gpu_devices() -> Optional[list]:
     daemon/registry cannot answer this call. An empty list is a real answer
     (the runtime registers no non-CPU device).
 
-    The ``index`` values are the native backend's device order - on the
-    ``vulkan`` build the ONLY index space a configured ``gpu_split_indices`` /
-    ``main_gpu_index`` actually means at load time (GPU-SPLIT-VKINDEX;
-    :func:`list_gpus` is structurally blind to it). This is the enumeration
-    source for the GUI's split/main-GPU SELECTORS on that build. Deliberately
+    The ``index`` values are the index space a configured
+    ``gpu_split_indices`` / ``main_gpu_index`` actually means at load time -
+    on the ``vulkan`` build the only source that can express it at all
+    (GPU-SPLIT-VKINDEX; :func:`list_gpus` is structurally blind to it). That
+    is NOT simply the registry's own numbering: llama.cpp drops integrated
+    GPUs whenever a discrete card exists and skips accelerators outright, so
+    the raw inventory from ``_loader.native_device_inventory`` is passed
+    through :func:`_llama_visible_devices` first, which keeps the devices the
+    loader will really use and renumbers them into the space it indexes. See
+    that helper for the measured upstream construction and for why an
+    iGPU-only box is deliberately left untouched. Every consumer here wants
+    that same list: the GUI selectors write these numbers into config,
+    :func:`resolve_auto_split_ratios` pairs a configured index BACK to a
+    device by it, and :func:`implicit_split_capacity` sums over the set.
+
+    This is the enumeration source for the GUI's split/main-GPU SELECTORS on
+    that build. Deliberately
     NOT merged into :func:`list_gpus`: its torch/nvidia-smi index space feeds
     the torch-side reads (:func:`vram_capacity`'s per-device sums,
     :func:`gpu_split_shortfall`), and mixing the two spaces is exactly the bug
@@ -1665,7 +1736,7 @@ def native_gpu_devices() -> Optional[list]:
         if isinstance(t, int):
             entry["type"] = t
         out.append(entry)
-    return out
+    return _llama_visible_devices(out)
 
 
 def resolve_main_gpu_index(configured, *, gpus: Optional[list] = None) -> int:
@@ -2015,7 +2086,20 @@ def resolve_auto_split_ratios(config: Optional[dict] = None, *,
         by_index = {d.get("index"): d for d in devices}
         for i in idx_list:
             d = by_index.get(i)
-            free = d.get("free") if isinstance(d, dict) else None
+            if not isinstance(d, dict):
+                # ABSENT, which is a different problem from UNMEASURABLE and
+                # needs different words. These devices are llama.cpp's own
+                # list (integrated GPUs and accelerators already removed, the
+                # rest renumbered - see _llama_visible_devices), so a
+                # configured index can legitimately point past the end:
+                # typically a split saved before that filtering existed, on a
+                # box whose raw registry had more entries than the loader
+                # keeps. Calling that "reported no free-VRAM figure" sends a
+                # reader hunting a driver fault instead of a stale setting.
+                return _fallback(
+                    f"device {i} is not one of the {len(devices)} device(s) "
+                    "this load will actually use")
+            free = d.get("free")
             if not isinstance(free, int):
                 return _fallback(
                     f"device {i} reported no free-VRAM figure")
@@ -2528,14 +2612,23 @@ def implicit_split_capacity(config: Optional[dict] = None, *,
         if not devices:
             return {}
         # DISCRETE GPUs ONLY, and this is a load-safety filter, not tidiness.
-        # The native registry reports every non-CPU device, but llama.cpp's
-        # device list SKIPS accelerators outright and appends integrated GPUs
-        # only when no discrete GPU was found. So a box with a discrete card
-        # AND an iGPU - an ordinary laptop, or any desktop CPU with integrated
-        # graphics - would otherwise have the iGPU's memory summed into a
-        # budget llama.cpp then places entirely on the discrete card. That
-        # over-budgets, which is the direction that OOMs rather than merely
-        # wasting memory.
+        # llama.cpp's device list SKIPS accelerators outright and appends
+        # integrated GPUs only when no discrete GPU was found. So a box with a
+        # discrete card AND an iGPU - an ordinary laptop, or any desktop CPU
+        # with integrated graphics - must not have the iGPU's memory summed
+        # into a budget llama.cpp then places entirely on the discrete card.
+        # That over-budgets, which is the direction that OOMs rather than
+        # merely wasting memory.
+        #
+        # SINCE 2026-08-12 :func:`native_gpu_devices` ALREADY APPLIES EXACTLY
+        # THIS FILTER (see _llama_visible_devices), so on a real reading this
+        # pass is now a no-op and is kept as defence in depth rather than as
+        # the thing standing between an iGPU and the budget. It still earns
+        # its place: ~5 test modules inject device lists by patching
+        # native_gpu_devices directly, which bypasses that derivation
+        # entirely, and a sum is the one consumer where a stray iGPU is
+        # actively unsafe rather than merely mis-numbered. Do not read its
+        # presence as evidence the upstream list is unfiltered.
         #
         # Filter to GGML_DEV_TYPE_GPU rather than excluding the others by
         # value: the enum has GROWN (IGPU was inserted ahead of ACCEL, so the

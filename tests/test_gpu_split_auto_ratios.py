@@ -380,6 +380,45 @@ class TestResolveAutoSplitRatiosVulkan:
         assert resolve_auto_split_ratios(
             {"gpu_split_indices": [0, 3], "gpu_split_ratios": None}) is None
 
+    def test_vulkan_absent_device_is_not_reported_as_unmeasurable(
+            self, monkeypatch, caplog):
+        """An index past the end of the device list and a device that reported
+        no VRAM are DIFFERENT problems and must not share a message.
+
+        native_gpu_devices now yields llama.cpp's own device list (integrated
+        GPUs and accelerators removed, the rest renumbered), which makes the
+        ABSENT case materially more likely - the ordinary cause being a split
+        saved before that filtering existed. Calling it "reported no free-VRAM
+        figure" would send a reader hunting a driver fault instead of a stale
+        setting."""
+        self._vulkan(monkeypatch)
+        monkeypatch.setattr(discover, "native_gpu_devices", lambda: self._NATIVE)
+        with caplog.at_level("INFO"):
+            assert resolve_auto_split_ratios(
+                {"gpu_split_indices": [0, 3], "gpu_split_ratios": None}) is None
+        msgs = " ".join(r.getMessage() for r in caplog.records)
+        assert "device 3 is not one of the 2 device(s)" in msgs
+        assert "free-VRAM figure" not in msgs
+
+    def test_vulkan_present_but_unmeasurable_device_keeps_the_vram_wording(
+            self, monkeypatch, caplog):
+        """The other arm, and what makes the test above discriminating: a
+        device that IS in the list but reported no bytes must still say so.
+        Without this pair, one message covering both cases passes either test
+        alone."""
+        self._vulkan(monkeypatch)
+        native = [
+            {"index": 0, "name": "Radeon", "total": 16 * GB, "free": 8 * GB},
+            {"index": 1, "name": "llvmpipe"},   # present, registry gave no bytes
+        ]
+        monkeypatch.setattr(discover, "native_gpu_devices", lambda: native)
+        with caplog.at_level("INFO"):
+            assert resolve_auto_split_ratios(
+                {"gpu_split_indices": [0, 1], "gpu_split_ratios": None}) is None
+        msgs = " ".join(r.getMessage() for r in caplog.records)
+        assert "device 1 reported no free-VRAM figure" in msgs
+        assert "is not one of" not in msgs
+
 
 # --------------------------------------------------------------------------- #
 #  apply_gpu_split(ratios_override=...) - the worker-side consumption           #
