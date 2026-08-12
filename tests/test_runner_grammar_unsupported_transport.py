@@ -158,6 +158,15 @@ def test_child_dispatch_reports_the_refusal_instead_of_dying(monkeypatch):
         envelope = resp_q.get(timeout=5)
         assert envelope[0] == "error", (
             f"expected a clean error envelope, got {envelope!r}")
+        # len BEFORE index, so a missing tag reports the LOSS rather than an
+        # IndexError. An untagged envelope is not a formatting detail: the parent
+        # turns it into RuntimeError, which GgufBackend answers by unloading the
+        # model, so "no tag" and "wrong tag" are the same defect and both must
+        # say so out loud.
+        assert len(envelope) > 2, (
+            f"the refusal crossed the IPC with NO type tag ({envelope!r}), so the "
+            f"parent will raise RuntimeError and GgufBackend will unload the "
+            f"user's model over a request the caller could simply resend")
         assert envelope[2] == "GrammarUnsupportedError", (
             f"untagged errors become RuntimeError, which makes GgufBackend unload "
             f"the model; got tag {envelope[2:]!r}")
