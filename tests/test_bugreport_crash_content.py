@@ -79,6 +79,106 @@ class TestRecentLogTail:
         assert "hunter2" not in tail
 
 
+class TestLogUnavailableIsNotSilence:
+    """H4: an empty digest used to mean THREE unrelated things - no log file
+    matched this run, the file was found but could not be READ, and the run
+    genuinely logged nothing notable - and all three rendered as no log section
+    at all. The first two are failures to collect; reporting them as silence is
+    the AGENTS.md rule 5 shape (a step that failed must not look like success),
+    and it costs the maintainer the one artifact triage needs."""
+
+    def test_unreadable_log_is_distinguished_from_a_missing_one(self, tmp_path):
+        # A REAL OSError out of a REAL filesystem state (a directory wearing the
+        # log's name), not a mock of the function under test: read_text on a
+        # directory raises PermissionError on Windows and IsADirectoryError on
+        # POSIX, and both are the OSError this must survive.
+        d = tmp_path / "logs"
+        d.mkdir()
+        (d / "localm_2026-06-22_231715_777.log").mkdir()
+        tail, reason = br._recent_log_tail_result(home=tmp_path, pid=777)
+        assert tail == ""
+        assert "could not be read" in reason
+        # ...and NOT the same answer as "there was no log at all" (case a).
+        assert reason != br._LOG_UNAVAILABLE_NO_FILE
+
+    def test_no_log_file_gets_its_own_message(self, tmp_path):
+        tail, reason = br._recent_log_tail_result(home=tmp_path, pid=999)
+        assert tail == ""
+        assert reason == br._LOG_UNAVAILABLE_NO_FILE
+        assert "could not be read" not in reason
+
+    def test_a_log_that_was_read_is_never_reported_as_uncollected(self, tmp_path):
+        # Case (c), the honest empty: the collection SUCCEEDED. A false "not
+        # collected" here would be the mirror defect - crying failure on a
+        # clean run - so it is pinned rather than left to chance.
+        _make_log(tmp_path, 888, "2026-07-13 15:24:50,000 INFO    localm: started\n")
+        _, reason = br._recent_log_tail_result(home=tmp_path, pid=888)
+        assert reason == ""
+
+    def test_the_str_of_the_error_would_leak_the_account_name_and_is_not_used(self):
+        # THE PRIVACY PROPERTY, pinned where the fixture can actually express the
+        # leak: an OSError whose filename is under the REAL home dir. A tmp_path
+        # fixture cannot express it (pytest's basetemp is off the home tree), so
+        # a "no username" assertion there would pass no matter what the code did.
+        leaky = Path.home() / "logs" / "localm_2026-06-22_231715_777.log"
+        exc = PermissionError(13, "Permission denied", str(leaky))
+        # Guard the guard: confirm the naive formatting really does leak, so this
+        # test cannot quietly become vacuous if the interpreter's repr changes.
+        assert Path.home().name in str(exc)
+        reason = br._log_failure_reason(exc)
+        assert "Permission denied" in reason      # it still says WHY
+        assert str(leaky) not in reason
+        assert Path.home().name not in reason
+
+    def test_a_non_oserror_contributes_no_message_at_all(self):
+        # repr() is safe for OSError only (its __repr__ drops the filename), so
+        # this is the case that catches a "simplification" to repr(exc).
+        leaky = Path.home() / "logs" / "localm_2026-06-22_231715_777.log"
+        exc = ValueError(f"boom {leaky}")
+        reason = br._log_failure_reason(exc)
+        assert "ValueError" in reason
+        assert str(leaky) not in reason
+        assert Path.home().name not in reason
+
+    def test_a_path_shaped_strerror_is_dropped_whole(self):
+        # The structural guard: a leak is made UNREPRESENTABLE rather than
+        # trusting strerror never to carry a path. Asserted against the
+        # instance's OWN class name, because OSError auto-subclasses on errno
+        # (errno 13 constructs a PermissionError), so a literal here would pin
+        # the constructor's behaviour rather than this function's.
+        exc = OSError(13, "denied reading sub/dir")
+        reason = br._log_failure_reason(exc)
+        assert "sub/dir" not in reason
+        assert "/" not in reason
+        assert reason == type(exc).__name__   # nothing but the class name left
+
+    def test_the_report_says_the_log_could_not_be_collected(self, tmp_path):
+        # End to end through the REAL failure, into the REAL report text.
+        d = tmp_path / "logs"
+        d.mkdir()
+        (d / "localm_2026-06-22_231715_777.log").mkdir()
+        tail, reason = br._recent_log_tail_result(home=tmp_path, pid=777)
+        text = br.build_report(
+            "localm server crashed (recovered on the next start)",
+            context={"recent_log_tail": tail, "log_unavailable": reason},
+        )
+        assert "## Recent log (tail)" in text
+        assert "not collected" in text
+        # The log's own absolute path is the leak vector this fixture CAN
+        # express, and it must not reach the report.
+        assert str(d) not in text
+        assert str(tmp_path / "logs") not in text
+
+    def test_a_real_tail_renders_the_log_and_never_the_notice(self):
+        text = br.build_report(
+            "crashed",
+            context={"recent_log_tail": "DEBUG POST /api/models/load -> 200",
+                     "log_unavailable": "must never render alongside a real tail"},
+        )
+        assert "POST /api/models/load" in text
+        assert "not collected" not in text
+
+
 class TestBuildReportRendersCrashDetail:
     def test_native_trace_and_log_tail_rendered(self):
         text = br.build_report(
