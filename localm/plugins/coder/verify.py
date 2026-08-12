@@ -171,8 +171,20 @@ def detect_verify_command(cwd: Path) -> Optional[VerifyCommand]:
     theoretical - it is why this repository's own `npm test` became an oracle
     that could only ever return "failed to run" (see :func:`_has_project_check`).
     """
-    from .project_config import load_project_config
-    configured = load_project_config(cwd).get("verify")
+    from .project_config import ProjectConfigUnreadable, load_project_config
+    try:
+        configured = load_project_config(cwd).get("verify")
+    except ProjectConfigUnreadable as e:
+        # Say so rather than quietly auto-detecting: the project may configure a
+        # DIFFERENT verify command, so falling through silently would run an
+        # oracle the user did not choose and report its result as theirs. A note
+        # is the right altitude here (unlike the CLI's refusal): this runs mid
+        # session, where aborting would cost more than it protects, and a wrong
+        # verify command is a quality gate rather than a safety one.
+        from localm.debuglog import logger
+        logger.warning("verify: ignoring the project config (%s); falling back "
+                       "to auto-detection", e)
+        configured = None
     if configured:
         return str(configured)
     if not _has_project_check(cwd):

@@ -94,10 +94,21 @@ def effective_mode(surface: str, cwd=None) -> SessionMode:
     # localcoder CLI reads the same file itself before it gets here).
     if surface == "coder" and cwd is not None:
         try:
-            from localm.plugins.coder.project_config import load_project_config
+            from localm.plugins.coder.project_config import (
+                ProjectConfigUnreadable,
+                load_project_config,
+            )
             pmode = load_project_config(Path(cwd)).get("mode")
             if isinstance(pmode, str) and pmode.strip().lower() in _VALID_MODES:
                 return SessionMode(pmode.strip().lower())
+        except ProjectConfigUnreadable:
+            # The project file is the one place a user can say "this project is
+            # private", and it did not parse, so we cannot know whether it did.
+            # Continuing to the global coder_mode would write a transcript for a
+            # session that may have been marked private - the one direction that
+            # cannot be undone afterwards. Fail safe, exactly as the load_config
+            # failure below does.
+            return SessionMode.PRIVACY
         except Exception:
             pass
 
