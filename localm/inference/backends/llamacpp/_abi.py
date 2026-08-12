@@ -60,6 +60,8 @@ from localm.bugreport import LocalmError
 
 from ._structs import (
     _VALID_LOAD_MODES,
+    LLAMA_LOAD_MODE_AUTO,
+    LLAMA_LOAD_MODE_MMAP,
     LlamaContextParamsV1,
     LlamaContextParamsV2,
     LlamaModelParamsV1,
@@ -578,10 +580,18 @@ def evaluate(mp, cp) -> AbiVerdict:
     # probe CONTRADICTION (symbols vs value fingerprint). See
     # test_evaluate_cannot_discriminate_the_two_layouts, which pins this so the
     # stronger claim cannot creep back in.
+    # The valid set MIRRORS llama.h and is imported, never spelled out here - a
+    # second copy of an upstream enumerator list is a second thing to forget to
+    # update, and forgetting it once already cost a live outage: upstream added
+    # LLAMA_LOAD_MODE_AUTO = -1 between b10361 and b10373 and made it the
+    # default, so every build from b10373 on was refused by this line for
+    # reporting a value that was correct. The message renders the set rather
+    # than restating it for the same reason.
     if is_v2 and mp.load_mode not in _VALID_LOAD_MODES:
         failures.append(
             f"model_params.load_mode = {mp.load_mode} "
-            "(expected a valid LLAMA_LOAD_MODE: 0, 1, 2, 3 or 4)"
+            "(expected a valid LLAMA_LOAD_MODE: "
+            f"{', '.join(str(v) for v in _VALID_LOAD_MODES)})"
         )
     # main_gpu is a device INDEX. llama_max_devices() is 16 on every build
     # localm has seen, so this bound is enormously generous; its job is to catch
@@ -626,13 +636,22 @@ def evaluate(mp, cp) -> AbiVerdict:
     ]
     # The mmap default is expressed differently per layout, so name the field
     # that layout actually has rather than a field that may not exist.
+    #
+    # TWO typical values, not one, and this is what keeps the diagnostic worth
+    # reading. Upstream's default moved from MMAP (1) to AUTO (-1) at b10373, so
+    # a single expected value makes EVERY load on a current build emit drift
+    # noise - and a diagnostic that always fires is how a real one gets ignored.
+    # Both are genuine upstream defaults; anything else still reports.
     if is_v2:
-        checks.append(("model_params.load_mode", mp.load_mode, 1))
+        checks.append(("model_params.load_mode", mp.load_mode,
+                       (LLAMA_LOAD_MODE_AUTO, LLAMA_LOAD_MODE_MMAP)))
     else:
         checks.append(("model_params.use_mmap", bool(mp.use_mmap), True))
     for label, got, exp in checks:
-        if got != exp:
-            diags.append(f"{label} = {got} (typical default {exp})")
+        expected = exp if isinstance(exp, tuple) else (exp,)
+        if got not in expected:
+            shown = " or ".join(str(e) for e in expected)
+            diags.append(f"{label} = {got} (typical default {shown})")
 
     layout = MODEL_PARAMS_V2 if is_v2 else MODEL_PARAMS_V1
     context_layout = (CONTEXT_PARAMS_V2 if isinstance(cp, LlamaContextParamsV2)

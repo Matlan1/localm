@@ -54,6 +54,18 @@ permanent public record of what shipped and are never rewritten; the in-progress
   for a run that changed nothing.
 
 ### Fixed
+- **localm no longer installs a llama.cpp runtime it then refuses to load.** A
+  fresh `localm setup-llama` fetches the newest upstream build, and from build
+  b10373 onward localm rejected what it had just installed with "incompatible
+  struct layout (ABI mismatch)", on every backend - CUDA, Vulkan and CPU alike.
+  Nothing was actually wrong with those builds: upstream added a new "auto"
+  option for how model weights are loaded and made it the default, and localm's
+  check did not know that option yet, so it read a perfectly good setting as
+  corruption. The check now knows it. Because localm asks upstream for the
+  newest build at install time, this could start happening to an installed copy
+  of localm with no update on our side, so it is worth updating even if yours
+  works today. If you already worked around it by pinning an older build with
+  `localm setup-llama --tag <build>`, you can go back to the default.
 - **A server that asks for an API key no longer loads any of your data before
   you have entered one.** Opening a link that pointed straight at a page
   (`?view=models`, `?view=settings`, a shared image, or simply returning to the

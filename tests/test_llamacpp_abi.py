@@ -986,14 +986,81 @@ def test_ctx_v2_with_a_minus_one_ctx_type_is_a_known_undetectable_misbind():
 
 
 def test_evaluate_does_catch_a_misaligned_read():
-    """The capability the checks above DO have: a pointer low-word or a -1
-    landing in these fields is refused, in either layout."""
+    """The capability the checks above DO have: a pointer low-word, or a -1 in a
+    field whose valid range excludes it, is refused - in either layout.
+
+    THE -1-IN-load_mode CASE USED TO BE HERE AND DELIBERATELY IS NOT ANY MORE.
+    Upstream added LLAMA_LOAD_MODE_AUTO = -1 between b10361 and b10373 and made
+    it the default, so -1 in that field is now a CORRECT value and refusing it
+    took every current build offline. That is a real, narrow loss of tripwire
+    reach and it is recorded rather than papered over - see
+    test_load_mode_auto_is_accepted_and_costs_the_tripwire_one_value.
+    """
     mp = good_model_v2()
-    mp.load_mode = -1                     # e.g. an UNSPECIFIED enum shifted in
+    mp.load_mode = 0x6F2A1000             # a pointer low-word, still nonsense
     assert evaluate(mp, good_ctx()).status == "mismatch"
     mp = good_model_v1()
     mp.main_gpu = 0x6F2A1000              # a pointer low-word
     assert evaluate(mp, good_ctx()).status == "mismatch"
+    # -1 IS still caught where its range genuinely excludes it, so the "a -1
+    # landing in these fields" claim survives for the field that can still make
+    # it - this is the half that did not change.
+    mp = good_model_v2()
+    mp.main_gpu = -1
+    assert evaluate(mp, good_ctx()).status == "mismatch"
+
+
+def test_load_mode_auto_is_accepted_and_costs_the_tripwire_one_value():
+    """LLAMA_LOAD_MODE_AUTO (-1) must pass, and the price must stay visible.
+
+    THE OUTAGE: upstream added AUTO between b10361 and b10373 and made it the
+    new default, so `llama_model_default_params()` on every build from b10373 on
+    reports load_mode = -1. localm's hardcoded valid set predated it and refused
+    the value, taking out any install that resolved to a current upstream
+    release - and `_latest_tag()` resolves at runtime, so no localm change was
+    needed to break a shipped install.
+
+    THIS IS NOT THE GATE BEING RELAXED. The set mirrors llama.h's enumerators;
+    -1 belongs in it because upstream defines it, which is the only reason any
+    value belongs in it. Widening it to a RANGE, or dropping the check, would be
+    the forbidden move.
+
+    THE COST, stated because a bound that is quietly given up is worse than one
+    that is argued: load_mode can no longer flag -1 as a misaligned read. NO
+    STRUCTURAL DISCRIMINATOR IS AVAILABLE TO NARROW THIS TO NEW BUILDS ONLY -
+    MEASURED, not assumed: the two tags export an IDENTICAL 240-function
+    LLAMA_API surface (nothing added, nothing removed), so there is no marker
+    symbol in the `llama_load_mode_*` spirit to key on; and the two obvious
+    runtime probes are unsafe on a build that lacks the mode, because
+    llama_load_mode_name(-1) falls off its switch into GGML_ABORT and kills the
+    process (hit live on b10361) while llama_load_mode_from_str throws
+    std::invalid_argument across the C ABI.
+    """
+    from localm.inference.backends.llamacpp._structs import (
+        LLAMA_LOAD_MODE_AUTO, _VALID_LOAD_MODES)
+
+    assert LLAMA_LOAD_MODE_AUTO == -1
+    assert LLAMA_LOAD_MODE_AUTO in _VALID_LOAD_MODES
+
+    mp = good_model_v2()
+    mp.load_mode = LLAMA_LOAD_MODE_AUTO
+    v = evaluate(mp, good_ctx())
+    assert v.status == "ok", v.failures
+
+    # AUTO must not read as drift either. It is a genuine upstream default, and
+    # a diagnostic that fires on every load of every current build is how a real
+    # one gets ignored.
+    assert not any("load_mode" in d for d in v.diagnostics), v.diagnostics
+
+    # The older default stays equally quiet - two typical values, not a swap.
+    mp.load_mode = 1
+    v1 = evaluate(mp, good_ctx())
+    assert v1.status == "ok", v1.failures
+    assert not any("load_mode" in d for d in v1.diagnostics), v1.diagnostics
+
+    # But a value upstream does NOT define still reports as drift.
+    mp.load_mode = 3
+    assert any("load_mode" in d for d in evaluate(mp, good_ctx()).diagnostics)
 
 
 def test_skip_env_still_surfaces_a_probe_contradiction():
