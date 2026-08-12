@@ -2385,6 +2385,20 @@ def _apply_version_request(tag: Optional[str], rollback: bool, backend: str,
             "--rollback needs to know which backend to roll back, and nothing is "
             "recorded as installed on this machine. Name it explicitly, for "
             "example: localm setup-llama --rollback --backend vulkan")
+    if which == "amd-rocm":
+        # amd-rocm's build is fixed by the _ROCM_TAG CONSTANT in this file, not
+        # resolved from a release listing, so there is exactly one amd-rocm build
+        # per localm release and a pin cannot move it. Without this refusal the
+        # command printed "Rolling back the amd-rocm runtime to llama.cpp b1288"
+        # and then, moments later, the pin note saying that build does not apply
+        # to amd-rocm - two contradictory sentences for one action that changed
+        # nothing. Refusing with the real reason beats promising and retracting.
+        raise click.ClickException(
+            f"the amd-rocm backend cannot be rolled back: its build is fixed by "
+            f"the localm release you are running ({_ROCM_TAG}, from lemonade-sdk), "
+            "not chosen from upstream llama.cpp releases. To try a different "
+            "llama.cpp build on this machine, switch backend, for example: "
+            "localm setup-llama --backend vulkan --tag <tag>")
     prev = previous_tag(which)
     if not prev:
         current = installed_build()

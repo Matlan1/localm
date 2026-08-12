@@ -324,6 +324,28 @@ def test_rollback_with_nothing_to_go_back_to_is_refused(monkeypatch, tmp_path, h
     assert sl.pinned_tag() is None, "a refused rollback must not move the pin"
 
 
+def test_rollback_is_refused_for_amd_rocm(monkeypatch, tmp_path, home):
+    """amd-rocm's build is fixed by a constant in the shipped code, so a pin
+    cannot move it. Without this the command printed "Rolling back ... to
+    llama.cpp b1288" and then the pin note saying that build does not apply to
+    amd-rocm - two contradictory sentences for an action that changed nothing.
+
+    Note the history entries here use LEMONADE's numbering, which is what makes
+    the promise doubly wrong: b1288 is not even an upstream tag."""
+    monkeypatch.setattr(sl, "_repo_runtime_lib", lambda: tmp_path)
+    sl._record_runtime_history("amd-rocm", "b1288")
+    sl._record_runtime_history("amd-rocm", "b1307")
+    sl._record_provisioned_backend(tmp_path, "amd-rocm", build="b1307")
+
+    with pytest.raises(click.ClickException) as e:
+        sl._apply_version_request(None, True, "auto", None, None)
+
+    assert "cannot be rolled back" in str(e.value)
+    assert sl._ROCM_TAG in str(e.value), "name the build it is fixed at"
+    assert "--backend vulkan" in str(e.value), "offer the route that does work"
+    assert sl.pinned_tag() is None, "a refused rollback must not move the pin"
+
+
 def test_rollback_without_a_known_backend_is_refused(monkeypatch, tmp_path, home):
     monkeypatch.setattr(sl, "_repo_runtime_lib", lambda: tmp_path)
     with pytest.raises(click.ClickException) as e:
