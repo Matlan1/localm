@@ -4454,7 +4454,7 @@ async def _stream_sse(
 
     if gen_error is not None:
         err_chunk = ChatChunk.token(
-            f"\n[inference error: {gen_error}]", model_id, chunk_id, ts)
+            inference_error_text(gen_error), model_id, chunk_id, ts)
         yield f"data: {err_chunk.model_dump_json()}\n\n"
 
     streamed = "".join(completion_parts)
@@ -4594,7 +4594,7 @@ async def _stream_sse_completion(
         err = {
             "id": chunk_id, "object": "text_completion.chunk",
             "created": ts, "model": model_id,
-            "choices": [{"text": f"\n[inference error: {gen_error}]",
+            "choices": [{"text": inference_error_text(gen_error),
                          "index": 0, "finish_reason": None}],
         }
         yield f"data: {json.dumps(err)}\n\n"
@@ -4817,6 +4817,32 @@ def backend_error_status(exc: BaseException) -> Optional[int]:
     return None
 
 
+def inference_error_text(exc: BaseException) -> str:
+    """The `[inference error: ...]` body a FAILED generation is rendered as, on
+    every one of the four generation paths.
+
+    ONE implementation for all four deliberately. The string was written out
+    four times, and a fact stated in four places diverges - which is exactly
+    what this unit was sent to fix on the status side, so repeating the mistake
+    on the text side would be perverse.
+
+    THE PATHS ARE SCRUBBED, and that is not decoration. A mid-generation
+    RuntimeError is not always a tidy "not enough free VRAM" sentence: the GGUF
+    loader raises `Failed to load model: <absolute path>` with a native stderr
+    tail appended, and an auto-reload inside chat_stream can surface exactly
+    that here. Handing a client the machine's directory layout is the
+    disclosure `pathscrub` exists for, and `bugreport.py` already names
+    scrub_paths as the rule for a response to a lower-privileged caller.
+
+    scrub_paths REDACTS, it does not mute (AGENTS.md rule 5): the reason, the
+    file name and the line number survive, only the leading directories are
+    replaced. A caller still learns what failed - which is the whole point of
+    the error contract - without learning where this machine keeps its files.
+    """
+    from localm.pathscrub import scrub_paths
+    return f"\n[inference error: {scrub_paths(str(exc))}]"
+
+
 async def _complete(
     engine: Engine,
     messages: list,
@@ -4895,7 +4921,7 @@ async def _complete(
             from localm.debuglog import logger as _dbg
             _dbg.exception("non-streaming generation failed")
             gen_error = e
-            text = f"\n[inference error: {e}]"
+            text = inference_error_text(e)
         gen_end = time.perf_counter()
     first_token_at = timing.get("first_token_at")
 

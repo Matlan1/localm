@@ -1273,6 +1273,33 @@ def test_the_completions_route_also_answers_503(monkeypatch):
     engine.chat_stream.assert_not_called()
 
 
+def test_sequential_callers_keep_exactly_one_daemon_alive():
+    """The pool must cost NOTHING in the ordinary case, and that is a claim
+    about LIFO specifically, not about pools in general.
+
+    Handing slots out last-in-first-out re-gives the same warm slot to each
+    sequential caller, so a server whose real concurrency is 1 spawns ONE
+    daemon and the other three slots stay empty. Swap the LifoQueue for a plain
+    (FIFO) Queue and the same six calls round-robin across all four slots,
+    spawning four Python subprocesses to serve a workload that never had more
+    than one caller - paying the whole pool's memory for concurrency nobody
+    used.
+
+    Deliberately uses REAL daemons and the real protocol: the property is about
+    how many processes actually get spawned, which a faked spawn cannot show."""
+    import localm.inference.gbnf as gbnf
+
+    for i in range(6):
+        verdict, reason = gbnf._probe_pattern_is_safe(rf"^<seq_daemon_probe_{i}>")
+        assert verdict == gbnf._PROBE_SAFE, (verdict, reason)
+
+    live = [s for s in list(gbnf._PROBE_SLOTS_FREE.queue)
+            if s.proc is not None and s.proc.poll() is None]
+    assert len(live) == 1, (
+        f"{len(live)} daemons alive after 6 SEQUENTIAL probes - slots are not "
+        "being reused, so a single-caller server pays for the whole pool")
+
+
 def test_a_slot_is_returned_to_the_pool_even_when_the_probe_rejects(monkeypatch):
     """A leaked slot is a permanent, silent capacity loss: enough of them and
     every later request is refused as 'busy' forever, with nothing in the logs

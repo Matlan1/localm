@@ -663,6 +663,58 @@ class TestARuntimeErrorReachesTheClientOnAllFourPaths:
         assert plain.json()["choices"][0]["finish_reason"] == "error"
 
 
+class TestTheReasonIsRedactedNotMuted:
+    """A generation failure's reason crosses a trust boundary into a response
+    body, and it is NOT always a tidy sentence: the GGUF loader raises
+    ``Failed to load model: <absolute path>`` with a native stderr tail, and an
+    auto-reload inside chat_stream surfaces exactly that here.
+
+    Both halves matter and they pull against each other, which is why each gets
+    its own assertion: the machine's directory layout must NOT reach the client,
+    and the REASON must still reach it. Dropping the message entirely would
+    satisfy the first and destroy the error contract this module exists for
+    (AGENTS.md rule 5: redact, never mute).
+    """
+
+    _HOMEISH = r"C:\Users\someaccount\models\thing.gguf"
+
+    def _post_failing(self, path, payload):
+        return _post(_mock_engine(stream_exc=RuntimeError(
+            f"Failed to load model: {self._HOMEISH} (no backends loaded)")),
+            payload, path=path)
+
+    def test_the_account_name_does_not_reach_a_completions_client(self):
+        r = self._post_failing("/v1/completions",
+                               {"model": "test-model", "prompt": "hi",
+                                "stream": False})
+        body = r.json()["choices"][0]["text"]
+        assert "someaccount" not in body, body
+        # ...and the reason survives, which is the half a bare "strip it all"
+        # fix would silently destroy.
+        assert "no backends loaded" in body, body
+        assert "thing.gguf" in body, body
+
+    def test_the_account_name_does_not_reach_a_chat_client(self):
+        r = self._post_failing("/v1/chat/completions",
+                               {"model": "test-model", "messages": _TEXT_MSG,
+                                "stream": False})
+        body = r.json()["choices"][0]["message"]["content"]
+        assert "someaccount" not in body, body
+        assert "no backends loaded" in body, body
+
+    def test_the_streaming_legs_scrub_too(self):
+        # The streaming legs were ALREADY rendering the reason inline before
+        # this unit, so they carried this disclosure already. Fixing only the
+        # leg CodeQL happened to flag would be fixing the alert, not the bug.
+        for path, payload in (
+            ("/v1/completions", {"model": "test-model", "prompt": "hi"}),
+            ("/v1/chat/completions", {"model": "test-model", "messages": _TEXT_MSG}),
+        ):
+            r = self._post_failing(path, {**payload, "stream": True})
+            assert "someaccount" not in r.text, (path, r.text[:400])
+            assert "no backends loaded" in r.text, (path, r.text[:400])
+
+
 class TestTheRuntimeCatchIsNotWidened:
     """The other half, and the reason the arm names RuntimeError rather than
     Exception: a genuine defect must still be an opaque 500, not dressed up as

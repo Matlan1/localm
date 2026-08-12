@@ -671,7 +671,13 @@ def register(app: FastAPI, ctx) -> None:
                     from localm.debuglog import logger as _dbg
                     _dbg.exception("non-streaming completion generation failed")
                     gen_error = e
-                    text = f"\n[inference error: {e}]"
+                    # The SHARED renderer, not a fourth copy of the f-string:
+                    # it also scrubs machine paths out of the reason, which a
+                    # model-load RuntimeError carries verbatim. See its
+                    # docstring - this was the fourth site, and four copies of
+                    # one sentence is how the four paths diverged in the first
+                    # place.
+                    text = _hs.inference_error_text(e)
 
             # Outlet fully controls the returned content in the non-streaming path
             # (but a failed generation surfaces its error verbatim, not reshaped by
