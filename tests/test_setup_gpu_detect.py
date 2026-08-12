@@ -143,17 +143,12 @@ def _run_pre_venv_gpu_block(tmp_path: Path, *, stub_names: list[str], yes: bool)
     return result.stdout
 
 
-pytestmark_full = pytest.mark.skipif(_bash() is None, reason="no bash on PATH")
-
-
-@pytestmark_full
 def test_pre_venv_block_never_prints_a_detection_verdict_line(tmp_path):
     out = _run_pre_venv_gpu_block(tmp_path, stub_names=["rocminfo"], yes=True)
     assert "Detected acceleration" not in out
     assert "GPU=rocm" in out
 
 
-@pytestmark_full
 def test_pre_venv_block_gpu_var_still_correct_for_the_probe_failed_fallback(tmp_path):
     # $GPU still has to be right even though it is no longer printed as a
     # verdict: setup.sh's own fallback (`case "$REC" in ... *) case "$GPU"
