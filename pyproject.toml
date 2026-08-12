@@ -184,7 +184,7 @@ grammar = [
 cpu = []
 # Development + CI tooling (lint + tests). Install with:  pip install -e ".[dev]"
 dev = [
-    "ruff>=0.16.1",
+    "ruff>=0.16.2",
     "pytest>=8.0",
     # Coverage measurement (TEST-1). Visibility only for now: CI publishes a
     # number, there is no --cov-fail-under gate. See [tool.coverage] below.
