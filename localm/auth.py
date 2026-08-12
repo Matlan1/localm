@@ -288,10 +288,7 @@ def set_api_key(key: Optional[str]) -> None:
     ensure_dirs()
     path = key_file()
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(key.strip() + "\n", encoding="utf-8")
-    os.replace(tmp, path)          # atomic on Windows + POSIX (same dir)
-    _restrict_perms(path)
+    _atomic_write_private(path, key.strip() + "\n")
     # The key changed, so any memoised derivation for the OLD one is stale.
     _forget_cached_digests()
     # Derive at SET time, not on the per-request verify path: this is the
@@ -437,6 +434,73 @@ def _restrict_perms(path: Path) -> bool:
     on. Dropping it here made that pattern silently degrade to always retrying."""
     from localm.config import restrict_file_perms
     return restrict_file_perms(path)
+
+
+def _atomic_write_private(path: Path, text: str) -> None:
+    """Write *text* to *path* atomically, owner-restricted from the moment the
+    bytes first exist on disk.
+
+    Every credential file in this module used to be written as
+    ``tmp.write_text(...)`` then ``os.replace`` then ``_restrict_perms(path)``,
+    which leaves the WHOLE payload readable at the umask default (POSIX) or the
+    inherited ACL (Windows, commonly ``BUILTIN\\Users`` read) for the entire
+    write. Restricting only the destination closes the window after the fact,
+    not during it.
+
+    TWO precedents are needed here and neither closes both halves alone:
+
+    * ``tls._write_private`` creates via ``os.open`` with an explicit 0600, so
+      the file is never briefly at the umask default. That is POSIX-only: on
+      Windows the mode argument writes no ACL at all.
+    * ``restrict_file_perms`` on the TEMP file before the rename is what covers
+      Windows, and it is the contract that function documents - ``os.replace``
+      carries the source's ACL (and POSIX mode) onto the destination, MEASURED
+      there, so the single call covers both names. The destination is retried
+      only when the first attempt failed, so one failure is not the single
+      point of failure for the property.
+
+    The pre-rename restrict also covers the one case ``os.open`` cannot: a
+    stale ``.tmp`` left by an earlier crash is opened, not created, so its
+    existing mode survives O_CREAT.
+
+    Best-effort by contract, unchanged: a tightening that fails is reported by
+    ``restrict_file_perms`` (which warns) and retried, never raised. Writing a
+    credential must not become conditional on a permissions nicety.
+
+    THE BYTES ON DISK ARE UNCHANGED by this, deliberately - a permissions fix
+    must not quietly rewrite every credential file. Do NOT "correct" this by
+    adding ``os.O_BINARY``. MEASURED on this Windows box: ``os.open`` without
+    it opens in TEXT mode, so ``os.write`` expands ``\\n`` to ``\\r\\n`` exactly
+    as the ``Path.write_text`` this replaced did, and the resulting file is
+    byte-identical on both platforms. Adding O_BINARY would silently switch
+    every Windows install's ``auth.key``, ``auth.json`` and owner-KDF file to
+    LF on the next write.
+
+    The write loops because ``os.write`` is a single syscall that may consume
+    less than the whole buffer (ENOSPC after a partial write returns the short
+    count rather than raising). ``Path.write_text`` looped internally, so
+    dropping to raw ``os.write`` without this would newly allow a SILENTLY
+    truncated credential file - rule 5 - and a truncated keystore replacing a
+    good one is the worst outcome available here. Raising leaves the temp file
+    behind and the destination untouched, which is the safe half."""
+    tmp = path.with_name(path.name + ".tmp")
+    data = text.encode("utf-8")
+    fd = os.open(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+    try:
+        written = 0
+        while written < len(data):
+            n = os.write(fd, data[written:])
+            if not n:
+                raise OSError(
+                    f"short write persisting {path.name}: {written} of "
+                    f"{len(data)} bytes accepted; the previous file is intact")
+            written += n
+    finally:
+        os.close(fd)
+    ok = _restrict_perms(path=tmp)
+    os.replace(tmp, path)          # atomic on Windows + POSIX (same dir)
+    if not ok:
+        _restrict_perms(path=path)
 
 
 # --------------------------------------------------------------------------- #
@@ -677,16 +741,14 @@ def _save_owner_kdf(records: list) -> None:
     ensure_dirs()
     path = owner_kdf_file()
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps({"v": 1, "records": records}, indent=2),
-                   encoding="utf-8")
     # Restrict the TEMP file (it already holds the whole payload) before the
-    # rename, exactly as sessions._save does, so a crash between the two lines
-    # cannot leave an unrestricted copy behind.
-    ok = _restrict_perms(path=tmp)
-    os.replace(tmp, path)
-    if not ok:
-        _restrict_perms(path=path)
+    # rename, so a crash between the two lines cannot leave an unrestricted
+    # copy behind. This function had that half right while set_api_key and
+    # _save_keystore did not; _atomic_write_private is the one implementation
+    # all three now share, and it additionally creates the temp file already
+    # restricted rather than tightening it a moment later.
+    _atomic_write_private(path, json.dumps({"v": 1, "records": records},
+                                           indent=2))
 
 
 def _owner_kdf_record_for(key: str, records: list) -> Optional[dict]:
@@ -926,10 +988,7 @@ def _save_keystore(records: list) -> None:
     ensure_dirs()
     path = keystore_file()
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(records, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
-    _restrict_perms(path)
+    _atomic_write_private(path, json.dumps(records, indent=2))
 
 
 # Filesystem-access level a credential may reach on the SERVER HOST. A single

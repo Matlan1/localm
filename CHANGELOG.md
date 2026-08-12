@@ -154,6 +154,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   with the existing "the validator is busy, retry shortly" 503 instead of
   joining the queue. Nothing is accepted without being checked, and an ordinary
   request that does not have to wait is unaffected.
+- **Your API key was briefly readable by other accounts on the machine each
+  time it was saved.** localm writes the key file, the named-key store and the
+  key-derivation file by writing a temporary file and renaming it into place,
+  which is what stops a crash mid-write from destroying the old one. The
+  finished file was locked down to your account only, but the temporary one was
+  not, so on a shared or multi-account machine the full contents sat readable
+  by anyone for the length of the write. They are now locked down from the
+  moment they are created, before anything is written into them. On Windows
+  this matters most: files there inherit the folder's permissions, which
+  commonly include read access for all local users.
 - **A couple of dismissable UI hints (the NVIDIA/Vulkan backend hint, and
   whether the Studio nav group is expanded) could survive turning on privacy
   mode, unlike every other saved GUI preference.** Both were already withheld
