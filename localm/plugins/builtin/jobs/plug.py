@@ -257,6 +257,41 @@ def _caller_is_owner_key(request: Request) -> bool:
             or ct_equal(h, _legacy_owner_identity(owner_key)))
 
 
+def _needs_owner_key_restamp(job: Job, request: Request) -> bool:
+    """True when THIS request is provable proof that its caller now owns *job*
+    the way ``owner_is_owner_key`` records, and the stamp has not been set yet.
+
+    Repairs the residual REG-509 gap: a shell-enabled job whose stamp is False
+    because it was created before #1171 over an owner COOKIE session, or before
+    #663 with no field at all, AND that never ran while the owner key still had
+    its creation-time value (disabled, long-cron, or created shortly before a
+    roll) - so ``_remember_owner_key_job`` (runner.py) never got a run to prove
+    it during. After a roll the runner alone can no longer tell that job apart
+    from a genuinely revoked scoped key (both hash to nothing live), and there
+    was no path back short of delete-and-recreate. An authenticated REQUEST is a
+    second, independent proof the runner cannot make: ``_caller_is_owner_key``
+    reads the session's own mint-time record (``caller_minted_by_owner_key``),
+    which survives a roll by design, precisely when the runner's key-VALUE
+    compare stops matching.
+
+    The ``job.owner == principal_id(request)`` conjunction is load-bearing and
+    is NOT redundant with ``_caller_is_owner_key`` alone: ``owned_job`` (via
+    ``job_owner_ok``) lets an ADMIN caller reach ANOTHER principal's job, and
+    that caller must never be able to upgrade THAT job to permanent owner-key
+    shell just by running or editing it - only the job's own creator, proven as
+    the owner key, may. ``principal_id`` returns the SAME frozen identity a
+    cookie session was minted with (never re-derived from the current key
+    value), so for the exact pre-roll session that created (or was live when it
+    was created) *job*, this equality still holds after the roll - that is what
+    makes the repair reachable at all."""
+    if getattr(job, "owner_is_owner_key", False) or job.owner is None:
+        return False
+    if not _caller_is_owner_key(request):
+        return False
+    from localm.inference.http_server import principal_id
+    return principal_id(request) == job.owner
+
+
 def _store() -> JobStore:
     return JobStore()
 
@@ -397,6 +432,11 @@ async def update_job(job_id: str, req: JobUpdate, request: Request,
         # without this the create-time confinement is simply routed around with an
         # update.
         changes["cwd"] = _effective_cwd(changes["cwd"], request)
+    # REG-509 repair: fold into this SAME write rather than a second one - see
+    # _needs_owner_key_restamp. "changes" has no such key from the request body
+    # (JobUpdate carries no such field), so this can never be attacker-supplied.
+    if _needs_owner_key_restamp(job, request):
+        changes["owner_is_owner_key"] = True
     try:
         job = store.update(job_id, **changes)
     except KeyError:
@@ -425,6 +465,20 @@ async def run_now(job_id: str, request: Request, job: Job = Depends(owned_job)):
         raise HTTPException(
             403, "running a shell-enabled job on demand needs the owner key or a "
             "coder:full key.")
+    # REG-509 repair: a live, provable owner acting on their OWN job is a second
+    # proof the runner cannot make on its own after a key roll (see
+    # _needs_owner_key_restamp). Do this BEFORE the run so _shell_still_authorized
+    # sees the repaired stamp on this very run, not just the next one.
+    if _needs_owner_key_restamp(job, request):
+        try:
+            job = store.update(job_id, owner_is_owner_key=True)
+        except (KeyError, ValueError) as e:
+            from localm.debuglog import logger
+            logger.debug(
+                "jobs: could not persist the owner-key re-stamp for job %s "
+                "(%s); it will be re-derived on the next provable-owner "
+                "request", job_id, e)
+            job.owner_is_owner_key = True
     engine = _engine_resolver()
     loop = asyncio.get_running_loop()
 

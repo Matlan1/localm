@@ -838,3 +838,203 @@ def test_authorized_run_adds_no_downgrade_note(home, tmp_path, monkeypatch):
     result = runner.run_job(job, engine=None)
     assert result["status"] == "ok"
     assert result["output"] == "ran"
+
+
+# --------------------------------------------------------------------------- #
+#  THE REMAINING RESIDUAL: a legacy job that never ran while the owner key      #
+#  still matched (disabled / long-cron / created shortly before a roll) has NO #
+#  repair path in the runner alone - _remember_owner_key_job never got a run   #
+#  to prove it during. run_now and update_job repair it instead, because an    #
+#  authenticated REQUEST from the job's own creator, proven as the owner key,  #
+#  is a second, independent proof the runner cannot make after the roll.       #
+# --------------------------------------------------------------------------- #
+
+def test_run_now_repairs_a_pre_roll_cookie_job_and_keeps_shell_after_rotation(
+        jobs_app, tmp_path, monkeypatch):
+    """The exact gap the runner's own backfill cannot close: a shell job stamped
+    False (created before the field existed, or before #1171's cookie-session
+    fix) that never ran while the owner key still matched. Before this fix the
+    only remedy was delete-and-recreate. The owner's still-valid PRE-ROLL cookie
+    session triggering a manual run must repair the stamp on the spot."""
+    from localm import auth, sessions
+    from localm.inference import http_server as hs
+    from localm.plugins.builtin.jobs.store import Job, JobStore
+    work = tmp_path / "proj"
+    work.mkdir()
+    runner, captured = _fake_agent_capture(monkeypatch)
+
+    auth.set_api_key(KEY_ONE)
+    sid = _login(jobs_app, KEY_ONE)              # session minted under K1
+
+    store = JobStore()
+    legacy = Job.from_dict({
+        "name": "legacy-cookie", "task_kind": "coder", "prompt": "x",
+        "cwd": str(work), "schedule_kind": "interval", "schedule": 3600,
+        "allow_shell": OPT_IN, "owner": auth._hash_key(KEY_ONE),
+        # no owner_is_owner_key key at all -> defaults False, and (unlike every
+        # other legacy-job test in this file) it never RUNS before the roll, so
+        # the runner's own one-shot backfill never gets a chance either.
+    })
+    store.add(legacy)
+    assert store.get(legacy.id).owner_is_owner_key is False
+
+    auth.regenerate_key()                        # the roll: K1 -> K2
+    assert sessions.lookup(sid) is not None, \
+        "premise broken: the roll signed the browser out"
+
+    # Control: the autonomous scheduler alone cannot repair this - there is no
+    # request in sight to prove ownership from, which is exactly the residual.
+    result = runner.run_job(store.get(legacy.id), engine=None)
+    assert result["status"] == "ok"
+    assert captured["restricted"] is True, (
+        "premise broken: the scheduler should not be able to repair a pre-roll "
+        "legacy job with no caller in sight")
+    assert store.get(legacy.id).owner_is_owner_key is False
+
+    # THE FIX: the owner triggers a manual run over their still-valid pre-roll
+    # session (exactly what the GUI's "Run now" button sends).
+    captured.clear()
+    with TestClient(jobs_app) as c:
+        c.cookies.set(hs.SESSION_COOKIE, sid)
+        state = c.get("/api/session")
+        assert state.status_code == 200, state.text
+        csrf = state.json()["csrf"]
+        r = c.post(f"/api/jobs/{legacy.id}/run", headers={hs.CSRF_HEADER: csrf})
+    assert r.status_code == 200, r.text
+    assert captured["restricted"] is False, (
+        "run_now discarded a live, proven owner and downgraded anyway "
+        "(REG-509 residual)")
+    assert store.get(legacy.id).owner_is_owner_key is True, \
+        "run_now proved ownership but never repaired the stamp"
+
+    # The repair persisted, so the AUTONOMOUS path keeps shell too, now with no
+    # caller in sight at all.
+    captured.clear()
+    result = runner.run_job(store.get(legacy.id), engine=None)
+    assert result["status"] == "ok"
+    assert captured["restricted"] is False
+
+
+def test_run_now_by_owner_does_not_restamp_another_principals_job(
+        jobs_app, tmp_path, monkeypatch):
+    """The load-bearing negative for the repair path. ``job_owner_ok`` lets an
+    ADMIN caller (the owner) reach ANOTHER principal's job; acting on it must
+    NOT upgrade that job to permanent owner-key shell. Only the job's OWN
+    creator, proven as the owner key, may repair it - the
+    ``job.owner == principal_id(request)`` conjunction in
+    ``_needs_owner_key_restamp``."""
+    from localm import auth
+    work = tmp_path / "proj"
+    work.mkdir()
+    runner, captured = _fake_agent_capture(monkeypatch)
+
+    auth.set_api_key(KEY_ONE)
+    created = auth.create_key("device", [S.ADMIN, JOBS], allow_privileged=True)
+    job_id = _create_shell_job(jobs_app, created["key"], work)["id"]
+    assert _stored(job_id).owner_is_owner_key is False
+
+    # Revoke the creating key so a WRONGFUL re-stamp would be observable: if the
+    # owner's run_now upgraded this job to owner-key shell, it would keep
+    # running unrestricted even though the key that actually created it is dead.
+    assert auth.revoke_key(created["id"]) is True
+
+    with TestClient(jobs_app) as c:
+        r = c.post(f"/api/jobs/{job_id}/run", headers=_h(KEY_ONE))
+    assert r.status_code == 200, r.text
+    assert captured["restricted"] is True, (
+        "a wrongful re-stamp let a revoked scoped key's job keep shell "
+        "(LM-DA-014, via the repair path)")
+    assert _stored(job_id).owner_is_owner_key is False, (
+        "the owner upgraded ANOTHER principal's job to permanent owner-key "
+        "shell just by running it")
+
+
+def test_update_job_repairs_a_pre_roll_cookie_job(jobs_app, tmp_path, monkeypatch):
+    """Same repair, through PUT instead of run-now: ``update_job`` never
+    re-stamped at all before this fix."""
+    from localm import auth, sessions
+    from localm.inference import http_server as hs
+    from localm.plugins.builtin.jobs.store import Job, JobStore
+    work = tmp_path / "proj"
+    work.mkdir()
+    runner, captured = _fake_agent_capture(monkeypatch)
+
+    auth.set_api_key(KEY_ONE)
+    sid = _login(jobs_app, KEY_ONE)
+
+    store = JobStore()
+    legacy = Job.from_dict({
+        "name": "legacy-cookie", "task_kind": "coder", "prompt": "x",
+        "cwd": str(work), "schedule_kind": "interval", "schedule": 3600,
+        "allow_shell": OPT_IN, "owner": auth._hash_key(KEY_ONE),
+    })
+    store.add(legacy)
+    auth.regenerate_key()
+    assert sessions.lookup(sid) is not None
+
+    with TestClient(jobs_app) as c:
+        c.cookies.set(hs.SESSION_COOKIE, sid)
+        state = c.get("/api/session")
+        csrf = state.json()["csrf"]
+        r = c.put(f"/api/jobs/{legacy.id}", json={"name": "renamed"},
+                  headers={hs.CSRF_HEADER: csrf})
+    assert r.status_code == 200, r.text
+    assert store.get(legacy.id).name == "renamed"
+    assert store.get(legacy.id).owner_is_owner_key is True, \
+        "update_job proved ownership but never repaired the stamp"
+
+    result = runner.run_job(store.get(legacy.id), engine=None)
+    assert result["status"] == "ok"
+    assert captured["restricted"] is False
+
+
+def test_update_job_by_owner_does_not_restamp_another_principals_job(
+        jobs_app, tmp_path, monkeypatch):
+    """PUT's mirror of the run_now negative above."""
+    from localm import auth
+    work = tmp_path / "proj"
+    work.mkdir()
+    runner, captured = _fake_agent_capture(monkeypatch)
+
+    auth.set_api_key(KEY_ONE)
+    created = auth.create_key("device", [S.ADMIN, JOBS], allow_privileged=True)
+    job_id = _create_shell_job(jobs_app, created["key"], work)["id"]
+    assert auth.revoke_key(created["id"]) is True
+
+    with TestClient(jobs_app) as c:
+        r = c.put(f"/api/jobs/{job_id}", json={"name": "renamed"},
+                  headers=_h(KEY_ONE))
+    assert r.status_code == 200, r.text
+    assert _stored(job_id).owner_is_owner_key is False
+
+    result = runner.run_job(_stored(job_id), engine=None)
+    assert result["status"] == "ok"
+    assert captured["restricted"] is True
+
+
+def test_downgrade_wording_does_not_assert_revoked_or_expired_as_certain(
+        home, tmp_path, monkeypatch):
+    """The downgrade note used to STATE 'revoked or expired' as fact, which is
+    FALSE for exactly this scenario: a job whose owner turns out to have been
+    the owner key, rolled since creation. It must hedge, name that possibility,
+    and point at the repair path (run/edit as the owner) this fix adds."""
+    from localm import auth
+    from localm.plugins.builtin.jobs.store import Job
+    work = tmp_path / "proj"
+    work.mkdir()
+    runner, _captured = _fake_agent_capture(monkeypatch)
+
+    auth.set_api_key(KEY_ONE)
+    job = Job(name="x", task_kind="coder", prompt="p", cwd=str(work),
+              schedule_kind="interval", schedule=60, allow_shell=OPT_IN,
+              owner=auth._hash_key(KEY_ONE))    # never ran; no owner_is_owner_key
+    auth.regenerate_key()                        # rolled before it ever ran once
+
+    result = runner.run_job(job, engine=None)
+    assert result["status"] == "ok"
+    out = result["output"]
+    assert "is no longer authorized (revoked or expired)" not in out, (
+        "the downgrade note still asserts revoked-or-expired as a bare fact")
+    assert "may have been revoked or expired" in out
+    assert "rolled" in out
+    assert "owner" in out.lower() and ("run" in out.lower() or "edit" in out.lower())

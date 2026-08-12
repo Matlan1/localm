@@ -119,6 +119,125 @@ def test_failed_no_change_session_stores_thin_failure_episode(home, tmp_path):
     assert "importer" in eps[0].what_failed
 
 
+# --------------------------------------------------------------------------- #
+#  REG-594: the CLI's synchronous close-time reflection must not hang exit -   #
+#  every OTHER test in this file drives close() with an INSTANT canned         #
+#  backend, so none of them can observe the wall-clock cost this bounds.       #
+# --------------------------------------------------------------------------- #
+
+def test_cli_close_reflection_is_bounded_not_unbounded(home, tmp_path, monkeypatch):
+    """A no-file-change FAILED session (max_turns / a circuit breaker / a failed
+    verify oracle - REG-594's exact trigger) must not block CLI exit for the
+    full duration of a slow or wedged model call. Patches the deadline down so
+    the test itself stays fast while still proving the bound is real."""
+    import threading
+    import time
+
+    import localm.plugins.coder.agent.session as _session_mod
+    monkeypatch.setattr(_session_mod, "_CLI_REFLECTION_DEADLINE_S", 0.2)
+
+    started = threading.Event()
+    release = threading.Event()
+
+    class _BlockingBackend(_StubBackend):
+        def chat(self, messages, **kw):
+            started.set()
+            release.wait(5)          # would hang the test outright if unbounded
+            return _GOOD_REPLY
+
+    agent = _agent(tmp_path, backend=_BlockingBackend(), mode=SessionMode.LOG)
+    agent._episode_task = "investigate a crash"
+    agent._last_run_ok = False        # no file change, but a real failure
+    agent._error_trace = ["read_file: no such file: importer.py"]
+
+    t0 = time.monotonic()
+    agent.close()                     # on_event None -> synchronous, now bounded
+    elapsed = time.monotonic() - t0
+
+    assert started.wait(5), "premise broken: the model call never started"
+    release.set()                     # free the leaked daemon thread
+    assert elapsed < 2.0, (
+        f"close() took {elapsed:.2f}s - the reflection deadline did not bound it")
+    # A timeout must not lose the evidence that led here: episodes.py's
+    # thin-failure fallback still fires from the real error trace, so the
+    # session's lesson survives even though the model's prose did not.
+    eps = agent._episode_store.all()
+    assert len(eps) == 1
+    assert eps[0].outcome == "incomplete"
+    assert "importer" in eps[0].what_failed
+
+
+def test_cli_close_reflection_stores_the_full_episode_within_deadline(
+        home, tmp_path, monkeypatch):
+    """Negative for the bound: a normal-speed reflection must not be truncated
+    or downgraded to the thin fallback just because it is now wrapped in a
+    deadline - REG-594's fix must not change what gets stored in the common
+    case, only cap the worst case."""
+    import localm.plugins.coder.agent.session as _session_mod
+    monkeypatch.setattr(_session_mod, "_CLI_REFLECTION_DEADLINE_S", 5.0)
+
+    agent = _agent(tmp_path, backend=_ChatBackend(), mode=SessionMode.LOG)
+    agent._episode_task = "find why the importer crashes"
+    agent._last_run_ok = False
+    agent._error_trace = ["read_file: no such file: importer.py"]
+    agent.close()
+
+    eps = agent._episode_store.all()
+    assert len(eps) == 1
+    # The FULL reflection landed (from _GOOD_REPLY), not the thin fallback.
+    assert eps[0].summary == "ran the generator"
+    assert eps[0].lesson == "regenerate after schema edits"
+
+
+def test_cli_close_prints_a_reflecting_notice_before_the_synchronous_call(
+        home, tmp_path, monkeypatch):
+    """The synchronous wait must be visible, not a silent hang (REG-594)."""
+    import localm.plugins.coder.agent.session as _session_mod
+    printed: list = []
+    monkeypatch.setattr(_session_mod, "print_info", printed.append)
+
+    agent = _agent(tmp_path, backend=_ChatBackend(), mode=SessionMode.LOG)
+    agent._episode_task = "investigate a crash"
+    agent._last_run_ok = False
+    agent._error_trace = ["read_file: no such file: importer.py"]
+    agent.close()
+
+    assert any("reflect" in m.lower() for m in printed), (
+        "no visible notice was printed before the synchronous close-time "
+        "reflection")
+
+
+def test_gui_session_reflection_stays_unbounded_and_gets_no_notice(
+        home, tmp_path, monkeypatch):
+    """Negative for the bound's SCOPE: the GUI/web path (on_event set) already
+    backgrounds the call off the event loop with nobody waiting on it, so it
+    must keep passing deadline=None and print no CLI-only notice."""
+    import localm.plugins.coder.agent.session as _session_mod
+    printed: list = []
+    monkeypatch.setattr(_session_mod, "print_info", printed.append)
+    monkeypatch.setattr(_session_mod, "_CLI_REFLECTION_DEADLINE_S", 0.01)
+
+    agent = _agent(tmp_path, backend=_ChatBackend(), mode=SessionMode.LOG,
+                   on_event=lambda e: None)
+    agent._episode_task = "investigate a crash"
+    agent._last_run_ok = False
+    agent._error_trace = ["read_file: no such file: importer.py"]
+    agent.close()
+
+    for _ in range(100):                # the background thread stores async
+        if agent._episode_store.all():
+            break
+        import time
+        time.sleep(0.02)
+    eps = agent._episode_store.all()
+    assert len(eps) == 1
+    # Reached the FULL reflection, not the thin fallback, even though the CLI
+    # deadline was patched to something absurdly short - proving it never
+    # applied on this path.
+    assert eps[0].summary == "ran the generator"
+    assert printed == [], "the GUI path must not print the CLI-only notice"
+
+
 def test_clean_no_change_session_stores_nothing(home, tmp_path):
     # The benign case must stay silent (no bloat): no changes, no failures.
     agent = _agent(tmp_path, backend=_ChatBackend(), mode=SessionMode.LOG)

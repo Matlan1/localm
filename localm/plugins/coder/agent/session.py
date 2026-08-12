@@ -9,10 +9,22 @@ import threading
 from pathlib import Path
 
 import localm.plugins.coder.agent as _agent
+from ..display import print_info
 from ..memory import cap_user_instructions, forget, remember
 from ..parser import strip_tool_calls
 from ..prompts import build_subagent_system_prompt, build_system_prompt
 from ..audit import SessionMode
+
+# Upper bound on how long the CLI's SYNCHRONOUS close-time reflection (see
+# _maybe_store_episode) may hold the process open. A no-file-change session
+# that ended via max_turns, a circuit breaker, or a failed verify oracle still
+# pays for one 1024-token model call before the CLI can exit (REG-594) - this
+# caps that wait instead of leaving it unbounded, and _reflect_into_episode's
+# own try/except (episodic memory is best-effort) turns an expired deadline
+# into the same "reflection skipped" outcome as any other backend failure.
+# GUI/web sessions never see this: they already background the call
+# (on_event is not None below), so nothing there is waiting on it.
+_CLI_REFLECTION_DEADLINE_S = 30.0
 
 
 class _SessionMixin:
@@ -245,14 +257,25 @@ class _SessionMixin:
                 target=self._reflect_into_episode, args=(changed,),
                 kwargs={"diff_override": diff_override}, daemon=True).start()
         else:
-            self._reflect_into_episode(changed, diff_override=diff_override)
+            # CLI: the process is about to exit, so this must still run
+            # SYNCHRONOUSLY (a daemon thread might never get scheduled again
+            # before exit) - but it must not be a SILENT, UNBOUNDED wait
+            # (REG-594): say so, and cap it.
+            print_info("Reflecting on this session before exiting...")
+            self._reflect_into_episode(
+                changed, diff_override=diff_override,
+                deadline=_CLI_REFLECTION_DEADLINE_S)
 
-    def _reflect_into_episode(self, changed: list, diff_override=None) -> None:
+    def _reflect_into_episode(self, changed: list, diff_override=None,
+                              deadline: "float | None" = None) -> None:
         """Build and store one episode for this session (best-effort).
 
         *diff_override* supplies the work-log diff when the changes were detected
         outside the write-tool tracker (e.g. run_shell writes via git); None means
-        use the tracker's cumulative session_diff()."""
+        use the tracker's cumulative session_diff(). *deadline* bounds the model
+        call itself (seconds); None means unbounded, which is correct for the
+        GUI/web path - it already runs this off a daemon thread with nobody
+        waiting on it (REG-594's caller, the CLI, always passes one)."""
         print_warning = _agent.print_warning  # live: honour a patched agent.print_warning
         try:
             import time as _time
@@ -280,9 +303,44 @@ class _SessionMixin:
                 # stored on those models (memory-audit 2026-07-02, live).
                 # strip_think keeps the scratchpad out of the stored lesson.
                 from localm.textnorm import strip_think
-                return strip_think(self.backend.chat(
-                    [{"role": "user", "content": prompt}],
-                    max_tokens=1024) or "")
+
+                def _call() -> str:
+                    return self.backend.chat(
+                        [{"role": "user", "content": prompt}],
+                        max_tokens=1024) or ""
+
+                if deadline is None:
+                    return strip_think(_call())
+                # Bounded: run the blocking HTTP/inference call off-thread and
+                # cap the wait, so a slow or wedged backend cannot hold the CLI
+                # open indefinitely (REG-594). reflect_and_store already treats
+                # an exception from _complete as "no usable reply" and, when
+                # the session had real tool/command errors, still stores a
+                # thin failure episode from those (episodes.py) - so a timeout
+                # costs the model's PROSE, not the evidence that led here.
+                # daemon=True: if the deadline expires this thread is
+                # abandoned, not joined again; it must never block interpreter
+                # exit on its own. Named "_holder", not "outcome" - the
+                # enclosing _reflect_into_episode already binds "outcome" to
+                # the "ok"/"incomplete" episode-outcome string, and shadowing
+                # it here would be one accidental read away from a real bug.
+                _holder: dict = {}
+
+                def _target() -> None:
+                    try:
+                        _holder["text"] = _call()
+                    except Exception as e:
+                        _holder["error"] = e
+
+                t = threading.Thread(target=_target, daemon=True)
+                t.start()
+                t.join(deadline)
+                if t.is_alive():
+                    raise TimeoutError(
+                        f"reflection did not finish within {deadline:.0f}s")
+                if "error" in _holder:
+                    raise _holder["error"]
+                return strip_think(_holder.get("text", ""))
 
             reflect_and_store(
                 self._episode_store, task=task, diff=diff,
