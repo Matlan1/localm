@@ -52,8 +52,17 @@ tagged-envelope style of ``voice.py`` rather than shipping exception objects):
     ("ok", value)                        - success (value shape depends on command)
     ("cancelled", message)                - load() aborted via cancel_load
     ("error", message[, kind])            - a clean, expected failure; kind is
-                                             an optional typed-exception tag
-                                             (e.g. "InvalidGrammarError")
+                                             an optional typed-exception tag,
+                                             re-raised as that type by the parent.
+                                             Recognised: "InvalidGrammarError",
+                                             "UnsupportedInputError",
+                                             "GrammarUnsupportedError". An
+                                             UNTAGGED error becomes a
+                                             RuntimeError, which GgufBackend
+                                             reads as "the isolated worker
+                                             faulted" and answers by UNLOADING
+                                             the model - so anything the CALLER
+                                             can fix must carry a tag
     ("chunk", text)                       - one streamed token (chat_stream only)
     ("done", {finish_reason, grammar_unsupported, chatml_fallback_reason})
                                           - end of one chat_stream
@@ -105,7 +114,8 @@ import time
 from typing import Optional
 
 from localm.inference.backends.base import (
-    InvalidGrammarError, ModelLoadCancelled, UnsupportedInputError)
+    GrammarUnsupportedError, InvalidGrammarError, ModelLoadCancelled,
+    UnsupportedInputError)
 
 
 class RunnerBusy(Exception):
@@ -358,6 +368,19 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
                     "grammar_unsupported": worker.grammar_unsupported_this_call,
                     "chatml_fallback_reason": worker.chatml_fallback_reason,
                 }))
+            except GrammarUnsupportedError as e:
+                # Same shape as the InvalidGrammarError arm below, and it must be
+                # caught for the same reason: _build_sampler now REFUSES a lazy
+                # grammar it cannot apply instead of building a chain with no
+                # grammar stage and generating unconstrained text
+                # (NEW-LAZY-GRAMMAR-SILENT-UNCONSTRAINED). Raised while building
+                # the sampler, before a single token and before any native
+                # decode, so the loaded model is untouched and this worker can
+                # keep serving. Without this arm it would fall through to the
+                # deliberately-uncaught path below, killing the process and
+                # evicting the user's model over a request the caller can simply
+                # resend differently.
+                resp_q.put(("error", str(e), "GrammarUnsupportedError"))
             except InvalidGrammarError as e:
                 # A malformed grammar the native parser safely rejected (a
                 # checked, ordinary Python exception, not a crash) - the
@@ -957,6 +980,16 @@ class ModelRunner:
                         tag = result[2] if len(result) > 2 else ""
                         if tag == "InvalidGrammarError":
                             raise InvalidGrammarError(msg)
+                        if tag == "GrammarUnsupportedError":
+                            # Re-raise the TYPE, for the same reason as
+                            # UnsupportedInputError below: the routes map this to
+                            # a 400 naming the real problem (the lazy grammar
+                            # could not be applied), while a RuntimeError out of
+                            # this generator means "the worker died" and makes
+                            # GgufBackend.chat_stream unload the model. A healthy
+                            # worker declining one request must not cost the user
+                            # their loaded model.
+                            raise GrammarUnsupportedError(msg)
                         if tag == "UnsupportedInputError":
                             # Deliberately NOT a RuntimeError: GgufBackend.chat_stream
                             # treats RuntimeError from here as "the worker died" and
@@ -1053,6 +1086,16 @@ class ModelRunner:
                 tag = result[2] if len(result) > 2 else ""
                 if tag == "InvalidGrammarError":
                     raise InvalidGrammarError(msg)
+                if tag == "GrammarUnsupportedError":
+                    # Kept in step with the chat_stream decoder above rather than
+                    # added only where a producer exists today. The two decoders
+                    # read ONE protocol off ONE queue, so a tag honoured by one
+                    # and not the other means the same envelope means different
+                    # things depending on which command happened to be in flight
+                    # - and the untagged fallback is RuntimeError, which reads as
+                    # "the worker faulted" and unloads the model. That is a
+                    # dangerous default to leave a gap in front of.
+                    raise GrammarUnsupportedError(msg)
                 raise RuntimeError(msg)
             raise RuntimeError(f"Unexpected response for '{name}': {result!r}")
         finally:

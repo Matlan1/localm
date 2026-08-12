@@ -13,6 +13,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
+from localm.inference.backends.base import (
+    GRAMMAR_LAZY_NO_TRIGGERS_MESSAGE,
+    GRAMMAR_LAZY_UNSUPPORTED_MESSAGE,
+    GrammarUnsupportedError,
+)
 from localm.inference.backends.llamacpp.llama import _build_sampler
 from localm.inference.gbnf import TOOL_CALL_TRIGGER, TOOL_CALLS_ONLY
 
@@ -34,21 +39,57 @@ class TestBuildSamplerLazySelection:
             1, b'root ::= "x"', b"root", [b"[\\s\\S]*?(<t>[\\s\\S]*)"])
         mock_api.llama_sampler_init_grammar.assert_not_called()
 
-    def test_lazy_without_triggers_skips_grammar_entirely(self):
-        # A lazy request must NEVER silently become a strict constraint.
+    def test_lazy_without_triggers_refuses_and_never_falls_back(self):
+        # A lazy request must NEVER silently become a strict constraint - and
+        # never silently become NO constraint either. These two assertions used
+        # to stand alone and passed while the sampler was built with no grammar
+        # stage at all, so the caller got a normal 200 of unconstrained text it
+        # believed was grammar-conformant. The refusal is what closes that.
         mock_api = self._mock_api()
         with patch(_API, mock_api):
-            _build_sampler(vocab=1, grammar="root ::= \"x\"", grammar_lazy=True)
+            with pytest.raises(GrammarUnsupportedError) as ei:
+                _build_sampler(vocab=1, grammar="root ::= \"x\"", grammar_lazy=True)
+        assert GRAMMAR_LAZY_NO_TRIGGERS_MESSAGE in str(ei.value)
         mock_api.llama_sampler_init_grammar_lazy_patterns.assert_not_called()
         mock_api.llama_sampler_init_grammar.assert_not_called()
 
-    def test_lazy_on_grammarless_build_skips_grammar_entirely(self):
+    def test_lazy_on_grammarless_build_refuses_and_never_falls_back(self):
         mock_api = self._mock_api(lazy_supported=False)
         with patch(_API, mock_api):
-            _build_sampler(vocab=1, grammar="root ::= \"x\"", grammar_lazy=True,
-                           grammar_triggers=["p"])
+            with pytest.raises(GrammarUnsupportedError) as ei:
+                _build_sampler(vocab=1, grammar="root ::= \"x\"", grammar_lazy=True,
+                               grammar_triggers=["p"])
+        assert GRAMMAR_LAZY_UNSUPPORTED_MESSAGE in str(ei.value)
         mock_api.llama_sampler_init_grammar_lazy_patterns.assert_not_called()
         mock_api.llama_sampler_init_grammar.assert_not_called()
+
+    def test_refusal_frees_the_chain_on_both_arms(self):
+        """A refusal must not leak the native sampler chain it had already
+        allocated. Both InvalidGrammarError arms in _build_sampler free it before
+        raising; these two must match, or a client retrying a lazy request
+        against an old build leaks one chain per attempt."""
+        for kwargs in ({}, {"grammar_triggers": ["p"]}):
+            mock_api = self._mock_api(lazy_supported=not kwargs)
+            mock_api.llama_sampler_chain_init.return_value = 4242
+            with patch(_API, mock_api):
+                with pytest.raises(GrammarUnsupportedError):
+                    _build_sampler(vocab=1, grammar="root ::= \"x\"",
+                                   grammar_lazy=True, **kwargs)
+            mock_api.llama_sampler_free.assert_called_once_with(4242)
+
+    def test_the_three_grammar_messages_are_mutually_non_containing(self):
+        """``coder/agent/context.py`` routes a refusal by SUBSTRING match against
+        these strings, testing the lazy one first. If any were a substring of
+        another, a no-triggers refusal (a caller bug) would latch
+        _lazy_grammar_confirmed_unsupported and disable trigger-gated tool calls
+        for the whole session, blaming the backend."""
+        from localm.inference.backends.base import GRAMMAR_UNSUPPORTED_MESSAGE
+        msgs = [GRAMMAR_UNSUPPORTED_MESSAGE, GRAMMAR_LAZY_UNSUPPORTED_MESSAGE,
+                GRAMMAR_LAZY_NO_TRIGGERS_MESSAGE]
+        for a in msgs:
+            for b in msgs:
+                if a is not b:
+                    assert a not in b, f"{a!r} is a substring of {b!r}"
 
     def test_strict_path_unchanged(self):
         mock_api = self._mock_api()

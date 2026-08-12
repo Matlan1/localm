@@ -626,11 +626,19 @@ def _build_sampler(
         With *grammar_triggers*, generation stays UNCONSTRAINED until the
         output matches a trigger pattern; the grammar enforces from there
         (text-or-tool). When the runtime lacks the lazy export, or no
-        triggers are given, the grammar is skipped entirely - a lazy request
-        must never silently become a strict constraint (a strict grammar
-        stalls thinking models, live-verified 2026-07-02).
+        triggers are given, the request is REFUSED with
+        :class:`GrammarUnsupportedError` - a lazy request must never silently
+        become a strict constraint (a strict grammar stalls thinking models,
+        live-verified 2026-07-02), and it must never silently become NO
+        constraint either (the caller is told the reply matches a grammar it
+        was never sampled against).
     """
-    from localm.inference.backends.base import InvalidGrammarError
+    from localm.inference.backends.base import (
+        GRAMMAR_LAZY_NO_TRIGGERS_MESSAGE,
+        GRAMMAR_LAZY_UNSUPPORTED_MESSAGE,
+        GrammarUnsupportedError,
+        InvalidGrammarError,
+    )
 
     chain_params = api.llama_sampler_chain_default_params()
     chain_params.no_perf = True
@@ -656,11 +664,38 @@ def _build_sampler(
                 raise InvalidGrammarError(_INVALID_GRAMMAR_MSG)
             api.llama_sampler_chain_add(chain, gsampler)
         else:
-            from localm.debuglog import logger as _dbg
-            _dbg.debug(
-                "lazy grammar requested but %s; generating unconstrained",
-                "no trigger patterns were given" if not grammar_triggers
-                else "this llama build lacks llama_sampler_init_grammar_lazy_patterns")
+            # REFUSE, do not drop. Dropping the grammar here answered the request
+            # with a normal 200 of unconstrained text that the caller had every
+            # reason to believe was grammar-conformant - the exact "a step that
+            # failed must never report success" violation, and the one the coder
+            # acts on by parsing that reply for tool calls. A typed refusal costs
+            # the caller one clean 400 naming what to do instead
+            # (http_server.py's _BACKEND_ERROR_STATUS already maps
+            # GrammarUnsupportedError -> 400; _runner.py carries the type across
+            # the worker IPC as a tagged envelope so it does not degrade into the
+            # worker-faulted RuntimeError that would evict the loaded model).
+            #
+            # Two DISTINCT messages because the two recoveries are opposite: the
+            # caller fixes a missing trigger list by sending one, and can only fix
+            # a build without the native export by dropping grammar_lazy. See
+            # GRAMMAR_LAZY_NO_TRIGGERS_MESSAGE for why reusing one string here
+            # would also mis-latch the coder's session-wide lazy-grammar disable.
+            #
+            # `not grammar_triggers` FIRST, deliberately, and it mirrors the
+            # short-circuit in the `if` above: with no triggers, has_lazy_grammar()
+            # was never called, so this branch has no idea whether the export
+            # exists and must not imply one. A caller who is BOTH missing triggers
+            # AND on an old build therefore learns it in two steps - which is the
+            # honest order, since the missing triggers are the problem they
+            # introduced and the one they can act on right now.
+            #
+            # Free the chain first, exactly like the two InvalidGrammarError arms:
+            # nothing else owns it yet, so raising past it would leak the native
+            # allocation on every refusal.
+            api.llama_sampler_free(chain)
+            raise GrammarUnsupportedError(
+                GRAMMAR_LAZY_NO_TRIGGERS_MESSAGE if not grammar_triggers
+                else GRAMMAR_LAZY_UNSUPPORTED_MESSAGE)
     elif grammar:
         gsampler = api.llama_sampler_init_grammar(vocab, grammar.encode(), b"root")
         if gsampler is None:
