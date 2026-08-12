@@ -1327,7 +1327,16 @@ export let personaCache = [];
 export async function refreshPersonas() {
   try {
     const r = await fetch("/api/prompts", { headers: authHeaders() });
-    if (!r.ok) return;
+    if (!r.ok) {
+      // A failed LIST must not fall through to an empty dropdown: "(none)"
+      // renders a library we could not READ identically to one the user
+      // genuinely has none of, which is the same collapse the server side
+      // now refuses (a 500 rather than {"prompts": []}). Say so, or the user
+      // concludes their personas are gone and rebuilds them from scratch.
+      const detail = await r.json().then((d) => d.detail).catch(() => null);
+      toast("Could not load personas: " + (detail || r.statusText), true);
+      return;
+    }
     personaCache = (await r.json()).prompts;
     const sel = $("p-persona");
     const current = sel.value;
