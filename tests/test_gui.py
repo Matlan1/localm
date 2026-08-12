@@ -2,10 +2,12 @@
 """Tests for the GUI plugin: coder sessions, agent event hooks, web endpoints."""
 
 import asyncio
+import contextlib
 import json
 import os
 import queue
 import shutil
+import sys
 import threading
 import time
 from pathlib import Path
@@ -2216,22 +2218,55 @@ class TestPlatformEndpoints:
 
 
 
+@contextlib.contextmanager
+def _patched_without_leaking(module, name, replacement):
+    """Patch ``module.name`` for the body, then restore it AND any copy that a
+    ``from``-import bound under the same name while the patch was live.
+
+    monkeypatch restores the attribute on ``module`` and nothing else. A module
+    whose FIRST import happens inside the window runs its module-level
+    ``from ..model_manager import X`` against the patched package and binds
+    ``replacement`` into its own globals; monkeypatch has no knowledge of that
+    second reference, so it outlives teardown and poisons the rest of the pytest
+    process. Measured on ``get_model_info``: it leaked into localm.cli,
+    localm.cli.chat AND localm.cli.models, and localm/cli/chat.py then called it
+    with ``allow_direct_path=True``, failing five unrelated tests with a
+    TypeError in any selection that collected this file first.
+
+    The sweep matches by object IDENTITY rather than against a list of known
+    consumers, so a module that grows the same ``from``-import later is repaired
+    too, without this test having to learn about it. The one shape it would miss
+    is an aliased ``from ... import X as Y``; no such import of model_manager
+    exists today (checked), and the miss would be loud, not silent, because the
+    stale binding raises.
+    """
+    real = getattr(module, name)
+    setattr(module, name, replacement)
+    try:
+        yield
+    finally:
+        setattr(module, name, real)
+        for mod in list(sys.modules.values()):
+            # Read the module dict directly: a getattr() probe can fire an
+            # unrelated module's PEP 562 __getattr__ and its side effects.
+            ns = getattr(mod, "__dict__", None)
+            if ns is not None and ns.get(name) is replacement:
+                setattr(mod, name, real)
+
+
 class TestGuiNoModel:
     """`localm gui --no-model` opens model-less even when usable models exist."""
 
     def test_no_model_flag_skips_auto_selection(self, monkeypatch):
         from click.testing import CliRunner
 
+        import localm.model_manager as model_manager
         from localm.plugins.gui import cli as guicli
 
         # A populated registry that would normally auto-select a default model.
         monkeypatch.setattr(
             "localm.config.load_registry",
             lambda: {"some-model": {"path": "x.gguf", "source": "local"}})
-        # get_model_info must NOT be consulted when --no-model is set.
-        monkeypatch.setattr(
-            "localm.model_manager.get_model_info",
-            lambda name: (_ for _ in ()).throw(AssertionError("auto-selected a model")))
         monkeypatch.setattr("localm.winconsole.disable_quickedit", lambda: None)
         ran = {}
         # Mock localm's serving seam (portmux.run_server), NOT uvicorn.run: the
@@ -2242,7 +2277,15 @@ class TestGuiNoModel:
         monkeypatch.setattr("localm.portmux.run_server",
                             lambda *a, **kw: ran.setdefault("ok", True))
 
-        result = CliRunner().invoke(guicli.main, ["--no-model", "--no-browser"])
+        # get_model_info must NOT be consulted when --no-model is set. NOT via
+        # monkeypatch: this invocation is the first import of localm.cli in many
+        # selections, and a plain patch leaks into it (see the helper above).
+        def _must_not_auto_select(name):
+            raise AssertionError("auto-selected a model")
+
+        with _patched_without_leaking(
+                model_manager, "get_model_info", _must_not_auto_select):
+            result = CliRunner().invoke(guicli.main, ["--no-model", "--no-browser"])
         assert result.exit_code == 0, result.output
         assert "no model loaded" in result.output.lower()
         assert ran.get("ok")
