@@ -2612,14 +2612,23 @@ def implicit_split_capacity(config: Optional[dict] = None, *,
         if not devices:
             return {}
         # DISCRETE GPUs ONLY, and this is a load-safety filter, not tidiness.
-        # The native registry reports every non-CPU device, but llama.cpp's
-        # device list SKIPS accelerators outright and appends integrated GPUs
-        # only when no discrete GPU was found. So a box with a discrete card
-        # AND an iGPU - an ordinary laptop, or any desktop CPU with integrated
-        # graphics - would otherwise have the iGPU's memory summed into a
-        # budget llama.cpp then places entirely on the discrete card. That
-        # over-budgets, which is the direction that OOMs rather than merely
-        # wasting memory.
+        # llama.cpp's device list SKIPS accelerators outright and appends
+        # integrated GPUs only when no discrete GPU was found. So a box with a
+        # discrete card AND an iGPU - an ordinary laptop, or any desktop CPU
+        # with integrated graphics - must not have the iGPU's memory summed
+        # into a budget llama.cpp then places entirely on the discrete card.
+        # That over-budgets, which is the direction that OOMs rather than
+        # merely wasting memory.
+        #
+        # SINCE 2026-08-12 :func:`native_gpu_devices` ALREADY APPLIES EXACTLY
+        # THIS FILTER (see _llama_visible_devices), so on a real reading this
+        # pass is now a no-op and is kept as defence in depth rather than as
+        # the thing standing between an iGPU and the budget. It still earns
+        # its place: ~5 test modules inject device lists by patching
+        # native_gpu_devices directly, which bypasses that derivation
+        # entirely, and a sum is the one consumer where a stray iGPU is
+        # actively unsafe rather than merely mis-numbered. Do not read its
+        # presence as evidence the upstream list is unfiltered.
         #
         # Filter to GGML_DEV_TYPE_GPU rather than excluding the others by
         # value: the enum has GROWN (IGPU was inserted ahead of ACCEL, so the
