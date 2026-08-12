@@ -137,7 +137,11 @@ def register(app: FastAPI, ctx) -> None:
                                             engine_managed_keys)
         readonly = {"effective_mode", "effective_coder_mode", "effective_ctx_max",
                     "instance_id"}
-        body = {k: v for k, v in body.items() if k not in readonly}
+        # NEW-RAG-DIM-NO-REEMBED: `confirm` is this route's own protocol flag
+        # (mirrors POST /api/rag/embedding's), not a config key - strip it here
+        # alongside the read-only extras so validate_update never sees it.
+        confirm = bool(body.get("confirm"))
+        body = {k: v for k, v in body.items() if k not in readonly and k != "confirm"}
         # REC-OWNER-SETTINGS: an admin_only key widens a trust boundary, so a
         # non-owner config:write key must not set it. Today that is the rag_*
         # indexing settings (which host folders the indexer may read),
@@ -183,6 +187,29 @@ def register(app: FastAPI, ctx) -> None:
                     "plugin's own endpoint (/v1/tts/config, /v1/media/config/"
                     "<plugin>, /api/plugins/<name>/enable), which validates the "
                     "value and enforces its own permission.")
+        # NEW-RAG-DIM-NO-REEMBED: this is the second writer of `embedding_model`
+        # besides the RAG picker's POST /api/rag/embedding (rag/plug.py), which
+        # already dry-runs a switch that would invalidate existing collections'
+        # semantic search before it takes effect. Without this, a Settings-page
+        # edit silently invalidated them with no warning at all. Placed AFTER
+        # the admin_only auth check above (embedding_model is admin_only), so an
+        # unauthorized caller still gets a 403 rather than a report naming
+        # collections it has no business seeing. Gated on an ACTUAL value change
+        # (not just the key's presence) and on there being something to lose -
+        # unlike the RAG-picker route this is a generic multi-key route used for
+        # ordinary settings saves too, so a no-op or nothing-at-risk write must
+        # not force every caller through an extra confirm round trip.
+        if "embedding_model" in body and not confirm:
+            from localm.config import load_config
+            new_model = str(body["embedding_model"]).strip()
+            current_model = str(load_config().get("embedding_model") or "")
+            if new_model and new_model != current_model:
+                from localm.rag import collection_provenance_note, collection_provenance_report
+                affected = collection_provenance_report()
+                if affected:
+                    return {"needs_confirm": True, "model": new_model,
+                            "collections": affected,
+                            "note": collection_provenance_note(new_model, affected)}
         try:
             validated = validate_update(body)
         except ValueError as e:

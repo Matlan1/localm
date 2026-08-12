@@ -90,7 +90,9 @@ main.add_command(_setup_llama_main, name="setup-llama")
               help="Embedding model to install (a known key, a registered model "
                    "name, or a path to a GGUF). Persisted as the embedding_model "
                    "config. Default: the current embedding_model config.")
-def setup_embeddings(model):
+@click.option("-y", "--yes", "yes", is_flag=True,
+              help="Skip the pre-switch collection-impact confirmation.")
+def setup_embeddings(model, yes=False):
     """Install the on-device embedding model for semantic search (memory + RAG).
 
     Semantic retrieval uses a small dedicated model (bge-small, ~25 MB) rather
@@ -113,6 +115,43 @@ def setup_embeddings(model):
                                       KNOWN_EMBEDDING_MODELS,
                                       resolve_embedding_model_path)
     if model:
+        current = str(load_config().get("embedding_model") or "")
+        if model != current:
+            # NEW-RAG-DIM-NO-REEMBED: the third writer of embedding_model,
+            # alongside the RAG picker (POST /api/rag/embedding) and PATCH
+            # /v1/config, both of which already warn what a switch is about to
+            # invalidate BEFORE it happens rather than only in a post-switch
+            # note (see the ready message far below, which still states what
+            # each capability can do but no longer carries the whole warning
+            # alone).
+            from ..rag import collection_provenance_note, collection_provenance_report
+            affected = collection_provenance_report()
+            if affected:
+                console.print(
+                    f"[yellow]{collection_provenance_note(model, affected)}[/yellow]")
+                for c in affected:
+                    built = f" (built with {c['built_with']})" if c.get("built_with") else ""
+                    chunks = f" - {c['n_chunks']} chunks" if c.get("n_chunks") is not None else ""
+                    console.print(f"  - {c['name']}{built}{chunks}")
+                if not yes:
+                    # Deliberately NOT abort=True (REG-589's shape, cli/rag.py):
+                    # nothing here is destroyed by proceeding - a collection's
+                    # chunk text and existing vectors stay on disk either way,
+                    # they only fall back to lexical search until re-embedded -
+                    # so unlike rag repair's embeddings-loss prompt, a script or
+                    # non-interactive run with nobody to answer should PROCEED
+                    # rather than abort: there is nothing to lose that was not
+                    # already disclosed above.
+                    try:
+                        proceed = click.confirm("Continue with the switch?")
+                    except click.Abort:
+                        console.print(
+                            "[yellow]Not an interactive terminal, so nothing can "
+                            "answer that. Proceeding with the switch - pass --yes "
+                            "to silence this prompt next time.[/yellow]")
+                        proceed = True
+                    if not proceed:
+                        raise click.Abort()
         update_config(lambda c: c.update({"embedding_model": model}))
     name = str(load_config().get("embedding_model") or DEFAULT_EMBEDDING_MODEL)
     console.print(f"Installing embedding model: [bold cyan]{name}[/bold cyan]")

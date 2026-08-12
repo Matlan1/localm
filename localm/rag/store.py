@@ -2580,6 +2580,65 @@ class Collection:
             return cls(checked_name, base)       # busy: today's exact fallback
 
 
+def collection_provenance_report() -> list:
+    """Every collection that currently has vectors, with its recorded 'built
+    with' model (``Collection.embedding_model()``, None if never recorded)
+    and chunk count - the pre-switch, new-model-dimension-free report used by
+    every writer of the ``embedding_model`` config key (the RAG picker's
+    ``POST /api/rag/embedding``, ``PATCH /v1/config``, and
+    ``localm setup-embeddings``) to warn what an embedding-model switch is
+    about to invalidate, before it happens.
+
+    Deliberately does NOT assert whether a given collection's dimension will
+    actually change - that needs the CANDIDATE model's own dimension, which
+    means resolving and loading it (a real fetch/VRAM-load, not a free
+    probe), and no caller of this report may take that step before the user
+    has confirmed. So this reports what CAN be known for free from disk
+    alone: which collections have semantic search today, and what they were
+    built with. Honest under-claiming (AGENTS rule 5: never assert a
+    dimension nobody has measured) rather than a confident but fabricated
+    per-collection verdict.
+
+    Best-effort per collection: one that fails to even construct is still
+    named, with the failure NOTED (not silently dropped from the count).
+    The exception's own text is logged server-side only, never placed in the
+    field this function returns - a caller (an HTTP route) may serialize the
+    return value straight into a response body, and the raw message can
+    carry a filesystem path or other implementation detail (CWE-209)."""
+    out: list = []
+    for name in collection_names():
+        try:
+            coll = Collection(name)
+            stats = coll.stats()
+        except Exception as e:
+            _log.warning("rag: %r could not be read for the embedding-switch "
+                        "impact preview (%s: %s)", name, type(e).__name__, e)
+            out.append({"name": name, "built_with": None, "n_chunks": None,
+                        "reason": "could not be read"})
+            continue
+        if not stats.get("has_vectors"):
+            continue
+        out.append({"name": name, "built_with": coll.embedding_model(),
+                    "n_chunks": stats["n_chunks"]})
+    return out
+
+
+def collection_provenance_note(model: str, affected: list) -> str:
+    """The human-readable note accompanying a ``collection_provenance_report()``
+    result, shared by every writer of ``embedding_model`` (the RAG picker,
+    ``PATCH /v1/config``, ``localm setup-embeddings``) so the wording a user
+    sees does not drift between which surface they switched from."""
+    if affected:
+        return (
+            f"Switching to '{model}' may invalidate the semantic search of "
+            f"{len(affected)} existing collection(s) until they are "
+            "re-embedded. The exact impact cannot be confirmed until the "
+            "new model is loaded and tested - re-embed after switching if "
+            "any of them drop to BM25/lexical-only.")
+    return (f"No existing collection currently has embeddings, so "
+            f"switching to '{model}' has nothing to invalidate.")
+
+
 def _cosine(a: list, b: list) -> float:
     if len(a) != len(b):
         # Mismatched dims must never be scored as a real (zero) similarity - that
