@@ -334,8 +334,27 @@ test("P1a: an authenticated (200) boot still fires the normal boot-time /api " +
 // the three branches is even reachable. A fixture whose value space cannot
 // intersect the defect's trigger space reads as covered while being unable to
 // go red.
+// THE FETCH MUST BE SLOW, AND THAT IS THE WHOLE EXPERIMENT - do not "simplify"
+// it back to an immediately-resolved value. Every other mock in this file
+// returns an already-resolved promise, which settles on the MICROTASK queue. A
+// `setTimeout(..., 0)` is a MACROTASK, and microtasks all run first - so with an
+// instant mock, bootAuthProbe resolves and lockUI() sets window.__localmLocked
+// BEFORE the deep-link timer ever fires, and the old `if (window.__localmLocked)
+// return;` guard reads `true` and correctly bails. The fixture would then pass
+// on the UNFIXED code (measured: it did - all four cases green against pre-fix
+// init.js) while the browser does the opposite, because a real network round
+// trip resolves LONG after a 0 ms timer.
+//
+// Delaying the mock past one macrotask turn restores the real ordering: the
+// timer fires first, reads `undefined`, and fails open. This is a third,
+// independent way this fixture could not express the defect, on top of the two
+// named above (no trigger seeded, no onViewShown loaded) - and the only one that
+// survives fixing those, so it is the one that decides whether these tests mean
+// anything.
+const NET_MS = 25;   // > the 0 ms deep-link timer, like any real round trip
 const keylessCounting = (calls) => async (url) => {
   calls.push(String(url));
+  await new Promise((r) => setTimeout(r, NET_MS));
   return {
     ok: false, status: 401,
     json: async () => ({ detail: "Missing or invalid API key" }),
@@ -377,6 +396,7 @@ test("P1a: an AUTHED boot still restores ?view=settings - the fix must sequence 
   const calls = [];
   const fetchImpl = async (url) => {
     calls.push(String(url));
+    await new Promise((r) => setTimeout(r, NET_MS));   // see the note above
     return { ok: true, status: 200, text: async () => "",
              json: async () => ({ models: [], active: "", items: [], conversations: [] }) };
   };
