@@ -59,6 +59,21 @@ on:
   # against a branch when a change is one the three axes above could bite - a
   # platform-specific path, anything touching dependency resolution - and WSL
   # (Ubuntu, python 3.12) reproduces two of the three for free.
+  #
+  # ============================================================================
+  # TEMPORARY, 2026-08-12: THIS pull_request TRIGGER IS TIME-BOXED AND MUST COME
+  # BACK OUT. Enabled on the maintainer's explicit request ("enable ci runs for a
+  # few minutes"), which is the ask the standing decision above requires. It is
+  # NOT a reversal of that decision.
+  #
+  # REMOVE IT when the maintainer says the window is over. If you are reading
+  # this and do not know whether the window is still open, it is not - ASK, and
+  # default to removing it. Every previous flip of this trigger was left in by
+  # someone who assumed a window was still open; it has now been removed,
+  # re-added and removed again across #839, #860 and 2026-07-29/07-30/08-04, and
+  # each flip cost a round of confusion about what actually gates a merge.
+  # ============================================================================
+  pull_request:
   workflow_dispatch:
     inputs:
       run_abi:
