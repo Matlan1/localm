@@ -40,6 +40,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
   directly, so this path names a real file and verifies it.
 
 ### Added
+- **A coder skill's `allowed-tools` is now enforced, not just displayed.** A
+  `SKILL.md` could declare that it only needs `read_file` and then, once loaded,
+  call `run_shell`, `write_file` or `git_push` anyway - the declaration was shown
+  to the model as a suggestion and nothing checked it. Loading a skill now
+  restricts the session to the tools that skill declares, and anything else is
+  refused before it runs. The restriction only ever narrows: it cannot re-enable
+  a tool you have switched off, loading a second skill can only narrow it
+  further, a sub-agent the skill spawns inherits it, and nothing the model itself
+  can call lifts it - your next request does. Skills that declare no
+  `allowed-tools` are unrestricted, exactly as before.
+
 - **The llama.cpp compatibility check now catches an upstream change that
   redefines a VALUE, not just one that moves a field.** The check compared where
   each field sits in memory, which cannot see a change to which values are legal
