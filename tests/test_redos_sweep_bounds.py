@@ -88,24 +88,37 @@ def test_parse_web_call_is_bounded_on_hostile_model_output(name, make_witness):
 
 
 @pytest.mark.parametrize("name, make_witness", [
+    # The enumeration-level witnesses, re-run with a real call in FRONT of them.
     ("think_openers", lambda: "<r >" * 8_000),
     ("wrap_spaces", lambda: "<tool_call>" + " " * 4_000),
     ("unmatched_braces", lambda: "{" * 16_000),
     ("fence_tabs", lambda: "```" + "\t" * 50_000),
     ("wrap_openers", lambda: "<|tool_call>" * 5_000),
+    # The one that is genuinely NEW, and the reason this test exists: 2,000
+    # well-formed but unparseable wrapped bodies AFTER the real call. limit=1
+    # never looks at them; limit=2 runs _lenient_json (4 regex passes) over
+    # every one. MEASURED on this box at limit=2: 0.022s / 0.041s / 0.095s /
+    # 0.248s at n = 500 / 1,000 / 2,000 / 4,000, i.e. ~linear (8x input, 11x
+    # time) rather than the quadratic shape this file exists to catch. n=2,000
+    # sits ~5x under BUDGET, which survives a loaded box without going soft.
+    ("junk_bodies_after_a_real_call",
+     lambda: ("<tool_call>" + "'a" * 200 + "</tool_call>") * 2_000),
 ])
 def test_parse_web_calls_is_bounded_when_a_real_call_precedes_the_hostile_tail(
         name, make_witness):
-    """The witnesses above are all reached through ``parse_web_call``, which stops
-    at the FIRST call - so on input that contains one, the scan ends before the
-    hostile tail is ever examined.
+    """``parse_web_call`` stops at the FIRST call, so on input that contains one
+    the scan ends before any hostile tail is examined - the limit=1 bound above
+    cannot speak for what follows a valid call.
 
     ``run_chat_with_web`` now asks for ``limit=2``: it runs the first call and
-    needs to know whether ANY further call followed. That deliberately keeps
-    scanning past the first hit, so a valid call FOLLOWED BY a hostile tail is a
-    path the limit=1 bound above cannot speak for - it is a different input shape
-    reaching the same quantifiers. Reads on raw model output, same as its
-    neighbour, so the same budget applies.
+    needs to know whether ANY further call followed, which deliberately keeps
+    scanning past the first hit. That is a new input shape reaching the same
+    quantifiers, on raw model output, so it gets the same budget.
+
+    HONEST SCOPE: the first five witnesses are enumerated into ``candidates``
+    before any parsing in BOTH limits, so they cost the same either way and are
+    breadth, not the new risk. Only the last one isolates the cost limit=2
+    actually adds.
     """
     valid = '<tool_call>{"name": "web_search", "args": {"query": "x"}}</tool_call>'
     calls, elapsed = _timed(parse_web_calls, valid + make_witness(), 2)
