@@ -138,7 +138,7 @@ def test_fallback_records_the_fallback_tag_not_the_chosen_one(monkeypatch, tmp_p
     installed - the marker has to describe the disk."""
     seen = []
 
-    def fake_provision(backend, target, sha256, with_cudart, cuda_line=sl._CUDA_LINE):
+    def fake_provision(backend, target, sha256, with_cudart, cuda_line=sl._CUDA_LINE, tag=None):
         seen.append(backend)
         (target / sl._lib_name()).write_text("x")
         return {"cuda": "b10361", "vulkan": "b10300"}[backend]
