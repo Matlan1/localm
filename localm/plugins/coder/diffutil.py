@@ -16,18 +16,41 @@ from pathlib import Path
 from typing import Optional
 
 
-def read_old_content(cwd: Path, path_arg: str) -> str:
-    """The file's current text content for diff purposes, or "" when it
-    doesn't exist yet (a new file) or can't be decoded/read."""
+def read_old_content_checked(cwd: Path, path_arg: str) -> tuple[str, bool]:
+    """``(content, readable)`` for diff purposes.
+
+    ``readable`` is False ONLY when the file EXISTS and could not be read (a
+    lock, a permission denial). A file that does not exist yet is ``("", True)``:
+    a new file is a known, honest empty, not a failure.
+
+    Use this at any CONSENT surface. ``read_old_content`` collapses the two into
+    ``""``, and ``print_diff_preview``'s own contract reads ``""`` as "the file
+    doesn't exist yet" - so an overwrite of a file we merely failed to READ
+    renders as a pure addition with nothing being deleted, and the user approves
+    a change whose destructive half is invisible. The ``is_file()`` check below
+    runs BEFORE the read, so at the point of failure we already know the file
+    exists; that information used to be discarded.
+    """
     if not path_arg:
-        return ""
+        return "", True
     abs_path = (cwd / path_arg).resolve()
     if not abs_path.is_file():
-        return ""
+        return "", True                    # a new file: an honest empty
     try:
-        return abs_path.read_text(encoding="utf-8", errors="replace")
+        return abs_path.read_text(encoding="utf-8", errors="replace"), True
     except Exception:
-        return ""
+        return "", False                   # EXISTS, and we could not read it
+
+
+def read_old_content(cwd: Path, path_arg: str) -> str:
+    """The file's current text content for diff purposes, or "" when it
+    doesn't exist yet (a new file) or can't be decoded/read.
+
+    Collapses those two cases deliberately for DISPLAY and patch-record paths,
+    where a best-effort empty is the right altitude. Do NOT use it where the
+    result is shown to a user who is about to approve a write: see
+    read_old_content_checked, which keeps them apart."""
+    return read_old_content_checked(cwd, path_arg)[0]
 
 
 def resolve_new_content(tool_name: str, args: dict, old_content: str) -> Optional[str]:

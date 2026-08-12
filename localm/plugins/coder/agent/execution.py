@@ -19,7 +19,7 @@ from ..display import (
 )
 from ..diffutil import (
     compute_multifile_diff, compute_search_replace_diff, compute_tool_diff,
-    read_old_content, resolve_new_content,
+    read_old_content, read_old_content_checked, resolve_new_content,
 )
 from ..confirm import invoke_confirm
 from ..parser import ToolCall
@@ -756,7 +756,20 @@ class _ExecutionMixin:
         print_diff_preview = _agent.print_diff_preview
         if call.name in ("write_file", "edit_file"):
             path_arg = call.args.get("path", "")
-            old_content = read_old_content(self.cwd, path_arg)
+            old_content, readable = read_old_content_checked(self.cwd, path_arg)
+            if not readable:
+                # This is a CONSENT surface. old_content is "" because the file
+                # could not be READ, not because it is new, and print_diff_preview
+                # reads "" as "does not exist yet" - so the diff below shows the
+                # whole write as an addition and NOTHING as deleted. Say so, or
+                # the user approves an overwrite whose destructive half is
+                # invisible to them.
+                from ..display import console as _con
+                _con.print(
+                    f"[yellow]![/yellow] Could not read the current contents of "
+                    f"{path_arg or 'the file'}. The diff below CANNOT show what "
+                    f"would be replaced - treat it as an overwrite of unknown "
+                    f"content.")
             new_content = resolve_new_content(call.name, call.args, old_content)
             print_diff_preview(old_content, new_content, path_label=path_arg)
             return confirm_diff(path_arg or "file")
