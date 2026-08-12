@@ -163,10 +163,17 @@ CORE_FIELDS: list = [
                  "the newest upstream release. Set with "
                  "`localm setup-llama --tag`, not here.",
                  group="Engine", applies=Applies.NEXT_LOAD, admin_only=True),
+    # NOT engine_managed, despite being written by the engine rather than by a
+    # user: that flag means PLUGIN STATE specifically (`plugins`,
+    # `plugins_enabled` - see test_config_plugin_state_gate.py, which pins the
+    # set), and the two flags are deliberately DISJOINT gates - admin_only also
+    # hides a value from a non-owner, engine_managed only refuses the write, so
+    # carrying both would silently narrow reads. admin_only is the correct one
+    # here and it alone satisfies the owner-gate requirement for a verbatim key.
     SettingField("llama_runtime_history", Widget.HIDDEN, "Runtime build history",
                  "Builds provisioned on this machine, newest last. Recorded by "
                  "setup-llama so `--rollback` knows what to return to.",
-                 group="Engine", admin_only=True, engine_managed=True),
+                 group="Engine", admin_only=True),
     SettingField("n_ctx", Widget.NUMBER, "Context window (initial)",
                  "Tokens of history the model starts with; grows on demand up to "
                  "the maximum below.",

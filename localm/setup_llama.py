@@ -392,9 +392,34 @@ def installed_build() -> "Optional[str]":
 _RUNTIME_HISTORY_MAX = 20
 
 
+# A release tag is interpolated straight into a GitHub API path and a download
+# URL, so it is validated as a PATH SEGMENT, not merely as "looks like a tag": a
+# value carrying '/', '..', '?' or '#' would silently retarget the request at a
+# different endpoint. Deliberately broader than upstream's own bNNNNN shape so a
+# future tag scheme is not refused by a cosmetic rule - the check is about what
+# is safe in a URL, which is the part that must never be relaxed.
+_TAG_SAFE_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
+
+
+def _is_safe_tag(tag: "Optional[str]") -> bool:
+    """Whether *tag* is safe to interpolate into a release URL path segment."""
+    tag = (tag or "").strip()
+    return bool(_TAG_SAFE_RE.match(tag)) and ".." not in tag
+
+
 def pinned_tag() -> "Optional[str]":
     """The llama.cpp release tag the user has pinned, or None when the install
     tracks upstream's newest release (the default).
+
+    VALIDATED ON READ, not only where --tag writes it. The CLI flag is not the
+    only way this value can arrive: the key is HIDDEN with no coercion branch, so
+    PATCH /v1/config stores whatever it is handed (owner-gated, but stored
+    verbatim - see test_config_plugin_state_gate.py), and config.json is a plain
+    file a user can edit by hand, which no route can police. Checking here covers
+    every entry point at the one place the value is actually used, so a tag that
+    would escape its URL path segment can never reach _release_assets. An unsafe
+    stored value is treated as NO PIN and said out loud rather than silently
+    obeyed or silently dropped.
 
     Never raises: a pin is read on the provisioning path, and an unreadable
     config must degrade to "no pin" rather than break setup entirely."""
@@ -403,7 +428,15 @@ def pinned_tag() -> "Optional[str]":
     except Exception:
         return None
     raw = str(raw).strip()
-    return raw or None
+    if not raw:
+        return None
+    if not _is_safe_tag(raw):
+        console.print(f"[yellow]Warning:[/yellow] ignoring the stored llama.cpp "
+                      f"pin {raw!r} - it is not a usable release tag. Set one "
+                      "with [bold]localm setup-llama --tag <tag>[/bold].")
+        logger.warning("ignoring an unsafe llama_runtime_pin from config: %r", raw)
+        return None
+    return raw
 
 
 def set_pinned_tag(tag: "Optional[str]") -> None:
@@ -461,8 +494,13 @@ def _record_runtime_history(backend: str, tag: "Optional[str]") -> None:
 
 
 def runtime_history() -> list:
-    """The recorded provisions, oldest first. Filtered to well-formed entries so
-    a hand-edited config cannot make --rollback offer a nonsense target."""
+    """The recorded provisions, oldest first. Filtered to well-formed entries
+    whose tag is SAFE, so neither a hand-edited config nor a verbatim PATCH can
+    make --rollback offer a nonsense - or hostile - target.
+
+    The safety filter matters here and not only in pinned_tag(): --rollback takes
+    a tag from this list and pins it, so an unchecked entry would become a pin by
+    a route that never passed through _validated_tag."""
     try:
         raw = config.load_config().get("llama_runtime_history")
     except Exception:
@@ -470,7 +508,7 @@ def runtime_history() -> list:
     if not isinstance(raw, list):
         return []
     return [e for e in raw
-            if isinstance(e, dict) and str(e.get("tag") or "").strip()]
+            if isinstance(e, dict) and _is_safe_tag(str(e.get("tag") or ""))]
 
 
 def previous_tag(backend: str) -> "Optional[str]":
@@ -2304,19 +2342,13 @@ def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
         context={"operation": "setup-llama", "requested_backend": chosen})
 
 
-# A release tag is interpolated straight into a GitHub API path and a download
-# URL, so it is validated as a PATH SEGMENT, not merely as "looks like a tag":
-# a value carrying '/', '..', '?' or '#' would silently retarget the request at
-# a different endpoint. Deliberately broader than upstream's own bNNNNN shape so
-# a future tag scheme is not refused by a cosmetic rule - the check is about
-# what is safe to put in a URL, which is the part that must never be relaxed.
-_TAG_SAFE_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
-
-
 def _validated_tag(raw: str) -> str:
-    """*raw* as a usable release tag, or a ClickException naming the problem."""
+    """*raw* as a usable release tag, or a ClickException naming the problem.
+
+    The CLI-facing half of _is_safe_tag: same predicate, so the flag and the
+    stored-value check can never disagree about what a usable tag is."""
     tag = (raw or "").strip()
-    if not _TAG_SAFE_RE.match(tag) or ".." in tag:
+    if not _is_safe_tag(tag):
         raise click.ClickException(
             f"{raw!r} is not a usable release tag. Use a tag as upstream "
             "publishes it, for example 'b10355' (letters, digits, dot, dash and "

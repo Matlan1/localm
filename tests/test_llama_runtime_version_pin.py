@@ -399,6 +399,56 @@ def test_tag_with_a_supplied_build_is_refused(from_dir, url, home):
     assert sl.pinned_tag() is None
 
 
+@pytest.mark.parametrize("planted", [
+    "../../../../evil", "b10355/../../other", "b10355?x=1", "b10355#f", "a b",
+])
+def test_an_unsafe_pin_STORED_IN_CONFIG_never_reaches_a_url(planted, monkeypatch,
+                                                            capsys, tmp_path, home):
+    """--tag is NOT the only way a pin arrives, so validating there is not enough.
+
+    `llama_runtime_pin` is HIDDEN with no coercion branch, so PATCH /v1/config
+    stores whatever it is handed (owner-gated but verbatim - see
+    test_config_plugin_state_gate.py), and config.json is a plain file a user can
+    edit by hand, which no route can police. The value is interpolated into a
+    GitHub API path and a download URL, so a tag carrying '/', '..', '?' or '#'
+    would retarget the request. Checked on READ, at the one place it is used.
+
+    Asserts on WHERE THE REQUEST WENT, not merely on the return value: the
+    property is "this string never reached a URL", and a resolver call is the
+    thing that would carry it there."""
+    cfg.update_config(lambda c: c.__setitem__("llama_runtime_pin", planted))
+    resolved = []
+    monkeypatch.setattr(sl, "_platform_key", lambda: "win32")
+    monkeypatch.setattr(sl, "_latest_tag", lambda: "b10361")
+    monkeypatch.setattr(sl, "_release_assets",
+                        lambda tag, repo=sl._UPSTREAM_REPO:
+                            (resolved.append(tag), _release_listing(tag))[1])
+    monkeypatch.setattr(sl, "_fetch_verified", lambda url, target, sha, what: None)
+
+    tag = sl._provision_backend("vulkan", tmp_path, None, False)
+
+    assert resolved == ["b10361"], (
+        f"the planted value must never be resolved against; got {resolved}")
+    assert tag == "b10361"
+    assert planted not in "".join(resolved)
+    assert "ignoring the stored llama.cpp pin" in capsys.readouterr().out, (
+        "an ignored pin must be said out loud, not silently dropped")
+
+
+def test_an_unsafe_history_entry_cannot_become_a_pin(monkeypatch, tmp_path, home):
+    """--rollback takes a tag from history and PINS it, so an unchecked entry
+    would become a pin by a route that never passed through --tag's validator."""
+    monkeypatch.setattr(sl, "_repo_runtime_lib", lambda: tmp_path)
+    cfg.update_config(lambda c: c.__setitem__("llama_runtime_history", [
+        {"backend": "vulkan", "tag": "../../evil"},
+        {"backend": "vulkan", "tag": "b10361"}]))
+    sl._record_provisioned_backend(tmp_path, "vulkan", build="b10361")
+
+    assert [e["tag"] for e in sl.runtime_history()] == ["b10361"]
+    assert sl.previous_tag("vulkan") is None, (
+        "the only other entry is unsafe, so there is nothing to roll back to")
+
+
 def test_no_version_request_leaves_the_pin_alone(home):
     sl.set_pinned_tag("b10355")
     sl._apply_version_request(None, False, "vulkan", None, None)

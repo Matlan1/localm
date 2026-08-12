@@ -269,7 +269,23 @@ def test_the_verbatim_set_is_exactly_what_we_think_it_is():
         "bugreport_upload_token",
         "update_url",               # admin_only: the update channel base
         "update_token",
+        # admin_only: which llama.cpp build setup-llama installs. Stored verbatim
+        # like the rest of this set, so the owner gate is what keeps a non-owner
+        # out - but being owner-gated is NOT the whole story here, because the
+        # value is interpolated into a GitHub API path and a download URL. It is
+        # therefore ALSO validated ON READ (_is_safe_tag, in setup_llama's
+        # pinned_tag/runtime_history), which is the check that covers a
+        # hand-edited config.json too - something no route can police.
+        "llama_runtime_pin",
     }
+    # MEASURED, not assumed, because "HIDDEN with a container default" is exactly
+    # the wrong guard this helper's docstring warns about: llama_runtime_history
+    # is deliberately ABSENT above. It has a list-coercion branch, so a non-list
+    # is rejected ("expected a list") and list elements are stringified - so it
+    # never reaches the bare `return val` tail and is not a passthrough.
+    from localm import settings_schema as ss
+    with pytest.raises(ValueError, match="expected a list"):
+        ss.validate_update({"llama_runtime_history": {"evil": "payload"}})
 
 
 def test_key_presets_is_not_a_passthrough():
