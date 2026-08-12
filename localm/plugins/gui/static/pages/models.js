@@ -1131,6 +1131,76 @@ export async function updateApply() {
 if ($("update-check")) $("update-check").onclick = updateCheck;
 if ($("update-apply")) $("update-apply").onclick = updateApply;
 
+// Runtime update: the native llama.cpp binaries `localm setup-llama`
+// provisions, separate from the "Updates" card above (the Python source
+// tree). Check is read-only (GET /api/runtime/check); apply streams a job
+// (POST /api/runtime/update), since a real download + native load-test can
+// take a while - same shape as the managed-ComfyUI update panel's job log,
+// unlike the plain source-tree update above which is a single blocking call.
+export async function runtimeUpdateCheck() {
+  const out = $("runtime-update-status"), applyBtn = $("runtime-update-apply");
+  if (out) { out.hidden = false; out.textContent = "Checking..."; }
+  try {
+    const r = await fetch("/api/runtime/check", { headers: authHeaders() });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.detail || r.statusText);
+    if (!out) return;
+    if (!d.installed) {
+      out.textContent = "No llama.cpp runtime is installed yet - run setup first.";
+      if (applyBtn) applyBtn.hidden = true;
+      return;
+    }
+    const current = d.current || "an unrecorded build";
+    if (d.newer) {
+      out.textContent = "A different build is available for " + d.backend + ": " +
+        d.target + " (you have " + current + ")." +
+        (d.pinned ? " Pinned to " + d.pinned + "." : "");
+      if (applyBtn) applyBtn.hidden = false;
+    } else {
+      out.textContent = "Up to date (" + d.backend + " " + current + ")." +
+        (d.pinned ? " Pinned to " + d.pinned + "." : "");
+      if (applyBtn) applyBtn.hidden = true;
+    }
+  } catch (e) { if (out) { out.hidden = false; out.textContent = "Could not check: " + e.message; } }
+}
+
+export async function runtimeUpdateApply() {
+  const out = $("runtime-update-status"), btn = $("runtime-update-apply");
+  const log = $("runtime-update-log");
+  if (btn) btn.disabled = true;
+  if (out) { out.hidden = false; out.textContent = "Updating the runtime..."; }
+  if (log) { log.style.display = ""; log.textContent = ""; }
+  let jobId;
+  try {
+    const r = await fetch("/api/runtime/update", { method: "POST", headers: authHeaders() });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.detail || r.statusText);
+    jobId = d.job_id;
+  } catch (e) {
+    if (out) out.textContent = "Update failed: " + e.message;
+    if (btn) btn.disabled = false;
+    if (log) log.style.display = "none";
+    return;
+  }
+  const tail = [];
+  const end = await streamJob(jobId, (line) => {
+    if (log) { log.textContent += line + "\n"; log.scrollTop = log.scrollHeight; }
+    // A short tail, not just the last line: setup-llama's failure messages
+    // wrap across several printed lines, so the final line alone is often a
+    // fragment with the actual reason lost.
+    if (line && line.trim()) { tail.push(line.trim()); if (tail.length > 6) tail.shift(); }
+  });
+  const ok = !!(end && end.status === "done");
+  if (out) {
+    out.textContent = ok ? "Runtime updated." :
+      (tail.join(" ").trim() || "The update did not finish. See the log below.");
+  }
+  if (btn) { btn.disabled = false; if (ok) btn.hidden = true; }
+  if (ok) runtimeUpdateCheck();
+}
+if ($("runtime-update-check")) $("runtime-update-check").onclick = runtimeUpdateCheck;
+if ($("runtime-update-apply")) $("runtime-update-apply").onclick = runtimeUpdateApply;
+
 // Changelog: show the RELEASED history (newest first) in the shared modal. The
 // endpoint strips the in-progress [Unreleased] section before serving, so this
 // never shows changes that are not in the running build.

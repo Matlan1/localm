@@ -672,44 +672,53 @@ def _updater_argv():
 
 
 def test_update_reprovision_honours_the_pin(monkeypatch, tmp_path, cli_runner):
-    """The updater re-invokes setup-llama with only --backend, so the pin is only
-    real if that bare invocation reads it. Driven with the updater's OWN argv."""
+    """The updater re-invokes setup-llama with --backend --force --yes (see
+    _apply_update.post_swap_command), so the pin is only real if that
+    invocation reads it. Driven with the updater's OWN argv."""
     target = tmp_path / "rt"
     target.mkdir()
     tags = []
     _wire_cli(monkeypatch, target, tags)
-    # A cuda install being re-provisioned onto vulkan: backends differ, so the
-    # guard does not short-circuit and this genuinely re-fetches.
+    # A cuda install being re-provisioned onto vulkan: backends differ, so this
+    # would genuinely re-fetch even without --force - the pin is the property
+    # under test here, not the force behaviour (see the sibling test above).
     (target / "llama.dll").write_text("old")
     sl._record_provisioned_backend(target, "cuda", build="b10200")
     sl.set_pinned_tag("b10355")
 
-    res = cli_runner.invoke(sl.main, [*_updater_argv(), "-y"])
+    res = cli_runner.invoke(sl.main, _updater_argv())
 
     assert res.exit_code == 0, res.output
     assert tags == ["b10355"], "the pinned build, not upstream's newest"
     assert sl._provisioned_build(target) == "b10355"
 
 
-def test_update_leaves_an_already_provisioned_build_alone(monkeypatch, tmp_path, cli_runner):
-    """The other half of the same guarantee: when the backend already matches,
-    the updater's bare invocation short-circuits and must NOT quietly move the
-    install to whatever upstream published since. Without a recorded build this
-    was unobservable - the very gap this unit closes."""
+def test_update_reprovision_actually_reprovisions_when_backend_matches(
+        monkeypatch, tmp_path, cli_runner):
+    """NEW-UPDATE-RUNTIME-CLASS-IS-A-NO-OP, closed: `updater.classify()` only ever
+    escalates to "runtime" class when the release manifest DECLARES the native
+    binaries need re-provisioning, so once the updater's re-invocation runs at
+    all, it must actually replace the build - not silently keep whatever is
+    already on disk just because the backend string happens to match. Before
+    _apply_update.post_swap_command carried --force, setup-llama's own
+    "already provisioned, same backend" guard short-circuited this exact
+    invocation and returned immediately: the update reported success having
+    changed nothing on disk. Driven with the updater's OWN argv, like its
+    pin-honouring sibling above, so a future change to what flags the updater
+    passes is caught here too."""
     target = tmp_path / "rt"
     target.mkdir()
     (target / "llama.dll").write_text("old")
     sl._record_provisioned_backend(target, "vulkan", build="b10300")
     tags = []
-    _wire_cli(monkeypatch, target, tags)
+    _wire_cli(monkeypatch, target, tags)   # _latest_tag() stubbed to "b10361"
 
-    res = cli_runner.invoke(sl.main, [*_updater_argv(), "-y"])
+    res = cli_runner.invoke(sl.main, _updater_argv())
 
     assert res.exit_code == 0, res.output
-    assert tags == [], "no release lookup: nothing needed re-provisioning"
-    assert sl._provisioned_build(target) == "b10300", (
-        "an update must never move the installed build on its own")
-    assert "b10300" in res.output, "and it says which build it kept"
+    assert tags == ["b10361"], "the updater's re-invocation must resolve a release"
+    assert sl._provisioned_build(target) == "b10361", (
+        "a 'runtime'-class update must actually re-provision, not keep the old build")
 
 
 def test_cli_tag_latest_unpins_and_tracks_upstream(monkeypatch, tmp_path, cli_runner):
@@ -725,3 +734,88 @@ def test_cli_tag_latest_unpins_and_tracks_upstream(monkeypatch, tmp_path, cli_ru
     assert res.exit_code == 0, res.output
     assert sl.pinned_tag() is None
     assert tags == ["b10361"], "unpinned, it resolves upstream's newest again"
+
+
+# --------------------------------------------------------------------------- #
+#  CHECK - the read-only "is a different build available" surface             #
+# --------------------------------------------------------------------------- #
+
+def test_check_runtime_update_reports_not_installed_when_nothing_provisioned(
+        monkeypatch, tmp_path):
+    """No marker at all means no runtime has ever been provisioned - that is
+    initial setup's job, not an update, and must not be reported as one."""
+    monkeypatch.setattr(sl, "_repo_runtime_lib", lambda: tmp_path)
+    assert sl.check_runtime_update() == {
+        "installed": False, "backend": None, "current": None,
+        "target": None, "newer": False, "pinned": None}
+
+
+def test_check_runtime_update_compares_against_latest_when_unpinned(
+        monkeypatch, tmp_path, home):
+    monkeypatch.setattr(sl, "_repo_runtime_lib", lambda: tmp_path)
+    monkeypatch.setattr(sl, "_latest_tag", lambda: "b10361")
+    sl._record_provisioned_backend(tmp_path, "vulkan", build="b10300")
+
+    result = sl.check_runtime_update()
+
+    assert result == {"installed": True, "backend": "vulkan", "current": "b10300",
+                      "target": "b10361", "newer": True, "pinned": None}
+
+
+def test_check_runtime_update_reports_up_to_date_when_matching(monkeypatch, tmp_path, home):
+    monkeypatch.setattr(sl, "_repo_runtime_lib", lambda: tmp_path)
+    monkeypatch.setattr(sl, "_latest_tag", lambda: "b10361")
+    sl._record_provisioned_backend(tmp_path, "vulkan", build="b10361")
+
+    result = sl.check_runtime_update()
+
+    assert result["newer"] is False
+    assert result["current"] == result["target"] == "b10361"
+
+
+def test_check_runtime_update_prefers_the_pin_over_a_release_lookup(
+        monkeypatch, tmp_path, home):
+    """A build pinned away from a broken release must never be told THAT
+    release is "available" again - the pin, not upstream's newest, is the
+    correct comparison target. No release lookup should even happen: an
+    install that pinned specifically because the network/API was unreliable
+    must still get an honest check."""
+    monkeypatch.setattr(sl, "_repo_runtime_lib", lambda: tmp_path)
+    monkeypatch.setattr(sl, "_latest_tag",
+                        lambda: pytest.fail("a pinned install must not query releases"))
+    sl._record_provisioned_backend(tmp_path, "vulkan", build="b10300")
+    sl.set_pinned_tag("b10355")
+
+    result = sl.check_runtime_update()
+
+    assert result == {"installed": True, "backend": "vulkan", "current": "b10300",
+                      "target": "b10355", "newer": True, "pinned": "b10355"}
+
+
+def test_check_runtime_update_amd_rocm_compares_against_the_fixed_tag(monkeypatch, tmp_path):
+    """amd-rocm's build is fixed by the localm release (_ROCM_TAG), never
+    resolved from an upstream release listing - the check must not query one
+    for this backend either."""
+    monkeypatch.setattr(sl, "_repo_runtime_lib", lambda: tmp_path)
+    monkeypatch.setattr(sl, "_latest_tag",
+                        lambda: pytest.fail("amd-rocm must not query releases"))
+    sl._record_provisioned_backend(tmp_path, "amd-rocm", build="b1288")
+
+    result = sl.check_runtime_update()
+
+    assert result["target"] == sl._ROCM_TAG
+    assert result["newer"] is True
+
+
+def test_check_runtime_update_never_raises_on_an_unreadable_config(monkeypatch, tmp_path):
+    """pinned_tag() already degrades an unreadable config to 'no pin' rather
+    than raising; this check must inherit that, not newly break on it."""
+    monkeypatch.setattr(sl, "_repo_runtime_lib", lambda: tmp_path)
+    monkeypatch.setattr(sl, "_latest_tag", lambda: "b10361")
+    monkeypatch.setattr(sl.config, "load_config", lambda: (_ for _ in ()).throw(OSError("nope")))
+    sl._record_provisioned_backend(tmp_path, "vulkan", build="b10300")
+
+    result = sl.check_runtime_update()
+
+    assert result["pinned"] is None
+    assert result["target"] == "b10361"

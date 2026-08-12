@@ -63,8 +63,10 @@ import it.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
+import os
 import re
 import shutil
 import socket
@@ -529,6 +531,52 @@ def previous_tag(backend: str) -> "Optional[str]":
         if tag and tag != current:
             return tag
     return None
+
+
+def check_runtime_update() -> dict:
+    """Compare the installed llama.cpp runtime against what ``setup-llama``
+    would install right now, without provisioning anything: the read-only
+    counterpart to a real re-provision, for a "check for updates" surface (the
+    GUI's runtime-update card; see localm/plugins/gui/routes/runtime.py).
+
+    The comparison target is a PIN if one is set (an install that pinned away
+    from a broken release must not be told a newer build is "available" -
+    that newer build is exactly what it pinned away from), else upstream's
+    newest release with uploaded assets (the same ``_latest_tag()`` a bare
+    ``setup-llama`` resolves against). ``amd-rocm`` compares against its fixed
+    ``_ROCM_TAG`` instead, since that build is never resolved from an upstream
+    tag at all.
+
+    This target is a CANDIDATE, not a proof: whether it actually loads on this
+    machine is only established by attempting the provision - setup-llama's
+    existing ABI walk-back (``_provision_with_fallback``) is what makes the
+    build it eventually lands on the confirmed one, exactly as for every other
+    install path. This function only says whether the installed build differs
+    from the candidate; it makes the same release-listing network call a bare
+    ``setup-llama`` would (so a caller on an event loop must offload it, same
+    as ``updater.check()``), and never re-provisions anything.
+
+    Returns ``{installed, backend, current, target, newer, pinned}``.
+    ``installed`` is False when nothing has been provisioned yet (there is no
+    "update" for a runtime that was never set up - that is initial setup, a
+    different action). Never raises: an unreadable pin/marker degrades to the
+    safe "nothing to report" shape rather than breaking the check (mirrors
+    ``pinned_tag()``'s own never-raises contract)."""
+    backend = installed_backend()
+    if not backend:
+        return {"installed": False, "backend": None, "current": None,
+                "target": None, "newer": False, "pinned": None}
+    current = installed_build()
+    pin = pinned_tag()
+    if backend == "amd-rocm":
+        target = _ROCM_TAG
+    elif pin:
+        target = pin
+    else:
+        target = _latest_tag()
+    newer = bool(target) and target != current
+    return {"installed": True, "backend": backend, "current": current,
+            "target": target, "newer": newer, "pinned": pin}
 
 
 def _tag_for(backend: str) -> str:
@@ -1769,6 +1817,131 @@ def _exit_runtime_in_use(e: RuntimeInUseError) -> None:
     sys.exit(1)
 
 
+# --------------------------------------------------------------------------- #
+#  Single-flight: only ONE process may PROVISION the runtime lib dir at once   #
+# --------------------------------------------------------------------------- #
+# Provisioning CLEARS then REFILLS `target` (_clear_target_or_refuse + a
+# download/copy). Until the GUI grew its own standalone runtime-update button,
+# this ran from effectively one caller at a time: a user's own CLI invocation,
+# or `localm update`'s runtime-class post-swap step (itself serialized against
+# OTHER `localm update` calls by updater.py's own _apply_lock, but that lock
+# knows nothing about a bare `setup-llama` run in a terminal or a second,
+# independent caller like the GUI route below). Two provisions racing on the
+# SAME directory is not merely slow, it is a corrupted install: both clear and
+# refill it, so one process's half-written file can be read - or deleted - by
+# the other's _clear_target/_copy_binaries. Same hazard, same fix shape, as
+# managed_comfy_update.py's update lock (diff-review-discipline.md item 26):
+# do NOT copy managed_comfy._remove_lock (a threading.Lock) here either - the
+# GUI route spawns `setup-llama` as a CHILD PROCESS, so the contenders are
+# separate interpreters and a threading.Lock would guard nothing. mkdir is
+# atomic; stat-then-create is not.
+_PROVISION_LOCK_OWNER = "owner.json"
+
+
+class ProvisioningBusyError(Exception):
+    """Another process already holds the provisioning lock."""
+
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(reason)
+
+
+def _provision_lock_path(target: Path) -> Path:
+    """Where the provisioning lock lives: a SIBLING of the runtime lib dir,
+    never inside it, so this command's own directory clear can never disturb
+    the lock protecting it (same reasoning as managed_comfy_update.py's
+    _update_lock_path)."""
+    return target.parent / (target.name + ".setup.lock")
+
+
+def _provision_lock_holder_pid(lock: Path) -> "Optional[int]":
+    try:
+        data = json.loads((lock / _PROVISION_LOCK_OWNER).read_text(encoding="utf-8"))
+        pid = data.get("pid") if isinstance(data, dict) else None
+        return pid if isinstance(pid, int) else None
+    except (OSError, ValueError):
+        return None
+
+
+@contextlib.contextmanager
+def _provisioning_lock(target: Path):
+    """Cross-process, fail-fast single-flight guard around a run that mutates
+    *target*. FAILS FAST rather than blocking: a provision can legitimately run
+    for minutes (a download over a slow link), and a caller blocked that long
+    is indistinguishable from a hang - a GUI button would spin forever with no
+    way to tell the user why.
+
+    Staleness is judged by PID LIVENESS, never elapsed time, for the same
+    reason managed_comfy_update.py's lock is: the operation is unbounded, so
+    any fixed timeout would eventually reclaim a LIVE holder's lock and
+    recreate the exact race this exists to prevent. ``pid_alive`` is
+    conservative - when it genuinely cannot tell, it returns True - so an
+    uncertain answer keeps the lock rather than stealing it.
+
+    Raises :class:`ProvisioningBusyError` with an honest reason when the lock
+    cannot be acquired. Always released in ``finally``."""
+    from localm.instances import pid_alive
+    lock = _provision_lock_path(target)
+    acquired = False
+    for attempt in (1, 2):
+        try:
+            lock.parent.mkdir(parents=True, exist_ok=True)
+            os.mkdir(str(lock))              # ATOMIC: creates or raises
+            acquired = True
+            break
+        except FileExistsError:
+            pid = _provision_lock_holder_pid(lock)
+            if pid is not None and not pid_alive(pid):
+                # The holder is provably gone. Reclaim once, then retry the
+                # atomic create - never assume the retry wins, another caller
+                # may have taken it in the meantime.
+                with contextlib.suppress(OSError):
+                    shutil.rmtree(str(lock))
+                if attempt == 1:
+                    continue
+                raise ProvisioningBusyError(
+                    "Another setup-llama run is already provisioning the "
+                    "runtime. Wait for it to finish, then try again.")
+            if pid is None:
+                # Cannot tell who holds it: do NOT steal (that is how two
+                # provisions end up interleaved). Say how to clear it by hand.
+                raise ProvisioningBusyError(
+                    f"A provisioning lock exists at {lock} but its owner could "
+                    "not be read. If no setup-llama run is in progress, remove "
+                    "that folder and try again.")
+            raise ProvisioningBusyError(
+                f"Another setup-llama run is already provisioning the runtime "
+                f"(process {pid}). Wait for it to finish, then try again.")
+        except OSError as e:
+            raise ProvisioningBusyError(
+                f"Could not take the provisioning lock at {lock}: {e}")
+    if not acquired:
+        raise ProvisioningBusyError(
+            "Another setup-llama run is already provisioning the runtime. "
+            "Wait for it to finish, then try again.")
+    # Record who holds it, so a future caller's staleness check can ask
+    # instances.pid_alive() instead of guessing from elapsed time.
+    try:
+        (lock / _PROVISION_LOCK_OWNER).write_text(
+            json.dumps({"pid": os.getpid()}), encoding="utf-8")
+    except OSError:
+        pass
+    try:
+        yield
+    finally:
+        with contextlib.suppress(OSError):
+            shutil.rmtree(str(lock))
+
+
+def _exit_provisioning_busy(e: ProvisioningBusyError) -> None:
+    """Report a refused provision and exit non-zero, mirroring
+    _exit_runtime_in_use: the existing install is left completely untouched
+    (the lock is taken before anything is cleared), so this is honest, not
+    alarming."""
+    console.print(f"[red]Cannot provision the runtime right now:[/red] {e.reason}")
+    sys.exit(1)
+
+
 def _fetch_verified(url: str, target: Path, sha: Optional[str], what: str = "release asset") -> None:
     """Fetch + place an archive, WARNING honestly when no checksum is available
     to verify it. A security step that silently does not run is a hidden problem
@@ -2753,123 +2926,132 @@ def main(from_dir: Optional[str], backend: str, url: Optional[str],
         else:
             console.print(f"[yellow]Replacing {have} build with {want}.[/yellow]")
 
-    if from_dir:
-        src = Path(from_dir)
-        console.print(f"Copying binaries from [bold]{src}[/bold] ...")
-        try:
-            _clear_target_or_refuse(target)
-        except RuntimeInUseError as e:
-            _exit_runtime_in_use(e)
-        n = _copy_binaries(src, target)
-        if not (target / lib_name).exists():
-            console.print(f"[red]No {lib_name} found in the source directory.[/red] "
-                          f"Point --from at the build output containing {lib_name}.")
-            sys.exit(1)
-        console.print(f"[green]Copied {n} file(s)[/green] into {target}")
-        _install_runtime_wheel(_runtime_pkg_dir())
-        loaded, detail = _native_loads_ok()
-        if loaded:
-            console.print("[green]OK - the provided build loads on this machine.[/green]")
-            _record_provisioned_backend(target, "custom")
-        else:
-            # The user pinned this build, so we do NOT fall back - but we must not
-            # report success on a library that will not load. Exit non-zero with a
-            # clear reason rather than leaving a broken runtime behind.
-            console.print(f"[red]Copied, but the library did not load[/red] "
-                          f"({detail}) - is it built for this OS/GPU? "
-                          "See docs/gpu-setup.md.")
-            sys.exit(1)
-    elif url:
-        if not sha256:
-            console.print("[yellow]Warning: Custom URL download is unverified (no --sha256 provided).[/yellow]")
-        console.print(f"[dim]Fetching:[/dim] {url}")
-        try:
-            _clear_target_or_refuse(target)
-            _fetch_and_place(url, target, sha256)
-        except RuntimeInUseError as e:
-            # Ahead of the broad handlers below, which would otherwise report a
-            # locked file as "Download failed" - a cause the user would go and
-            # investigate instead of the one that is true.
-            _exit_runtime_in_use(e)
-        except ArtifactError as e:
-            console.print(f"[red]Refusing to install:[/red] {e}")
-            console.print("Provide a local build with --from instead, or a different "
-                          "--url (and --sha256 if you pin one).")
-            sys.exit(1)
-        except Exception as e:
-            console.print(f"[red]Download failed:[/red] {e}")
-            console.print("Provide a local build with --from instead, or a different --url.")
-            sys.exit(1)
-        if not (target / lib_name).exists():
-            console.print(f"[red]The archive did not contain {lib_name}.[/red] "
-                          "Try a different --url or use --from.")
-            sys.exit(1)
-        _install_runtime_wheel(_runtime_pkg_dir())
-        loaded, detail = _native_loads_ok()
-        if loaded:
-            console.print("[green]OK - the fetched build loads on this machine.[/green]")
-            _record_provisioned_backend(target, "custom")
-        else:
-            # A user-pinned --url: do not fall back, but do not claim success on a
-            # library that will not load. Exit non-zero with a clear reason.
-            console.print(f"[red]Placed, but the library did not load[/red] "
-                          f"({detail}). Is this build right for your OS/GPU? "
-                          "See docs/gpu-setup.md.")
-            sys.exit(1)
-    else:
-        chosen = _auto_backend() if backend == "auto" else backend
-        # warn-once-then-comply: an explicit off-profile choice is the user's to
-        # make, but flag a vendor mismatch a single time so a misclick is visible.
-        # Also captures the SAME detection for the CUDA dialogue below, so a
-        # "no NVIDIA found" fallback can name the vendor that IS actually
-        # present and recommend the real match for it, rather than compute it
-        # a second time (or not have it at all).
-        det = _warn_off_profile(chosen) if backend != "auto" else None
-        # CUDA is the visible peak-NVIDIA option: detect the driver, then offer to
-        # fetch a self-contained runtime (no Toolkit) or fall back cleanly.
-        with_cudart = False
-        cuda_line = _CUDA_LINE
-        # NOT platform-gated to win32: nvidia_preflight() and _cuda_setup_dialogue()
-        # are both fully platform-neutral (nvidia-smi runs on Linux too, and the
-        # dialogue's text/branches reference no OS). Restricting this to win32 was
-        # an accident of when Linux CUDA support was added (_provision_backend's
-        # Linux cudart branch, _resolve_backend_asset's Linux cuda_line-aware
-        # matcher, and _fetch_cuda_runtime_libs already handle cuda_line correctly
-        # for Linux and are unit-tested for it - see test_linux_cuda_runtime_
-        # provisioning.py) without this call site being revisited, so a real
-        # Blackwell (or any cuda-13-line) GPU on Linux silently got the cuda-12
-        # line - a build with no kernels for it - and no PyPI cudart runtime
-        # fetch, producing a runtime that LOADS (passes the ABI check) but
-        # registers zero usable GPU devices (found live, 2026-08-11, on a
-        # 3x-Blackwell Linux box: 'GPU: none in the loaded runtime (cuda)').
-        # Only darwin is excluded - CUDA is not a real path on Apple Silicon.
-        if chosen == "cuda" and sys.platform != "darwin":
-            # Preflight ONCE and reuse it for both the dialogue and the asset
-            # line - a second nvidia-smi call could (rarely) see different
-            # hardware and pick a line the dialogue never actually displayed.
-            info = nvidia_preflight()
-            cuda_line = info.cuda_line
-            chosen, with_cudart = _cuda_setup_dialogue(info, assume_yes, det)
-        _pin_note_for_backend(chosen)
-        result, used_tag = _provision_with_fallback(chosen, target, sha256,
-                                                    with_cudart, assume_yes,
-                                                    cuda_line)
-        # Record the build tag for EVERY backend now, not only amd-rocm. The old
-        # restriction rested on "the upstream backends resolve theirs through
-        # _latest_tag(), a NETWORK CALL, and recording a version is not worth
-        # making one". The premise was that the tag was not in hand; it was -
-        # the fetch had already resolved it and simply discarded it.
-        # _provision_with_fallback now returns the tag of the attempt that
-        # SUCCEEDED, so this costs no additional lookup and, on a fallback,
-        # records the build actually installed rather than the one that failed.
-        #
-        # amd-rocm still supplies _ROCM_TAG from the constant, because its build
-        # is not resolved from an upstream tag at all (used_tag is None for it).
-        build = _ROCM_TAG if result == "amd-rocm" else used_tag
-        _record_provisioned_backend(target, result, build=build)
-        _record_runtime_history(result, build)
+    # Everything below actually MUTATES target (clear + refill), so it is guarded
+    # by the cross-process provisioning lock - see _provisioning_lock's docstring
+    # for why this needs to be atomic across separate processes rather than a
+    # threading.Lock. Nothing above this point (the "already provisioned" read
+    # and its short-circuit) touches disk, so it deliberately runs unlocked.
+    try:
+        with _provisioning_lock(target):
+            if from_dir:
+                src = Path(from_dir)
+                console.print(f"Copying binaries from [bold]{src}[/bold] ...")
+                try:
+                    _clear_target_or_refuse(target)
+                except RuntimeInUseError as e:
+                    _exit_runtime_in_use(e)
+                n = _copy_binaries(src, target)
+                if not (target / lib_name).exists():
+                    console.print(f"[red]No {lib_name} found in the source directory.[/red] "
+                                  f"Point --from at the build output containing {lib_name}.")
+                    sys.exit(1)
+                console.print(f"[green]Copied {n} file(s)[/green] into {target}")
+                _install_runtime_wheel(_runtime_pkg_dir())
+                loaded, detail = _native_loads_ok()
+                if loaded:
+                    console.print("[green]OK - the provided build loads on this machine.[/green]")
+                    _record_provisioned_backend(target, "custom")
+                else:
+                    # The user pinned this build, so we do NOT fall back - but we must not
+                    # report success on a library that will not load. Exit non-zero with a
+                    # clear reason rather than leaving a broken runtime behind.
+                    console.print(f"[red]Copied, but the library did not load[/red] "
+                                  f"({detail}) - is it built for this OS/GPU? "
+                                  "See docs/gpu-setup.md.")
+                    sys.exit(1)
+            elif url:
+                if not sha256:
+                    console.print("[yellow]Warning: Custom URL download is unverified (no --sha256 provided).[/yellow]")
+                console.print(f"[dim]Fetching:[/dim] {url}")
+                try:
+                    _clear_target_or_refuse(target)
+                    _fetch_and_place(url, target, sha256)
+                except RuntimeInUseError as e:
+                    # Ahead of the broad handlers below, which would otherwise report a
+                    # locked file as "Download failed" - a cause the user would go and
+                    # investigate instead of the one that is true.
+                    _exit_runtime_in_use(e)
+                except ArtifactError as e:
+                    console.print(f"[red]Refusing to install:[/red] {e}")
+                    console.print("Provide a local build with --from instead, or a different "
+                                  "--url (and --sha256 if you pin one).")
+                    sys.exit(1)
+                except Exception as e:
+                    console.print(f"[red]Download failed:[/red] {e}")
+                    console.print("Provide a local build with --from instead, or a different --url.")
+                    sys.exit(1)
+                if not (target / lib_name).exists():
+                    console.print(f"[red]The archive did not contain {lib_name}.[/red] "
+                                  "Try a different --url or use --from.")
+                    sys.exit(1)
+                _install_runtime_wheel(_runtime_pkg_dir())
+                loaded, detail = _native_loads_ok()
+                if loaded:
+                    console.print("[green]OK - the fetched build loads on this machine.[/green]")
+                    _record_provisioned_backend(target, "custom")
+                else:
+                    # A user-pinned --url: do not fall back, but do not claim success on a
+                    # library that will not load. Exit non-zero with a clear reason.
+                    console.print(f"[red]Placed, but the library did not load[/red] "
+                                  f"({detail}). Is this build right for your OS/GPU? "
+                                  "See docs/gpu-setup.md.")
+                    sys.exit(1)
+            else:
+                chosen = _auto_backend() if backend == "auto" else backend
+                # warn-once-then-comply: an explicit off-profile choice is the user's to
+                # make, but flag a vendor mismatch a single time so a misclick is visible.
+                # Also captures the SAME detection for the CUDA dialogue below, so a
+                # "no NVIDIA found" fallback can name the vendor that IS actually
+                # present and recommend the real match for it, rather than compute it
+                # a second time (or not have it at all).
+                det = _warn_off_profile(chosen) if backend != "auto" else None
+                # CUDA is the visible peak-NVIDIA option: detect the driver, then offer to
+                # fetch a self-contained runtime (no Toolkit) or fall back cleanly.
+                with_cudart = False
+                cuda_line = _CUDA_LINE
+                # NOT platform-gated to win32: nvidia_preflight() and _cuda_setup_dialogue()
+                # are both fully platform-neutral (nvidia-smi runs on Linux too, and the
+                # dialogue's text/branches reference no OS). Restricting this to win32 was
+                # an accident of when Linux CUDA support was added (_provision_backend's
+                # Linux cudart branch, _resolve_backend_asset's Linux cuda_line-aware
+                # matcher, and _fetch_cuda_runtime_libs already handle cuda_line correctly
+                # for Linux and are unit-tested for it - see test_linux_cuda_runtime_
+                # provisioning.py) without this call site being revisited, so a real
+                # Blackwell (or any cuda-13-line) GPU on Linux silently got the cuda-12
+                # line - a build with no kernels for it - and no PyPI cudart runtime
+                # fetch, producing a runtime that LOADS (passes the ABI check) but
+                # registers zero usable GPU devices (found live, 2026-08-11, on a
+                # 3x-Blackwell Linux box: 'GPU: none in the loaded runtime (cuda)').
+                # Only darwin is excluded - CUDA is not a real path on Apple Silicon.
+                if chosen == "cuda" and sys.platform != "darwin":
+                    # Preflight ONCE and reuse it for both the dialogue and the asset
+                    # line - a second nvidia-smi call could (rarely) see different
+                    # hardware and pick a line the dialogue never actually displayed.
+                    info = nvidia_preflight()
+                    cuda_line = info.cuda_line
+                    chosen, with_cudart = _cuda_setup_dialogue(info, assume_yes, det)
+                _pin_note_for_backend(chosen)
+                result, used_tag = _provision_with_fallback(chosen, target, sha256,
+                                                            with_cudart, assume_yes,
+                                                            cuda_line)
+                # Record the build tag for EVERY backend now, not only amd-rocm. The old
+                # restriction rested on "the upstream backends resolve theirs through
+                # _latest_tag(), a NETWORK CALL, and recording a version is not worth
+                # making one". The premise was that the tag was not in hand; it was -
+                # the fetch had already resolved it and simply discarded it.
+                # _provision_with_fallback now returns the tag of the attempt that
+                # SUCCEEDED, so this costs no additional lookup and, on a fallback,
+                # records the build actually installed rather than the one that failed.
+                #
+                # amd-rocm still supplies _ROCM_TAG from the constant, because its build
+                # is not resolved from an upstream tag at all (used_tag is None for it).
+                build = _ROCM_TAG if result == "amd-rocm" else used_tag
+                _record_provisioned_backend(target, result, build=build)
+                _record_runtime_history(result, build)
 
-    _verify()
+            _verify()
+    except ProvisioningBusyError as e:
+        _exit_provisioning_busy(e)
 
 
 def _ensure_importable() -> None:
