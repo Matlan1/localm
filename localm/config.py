@@ -746,11 +746,17 @@ def _perm_warn(path: Path, why: str) -> None:
         pass
 
 
-def restrict_file_perms(path: Path) -> bool:
-    """Best-effort: restrict *path* to the current user (POSIX chmod 0600, or
-    Windows icacls). Returns True when the tightening is believed to have
-    happened, False when it did not. No-op on failure - the data dir is already
-    user-scoped, so this per-file tightening is defence in depth.
+def restrict_file_perms(path: Path, *, mode: int = 0o600) -> bool:
+    """Best-effort: restrict *path* to the current user (POSIX chmod *mode*, or
+    Windows icacls - which grants sole full control regardless of *mode*, since
+    ACLs do not encode POSIX bits). Returns True when the tightening is believed
+    to have happened, False when it did not. No-op on failure - the data dir is
+    already user-scoped, so this per-file tightening is defence in depth.
+
+    *mode* defaults to 0o600 for a FILE. A caller locking down a DIRECTORY must
+    pass 0o700 (or another mode with the execute/search bit set) - 0o600 on a
+    directory removes POSIX traversal (x), so every file inside becomes
+    unreachable by path even though it still lists in a directory scan.
 
     The return value exists so a caller doing the atomic temp+replace dance can
     restrict the TEMP file (which already holds the whole payload) and skip a
@@ -774,7 +780,7 @@ def restrict_file_perms(path: Path) -> bool:
     """
     try:
         if os.name == "posix":
-            os.chmod(path, 0o600)
+            os.chmod(path, mode)
         else:
             import subprocess
             user = os.environ.get("USERNAME") or os.environ.get("USER") or ""

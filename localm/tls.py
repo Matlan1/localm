@@ -14,7 +14,8 @@ trusted once stays trusted even if this machine's LAN IP later changes.
 This is the same model as Caddy's ``tls internal`` and mkcert. The CA and leaf
 private keys are stored as unencrypted PEM under ``<LOCALM_HOME>/tls/`` (uvicorn
 loads them without a passphrase); the directory and key files are locked down
-where the OS permits it (POSIX chmod; best-effort and harmless elsewhere).
+to the current user via ``config.restrict_file_perms`` (POSIX chmod, Windows
+icacls; best-effort, defence in depth on top of the data dir's own scoping).
 """
 
 from __future__ import annotations
@@ -27,6 +28,8 @@ import socket
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, Optional
+
+from localm.debuglog import logger
 
 # Validity windows. The CA outlives many leaf regenerations, so trusting it once
 # survives an IP change; the leaf stays under Apple's 825-day ceiling (iOS and
@@ -351,33 +354,47 @@ def _lock_down_dir(path: Path) -> None:
     """Restrict the tls dir to the owner where the OS supports it (best-effort)."""
     try:
         path.mkdir(parents=True, exist_ok=True)
-        os.chmod(path, 0o700)
     except OSError:
-        # Defense-in-depth, proven low-risk. chmod is a Windows no-op and only
-        # raises on POSIX filesystems with no per-file perms (FAT, some network
-        # mounts) - exactly the case where NO process could restrict perms anyway.
-        # The tls dir lives under the user-owned data home, so its parent perms
-        # already scope it; this 0o700 is a belt-and-braces tightening, not the
-        # sole protection.
-        pass
+        # Defense-in-depth, proven low-risk. mkdir only fails here on a location
+        # nothing could write to anyway, which ensure_cert's own writes will hit
+        # and surface next; nothing further to report at this layer.
+        return
+    from localm.config import restrict_file_perms
+    if not restrict_file_perms(path, mode=0o700):
+        # LM-DA-044: this directory holds the CA private key. Unlike a digest
+        # file (sessions.json, jobs.json), a leaked CA key mints certificates
+        # every device that ever trusted this install's CA will accept - the
+        # compromise is not local - so this is louder than
+        # config._perm_warn's debug-only default for an ordinary credential.
+        logger.warning(
+            "could not restrict %s to the current user; its contents "
+            "(including the CA private key) rely on the data directory's own "
+            "permissions instead", path)
 
 
 def _write_private(path: Path, data: bytes) -> None:
-    """Write key material with 0600 perms where the OS supports it."""
-    path.write_bytes(data)
+    """Write key material at 0600 from the moment it exists, then run the
+    Windows-aware lockdown every other credential file in this project uses.
+
+    Creating via ``os.open`` with an explicit mode (rather than
+    ``Path.write_bytes`` followed by a separate ``chmod``) means the file is
+    never briefly readable at the umask-default mode between the write and the
+    permission tightening."""
+    fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
     try:
-        os.chmod(path, 0o600)
-    except OSError:
-        # Private key perms - the most sensitive write here, so the reasoning is
-        # explicit. chmod is a Windows no-op and only raises on POSIX filesystems
-        # that have no per-file perms at all (FAT, some network mounts). On such a
-        # filesystem NO API could restrict this file, and the same limit applied
-        # to the enclosing tls dir (already 0o700-attempted by _lock_down_dir) and
-        # to the user data home it sits in: the key is exactly as protected as
-        # everything else the user stores there. So a failure here cannot single
-        # out the key as newly exposed; it is the user's storage choice, not a
-        # localm regression. Hence safe to proceed rather than refuse to serve TLS.
-        pass
+        os.write(fd, data)
+    finally:
+        os.close(fd)
+    from localm.config import restrict_file_perms
+    if not restrict_file_perms(path):
+        # LM-DA-044: a leaked CA or leaf private key mints certificates every
+        # device that ever trusted this install's CA will accept - the
+        # compromise is not local - so this is louder than
+        # config._perm_warn's debug-only default for an ordinary credential.
+        logger.warning(
+            "could not restrict %s to the current user; the data "
+            "directory's own permissions are this key's only remaining "
+            "protection", path.name)
 
 
 # ------------------------------------------------------------------ #
@@ -546,11 +563,26 @@ def _cert_sans(cert) -> tuple[set[str], set[str]]:
 
 
 def _leaf_is_reusable(home: Path, hostnames: list[str], ips: list[str]) -> bool:
-    """True when the persisted leaf is safe to reuse: it and the CA exist, it is
-    not near expiry, it is issued by the current CA, and it already covers every
-    required SAN. Anything else (missing, expired, wrong issuer, missing SAN)
-    forces a regenerate."""
+    """True when the persisted leaf is safe to reuse: it and the CA exist,
+    neither is near its own expiry, the leaf's SIGNATURE actually verifies
+    against the CA we currently serve for download, and the leaf already
+    covers every required SAN. Anything else (missing, an expired leaf OR CA,
+    a signature that does not verify, a missing SAN) forces a regenerate.
+
+    LM-DA-043: the issuer check used to be ``cert.issuer != ca.subject`` -
+    this module mints EVERY CA with the identical constant subject
+    (``CN=localm local CA, O=localm``), so that compared a fixed string to
+    itself and could never tell a rotated CA keypair from the one on disk.
+    Verifying the signature is the same check a TLS client performs when it
+    validates the chain, so "reusable" and "will validate" cannot diverge -
+    and because this is the ONLY gate that reaches ensure_cert's early return,
+    it is also the only place that can force a CA regenerated in place (e.g.
+    restored from a partial backup) to bring its leaf along with it, and the
+    only place that notices the CA itself has reached expiry (the leaf's own
+    _RENEW_MARGIN_DAYS check never looked at the CA it was signed by)."""
     from cryptography import x509
+    from cryptography.exceptions import InvalidSignature
+    from cryptography.hazmat.primitives.asymmetric import padding
 
     cp, kp, cap = _leaf_cert_path(home), _leaf_key_path(home), ca_cert_path(home)
     if not (cp.exists() and kp.exists() and cap.exists()):
@@ -561,11 +593,25 @@ def _leaf_is_reusable(home: Path, hostnames: list[str], ips: list[str]) -> bool:
     except Exception:
         return False
 
+    # A CA nearing (or past) its own expiry must force regeneration of BOTH:
+    # a leaf signed by an expiring CA is no safer than an expiring leaf, and
+    # _load_or_make_ca's own expiry check is unreachable in the steady state
+    # (ensure_cert only calls it once the leaf is judged NOT reusable).
+    if ca.not_valid_after_utc - timedelta(days=_RENEW_MARGIN_DAYS) <= _now():
+        return False
     if cert.not_valid_after_utc - timedelta(days=_RENEW_MARGIN_DAYS) <= _now():
         return False
-    # Leaf must chain to the CA we currently serve for download, else a trusted
-    # device would still see a warning.
-    if cert.issuer != ca.subject:
+
+    # Prove the leaf actually chains to the CA we currently serve for
+    # download - not merely that their subject/issuer NAMES match.
+    try:
+        ca.public_key().verify(
+            cert.signature,
+            cert.tbs_certificate_bytes,
+            padding.PKCS1v15(),
+            cert.signature_hash_algorithm,
+        )
+    except (InvalidSignature, ValueError, TypeError):
         return False
 
     have_hosts, have_ips = _cert_sans(cert)

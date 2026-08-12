@@ -14,6 +14,7 @@ from datetime import timedelta
 import pytest
 
 from cryptography import x509
+from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 
@@ -206,6 +207,95 @@ def test_corrupt_ca_is_replaced(tmp_path):
     leaf = _load(cert_path)
     ca = _load(tls.ca_cert_path(tmp_path))
     assert leaf.issuer == ca.subject
+
+
+# ------------------------------------------------------------------ #
+#  LM-DA-043: leaf-reuse must verify against the CA actually on disk,  #
+#  not merely compare a constant subject name to itself                #
+# ------------------------------------------------------------------ #
+
+def _verify_chain(leaf, ca):
+    """Raises (InvalidSignature or a key-mismatch error) unless *leaf* was
+    actually signed by *ca* - the same check a TLS client performs, and the
+    property _leaf_is_reusable's old issuer-name comparison could not prove."""
+    ca.public_key().verify(
+        leaf.signature,
+        leaf.tbs_certificate_bytes,
+        padding.PKCS1v15(),
+        leaf.signature_hash_algorithm,
+    )
+
+
+def test_leaf_not_reused_after_out_of_band_ca_rotation(tmp_path):
+    """Every CA this module mints shares the identical constant subject, so a
+    leaf's ``issuer == ca.subject`` name comparison can never distinguish a
+    rotated CA keypair from the one the leaf was actually signed by. Simulate
+    the out-of-band rotation the finding names (restoring ``tls/`` from a
+    partial backup, or copying a data dir between machines): mint a CA, mint
+    a leaf against it, then re-mint the CA in place without touching the
+    leaf - exactly what a partial restore leaves behind."""
+    cert_path, _ = tls.ensure_cert(tmp_path)
+    old_leaf_serial = _load(cert_path).serial_number
+    old_leaf = _load(tls._leaf_cert_path(tmp_path))
+    hosts, ips = tls.san_targets()
+
+    # Out-of-band rotation: a fresh CA overwrites ca.crt/ca.key; the leaf
+    # signed by the OLD CA is left untouched on disk.
+    new_ca_cert, _ = tls._make_ca(tmp_path)
+
+    # The scenario is genuinely dangerous even before _leaf_is_reusable is
+    # asked anything: the old leaf's issuer NAME still matches the new CA's
+    # subject (both are the module's one constant name)...
+    assert old_leaf.issuer == new_ca_cert.subject
+    # ...but its signature does NOT verify against the CA now served for
+    # download. This is the exact gap LM-DA-043 reports.
+    with pytest.raises(InvalidSignature):
+        _verify_chain(old_leaf, new_ca_cert)
+
+    assert not tls._leaf_is_reusable(tmp_path, hosts, ips), (
+        "a leaf signed by a since-rotated CA must never be judged reusable")
+
+    # ensure_cert must regenerate the leaf so the served pair actually chains.
+    cert_path, _ = tls.ensure_cert(tmp_path)
+    leaf = _load(cert_path)
+    ca = _load(tls.ca_cert_path(tmp_path))
+    assert leaf.serial_number != old_leaf_serial
+    _verify_chain(leaf, ca)   # raises on failure
+
+
+def test_ca_past_expiry_forces_full_regeneration(tmp_path, monkeypatch):
+    """An expired CA on disk must force ensure_cert to regenerate BOTH the CA
+    and the leaf, even when the leaf itself - minted late in the CA's life -
+    is nowhere near its own expiry. Reachable through ordinary renewal timing
+    (a long-running or rarely-restarted instance), not a corrupt file: the
+    leaf's own ~2-year validity window comfortably outlives an already-past
+    CA. Before the fix, _leaf_is_reusable never looked at the CA's own
+    not_valid_after (only the leaf's own), so ensure_cert reported success
+    while continuing to serve an unvalidatable chain and never self-healed."""
+    t0 = tls._now()
+    monkeypatch.setattr(tls, "_now", lambda: t0)
+    ca_cert, ca_key = tls._make_ca(tmp_path)
+
+    # Mint the leaf just after the CA has already expired.
+    t1 = t0 + timedelta(days=tls._CA_DAYS + 5)
+    monkeypatch.setattr(tls, "_now", lambda: t1)
+    hosts, ips = tls.san_targets()
+    tls._make_leaf(tmp_path, ca_cert, ca_key, hosts, ips)
+
+    old_ca_bytes = tls.ca_cert_path(tmp_path).read_bytes()
+    assert not tls._leaf_is_reusable(tmp_path, hosts, ips), (
+        "an expired CA must force a regenerate even though the leaf minted "
+        "against it is not itself near its own expiry")
+
+    cert_path, _ = tls.ensure_cert(tmp_path)
+    new_ca_bytes = tls.ca_cert_path(tmp_path).read_bytes()
+    assert new_ca_bytes != old_ca_bytes, (
+        "the expired CA must be replaced, not just the leaf")
+
+    leaf = _load(cert_path)
+    ca = _load(tls.ca_cert_path(tmp_path))
+    assert ca.not_valid_after_utc > t1, "the new CA must not itself be expired"
+    _verify_chain(leaf, ca)   # raises on failure
 
 
 @pytest.mark.skipif(
