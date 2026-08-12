@@ -61,6 +61,16 @@ class _RevalidatingStatic(StaticFiles):
 # The literal that every inline <script> in index.html carries in place of a
 # real nonce. Substituted per request by _index_html_with_shell_token below.
 #
+# THE BRACES ARE LOAD-BEARING - do not "tidy" this into an identifier-shaped
+# name. It was first written as __LOCALM_CSP_NONCE__, which is ALSO the name of
+# the JS global the shell publishes for the artifact canvas, so a plain
+# str.replace rewrote `window.__LOCALM_CSP_NONCE__ = ...` into
+# `window.<nonce> = ...` - a subtraction on the left of an assignment, i.e.
+# "SyntaxError: Invalid left-hand side in assignment", which killed the whole
+# bootstrap script. A form that cannot be a JS identifier cannot collide with
+# one. Caught only by loading the real GUI in a real browser; every unit test
+# passed, because the placeholder WAS substituted, just in one place too many.
+#
 # A PLACEHOLDER rather than server-side parsing of our own HTML, for the same
 # reason /sw.js substitutes its CACHE digest instead of anyone hand-bumping it:
 # a regex over <script> tags would have to tell an inline block from a src= one
@@ -69,7 +79,7 @@ class _RevalidatingStatic(StaticFiles):
 # to introduce silently - a new inline script without it is caught by
 # test_security_headers.py's mechanical nonce-coverage check, which parses the
 # SERVED body rather than trusting this substitution.
-CSP_NONCE_PLACEHOLDER = "__LOCALM_CSP_NONCE__"
+CSP_NONCE_PLACEHOLDER = "{{LOCALM_CSP_NONCE}}"
 
 
 def _index_html_with_shell_token(token: str, nonce: str = "") -> str:

@@ -7,7 +7,7 @@
      runs HERE, before any (possibly wedged) cached app module executes, so it is
      the one recovery path a bad SW/cache cannot break. This is the manual escape
      hatch for "the app is acting weird after an update / on revisit". -->
-<script nonce="__LOCALM_CSP_NONCE__">
+<script nonce="{{LOCALM_CSP_NONCE}}">
 // Publish this document's CSP nonce for the artifact canvas, which renders
 // model-authored HTML in a srcdoc iframe. A srcdoc document INHERITS this
 // document's CSP (measured), and its own <meta> CSP cannot loosen what the
@@ -1009,7 +1009,7 @@
 <script type="module" src="/app/main.js"></script>
 <!-- type="module" so this runs AFTER app/main.js has loaded and attached the app
      API to window (module scripts execute in order, after classic + parsing). -->
-<script type="module" nonce="__LOCALM_CSP_NONCE__">
+<script type="module" nonce="{{LOCALM_CSP_NONCE}}">
 /* PWA: register the service worker, show which server we are connected to, and
    wire an "Install as app" button when the browser offers the install prompt. */
 (function () {

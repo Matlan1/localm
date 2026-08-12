@@ -115,8 +115,30 @@ def test_every_inline_script_in_the_served_shell_carries_the_nonce():
 
     # The placeholder must never survive into a served page: if it did, the
     # substitution silently failed and every one of those scripts is dead.
-    assert "LOCALM_CSP_NONCE__" not in body, \
+    assert "{{LOCALM_CSP_NONCE}}" not in body, \
         "the CSP nonce placeholder reached the client unsubstituted"
+
+
+def test_substitution_does_not_eat_the_nonce_global():
+    """REGRESSION, and it was a live-browser find, not a unit-test one.
+
+    The placeholder was first spelled __LOCALM_CSP_NONCE__, which is ALSO the
+    name of the JS global the shell publishes for the artifact canvas. A plain
+    str.replace therefore rewrote
+
+        window.__LOCALM_CSP_NONCE__ = ...   ->   window.<nonce> = ...
+
+    a subtraction on the left of an assignment: "SyntaxError: Invalid left-hand
+    side in assignment", which killed the entire bootstrap script. Every unit
+    test still passed, because the placeholder HAD been substituted - just in
+    one place too many - so nothing that only looks for a surviving placeholder
+    can see this. Assert the global itself survives.
+    """
+    with TestClient(_shell_app()) as c:
+        body = c.get("/").text
+    assert "window.__LOCALM_CSP_NONCE__ =" in body, (
+        "the nonce substitution clobbered the JS global it is supposed to "
+        "populate; the shell bootstrap will not parse")
 
 
 def test_shell_token_snippet_is_nonced_too():
