@@ -194,6 +194,20 @@ permanent public record of what shipped and are never rewritten; the in-progress
   is opt-in. Every one of them now refuses a redirect that leaves HTTPS, and
   says so instead of failing as though the network had dropped. Redirects that
   stay on HTTPS still work, which is what the real downloads depend on.
+- **Web search now reads the promising page instead of answering from the
+  search engine's one-line summary.** `web_search` only ever returns snippets;
+  reading a page needs a separate `fetch_url` call, and nothing told the model
+  to make one, so answers were built from result summaries while looking like
+  they came from the pages themselves. Chat and scheduled jobs now both tell it
+  to follow up on a result that looks like it holds the answer, matching what
+  the coder agent already did.
+- **A second tool call in one reply is no longer thrown away in silence.** Chat
+  and scheduled jobs run one web lookup per message, but a model that asked for
+  two got no hint that the second never happened, so it answered as though it
+  had those results too - and the chat transcript displayed both lookups, so it
+  looked to you as if both had run. Only the first still runs (asking for two
+  at once is not supported here), but the model is now told which call was
+  ignored and can ask for it again on its next turn.
 - **A couple of dismissable UI hints (the NVIDIA/Vulkan backend hint, and
   whether the Studio nav group is expanded) could survive turning on privacy
   mode, unlike every other saved GUI preference.** Both were already withheld

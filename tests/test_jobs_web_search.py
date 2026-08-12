@@ -8,6 +8,8 @@ net_mode gating (web only when not "off"), the search round-trip, and the loop c
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from localm.plugins.builtin.jobs import webtool
@@ -191,6 +193,125 @@ class TestRunChatWithWeb:
             "a literal control token reached the model - role/frame forgery is possible"
         assert "&lt;|im_start|>" in injected
         assert "<untrusted_content>" in injected and "</untrusted_content>" in injected
+
+
+# --------------------------------------------------------------------------- #
+#  NEW-WEBSEARCH-UX (1): search returns SNIPPETS, so the model must be told to  #
+#  read a promising result before answering, or it answers from the search      #
+#  engine's summary and never opens the page.                                   #
+# --------------------------------------------------------------------------- #
+
+_JS_WEB_SURFACE = (Path(__file__).resolve().parents[1] / "localm" / "plugins" / "gui"
+                   / "static" / "app" / "settings-perf.js")
+
+
+class TestFetchUrlFollowUpNudge:
+    def test_system_prompt_nudges_a_fetch_url_follow_up(self):
+        sys = webtool.WEB_TOOL_SYSTEM.lower()
+        assert "follow up with fetch_url" in sys, \
+            "the prompt states the fetch_url capability but never tells the model to USE it"
+        assert "snippets, not page text" in sys, \
+            "the model needs the REASON, or it cannot judge when a follow-up is worth it"
+
+    def test_system_prompt_asks_for_exactly_one_call(self):
+        # The loop runs one call per round; the prompt is the only thing enforcing
+        # it (there is no grammar constraint on this surface).
+        assert "ONLY ONE tool call block" in webtool.WEB_TOOL_SYSTEM
+
+    # Bound to the REAL shipped GUI file, not a fixture: these two prompts are
+    # textual mirrors maintained by hand in different languages, and a fixture
+    # could only ever re-assert what this file already says. The GUI half is the
+    # surface a human actually exercises, so a Python-only fix is the drift that
+    # matters. Same shape as tests/test_gui_no_import_reassignment.py.
+    @pytest.mark.parametrize("phrase", [
+        "follow up with fetch_url",
+        "snippets, not page text",
+        "ONLY ONE tool call",
+    ])
+    def test_the_gui_surface_carries_the_same_rules(self, phrase):
+        js = _JS_WEB_SURFACE.read_text(encoding="utf-8")
+        assert phrase in js, (
+            f"the jobs prompt and the GUI prompt have drifted on {phrase!r} - "
+            "fixing one surface and not the other is the defect this pair exists to stop")
+
+
+# --------------------------------------------------------------------------- #
+#  NEW-WEBSEARCH-UX (3): one call per round is the design, but the extras used  #
+#  to vanish in silence - the model answered as though it held their results.   #
+# --------------------------------------------------------------------------- #
+
+_TWO_CALLS = (
+    '<tool_call>{"name": "web_search", "args": {"query": "weather in Paris"}}</tool_call>\n'
+    '<tool_call>{"name": "fetch_url", "args": {"url": "https://example.com/b"}}</tool_call>')
+
+
+class TestMultipleToolCalls:
+    def test_a_single_call_is_one_call_not_two(self):
+        # The JSON inside a wrapper/fence IS also a bare top-level object. If the
+        # last-resort layer ran unconditionally, every ordinary reply would look
+        # like two calls and the model would be told, every run, that a second
+        # call it never made had been ignored.
+        assert len(webtool.parse_web_calls(_TOOL_CALL)) == 1
+        assert len(webtool.parse_web_calls(
+            '```json\n{"name": "web_search", "args": {"query": "x"}}\n```')) == 1
+        assert len(webtool.parse_web_calls(
+            '{"name": "web_search", "args": {"query": "x"}}')) == 1
+        assert webtool.parse_web_calls("The capital of France is Paris.") == []
+
+    def test_both_calls_are_reported_but_parse_web_call_still_returns_the_first(self):
+        calls = webtool.parse_web_calls(_TWO_CALLS)
+        assert [c["name"] for c in calls] == ["web_search", "fetch_url"]
+        assert webtool.parse_web_call(_TWO_CALLS)["name"] == "web_search"
+        assert len(webtool.parse_web_calls(_TWO_CALLS, limit=1)) == 1
+
+    def test_no_note_when_there_is_nothing_to_report(self):
+        assert webtool.ignored_calls_note([]) == ""
+        assert webtool.ignored_calls_note([{"name": "web_search", "args": {}}]) == ""
+
+    def test_second_call_is_reported_to_the_model_not_silently_dropped(self, home, monkeypatch):
+        monkeypatch.setenv("LOCALM_NET_MODE", "allow")
+        searched, fetched = [], []
+        monkeypatch.setattr(
+            "localm.netpolicy.web_search",
+            lambda q, max_results=5: searched.append(q) or [
+                {"title": "t", "url": "https://x", "snippet": "s"}])
+        monkeypatch.setattr(
+            "localm.netpolicy.fetch_text",
+            lambda u: fetched.append(u) or ("https://x", "page"))
+        eng = ScriptedEngine([_TWO_CALLS, _ANSWER])
+
+        out = webtool.run_chat_with_web(eng, "What's the weather in Paris?")
+
+        assert out == _ANSWER
+        assert searched == ["weather in Paris"]      # the first call ran
+        assert fetched == [], "the second call must NOT run - one call per round"
+        injected = eng.seen[1][-1]["content"]
+        assert "only the first tool call ran" in injected, \
+            "the model was never told its second call was ignored"
+        assert "fetch_url" in injected, \
+            "the notice must name what was ignored, not just that something was"
+        assert "Results of web_search" in injected, \
+            "the notice rides on the result message, keeping role alternation intact"
+        # LM-DA-014: everything inside the fence is DATA the model is told not to
+        # obey. A notice that landed in there would be self-defeating - it is our
+        # instruction, not fetched content - and "present in the message" cannot
+        # tell the two positions apart.
+        assert (injected.index("only the first tool call ran")
+                > injected.rindex("</untrusted_content>")), \
+            "the notice must sit OUTSIDE the untrusted-content fence"
+
+    def test_an_ordinary_single_call_run_gets_no_notice(self, home, monkeypatch):
+        monkeypatch.setenv("LOCALM_NET_MODE", "allow")
+        monkeypatch.setattr(
+            "localm.netpolicy.web_search",
+            lambda q, max_results=5: [{"title": "t", "url": "https://x", "snippet": "s"}])
+        eng = ScriptedEngine([_TOOL_CALL, _ANSWER])
+
+        webtool.run_chat_with_web(eng, "What's the weather in Paris?")
+
+        injected = eng.seen[1][-1]["content"]
+        assert "only the first tool call ran" not in injected, \
+            "a single call must never be reported as though a second was dropped"
 
 
 # --------------------------------------------------------------------------- #
