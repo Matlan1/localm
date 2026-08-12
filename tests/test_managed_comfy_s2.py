@@ -476,7 +476,12 @@ def test_provision_copy_names_the_unresolvable_package_not_just_a_pip_tail(
     output ("pip found no matching version", "non-public index", "local
     wheel") rather than merely checking the package name appears somewhere -
     the package name alone would ALSO appear in the status-quo generic
-    tail-of-pip-output message and prove nothing about this fix."""
+    tail-of-pip-output message and prove nothing about this fix.
+
+    Also pins the recovery hint (NEW-COMFY-S2-COPY-FAILS-ON-SIDELOADED-PACKAGE
+    option (c)): the message must point at the actual next step (clear the
+    ComfyUI folder setting, re-run setup for the fresh hardware-matched path)
+    rather than leaving the user stuck on a dead-end copy path."""
     from localm.media import managed_comfy_provision as prov
 
     monkeypatch.setenv("PIP_NO_INDEX", "1")
@@ -499,6 +504,56 @@ def test_provision_copy_names_the_unresolvable_package_not_just_a_pip_tail(
     assert bogus_pkg in result.message
     assert "pip found no matching version" in result.message
     assert "non-public index" in result.message or "local wheel" in result.message
+    # The actionable next step: this path is a dead end, and the message must say
+    # what to do instead (clear the workdir setting, re-run setup for S3 fresh).
+    assert "cannot be replicated" in result.message
+    assert "comfy setup" in result.message
+    assert mc.is_managed_comfy_installed() is False
+    assert not mc.managed_comfy_paths().root.exists()   # rolled back, nothing lingers
+
+
+def test_provision_copy_fails_loudly_when_venv_has_no_pip(home, fake_user_comfy,
+                                                           monkeypatch):
+    """NEW-MANAGED-COMFY-VENV-MISSING-PIP, S2 copy path: the same probe as S3, so a
+    pip-less managed venv is diagnosed immediately after creation rather than
+    surfacing as an opaque failure two steps later inside the replicated-package
+    install. Mocks only `_run` (git clone/checkout are trivially satisfied, no real
+    network needed for this probe-only check) - if the probe were missing, the
+    fake `_run` below would receive the subsequent `pip install` replay call and
+    raise, which is what makes this a real fires-control."""
+    from localm.media import managed_comfy_provision as prov
+
+    cfg.save_config({**cfg.load_config(), "comfy_workdir": str(fake_user_comfy.workdir)})
+    stack = prov.discover_user_comfy()
+    assert stack is not None
+
+    calls = []
+
+    def _fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if "clone" in cmd or "checkout" in cmd:
+            return True, ""
+        if "venv" in cmd:
+            # Venv creation genuinely "succeeds" (dest exists) - only pip is
+            # missing, matching the real broken instance this entry describes.
+            dest = Path(cmd[-1])
+            venv_py = _venv_python(dest)
+            venv_py.parent.mkdir(parents=True, exist_ok=True)
+            venv_py.write_bytes(b"")
+            return True, ""
+        if "pip" in cmd and "--version" in cmd:
+            return False, "No module named pip"
+        raise AssertionError(f"unexpected call reached past the pip probe: {cmd}")
+
+    monkeypatch.setattr(prov, "_run", _fake_run)
+
+    result = prov.provision_by_copy(stack, copy_custom_nodes=False)
+
+    assert result.ok is False
+    assert "no working pip" in result.message
+    assert "localm doctor" in result.message
+    install_calls = [c for c in calls if "install" in c]
+    assert install_calls == [], f"reached an install call past the probe: {install_calls}"
     assert mc.is_managed_comfy_installed() is False
     assert not mc.managed_comfy_paths().root.exists()   # rolled back, nothing lingers
 

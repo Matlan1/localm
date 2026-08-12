@@ -72,6 +72,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
   work. Restarting from Settings also waits for the new server to actually be
   up before reconnecting, rather than reconnecting to the one that is shutting
   down.
+- **Setting up localm's own ComfyUI now says so immediately when the new
+  install's venv has no working pip**, instead of failing two steps later with
+  an opaque "No module named pip" buried in a PyTorch install transcript. This
+  can happen when the base Python's own pip bootstrap is broken or stripped; the
+  new message names the real cause and points at `localm doctor`, in both the
+  fresh install and the copy-your-existing-ComfyUI paths. Replicating an
+  existing ComfyUI whose venv has a package from a private index or a local
+  wheel (a vendor-bundled driver package, for example) now also tells you the
+  actual next step - clear the ComfyUI folder setting and run setup again for
+  the fresh, hardware-matched install - instead of leaving you stuck on a copy
+  that can never succeed.
 - **A vision model's image projector no longer lands on a graphics card you
   told localm not to use.** If you split a model across specific GPUs with
   `gpu_split_indices`, or picked one with `main_gpu_index`, the text model went
