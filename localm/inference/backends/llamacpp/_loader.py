@@ -685,9 +685,13 @@ def _ggml_sym(handles: "List[ctypes.CDLL]", name: str):
 
 def compute_devices() -> "List[tuple]":
     """The ggml compute DEVICES the provisioned runtime registers, as a list of
-    ``(name, type)`` where *type* follows ggml_backend_dev_type (0=CPU, 1=GPU,
-    2=ACCEL). Loads the library first (idempotent, which also registers the
-    backends), so this reports the devices a real model load would actually use.
+    ``(name, type)`` where *type* is a raw ``ggml_backend_dev_type`` value.
+    COMPARE IT AGAINST :data:`GGML_DEV_TYPE_CPU` / :data:`GGML_DEV_TYPE_GPU`,
+    never against a literal: the enum has GROWN (IGPU was inserted AHEAD of
+    ACCEL, so ACCEL is 2 on an older runtime and 3 on a newer one - see the
+    comment above those constants). Loads the library first (idempotent, which
+    also registers the backends), so this reports the devices a real model load
+    would actually use.
 
     Returns ``[]`` when the ggml device-registry symbols are unavailable (an
     older build without ``ggml_backend_dev_*``); the caller then has no
@@ -737,12 +741,32 @@ def native_device_inventory() -> "Optional[list]":
     ``ggml_backend_dev_*``). An empty list is a real answer: the runtime
     registers no non-CPU device.
 
-    ``index`` is the device's position AMONG the non-CPU devices (0-based) -
-    the order llama.cpp's loader walks them, i.e. the index space
-    ``mp.main_gpu`` / ``mp.tensor_split`` (a configured ``gpu_split_indices``)
-    actually consume on this build. That is this inventory's whole point
+    ``index`` is the device's position AMONG the non-CPU devices (0-based), in
+    ggml's own registry order. That is this inventory's whole point
     (GPU-SPLIT-VKINDEX): on the vulkan build no torch/nvidia-smi source can
-    see or number these devices. ``description`` is the human device name when
+    see or number these devices.
+
+    IT IS NOT, IN GENERAL, THE INDEX SPACE ``mp.main_gpu`` / ``mp.tensor_split``
+    CONSUME. This docstring asserted that it was until 2026-08-12; measured
+    against upstream ``src/llama.cpp`` (``llama_prepare_model_devices``) at
+    b10361, llama.cpp builds ``model->devices`` by hoisting RPC devices to the
+    FRONT, deduplicating GPUs by device_id, SKIPPING ACCEL and META, and
+    admitting iGPUs only when NO discrete GPU was found (then at most one).
+    Two of those cannot arise here (localm never calls
+    ``ggml_backend_rpc_add_server``, and ggml-vulkan already dedups one physical
+    GPU seen under two drivers by UUID/LUID), but the iGPU case can and is
+    ordinary: ggml-vulkan enumerates integrated GPUs and types them
+    ``GGML_BACKEND_DEVICE_TYPE_IGPU``, so on a box with a discrete card plus
+    integrated graphics this list contains a device llama.cpp's does not, and
+    every index past it refers to a different card.
+
+    The two sequences ARE identical when every entry here has ``type`` ==
+    :data:`GGML_DEV_TYPE_GPU`, which a caller mapping an index to a device can
+    check for itself (``mtmd._resolve_backend_device_name`` does exactly that,
+    and refuses otherwise). A caller that does NOT check is relying on a
+    coincidence. See dev-notes/mmproj-device-placement-2026-08-12.md.
+
+    ``description`` is the human device name when
     the build exposes ``ggml_backend_dev_description`` (ggml-vulkan's terse
     ``name`` is "Vulkan<n>"), else "". ``free``/``total`` are
     ``ggml_backend_dev_memory``'s live bytes, 0 when that call fails for a

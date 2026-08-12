@@ -880,6 +880,13 @@ class LlamaCpp:
         # below - it is read once at load time, not held as a live pointer.
         _tensor_split_keepalive = apply_gpu_split(
             mp, ratios_override=gpu_split_ratios)
+        # Read AFTER apply_gpu_split, which is what makes this value meaningful:
+        # it forces main_gpu inside the configured split set (substituting the
+        # first split device, with a warning, when the configured main_gpu_index
+        # is not one of them). So this is the load's RESOLVED primary device, not
+        # the raw config value. The vision projector follows it (below) so it does
+        # not land on a card the user's split deliberately excluded.
+        self._main_gpu_index = int(mp.main_gpu)
 
         # MoE expert placement (opt-in, n_cpu_moe > 0): keep the EXPERT weights of
         # the first N layers in system RAM while everything else follows the normal
@@ -1119,7 +1126,13 @@ class LlamaCpp:
             with _mtmd_mirror_ctx(), _mtmd_load_ctx() as captured:
                 try:
                     from .mtmd import MtmdContext
-                    mt = MtmdContext(mmproj_path, self._model_ptr)
+                    # getattr, not self._main_gpu_index: this method is unit-tested
+                    # directly against instances that never ran __init__ (see this
+                    # docstring's note on why it was pulled out), and 0 is exactly
+                    # the "leave clip's own default alone" value.
+                    mt = MtmdContext(
+                        mmproj_path, self._model_ptr,
+                        gpu_index=getattr(self, "_main_gpu_index", 0))
                 except Exception:
                     if captured is not None:
                         _mtmd_detail = captured.tail()

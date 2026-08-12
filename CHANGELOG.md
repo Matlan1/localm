@@ -29,6 +29,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   a version update, and the button now says so instead of failing part way in.
 
 ### Fixed
+- **A vision model's image projector no longer lands on a graphics card you
+  told localm not to use.** If you split a model across specific GPUs with
+  `gpu_split_indices`, or picked one with `main_gpu_index`, the text model went
+  where you asked but the projector always went to the first card regardless,
+  taking about a gigabyte of memory on it. It now follows the same card the
+  rest of the model is anchored to. On setups where localm cannot work out
+  which card that is with certainty (a machine with integrated graphics
+  alongside a discrete card, for example) it leaves the projector where it was
+  rather than guessing, and says so in the log. Nothing changes if you have not
+  configured a specific GPU.
 - **`localm update` no longer swaps your installed backend for a different
   one.** The runtime-provisioning step picked whichever backend the current
   hardware recommendation named, rather than the one you actually had
