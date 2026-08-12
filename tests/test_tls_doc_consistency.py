@@ -20,7 +20,17 @@ _DOC = Path(__file__).resolve().parents[1] / "docs" / "tls.md"
 
 
 def _doc() -> str:
-    return _DOC.read_text(encoding="utf-8")
+    """The doc with every run of whitespace collapsed to one space.
+
+    The prose is hard-wrapped at ~80 columns, so ANY sentence-level assertion
+    against the raw text is decided by where the line break happens to fall.
+    Caught by the fires-control on the very first run of this file: the
+    retired-claim test below passed against the pre-fix doc, which contains
+    that claim, because it is wrapped as "The CA is\\n  reused even then" and
+    the substring therefore did not appear. A test that cannot fail on the
+    input it exists to reject is worse than no test.
+    """
+    return re.sub(r"\s+", " ", _DOC.read_text(encoding="utf-8"))
 
 
 def test_renew_margin_stated_in_the_doc_matches_the_code():
