@@ -92,7 +92,7 @@ from rich.console import Console
 
 from localm import config
 from localm.debuglog import logger
-from localm.http_ssl import verified_urlopen
+from localm.http_ssl import RedirectDowngradeRefused, verified_urlopen
 
 console = Console(highlight=False)
 
@@ -1055,7 +1055,14 @@ def _recent_tags(limit: int = 10) -> list:
             # ~25 archives, so a tag with an empty assets array 404s on download.
             if isinstance(tag, str) and tag and rel.get("assets"):
                 out.append(tag)
-    except Exception:
+    except Exception as e:
+        # Best-effort like its two siblings (_release_assets, _pypi_wheel_url_
+        # and_sha), and logged like them: every caller has a pinned fallback, so
+        # this must not raise, but "the lookup was unavailable" must stay
+        # discoverable (rule 5). It was the ONE verified_urlopen call site that
+        # swallowed with no trace at all, which meant a refused downgrade
+        # redirect here would have been the only one nothing recorded.
+        logger.debug("release tag listing failed for %s (%s)", api, e)
         return []
     return out
 
@@ -1275,9 +1282,15 @@ def _download(url: str, dest: Path) -> _DownloadResult:
     nread = 0
     try:
         # verified_urlopen (see localm/http_ssl.py) follows the GitHub -> release-CDN
-        # 302 over HTTPS and verifies both hops. Stream in chunks so a multi-hundred-MB
-        # archive is never held in memory; the default socket timeout is the
-        # between-reads stall deadline (not a total cap).
+        # 302 and verifies both hops. "Over HTTPS" is ENFORCED, not assumed: its
+        # default HttpsOnlyRedirect refuses a redirect off https and raises
+        # RedirectDowngradeRefused, handled below. Until that guard existed this
+        # comment asserted a property nothing checked, on the one download whose
+        # bytes become a loaded native DLL - and _validate_archive's digest check
+        # is opt-in (its expected_sha256, i.e. --sha256), so an unpinned archive
+        # has no cryptographic check on its content either. Stream in chunks so a
+        # multi-hundred-MB archive is never held in memory; the default socket
+        # timeout is the between-reads stall deadline (not a total cap).
         req = urllib.request.Request(url, headers={"User-Agent": "localm-setup-llama"})
         with verified_urlopen(req, timeout=_DOWNLOAD_STALL_TIMEOUT) as r, open(dest, "wb") as f:
             total = int(r.headers.get("Content-Length") or 0)
@@ -1296,6 +1309,21 @@ def _download(url: str, dest: Path) -> _DownloadResult:
                 f.write(chunk)
                 nread += len(chunk)
                 _report(nread, total)
+    except RedirectDowngradeRefused as e:
+        # BEFORE the OSError clause below, which it would otherwise hit
+        # (RedirectDowngradeRefused is a URLError, and URLError is an OSError):
+        # that clause tells the user this "looks like a dropped or flaky
+        # connection" and to retry. Retrying an attempt to hand us a native DLL
+        # over cleartext is the opposite of the right advice, and collapsing the
+        # two into one message is exactly the failure rule 5 forbids.
+        raise ArtifactError(
+            f"refused to follow this download off HTTPS ({e}) - the archive "
+            "would have arrived in cleartext, where anything on the network "
+            "path can replace it, and its bytes are loaded as a native "
+            "library. This is not a transient network fault: check the URL, "
+            "or provision from a local build with 'localm setup-llama --from "
+            "<build-dir>'."
+        ) from e
     except (socket.timeout, TimeoutError) as e:
         raise ArtifactError(
             f"download stalled (no data for {_DOWNLOAD_STALL_TIMEOUT}s, after "

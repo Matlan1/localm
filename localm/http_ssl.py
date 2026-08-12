@@ -31,24 +31,96 @@ Verification order, and why:
 
 Any OTHER failure (HTTP error, timeout, DNS, or a certificate failure that survives
 BOTH attempts) propagates unchanged - never silently swallowed (AGENTS.md rule 5).
+
+Verifying the FIRST hop is only half of it, which is why :class:`HttpsOnlyRedirect`
+below is installed by default: see its docstring for the downgrade a verified
+opener otherwise follows without complaint.
 """
 
 from __future__ import annotations
 
 import ssl
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Optional, Sequence
 
 from localm.debuglog import logger
 
 
+class RedirectDowngradeRefused(urllib.error.URLError):
+    """An outbound request was redirected off HTTPS and localm refused to follow.
+
+    A ``URLError`` subclass ON PURPOSE: every outbound caller in this project
+    already funnels ``URLError`` either into its own domain error (interpolating
+    the reason, so the refusal is quoted to the user) or into a LOGGED
+    best-effort fallback. Checked call site by call site, not assumed. So a
+    refusal is reported wherever it happens, needs no new handling to be
+    visible, and can never read as a success. Two sites catch it explicitly
+    ahead of that funnel - setup_llama._download and updater.download - because
+    their generic transport wording would misdescribe it as a network fault.
+    """
+
+
+class HttpsOnlyRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse a redirect that leaves HTTPS for a weaker scheme.
+
+    urllib's own redirect handler follows up to 10 hops and, in
+    ``http_error_302``, admits any target whose scheme is in
+    ``('http', 'https', 'ftp', '')`` - so a plain ``http://`` Location IS
+    followed, in cleartext, off a connection the caller verified. Verifying the
+    first hop's certificate says nothing about the hops after it. That is what
+    this closes, for every :func:`verified_urlopen` caller at once rather than
+    one guard per client (hoisted here out of updater.py, which had the only one).
+
+    The rule is DOWNGRADE, not https-only: the target scheme is compared to the
+    scheme of the request being redirected, so each hop is judged on its own. A
+    caller that legitimately started on plain http (a user-configured http
+    endpoint) has no confidentiality left to lose and keeps working; a caller on
+    https can never be walked off it.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        # newurl is already absolute here: http_error_302 urljoin()s it against
+        # the current request before calling us, so a relative Location cannot
+        # arrive with an empty scheme and read as "not https".
+        old = urllib.parse.urlsplit(req.get_full_url()).scheme.lower()
+        new = urllib.parse.urlsplit(newurl).scheme.lower()
+        if old == "https" and new != "https":
+            raise RedirectDowngradeRefused(
+                f"refused an HTTPS -> {new or 'scheme-less'} downgrade redirect "
+                f"(HTTP {code}, to {newurl!r}) - the response after it would "
+                "travel in cleartext")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 def _open(req, timeout, context, handlers):
-    if handlers:
-        opener = urllib.request.build_opener(
-            *handlers, urllib.request.HTTPSHandler(context=context))
-        return opener.open(req, timeout=timeout)
-    return urllib.request.urlopen(req, timeout=timeout, context=context)
+    opener = urllib.request.build_opener(
+        *handlers, urllib.request.HTTPSHandler(context=context))
+    return opener.open(req, timeout=timeout)
+
+
+def _with_redirect_guard(handlers: Sequence[type]) -> tuple:
+    """*handlers* with :class:`HttpsOnlyRedirect` prepended, unless the caller
+    already supplied a redirect policy of its own.
+
+    That is the ONLY opt-out, and it is deliberately the explicit one: a caller
+    states its policy by passing a handler (comfy_client's ``_RefuseRedirect``
+    refuses every hop outright), and build_opener drops the stdlib default
+    whenever a subclass of it is passed. There is no argument, and no empty
+    ``handlers=()``, that reaches urllib's permissive default - which is exactly
+    how the six unguarded call sites came to have no guard at all.
+    """
+    handlers = tuple(handlers)
+    # Class OR instance, mirroring build_opener's own test: it accepts both, and
+    # a policy we failed to recognise would not replace ours - it would join it,
+    # leaving TWO redirect handlers on one opener and which one applies decided
+    # by registration order.
+    if any(issubclass(h, urllib.request.HTTPRedirectHandler) if isinstance(h, type)
+           else isinstance(h, urllib.request.HTTPRedirectHandler)
+           for h in handlers):
+        return handlers
+    return (HttpsOnlyRedirect,) + handlers
 
 
 def verified_urlopen(req, *, timeout: Optional[float] = None,
@@ -57,11 +129,13 @@ def verified_urlopen(req, *, timeout: Optional[float] = None,
     platform's native certificate store first, falling back to certifi's
     bundled root list only on a certificate-verification failure specifically.
 
-    *handlers* are extra ``urllib.request`` handler classes to install ahead of
-    the HTTPS handler (e.g. a redirect-scheme guard) - when empty, this calls
-    plain ``urlopen`` directly. Returns whatever the underlying open call
-    returns (a context-manager-compatible response).
+    A redirect off HTTPS is refused (:class:`HttpsOnlyRedirect`, raising
+    :class:`RedirectDowngradeRefused`) unless *handlers* carries a redirect
+    policy of its own. *handlers* are extra ``urllib.request`` handler classes
+    installed ahead of the HTTPS handler. Returns whatever the underlying open
+    call returns (a context-manager-compatible response).
     """
+    handlers = _with_redirect_guard(handlers)
     try:
         return _open(req, timeout, ssl.create_default_context(), handlers)
     except urllib.error.URLError as e:

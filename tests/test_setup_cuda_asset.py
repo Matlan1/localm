@@ -14,6 +14,7 @@ import io
 import json
 
 from localm import setup_llama as sl
+from tests._fake_https import patch_https_transport
 
 # Realistic upstream listing: the cudart runtime is listed BEFORE the build,
 # both carry "bin-win-cuda-12".
@@ -52,7 +53,7 @@ class _FakeHTTP:
 def test_resolve_backend_url_cuda_skips_cudart(monkeypatch):
     monkeypatch.setattr(sl, "_platform_key", lambda: "win32")
     monkeypatch.setattr(sl, "_latest_tag", lambda: "b9842")
-    monkeypatch.setattr("urllib.request.urlopen",
+    patch_https_transport(monkeypatch,
                         lambda req, timeout=None, context=None: _FakeHTTP({"assets": ASSETS}))
     url = sl._resolve_backend_url("cuda")
     assert url == "https://example/llama-cuda-12.zip"   # NOT the cudart zip
@@ -62,7 +63,7 @@ def test_resolve_backend_url_cuda_skips_cudart(monkeypatch):
 def test_resolve_backend_url_vulkan_unaffected(monkeypatch):
     monkeypatch.setattr(sl, "_platform_key", lambda: "win32")
     monkeypatch.setattr(sl, "_latest_tag", lambda: "b9842")
-    monkeypatch.setattr("urllib.request.urlopen",
+    patch_https_transport(monkeypatch,
                         lambda req, timeout=None, context=None: _FakeHTTP({"assets": ASSETS}))
     assert sl._resolve_backend_url("vulkan") == "https://example/llama-vulkan.zip"
 

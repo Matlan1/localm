@@ -181,6 +181,19 @@ permanent public record of what shipped and are never rewritten; the in-progress
   macOS, where a failed check reported an Intel Mac and so passed over the
   Metal recommendation. Detection is still advisory and still falls back to the
   same safe default; it just no longer states a finding it did not make.
+- **A download that was redirected off HTTPS onto plain HTTP was followed.**
+  localm verifies the certificate of every outbound HTTPS request, but that only
+  covers the FIRST hop: the underlying library follows up to ten redirects and
+  accepts a plain-HTTP target, so a server (or anything able to answer as one)
+  could answer a verified request with a redirect and have the rest arrive in
+  cleartext, where it can be read or replaced in transit. Only the update
+  download and the calls to your ComfyUI were guarded against this; the
+  llama.cpp runtime download, its GitHub and PyPI lookups, the issues list and
+  the bug-report upload were not. The runtime download is the one that matters
+  most, because its bytes are loaded as a native library and its checksum check
+  is opt-in. Every one of them now refuses a redirect that leaves HTTPS, and
+  says so instead of failing as though the network had dropped. Redirects that
+  stay on HTTPS still work, which is what the real downloads depend on.
 - **A couple of dismissable UI hints (the NVIDIA/Vulkan backend hint, and
   whether the Studio nav group is expanded) could survive turning on privacy
   mode, unlike every other saved GUI preference.** Both were already withheld
