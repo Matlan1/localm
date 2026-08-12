@@ -489,6 +489,16 @@ _CANCEL_DRAIN_TIMEOUT = 5.0
 # these never touch a slow native path, so this is intentionally short.
 _SIMPLE_CMD_TIMEOUT = 30.0
 
+# Coarse decode-progress heartbeat on the PARENT side, mirroring llama.py's
+# _DECODE_PROGRESS_INTERVAL (an independent constant - different process, no
+# shared import). Counts "chunk" envelopes actually RECEIVED rather than
+# tokens the child claims to have generated, so it stays correct even if the
+# two processes' native counters ever drift (a stolen/duplicated envelope,
+# for instance). See dev-notes/generation-path-logging-instrumentation-
+# 2026-08-12.md for why this reaches the always-on ring buffer even without
+# --debug, unlike the child-side equivalent.
+_STREAM_PROGRESS_INTERVAL = 50
+
 
 class _RunnerTornDown(Exception):
     """Internal: ``shutdown()`` released the child and its queues underneath an
@@ -811,9 +821,23 @@ class ModelRunner:
         (HON-02). The lock is acquired here and released when this generator is
         exhausted, errors, or is closed - all of which happen on the single
         producer thread that drives it, so the non-reentrant Lock is always
-        released on the thread that took it."""
+        released on the thread that took it.
+
+        BOUNDARY LOGGING (dev-notes/generation-path-logging-instrumentation-
+        2026-08-12.md): unlike llama.py's own boundary markers (which only
+        reach a bug report once --debug is on, since they run inside the
+        isolated child), everything logged here runs in THIS process, where
+        ``install_ring_buffer()`` already ran at CLI startup - so it reaches
+        the always-on ring buffer unconditionally. Built entirely from
+        envelopes this method already receives: no new IPC, no protocol
+        change. In particular the worker-died branch below now says WHICH
+        PHASE the child was in (no response ever received vs N chunks
+        already streamed) - the question a bare exit code cannot answer."""
+        from localm.debuglog import logger
         first_budget = first_chunk_timeout or FIRST_TOKEN_TIMEOUT_DEFAULT
         awaiting_first = True
+        chunks_received = 0
+        _stream_t0 = time.monotonic()
         with self._q_lock:
             self._req_q.put(("chat_stream", kwargs))
             try:
@@ -857,6 +881,17 @@ class ModelRunner:
                                     "Native inference fault"
                                     if native else
                                     "The model process exited unexpectedly")
+                                # Answers the question a bare exit code/trace
+                                # cannot: was the worker still prefilling/
+                                # dispatching (no envelope ever arrived) or
+                                # generating (N tokens already streamed back)?
+                                phase = (
+                                    "prefill/dispatch (no response received yet)"
+                                    if awaiting_first else
+                                    f"decode ({chunks_received} token(s) "
+                                    "already streamed)")
+                                logger.error(
+                                    "gguf worker: died mid-stream during %s", phase)
                                 raise RuntimeError(
                                     f"{opening} (worker exit "
                                     f"{self._exit_reason()}). The model has been "
@@ -880,11 +915,26 @@ class ModelRunner:
                                     "responding. It has been unloaded and will "
                                     "reload on the next request."
                                 )
-                    awaiting_first = False
                     kind = result[0]
+                    if awaiting_first:
+                        logger.info(
+                            "gguf worker: prefill complete, first response "
+                            "after %.2fs (kind=%s)",
+                            time.monotonic() - _stream_t0, kind)
+                        awaiting_first = False
                     if kind == "chunk":
+                        chunks_received += 1
+                        # Coarse heartbeat - see _STREAM_PROGRESS_INTERVAL.
+                        if chunks_received % _STREAM_PROGRESS_INTERVAL == 0:
+                            logger.info(
+                                "gguf worker: decode progress, %d token(s) "
+                                "received", chunks_received)
                         yield result[1]
                     elif kind == "done":
+                        logger.info(
+                            "gguf worker: generation complete, %d token(s), "
+                            "finish_reason=%s",
+                            chunks_received, result[1].get("finish_reason"))
                         self.last_done = result[1]
                         return
                     elif kind == "error":
@@ -906,6 +956,9 @@ class ModelRunner:
                     else:
                         raise RuntimeError(f"Unexpected response during generation: {result!r}")
             except GeneratorExit:
+                logger.info(
+                    "gguf worker: generation cancelled by caller after %d "
+                    "token(s)", chunks_received)
                 self._cancel_stream_and_drain()
                 raise
 

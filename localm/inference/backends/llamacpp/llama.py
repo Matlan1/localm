@@ -568,6 +568,13 @@ from localm.textnorm import scrub_stream as _scrub_stream  # noqa: E402
 # Suffix tokens are prefilled in chunks of this size (matches n_batch ceiling)
 _PREFILL_CHUNK = 2048
 
+# Coarse decode-progress heartbeat: every N generated tokens, never per token
+# (a per-token line would flood the shared debug log and the bug-report
+# digest's benign-record budget - see debuglog.py's ring-buffer docstring).
+# 50 gives several checkpoints even on a short reply while keeping a stalled
+# or crashed generation localized to within ~50 tokens of decode time.
+_DECODE_PROGRESS_INTERVAL = 50
+
 
 def _common_prefix_len(a: List[int], b: List[int]) -> int:
     """Length of the longest common prefix of two token lists."""
@@ -1316,45 +1323,68 @@ class LlamaCpp:
             initial_budget = max_new_tokens if max_new_tokens > 0 else 512
             needed = n_prompt + initial_budget + 64
 
-            # One contiguous suppression scope covering context work and prefill.
-            # The ROCm lazy-buffer verification messages fire asynchronously
-            # after llama_init_from_model returns but before the first
-            # llama_decode completes, so separate windows leave a gap.
-            # Prefill (re)creates/decodes into the context, so it must hold the
-            # lock against a concurrent unload too.
-            with self._gen_lock:
-                if self._stop.is_set():
-                    return
-                with _ctx():
-                    if self._can_reuse_kv(needed):
-                        self._prefill_with_reuse(prompt_tokens)
-                    else:
-                        self._prefill_fresh_context(prompt_tokens, needed)
-
-            # Build sampler
-            sampler = _build_sampler(
-                vocab=self._tokenizer._vocab,
-                temperature=temperature,
-                top_k=top_k,
-                top_p=top_p,
-                repeat_penalty=repeat_penalty,
-                # A per-request seed (when provided) overrides the instance default
-                # so temperature>0 sampling is reproducible; masked to uint32 to match
-                # llama_sampler_init_dist's c_uint32 binding.
-                seed=self._seed if seed is None else (seed & 0xFFFFFFFF),
-                grammar=grammar,
-                grammar_lazy=grammar_lazy,
-                grammar_triggers=grammar_triggers,
-            )
-
-            pos = n_prompt
-            # Why generation ended, read by callers as self.last_finish_reason.
-            # Default "stop" - it must cover every early exit (EOG token, a
-            # stop-string match in _filtered_stream abandoning this generator,
-            # client abort). Only a genuinely exhausted token budget is "length".
-            self.last_finish_reason = "stop"
+            # BOUNDARY LOGGING (dev-notes/generation-path-logging-instrumentation-
+            # 2026-08-12.md): between "model loaded" and either a token or a
+            # corpse this worker used to emit nothing at any level, so a native
+            # crash mid-generation could not be placed in prefill vs decode.
+            # INFO, following discover.py's resolve_auto_split_ratios precedent
+            # ("the always-on ring buffer is INFO+, so a bug report ... shows
+            # what was decided") - though here that only reaches a bug report
+            # once --debug is on, since this method runs inside the isolated
+            # worker process and the parent's ring buffer is process-local (see
+            # the dev-note). Per-token detail never lands here - see
+            # _DECODE_PROGRESS_INTERVAL.
+            from localm.debuglog import logger
+            logger.info("gguf generate: prefill starting, %d prompt token(s)", n_prompt)
+            _t0 = time.monotonic()
             tokens_generated = 0
+            in_decode = False
+            sampler = None
             try:
+                # One contiguous suppression scope covering context work and
+                # prefill. The ROCm lazy-buffer verification messages fire
+                # asynchronously after llama_init_from_model returns but before
+                # the first llama_decode completes, so separate windows leave a
+                # gap. Prefill (re)creates/decodes into the context, so it must
+                # hold the lock against a concurrent unload too.
+                with self._gen_lock:
+                    if self._stop.is_set():
+                        return
+                    reuse = self._can_reuse_kv(needed)
+                    with _ctx():
+                        if reuse:
+                            self._prefill_with_reuse(prompt_tokens)
+                        else:
+                            self._prefill_fresh_context(prompt_tokens, needed)
+
+                logger.info("gguf generate: prefill complete in %.2fs (kv_reuse=%s)",
+                            time.monotonic() - _t0, reuse)
+
+                # Build sampler
+                sampler = _build_sampler(
+                    vocab=self._tokenizer._vocab,
+                    temperature=temperature,
+                    top_k=top_k,
+                    top_p=top_p,
+                    repeat_penalty=repeat_penalty,
+                    # A per-request seed (when provided) overrides the instance default
+                    # so temperature>0 sampling is reproducible; masked to uint32 to match
+                    # llama_sampler_init_dist's c_uint32 binding.
+                    seed=self._seed if seed is None else (seed & 0xFFFFFFFF),
+                    grammar=grammar,
+                    grammar_lazy=grammar_lazy,
+                    grammar_triggers=grammar_triggers,
+                )
+
+                pos = n_prompt
+                # Why generation ended, read by callers as self.last_finish_reason.
+                # Default "stop" - it must cover every early exit (EOG token, a
+                # stop-string match in _filtered_stream abandoning this generator,
+                # client abort). Only a genuinely exhausted token budget is "length".
+                self.last_finish_reason = "stop"
+                in_decode = True
+                logger.info("gguf generate: entering decode loop")
+                _decode_t0 = time.monotonic()
                 # ONE contiguous _ctx() scope for the whole streaming loop, not
                 # re-entered per native call: dedup_native_stderr() spins up a
                 # background reader thread, so re-entering it per-token would
@@ -1436,11 +1466,33 @@ class LlamaCpp:
                                 # _prefill_fresh_context above raises mid-growth.
                                 if batch is not None:
                                     api.llama_batch_free(batch)
+                        # Coarse heartbeat, OUTSIDE the lock above (never add
+                        # work to a native-call-holding region) - see
+                        # _DECODE_PROGRESS_INTERVAL for why this is not per-token.
+                        if (tokens_generated
+                                and tokens_generated % _DECODE_PROGRESS_INTERVAL == 0):
+                            logger.info(
+                                "gguf generate: decode progress, %d token(s) in %.2fs",
+                                tokens_generated, time.monotonic() - _decode_t0)
                     else:
                         # Budget exhausted without the model finishing its turn
                         self.last_finish_reason = "length"
+                logger.info(
+                    "gguf generate: complete, %d token(s) in %.2fs, finish_reason=%s",
+                    tokens_generated, time.monotonic() - _decode_t0, self.last_finish_reason)
+            except GeneratorExit:
+                logger.info(
+                    "gguf generate: aborted (cancelled) during %s, %d token(s) generated",
+                    "decode" if in_decode else "prefill", tokens_generated)
+                raise
+            except Exception:
+                logger.info(
+                    "gguf generate: aborted (exception) during %s, %d token(s) generated",
+                    "decode" if in_decode else "prefill", tokens_generated)
+                raise
             finally:
-                api.llama_sampler_free(sampler)
+                if sampler is not None:
+                    api.llama_sampler_free(sampler)
 
     @staticmethod
     def _messages_with_markers(messages: List[Dict], marker: str):
