@@ -675,8 +675,14 @@ def _probe_pattern_is_safe(pattern: str) -> "tuple[str, str]":
     saturated, or the daemon could not be spawned or reached. The request is
     still REJECTED (an unproven pattern never reaches the native sampler), but
     an identical retry a second later can legitimately succeed."""
+    # Bound the pool reference ONCE and return the slot to THAT queue, never to
+    # whatever _PROBE_SLOTS_FREE happens to name by the time this finishes. The
+    # two are the same object in production; they differ in a test that swaps
+    # the pool out, where a thread still in flight would otherwise hand its slot
+    # back into the restored pool and quietly grow it past its own size.
+    pool = _PROBE_SLOTS_FREE
     try:
-        slot = _PROBE_SLOTS_FREE.get(timeout=_TRIGGER_PROBE_SLOT_WAIT)
+        slot = pool.get(timeout=_TRIGGER_PROBE_SLOT_WAIT)
     except queue.Empty:
         return _PROBE_UNDETERMINED, (
             f"the trigger-pattern validator is busy (all "
@@ -689,7 +695,7 @@ def _probe_pattern_is_safe(pattern: str) -> "tuple[str, str]":
         # Unconditional: a slot that is not returned is leaked from the pool
         # forever, and enough leaks turn every later request into a permanent
         # saturation refusal.
-        _PROBE_SLOTS_FREE.put(slot)
+        pool.put(slot)
 
 
 def _probe_on_slot(slot: "_ProbeSlot", pattern: str) -> "tuple[str, str]":

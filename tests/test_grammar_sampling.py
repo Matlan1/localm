@@ -935,7 +935,13 @@ def test_probe_on_slot_joins_inflight_prewarm_without_duplicate_spawn():
             with slot.lock:
                 slot.proc = fake_proc
 
-        prewarm_thread = threading.Thread(target=fake_prewarm)
+        # daemon=True is not decoration: fake_prewarm blocks until join() sets
+        # the event, so if the join under test is ever REMOVED the thread never
+        # finishes, and a non-daemon thread blocks interpreter exit - pytest
+        # would hang forever instead of reporting the failure. Found by running
+        # exactly that break as a fires-control; the pre-existing version of
+        # this test had the same shape.
+        prewarm_thread = threading.Thread(target=fake_prewarm, daemon=True)
         slot.prewarm = prewarm_thread
 
         real_join = prewarm_thread.join
