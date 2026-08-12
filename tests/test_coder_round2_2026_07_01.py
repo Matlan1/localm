@@ -77,13 +77,18 @@ def test_repeated_response_breaker_aborts(tmp_path):
     # a statement about the breaker itself.
     #
     # This line asserted the exact run of words "repeated the same response"
-    # until 2026-08-12. #1179 reworded the message to "repeated ESSENTIALLY the
-    # same response" without touching the test, and it sat red on master for
-    # weeks: ci.yml carries no pull_request or push trigger, so the full suite
-    # runs neither per PR nor per merge, and this test is in nobody's targeted
-    # selection. An exact-phrase assertion on a human-facing sentence is a
-    # standing trap, and re-asserting the NEW phrase would only re-arm it for
-    # the next reword.
+    # until 2026-08-12, and it sat red on master for weeks: ci.yml carries no
+    # pull_request or push trigger, so the full suite runs neither per PR nor
+    # per merge, and this test is in nobody's targeted selection.
+    #
+    # THE REWORD WAS NOT COSMETIC, which is the reason not to simply re-assert
+    # the new phrase. #1179 replaced the exact-consecutive detector with a
+    # SIMILARITY-based one (_REPEAT_SIMILARITY), so the responses no longer
+    # have to be identical, and "essentially" was added to say so. The
+    # sentence therefore tracks the detector's semantics and will keep moving
+    # as that is retuned. An exact-phrase assertion against a message that
+    # describes an evolving algorithm is a standing trap; re-arming it on the
+    # newer phrase only postpones the same red.
     #
     # _repeat_response_count is incremented in exactly ONE place (the
     # repeated-scaffold breaker in agent/loop.py) and run_task does not reset
