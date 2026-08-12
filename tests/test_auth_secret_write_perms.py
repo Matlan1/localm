@@ -181,6 +181,17 @@ def test_every_credential_writer_restricts_its_temp_before_the_rename(
             f"{dest.name}: temp permissions at rename time {fingerprint} "
             f"differ from a genuinely restricted file {restricted}")
 
+        # AND THE END STATE IS NOT WEAKENED. Restricting the temp instead of the
+        # destination relies on os.replace carrying the source's ACL/mode across
+        # (config.py:766-773, MEASURED there and the basis of the same pattern in
+        # sessions.py, instances.py and gpu_registry.py). The previous code
+        # tightened the destination directly, so if that carry-over were ever
+        # untrue on some filesystem this refactor would silently weaken the
+        # finished file. Pinned here rather than assumed.
+        assert _perm_fingerprint(dest) == restricted, (
+            f"{dest.name}: the finished file is not restricted - os.replace did "
+            f"not carry the temp file's permissions onto it")
+
 
 def test_a_failed_restriction_still_persists_the_key_and_never_raises(
         auth, monkeypatch):
