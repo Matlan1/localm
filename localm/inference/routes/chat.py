@@ -26,7 +26,7 @@ from fastapi.responses import StreamingResponse
 import localm.inference.http_server as _hs
 from localm.inference.backends.base import (
     EmbedBatchTooLargeError, GrammarUnsupportedError, InvalidGrammarError,
-    messages_contain_image,
+    TriggerValidatorUnavailableError, messages_contain_image,
 )
 from localm.inference.chat_pipeline import ChatHookContext
 from localm.inference.gbnf import check_grammar_structure, validate_trigger_patterns
@@ -185,6 +185,14 @@ def register(app: FastAPI, ctx) -> None:
                 try:
                     await asyncio.get_running_loop().run_in_executor(
                         None, validate_trigger_patterns, req.grammar_triggers)
+                except TriggerValidatorUnavailableError as e:
+                    # BEFORE the InvalidGrammarError arm, because it IS one. The
+                    # pattern was never checked (the probe pool was saturated, or
+                    # its daemon could not be reached), so 400 would blame the
+                    # caller for a condition on this side of the wire that a
+                    # retry can clear. Still a refusal: an unproven pattern never
+                    # reaches the native sampler.
+                    raise HTTPException(503, str(e))
                 except InvalidGrammarError as e:
                     raise HTTPException(400, f"Invalid grammar trigger: {e}")
                 gen_kwargs["grammar_lazy"] = True
@@ -554,6 +562,10 @@ def register(app: FastAPI, ctx) -> None:
                 try:
                     await asyncio.get_running_loop().run_in_executor(
                         None, validate_trigger_patterns, req.grammar_triggers)
+                except TriggerValidatorUnavailableError as e:
+                    # Same arm order and same reasoning as /v1/chat/completions:
+                    # "could not check" is a 503, not a 400 blaming the pattern.
+                    raise HTTPException(503, str(e))
                 except InvalidGrammarError as e:
                     raise HTTPException(400, f"Invalid grammar trigger: {e}")
                 gen_kwargs["grammar_lazy"] = True
@@ -610,6 +622,7 @@ def register(app: FastAPI, ctx) -> None:
             prompt_tokens = await loop.run_in_executor(
                 None, engine.count_tokens, _messages_prompt_text(messages))
 
+            gen_error: Exception | None = None
             async with sem:
                 # Cancelable on client disconnect (same as /v1/chat/completions'
                 # non-streaming path): an aborted request releases the per-model
@@ -629,10 +642,33 @@ def register(app: FastAPI, ctx) -> None:
                     text = await _generate_full(engine, messages, request, **gen_kwargs)
                 except _hs._BACKEND_ERROR_TYPES as e:
                     raise HTTPException(_hs.backend_error_status(e), str(e))
+                except RuntimeError as e:
+                    # A generation FAILURE (not enough free VRAM for this prompt,
+                    # a conversation that outgrew n_ctx_max, a native decode
+                    # error) - the LAST of the four generation paths to get this
+                    # arm. The other three already render it inline: _complete
+                    # for non-streaming chat, and both streaming legs via their
+                    # gen_error handling. This one had no arm, so the reason was
+                    # discarded by the generic backstop and the caller got
+                    # {"detail": "Internal server error"} for a failure its OWN
+                    # streaming twin reports in full.
+                    #
+                    # Catch ONLY RuntimeError, not Exception, for the same reason
+                    # _complete does: a broken engine (a method-less mock ->
+                    # AttributeError) is a real bug that must surface loudly
+                    # rather than be dressed up as an "inference error" (rule 5),
+                    # and CancelledError (client disconnect) must not be
+                    # swallowed either.
+                    from localm.debuglog import logger as _dbg
+                    _dbg.exception("non-streaming completion generation failed")
+                    gen_error = e
+                    text = f"\n[inference error: {e}]"
 
-            # Outlet fully controls the returned content in the non-streaming path;
+            # Outlet fully controls the returned content in the non-streaming path
+            # (but a failed generation surfaces its error verbatim, not reshaped by
+            # the outlet - same carve-out as _complete);
             # then record the exchange (audit + transcript), exactly like chat.
-            if pipeline is not None and ctx is not None and pipeline.has("outlet"):
+            if gen_error is None and pipeline is not None and ctx is not None and pipeline.has("outlet"):
                 text = await pipeline.run_outlet(text, messages, ctx)
             _audit_exchange(_audit, _transcript, messages, text)
 
@@ -644,7 +680,14 @@ def register(app: FastAPI, ctx) -> None:
                 "object": "text_completion",
                 "created": ts,
                 "model": reported_model,
-                "choices": [{"text": text, "index": 0, "finish_reason": "stop"}],
+                # "error", not "stop", when generation failed - the machine-
+                # detectable half of the contract, and the whole reason a 200
+                # carrying an error text is honest rather than a lie. Its own
+                # streaming twin already marks its terminal frame this way
+                # (http_server.py's _stream_sse_completion), so a client that
+                # already handles the stream needs no change to handle this.
+                "choices": [{"text": text, "index": 0,
+                             "finish_reason": "error" if gen_error is not None else "stop"}],
                 "usage": {
                     "prompt_tokens": prompt_tokens,
                     "completion_tokens": completion_tokens,

@@ -895,13 +895,20 @@ def test_route_accepts_safe_grammar_trigger_and_reaches_generation():
     engine.chat_stream.assert_called_once()
 
 
-def test_probe_pattern_is_safe_joins_inflight_prewarm_without_duplicate_spawn():
-    """Verify that _probe_pattern_is_safe joins an in-flight pre-warm thread
-    outside _TRIGGER_PROBE_LOCK rather than spawning a duplicate daemon.
+def test_probe_on_slot_joins_inflight_prewarm_without_duplicate_spawn():
+    """PR #943's property, carried over to the per-slot probe pool: a caller
+    that finds its slot empty must JOIN an in-flight pre-warm thread rather
+    than start a duplicate spawn.
 
-    Uses Event synchronization to guarantee that the fake pre-warm thread is
-    alive and waiting when _probe_pattern_is_safe performs its first lock
-    check (proc is None), and unblocks only when join() is actually invoked."""
+    Uses Event synchronization to guarantee the fake pre-warm thread is alive
+    and waiting when _probe_on_slot performs its first check (slot.proc is
+    None), and unblocks only when join() is actually invoked.
+
+    Runs against a FRESH _ProbeSlot rather than one taken from
+    _PROBE_SLOTS_FREE: the pool is module-level state shared with every other
+    test in the run, and a test that borrowed a real slot and then failed
+    mid-way could return it holding a MagicMock, which the next test to draw
+    that slot would try to talk to."""
     import localm.inference.gbnf as gbnf
 
     fake_proc = MagicMock()
@@ -918,17 +925,18 @@ def test_probe_pattern_is_safe_joins_inflight_prewarm_without_duplicate_spawn():
         spawn_called = True
         return fake_proc
 
-    with patch.object(gbnf, "_TRIGGER_PROBE_PROC", None), \
-         patch.object(gbnf, "_spawn_trigger_probe_daemon", side_effect=mock_spawn), \
+    slot = gbnf._ProbeSlot()
+
+    with patch.object(gbnf, "_spawn_trigger_probe_daemon", side_effect=mock_spawn), \
          patch.object(gbnf, "_readline_with_timeout", return_value="OK"):
 
         def fake_prewarm():
             start_prewarm.wait()
-            with gbnf._TRIGGER_PROBE_LOCK:
-                gbnf._TRIGGER_PROBE_PROC = fake_proc
+            with slot.lock:
+                slot.proc = fake_proc
 
         prewarm_thread = threading.Thread(target=fake_prewarm)
-        gbnf._PREWARM_THREAD = prewarm_thread
+        slot.prewarm = prewarm_thread
 
         real_join = prewarm_thread.join
         def tracing_join(*a, **kw):
@@ -940,10 +948,345 @@ def test_probe_pattern_is_safe_joins_inflight_prewarm_without_duplicate_spawn():
         prewarm_thread.join = tracing_join
         prewarm_thread.start()
 
-        is_safe, reason = gbnf._probe_pattern_is_safe(r"^<tool_call>")
+        verdict, reason = gbnf._probe_on_slot(slot, r"^<tool_call>")
 
-        assert is_safe is True
+        assert verdict == gbnf._PROBE_SAFE, reason
         assert join_called is True, "join() must have been called on in-flight pre-warm thread"
         assert spawn_called is False, "should have joined in-flight prewarm instead of spawning duplicate"
+
+
+#  Concurrency and admission control (the 2026-07-30 ruling's residual)
+#
+#  The ReDoS crash/hang vulnerability was closed by the static filter plus the
+#  daemon probe. What the corrected arithmetic then identified as the REMAINING
+#  cost was pure serialization:
+#
+#      18 x 2.0s steady-state probe timeout  = 36 s
+#       2 x 10s daemon spawn                 = 20 s   (addressed by PR #943)
+#
+#  i.e. 36 of the 56 seconds were LEGITIMATE probe timeouts made serial by one
+#  global lock held across the whole round trip. The ruling names the fix:
+#  CONCURRENCY or ADMISSION CONTROL. These pin both.
+
+
+class _HangingStream:
+    """A stdout whose readline() never returns, which is EXACTLY what a
+    catastrophic pattern does to the daemon: the process is alive and stuck
+    inside re.search(), so the caller's own timeout is the only thing that can
+    detect it (nothing inside one thread can interrupt a C-level match).
+
+    Patched in at the SPAWN level rather than replacing _readline_with_timeout,
+    so the real timeout helper - its reader thread, its queue, its abandonment
+    of the stuck thread - runs for real. Patching the helper instead would
+    delete the very mechanism these tests exist to measure."""
+
+    def __init__(self) -> None:
+        self._never = threading.Event()
+
+    def readline(self):
+        self._never.wait()      # never set; the reader thread is abandoned
+        return ""
+
+
+def _hanging_daemon() -> MagicMock:
+    proc = MagicMock()
+    proc.poll.return_value = None
+    proc.stdout = _HangingStream()
+    proc.stdin = MagicMock()
+    return proc
+
+
+def _fresh_pool(monkeypatch, size: int) -> None:
+    """Replace the module-level pool with *size* fresh slots for one test.
+
+    monkeypatch.setattr restores the real pool afterwards, so a test that
+    shrinks the pool cannot leak that into the next one."""
+    import queue as _queue
+
+    import localm.inference.gbnf as gbnf
+
+    pool = _queue.LifoQueue()
+    for _ in range(size):
+        pool.put(gbnf._ProbeSlot())
+    monkeypatch.setattr(gbnf, "_TRIGGER_PROBE_POOL_SIZE", size)
+    monkeypatch.setattr(gbnf, "_PROBE_SLOTS_FREE", pool)
+
+
+def test_concurrent_dangerous_patterns_do_not_serialize(monkeypatch):
+    """THE residual, measured: N patterns that each hang their probe must cost
+    about ceil(N / pool) timeouts of wall clock, not N of them.
+
+    Every pattern here is UNIQUE (the cache is keyed on the exact string, and a
+    repeated pattern would be answered from it) and shaped to pass the static
+    filter, so each one genuinely reaches the daemon and genuinely waits out the
+    full timeout - which is what the 18 x 2.0s in the ruling's arithmetic were.
+
+    The assertion is deliberately loose relative to the arithmetic (8 patterns
+    over 4 slots = 2 rounds = ~1.0s, allowed up to 2.5s) because this box runs
+    many sessions at once. It is still nowhere near the ~4.0s that serial
+    execution costs, and the fires-control below pins that gap: forcing the pool
+    to 1 slot makes this same test fail on the elapsed bound."""
+    import time
+
+    import localm.inference.gbnf as gbnf
+
+    monkeypatch.setattr(gbnf, "_TRIGGER_PROBE_TIMEOUT", 0.5)
+    monkeypatch.setattr(gbnf, "_TRIGGER_PROBE_SPAWN_TIMEOUT", 0.5)
+    monkeypatch.setattr(gbnf, "_spawn_trigger_probe_daemon", _hanging_daemon)
+    _fresh_pool(monkeypatch, 4)
+
+    patterns = [f"^<hang_{i}_{time.time_ns()}>" for i in range(8)]
+    verdicts: list = []
+    lock = threading.Lock()
+
+    def _one(p):
+        v, _reason = gbnf._probe_pattern_is_safe(p)
+        with lock:
+            verdicts.append(v)
+
+    threads = [threading.Thread(target=_one, args=(p,)) for p in patterns]
+    t0 = time.perf_counter()
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    elapsed = time.perf_counter() - t0
+
+    # Every one of them was correctly judged dangerous - the concurrency must
+    # not have been bought by skipping the check.
+    assert verdicts == [gbnf._PROBE_UNSAFE] * 8, verdicts
+    assert elapsed < 2.5, (
+        f"8 hanging probes over a 4-slot pool took {elapsed:.2f}s; serial "
+        "execution of 8 x 0.5s is ~4.0s, so they are still queueing behind "
+        "each other")
+
+
+def test_a_saturated_pool_refuses_fast_instead_of_queueing(monkeypatch):
+    """ADMISSION CONTROL: a caller that cannot get a slot is refused promptly,
+    and is refused as UNDETERMINED - a statement about the validator, not a
+    verdict on its pattern.
+
+    Without this, concurrency alone would still let a large enough flood queue
+    without limit; it would just take pool-size times longer to get there."""
+    import time
+
+    import localm.inference.gbnf as gbnf
+
+    monkeypatch.setattr(gbnf, "_TRIGGER_PROBE_TIMEOUT", 5.0)
+    monkeypatch.setattr(gbnf, "_TRIGGER_PROBE_SPAWN_TIMEOUT", 5.0)
+    monkeypatch.setattr(gbnf, "_TRIGGER_PROBE_SLOT_WAIT", 0.3)
+    monkeypatch.setattr(gbnf, "_spawn_trigger_probe_daemon", _hanging_daemon)
+    _fresh_pool(monkeypatch, 1)
+
+    started = threading.Event()
+
+    def _occupy():
+        started.set()
+        gbnf._probe_pattern_is_safe(f"^<occupier_{time.time_ns()}>")
+
+    holder = threading.Thread(target=_occupy, daemon=True)
+    holder.start()
+    started.wait(timeout=5.0)
+    time.sleep(0.15)     # let the holder actually take the only slot
+
+    t0 = time.perf_counter()
+    verdict, reason = gbnf._probe_pattern_is_safe(f"^<refused_{time.time_ns()}>")
+    elapsed = time.perf_counter() - t0
+
+    assert verdict == gbnf._PROBE_UNDETERMINED, (verdict, reason)
+    assert "busy" in reason, reason
+    # Refused after roughly the admission wait, NOT after the holder's 5.0s
+    # probe timeout. The gap between those two is the whole point.
+    assert elapsed < 2.0, (
+        f"a refused caller waited {elapsed:.2f}s - it queued behind the "
+        "in-flight probe instead of being admission-refused")
+    holder.join(timeout=10.0)
+
+
+def test_an_undetermined_verdict_is_never_cached(monkeypatch):
+    """"I could not check this" must NEVER be remembered as "this pattern is
+    bad". The cache is keyed on the pattern and lives for the process, so
+    caching a transient validator failure would reject a perfectly good pattern
+    for the rest of the run.
+
+    This is not only about the new saturation case: a spawn failure has always
+    been classified as a rejection and cached as one, so before this change a
+    single failed subprocess spawn permanently poisoned whatever pattern
+    happened to arrive during it."""
+    import localm.inference.gbnf as gbnf
+    from localm.inference.backends.base import TriggerValidatorUnavailableError
+
+    # A FRESH, EMPTY pool is the precondition, not decoration. Patching
+    # _spawn_trigger_probe_daemon simulates nothing unless a spawn is actually
+    # needed, and _PROBE_SLOTS_FREE is module-level state that earlier tests in
+    # the same run leave holding LIVE daemons - which answer "OK" without ever
+    # reaching the patch. Measured: this test passed alone and failed in a
+    # three-test selection for exactly that reason.
+    _fresh_pool(monkeypatch, 2)
+
+    pattern = r"^<undetermined_is_not_a_verdict>"
+    gbnf._VALIDATED_TRIGGER_PATTERNS.pop(pattern, None)
+
+    def _cannot_spawn():
+        raise OSError("simulated: no subprocess available")
+
+    with patch.object(gbnf, "_spawn_trigger_probe_daemon", side_effect=_cannot_spawn):
+        with pytest.raises(TriggerValidatorUnavailableError):
+            gbnf.validate_trigger_patterns([pattern])
+
+    assert pattern not in gbnf._VALIDATED_TRIGGER_PATTERNS, (
+        "a transient validator failure was cached as a verdict on the pattern")
+
+    # And the proof that it matters: the identical pattern validates fine once
+    # the validator is working again. Cached, this would raise forever.
+    gbnf.validate_trigger_patterns([pattern])
+    assert gbnf._VALIDATED_TRIGGER_PATTERNS[pattern] is None
+
+
+def test_an_unsafe_verdict_is_still_cached(monkeypatch):
+    """The other direction, so the fix above cannot be 'stop caching anything'.
+
+    A pattern PROVEN dangerous stays proven: re-sending it must be answered
+    from the cache, not re-probed. Otherwise an attacker replays the full
+    timeout on every repeat of one pattern for free."""
+    import time
+
+    import localm.inference.gbnf as gbnf
+    from localm.inference.backends.base import InvalidGrammarError
+
+    monkeypatch.setattr(gbnf, "_TRIGGER_PROBE_TIMEOUT", 0.5)
+    monkeypatch.setattr(gbnf, "_TRIGGER_PROBE_SPAWN_TIMEOUT", 0.5)
+    monkeypatch.setattr(gbnf, "_spawn_trigger_probe_daemon", _hanging_daemon)
+    _fresh_pool(monkeypatch, 2)
+
+    pattern = f"^<proven_dangerous_{time.time_ns()}>"
+    gbnf._VALIDATED_TRIGGER_PATTERNS.pop(pattern, None)
+
+    with pytest.raises(InvalidGrammarError):
+        gbnf.validate_trigger_patterns([pattern])
+    assert gbnf._VALIDATED_TRIGGER_PATTERNS.get(pattern) is not None
+
+    t0 = time.perf_counter()
+    with pytest.raises(InvalidGrammarError):
+        gbnf.validate_trigger_patterns([pattern])
+    elapsed = time.perf_counter() - t0
+    assert elapsed < 0.05, (
+        f"a re-sent proven-dangerous pattern cost {elapsed:.3f}s - it was "
+        "re-probed instead of answered from the cache")
+
+
+def test_route_answers_503_not_400_when_the_validator_cannot_check(monkeypatch):
+    """WHO IS AT FAULT. A saturated or unreachable validator is a condition on
+    the SERVER's side that a retry can clear, so it is a 503. A 400 would tell
+    the caller to go and fix a pattern that was never even looked at.
+
+    Both are refusals - nothing unvalidated reaches generation either way, and
+    chat_stream is asserted never called - so the status is the only thing that
+    carries the difference to the client."""
+    import os
+
+    from fastapi.testclient import TestClient
+
+    import localm.inference.gbnf as gbnf
+    from localm.inference.http_server import create_app
+
+    # See test_an_undetermined_verdict_is_never_cached: an empty pool is what
+    # makes the spawn patch below bite at all.
+    _fresh_pool(monkeypatch, 2)
+
+    os.environ.pop("LOCALM_API_KEY", None)
+    engine = MagicMock()
+    engine.display_name = "test-model"
+    type(engine).loaded = property(lambda self: True)
+    engine.active_requests = 0
+    engine.chat_stream.side_effect = AssertionError(
+        "generation must not start on a pattern that was never validated")
+
+    def _cannot_spawn():
+        raise OSError("simulated: no subprocess available")
+
+    pattern = r"^<route_503_probe>"
+    gbnf._VALIDATED_TRIGGER_PATTERNS.pop(pattern, None)
+
+    client = TestClient(create_app(engine), raise_server_exceptions=True)
+    with patch.object(gbnf, "_spawn_trigger_probe_daemon", side_effect=_cannot_spawn):
+        r = client.post("/v1/chat/completions", json={
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "grammar": 'root ::= "x"',
+            "grammar_lazy": True,
+            "grammar_triggers": [pattern],
+            "max_tokens": 4,
+        })
+
+    assert r.status_code == 503, (r.status_code, r.text)
+    assert "not checked" in r.text or "could not be" in r.text, r.text
+    engine.chat_stream.assert_not_called()
+    assert pattern not in gbnf._VALIDATED_TRIGGER_PATTERNS
+
+
+def test_the_completions_route_also_answers_503(monkeypatch):
+    """The same arm on /v1/completions. Both routes call the same validator, so
+    a fix applied to only one of them would leave exactly the kind of per-route
+    divergence the error-contract work exists to remove."""
+    import os
+
+    from fastapi.testclient import TestClient
+
+    import localm.inference.gbnf as gbnf
+    from localm.inference.http_server import create_app
+
+    _fresh_pool(monkeypatch, 2)
+
+    os.environ.pop("LOCALM_API_KEY", None)
+    engine = MagicMock()
+    engine.display_name = "test-model"
+    type(engine).loaded = property(lambda self: True)
+    engine.active_requests = 0
+    engine.chat_stream.side_effect = AssertionError(
+        "generation must not start on a pattern that was never validated")
+
+    def _cannot_spawn():
+        raise OSError("simulated: no subprocess available")
+
+    pattern = r"^<route_503_probe_completions>"
+    gbnf._VALIDATED_TRIGGER_PATTERNS.pop(pattern, None)
+
+    client = TestClient(create_app(engine), raise_server_exceptions=True)
+    with patch.object(gbnf, "_spawn_trigger_probe_daemon", side_effect=_cannot_spawn):
+        r = client.post("/v1/completions", json={
+            "model": "test-model",
+            "prompt": "hi",
+            "grammar": 'root ::= "x"',
+            "grammar_lazy": True,
+            "grammar_triggers": [pattern],
+            "max_tokens": 4,
+        })
+
+    assert r.status_code == 503, (r.status_code, r.text)
+    engine.chat_stream.assert_not_called()
+
+
+def test_a_slot_is_returned_to_the_pool_even_when_the_probe_rejects(monkeypatch):
+    """A leaked slot is a permanent, silent capacity loss: enough of them and
+    every later request is refused as 'busy' forever, with nothing in the logs
+    saying why. So the return has to survive the rejecting path too, not only
+    the happy one."""
+    import time
+
+    import localm.inference.gbnf as gbnf
+
+    monkeypatch.setattr(gbnf, "_TRIGGER_PROBE_TIMEOUT", 0.3)
+    monkeypatch.setattr(gbnf, "_TRIGGER_PROBE_SPAWN_TIMEOUT", 0.3)
+    monkeypatch.setattr(gbnf, "_spawn_trigger_probe_daemon", _hanging_daemon)
+    _fresh_pool(monkeypatch, 2)
+
+    for _ in range(3):
+        verdict, _reason = gbnf._probe_pattern_is_safe(f"^<leak_{time.time_ns()}>")
+        assert verdict == gbnf._PROBE_UNSAFE
+
+    assert gbnf._PROBE_SLOTS_FREE.qsize() == 2, (
+        f"{2 - gbnf._PROBE_SLOTS_FREE.qsize()} slot(s) leaked after rejecting "
+        "probes - the pool shrinks permanently on every rejection")
 
 

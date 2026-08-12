@@ -43,6 +43,7 @@ from localm.inference.backends.base import (
     ImageDecodeUnavailable,
     InvalidGrammarError,
     ModelLoadCancelled,
+    TriggerValidatorUnavailableError,
     UnsupportedInputError,
     VisionInputError,
 )
@@ -4766,8 +4767,17 @@ def _memory_used_header(ctx) -> dict:
 # ORDER IS LOAD-BEARING and the table is a sequence, not a dict, for exactly that
 # reason: ImageDecodeUnavailable and VisionInputError are BOTH UnsupportedInputError
 # subclasses, so a base-class-first table would swallow them and report a missing
-# image decoder as the caller's bad input. This is the same arm-ordering hazard
-# documented in cli/chat.py's vision handling, and it has its own test.
+# image decoder as the caller's bad input. TriggerValidatorUnavailableError sits
+# above InvalidGrammarError for the same reason: it IS one, and listed after its
+# parent it would answer 400 - blaming the caller's pattern for a validator that
+# was too busy to look at it. This is the same arm-ordering hazard documented in
+# cli/chat.py's vision handling, and it has its own test.
+#
+# 503 for TriggerValidatorUnavailableError, and this is the one entry in the table
+# that is not permanent: everything else here describes a request or a build that
+# will fail identically on a retry, while a saturated probe pool clears on its own
+# within seconds. "Service Unavailable" is the only status that says "try again"
+# rather than "change something".
 #
 # 501 for ImageDecodeUnavailable, not 400 and not 503: the request is fine and the
 # caller can do nothing about it, so 4xx would blame the wrong party; and the
@@ -4778,6 +4788,7 @@ _BACKEND_ERROR_STATUS: tuple = (
     (VisionInputError, 400),
     (UnsupportedInputError, 400),
     (GrammarUnsupportedError, 400),
+    (TriggerValidatorUnavailableError, 503),
     (InvalidGrammarError, 400),
     (EmbedBatchTooLargeError, 413),
 )

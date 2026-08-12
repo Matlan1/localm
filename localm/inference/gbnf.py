@@ -313,6 +313,7 @@ def check_grammar_structure(grammar: str) -> None:
 # spawn/lock/timeout/kill-and-respawn architecture rather than inventing a
 # new one.
 
+import queue
 import threading as _threading
 
 # No caller-supplied trigger pattern is bounded in size before this point -
@@ -334,9 +335,81 @@ import threading as _threading
 # never reaches even that function's own O(n) work, let alone the daemon.
 MAX_TRIGGER_PATTERN_BYTES = 4096
 
-_TRIGGER_PROBE_PROC = None
-_TRIGGER_PROBE_LOCK = _threading.Lock()
-_PREWARM_THREAD = None
+# How many probes may run AT ONCE, and how long a caller may wait for its turn.
+#
+# WHY A POOL AT ALL (the 2026-07-30 maintainer ruling, quoted because getting
+# this wrong builds the wrong mechanism): the residual measured after the
+# vulnerability itself was closed was "~56s for 20 crafted patterns", and
+# splitting the per-attack numbers showed it was NOT daemon-spawn compounding:
+#
+#     18 x 2.0s steady-state probe timeout  = 36 s   <- the dominant cost
+#      2 x 10s daemon spawn                 = 20 s   <- addressed by PR #943
+#
+# 36 of those 56 seconds were LEGITIMATE probe timeouts - the mechanism working
+# exactly as designed - made serial by a single global lock held across the whole
+# round trip. So the fix is CONCURRENCY or ADMISSION CONTROL, not the periodic
+# maintenance thread earlier drafts of this comment (and the issue entry) pointed
+# at, and not a pattern-size cap: MAX_TRIGGER_PATTERN_BYTES above never fires on
+# an (a|a)*b-class attack, which is a dozen bytes. Both are implemented here.
+#
+# CONCURRENCY: _PROBE_SLOTS_FREE below hands out one INDEPENDENT daemon per
+# concurrent caller, so N dangerous patterns cost ceil(N / _TRIGGER_PROBE_POOL_SIZE)
+# rounds instead of N.
+#
+# ADMISSION CONTROL: _TRIGGER_PROBE_SLOT_WAIT bounds how long a caller queues for
+# a slot before being refused outright. This bounds PER-CALLER latency, which is
+# what the residual actually measures - without it, concurrency alone would still
+# let a large enough flood queue unboundedly, just N/POOL_SIZE times more slowly.
+#
+# Sizing: 4 concurrent probes plus a 5.0s admission wait bounds an admitted
+# caller at roughly 5.0s of queueing plus its own _TRIGGER_PROBE_TIMEOUT, against
+# the 36s measured above. Slots are spawned LAZILY and handed out LIFO (see
+# _PROBE_SLOTS_FREE), so the normal case - one caller at a time - keeps exactly
+# ONE daemon alive and this pool costs nothing over the previous single daemon.
+_TRIGGER_PROBE_POOL_SIZE = 4
+_TRIGGER_PROBE_SLOT_WAIT = 5.0
+
+
+class _ProbeSlot:
+    """One probe daemon plus the state needed to replace it.
+
+    ``lock`` guards ``proc`` against the background pre-warm thread ONLY, and is
+    held for microseconds to install or claim a process - NEVER across a spawn or
+    a probe round trip. That is the whole point of this class: exclusive use of
+    the daemon comes from having CHECKED THE SLOT OUT of _PROBE_SLOTS_FREE, not
+    from holding a lock, so one caller's 2.0s timeout no longer serialises every
+    other caller behind it.
+    """
+
+    __slots__ = ("lock", "proc", "prewarm")
+
+    def __init__(self) -> None:
+        self.lock = _threading.Lock()
+        self.proc = None
+        self.prewarm = None
+
+
+# Free slots, LIFO. LIFO rather than FIFO deliberately: it re-hands the
+# most-recently-returned (and therefore already-spawned, already-warm) slot to
+# the next caller, so a server whose real concurrency is 1 only ever spawns ONE
+# daemon and the other _TRIGGER_PROBE_POOL_SIZE - 1 slots stay empty and free.
+# A FIFO queue would round-robin every caller across all slots and spawn a
+# daemon for each, paying the full pool's memory for concurrency nobody used.
+_PROBE_SLOTS_FREE: "queue.LifoQueue" = queue.LifoQueue()
+for _ in range(_TRIGGER_PROBE_POOL_SIZE):
+    _PROBE_SLOTS_FREE.put(_ProbeSlot())
+
+# The three outcomes of a probe. SAFE and UNSAFE are statements about the
+# PATTERN; UNDETERMINED is a statement about the VALIDATOR, and conflating them
+# is a real defect rather than a tidiness point: validate_trigger_patterns caches
+# a verdict for the process lifetime, so caching "I could not ask right now"
+# would permanently reject a perfectly good pattern because the box was busy once.
+# Both UNSAFE and UNDETERMINED still REJECT the request - never generate with a
+# pattern that was not proven safe - they just differ in what is remembered and
+# in who is told they are at fault (see TriggerValidatorUnavailableError).
+_PROBE_SAFE = "safe"
+_PROBE_UNSAFE = "unsafe"
+_PROBE_UNDETERMINED = "undetermined"
 
 # validate_trigger_patterns's per-process cache - see that function's
 # docstring for why this is an efficiency measure, not the safety mechanism.
@@ -365,8 +438,10 @@ _TRIGGER_PROBE_SPAWN_TIMEOUT = 10.0
 
 
 def _spawn_trigger_probe_daemon():
-    """Start the long-lived trigger-pattern-probe daemon. Caller holds
-    _TRIGGER_PROBE_LOCK. Line-buffered text pipes (bufsize=1) so one
+    """Start the long-lived trigger-pattern-probe daemon. Caller must NOT hold
+    any slot lock: process creation takes multiple seconds, and holding a lock
+    across it is exactly the contention PR #943 removed (see
+    _slot_kill_and_prewarm). Line-buffered text pipes (bufsize=1) so one
     print()/readline() on either side is exactly one protocol message - see
     _trigger_probe.py for the request/response contract. stderr discarded:
     this daemon has no diagnostic output a caller needs (a probe hanging is
@@ -413,58 +488,59 @@ def _readline_with_timeout(stream, timeout: float):
     return line
 
 
-def _kill_and_clear_trigger_probe() -> None:
-    """Caller holds _TRIGGER_PROBE_LOCK. Best-effort kill of a dead/hung
-    daemon, then hands off to a BACKGROUND thread to pre-spawn its
-    replacement, so the respawn cost usually lands on nobody's request
-    instead of landing on whichever caller happens to arrive next.
+def _slot_kill_and_prewarm(slot: "_ProbeSlot") -> None:
+    """Best-effort kill of *slot*'s dead/hung daemon, then hand off to a
+    BACKGROUND thread to pre-spawn its replacement, so the respawn cost usually
+    lands on nobody's request instead of landing on whichever caller happens to
+    check this slot out next.
 
-    Why this exists (measured live): every timeout kills the daemon
-    (nothing else can be trusted alive after a stuck native regex match),
-    so without this, the VERY NEXT validate_trigger_patterns() call - from
-    an attacker sending the next of many distinct dangerous patterns, or
-    from a wholly unrelated legitimate caller who just happened to arrive
-    after one - pays the SPAWN timeout (multiple seconds) synchronously,
-    not the fast steady-state one. N distinct attack requests were measured
-    compounding at close to the spawn cost EACH as a direct result.
+    Caller OWNS *slot* (it checked it out of _PROBE_SLOTS_FREE) and must not
+    hold slot.lock.
 
-    ASYMMETRY AND FIX: Previously, the background pre-warm thread spawned
-    outside _TRIGGER_PROBE_LOCK and acquired the lock only to install its
-    finished result, while the main thread's synchronous daemon spawn ran
-    INSIDE _TRIGGER_PROBE_LOCK, holding it for the full multi-second spawn.
-    This caused the pre-warm thread to block behind the main thread's spawn,
-    rendering pre-warming ineffective under back-to-back requests. The main
-    thread now spawns outside the lock as well and joins an in-flight
-    pre-warm thread rather than starting a duplicate spawn, removing lock
-    contention during process creation."""
-    global _TRIGGER_PROBE_PROC, _PREWARM_THREAD
-    if _TRIGGER_PROBE_PROC is not None:
+    Why this exists (measured live): every timeout kills the daemon (nothing
+    else can be trusted alive after a stuck native regex match), so without
+    this, the VERY NEXT caller to take this slot - an attacker sending the next
+    of many distinct dangerous patterns, or a wholly unrelated legitimate
+    caller who just happened to arrive after one - pays the SPAWN timeout
+    (multiple seconds) synchronously, not the fast steady-state one. N distinct
+    attack requests were measured compounding at close to the spawn cost EACH
+    as a direct result.
+
+    ASYMMETRY AND FIX (PR #943, preserved here per-slot): the background
+    pre-warm thread spawns OUTSIDE any lock and acquires slot.lock only to
+    install its finished result. The main thread also spawns outside the lock
+    and JOINS an in-flight pre-warm rather than starting a duplicate. An
+    earlier version held the lock across the main thread's multi-second spawn,
+    which blocked the pre-warm thread behind it and made pre-warming
+    ineffective under back-to-back requests."""
+    with slot.lock:
+        proc, slot.proc = slot.proc, None
+    if proc is not None:
         try:
-            _TRIGGER_PROBE_PROC.kill()
+            proc.kill()
         except Exception:
             pass
-    _TRIGGER_PROBE_PROC = None
 
     def _prewarm_replacement() -> None:
-        global _TRIGGER_PROBE_PROC
         try:
             replacement = _spawn_trigger_probe_daemon()
         except Exception:
             return   # best-effort: the next caller's own synchronous spawn is the fallback
-        with _TRIGGER_PROBE_LOCK:
-            if _TRIGGER_PROBE_PROC is None or _TRIGGER_PROBE_PROC.poll() is not None:
-                _TRIGGER_PROBE_PROC = replacement
-            else:
-                # Someone else already spawned one while we were working -
-                # do not leak our own spare, it was never handed to anyone.
-                try:
-                    replacement.kill()
-                except Exception:
-                    pass
+        with slot.lock:
+            if slot.proc is None or slot.proc.poll() is not None:
+                slot.proc = replacement
+                return
+        # Someone else already spawned one while we were working - do not leak
+        # our own spare, it was never handed to anyone. Killed OUTSIDE the lock:
+        # nothing else may block on a lock while a process teardown runs.
+        try:
+            replacement.kill()
+        except Exception:
+            pass
 
     t = _threading.Thread(target=_prewarm_replacement, daemon=True,
                           name="localm-trigger-probe-prewarm")
-    _PREWARM_THREAD = t
+    slot.prewarm = t
     t.start()
 
 
@@ -484,13 +560,17 @@ def _static_shape_rejection(pattern: str) -> "str | None":
     spawn timeout too, not the steady-state one. MEASURED live: ~10s per
     rejected pattern even with a 1s steady-state timeout configured,
     because every one of N distinct attack patterns forces a respawn for
-    the (N+1)th check. N distinct attack patterns therefore serialize
-    behind one lock at close to the SPAWN timeout each, turning the
-    validator itself into the chokepoint it exists to prevent. Catching
-    the shapes recognized here removes them from that queue entirely -
-    zero lock contention, zero subprocess cost, zero effect on legitimate
-    traffic - which is the only way to make repeated attack traffic cheap
-    to reject rather than merely SAFE to reject.
+    the (N+1)th check. That measurement was taken when a SINGLE daemon sat
+    behind a SINGLE lock held across the whole round trip, so N patterns
+    serialized at close to the SPAWN timeout each; the pool and the
+    admission wait above have since bounded that (see
+    validate_trigger_patterns). This filter is not thereby optional -
+    a bound is not an absence, and it is what keeps the KNOWN shapes from
+    consuming a bounded resource at all: a pattern recognized here never
+    takes a probe slot, never spawns a subprocess, and therefore never
+    contributes to the saturation that would refuse a legitimate caller.
+    Catching them here is still the only way to make repeated attack
+    traffic cheap to reject rather than merely SAFE to reject.
 
     A length check runs first (see MAX_TRIGGER_PATTERN_BYTES above), before
     either shape check below even scans the pattern once - real trigger
@@ -578,50 +658,86 @@ def _static_shape_rejection(pattern: str) -> "str | None":
     return None
 
 
-def _probe_pattern_is_safe(pattern: str) -> "tuple[bool, str]":
-    """(is_safe, reason). is_safe=False covers three distinct cases, all
-    treated identically by the caller (reject): the daemon determined the
-    pattern is invalid or dangerous and said so ("BAD ..."), the daemon
-    could not be reached at all (spawn failure), or - the case this whole
-    mechanism exists for - the daemon hung trying to check the pattern and
-    never replied within the timeout. Never raises."""
-    global _TRIGGER_PROBE_PROC, _PREWARM_THREAD
+def _probe_pattern_is_safe(pattern: str) -> "tuple[str, str]":
+    """(verdict, reason) where verdict is _PROBE_SAFE / _PROBE_UNSAFE /
+    _PROBE_UNDETERMINED. Never raises.
+
+    ADMISSION CONTROL LIVES HERE. Checking a slot out of _PROBE_SLOTS_FREE is
+    what grants the right to run a probe, and the bounded wait for one is what
+    stops a flood queueing without limit. A caller that cannot get a slot within
+    _TRIGGER_PROBE_SLOT_WAIT is refused IMMEDIATELY as _PROBE_UNDETERMINED
+    rather than waiting behind the whole queue - the residual this closes is
+    per-caller latency, so making the last caller in a flood wait 36s "but
+    correctly" would not have fixed anything.
+
+    _PROBE_UNDETERMINED is NOT a verdict about the pattern and must never be
+    cached as one. It says the validator could not answer: the pool was
+    saturated, or the daemon could not be spawned or reached. The request is
+    still REJECTED (an unproven pattern never reaches the native sampler), but
+    an identical retry a second later can legitimately succeed."""
+    try:
+        slot = _PROBE_SLOTS_FREE.get(timeout=_TRIGGER_PROBE_SLOT_WAIT)
+    except queue.Empty:
+        return _PROBE_UNDETERMINED, (
+            f"the trigger-pattern validator is busy (all "
+            f"{_TRIGGER_PROBE_POOL_SIZE} probe slots in use for more than "
+            f"{_TRIGGER_PROBE_SLOT_WAIT:.1f}s); this pattern was not checked, "
+            "so it was not accepted - retry shortly")
+    try:
+        return _probe_on_slot(slot, pattern)
+    finally:
+        # Unconditional: a slot that is not returned is leaked from the pool
+        # forever, and enough leaks turn every later request into a permanent
+        # saturation refusal.
+        _PROBE_SLOTS_FREE.put(slot)
+
+
+def _probe_on_slot(slot: "_ProbeSlot", pattern: str) -> "tuple[str, str]":
+    """One probe round trip on a slot the caller OWNS. Never raises.
+
+    No lock is held across the round trip, and that is the fix: exclusive access
+    to this daemon comes from having checked the slot out of _PROBE_SLOTS_FREE,
+    so the up-to-_TRIGGER_PROBE_TIMEOUT wait that REJECTING a dangerous pattern
+    costs by construction no longer blocks any other caller. slot.lock is taken
+    only for the microseconds needed to claim or install a process, never around
+    a spawn and never around _readline_with_timeout."""
     first_spawn = False
 
-    with _TRIGGER_PROBE_LOCK:
-        if _TRIGGER_PROBE_PROC is not None and _TRIGGER_PROBE_PROC.poll() is None:
-            proc = _TRIGGER_PROBE_PROC
+    with slot.lock:
+        if slot.proc is not None and slot.proc.poll() is None:
+            proc = slot.proc
         else:
-            if _TRIGGER_PROBE_PROC is not None:
+            if slot.proc is not None:
                 try:
-                    _TRIGGER_PROBE_PROC.kill()
+                    slot.proc.kill()
                 except Exception:
                     pass
-                _TRIGGER_PROBE_PROC = None
+                slot.proc = None
             proc = None
 
     if proc is None:
-        # Read _PREWARM_THREAD outside _TRIGGER_PROBE_LOCK: safe because
-        # thread references in Python are atomic object assignments, and
-        # joining an already-finished thread is a harmless no-op.
-        prewarm = _PREWARM_THREAD
+        # Read slot.prewarm outside slot.lock: safe because thread references in
+        # Python are atomic object assignments, and joining an already-finished
+        # thread is a harmless no-op.
+        prewarm = slot.prewarm
         if prewarm is not None and prewarm.is_alive():
             prewarm.join(timeout=_TRIGGER_PROBE_SPAWN_TIMEOUT)
 
-        with _TRIGGER_PROBE_LOCK:
-            if _TRIGGER_PROBE_PROC is not None and _TRIGGER_PROBE_PROC.poll() is None:
-                proc = _TRIGGER_PROBE_PROC
+        with slot.lock:
+            if slot.proc is not None and slot.proc.poll() is None:
+                proc = slot.proc
                 first_spawn = True
 
         if proc is None:
             try:
                 new_proc = _spawn_trigger_probe_daemon()
             except Exception as e:
-                return False, f"trigger-pattern probe could not be started ({e})"
+                return (_PROBE_UNDETERMINED,
+                        f"trigger-pattern probe could not be started ({e})")
 
-            with _TRIGGER_PROBE_LOCK:
-                if _TRIGGER_PROBE_PROC is None or _TRIGGER_PROBE_PROC.poll() is not None:
-                    _TRIGGER_PROBE_PROC = new_proc
+            with slot.lock:
+                if slot.proc is None or slot.proc.poll() is not None:
+                    slot.proc = new_proc
                     proc = new_proc
                     first_spawn = True
                 else:
@@ -629,35 +745,43 @@ def _probe_pattern_is_safe(pattern: str) -> "tuple[bool, str]":
                         new_proc.kill()
                     except Exception:
                         pass
-                    proc = _TRIGGER_PROBE_PROC
+                    proc = slot.proc
 
-    with _TRIGGER_PROBE_LOCK:
-        if proc is not _TRIGGER_PROBE_PROC or proc.poll() is not None:
-            return False, "trigger-pattern probe process is no longer valid"
-        try:
-            import json
-            proc.stdin.write(json.dumps({"pattern": pattern}) + "\n")
-            proc.stdin.flush()
-        except Exception as e:
-            _kill_and_clear_trigger_probe()
-            return False, f"trigger-pattern probe could not be reached ({e})"
-        timeout = _TRIGGER_PROBE_SPAWN_TIMEOUT if first_spawn else _TRIGGER_PROBE_TIMEOUT
-        line = _readline_with_timeout(proc.stdout, timeout)
-        if line is None:
-            # No reply within the timeout: either the daemon crashed/exited
-            # (EOF), or - the case this mechanism exists to catch - it is
-            # still alive and stuck inside re.search() on an adversarial
-            # probe. Either way the pattern is not safe to use, and the
-            # daemon (alive or not) is killed so a fresh one handles the
-            # NEXT request rather than staying wedged for it too.
-            _kill_and_clear_trigger_probe()
-            return False, (
+    if proc.poll() is not None:
+        return (_PROBE_UNDETERMINED,
+                "trigger-pattern probe process is no longer valid")
+    try:
+        import json
+        proc.stdin.write(json.dumps({"pattern": pattern}) + "\n")
+        proc.stdin.flush()
+    except Exception as e:
+        _slot_kill_and_prewarm(slot)
+        return (_PROBE_UNDETERMINED,
+                f"trigger-pattern probe could not be reached ({e})")
+    timeout = _TRIGGER_PROBE_SPAWN_TIMEOUT if first_spawn else _TRIGGER_PROBE_TIMEOUT
+    line = _readline_with_timeout(proc.stdout, timeout)
+    if line is None:
+        # No reply within the timeout: either the daemon crashed/exited (EOF),
+        # or - the case this mechanism exists to catch - it is still alive and
+        # stuck inside re.search() on an adversarial probe. Either way the
+        # pattern is not safe to use, and the daemon (alive or not) is killed so
+        # a fresh one handles the NEXT caller of this slot rather than staying
+        # wedged for it too.
+        #
+        # Deliberately _PROBE_UNSAFE, not _PROBE_UNDETERMINED: a timeout IS the
+        # detector this whole mechanism is built on (nothing inside one thread
+        # can interrupt a C-level backtracking match, so "it never answered" is
+        # the only evidence of danger that exists). Classing it undetermined
+        # would stop caching it and hand an attacker a free replay of the full
+        # timeout on every repeat of the same pattern.
+        _slot_kill_and_prewarm(slot)
+        return (_PROBE_UNSAFE,
                 f"pattern did not pass the safety probe within {timeout:.1f}s - "
                 "likely catastrophic regex backtracking")
-        line = line.strip()
-        if line == "OK":
-            return True, ""
-        return False, line[4:] if line.startswith("BAD ") else line
+    line = line.strip()
+    if line == "OK":
+        return _PROBE_SAFE, ""
+    return _PROBE_UNSAFE, (line[4:] if line.startswith("BAD ") else line)
 
 
 def validate_trigger_patterns(patterns: "list[str]") -> None:
@@ -670,10 +794,10 @@ def validate_trigger_patterns(patterns: "list[str]") -> None:
 
     Two layers, cheapest first: _static_shape_rejection (in-process,
     microseconds, catches KNOWN catastrophic shapes - see its own docstring
-    for why this is not optional ceremony but load-bearing: without it, N
-    distinct attacker-supplied patterns serialize behind the probe's single
-    lock at close to its SPAWN timeout each - MEASURED live - turning this
-    validator into the same kind of chokepoint it exists to remove), then
+    for why this is not optional ceremony but load-bearing: a pattern it
+    recognizes never occupies a probe slot at all, so known attack traffic
+    costs the pool nothing, whereas anything reaching the probe holds a slot
+    for as long as it takes to time out), then
     _probe_pattern_is_safe (the daemon round-trip - see that function and
     _trigger_probe.py) for whatever survives the cheap check. Composing
     both catches more than either alone: the static layer is free but
@@ -693,16 +817,24 @@ def validate_trigger_patterns(patterns: "list[str]") -> None:
     from an async handler - see routes/chat.py's call sites for why (a
     direct call would freeze that whole event loop, and every OTHER
     concurrent request on it, for the duration of one caller's bad
-    pattern). Residual, honestly-noted limitation of that same executor
-    hand-off: it shares Python's default thread pool with other blocking
-    work this server offloads (engine.load, embedding, token counting), so
-    a coordinated flood of MANY concurrent requests each submitting a
-    distinct uncached pattern that survives the static filter could still
-    exhaust that pool for a few seconds. Lower severity than the original
-    defect (temporary degradation under a sustained multi-connection
-    attack, not a crash or an indefinite hang, and it self-resolves once
-    patterns time out) - not solved here; general request-concurrency
-    bounding is a broader problem than this one fix.
+    pattern).
+
+    CONCURRENT CALLERS DO NOT QUEUE BEHIND EACH OTHER, which is the 2026-07-30
+    ruling's residual and is why the pool above exists rather than a single
+    daemon behind a single lock. Up to _TRIGGER_PROBE_POOL_SIZE probes run at
+    once, and a caller that cannot get a slot within _TRIGGER_PROBE_SLOT_WAIT is
+    refused outright instead of waiting behind the whole queue. So the cost of a
+    flood of N distinct dangerous patterns is bounded per caller rather than
+    growing with N: see MEASUREMENT-PLACEHOLDER-FILL-BEFORE-COMMIT.
+
+    WHAT IS STILL NOT SOLVED, stated because a bound is not an absence: the
+    executor hand-off above shares Python's default thread pool with other
+    blocking work this server offloads (engine.load, embedding, token counting),
+    so a sustained multi-connection flood still occupies executor threads. It is
+    now BOUNDED - each such thread is released within
+    _TRIGGER_PROBE_SLOT_WAIT plus one probe timeout, rather than however long the
+    queue ahead of it happened to be - but general request-concurrency bounding
+    remains a broader problem than this one fix.
 
     Each unique pattern's final verdict (from either layer) is cached for
     this process's lifetime, keyed on the exact pattern string - most real
@@ -716,7 +848,10 @@ def validate_trigger_patterns(patterns: "list[str]") -> None:
     safety guarantee is the static filter plus the probe's per-call daemon
     round-trip, run unconditionally on every pattern this process has not
     already validated."""
-    from localm.inference.backends.base import InvalidGrammarError
+    from localm.inference.backends.base import (
+        InvalidGrammarError,
+        TriggerValidatorUnavailableError,
+    )
 
     for pattern in patterns:
         if pattern in _VALIDATED_TRIGGER_PATTERNS:
@@ -726,15 +861,30 @@ def validate_trigger_patterns(patterns: "list[str]") -> None:
             continue
         static_reason = _static_shape_rejection(pattern)
         if static_reason is not None:
-            is_safe, reason = False, static_reason
+            verdict, reason = _PROBE_UNSAFE, static_reason
         else:
-            is_safe, reason = _probe_pattern_is_safe(pattern)
+            verdict, reason = _probe_pattern_is_safe(pattern)
+
+        if verdict == _PROBE_UNDETERMINED:
+            # NOT cached, and this is the load-bearing half of the three-state
+            # verdict rather than a nicety. The cache is keyed on the pattern and
+            # lives for the whole process, so recording "the validator was busy"
+            # or "the daemon would not spawn" against a pattern would reject that
+            # pattern FOREVER for a reason that had nothing to do with it - one
+            # unlucky second poisoning a legitimate integration until restart.
+            # Still a rejection: an unproven pattern must never reach the native
+            # sampler (that is the whole point of this gate). A distinct type so
+            # the route can answer 503 rather than blaming the caller with a 400
+            # for a condition on this side of the wire.
+            raise TriggerValidatorUnavailableError(
+                f"grammar trigger pattern could not be validated: {reason}")
+
         # Bounded so a flood of distinct junk patterns cannot grow this
         # dict without limit; legitimate use reuses a handful of patterns,
         # well under this ceiling in practice.
         if len(_VALIDATED_TRIGGER_PATTERNS) >= _MAX_CACHED_TRIGGER_PATTERNS:
             _VALIDATED_TRIGGER_PATTERNS.clear()
-        _VALIDATED_TRIGGER_PATTERNS[pattern] = None if is_safe else reason
-        if not is_safe:
+        _VALIDATED_TRIGGER_PATTERNS[pattern] = None if verdict == _PROBE_SAFE else reason
+        if verdict != _PROBE_SAFE:
             raise InvalidGrammarError(f"grammar trigger pattern rejected: {reason}")
 

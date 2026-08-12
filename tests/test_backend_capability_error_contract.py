@@ -37,6 +37,7 @@ from localm.inference.backends.base import (
     GrammarUnsupportedError,
     ImageDecodeUnavailable,
     InvalidGrammarError,
+    TriggerValidatorUnavailableError,
     UnsupportedInputError,
     VisionInputError,
 )
@@ -306,6 +307,7 @@ class TestBackendErrorStatusTable:
         (UnsupportedInputError("no images"), 400),
         (GrammarUnsupportedError("no grammar"), 400),
         (InvalidGrammarError("bad grammar"), 400),
+        (TriggerValidatorUnavailableError("probe pool busy"), 503),
         (EmbedBatchTooLargeError("too many"), 413),
     ])
     def test_each_family_maps_to_its_status(self, exc, status):
@@ -319,6 +321,21 @@ class TestBackendErrorStatusTable:
         assert backend_error_status(ImageDecodeUnavailable("x")) == 501
         assert backend_error_status(ImageDecodeUnavailable("x")) != \
             backend_error_status(UnsupportedInputError("x"))
+
+        # Same hazard, second instance: TriggerValidatorUnavailableError IS an
+        # InvalidGrammarError, so listed after its parent it would answer 400 -
+        # telling a caller to fix a pattern the validator never managed to look
+        # at, and promising a retry would fail the same way when it would not.
+        assert backend_error_status(TriggerValidatorUnavailableError("x")) == 503
+        assert backend_error_status(TriggerValidatorUnavailableError("x")) != \
+            backend_error_status(InvalidGrammarError("x"))
+
+    def test_the_unavailable_error_stays_catchable_as_an_invalid_grammar_error(self):
+        # The subclassing is load-bearing in the OTHER direction: every existing
+        # `except InvalidGrammarError` arm must keep catching it, or a saturated
+        # validator would escape as an opaque 500 at whichever call site nobody
+        # remembered to update.
+        assert issubclass(TriggerValidatorUnavailableError, InvalidGrammarError)
 
     def test_an_unrelated_value_error_is_not_claimed(self):
         # The guard against over-widening. Every mapped class IS a ValueError, so
@@ -533,3 +550,152 @@ class TestBothPathsAgree:
         assert reason in plain.json()["detail"]
         assert plain.json()["detail"] != "Internal server error"
         assert plain.status_code == backend_error_status(exc_factory(reason))
+
+
+# --------------------------------------------------------------------------- #
+#  6. The RuntimeError family - a GENERATION failure, not a backend refusal     #
+#                                                                              #
+#  Everything above is about the six ValueError-family backend REFUSALS: the    #
+#  request or the build is wrong, nothing was generated, and a status is the    #
+#  honest report. A RuntimeError is the other kind - not enough free VRAM for   #
+#  this prompt, a conversation that outgrew n_ctx_max, a native decode error -  #
+#  and localm answers it INLINE with finish_reason="error" rather than a status,#
+#  because its two streaming legs have already committed a 200 by the time it   #
+#  can happen and a non-streaming twin that disagreed would re-open exactly the #
+#  per-route divergence this module exists to close.                            #
+#                                                                              #
+#  Three of the four paths did that. /v1/completions non-streaming had NO       #
+#  RuntimeError arm, so the reason was discarded by the generic backstop and    #
+#  the caller got {"detail": "Internal server error"} for a failure its own     #
+#  streaming twin reported in full.                                            #
+# --------------------------------------------------------------------------- #
+
+_RUNTIME_REASON = "not enough free VRAM for this prompt (needs 6.2 GiB, 1.1 GiB free)"
+
+
+def _sse_completion_text(body: str) -> str:
+    """Concatenate the `text` deltas of a /v1/completions stream. Its chunks
+    carry `text`, not chat's `delta.content`, so the chat helper above cannot
+    read them - and a helper that silently returned "" for the wrong shape
+    would make an assertion pass on an empty string."""
+    out = []
+    for line in body.splitlines():
+        if not line.startswith("data: ") or line.endswith("[DONE]"):
+            continue
+        for choice in json.loads(line[len("data: "):]).get("choices", []):
+            out.append(choice.get("text") or "")
+    return "".join(out)
+
+
+def _completion_finish_reasons(body: str) -> list:
+    out = []
+    for line in body.splitlines():
+        if not line.startswith("data: ") or line.endswith("[DONE]"):
+            continue
+        for choice in json.loads(line[len("data: "):]).get("choices", []):
+            if choice.get("finish_reason"):
+                out.append(choice["finish_reason"])
+    return out
+
+
+class TestARuntimeErrorReachesTheClientOnAllFourPaths:
+    """The gap was ONE of four legs, so all four are asserted here rather than
+    the one that was broken. A leg covered only by the leg next to it cannot
+    fail when a regression re-opens it specifically, and 'these four must agree'
+    IS the property - see the identical reasoning on the ValueError families
+    above."""
+
+    def test_non_streaming_completions_reports_the_reason_and_marks_it(self):
+        # THE regression. Before this arm existed the assertions below read
+        # {"detail": "Internal server error"} with the reason gone.
+        r = _post(_mock_engine(stream_exc=RuntimeError(_RUNTIME_REASON)),
+                  {"model": "test-model", "prompt": "hi", "stream": False},
+                  path="/v1/completions")
+        body = r.json()
+        # The REASON first and the status second, deliberately (same ordering
+        # rule as the ValueError tests above): a body assertion that fails says
+        # "the caller was told nothing", which is the actual defect. A status
+        # assertion that fails reads like a number to adjust.
+        assert _RUNTIME_REASON in body["choices"][0]["text"], body
+        assert body != {"detail": "Internal server error"}
+        # Machine-detectable, which is what makes a 200 carrying an error
+        # honest rather than a lie. WITHOUT this the response is a success
+        # containing an apology, and a client keying off status alone would
+        # record a failed generation as a completed one.
+        assert body["choices"][0]["finish_reason"] == "error", body
+        assert r.status_code == 200
+
+    def test_streaming_completions_reports_the_reason_and_marks_it(self):
+        r = _post(_mock_engine(stream_exc=RuntimeError(_RUNTIME_REASON)),
+                  {"model": "test-model", "prompt": "hi", "stream": True},
+                  path="/v1/completions")
+        assert _RUNTIME_REASON in _sse_completion_text(r.text)
+        assert "error" in _completion_finish_reasons(r.text)
+
+    def test_non_streaming_chat_reports_the_reason_and_marks_it(self):
+        r = _post(_mock_engine(stream_exc=RuntimeError(_RUNTIME_REASON)),
+                  {"model": "test-model", "messages": _TEXT_MSG, "stream": False})
+        body = r.json()
+        assert _RUNTIME_REASON in body["choices"][0]["message"]["content"], body
+        assert body["choices"][0]["finish_reason"] == "error", body
+        assert r.status_code == 200
+
+    def test_streaming_chat_reports_the_reason_and_marks_it(self):
+        r = _post(_mock_engine(stream_exc=RuntimeError(_RUNTIME_REASON)),
+                  {"model": "test-model", "messages": _TEXT_MSG, "stream": True})
+        assert _RUNTIME_REASON in TestBothPathsAgree()._sse_text(r.text)
+        assert "error" in TestBothPathsAgree()._finish_reasons(r.text)
+
+    def test_the_two_completions_legs_agree_with_each_other(self):
+        """The pairing the entry was actually about: same route, same failure,
+        one streamed and one not. These two disagreeing is what a caller hits
+        when it flips `stream` and nothing else."""
+        streamed = _post(_mock_engine(stream_exc=RuntimeError(_RUNTIME_REASON)),
+                         {"model": "test-model", "prompt": "hi", "stream": True},
+                         path="/v1/completions")
+        plain = _post(_mock_engine(stream_exc=RuntimeError(_RUNTIME_REASON)),
+                      {"model": "test-model", "prompt": "hi", "stream": False},
+                      path="/v1/completions")
+
+        assert _RUNTIME_REASON in _sse_completion_text(streamed.text)
+        assert _RUNTIME_REASON in plain.json()["choices"][0]["text"]
+        assert "error" in _completion_finish_reasons(streamed.text)
+        assert plain.json()["choices"][0]["finish_reason"] == "error"
+
+
+class TestTheRuntimeCatchIsNotWidened:
+    """The other half, and the reason the arm names RuntimeError rather than
+    Exception: a genuine defect must still be an opaque 500, not dressed up as
+    an 'inference error' the user is invited to read (AGENTS.md rule 5, in the
+    direction people forget)."""
+
+    def test_an_attribute_error_on_completions_is_still_an_opaque_500(self):
+        r = _post_observing_500(
+            _mock_engine(stream_exc=AttributeError("'Mock' has no 'foo'")),
+            {"model": "test-model", "prompt": "hi", "stream": False},
+            path="/v1/completions")
+        assert r.json() == {"detail": "Internal server error"}
+        assert r.status_code == 500
+        assert "Mock" not in r.text
+
+    def test_an_unrelated_value_error_on_completions_is_still_an_opaque_500(self):
+        # Sharpest case: a ValueError that is NOT one of the mapped families.
+        # It must not be claimed by the backend-error arm above it, and it must
+        # not be swallowed by the RuntimeError arm below it either.
+        r = _post_observing_500(
+            _mock_engine(stream_exc=ValueError("int() got a str")),
+            {"model": "test-model", "prompt": "hi", "stream": False},
+            path="/v1/completions")
+        assert r.json() == {"detail": "Internal server error"}
+        assert r.status_code == 500
+        assert "int() got a str" not in r.text
+
+    def test_a_working_completion_is_untouched(self):
+        # finish_reason must still be "stop" on the happy path - the new arm
+        # must not mark every response as an error.
+        r = _post(_mock_engine(),
+                  {"model": "test-model", "prompt": "hi", "stream": False},
+                  path="/v1/completions")
+        assert r.status_code == 200
+        assert r.json()["choices"][0]["text"] == "ok"
+        assert r.json()["choices"][0]["finish_reason"] == "stop"
