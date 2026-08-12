@@ -192,7 +192,15 @@ def register(app: FastAPI, ctx) -> None:
                     # caller for a condition on this side of the wire that a
                     # retry can clear. Still a refusal: an unproven pattern never
                     # reaches the native sampler.
-                    raise HTTPException(503, str(e))
+                    #
+                    # The status comes FROM the shared table, not from a literal
+                    # here. Writing 503 twice would make the table's documented
+                    # arm ordering decorative at this call site: reordering it
+                    # (which IS the hazard the table warns about, and which has
+                    # its own test) would silently stop mattering here while the
+                    # test still passed. Measured exactly that way round before
+                    # this line derived its status.
+                    raise HTTPException(_hs.backend_error_status(e), str(e))
                 except InvalidGrammarError as e:
                     raise HTTPException(400, f"Invalid grammar trigger: {e}")
                 gen_kwargs["grammar_lazy"] = True
@@ -563,9 +571,10 @@ def register(app: FastAPI, ctx) -> None:
                     await asyncio.get_running_loop().run_in_executor(
                         None, validate_trigger_patterns, req.grammar_triggers)
                 except TriggerValidatorUnavailableError as e:
-                    # Same arm order and same reasoning as /v1/chat/completions:
-                    # "could not check" is a 503, not a 400 blaming the pattern.
-                    raise HTTPException(503, str(e))
+                    # Same arm order, same reasoning, and same table-derived
+                    # status as /v1/chat/completions: "could not check" is a 503,
+                    # not a 400 blaming the pattern.
+                    raise HTTPException(_hs.backend_error_status(e), str(e))
                 except InvalidGrammarError as e:
                     raise HTTPException(400, f"Invalid grammar trigger: {e}")
                 gen_kwargs["grammar_lazy"] = True
