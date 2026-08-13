@@ -57,6 +57,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   They are now created already restricted, which closes the window rather than
   shortening it. Windows was not affected here: on that platform the
   restriction was always applied before the file was moved into place.
+- **A bug report could leak a credential carried in a configured URL's query
+  string.** The search, ComfyUI and code-review endpoint URLs you configure are
+  echoed into a report to help diagnose setup problems; a credential written as
+  `user:pass@` in one of those was already redacted, but one passed as
+  `?api_key=...`/`?token=...` (or pasted in from an `X-Api-Key:` header) was
+  not. Both shapes are now redacted by name, keeping the rest of the address
+  visible so the report stays useful.
 
 ### Added
 - **A coder skill's `allowed-tools` is now enforced, not just displayed.** A
