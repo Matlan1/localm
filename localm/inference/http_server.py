@@ -4046,8 +4046,21 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
     # case: it permits WebAssembly compilation only, and does NOT permit dynamic
     # evaluation of JavaScript, so it is strictly tighter than the broader token
     # the browser error text names. Do not widen it to that broader one.
+    # `blob:` in script-src is REQUIRED once the page is cross-origin isolated,
+    # and it only became necessary then. Isolation gives onnxruntime-web
+    # SharedArrayBuffer, so it switches to its THREADED build, which loads its
+    # worker as a blob: module. Without this the load dies with
+    #     no available backend found. ERR: [wasm] TypeError: Failed to fetch
+    #     dynamically imported module: blob:http://.../<uuid>
+    # i.e. adding the isolation headers alone breaks TTS in a NEW way, while
+    # every unit test stays green - measured live 2026-08-13. `worker-src 'self'
+    # blob:` was already present and is NOT sufficient: the dynamic import of the
+    # blob module is governed by script-src.
+    # On the security trade: a blob: URL can only be minted by same-origin script
+    # that is already executing, so this does not give an INJECTED script a new
+    # way in - the nonce still gates what may execute in the first place.
     _CSP_PREFIX = ("default-src 'self'; "
-                   "script-src 'self' https://cdn.jsdelivr.net 'wasm-unsafe-eval' 'nonce-")
+                   "script-src 'self' blob: https://cdn.jsdelivr.net 'wasm-unsafe-eval' 'nonce-")
     _CSP_SUFFIX = (
         "'; "
         "style-src 'self' 'unsafe-inline'; "
@@ -4075,6 +4088,24 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
         resp.headers.setdefault("X-Content-Type-Options", "nosniff")
         resp.headers.setdefault(
             "Content-Security-Policy", _CSP_PREFIX + nonce + _CSP_SUFFIX)
+        # CROSS-ORIGIN ISOLATION, so onnxruntime-web can use more than one thread.
+        # Without both of these the document is not isolated, SharedArrayBuffer is
+        # unavailable, and onnxruntime falls back to numThreads=1 - measured on a
+        # 12-core box, which is why neural TTS was ~10x slower than it needed to
+        # be. Same sentence (6.3 s of audio), both warm, median of 3 runs:
+        #     isolated  threads   median     realtime
+        #     true      multi     4762 ms    0.76x     streaming keeps ahead
+        #     false     1        12883 ms    2.04x     stalls every sentence
+        # Above 1.0x, synthesis is slower than playback, so a long reply stutters.
+        #
+        # 'credentialless' rather than 'require-corp': require-corp demands a CORP
+        # header on EVERY cross-origin subresource, which we do not control for
+        # huggingface.co or the onnx CDN. credentialless instead sends those
+        # requests WITHOUT credentials, which is both sufficient for isolation and
+        # correct here - none of localm's cross-origin fetches are authenticated,
+        # they are public model and library downloads.
+        resp.headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
+        resp.headers.setdefault("Cross-Origin-Embedder-Policy", "credentialless")
         return resp
 
     # API-surface disclosure guard. FastAPI's built-in docs (/docs, /redoc,
