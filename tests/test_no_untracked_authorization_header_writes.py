@@ -28,7 +28,7 @@ latter would flag these two as violations:
                                  (resolve_bearer_headers, wrapping the raw-
                                  token precedence in resolve_bearer_token).
 
-  localm/cli/rag.py:417         POSTs /v1/embeddings, which IS listed in
+  localm/cli/rag.py:443         POSTs /v1/embeddings, which IS listed in
                                  http_server.py's _CROSS_ORIGIN_OK - the
                                  open-mode gate never applies, so get_api_key()
                                  alone (no instance_token fallback) is correct,
@@ -102,7 +102,7 @@ from localm import auth as _auth
 # forward slashes regardless of host OS so the assertion is platform-stable.
 _REVIEWED_SITES = {
     ("localm/auth.py", 251),
-    ("localm/cli/rag.py", 417),
+    ("localm/cli/rag.py", 443),
     ("localm/inference/http_engine.py", 108),
     ("localm/inference/http_engine.py", 203),
     ("localm/plugins/coder/backends/http.py", 353),
