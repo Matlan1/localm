@@ -121,6 +121,36 @@ def test_script_src_admits_the_onnx_runtime_origin_not_just_connect_src():
     assert "https://huggingface.co" in connect_src, connect_src
 
 
+def test_cross_origin_isolation_headers_are_present():
+    """Both are needed, on the DOCUMENT, or the page is not isolated at all.
+
+    Without isolation SharedArrayBuffer is unavailable and onnxruntime-web drops
+    to numThreads=1. Measured on a 12-core box: 12883 ms vs 4762 ms for the same
+    6.3 s of audio (2.04x vs 0.76x realtime), i.e. neural TTS went from stalling
+    on every sentence to streaming ahead of playback.
+
+    COOP alone or COEP alone does NOT isolate, which is why this asserts both
+    rather than either.
+    """
+    with TestClient(create_app(_engine())) as c:
+        r = c.get("/health")
+    assert r.headers.get("Cross-Origin-Opener-Policy") == "same-origin"
+    assert r.headers.get("Cross-Origin-Embedder-Policy") == "credentialless"
+
+
+def test_coep_is_credentialless_not_require_corp():
+    """require-corp would demand a CORP header on every cross-origin subresource.
+
+    We do not control huggingface.co or the onnx CDN, so require-corp would break
+    the model and backend downloads outright. credentialless is sufficient for
+    isolation and correct here: none of localm's cross-origin fetches are
+    authenticated, they are public downloads.
+    """
+    with TestClient(create_app(_engine())) as c:
+        r = c.get("/health")
+    assert r.headers.get("Cross-Origin-Embedder-Policy") != "require-corp"
+
+
 def test_script_src_allows_webassembly_compilation():
     """onnxruntime-web is WebAssembly, and compiling it needs its own CSP grant.
 

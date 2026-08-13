@@ -4075,6 +4075,24 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
         resp.headers.setdefault("X-Content-Type-Options", "nosniff")
         resp.headers.setdefault(
             "Content-Security-Policy", _CSP_PREFIX + nonce + _CSP_SUFFIX)
+        # CROSS-ORIGIN ISOLATION, so onnxruntime-web can use more than one thread.
+        # Without both of these the document is not isolated, SharedArrayBuffer is
+        # unavailable, and onnxruntime falls back to numThreads=1 - measured on a
+        # 12-core box, which is why neural TTS was ~10x slower than it needed to
+        # be. Same sentence (6.3 s of audio), both warm, median of 3 runs:
+        #     isolated  threads   median     realtime
+        #     true      multi     4762 ms    0.76x     streaming keeps ahead
+        #     false     1        12883 ms    2.04x     stalls every sentence
+        # Above 1.0x, synthesis is slower than playback, so a long reply stutters.
+        #
+        # 'credentialless' rather than 'require-corp': require-corp demands a CORP
+        # header on EVERY cross-origin subresource, which we do not control for
+        # huggingface.co or the onnx CDN. credentialless instead sends those
+        # requests WITHOUT credentials, which is both sufficient for isolation and
+        # correct here - none of localm's cross-origin fetches are authenticated,
+        # they are public model and library downloads.
+        resp.headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
+        resp.headers.setdefault("Cross-Origin-Embedder-Policy", "credentialless")
         return resp
 
     # API-surface disclosure guard. FastAPI's built-in docs (/docs, /redoc,
