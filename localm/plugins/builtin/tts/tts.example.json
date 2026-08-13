@@ -1,6 +1,7 @@
 {
   "_comment": "Shipped TTS defaults (template). User overrides live in the non-tracked config under plugins.tts and win over these values; edit them in Settings > Text-to-speech (GET/POST /v1/tts/config), which validates each one. The voice here is the DEFAULT: a browser that picks its own voice in chat keeps that pick locally. Do not put personal model choices in tracked files - override here.",
   "_dtype_note": "dtype 'auto' picks fp32 (clean audio - the q8 quantized model produced cracks/pings on the WASM path). Set 'q8' or 'fp16' for a smaller/faster but lower-quality download, or 'fp32' explicitly.",
+  "_device_note": "device 'auto' picks 'wasm' even when the browser has WebGPU. Kokoro on the WebGPU backend produces corrupted audio that gets worse the longer the sentence, so a chat reply is the worst case (measured: a 34-word sentence peaked at 74 million with 25 samples out of range, against 0.572 and 0 on wasm). This is a known unfixed upstream defect, not a localm one. wasm is about 10x slower but still faster than realtime, so streaming keeps up. Set 'webgpu' explicitly to override; the browser console will warn if corrupted samples are detected.",
   "engine": "kokoro",
   "model": "onnx-community/Kokoro-82M-v1.0-ONNX",
   "device": "auto",

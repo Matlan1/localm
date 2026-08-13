@@ -12,7 +12,7 @@
  * machine and nothing is written to the server, so privacy mode stays intact.
  */
 
-import { classifyLoadError, loadToast, pickDevice, pickDtype } from "./tts-util.js";
+import { classifyLoadError, loadToast, pickDevice, pickDtype, repairAudioTransient } from "./tts-util.js";
 
 const VENDOR_VOICES = new URL("vendor/voices.json", import.meta.url);
 
@@ -57,6 +57,8 @@ export async function register(ctx) {
   let kokoro = null;
   let loadPromise = null;
   let announced = false;
+  let activeDevice = null;   // the backend that actually built the model (see build())
+  let repairWarned = false;  // warn once per page, not once per sentence
 
   // R08: is this Kokoro model already in the transformers.js browser cache?
   // Used to avoid a misleading "first run downloads" toast on a hard reload, and
@@ -103,6 +105,11 @@ export async function register(ctx) {
     // retry on the main thread, so this never regresses TTS.
     function build(dev, useProxy) {
       if (onnx && onnx.wasm) onnx.wasm.proxy = !!(useProxy && dev === "wasm");
+      // Record the device that actually produced the model, not the one we asked
+      // for: the fallbacks below can land on wasm after a webgpu failure, and a
+      // repair warning naming the wrong backend would send the reader hunting a
+      // fault on hardware that never ran.
+      activeDevice = dev;
       return mod.KokoroTTS.from_pretrained(model, { dtype: pickDtype(cfg, dev), device: dev });
     }
     try {
@@ -201,6 +208,18 @@ export async function register(ctx) {
       // first words start playing without waiting for the whole reply.
       for await (const chunk of k.stream(text, { voice: currentVoice, speed })) {
         if (myToken !== token) return;
+        // Repair the WebGPU leading transient BEFORE encoding: toBlob() writes a
+        // float32 wav, so an out-of-range sample is carried through verbatim and
+        // clips at the output as a full-scale click on EVERY sentence.
+        const rep = repairAudioTransient(chunk.audio.audio, chunk.audio.sampling_rate);
+        if (rep.count && !repairWarned) {
+          repairWarned = true;                   // once per page: this fires per sentence
+          console.warn(
+            "[tts] repaired " + rep.count + " out-of-range audio sample(s) (peak " +
+            rep.peak.toFixed(2) + ", first at index " + rep.firstIndex + ") from the " +
+            activeDevice + " backend. Audio must lie in [-1,1]; this is a backend fault, " +
+            "not a repair we want to be needed - see dev-notes/TTS-ROOT-CAUSE-2026-08-13.md.");
+        }
         const url = URL.createObjectURL(chunk.audio.toBlob());
         const wasIdle = queue.length === 0 && player.paused;
         queue.push(url);
