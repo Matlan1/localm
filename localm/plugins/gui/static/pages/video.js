@@ -13,6 +13,28 @@ import { hideStop, showStop } from "./images.js";
 import { pickDirectory } from "../app/picker.js";
 import { modelOverrides } from "./workflow.js";
 
+/* A media element reports a failed src by firing an ERROR EVENT on itself, not
+   by throwing and not by rejecting - so a try/catch around `player.src = url`
+   is structurally unable to see it. Without this the player just sits there
+   dead and the user gets nothing at all, which is how a CSP that blocked every
+   blob: media URL survived unnoticed: the success path still ran and still
+   flipped the button to "hide".
+
+   Call this on any media element BEFORE assigning src. */
+function reportMediaLoadFailure(player, what, onFail) {
+  player.addEventListener("error", () => {
+    const err = player.error;
+    const why = {
+      1: "loading was aborted",
+      2: "a network error",
+      3: "the file could not be decoded",
+      4: "this browser refused the source",
+    }[err && err.code] || "an unknown error";
+    toast(`Could not play ${what}: ${why}.`, true);
+    if (onFail) onFail();
+  });
+}
+
 /* ================================================================ */
 /*  Video page                                                       */
 /* ================================================================ */
@@ -60,6 +82,7 @@ $("video-generate").onclick = async () => {
       player.style.width = "100%";
       const url = await fetchImageURL(
         "/api/video/file/" + encodeURIComponent(end.result));
+      reportMediaLoadFailure(player, "the clip");
       player.src = url;
       $("video-result").appendChild(player);
       refreshVideoHistory();
@@ -114,6 +137,10 @@ export async function refreshVideoHistory() {
         player.controls = true;
         player.autoplay = true;
         player.style.width = "100%";
+        reportMediaLoadFailure(player, "the clip", () => {
+          if (player) { player.remove(); player = null; }
+          play.textContent = "play";
+        });
         player.src = url;
         row.appendChild(player);
         play.textContent = "hide";
@@ -206,6 +233,10 @@ export async function refreshMusicHistory() {
         player.controls = true;
         player.autoplay = true;
         player.style.width = "100%";
+        reportMediaLoadFailure(player, "the track", () => {
+          if (player) { player.remove(); player = null; }
+          play.textContent = "play";
+        });
         player.src = url;
         row.appendChild(player);
         play.textContent = "hide";

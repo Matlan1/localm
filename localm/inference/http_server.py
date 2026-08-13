@@ -4066,8 +4066,21 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
         "style-src 'self' 'unsafe-inline'; "
         "img-src 'self' data: blob:; "
         "font-src 'self' data:; "
-        "connect-src 'self' https://huggingface.co https://*.hf.co "
+        # blob: here for the same reason it is in img-src/script-src/worker-src:
+        # the GUI mints these with its OWN URL.createObjectURL and then reads
+        # them back (fetch for "send to chat" / "copy image", and the <video>
+        # and <audio> players). A blob: URL is same-origin-scoped and cannot be
+        # pointed at a remote origin, so this grants no exfiltration path -
+        # connect-src still names every third-party origin explicitly.
+        #
+        # media-src MUST be spelled out. Without it, media falls back to
+        # default-src 'self', which has no blob:, and the failure is SILENT:
+        # assigning a blocked src fires an error EVENT on the element rather
+        # than throwing, so a try/catch around it cannot see it and the player
+        # just sits there dead. That is how this survived unnoticed.
+        "connect-src 'self' blob: https://huggingface.co https://*.hf.co "
         "https://cdn.jsdelivr.net; "
+        "media-src 'self' blob:; "
         "worker-src 'self' blob:; "
         "frame-src 'self'; "
         "object-src 'none'; "
