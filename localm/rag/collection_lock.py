@@ -459,6 +459,38 @@ def collection_write_lock(lockpath: Path, *, collection: str, op: str,
     while True:
         try:
             fd = os.open(str(lockpath), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except PermissionError:
+            # WINDOWS ONLY, and it is a WAIT, not a failure. On Windows a lock
+            # file that exists but is momentarily inaccessible - the holder's
+            # unlink in flight, a scanner or backup holding a handle - reports
+            # ERROR_ACCESS_DENIED here rather than the ERROR_FILE_EXISTS that
+            # becomes FileExistsError. Letting it propagate aborts the user's
+            # command with "localm hit an unexpected error" over a condition
+            # that clears on its own in milliseconds, which is what reddened
+            # the release gate for 0.1.5rc3.
+            #
+            # Treated as "a holder may be there and I could not read it": it
+            # waits on the SAME deadline as every other contended path, so it
+            # can never spin longer than the caller's timeout, and it reports a
+            # normal lock timeout if it never clears.
+            #
+            # NOT applied on POSIX: there this genuinely means the directory is
+            # not writable, which no amount of waiting fixes, and where raising
+            # at once is the honest answer.
+            if os.name != "nt":
+                raise
+            rec, mtime = _read_record(lockpath)
+            waited = time.time() - started_waiting
+            if time.time() >= deadline:
+                raise CollectionLockedError(collection, rec, waited, mtime,
+                                            lockpath)
+            if on_wait and not announced and waited >= WAIT_NOTICE_AFTER:
+                announced = True
+                on_wait(f"waiting for the write lock on '{collection}': "
+                        f"{describe_holder(rec, mtime)}")
+            time.sleep(min(_POLL * (attempt + 1), _POLL_CAP))
+            attempt += 1
+            continue
         except FileExistsError:
             rec, mtime = _read_record(lockpath)
             if (mtime is not None and _is_stale(rec, mtime, stale_after)

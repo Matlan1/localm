@@ -684,3 +684,64 @@ def test_env_override_reports_a_malformed_value(monkeypatch):
                         lambda *a, **k: warned.append(a[0] % a[1:]))
     assert cl._env_float(cl.ENV_WAIT, 30.0) == 30.0
     assert warned and "not a positive number" in warned[0]
+
+
+# --------------------------------------------------------------------------
+# A TRANSIENT ACCESS-DENIED ON THE LOCK FILE IS A WAIT, NOT A CRASH (Windows).
+#
+# The 0.1.5rc3 release gate went red here. On Windows a lock file that exists
+# but is momentarily inaccessible (the holder's unlink in flight, a scanner
+# holding a handle) reports ERROR_ACCESS_DENIED from the O_CREAT|O_EXCL create,
+# not the ERROR_FILE_EXISTS that becomes FileExistsError. That escaped the
+# `except FileExistsError` and killed the user's command with "localm hit an
+# unexpected error" over a condition that clears in milliseconds.
+#
+# Injected at os.open rather than by racing two real processes: the real window
+# is microseconds wide and would make this test a coin flip, which is worse than
+# no test. What is asserted is the CONTRACT - a PermissionError from the create
+# is retried within the deadline - not the Win32 condition that produces it.
+
+def _permission_denied_then_real(lockpath, times):
+    """Fail the create for *lockpath* `times` times with PermissionError, then
+    behave normally. Every other path is untouched."""
+    real = os.open
+    state = {"left": times}
+
+    def fake(path, flags, *a, **kw):
+        if str(path) == str(lockpath) and (flags & os.O_CREAT) and state["left"]:
+            state["left"] -= 1
+            raise PermissionError(13, "Permission denied", str(path))
+        return real(path, flags, *a, **kw)
+
+    return fake, state
+
+
+@pytest.mark.skipif(os.name != "nt", reason="the retry is deliberately Windows-only")
+def test_transient_access_denied_on_the_lock_file_is_waited_out(tmp_path, monkeypatch):
+    rag = tmp_path / "rag"
+    rag.mkdir()
+    lp = lock_path_for(rag / "kb")
+    fake, state = _permission_denied_then_real(lp, 3)
+    monkeypatch.setattr(os, "open", fake)
+
+    with collection_write_lock(lp, collection="kb", op="a re-sync", timeout=30):
+        assert lp.exists(), "the lock was acquired, so its file must be present"
+    assert state["left"] == 0, "the injected access-denied never fired"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="the retry is deliberately Windows-only")
+def test_access_denied_that_never_clears_reports_a_lock_timeout_not_a_crash(
+        tmp_path, monkeypatch):
+    """Bounded: it must never wait longer than the caller's timeout, and what
+    surfaces is the normal lock error, not a raw PermissionError."""
+    rag = tmp_path / "rag"
+    rag.mkdir()
+    lp = lock_path_for(rag / "kb")
+    fake, _ = _permission_denied_then_real(lp, 10_000)
+    monkeypatch.setattr(os, "open", fake)
+
+    started = time.time()
+    with pytest.raises(CollectionLockedError):
+        with collection_write_lock(lp, collection="kb", op="a re-sync", timeout=2):
+            pass
+    assert time.time() - started < 30, "the bounded wait was not bounded"
