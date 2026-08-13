@@ -148,9 +148,34 @@ def test_is_newer_pinned_to_shipped_tag_shape():
     assert _version.is_newer("v0.1.5rc1", "v0.1.5") is False
     assert _version.is_newer("v0.1.5rc1", "v0.1.5rc1") is False  # exact tie
     assert _version.normalize("v0.1.5rc2") == "0.1.5rc2"
+    assert _version.is_newer("v0.1.5rc3", "v0.1.5rc2") is True
+    assert _version.is_newer("v0.1.5rc2", "v0.1.5rc3") is False
+
+
+def test_shipping_version_is_offered_as_an_update_to_every_earlier_tag():
+    """The version in VERSION must compare NEWER than every published tag before
+    it, or `localm update` silently never offers this release to the users
+    already on one of them. `_refuse_downgrade` is gated on the same call, so a
+    break here is quiet in both directions.
+
+    Reads VERSION rather than hard-coding a pair: a hard-coded one stops
+    describing the release the moment someone bumps VERSION without touching
+    this file, which is exactly when the check is load-bearing."""
+    shipping = _version.read_version()
+    for earlier in ("0.1.0", "0.1.1", "0.1.2", "0.1.3", "0.1.4",
+                    "0.1.5rc1", "0.1.5rc2"):
+        if _version.normalize(shipping) == earlier:
+            continue    # re-cutting an existing tag: nothing to order against
+        assert _version.is_newer(shipping, earlier) is True, (
+            f"VERSION {shipping!r} is not newer than published {earlier!r}, so "
+            "the updater would not offer it")
+        assert _version.is_newer(earlier, shipping) is False, (
+            f"published {earlier!r} compares newer than VERSION {shipping!r}")
+        assert _version.comparable(shipping, earlier) is True
 
 
 def test_prerelease_suffix_shipped_tag_shape():
     assert _version._prerelease_suffix("0.1.5rc1") == ("rc", 1)
     assert _version._prerelease_suffix("0.1.5rc2") == ("rc", 2)
+    assert _version._prerelease_suffix("0.1.5rc3") == ("rc", 3)
     assert _version._prerelease_suffix("0.1.5") is None
