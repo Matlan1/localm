@@ -253,3 +253,77 @@ def test_survives_after_launcher_process_exits(tmp_path):
         time.sleep(0.2)
     assert "watchdog exiting with code" in content, (
         f"watchdog did not complete after its launcher exited; log so far: {content!r}")
+
+
+# ---------------------- proxy env must not break the probe ------------------
+
+def test_probe_ignores_http_proxy_env(monkeypatch):
+    """A user with http_proxy set must not have a HEALTHY restart rolled back.
+
+    probe_once targets THIS machine's own just-restarted instance at a host:port
+    it was handed, so a proxy is never appropriate - but urlopen()'s default
+    opener honours http_proxy/HTTPS_PROXY, and urllib does NOT exempt 127.0.0.1
+    (proxy_bypass("127.0.0.1") is False). Before the fix, any such user's probe
+    failed every time, the watchdog concluded the new build was unhealthy, and it
+    ROLLED BACK A GOOD UPDATE.
+
+    This also removes a cross-test poisoning route that made this file
+    non-deterministic on CI: urlopen builds its module-global _opener ONCE and
+    caches it with the proxy environment as it was then, so a test that sets
+    http_proxy to a dead port and makes a request breaks every later urlopen in
+    that xdist worker - and monkeypatch unsetting the variable does not undo it.
+    tests/test_ssrf_rebind_2026_07_01.py does exactly that, which is why these
+    tests passed and failed across two CI runs of identical code.
+    """
+    import urllib.request
+    wd = _load_wd()
+    server, thread, port = _whoami_server(lambda: {"app": "localm", "version": "9.9.9"})
+    dead = _free_port()          # nothing listens here: a proxy pointed at it always fails
+    try:
+        monkeypatch.setenv("http_proxy", f"http://127.0.0.1:{dead}")
+        monkeypatch.setenv("HTTP_PROXY", f"http://127.0.0.1:{dead}")
+        # Drop urllib's cached global opener so the env above is actually consulted.
+        # Without this the test is ORDER-DEPENDENT and mostly toothless: whenever an
+        # earlier test in the same process has already triggered urlopen(), the
+        # opener was built from a clean environment and setting these variables now
+        # changes nothing - so the unfixed code passes. Measured: reverting the fix
+        # left this test GREEN until this line was added.
+        urllib.request.install_opener(None)
+        body = wd.probe_once(f"http://127.0.0.1:{port}/whoami", 2)
+        assert body is not None, "the probe was routed through the proxy and failed"
+        assert body.get("version") == "9.9.9"
+    finally:
+        urllib.request.install_opener(None)   # never leak a poisoned opener onward
+        server.shutdown()
+        thread.join(timeout=2)
+
+
+def test_healthy_check_survives_a_poisoned_global_opener(monkeypatch):
+    """The end-to-end shape of the CI failure, not just the unit.
+
+    Simulates the cross-test pollution directly: build urllib's global opener
+    while a dead proxy is set, then unset it (what monkeypatch teardown does) and
+    run a full healthy check. The cached opener stays poisoned, so this fails
+    unless probe_once uses its own opener.
+    """
+    import urllib.request
+    wd = _load_wd()
+    dead = _free_port()
+    monkeypatch.setenv("http_proxy", f"http://127.0.0.1:{dead}")
+    urllib.request.install_opener(urllib.request.build_opener())   # capture the bad env
+    monkeypatch.delenv("http_proxy", raising=False)
+    monkeypatch.delenv("HTTP_PROXY", raising=False)
+    server, thread, port = _whoami_server(lambda: {"app": "localm", "version": "1.2.3"})
+    try:
+        def _boom(_install_root):
+            raise AssertionError("rollback must not be invoked on a healthy check")
+        monkeypatch.setattr(wd, "_load_rollback_module", _boom)
+        code = wd.main([
+            "--host", "127.0.0.1", "--port", str(port),
+            "--expect-version", "1.2.3", "--install-root", str(REPO),
+            "--timeout", "5", "--poll-interval", "0.2", "--request-timeout", "1"])
+        assert code == wd.EXIT_HEALTHY
+    finally:
+        urllib.request.install_opener(None)      # never leak it to other tests
+        server.shutdown()
+        thread.join(timeout=2)

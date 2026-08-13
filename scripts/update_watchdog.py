@@ -87,7 +87,33 @@ def probe_once(url: str, timeout: float) -> Optional[dict]:
     try:
         ctx = _insecure_ssl_context() if url.startswith("https://") else None
         req = urllib.request.Request(url, headers={"User-Agent": "localm-update-watchdog"})
-        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+        # NEVER route this through an HTTP proxy. We are probing THIS machine's own
+        # just-restarted instance at a host:port we were handed - a proxy makes no
+        # sense for that, and honouring one is actively dangerous here: a user with
+        # http_proxy set (a corporate network, or any of the tools that export it)
+        # would have every probe fail, so a PERFECTLY HEALTHY restart reads as
+        # unhealthy and the watchdog ROLLS BACK A GOOD UPDATE. urlopen()'s default
+        # opener honours those variables, and `urllib.request.proxy_bypass` does NOT
+        # exempt 127.0.0.1 (measured: False on this box), so localhost is not
+        # special-cased for us.
+        #
+        # It also removes a cross-test poisoning route that made this script's own
+        # tests non-deterministic on CI. urlopen() builds its module-global _opener
+        # ONCE and caches it for the process lifetime, capturing the proxy
+        # environment as it was at that moment - so a test that sets http_proxy to a
+        # dead port and makes a request leaves every later urlopen() in that worker
+        # broken, and monkeypatch unsetting the variable does NOT undo it (measured:
+        # still fails afterwards). An explicit opener sidesteps the global entirely.
+        #
+        # The TLS context has to ride on an HTTPSHandler rather than urlopen's
+        # `context=` kwarg, which opener.open() does not accept - dropping it would
+        # silently re-enable certificate verification against the self-signed cert a
+        # local TLS bind uses, and every https probe would fail instead.
+        handlers = [urllib.request.ProxyHandler({})]
+        if ctx is not None:
+            handlers.append(urllib.request.HTTPSHandler(context=ctx))
+        opener = urllib.request.build_opener(*handlers)
+        with opener.open(req, timeout=timeout) as resp:
             if resp.status != 200:
                 return None
             return json.loads(resp.read().decode("utf-8"))
