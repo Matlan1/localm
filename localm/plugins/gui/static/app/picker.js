@@ -36,6 +36,32 @@ export async function fetchPlaces() {
   return r.json();
 }
 
+/** Create a new folder named `name` inside `path`. Resolves to
+ *  {path, parent, name} for the created folder, or throws with the server's
+ *  real reason (never overwrites an existing file/folder - the server 409s). */
+export async function mkdirFs(path, name) {
+  const r = await fetch("/api/fs/mkdir", {
+    method: "POST", headers: authHeaders(),
+    body: JSON.stringify({ path, name }),
+  });
+  const data = await r.json();
+  if (!r.ok) throw new Error(data.detail || r.statusText);
+  return data;
+}
+
+/** Rename the file/folder at `path` to `newName`, in the same parent
+ *  directory. Resolves to {path, parent, name}, or throws (the server never
+ *  overwrites an existing target - it 409s instead). */
+export async function renameFs(path, newName) {
+  const r = await fetch("/api/fs/rename", {
+    method: "POST", headers: authHeaders(),
+    body: JSON.stringify({ path, new_name: newName }),
+  });
+  const data = await r.json();
+  if (!r.ok) throw new Error(data.detail || r.statusText);
+  return data;
+}
+
 function fmtSize(n) {
   if (n === null || n === undefined) return "";
   if (n < 1024) return n + " B";
@@ -79,6 +105,9 @@ const ICONS = {
   document: svg('<path d="M14 3v5h5"/><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M9 13h6"/><path d="M9 17h4"/>'),
   download: svg('<path d="M12 4v10"/><path d="M8 12l4 4 4-4"/><path d="M5 20h14"/>'),
   drive: svg('<path d="M4 6h16v6H4z"/><path d="M4 12v6h16v-6"/><path d="M8 15h.01"/><path d="M8 9h.01"/>'),
+  newfolder: svg('<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M12 11v6M9 14h6"/>'),
+  check: svg('<path d="M5 12l4 4 10-10"/>'),
+  close: svg('<path d="M6 6l12 12M18 6L6 18"/>'),
 };
 function iconSpan(cls, name) {
   const s = el("span", cls);
@@ -143,8 +172,12 @@ export function pickPath(opts = {}) {
       const upBtn = el("button", "picker-icon-btn");
       upBtn.type = "button"; upBtn.title = "Up one level";
       upBtn.appendChild(iconSpan("picker-svg", "up"));
+      const newFolderBtn = el("button", "picker-icon-btn");
+      newFolderBtn.type = "button"; newFolderBtn.title = "New folder";
+      newFolderBtn.appendChild(iconSpan("picker-svg", "newfolder"));
+      newFolderBtn.disabled = true;   // enabled once a real directory is loaded
       const pathWrap = el("div", "picker-path");
-      nav.append(backBtn, upBtn, pathWrap);
+      nav.append(backBtn, upBtn, newFolderBtn, pathWrap);
 
       const mainRow = el("div", "picker-main");
       const rail = el("div", "picker-places");
@@ -337,6 +370,16 @@ export function pickPath(opts = {}) {
         }
         row.appendChild(iconSpan("picker-ic", entry.is_dir ? "folder" : "file"));
         row.appendChild(el("span", "picker-name", entry.name));
+        if (current) {
+          // Renaming a synthetic drive-letter "folder" shown at the drive-list
+          // root (current === "") makes no sense - only real listed entries
+          // inside a real directory are renamable.
+          const renameBtn = el("button", "picker-row-rename");
+          renameBtn.type = "button"; renameBtn.title = "Rename";
+          renameBtn.appendChild(iconSpan("picker-svg", "edit"));
+          renameBtn.onclick = (e) => { e.stopPropagation(); startRename(row); };
+          row.appendChild(renameBtn);
+        }
         const meta = el("span", "picker-meta");
         if (entry.is_dir) {
           meta.appendChild(iconSpan("picker-svg picker-chev", "chevron"));
@@ -365,6 +408,108 @@ export function pickPath(opts = {}) {
         }
       }
 
+      // ---- create folder / rename ----
+      function startCreateFolder() {
+        if (!current) return;   // nothing to create into at the drive-list root
+        const row = el("div", "picker-row picker-row-editing");
+        row.appendChild(iconSpan("picker-ic", "folder"));
+        const inp = document.createElement("input");
+        inp.type = "text";
+        inp.className = "picker-inline-input";
+        inp.value = "New folder";
+        inp.setAttribute("aria-label", "New folder name");
+        const okIc = el("button", "picker-inline-btn");
+        okIc.type = "button"; okIc.title = "Create";
+        okIc.appendChild(iconSpan("picker-svg", "check"));
+        const cancelIc = el("button", "picker-inline-btn");
+        cancelIc.type = "button"; cancelIc.title = "Cancel";
+        cancelIc.appendChild(iconSpan("picker-svg", "close"));
+        row.append(inp, okIc, cancelIc);
+        listEl.prepend(row);
+        inp.focus(); inp.select();
+
+        let done = false;
+        const cancel = () => { if (done) return; done = true; renderList(); };
+        const commit = () => {
+          if (done) return;
+          const name = inp.value.trim();
+          if (!name) { cancel(); return; }
+          done = true;
+          mkdirFs(current, name).then((created) => {
+            navigate(created.path);
+          }).catch((e) => {
+            // Rule 5: surface the real reason, do not silently drop the attempt.
+            toast("Could not create folder: " + e.message, true);
+            done = false;
+            renderList();
+          });
+        };
+        okIc.onmousedown = (e) => { e.preventDefault(); commit(); };
+        cancelIc.onmousedown = (e) => { e.preventDefault(); cancel(); };
+        inp.onkeydown = (e) => {
+          if (e.key === "Enter") { e.preventDefault(); commit(); }
+          else if (e.key === "Escape") { e.preventDefault(); cancel(); }
+        };
+        // Revert on blur unless one of the buttons above took the click (their
+        // mousedown fires and commits/cancels - setting `done` - before this
+        // blur handler's setTimeout runs).
+        inp.onblur = () => setTimeout(() => {
+          if (!done && listEl.contains(row)) cancel();
+        }, 100);
+      }
+      newFolderBtn.onclick = startCreateFolder;
+
+      function startRename(row) {
+        const entry = row._entry;
+        const full = row.dataset.path;
+        const nameSpan = row.querySelector(".picker-name");
+        if (!nameSpan) return;
+        const inp = document.createElement("input");
+        inp.type = "text";
+        inp.className = "picker-inline-input";
+        inp.value = entry.name;
+        inp.setAttribute("aria-label", "Rename " + entry.name);
+        nameSpan.replaceWith(inp);
+        inp.focus();
+        if (entry.is_dir) {
+          inp.select();
+        } else {
+          // Select the stem only, leaving the extension untouched by default -
+          // matches the convention every desktop file manager uses.
+          const ext = extOf(entry.name);
+          const stopAt = ext ? entry.name.length - ext.length : entry.name.length;
+          inp.setSelectionRange(0, stopAt);
+        }
+
+        let done = false;
+        const restore = () => { if (done) return; done = true; renderList(); };
+        const commit = () => {
+          if (done) return;
+          const newName = inp.value.trim();
+          if (!newName || newName === entry.name) { restore(); return; }
+          done = true;
+          renameFs(full, newName).then((renamed) => {
+            if (selected.has(full)) {
+              const meta2 = selected.get(full);
+              selected.delete(full);
+              selected.set(renamed.path, meta2);
+            }
+            navigate(current, { push: false });   // refresh the listing in place
+          }).catch((e) => {
+            toast("Could not rename: " + e.message, true);
+            done = false;
+            renderList();
+          });
+        };
+        inp.onkeydown = (e) => {
+          e.stopPropagation();   // don't let listEl's arrow-key navigation fire
+          if (e.key === "Enter") { e.preventDefault(); commit(); }
+          else if (e.key === "Escape") { e.preventDefault(); restore(); }
+        };
+        inp.onclick = (e) => e.stopPropagation();
+        inp.onblur = () => setTimeout(() => { if (!done) restore(); }, 100);
+      }
+
       // ---- navigation ----
       function navigate(path, { push = true } = {}) {
         const seq = ++reqSeq;
@@ -390,6 +535,7 @@ export function pickPath(opts = {}) {
           highlightPlace();
           updateCount();
           backBtn.disabled = history.length === 0;
+          newFolderBtn.disabled = !current;
           listEl.scrollTop = 0;
         }).catch((e) => {
           if (seq !== reqSeq) return;
