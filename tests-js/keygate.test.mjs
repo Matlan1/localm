@@ -191,7 +191,7 @@ test("loadJsQR injects the bundled decoder script once", async () => {
   const p1 = window.loadJsQR();
   const p2 = window.loadJsQR();
   assert.equal(p1, p2, "concurrent calls share one load promise (no double-inject)");
-  const scripts = [...window.document.querySelectorAll('script[src="/vendor/jsQR.min.js"]')];
+  const scripts = [...window.document.querySelectorAll('script[src="/vendor/jsQR.js"]')];
   assert.equal(scripts.length, 1, "exactly one jsQR script tag added");
 });
 

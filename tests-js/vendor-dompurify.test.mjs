@@ -7,7 +7,8 @@
 // exactly how the shipped copy stayed on 3.2.6 while CVE-2026-0540 (rawtext
 // SAFE_FOR_XML bypass, fixed in 3.3.2) went unnoticed. This test is the
 // replacement signal for DOMPurify. `vendor-katex.test.mjs` is the same thing
-// for the KaTeX trio; `marked`, `highlight.js` and `jsQR` still have none.
+// for the KaTeX trio and vendor-jsqr.test.mjs for jsQR; `marked` and
+// `highlight.js` still have none.
 //
 // It deliberately does NOT use harness.mjs. That harness stubs the library out
 // entirely (`win.DOMPurify = { sanitize: (s) => s }`), which is right for the

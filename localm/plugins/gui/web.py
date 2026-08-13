@@ -186,7 +186,7 @@ def _sw_cacheable_files() -> list[Path]:
     first, sorted for deterministic hashing. Deliberately NOT limited to sw.js's
     own SHELL precache list: the fetch handler runtime-caches ANY same-origin,
     non-API GET into the same versioned cache (see sw.js's fetch listener), so a
-    non-SHELL asset (a KaTeX font, /vendor/jsQR.min.js, ...) goes stale exactly
+    non-SHELL asset (a KaTeX font, /vendor/jsQR.js, ...) goes stale exactly
     as hard as a SHELL one and must invalidate the version the same way."""
     out = []
     for p in STATIC_DIR.rglob("*"):
