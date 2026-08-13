@@ -81,27 +81,32 @@ on:
   # Tests was red, every open PR silently skipped coverage floors, the jsdom
   # GUI tests and ruff. A green Tests step is a precondition for the trigger
   # telling you anything about the rest of the pipeline.
-  # RE-ENABLED 2026-08-13 on the maintainer's explicit instruction ("re-enable ci
-  # runs"). This is the same switch the comments above describe being flipped
-  # several times; it is his call, and the reasoning against it is preserved
-  # rather than deleted because it is still accurate about the COST.
+  # ON 2026-08-13 ("re-enable ci runs"), OFF AGAIN 2026-08-14, both on the
+  # maintainer's explicit instruction. Ninth flip of this switch. It is his call
+  # in either direction and nobody else's; the argument for it is kept here so
+  # the next person asking does not have to rediscover it.
   #
-  # What it buys, and the 2026-08-12 window is the evidence: within minutes of
-  # being on, it surfaced a red on master that had been invisible for six weeks
-  # (a stale assertion from #1179), because with no push and no pull_request
-  # trigger NOTHING ever reads master. The three axes a local run cannot see -
-  # platform, dependency set, dependency version - are the same ones that let a
-  # Linux-only regression land in #845.
+  # WHAT THE DAY IT WAS ON ACTUALLY BOUGHT, measured rather than argued: it
+  # caught a stale assertion that had been red on master for six weeks (#1179)
+  # and nothing was reporting, and it caught a test that passed on a machine
+  # with a llama.cpp runtime provisioned while failing where there is none. With
+  # no push and no pull_request trigger NOTHING ever reads master, so a red
+  # introduced by a change nobody re-runs stays invisible indefinitely. The
+  # three axes a local run cannot see - platform, dependency set, dependency
+  # version - are the same ones that let a Linux-only regression land in #845.
   #
-  # What it costs: roughly 7 minutes per side, two platforms, on every PR.
-  # If that becomes unwanted again, remove this key alone - the comments above
-  # stay true and nothing else here depends on it.
+  # WHAT IT COST: roughly 7 minutes per side, two platforms, on every PR.
   #
-  # READ THE JOB CONCLUSIONS, NOT THE RUN CONCLUSION: the steps run in order and
-  # stop at the first failure, so a red Tests step silently skips the coverage
-  # floors, the jsdom GUI tests and ruff. A green Tests step is a PRECONDITION
-  # for this trigger telling you anything about the rest of the pipeline.
-  pull_request:
+  # SO WHAT GATES THINGS NOW: CodeQL per PR, the author's own targeted run, and
+  # for a RELEASE a deliberate `gh workflow run ci.yml --ref master` - the
+  # maintainer's 2026-08-14 rule is that releases of any kind, INCLUDING an
+  # in-place respin, always get a full suite. Dispatch gets that without editing
+  # this file, which is what the old add-it-then-remove-it release dance did and
+  # is why the trigger kept being left switched on.
+  #
+  # READ THE JOB CONCLUSIONS, NOT THE RUN CONCLUSION, whenever this does run:
+  # the steps run in order and stop at the first failure, so a red Tests step
+  # silently skips the coverage floors, the jsdom GUI tests and ruff.
   workflow_dispatch:
     inputs:
       run_abi:
