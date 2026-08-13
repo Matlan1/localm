@@ -2107,6 +2107,21 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
   font-size: 13px;
 }
 
+/* A checkbox with its label, standing alone in a card (Report a bug's two
+   attach toggles, Appearance's .mmproj toggle). `.check` was already the name
+   used in index.html and had NO rule at all, so those rows fell back to the
+   block `.card label` and the Appearance one carried three inline style
+   declarations instead. One rule, four call sites, no inline layout. It is
+   NOT .inline-check: that one has margin-left and sits beside a button row. */
+.check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 12px 0 4px;
+  cursor: pointer;
+}
+.check input { width: auto; margin: 0; flex: none; }
+
 /* inline checkbox next to a button row */
 .inline-check {
   display: inline-flex;

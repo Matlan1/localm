@@ -594,28 +594,43 @@
                 <code>localm setup-llama --backend cuda</code> if you want to try it.</span>
                 <button type="button" id="perf-backend-hint-dismiss" class="btn-secondary">Dismiss</button>
               </div>
-              <label>GPU layers (0-999) - how much of the model to offload to the GPU</label>
+              <!-- label / control / .sub, the same primitive the schema-driven
+                   sections above use (settings.js buildField). These four used to
+                   merge the label and its description into one long <label>, which
+                   read as a different app from the panels directly above them in
+                   the same nav group. The "(running model)" qualifiers distinguish
+                   them from Runtime & GPU's persisted "GPU layers (next load)". -->
+              <label for="perf-gpu-layers">GPU layers (running model)</label>
               <input type="number" id="perf-gpu-layers" min="0" max="999" step="1" value="999">
-              <label>Context window - the most tokens the model can attend to
-                (<span id="perf-ctx-val">4096</span>)</label>
+              <div class="sub">How much of the model to offload to the GPU (0-999).</div>
+              <label for="perf-ctx">Context window (running model)</label>
               <input type="range" id="perf-ctx" min="512" max="32768" step="512" value="4096">
+              <div class="sub">The most tokens the model can attend to
+                (<span id="perf-ctx-val">4096</span>).</div>
               <div id="perf-estimate" class="sub perf-estimate">estimate unavailable</div>
               <div id="perf-gpu-select-row" hidden>
-                <label for="perf-main-gpu">Main GPU - which device the model loads onto</label>
+                <label for="perf-main-gpu">Main GPU</label>
                 <select id="perf-main-gpu"></select>
-                <div class="sub">Saves immediately; applies on the next model load. Shown only
-                when more than one GPU is detected.</div>
+                <div class="sub">Which device the model loads onto. Saves immediately;
+                applies on the next model load.</div>
               </div>
               <div id="perf-gpu-split-row" hidden>
-                <label>Split across GPUs - spread a model too large for one card over
-                  several (check 2 or more)</label>
+                <label>Split across GPUs</label>
                 <div id="perf-gpu-split-list"></div>
-                <div class="sub">Each card's share follows its free VRAM at load time
-                (set gpu_split_ratios in config.json to pin fixed shares). Saves
-                immediately; applies on the next model load. Overrides Main GPU above
-                when 2 or more are checked. Shown only when more than one GPU is
-                detected.</div>
+                <!-- The gpu_split_ratios clause is LOad-BEARING, not filler: that key
+                     is Widget.HIDDEN and config-file-only, so this sentence is the
+                     only place in the GUI a user can learn it exists (finding M3;
+                     whether to give it a real control is a product call). Pinned by
+                     tests-js/perf.test.mjs. -->
+                <div class="sub">Spread a model too large for one card over several
+                (check 2 or more, which overrides Main GPU). Each card's share follows
+                its free VRAM at load time; set gpu_split_ratios in config.json to pin
+                fixed shares. Saves immediately; applies on the next model load.</div>
               </div>
+              <!-- ONE note for BOTH rows: setIndexSpaceHint used to append it per
+                   row, so a multi-GPU Vulkan box read the same sentence twice about
+                   130px apart. settings-perf.js syncIndexSpaceHint owns it now. -->
+              <div id="perf-gpu-index-space-hint" class="sub perf-index-space-hint" hidden></div>
               <div class="actions">
                 <button class="btn-primary" id="perf-apply">Apply</button>
               </div>
@@ -628,8 +643,8 @@
               <div class="sub">How the wordmark is drawn in the sidebar. Saved in this browser only.</div>
               <div id="logo-style-picker" class="logo-style-picker"></div>
 
-              <label style="margin-top:20px; display:flex; align-items:center; gap:8px;">
-                <input type="checkbox" id="show-mmproj-files" style="width:auto; margin:0">
+              <label class="check">
+                <input type="checkbox" id="show-mmproj-files">
                 Show vision projector (.mmproj) files in repository search results
               </label>
             </section>
@@ -719,7 +734,11 @@
                 <div class="card-head-text"><h3>Your data</h3></div></div>
               <div class="sub">Erase the conversations stored on this device. This cannot be undone.</div>
               <div class="actions">
-                <button class="btn-secondary" id="gui-clear-convs">Delete all conversations</button>
+                <!-- btn-danger: gui-design.md rule 3 reserves it for destructive
+                     actions, and this card's own copy says it cannot be undone.
+                     Paired with btn-secondary, the shape used at every other
+                     destructive site (knowledge.js, video.js, helpers.js). -->
+                <button class="btn-secondary btn-danger" id="gui-clear-convs">Delete all conversations</button>
               </div>
             </section>
 
@@ -737,7 +756,12 @@
               <label class="check"><input type="checkbox" id="bug-include-log" checked> Attach this session's debug log tail, if one exists (debug mode only; scrubbed, never chat content)</label>
               <label class="check"><input type="checkbox" id="bug-autoretry" checked> Automatically retry if rate limited</label>
               <div class="actions">
-                <button class="btn-primary" id="bug-send">Save report</button>
+                <!-- btn-SECONDARY: with an upload endpoint configured both this and
+                     bug-upload are visible at once, and rule 3 allows one primary
+                     per card. Same shape as the Updates card below - a persistent
+                     secondary check plus a primary that appears when the real
+                     action exists. -->
+                <button class="btn-secondary" id="bug-send">Save report</button>
                 <!-- Shown only when an upload endpoint is configured (capabilities
                      .bugreport_upload); files the report as a GitHub issue via the
                      proxy so no GitHub account is needed. -->

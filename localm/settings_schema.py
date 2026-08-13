@@ -174,9 +174,14 @@ CORE_FIELDS: list = [
                  "Builds provisioned on this machine, newest last. Recorded by "
                  "setup-llama so `--rollback` knows what to return to.",
                  group="Engine", admin_only=True),
+    # "up to the maximum below" until 2026-08-13: .settings-fields is a TWO-COLUMN
+    # grid (style.css), so the next field renders to the RIGHT, not below. Every
+    # positional reference in this schema was replaced with the setting's NAME
+    # (gui-design.md rule 9 / decision D3) - a name survives a reflow, a position
+    # does not.
     SettingField("n_ctx", Widget.NUMBER, "Context window (initial)",
-                 "Tokens of history the model starts with; grows on demand up to "
-                 "the maximum below.",
+                 "Tokens of history the model starts with; it grows on demand up "
+                 "to Context window (max).",
                  group="Engine", applies=Applies.NEXT_LOAD, min=512, step=512),
     SettingField("n_ctx_max", Widget.NUMBER, "Context window (max)",
                  "Largest the context window may grow to (0 = unlimited); bigger "
@@ -187,32 +192,41 @@ CORE_FIELDS: list = [
                  group="Engine", applies=Applies.NEXT_LOAD, min=256, step=256),
     SettingField("ctx_auto", Widget.TOGGLE, "Auto-size context from VRAM",
                  "Pick the context ceiling from free GPU memory at load time "
-                 "instead of the fixed maximum above.",
+                 "instead of the fixed Context window (max).",
                  group="Engine", applies=Applies.NEXT_LOAD),
-    SettingField("n_gpu_layers", Widget.NUMBER, "GPU layers",
+    # Label carries "(next load)" because the Live tuning card in the SAME nav
+    # group has its own "GPU layers (running model)" (index.html) - two controls
+    # of the same name, one persisted and one immediate, and the settings search
+    # box indexes both under the same words. See finding M4 in dev-notes.
+    SettingField("n_gpu_layers", Widget.NUMBER, "GPU layers (next load)",
                  "Model layers to run on the GPU. 99 puts the whole model on the "
                  "GPU; lower it if you run out of VRAM.",
                  group="Engine", applies=Applies.NEXT_LOAD, min=0, max=999),
+    # Trimmed to the 200-char budget (gui-design.md rule 9). Removed: "Has no
+    # effect on a normal (dense) model", which only restated the opening
+    # "Mixture-of-Experts models only".
     SettingField("n_cpu_moe", Widget.NUMBER, "MoE expert layers on CPU",
-                 "Mixture-of-Experts models only. Keeps the expert weights of "
-                 "this many layers in system RAM instead of GPU memory, so the "
-                 "model fits in a much smaller amount of VRAM at about the same "
-                 "speed. 0 turns it off. Has no effect on a normal (dense) model.",
+                 "Mixture-of-Experts models only. Keeps this many layers' expert "
+                 "weights in system RAM instead of VRAM, so the model fits in far "
+                 "less VRAM at about the same speed. 0 turns it off.",
                  group="Engine", applies=Applies.NEXT_LOAD, min=0, max=999),
     SettingField("n_gpu_layers_auto", Widget.TOGGLE, "Auto-size GPU layers from VRAM",
-                 "When GPU layers is left at 99 (all), pick how many layers "
-                 "actually fit from free VRAM at load: a model too big for the "
-                 "GPU runs some layers on CPU (slower) and still loads, instead "
-                 "of being refused. An explicit GPU-layers value is left as-is.",
+                 "When GPU layers is left at 99 (all), fit as many as free VRAM "
+                 "allows at load: an oversized model runs some layers on CPU and "
+                 "still loads instead of being refused. An explicit value is kept.",
                  group="Engine", applies=Applies.NEXT_LOAD),
+    # Trimmed to the 200-char budget; the consequence now leads. The removed
+    # explanation, kept here because it is the WHY and a future reader will want
+    # it: this is VRAM reserved beyond model weights for the KV cache's compute
+    # buffers and llama.cpp's graph/scratch allocations, deducted before GPU
+    # layers or context are auto-sized. It is real memory the loader needs, not
+    # a safety margin, which is why lowering it faults rather than just slowing
+    # things down - only lower it once you have confirmed your model/context
+    # needs less.
     SettingField("vram_overhead_mb", Widget.NUMBER, "Reserved VRAM overhead (MB)",
-                 "VRAM reserved beyond model weights for the KV cache's compute "
-                 "buffers and llama.cpp's graph/scratch allocations before "
-                 "auto-sizing GPU layers or context. This is real memory the "
-                 "loader needs, not just a safety margin - lowering it risks a "
-                 "native crash or GPU driver hang instead of a slower load; "
-                 "only lower it if you have confirmed your model/context needs "
-                 "less.",
+                 "Lowering this risks a native crash or GPU driver hang, not just "
+                 "a slower load: it is VRAM the loader genuinely needs for the KV "
+                 "cache and llama.cpp's scratch buffers.",
                  group="Engine", applies=Applies.NEXT_LOAD, min=256, step=128),
     # HIDDEN: rendered by a dedicated Main GPU selector in the Live Tuning card
     # (populated from GET /api/gpus), not the generic settings form - a plain
@@ -227,12 +241,15 @@ CORE_FIELDS: list = [
     # GPU selector (populated from GET /api/gpus), not the generic settings
     # form - same reasoning as main_gpu_index above. Still accepted by PATCH
     # /v1/config and `localm config gpu_split_indices 0,1` like any other field.
+    # Trimmed to the budget like every other field even though HIDDEN renders no
+    # control: the cap is enforced over the WHOLE schema (tests/test_settings_help_budget.py)
+    # so a field that later becomes visible cannot smuggle a wall of text in with
+    # it. Removed detail, kept here: each card's share follows its free VRAM at
+    # load time unless GPU split ratios pins exact weights.
     SettingField("gpu_split_indices", Widget.HIDDEN, "Split across GPUs",
-                 "Device indices to split a model across when it is too large "
-                 "for one card (2+ needed to take effect). Each card's share "
-                 "follows its free VRAM at load time unless GPU split ratios "
-                 "pins exact weights. Blank still spreads a model over every "
-                 "GPU by free VRAM; set this to control which cards.",
+                 "Device indices to split a model across when it is too large for "
+                 "one card (2+ needed to take effect). Blank still spreads a model "
+                 "over every GPU by free VRAM; set this to choose which cards.",
                  group="Engine", applies=Applies.NEXT_LOAD),
     SettingField("gpu_split_ratios", Widget.HIDDEN, "GPU split ratios",
                  "Optional relative weight per device in Split across GPUs "
@@ -259,50 +276,55 @@ CORE_FIELDS: list = [
                  "(0 = never; the model stays resident). The next message reloads "
                  "it automatically.",
                  group="Engine", min=0, step=30),
+    # These five repeated one near-identical paragraph five times (~1,220 chars
+    # for one idea). Trimmed to the 200-char budget and, deliberately, to the
+    # SAME sentence shape, so the panel reads as one family and a difference
+    # between two of them is visible instead of buried in boilerplate.
     SettingField("gguf_load_timeout_s", Widget.NUMBER, "GGUF load timeout (s)",
                  "How long a GGUF model load may run in its isolated worker "
-                 "process before it is treated as hung and cancelled. Raise this "
-                 "only if a genuinely huge model on slow storage needs longer "
-                 "than the default.",
+                 "before it is treated as hung and cancelled. Raise it only for a "
+                 "huge model on slow storage.",
                  group="Timeouts", min=10, step=60),
+    # Label prefixed "GGUF" 2026-08-13: three of the four load/first-token
+    # timeouts named their format and this one did not, so on screen a bare
+    # "First-token timeout" read as the global one (assessment A7b).
+    #
+    # Removed from the help, kept because it is the WHY the default is so large:
+    # the timer covers reading the whole prompt rather than emitting one token,
+    # so on CPU, with most layers off the GPU, or with a very long prompt, a
+    # legitimate first token can take minutes.
     SettingField("gguf_first_token_timeout_s", Widget.NUMBER,
-                 "First-token timeout (s)",
-                 "How long a reply may take to produce its first token before "
-                 "the model is treated as hung. This covers reading your whole "
-                 "prompt, not one token, so it is generous by default: on CPU, "
-                 "with most layers off the GPU, or with a very long prompt, that "
-                 "can legitimately take minutes. Raise it only if a slow machine "
-                 "needs longer than the default.",
+                 "GGUF first-token timeout (s)",
+                 "How long a reply may take to produce its first token before the "
+                 "model is treated as hung. It covers reading your whole prompt, "
+                 "so on CPU or with a long prompt this can legitimately take "
+                 "minutes.",
                  group="Timeouts", min=10, step=60),
     SettingField("hf_load_timeout_s", Widget.NUMBER,
                  "HuggingFace load timeout (s)",
-                 "How long a HuggingFace-format model load may run in its "
-                 "isolated worker process before it is treated as hung and "
-                 "cancelled. Raise this only if a genuinely huge model on slow "
-                 "storage needs longer than the default.",
+                 "How long a HuggingFace-format model load may run in its isolated "
+                 "worker before it is treated as hung and cancelled. Raise it only "
+                 "for a huge model on slow storage.",
                  group="Timeouts", min=10, step=60),
     SettingField("hf_first_token_timeout_s", Widget.NUMBER,
                  "HuggingFace first-token timeout (s)",
-                 "How long a HuggingFace-format model's reply may take to "
-                 "produce its first token before it is treated as hung. This "
-                 "covers reading your whole prompt, not one token, so it is "
-                 "generous by default. Raise it only if a slow machine needs "
-                 "longer than the default.",
+                 "How long a HuggingFace-format model's reply may take to produce "
+                 "its first token before it is treated as hung. It covers reading "
+                 "your whole prompt, so it is generous by default.",
                  group="Timeouts", min=10, step=60),
     SettingField("hf_embed_timeout_s", Widget.NUMBER,
                  "HuggingFace embed timeout (s)",
-                 "How long a HuggingFace-format model's embedding request may "
-                 "run in its isolated worker process before it is treated as "
-                 "hung. Raise this if you regularly embed large batches of "
-                 "text against a HuggingFace embedding model.",
+                 "How long a HuggingFace-format model's embedding request may run "
+                 "in its isolated worker before it is treated as hung. Raise it if "
+                 "you regularly embed large batches.",
                  group="Timeouts", min=10, step=60),
+    # Removed, kept as the WHY the cap is low: a HuggingFace embed runs one text
+    # at a time with no batching, so request cost is linear in the batch size.
     SettingField("hf_embed_max_texts", Widget.NUMBER,
                  "HuggingFace embed batch cap (texts)",
-                 "Maximum number of texts accepted in one /v1/embeddings "
-                 "request against a HuggingFace-format model. A HuggingFace "
-                 "embed runs one text at a time with no batching, so a very "
-                 "large request can take a long time; raise this only if "
-                 "you understand that cost.",
+                 "Most texts accepted in one /v1/embeddings request against a "
+                 "HuggingFace-format model. These embed one text at a time with no "
+                 "batching, so a large request is slow.",
                  group="Timeouts", min=1, step=1),
     SettingField("hf_embed_max_chars", Widget.NUMBER,
                  "HuggingFace embed batch cap (characters)",
@@ -359,11 +381,12 @@ CORE_FIELDS: list = [
                  "Browser origins allowed to call the API. Blank = localhost "
                  'only; comma-separated list; or "*" for any.',
                  group="Server", applies=Applies.RESTART, admin_only=True),
+    # Removed from the help, kept as the WHY a rename needs a restart: the name
+    # is also written into the HTTPS certificate's SANs, so it is not display-only.
     SettingField("mdns_name", Widget.TEXT, "Network name (mDNS)",
-                 "The name other devices use to reach this server on your LAN. "
-                 "Sets <name>.local (e.g. localm -> https://localm.local:PORT), so "
-                 "there is no IP to type. Letters, digits and hyphens only; also "
-                 "added to the HTTPS certificate.",
+                 "The name other devices use to reach this server on your LAN: "
+                 "<name>.local, so there is no IP to type. Letters, digits and "
+                 "hyphens only.",
                  group="Server", applies=Applies.RESTART),
     SettingField("mdns_enabled", Widget.TOGGLE, "Advertise on the network (mDNS)",
                  "Broadcast <name>.local over mDNS/Bonjour when bound past loopback "
@@ -419,46 +442,52 @@ CORE_FIELDS: list = [
                  "What localm saves: privacy = nothing written automatically; "
                  "log = a JSONL audit trail; full = log plus a chat transcript.",
                  group="Privacy", options=_PRIVACY, admin_only=True),
+    # "the global mode above" until 2026-08-13, and it was false twice over: the
+    # parent used to sit on a different nav TAB, and after the group-first move
+    # it sits in the same panel but to the LEFT (two-column grid). Both children
+    # now name the parent setting instead of pointing at a position (D3).
     SettingField("chat_mode", Widget.SELECT, "Chat persistence override",
-                 "Overrides the global persistence for chat only. Blank inherits "
-                 "the global mode above.",
+                 "Overrides Session persistence for chat only. Blank inherits "
+                 "whatever Session persistence is set to.",
                  group="Privacy", owner="chat", options=_PRIVACY_INHERIT,
                  admin_only=True),
     SettingField("coder_mode", Widget.SELECT, "Coder persistence override",
-                 "Overrides the global persistence for the coder only. Blank "
-                 "inherits the global mode.",
+                 "Overrides Session persistence for the coder only. Blank inherits "
+                 "whatever Session persistence is set to.",
                  group="Privacy", owner="coder", options=_PRIVACY_INHERIT,
                  admin_only=True),
     SettingField("memory_enabled", Widget.TOGGLE, "Memory recall",
-                 "While the memory plugin is enabled, recall the durable facts "
-                 "localm has learned about you and add them to the system prompt "
-                 "each chat turn. Off = keep the facts but stop recalling them. "
-                 "Privacy mode disables memory entirely unless the privacy-recall "
-                 "option below is turned on.",
+                 "Recall the durable facts localm has learned about you and add "
+                 "them to the system prompt each chat turn. Off = keep the facts "
+                 "but stop recalling them.",
                  group="Memory", owner="memory"),
+    # Removed, kept as the WHY there is no privacy exception here: consolidation
+    # WRITES, and privacy mode's contract is that nothing is written
+    # automatically - so unlike recall it can never be opted back in.
     SettingField("memory_auto_consolidate", Widget.TOGGLE, "Grow memory automatically",
                  "After a chat turn, quietly distil durable facts from the "
-                 "conversation into memory in the background, so it accumulates "
-                 "with no manual step. Always blocked in privacy mode (no new "
-                 "traces). Turn this off to grow memory only via the 'Synthesize "
-                 "now' button or a scheduled memory job.",
+                 "conversation into memory, so it grows with no manual step. Always "
+                 "blocked in privacy mode. Off, memory grows only on demand.",
                  group="Memory", owner="memory"),
     SettingField("memory_recall_in_privacy", Widget.TOGGLE,
                  "Allow memory recall in privacy mode",
                  "Privacy mode normally turns memory off entirely. Turn this on to "
-                 "still READ your existing memories into the prompt while in privacy "
-                 "mode - writing new memories stays off, so no new trace is ever "
-                 "created. Use the per-surface toggles below to choose where.",
+                 "still READ existing memories in privacy mode; writing new ones "
+                 "stays off, so no new trace is created.",
                  group="Memory", owner="memory"),
+    # These two labels began with a literal ellipsis ("...in privacy mode: chat"),
+    # which is meaningless in the settings SEARCH results, where a match renders
+    # outside its section with no parent to complete the sentence (D3).
     SettingField("memory_recall_in_privacy_chat", Widget.TOGGLE,
-                 "...in privacy mode: chat",
-                 "When the option above is on, recall chat memory during "
-                 "privacy-mode chats (read-only).",
+                 "Privacy-mode recall: chat",
+                 "With Allow memory recall in privacy mode on, recall chat memory "
+                 "during privacy-mode chats (read-only).",
                  group="Memory", owner="memory"),
     SettingField("memory_recall_in_privacy_coder", Widget.TOGGLE,
-                 "...in privacy mode: coder",
-                 "When the option above is on, recall the coder's past-session "
-                 "lessons during privacy-mode coder sessions (read-only).",
+                 "Privacy-mode recall: coder",
+                 "With Allow memory recall in privacy mode on, recall the coder's "
+                 "past-session lessons during privacy-mode coder sessions "
+                 "(read-only).",
                  group="Memory", owner="memory"),
     SettingField("keep_diagnostics", Widget.TOGGLE,
                  "Keep diagnostics for bug reports",
@@ -514,22 +543,25 @@ CORE_FIELDS: list = [
                  # binary_dir is the only field in this sweep to call an escalation.
                  # Do not flatten the two to one severity in a write-up.
                  group="Embeddings", applies=Applies.NEXT_LOAD, admin_only=True),
+    # Consequence first (it is destructive-adjacent: existing collections and
+    # memory vectors stop matching). Removed, kept as the WHY the choice matters:
+    # mean suits bge/nomic and matches everything already indexed, while a
+    # decoder-based embedder (Qwen3-Embedding, gte-Qwen2) is trained for
+    # last-token pooling and is DEGRADED by mean - choose last for those, or auto
+    # to follow whatever the model declares.
     SettingField("embedding_pooling", Widget.SELECT, "Embedding pooling",
-                 "How the embedding model's token states become one vector. "
-                 "mean suits bge/nomic (the default) and matches everything you "
-                 "have already indexed. A decoder-based embedder (Qwen3-Embedding, "
-                 "gte-Qwen2) is trained for last-token pooling and is degraded by "
-                 "mean: choose last, or auto to follow whatever the model "
-                 "declares. Changing this invalidates existing document "
-                 "collections and memory vectors - re-index after you change it.",
+                 "Changing this invalidates existing document collections and "
+                 "memory vectors: re-index afterwards. mean suits bge/nomic; a "
+                 "decoder-based embedder needs last, or auto to follow the model.",
                  group="Embeddings", applies=Applies.NEXT_LOAD,
                  options=_EMBEDDING_POOLING),
+    # Removed, kept as the WHY blank is not simply "use the GPU": a large embedder
+    # sharing one card with a loaded chat model oversubscribes VRAM and slows the
+    # chat model down, so automatic falls back to CPU rather than competing.
     SettingField("embedding_gpu_layers", Widget.NUMBER, "Embedder GPU layers",
-                 "GPU layers for the embedding model. Empty = automatic: full "
-                 "GPU offload when free VRAM holds it, otherwise CPU, so a "
-                 "loaded chat model is not slowed by VRAM oversubscription "
-                 "when a large embedder shares one card. 0 forces CPU; 99 "
-                 "forces full GPU offload regardless of free VRAM.",
+                 "GPU layers for the embedding model. Empty = automatic: full GPU "
+                 "offload when free VRAM holds it, otherwise CPU. 0 forces CPU; 99 "
+                 "forces full offload regardless of free VRAM.",
                  group="Embeddings", applies=Applies.NEXT_LOAD,
                  min=0, max=999, step=1),
     SettingField("confirm_remove", Widget.TOGGLE,
@@ -548,12 +580,13 @@ CORE_FIELDS: list = [
                  "When a command belongs to a known but inactive plugin, suggest "
                  "installing it instead of reporting an unknown command.",
                  group="Plugins"),
+    # Removed, kept because it is the reassurance the sentence was carrying: only
+    # the LOCAL operator can trigger this - a remote client never causes a
+    # server-side install (the install path is gated on the local principal).
     SettingField("auto_install_plugin_deps", Widget.TOGGLE,
                  "Auto-install plugin dependencies",
                  "When you install or enable a plugin that needs extra Python "
-                 "packages, install them automatically on this machine. Only the "
-                 "local operator triggers this; a remote client never causes a "
-                 "server-side install.",
+                 "packages, install them automatically on this machine.",
                  group="Plugins"),
     SettingField("plugins_enabled", Widget.HIDDEN, "Enabled plugins",
                  "Names of enabled engine plugins. Managed by the Plugins page "
@@ -615,9 +648,12 @@ CORE_FIELDS: list = [
     # it like every other network capability unless an admin opts it out here.
     SettingField("update_ignore_net_policy", Widget.TOGGLE,
                  "Check for updates even when network access is off",
-                 "The update check normally obeys the Network access setting "
-                 "above, so setting that to Off also turns off update checks. "
-                 "Turn this on to let the update channel through regardless.",
+                 # "the Network access setting above" until 2026-08-13, and after
+                 # the group-first move it is not merely mis-positioned but on a
+                 # different NAV GROUP (Server & network). Name it, never place it.
+                 "The update check normally obeys Network access, so setting that "
+                 "to Off also turns off update checks. Turn this on to let the "
+                 "update channel through regardless.",
                  group="Updates", admin_only=True),
     SettingField("plugins", Widget.HIDDEN, "Per-plugin config",
                  "Per-plugin settings (e.g. media output dirs). Managed by the "
@@ -663,14 +699,15 @@ CORE_FIELDS: list = [
                  "tool-call JSON (lazy GBNF grammar; local grammar-capable "
                  "backends only). Free text and thinking are unaffected.",
                  group="Coder", owner="coder", applies=Applies.NEXT_LOAD),
+    # Removed, kept as the WHY it is safe to leave on: recall itself is free, and
+    # the write half is skipped in privacy mode and for shared keys. Episodes are
+    # stored under the localm data dir, never inside your project, and are managed
+    # with `localcoder --episodes` / `--forget-episodes`.
     SettingField("coder_episodic_memory", Widget.TOGGLE,
                  "Coder episodic memory",
-                 "Recall lessons from past sessions on a project (what worked / "
-                 "what failed) and, at session close, distil the finished session "
-                 "into a new lesson. Recall is free; the reflection is one extra "
-                 "model call per session that changed files. Skipped in privacy "
-                 "mode and for shared keys; stored under the localm data dir, not "
-                 "your project. Manage with: localcoder --episodes / --forget-episodes.",
+                 "Recall lessons from past sessions on a project and, at session "
+                 "close, distil the finished session into a new one. Costs one "
+                 "extra model call per session that changed files.",
                  group="Coder", owner="coder", applies=Applies.NEXT_LOAD),
     # REC-MEDIA-CMD sweep: this is an INJECTION-HARDENING control. Its own help
     # says "leave ON unless you have a specific reason", so a non-owner turning
@@ -741,11 +778,14 @@ CORE_FIELDS: list = [
                  "Folders that are never indexed in blacklist mode (everything "
                  "else is allowed). Ignored in whitelist mode.",
                  group="Knowledge", owner="rag", admin_only=True),
+    # Removed, kept as the WHY this is off by default and narrow: format tagging
+    # from the extension and content is already free, so the LLM is asked only
+    # about an unknown extension it cannot tell structurally, and only while a
+    # chat model happens to be loaded.
     SettingField("rag_classify_unknown_files", Widget.TOGGLE, "Classify unknown files with AI",
-                 "Files are tagged with a format (JSON, YAML, ...) for free from their "
-                 "extension and content. Turn this on to let the local LLM guess the "
-                 "format of an unknown extension it can't tell structurally - only when "
-                 "a chat model is loaded. Off, such files are tagged plain text.",
+                 "Let the local LLM guess the format of a file whose extension it "
+                 "does not recognise, when a chat model is loaded. Off, those files "
+                 "are tagged plain text.",
                  group="Knowledge", owner="rag"),
     # ---- Media (ComfyUI: image / music / video plugins) ----
     # REC-MEDIA-CMD: these three are the CORE twins of MediaFields that were
@@ -767,7 +807,7 @@ CORE_FIELDS: list = [
                  group="Media", owner="image", admin_only=True),
     SettingField("comfy_launch_cmd", Widget.TEXT, "ComfyUI launch command",
                  "Launcher script (.bat/.sh) that starts ComfyUI. Blank "
-                 "auto-detects one in the ComfyUI folder above.",
+                 "auto-detects one inside the ComfyUI folder.",
                  group="Media", owner="image", admin_only=True),
     SettingField("comfy_api_url", Widget.TEXT, "ComfyUI API URL",
                  "Where ComfyUI listens. Blank uses FLUX_API_URL, else "
@@ -779,8 +819,8 @@ CORE_FIELDS: list = [
                  "start can take minutes.",
                  group="Media", owner="image", min=30, step=30),
     SettingField("comfy_output_dir", Widget.FOLDER, "ComfyUI output folder",
-                 "ComfyUI's own output folder. Only needed if you turn on "
-                 "'Remove ComfyUI's copy' below; blank derives it.",
+                 "ComfyUI's own output folder. Only needed with 'Remove ComfyUI's "
+                 "copy after generating' on; blank derives it.",
                  # DELIBERATELY NOT admin_only, though it names a folder this
                  # process DELETES from when comfy_delete_outputs is on
                  # (comfy_client.py, the unlink() calls under _comfy_output_root).
@@ -803,36 +843,40 @@ CORE_FIELDS: list = [
                  "Rewrite a slow float32 Flux GGUF dequant to fp16/bf16 on submit. "
                  "float32 is the usual cause of very slow gen on smaller cards.",
                  group="Media", owner="image"),
+    # Removed, kept as the WHY it can appear to do nothing: the flag is passed by
+    # appending --disable-auto-launch to the launcher, so it needs a launcher that
+    # FORWARDS args to main.py. The stock run_*.bat and a plain `python main.py`
+    # do; a launcher that drops its args simply ignores the setting.
     SettingField("comfy_disable_auto_launch", Widget.TOGGLE,
                  "Suppress ComfyUI's web page on launch",
                  "When localm starts ComfyUI for you, keep it headless instead of "
-                 "letting it open its own browser tab (appends "
-                 "--disable-auto-launch). Off by default. Needs a launcher that "
-                 "forwards args to main.py (the stock run_*.bat and 'python "
-                 "main.py' do); a launcher that drops args just ignores it.",
+                 "letting it open its own browser tab. Off by default.",
                  group="Media", owner="image"),
+    # Removed, kept because it is the mechanism and the reassurance, and a user
+    # deciding whether to enable a "patch" deserves both on the record: this is a
+    # reactive fix for ComfyUI core regression Comfy-Org/ComfyUI #12116, which
+    # crashes native ACE-Step audio with "'function' object has no attribute
+    # '__func__'". When on, a ComfyUI that localm STARTS gets an in-memory
+    # compatibility patch via a PYTHONPATH env var - localm writes NOTHING into
+    # your ComfyUI install and never patches a ComfyUI it did not start. The patch
+    # self-expires once ComfyUI ships its own fix.
     SettingField("comfy_func_shim", Widget.TOGGLE,
                  "Fix ComfyUI ACE-Step __func__ crash (in-memory)",
-                 "Reactive fix for a known ComfyUI core regression "
-                 "(Comfy-Org/ComfyUI #12116) that crashes native ACE-Step audio "
-                 "with \"'function' object has no attribute '__func__'\". Off by "
-                 "default; localm normally touches nothing. When on, a ComfyUI that "
-                 "localm STARTS gets an in-memory compatibility patch via a "
-                 "PYTHONPATH env var - localm writes nothing into your ComfyUI "
-                 "install and never patches a ComfyUI it did not start. The patch "
-                 "self-expires once ComfyUI ships its own fix.",
+                 "Work around a known ComfyUI crash in native ACE-Step audio. Off "
+                 "by default. Patches only a ComfyUI that localm starts, in memory "
+                 "- nothing is written into your install.",
                  group="Media", owner="image"),
+    # Removed, kept as the compatibility rule and the honest limit: per-component
+    # placement needs upstream ComfyUI 2026-05-25 or newer - localm's own managed
+    # ComfyUI has it, and an older ComfyUI of your own declines cleanly and says
+    # why. It does NOT split one model across cards (no ComfyUI feature does).
+    # Still UNPROVEN on real multi-GPU hardware, which is why it ships off; with
+    # it off, or on a single-GPU box, media generation is unchanged.
     SettingField("comfy_gpu_placement", Widget.TOGGLE,
                  "Split media across GPUs (experimental)",
-                 "EXPERIMENTAL, off by default. On a machine with two or more "
-                 "GPUs, put the text encoder and VAE on a second card so the "
-                 "diffusion model has more room on the first. Needs a ComfyUI that "
-                 "offers per-component placement (upstream 2026-05-25 or newer): "
-                 "localm's own managed ComfyUI does; an older ComfyUI of your own "
-                 "declines cleanly and says why. This does NOT split one model "
-                 "across cards (no ComfyUI feature does that). Unproven on real "
-                 "multi-GPU hardware, so it stays off until you turn it on; with "
-                 "it off, or on a single-GPU box, media generation is unchanged.",
+                 "EXPERIMENTAL, off by default. With two or more GPUs, put the text "
+                 "encoder and VAE on a second card so the diffusion model has more "
+                 "room on the first. Needs a recent ComfyUI.",
                  group="Media", owner="image", applies=Applies.RESTART),
     SettingField("reload_llm_after_imagine", Widget.TOGGLE,
                  "Reload chat model after generating",
@@ -844,14 +888,14 @@ CORE_FIELDS: list = [
                  "always = always unload chat; never = keep chat hot.",
                  group="Media", owner="image",
                  options=["auto", "always", "never"]),
+    # Removed, kept as the two reassurances that make either choice safe: 'own' is
+    # INERT until you actually run `localm comfy setup`, so leaving it there costs
+    # nothing; and your own ComfyUI is never modified either way, with neither
+    # install's settings lost by switching back and forth.
     SettingField("comfy_target", Widget.SELECT, "ComfyUI to use",
-                 "own = use localm's OWN managed ComfyUI (installed under the "
-                 "localm data folder) once you set one up with 'localm comfy "
-                 "setup' - inert until then, so this is safe to leave on "
-                 "'own'. user = always use your own ComfyUI install, even if "
-                 "a managed one exists. Your own ComfyUI is never modified "
-                 "either way, and switching back and forth never loses either "
-                 "one's settings below.",
+                 "own = localm's own managed ComfyUI, installed under the localm "
+                 "data folder by 'localm comfy setup'. user = always your own "
+                 "ComfyUI install, even when a managed one exists.",
                  group="Media", owner="image", options=["own", "user"],
                  applies=Applies.RESTART),
     # The GLOBAL fallback behind the per-plugin "Model weight dtype" Media
@@ -871,12 +915,15 @@ CORE_FIELDS: list = [
                  options=["default", "fp16", "bf16", "fp32", "fp8_e4m3fn",
                           "fp8_e5m2"]),
     # ---- Network (web plugin) ----
+    # Removed, kept because it is the SHARP EDGE of "ask" and a user choosing it
+    # is entitled to know: only a BROWSER-initiated request is prompted. A
+    # non-browser API or MCP client holding the web scope is NOT prompted and its
+    # requests proceed. The private-address SSRF guard and the domain lists apply
+    # in every mode, "off" included.
     SettingField("net_mode", Widget.SELECT, "Network access",
-                 "Model-initiated web access: off = blocked (all requests fail); "
-                 "ask = the GUI prompts before a browser-initiated request (a "
-                 "non-browser API/MCP client with web scope is NOT prompted - its "
-                 "requests proceed); allow = no prompt. The private-address SSRF "
-                 "guard and domain rules apply in every mode.",
+                 "Model-initiated web access: off = every request fails; ask = the "
+                 "GUI prompts first; allow = no prompt. The SSRF guard and the "
+                 "domain lists apply in all three.",
                  group="Network", owner="web", options=["off", "ask", "allow"]),
     SettingField("net_allow", Widget.LIST, "Allowed domains",
                  "Domains the model may reach. Empty = any. e.g. example.com "
@@ -894,8 +941,8 @@ CORE_FIELDS: list = [
     # fine-grained knob a scoped key legitimately manages. Removing a denial is
     # not the same act as adding a permission.
     SettingField("net_deny", Widget.LIST, "Denied domains",
-                 "Domains always refused, even if allowed above (deny wins). "
-                 "Empty = none.",
+                 "Domains always refused, even when listed in Allowed domains "
+                 "(deny wins). Empty = none.",
                  group="Network", owner="web", admin_only=True),
     SettingField("net_allow_private", Widget.TOGGLE,
                  "Allow private/loopback targets (disables the SSRF guard)",

@@ -1,10 +1,17 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // jsdom tests for the native index-space hint on the Settings GPU selectors
 // (settings-perf.js): when GET /api/gpus says index_space "native" (the
-// vulkan build serving ggml's own device registry - GPU-SPLIT-VKINDEX), both
-// the "Main GPU" selector row and the "Split across GPUs" row must carry a
-// visible hint that the numbering is the native backend's load-time order,
-// and must carry NO such hint otherwise.
+// vulkan build serving ggml's own device registry - GPU-SPLIT-VKINDEX), the
+// numbering shown is the native backend's load-time order and the page must
+// say so - once - and must say nothing otherwise.
+//
+// CONTRACT CHANGED 2026-08-13 (finding M1 of the settings conformance sweep).
+// It used to be appended PER ROW, so a multi-GPU Vulkan box rendered the
+// identical sentence twice about 130px apart. It is now ONE element that both
+// refreshers drive, so these tests assert on its VISIBILITY rather than on how
+// many copies exist, and additionally assert that a second copy never appears.
+// The property being guarded is unchanged: the note is present exactly when the
+// device list is native-sourced and a GPU row is actually on screen.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -16,6 +23,13 @@ async function waitFor(fn, timeout = 800) {
   const end = Date.now() + timeout;
   while (Date.now() < end) { if (fn()) return true; await settle(15); }
   return false;
+}
+
+/** The one shared note. Visible = present in the DOM and not `hidden`. */
+function hint(doc) { return doc.getElementById("perf-gpu-index-space-hint"); }
+function hintVisible(doc) {
+  const h = hint(doc);
+  return !!h && h.hidden === false;
 }
 
 function makeFetch(calls, { gpus = [], indexSpace = null } = {}) {
@@ -46,7 +60,7 @@ const TWO_NATIVE = [
   { index: 1, name: "llvmpipe (LLVM 19.1.7, 256 bits)", total: 8 * GIB, free: 7 * GIB },
 ];
 
-test("index_space native: both GPU rows show the native-numbering hint once", async () => {
+test("index_space native: the native-numbering hint is shown ONCE for both rows", async () => {
   const calls = [];
   const { window } = loadApp({
     fetchImpl: makeFetch(calls, { gpus: TWO_NATIVE, indexSpace: "native" }),
@@ -56,15 +70,23 @@ test("index_space native: both GPU rows show the native-numbering hint once", as
   const splitRow = doc.getElementById("perf-gpu-split-row");
   assert.ok(await waitFor(() => selRow.hidden === false), "selector row visible");
   assert.ok(await waitFor(() => splitRow.hidden === false), "split row visible");
-  const selHints = selRow.querySelectorAll(".perf-index-space-hint");
-  const splitHints = splitRow.querySelectorAll(".perf-index-space-hint");
-  assert.equal(selHints.length, 1, "exactly one hint under the Main GPU row");
-  assert.equal(splitHints.length, 1, "exactly one hint under the split row");
-  assert.match(selHints[0].textContent, /Vulkan backend/);
-  assert.match(splitHints[0].textContent, /Vulkan backend/);
+  assert.ok(await waitFor(() => hintVisible(doc)), "the shared hint is visible");
+
+  // M1 is exactly this assertion: BOTH rows are on screen, and the sentence
+  // still appears once. Before the fix this was 2.
+  const all = doc.querySelectorAll(".perf-index-space-hint");
+  assert.equal(all.length, 1,
+               `the note must exist once, found ${all.length} copies`);
+  assert.match(hint(doc).textContent, /Vulkan backend/);
+
+  // ...and it is NOT nested inside either row, which is what made it duplicate.
+  assert.equal(selRow.querySelectorAll(".perf-index-space-hint").length, 0,
+               "the note must not live inside the Main GPU row");
+  assert.equal(splitRow.querySelectorAll(".perf-index-space-hint").length, 0,
+               "the note must not live inside the split row");
 });
 
-test("no index_space: no native-numbering hint appears", async () => {
+test("no index_space: no native-numbering hint is shown", async () => {
   const calls = [];
   const gpus = [
     { index: 0, name: "NVIDIA RTX 4090", total: 24 * GIB, free: 20 * GIB },
@@ -75,8 +97,24 @@ test("no index_space: no native-numbering hint appears", async () => {
   const selRow = doc.getElementById("perf-gpu-select-row");
   assert.ok(await waitFor(() => selRow.hidden === false), "selector row visible");
   await settle(30);
-  assert.equal(doc.querySelectorAll(".perf-index-space-hint").length, 0,
+  assert.equal(hintVisible(doc), false,
                "no hint on a torch/nvidia-smi-sourced device list");
+});
+
+test("a single-GPU box hides the rows, so the shared hint stays hidden too", async () => {
+  // The note is shared, so it must not be left stranded under two hidden rows.
+  // A single-GPU box is the common case and the one that would show it.
+  const calls = [];
+  const one = [{ index: 0, name: "AMD Radeon RX 6900 XT", total: 16 * GIB, free: 15 * GIB }];
+  const { window } = loadApp({
+    fetchImpl: makeFetch(calls, { gpus: one, indexSpace: "native" }),
+  });
+  const doc = window.document;
+  const selRow = doc.getElementById("perf-gpu-select-row");
+  assert.ok(await waitFor(() => selRow.hidden === true), "selector row hidden");
+  await settle(30);
+  assert.equal(hintVisible(doc), false,
+               "the shared note must not show when no GPU row is on screen");
 });
 
 test("a refresh after switching away from native removes the stale hint", async () => {
@@ -96,15 +134,13 @@ test("a refresh after switching away from native removes the stale hint", async 
   };
   const { window } = loadApp({ fetchImpl });
   const doc = window.document;
-  const selRow = doc.getElementById("perf-gpu-select-row");
-  assert.ok(await waitFor(() => selRow.querySelectorAll(".perf-index-space-hint").length === 1),
-            "hint present after the native load");
+  assert.ok(await waitFor(() => hintVisible(doc)), "hint present after the native load");
   state.indexSpace = null;
   // Classic-script injection lands the top-level functions on the window
   // (see harness.mjs) - call the refreshers directly for the second pass.
   await window.refreshMainGpuSelector();
   await window.refreshGpuSplitCheckboxes();
   await settle(30);
-  assert.equal(doc.querySelectorAll(".perf-index-space-hint").length, 0,
-               "stale hint removed once the source is no longer native");
+  assert.equal(hintVisible(doc), false,
+               "stale hint hidden once the source is no longer native");
 });
