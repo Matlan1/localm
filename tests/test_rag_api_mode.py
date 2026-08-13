@@ -397,3 +397,75 @@ def test_rag_extract_offloads_extraction_off_the_event_loop(monkeypatch):
         f"{len(early_ticks)} ticker iterations landed before the 250ms mark "
         f"(the 300ms slow extract_bytes should not have prevented them): "
         f"{ticks}")
+
+
+# --- an attachment must be the WHOLE file, not a preview --------------------
+# REGRESSION, reported by the maintainer 2026-08-13: "attach file needs to
+# actually attach the file, the whole file, for n number of files attached".
+# RagExtractRequest.max_chars defaulted to 24_000 and NEITHER chat.js NOR
+# coder.js ever sent the field, so every attachment over ~24k characters was cut
+# to a preview. The chip said "trimmed" and the message said "(truncated)", but
+# a user who attached a document and asked about its later pages got a confident
+# answer drawn only from the opening. Images were never affected - they take a
+# different path (data URI -> image_url) - which is why attachments could look
+# like they worked and be truncated at the same time.
+
+def _extract(client, name, blob, **body):
+    import base64
+    payload = {"filename": name, "content_b64": base64.b64encode(blob).decode()}
+    payload.update(body)
+    return client.post("/api/rag/extract", json=payload)
+
+
+def test_extract_returns_the_whole_file_by_default(api_mode_app):
+    """The default must be the entire document, with no cap applied."""
+    big = ("QA-ATTACH-WHOLE-FILE line %d\n" % 0).encode()
+    body = b"".join(b"line %d padding padding padding\n" % i for i in range(4000))
+    blob = big + body + b"QA-ATTACH-TAIL-CANARY\n"
+    with TestClient(api_mode_app) as c:
+        r = _extract(c, "big.txt", blob)
+    assert r.status_code == 200, r.text
+    d = r.json()
+    assert len(blob.decode()) > 24_000, "fixture must exceed the OLD 24k default to be meaningful"
+    # ASSERT ON THE CONTENT FIRST: a length check alone would pass on a
+    # different 24k-plus string. The tail canary can only be present if nothing
+    # was cut off the end.
+    assert "QA-ATTACH-TAIL-CANARY" in d["text"], "the END of the file did not survive"
+    assert d["truncated"] is False
+    assert d["chars"] == len(d["text"])
+
+
+def test_extract_still_honours_an_explicit_max_chars(api_mode_app):
+    """A caller that WANTS an excerpt can still ask for one."""
+    blob = b"".join(b"line %d padding padding padding\n" % i for i in range(4000))
+    with TestClient(api_mode_app) as c:
+        r = _extract(c, "big.txt", blob, max_chars=1000)
+        # The FULL length comes from an unbounded call, not from the raw bytes:
+        # extraction normalises text, so len(blob) is not the extracted length
+        # and comparing against it fails for a reason that has nothing to do
+        # with the property under test.
+        full = _extract(c, "big.txt", blob).json()["text"]
+    assert r.status_code == 200, r.text
+    d = r.json()
+    assert len(d["text"]) == 1000
+    assert d["truncated"] is True
+    assert d["chars"] == len(full), "chars must report the FULL length, not the excerpt"
+    assert len(full) > 1000, "fixture must exceed the requested excerpt to be meaningful"
+
+
+def test_extract_handles_n_files_independently(api_mode_app):
+    """N attachments: each one comes back whole, and they do not bleed together."""
+    blobs = {
+        "a.txt": b"AAA-CANARY\n" + b"a" * 30_000 + b"\nAAA-TAIL",
+        "b.txt": b"BBB-CANARY\n" + b"b" * 30_000 + b"\nBBB-TAIL",
+        "c.txt": b"CCC-CANARY\n" + b"c" * 30_000 + b"\nCCC-TAIL",
+    }
+    with TestClient(api_mode_app) as c:
+      for name, blob in blobs.items():
+        d = _extract(c, name, blob).json()
+        tag = name[0].upper() * 3
+        assert d["text"].startswith(tag + "-CANARY"), f"{name} lost its head"
+        assert d["text"].endswith(tag + "-TAIL"), f"{name} lost its tail"
+        assert d["truncated"] is False
+        for other in "ABC".replace(name[0].upper(), ""):
+            assert other * 3 + "-CANARY" not in d["text"], f"{name} bled into another file"
