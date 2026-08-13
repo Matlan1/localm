@@ -874,9 +874,18 @@ CORE_FIELDS: list = [
     # it off, or on a single-GPU box, media generation is unchanged.
     SettingField("comfy_gpu_placement", Widget.TOGGLE,
                  "Split media across GPUs (experimental)",
+                 # "Single-GPU setups are unaffected" is four words and it is
+                 # load-bearing, not padding: this toggle is visible to EVERY user,
+                 # and most have one card. Without it the reader has to infer from
+                 # "with two or more GPUs" that the setting does nothing for them,
+                 # which is exactly the inference a settings description exists to
+                 # save them. tests/test_media_placement.py asserts both halves -
+                 # that placement is not promised everywhere, AND that single-GPU
+                 # users are still told it does not apply - and the second half went
+                 # red when a verbosity trim dropped this clause.
                  "EXPERIMENTAL, off by default. With two or more GPUs, put the text "
-                 "encoder and VAE on a second card so the diffusion model has more "
-                 "room on the first. Needs a recent ComfyUI.",
+                 "encoder and VAE on a second card, freeing room for the diffusion "
+                 "model. Single-GPU setups are unaffected. Needs a recent ComfyUI.",
                  group="Media", owner="image", applies=Applies.RESTART),
     SettingField("reload_llm_after_imagine", Widget.TOGGLE,
                  "Reload chat model after generating",
