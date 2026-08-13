@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """GUI local-admin routes: log export, the ComfyUI launcher writer, and the
-directory picker.
+directory picker (browse, create folder, rename).
 
 Extracted verbatim from attach_gui(); behavior unchanged. These are local
 filesystem operations gated on CONFIG_READ / CONFIG_WRITE; none need the shared
@@ -16,8 +16,8 @@ from fastapi import Depends, FastAPI, HTTPException
 
 from localm import scopes
 from localm.inference.http_server import require_fs_host, require_scope
-from localm.pathsafe import reject_unsafe_path_string
-from localm.plugins.gui.web import LogExportRequest
+from localm.pathsafe import confined_name, reject_unsafe_path_string
+from localm.plugins.gui.web import FsMkdirRequest, FsRenameRequest, LogExportRequest
 
 # Cap a single /api/fs/dirs listing so pointing the browser at a directory with an
 # enormous number of entries cannot spike CPU/IO/memory (one stat() per child with
@@ -339,6 +339,110 @@ def register(app: FastAPI, ctx) -> None:
         if meta:
             result["entries"] = entries
         return result
+
+    @app.post("/api/fs/mkdir",
+              dependencies=[Depends(require_scope(scopes.CONFIG_WRITE)),
+                            Depends(require_fs_host)])
+    def fs_mkdir(req: FsMkdirRequest):
+        """Create a new folder inside a directory the picker is currently
+        browsing. Same gating as the other host-filesystem WRITE routes in this
+        file (export_logs, create_comfy_launcher): CONFIG_WRITE (a state change)
+        plus require_fs_host (the parent, like fs_dirs' own `path`, is an
+        arbitrary caller-chosen host location, not one already on an allowlist).
+
+        Plain `def`, NOT `async def`: is_dir/resolve/mkdir all block, same
+        reasoning as fs_dirs above.
+        """
+        parent_raw = (req.path or "").strip()
+        name = (req.name or "").strip()
+        if not parent_raw:
+            raise HTTPException(400, "Missing parent folder")
+        if not name:
+            raise HTTPException(400, "Missing folder name")
+        # BEFORE Path()/is_dir(): a UNC parent dials SMB, same as fs_dirs' path.
+        try:
+            reject_unsafe_path_string(parent_raw)
+        except ValueError as e:
+            raise HTTPException(400, f"Invalid path: {e}")
+        parent = Path(parent_raw).expanduser()
+        if not parent.is_dir():
+            raise HTTPException(404, f"Not a directory: {parent_raw}")
+        parent = parent.resolve()
+        # confined_name rejects a separator/reserved-char/".."/empty name
+        # LEXICALLY, before it ever resolves anything, then verifies the
+        # resolved child's parent is exactly `parent` (catches an OS-level
+        # alias substitution too). `name` has already been proven separator-free
+        # by the time confined_name calls resolve(), so `parent / name` cannot
+        # become a UNC string - the syscall-before-check hazard reject_unsafe_
+        # path_string exists for does not apply to this second resolve().
+        child = confined_name(parent, name)
+        try:
+            child.mkdir()
+        except FileExistsError:
+            # mkdir(2)/CreateDirectory both refuse an existing target on every
+            # platform - there is no overwrite mode, so this is race-free by
+            # construction, unlike rename below.
+            raise HTTPException(409, f"'{name}' already exists")
+        except PermissionError:
+            raise HTTPException(403, f"Permission denied: {name}")
+        except OSError as e:
+            raise HTTPException(500, f"Could not create folder: {e}")
+        return {"path": str(child), "parent": str(parent), "name": child.name}
+
+    @app.post("/api/fs/rename",
+              dependencies=[Depends(require_scope(scopes.CONFIG_WRITE)),
+                            Depends(require_fs_host)])
+    def fs_rename(req: FsRenameRequest):
+        """Rename a file or folder in place (same parent directory only - this
+        is not a move). Same gating as fs_mkdir above.
+
+        NEVER overwrites an existing target. This has to be checked EXPLICITLY
+        rather than left to Path.rename()'s own error handling: on POSIX,
+        os.rename() SILENTLY REPLACES an existing FILE target (that is
+        rename(2)'s documented behavior) while on Windows it raises
+        FileExistsError - so relying on the exception alone would make this
+        route safe on Windows and silently destructive on Linux/macOS. The
+        pre-check closes the ordinary case; a concurrent racer landing a file
+        at the new name between the check and the rename() call below is the
+        same narrow, accepted window create_comfy_launcher's own
+        check-then-write already has for this key's trust level (full host
+        filesystem access).
+
+        Plain `def`, NOT `async def`: same reasoning as fs_dirs/fs_mkdir above.
+        """
+        target_raw = (req.path or "").strip()
+        new_name = (req.new_name or "").strip()
+        if not target_raw:
+            raise HTTPException(400, "Missing path")
+        if not new_name:
+            raise HTTPException(400, "Missing new name")
+        # BEFORE Path()/exists(): a UNC target dials SMB, same as fs_dirs' path.
+        try:
+            reject_unsafe_path_string(target_raw)
+        except ValueError as e:
+            raise HTTPException(400, f"Invalid path: {e}")
+        p = Path(target_raw).expanduser()
+        if not p.exists():
+            raise HTTPException(404, f"Not found: {target_raw}")
+        p = p.resolve()
+        parent = p.parent
+        # See fs_mkdir above: new_name is proven separator-free before this
+        # resolves anything, so it cannot turn `parent / new_name` into a UNC
+        # string.
+        new_path = confined_name(parent, new_name)
+        if new_path == p:
+            raise HTTPException(400, "New name is the same as the current name")
+        if new_path.exists():
+            raise HTTPException(409, f"'{new_name}' already exists")
+        try:
+            p.rename(new_path)
+        except FileExistsError:
+            raise HTTPException(409, f"'{new_name}' already exists")
+        except PermissionError:
+            raise HTTPException(403, f"Permission denied: {new_name}")
+        except OSError as e:
+            raise HTTPException(500, f"Could not rename: {e}")
+        return {"path": str(new_path), "parent": str(parent), "name": new_path.name}
 
     @app.get("/api/fs/places", dependencies=[Depends(require_fs_host)])
     def fs_places():

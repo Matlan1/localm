@@ -416,6 +416,286 @@ def test_logs_export_rejects_unc_destination(fs_app, fs_spy):
 
 
 # --------------------------------------------------------------------------- #
+#  POST /api/fs/mkdir - create a new folder from the picker                    #
+# --------------------------------------------------------------------------- #
+
+class TestFsMkdir:
+
+    @pytest.fixture
+    def browse_dir(self, tmp_path):
+        """A dedicated subdirectory to browse/create into, kept separate from
+        tmp_path's root: fs_app points LOCALM_HOME at tmp_path/".localm", so
+        minting a key (every test here needs one for auth) side-effect-creates
+        that folder directly under tmp_path the first time it is touched. A
+        test that lists/compares tmp_path's own contents would see that
+        unrelated directory and misattribute it to the mkdir under test."""
+        d = tmp_path / "browse"
+        d.mkdir()
+        return d
+
+    def test_creates_folder_and_navigable_result(self, fs_app, browse_dir):
+        with TestClient(fs_app) as c:
+            r = c.post("/api/fs/mkdir",
+                       json={"path": str(browse_dir), "name": "New Folder"},
+                       headers=_hdr(_cfgwrite_key()))
+        assert r.status_code == 200, r.text
+        created = browse_dir / "New Folder"
+        assert created.is_dir()
+        body = r.json()
+        assert body["name"] == "New Folder"
+        assert Path(body["path"]) == created.resolve()
+
+    @pytest.mark.parametrize("bad", [UNC, DEVICE, r"\\192.0.2.1\share\sub"])
+    def test_unc_parent_refused_without_touching_the_filesystem(
+            self, fs_app, fs_spy, bad):
+        with TestClient(fs_app) as c:
+            t0 = time.perf_counter()
+            r = c.post("/api/fs/mkdir", json={"path": bad, "name": "x"},
+                       headers=_hdr(_cfgwrite_key()))
+            elapsed = time.perf_counter() - t0
+        assert r.status_code == 400, r.text
+        assert _unc_calls(fs_spy) == [], (
+            "the UNC parent reached a filesystem call - the SMB dial (and the "
+            "net-NTLMv2 leak) happens there, before any status code is chosen")
+        assert elapsed < _NO_DIAL_SECONDS, f"took {elapsed:.2f}s"
+
+    @pytest.mark.parametrize("bad_name", ["../evil", "a/b", "..", ".", ""])
+    def test_unsafe_name_rejected_and_nothing_created(
+            self, fs_app, browse_dir, bad_name):
+        before = set(browse_dir.iterdir())
+        with TestClient(fs_app) as c:
+            r = c.post("/api/fs/mkdir",
+                       json={"path": str(browse_dir), "name": bad_name},
+                       headers=_hdr(_cfgwrite_key()))
+        assert r.status_code == 400, r.text
+        assert set(browse_dir.iterdir()) == before, (
+            "an unsafe name still created something inside the parent")
+
+    def test_reserved_character_rejected(self, fs_app, browse_dir):
+        with TestClient(fs_app) as c:
+            r = c.post("/api/fs/mkdir",
+                       json={"path": str(browse_dir), "name": "evil:stream"},
+                       headers=_hdr(_cfgwrite_key()))
+        assert r.status_code == 400, r.text
+        assert not list(browse_dir.iterdir())
+
+    def test_never_overwrites_an_existing_folder(self, fs_app, browse_dir):
+        existing = browse_dir / "already-here"
+        existing.mkdir()
+        (existing / "keep.txt").write_text("do not touch", encoding="utf-8")
+        with TestClient(fs_app) as c:
+            r = c.post("/api/fs/mkdir",
+                       json={"path": str(browse_dir), "name": "already-here"},
+                       headers=_hdr(_cfgwrite_key()))
+        assert r.status_code == 409, r.text
+        assert (existing / "keep.txt").read_text(encoding="utf-8") == "do not touch"
+
+    def test_never_overwrites_an_existing_file(self, fs_app, browse_dir):
+        existing = browse_dir / "already-here"
+        existing.write_text("do not touch", encoding="utf-8")
+        with TestClient(fs_app) as c:
+            r = c.post("/api/fs/mkdir",
+                       json={"path": str(browse_dir), "name": "already-here"},
+                       headers=_hdr(_cfgwrite_key()))
+        assert r.status_code == 409, r.text
+        assert existing.is_file()
+        assert existing.read_text(encoding="utf-8") == "do not touch"
+
+    def test_missing_parent_directory_is_404(self, fs_app, browse_dir):
+        missing = browse_dir / "does-not-exist"
+        with TestClient(fs_app) as c:
+            r = c.post("/api/fs/mkdir", json={"path": str(missing), "name": "x"},
+                       headers=_hdr(_cfgwrite_key()))
+        assert r.status_code == 404, r.text
+
+    def test_permission_denied_is_reported_not_swallowed(
+            self, fs_app, browse_dir, monkeypatch):
+        # Mint the key BEFORE sabotaging Path.mkdir: creating a key
+        # side-effect-creates LOCALM_HOME via the same Path.mkdir the patch
+        # below hijacks, so minting it afterwards would fail key creation
+        # itself rather than exercise the route's own PermissionError handling.
+        key = _cfgwrite_key()
+
+        def flaky_mkdir(self, *a, **kw):
+            raise PermissionError(13, "Permission denied")
+        monkeypatch.setattr(Path, "mkdir", flaky_mkdir)
+        with TestClient(fs_app) as c:
+            r = c.post("/api/fs/mkdir", json={"path": str(browse_dir), "name": "x"},
+                       headers=_hdr(key))
+        assert r.status_code == 403, r.text
+        assert "permission" in r.text.lower()
+
+    def test_config_read_only_key_is_refused(self, fs_app, browse_dir):
+        """A key that can browse but not write must not be able to mkdir - the
+        same CONFIG_WRITE gate as export_logs/create_comfy_launcher."""
+        with TestClient(fs_app) as c:
+            r = c.post("/api/fs/mkdir", json={"path": str(browse_dir), "name": "x"},
+                       headers=_hdr(_host_key()))
+        assert r.status_code == 403, r.text
+        assert not (browse_dir / "x").exists()
+
+    def test_config_write_without_host_fs_access_is_refused(self, fs_app, browse_dir):
+        """CONFIG_WRITE alone is not enough - the target is an arbitrary host
+        path, same as fs_dirs, so require_fs_host applies too."""
+        from localm import auth
+        key = auth.create_key("w-mkdir", [S.CONFIG_WRITE], allow_privileged=True,
+                              fs_access="none")["key"]
+        with TestClient(fs_app) as c:
+            r = c.post("/api/fs/mkdir", json={"path": str(browse_dir), "name": "x"},
+                       headers=_hdr(key))
+        assert r.status_code == 403, r.text
+        assert not (browse_dir / "x").exists()
+
+
+# --------------------------------------------------------------------------- #
+#  POST /api/fs/rename - rename a file or folder in place                      #
+# --------------------------------------------------------------------------- #
+
+class TestFsRename:
+
+    def test_renames_a_file(self, fs_app, tmp_path):
+        f = tmp_path / "old.txt"
+        f.write_text("content", encoding="utf-8")
+        with TestClient(fs_app) as c:
+            r = c.post("/api/fs/rename",
+                       json={"path": str(f), "new_name": "new.txt"},
+                       headers=_hdr(_cfgwrite_key()))
+        assert r.status_code == 200, r.text
+        assert not f.exists()
+        new_f = tmp_path / "new.txt"
+        assert new_f.is_file()
+        assert new_f.read_text(encoding="utf-8") == "content"
+        assert r.json()["name"] == "new.txt"
+
+    def test_renames_a_folder_preserving_contents(self, fs_app, tmp_path):
+        d = tmp_path / "old-dir"
+        d.mkdir()
+        (d / "inside.txt").write_text("hi", encoding="utf-8")
+        with TestClient(fs_app) as c:
+            r = c.post("/api/fs/rename",
+                       json={"path": str(d), "new_name": "new-dir"},
+                       headers=_hdr(_cfgwrite_key()))
+        assert r.status_code == 200, r.text
+        assert not d.exists()
+        new_d = tmp_path / "new-dir"
+        assert new_d.is_dir()
+        assert (new_d / "inside.txt").read_text(encoding="utf-8") == "hi"
+
+    @pytest.mark.parametrize("bad", [UNC, DEVICE, r"\\192.0.2.1\share\sub"])
+    def test_unc_target_refused_without_touching_the_filesystem(
+            self, fs_app, fs_spy, bad):
+        with TestClient(fs_app) as c:
+            t0 = time.perf_counter()
+            r = c.post("/api/fs/rename", json={"path": bad, "new_name": "x"},
+                       headers=_hdr(_cfgwrite_key()))
+            elapsed = time.perf_counter() - t0
+        assert r.status_code == 400, r.text
+        assert _unc_calls(fs_spy) == [], (
+            "the UNC target reached a filesystem call - the SMB dial (and the "
+            "net-NTLMv2 leak) happens there, before any status code is chosen")
+        assert elapsed < _NO_DIAL_SECONDS, f"took {elapsed:.2f}s"
+
+    @pytest.mark.parametrize("bad_name", ["../evil", "a/b", "..", ".", ""])
+    def test_unsafe_new_name_rejected_and_nothing_renamed(
+            self, fs_app, tmp_path, bad_name):
+        f = tmp_path / "keep.txt"
+        f.write_text("content", encoding="utf-8")
+        with TestClient(fs_app) as c:
+            r = c.post("/api/fs/rename",
+                       json={"path": str(f), "new_name": bad_name},
+                       headers=_hdr(_cfgwrite_key()))
+        assert r.status_code == 400, r.text
+        assert f.is_file()
+        assert f.read_text(encoding="utf-8") == "content"
+
+    def test_never_overwrites_an_existing_file(self, fs_app, tmp_path):
+        src = tmp_path / "source.txt"
+        src.write_text("SOURCE", encoding="utf-8")
+        dst = tmp_path / "target.txt"
+        dst.write_text("TARGET - must survive", encoding="utf-8")
+        with TestClient(fs_app) as c:
+            r = c.post("/api/fs/rename",
+                       json={"path": str(src), "new_name": "target.txt"},
+                       headers=_hdr(_cfgwrite_key()))
+        assert r.status_code == 409, r.text
+        assert src.is_file(), "the source must be untouched on refusal"
+        assert src.read_text(encoding="utf-8") == "SOURCE"
+        assert dst.read_text(encoding="utf-8") == "TARGET - must survive"
+
+    def test_never_overwrites_an_existing_folder(self, fs_app, tmp_path):
+        src = tmp_path / "source-dir"
+        src.mkdir()
+        dst = tmp_path / "target-dir"
+        dst.mkdir()
+        (dst / "keep.txt").write_text("do not touch", encoding="utf-8")
+        with TestClient(fs_app) as c:
+            r = c.post("/api/fs/rename",
+                       json={"path": str(src), "new_name": "target-dir"},
+                       headers=_hdr(_cfgwrite_key()))
+        assert r.status_code == 409, r.text
+        assert src.is_dir(), "the source must be untouched on refusal"
+        assert (dst / "keep.txt").read_text(encoding="utf-8") == "do not touch"
+
+    def test_missing_source_is_404(self, fs_app, tmp_path):
+        with TestClient(fs_app) as c:
+            r = c.post("/api/fs/rename",
+                       json={"path": str(tmp_path / "nope"), "new_name": "x"},
+                       headers=_hdr(_cfgwrite_key()))
+        assert r.status_code == 404, r.text
+
+    def test_same_name_is_refused_as_a_no_op(self, fs_app, tmp_path):
+        f = tmp_path / "same.txt"
+        f.write_text("x", encoding="utf-8")
+        with TestClient(fs_app) as c:
+            r = c.post("/api/fs/rename",
+                       json={"path": str(f), "new_name": "same.txt"},
+                       headers=_hdr(_cfgwrite_key()))
+        assert r.status_code == 400, r.text
+        assert f.is_file()
+
+    def test_permission_denied_is_reported_not_swallowed(
+            self, fs_app, tmp_path, monkeypatch):
+        f = tmp_path / "old.txt"
+        f.write_text("x", encoding="utf-8")
+        # Mint the key BEFORE sabotaging Path.rename - see the identical note
+        # in TestFsMkdir.test_permission_denied_is_reported_not_swallowed.
+        key = _cfgwrite_key()
+
+        def flaky_rename(self, target):
+            raise PermissionError(13, "Permission denied")
+        monkeypatch.setattr(Path, "rename", flaky_rename)
+        with TestClient(fs_app) as c:
+            r = c.post("/api/fs/rename",
+                       json={"path": str(f), "new_name": "new.txt"},
+                       headers=_hdr(key))
+        assert r.status_code == 403, r.text
+        assert "permission" in r.text.lower()
+
+    def test_config_read_only_key_is_refused(self, fs_app, tmp_path):
+        f = tmp_path / "old.txt"
+        f.write_text("x", encoding="utf-8")
+        with TestClient(fs_app) as c:
+            r = c.post("/api/fs/rename",
+                       json={"path": str(f), "new_name": "new.txt"},
+                       headers=_hdr(_host_key()))
+        assert r.status_code == 403, r.text
+        assert f.is_file()
+
+    def test_config_write_without_host_fs_access_is_refused(self, fs_app, tmp_path):
+        from localm import auth
+        key = auth.create_key("w-rename", [S.CONFIG_WRITE], allow_privileged=True,
+                              fs_access="none")["key"]
+        f = tmp_path / "old.txt"
+        f.write_text("x", encoding="utf-8")
+        with TestClient(fs_app) as c:
+            r = c.post("/api/fs/rename",
+                       json={"path": str(f), "new_name": "new.txt"},
+                       headers=_hdr(key))
+        assert r.status_code == 403, r.text
+        assert f.is_file()
+
+
+# --------------------------------------------------------------------------- #
 #  Cross-origin refusal for /api/fs/ in EVERY mode                             #
 # --------------------------------------------------------------------------- #
 
