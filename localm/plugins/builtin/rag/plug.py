@@ -94,7 +94,19 @@ class RagRemoveDocRequest(BaseModel):
 class RagExtractRequest(BaseModel):
     filename: str
     content_b64: str              # in-memory extraction - no disk writes
-    max_chars: int = 24_000
+    # None = the WHOLE file, and that is the default because it is what
+    # "attach this file" means. It used to default to 24_000, which silently
+    # turned every attachment over ~24k characters into a PREVIEW: neither
+    # chat.js nor coder.js ever sent this field, so both got the cap without
+    # asking for it, and a user who attached a real document and asked about
+    # its later pages got a confident answer drawn from the first few pages
+    # only. Images were never affected - they take a different path entirely
+    # (data URI -> image_url), which is why "attachments work" and "attachments
+    # are truncated" were both true at once and the bug survived.
+    #
+    # A caller that genuinely wants an excerpt (a preview pane, a cheap
+    # classification) can still ask for one by passing a number.
+    max_chars: int | None = None
 
 
 class RagUploadItem(BaseModel):
@@ -1266,6 +1278,14 @@ async def rag_extract(req: RagExtractRequest):
             get_plugin_executor(), extract_bytes, data, req.filename)
     except ExtractError as e:
         raise HTTPException(422, str(e))
+    # No cap unless one was ASKED for. The 30 MB byte guard above is the real
+    # memory bound and it already ran; a second character cap here only served
+    # to hand the model a fraction of the document it was told it had. If the
+    # text does not fit the model's context that is the engine's problem to
+    # report honestly, not a reason to quietly shorten the input.
+    if req.max_chars is None:
+        return {"filename": req.filename, "text": text,
+                "chars": len(text), "truncated": False}
     max_chars = max(500, min(req.max_chars, 200_000))
     return {"filename": req.filename,
             "text": text[:max_chars],
