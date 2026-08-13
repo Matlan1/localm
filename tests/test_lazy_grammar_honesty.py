@@ -309,6 +309,22 @@ def test_grammar_processor_raises_invalid_grammar_when_compilation_fails(monkeyp
     monkeypatch.setitem(sys.modules, "xgrammar", xgr)
     monkeypatch.setitem(sys.modules, "xgrammar.contrib", contrib)
     monkeypatch.setitem(sys.modules, "xgrammar.contrib.hf", hf_mod)
+    # `transformers` MUST be stubbed too, and it is not belt-and-braces: the
+    # code under test imports xgrammar AND `from transformers import
+    # LogitsProcessorList` in the SAME try, so on an install without
+    # transformers that import raises first and the except-ImportError arm
+    # returns GrammarUnsupportedError - never reaching the compile failure this
+    # test exists to pin. transformers is in NEITHER core nor the dev/rag
+    # extras, so CI (`.[dev,rag]`) never has it while a dev venv usually does:
+    # measured 2026-08-13, this test passed locally and failed on both CI
+    # platforms for exactly that reason, and it had been red on master
+    # unnoticed because nothing was running the suite. Stubbing it makes the
+    # test independent of whether transformers is installed, which is what its
+    # docstring already claims ("the code path under test is this module's own
+    # except-arm").
+    tfm = types.ModuleType("transformers")
+    tfm.LogitsProcessorList = list
+    monkeypatch.setitem(sys.modules, "transformers", tfm)
 
     with pytest.raises(InvalidGrammarError) as ei:
         _hf_worker._grammar_processor(_GRAMMAR, object(), object())
