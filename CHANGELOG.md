@@ -897,6 +897,25 @@ permanent public record of what shipped and are never rewritten; the in-progress
   everything was busy read as "Nothing was loaded". Both now say plainly that
   the model is still generating and to try again once it finishes, and Unload
   all names how many it had to skip.
+- **Video and music would not play, and sending a generated image to chat or
+  copying it failed.** The security policy the GUI started enforcing this cycle
+  refused every internally-generated media file, so players sat dead and the two
+  image buttons reported "Failed to fetch". Playback was the worse half because
+  it was silent: the browser reports a refused source as an event rather than an
+  error the page can catch, so nothing was shown at all and the button still
+  said "hide". Both are allowed again, and a media file that fails to load now
+  says so whatever the reason, instead of leaving you with a dead player.
+- **Answering "no" to using your GPU during setup on Linux or macOS no longer
+  recommends a GPU build anyway.** The question promises CPU only, but the next
+  screen still suggested a GPU backend and made it the default, so pressing
+  Enter downloaded and tested a runtime you had just declined. Every backend is
+  still listed if you change your mind.
+- **A command could stop with "localm hit an unexpected error" when a knowledge
+  collection was briefly busy.** On Windows, a collection's lock file can be
+  unreadable for a moment while another localm process releases it. That was
+  treated as a failure rather than as something to wait for. It now waits, up to
+  the same limit as any other busy collection, and says the collection is in use
+  if it never clears.
 
 ### Security
 - **The GUI's Content-Security-Policy now actually blocks, instead of only
