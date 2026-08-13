@@ -388,6 +388,13 @@ case "$REC" in
   vulkan|cuda|hip|cpu|metal|amd-rocm) ;;                      # a known backend from the policy
   *) case "$GPU" in cpu) REC=cpu ;; *) REC=vulkan ;; esac ;;  # fallback if the probe failed
 esac
+# The prompt above promises "n = CPU only", so honour it: hwdetect answers what
+# this HARDWARE could use, which is a different question from what the user just
+# said they WANT. Without this the next screen recommends a GPU backend and makes
+# it the default, so pressing Enter downloads and load-tests a ~195 MB GPU
+# runtime the user declined one question earlier. The menu still lists every
+# backend, so this changes the DEFAULT, never the available choice.
+if [ "$GPU" = cpu ]; then REC=cpu; fi
 # [1] is a shortcut for whichever backend the policy recommended, so it is ALWAYS
 # the same choice as one of the numbered entries below (vulkan on most GPUs, cpu
 # with none). Listing it twice with no relation shown reads as two different

@@ -261,3 +261,46 @@ def test_shell_token_snippet_is_nonced_too():
     for tag in _INLINE_SCRIPT_OPEN.findall(html):
         m = _NONCE_ATTR.search(tag)
         assert m and m.group(1) == "N0NCE", tag
+
+
+def test_media_and_fetch_of_blob_urls_are_permitted():
+    """The GUI mints blob: URLs from its OWN responses and then plays or reads
+    them back. Two directives have to allow that, and neither did.
+
+    Found live 2026-08-13 against master 1eb79919. `media-src` was absent
+    ENTIRELY, so media fell back to `default-src 'self'` and every <video>/<audio>
+    fed a blob: URL died with MEDIA_ELEMENT_ERROR "Media load rejected by URL
+    safety check". `connect-src` had no blob:, so "send to chat" and "copy image"
+    failed with "Failed to fetch".
+
+    The media half is the dangerous one because it is SILENT: a blocked src fires
+    an error EVENT on the element rather than throwing, so the try/catch around
+    the assignment cannot see it and the player sits there dead with no toast.
+    That is a step failing while reporting success.
+
+    Asserting on the HEADER, not on a browser, deliberately - this is the cheap
+    durable check that would have caught it, and it cannot regress silently.
+    """
+    with TestClient(create_app(_engine())) as c:
+        r = c.get("/health")
+    csp = r.headers.get("Content-Security-Policy", "")
+
+    assert "media-src" in csp, (
+        "no media-src directive: media falls back to default-src 'self', which "
+        f"has no blob:, and every gallery player dies silently. csp={csp!r}"
+    )
+    media_src = _directive(csp, "media-src")
+    assert "blob:" in media_src, (
+        f"<video>/<audio> cannot play a blob: URL. media-src={media_src!r}"
+    )
+    connect_src = _directive(csp, "connect-src")
+    assert "blob:" in connect_src, (
+        "fetch() of a blob: URL is refused, so 'send to chat' and 'copy image' "
+        f"fail. connect-src={connect_src!r}"
+    )
+    # The grant must stay scoped to blob:, which is same-origin-minted and cannot
+    # point at a remote origin. A wildcard here would hand an injected script an
+    # exfiltration channel, which is most of what connect-src is for.
+    assert "*" not in connect_src.replace("https://*.hf.co", ""), (
+        f"connect-src must not carry a wildcard origin: {connect_src!r}"
+    )
