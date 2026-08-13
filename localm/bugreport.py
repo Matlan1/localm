@@ -284,6 +284,43 @@ def _scrub_url_creds(text: str) -> str:
     return re.sub(r"(://)[^/@\s]+@", r"\1<redacted>@", text)
 
 
+# A credential is at least as often carried as a URL QUERY PARAMETER
+# (?api_key=..., ?token=...) as it is via user:pass@ syntax - that is the
+# ordinary way ComfyUI/SearXNG/a generic reviewer endpoint carry a key. Redact
+# by PARAMETER NAME, never by guessing the value's format: an opaque token has
+# no reliable shape, but a parameter literally called api_key/token/secret/...
+# is a name we can trust regardless of what it holds. Keep the parameter NAME
+# so the report still shows THAT the endpoint was credentialed and which
+# endpoint it is - only the value must go. Do not widen this by adding more
+# value-shape regexes (sk-..., 24-char-opaque, ...): that chases formats
+# forever and still misses the next one; the name is the durable signal.
+_QUERY_SECRET_RE = re.compile(
+    r"(?i)([?&](?:api[_-]?key|key|token|secret|password|passwd|pwd|auth"
+    r"|access[_-]?token|sig|signature)=)[^&\s#\"'\)\]\}]*"
+)
+
+# The same credential can arrive as a pasted HTTP header line instead of a URL
+# (a browser console error, a bundled log tail) - "X-Api-Key: <value>". Same
+# name-based reasoning as the query-string case above, kept to the small,
+# explicit set of credential header names rather than a bearer-style
+# catch-all, so an unrelated header is never touched.
+_HEADER_SECRET_RE = re.compile(
+    r"(?i)((?:x-)?(?:api[_-]key|api[_-]token|auth[_-]token)\s*:\s*)\S+"
+)
+
+
+def _scrub_query_and_header_secrets(text: str) -> str:
+    """Redact credential-ish URL query parameters and HTTP header lines, by
+    NAME (see the regexes above). Idempotent: the ``<redacted>`` replacement
+    contains none of the delimiters the value patterns stop on, so a second
+    pass matches nothing new and leaves an already-redacted value unchanged."""
+    if not text:
+        return text
+    text = _QUERY_SECRET_RE.sub(r"\1<redacted>", text)
+    text = _HEADER_SECRET_RE.sub(r"\1<redacted>", text)
+    return text
+
+
 # Bearer tokens ("Authorization: Bearer <token>") and API keys (OpenAI-style
 # sk-..., or a localm key) can appear in a pasted console error, a fetch log
 # line, or a mistyped config value. A bug report is share-intended, so strip
@@ -295,14 +332,16 @@ _APIKEY_RE = re.compile(r"(?i)\b(?:sk|localm[_-]sk)-[A-Za-z0-9._\-]{12,}")
 
 def _scrub_secrets(text: str) -> str:
     """Run every scrubber over untrusted text: home paths (username), URL
-    ``user:pass@`` credentials, and bearer / API-key tokens. Used for
-    client-supplied fields and the bundled log tails / activity ring a
-    share-intended report carries - each of which is untrusted, free-form text
-    that could contain a secret the plain home-scrub alone would leave in."""
+    ``user:pass@`` credentials, credential-named query params / header lines,
+    and bearer / API-key tokens. Used for client-supplied fields and the
+    bundled log tails / activity ring a share-intended report carries - each
+    of which is untrusted, free-form text that could contain a secret the
+    plain home-scrub alone would leave in."""
     if not text:
         return text
     text = _scrub_home(text)
     text = _scrub_url_creds(text)
+    text = _scrub_query_and_header_secrets(text)
     text = _BEARER_RE.sub(r"\1<redacted>", text)
     text = _APIKEY_RE.sub("<redacted>", text)
     return text
@@ -403,7 +442,10 @@ def _safe_config_subset() -> dict:
             continue
         val = cfg[key]
         if isinstance(val, str) and val:
-            val = _scrub_url_creds(_scrub_home(val))
+            # comfy_api_url / net_search_url / coder_reviewer routinely carry a
+            # credential as a query parameter (?api_key=...), not only as
+            # user:pass@ - see _scrub_query_and_header_secrets.
+            val = _scrub_query_and_header_secrets(_scrub_url_creds(_scrub_home(val)))
         out[key] = val
     return out
 

@@ -128,6 +128,20 @@ def read_proxy(config_path: Path | None = None) -> tuple:
 _BEARER_RE = re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._\-]{8,}")
 _APIKEY_RE = re.compile(r"(?i)\b(?:sk|localm[_-]sk)-[A-Za-z0-9._\-]{12,}")
 
+# Mirrors localm/bugreport.py's _QUERY_SECRET_RE / _HEADER_SECRET_RE: a
+# credential is at least as often carried as a URL query parameter
+# (?api_key=...) or a pasted header line (X-Api-Key: ...) as via user:pass@
+# syntax. Redact by NAME, never by guessing the value's format - see the
+# sibling comment in bugreport.py for why. Keep these two byte-identical to
+# their bugreport.py counterparts.
+_QUERY_SECRET_RE = re.compile(
+    r"(?i)([?&](?:api[_-]?key|key|token|secret|password|passwd|pwd|auth"
+    r"|access[_-]?token|sig|signature)=)[^&\s#\"'\)\]\}]*"
+)
+_HEADER_SECRET_RE = re.compile(
+    r"(?i)((?:x-)?(?:api[_-]key|api[_-]token|auth[_-]token)\s*:\s*)\S+"
+)
+
 
 def scrub(text: str) -> str:
     """Strip the account name from any path and any obvious credential from free
@@ -160,6 +174,10 @@ def scrub(text: str) -> str:
     # e.g. a comfy/searx/remote-server URL. Without this the standalone reporter would
     # ship a credential the in-app reporter scrubs.
     text = re.sub(r"(://)[^/@\s]+@", r"\1<redacted>@", text)
+    # Credential-named query params and header lines (mirror
+    # _scrub_query_and_header_secrets in localm/bugreport.py).
+    text = _QUERY_SECRET_RE.sub(r"\1<redacted>", text)
+    text = _HEADER_SECRET_RE.sub(r"\1<redacted>", text)
     # Defensive credential strip (a pasted token in a log line, a mistyped value).
     text = _BEARER_RE.sub(r"\1<redacted>", text)
     text = _APIKEY_RE.sub("<redacted>", text)

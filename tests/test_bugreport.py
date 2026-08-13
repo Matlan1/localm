@@ -122,6 +122,57 @@ def test_build_report_scrubs_credentialed_url_in_error_traceback():
     assert "<redacted>" in text
 
 
+# A credential is at least as often carried as a URL QUERY PARAMETER
+# (?api_key=...) or a pasted HTTP header line (X-Api-Key: ...) as it is via
+# user:pass@ syntax. Both shapes are asserted in ONE block together with the
+# user:pass@ case: if a regression ever deletes the _scrub_secrets call
+# entirely, a query-only test would still pass while user:pass@ silently
+# started leaking again (QA-FINDING-bugreport-url-query-secret-leak-2026-08-13).
+def test_scrub_secrets_redacts_credential_query_params_by_name():
+    out = bugreport._scrub_secrets(
+        "https://x.example/s?api_key=CANARY1&token=CANARY2"
+        "&apikey=CANARY3&key=CANARY4")
+    assert "CANARY1" not in out
+    assert "CANARY2" not in out
+    assert "CANARY3" not in out
+    assert "CANARY4" not in out
+    # The parameter NAME survives - the maintainer needs to see the endpoint
+    # was credentialed and which one, only the value must go.
+    assert "api_key=<redacted>" in out
+    assert "token=<redacted>" in out
+    assert "apikey=<redacted>" in out
+    assert "key=<redacted>" in out
+
+
+def test_scrub_secrets_leaves_non_credential_query_params_intact():
+    """Over-redaction destroys the diagnostic value of a report and is a real
+    failure mode here - a plain search/lang parameter must not be touched."""
+    out = bugreport._scrub_secrets("https://x.example/s?q=hello&lang=en")
+    assert out == "https://x.example/s?q=hello&lang=en"
+
+
+def test_scrub_secrets_still_redacts_user_pass_at_url_creds():
+    """Same assertion block as the query-param cases above, deliberately -
+    see the module comment on this test group."""
+    out = bugreport._scrub_secrets("http://user:SECRETPASS@remote:8000/v1")
+    assert "SECRETPASS" not in out
+    assert "<redacted>" in out
+
+
+def test_scrub_secrets_redacts_credential_header_line():
+    out = bugreport._scrub_secrets("X-Api-Key: CANARY5")
+    assert "CANARY5" not in out
+    assert "X-Api-Key: <redacted>" in out
+
+
+def test_scrub_secrets_query_and_header_redaction_is_idempotent():
+    once = bugreport._scrub_secrets(
+        "https://x.example/s?api_key=CANARY1&q=hello -- X-Api-Key: CANARY2")
+    twice = bugreport._scrub_secrets(once)
+    assert once == twice
+    assert "CANARY1" not in once and "CANARY2" not in once
+
+
 def test_build_report_no_secret_when_none_given():
     text = bugreport.build_report("x")
     assert "## Error detail" not in text

@@ -78,6 +78,24 @@ def test_scrub_strips_url_credentials():
     assert "<redacted>" in out
 
 
+def test_scrub_strips_query_string_and_header_credentials():
+    """Mirrors localm/bugreport.py's _scrub_query_and_header_secrets: a
+    credential is at least as often carried as a URL query parameter or a
+    pasted header line as via user:pass@ syntax. Same assertion block as the
+    user:pass@ case, deliberately (QA-FINDING-bugreport-url-query-secret-leak-
+    2026-08-13) - if a regression deletes the query/header redaction here, a
+    user:pass@-only test would not catch it, and vice versa."""
+    out = ri.scrub(
+        "https://x.example/s?api_key=CANARY1&q=hello "
+        "and X-Api-Key: CANARY2 "
+        "and http://admin:CANARY3@api.corp.local/v1")
+    assert "CANARY1" not in out
+    assert "CANARY2" not in out
+    assert "CANARY3" not in out
+    assert "api_key=<redacted>" in out
+    assert "q=hello" in out  # non-credential param left intact
+
+
 def test_scrub_empty_is_safe():
     assert ri.scrub("") == ""
     assert ri.scrub(None) is None

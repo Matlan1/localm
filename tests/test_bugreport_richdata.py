@@ -127,12 +127,55 @@ def test_config_subset_allowlisted_and_scrubbed(monkeypatch):
     assert "api_key" not in sub and "hf_token" not in sub
 
 
+def test_config_subset_redacts_query_string_credential_by_name(monkeypatch):
+    """QA-FINDING-bugreport-url-query-secret-leak-2026-08-13: comfy_api_url /
+    net_search_url / coder_reviewer are user-supplied URLs that routinely carry
+    a credential as a query parameter, not only via user:pass@. The config
+    subset chain does not call _scrub_secrets (it has its own narrower chain),
+    so this is a genuinely separate path from the _scrub_secrets tests in
+    test_bugreport.py and must be verified independently."""
+    fake = {
+        "net_search_url": "https://searx.example.com/search?api_key=CANARY1",
+        "comfy_api_url": "http://qauser:CANARY2@127.0.0.1:8188",
+        "coder_reviewer": "https://review.example.com/v1?token=CANARY3",
+    }
+    monkeypatch.setattr("localm.config.load_config", lambda: fake)
+    sub = bugreport._safe_config_subset()
+    assert "CANARY1" not in sub["net_search_url"]
+    assert "api_key=<redacted>" in sub["net_search_url"]
+    assert "CANARY2" not in sub["comfy_api_url"]
+    assert "CANARY3" not in sub["coder_reviewer"]
+    assert "token=<redacted>" in sub["coder_reviewer"]
+
+
 def test_build_report_does_not_leak_non_allowlisted_secret(monkeypatch):
     monkeypatch.setattr(
         "localm.config.load_config",
         lambda: {"api_key": "TOP-SECRET-XYZ", "port": 8642})
     text = bugreport.build_report("x")
     assert "TOP-SECRET-XYZ" not in text
+
+
+def test_build_report_end_to_end_no_canary_survives_with_credentialed_config_urls(
+        monkeypatch):
+    """The report-level regression test for the QA finding: a unit test on the
+    scrub regex alone cannot prove the regex is actually REACHED from a real
+    report. Render a full report with all three affected config keys set to
+    credentialed URLs and assert no canary substring survives ANYWHERE in the
+    rendered output - not just in the isolated config-subset dict."""
+    fake = {
+        "net_search_url": "https://searx.example.com/search?api_key=QACANARYQUERYKEY77d1e5c2",
+        "comfy_api_url": "http://qauser:QACANARYURLCRED31bf90aa@127.0.0.1:8188",
+        "coder_reviewer": "https://review.example.com/v1?token=QACANARYREVIEWTOK5a9c33e1",
+        "port": 8642,
+    }
+    monkeypatch.setattr("localm.config.load_config", lambda: fake)
+    text = bugreport.build_report("testing config url redaction")
+    assert "## Configuration (safe subset)" in text
+    assert "comfy_api_url" in text and "net_search_url" in text
+    assert "QACANARYQUERYKEY77d1e5c2" not in text
+    assert "QACANARYURLCRED31bf90aa" not in text
+    assert "QACANARYREVIEWTOK5a9c33e1" not in text
 
 
 # ----------------------- client / browser sanitizer ----------------------- #
