@@ -1305,7 +1305,15 @@ export async function issuesRefresh() {
     if (!out) return;
     if (d.error) { out.textContent = "Could not load: " + d.error; return; }
     const list = d.issues || [];
-    if (!list.length) { out.textContent = "No issues."; return; }
+    // gui-design.md rule 7: a designed empty state, not a lone .sub line. Note
+    // this is reached only on a SUCCESSFUL fetch of an empty list - the error
+    // paths above and below keep saying "could not load", because "nothing is
+    // open" and "I could not ask" are different answers.
+    if (!list.length) {
+      out.replaceChildren(emptyState("book", "No open issues",
+        "Reported bugs that are still open show up here."));
+      return;
+    }
     out.textContent = "";
     for (const it of list) {
       const row = document.createElement("div");
@@ -1371,6 +1379,15 @@ export async function refreshUploadsList() {
     if (!r.ok) { list.replaceChildren(); return; }   // e.g. a read-only key: hide
     const data = await r.json().catch(() => ({ items: [] }));
     list.replaceChildren();
+    // gui-design.md rule 7: an empty <ul> is the blank scroll area the rule
+    // names. Distinct from the read-only-key early return above, which leaves
+    // the list genuinely blank on purpose - "you may not see this" is not the
+    // same statement as "there is nothing here".
+    if (!(data.items || []).length) {
+      list.appendChild(emptyState("attach", "No uploaded files",
+        "Files you send here are readable by models and tools."));
+      return;
+    }
     for (const it of (data.items || [])) {
       const li = document.createElement("li");
       const span = document.createElement("span");

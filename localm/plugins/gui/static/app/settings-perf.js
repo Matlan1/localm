@@ -139,18 +139,36 @@ export function setupBackendHintDismiss() {
   };
 }
 
-/** Show (or remove) the native index-space note under a GPU selector row:
+// Last index_space reading from GET /api/gpus, remembered so the shared hint can
+// be re-evaluated from whichever refresher runs, including the early-return paths
+// that never see a payload.
+let _gpuIndexSpace = null;
+
+/** Show (or hide) the ONE native index-space note that covers both GPU rows:
  *  when /api/gpus says index_space "native", the device numbers are the
  *  active native (Vulkan) backend's own load-time order - the numbering
  *  gpu_split_indices / main_gpu_index actually mean - which can differ from
- *  other tools' GPU numbering, so say so. Idempotent per row, and removes a
- *  stale note when a later refresh is no longer native-sourced. */
-function setIndexSpaceHint(row, indexSpace) {
-  const existing = row.querySelector(".perf-index-space-hint");
-  if (indexSpace !== "native") { if (existing) existing.remove(); return; }
-  if (existing) return;
-  row.appendChild(el("div", "sub perf-index-space-hint",
-    "Device numbers are the Vulkan backend's own order (what a model load uses); other tools may number GPUs differently."));
+ *  other tools' GPU numbering, so say so.
+ *
+ *  It used to be appended PER ROW, idempotent within a row, which meant a
+ *  multi-GPU Vulkan box rendered the identical sentence twice about 130px
+ *  apart (finding M1). The note is now a single element in index.html that
+ *  both refreshers drive, shown only while at least one of the two rows is
+ *  actually visible - otherwise hiding a row would strand the note under
+ *  nothing. Call it on EVERY exit path of both refreshers, with the payload's
+ *  index_space when there is one and no argument when there is not. */
+function syncIndexSpaceHint(indexSpace) {
+  if (indexSpace !== undefined) _gpuIndexSpace = indexSpace;
+  const hint = $("perf-gpu-index-space-hint");
+  if (!hint) return;
+  const selRow = $("perf-gpu-select-row"), splitRow = $("perf-gpu-split-row");
+  const anyVisible = (selRow && !selRow.hidden) || (splitRow && !splitRow.hidden);
+  if (anyVisible && _gpuIndexSpace === "native") {
+    hint.textContent = "Device numbers are the Vulkan backend's own order (what a model load uses); other tools may number GPUs differently.";
+    hint.hidden = false;
+  } else {
+    hint.hidden = true;
+  }
 }
 
 /** Populate the "Main GPU" selector from GET /api/gpus: one option per detected
@@ -167,12 +185,12 @@ export async function refreshMainGpuSelector() {
   if (!row || !sel) return;
   try {
     const r = await fetch("/api/gpus", { headers: authHeaders() });
-    if (!r.ok) { row.hidden = true; return; }
+    if (!r.ok) { row.hidden = true; syncIndexSpaceHint(); return; }
     const data = await r.json();
     const gpus = data.gpus || [];
     if (gpus.length < 2) {
       if (data.probe_status && data.probe_status !== "ok") return;
-      row.hidden = true; return;
+      row.hidden = true; syncIndexSpaceHint(data.index_space ?? null); return;
     }
     sel.replaceChildren();
     for (const g of gpus) {
@@ -184,9 +202,11 @@ export async function refreshMainGpuSelector() {
     }
     const current = typeof data.main_gpu_index === "number" ? data.main_gpu_index : 0;
     sel.value = String(current);
-    setIndexSpaceHint(row, data.index_space);
     row.hidden = false;
-  } catch (e) { row.hidden = true; }   // server unreachable - stay hidden, not broken
+    syncIndexSpaceHint(data.index_space ?? null);   // after row.hidden - it reads it
+  } catch (e) {
+    row.hidden = true; syncIndexSpaceHint();        // server unreachable - hidden, not broken
+  }
 }
 
 /** Wire the Main GPU selector's onchange to PATCH /v1/config (main_gpu_index
@@ -221,12 +241,12 @@ export async function refreshGpuSplitCheckboxes() {
   if (!row || !list) return;
   try {
     const r = await fetch("/api/gpus", { headers: authHeaders() });
-    if (!r.ok) { row.hidden = true; return; }
+    if (!r.ok) { row.hidden = true; syncIndexSpaceHint(); return; }
     const data = await r.json();
     const gpus = data.gpus || [];
     if (gpus.length < 2) {
       if (data.probe_status && data.probe_status !== "ok") return;
-      row.hidden = true; return;
+      row.hidden = true; syncIndexSpaceHint(data.index_space ?? null); return;
     }
     const current = new Set(Array.isArray(data.gpu_split_indices) ? data.gpu_split_indices : []);
     list.replaceChildren();
@@ -242,9 +262,11 @@ export async function refreshGpuSplitCheckboxes() {
       label.appendChild(document.createTextNode(` ${g.index}: ${g.name || "GPU " + g.index}${gb}`));
       list.appendChild(label);
     }
-    setIndexSpaceHint(row, data.index_space);
     row.hidden = false;
-  } catch (e) { row.hidden = true; }   // server unreachable - stay hidden, not broken
+    syncIndexSpaceHint(data.index_space ?? null);   // after row.hidden - it reads it
+  } catch (e) {
+    row.hidden = true; syncIndexSpaceHint();        // server unreachable - hidden, not broken
+  }
 }
 
 /** PATCH /v1/config with the currently-checked GPU indices whenever a
@@ -1305,7 +1327,8 @@ export function openMemoryModal() {
           toast("Save failed: " + e.message, true);
         }
       };
-      const synth = el("button", "btn", "Synthesize now");
+      // btn-secondary: `.btn` has no rule in style.css and rendered native.
+      const synth = el("button", "btn-secondary", "Synthesize now");
       synth.title = "Distil durable facts from your recent chats into memory now";
       synth.onclick = async () => {
         synth.disabled = true;
@@ -1353,7 +1376,10 @@ export function openMemoryModal() {
             ta.value = memory.text;              // an applied update changes the list
             renderCorrections();
           };
-          const rej = el("button", "btn", "Keep as is");
+          // btn-secondary: the decline half of the primary/secondary pair. With
+          // the old `.btn` (no rule in style.css) this rendered as a native OS
+          // button directly beside the accent-filled primary above it.
+          const rej = el("button", "btn-secondary", "Keep as is");
           rej.onclick = async () => {
             rej.disabled = true;
             await resolveCorrection(c.id, false);

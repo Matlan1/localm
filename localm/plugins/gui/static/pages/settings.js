@@ -1281,7 +1281,11 @@ export function syncEmbeddingWarmupButton() {
   const wrap = document.querySelector('[data-field-key="embedding_model"]');
   if (!wrap) return;
   const row = el("div", "embedding-warmup-row");
-  const btn = el("button", "btn", "Warm up now");
+  // btn-SECONDARY, not "btn": there is no `.btn` rule in style.css, so that
+  // class rendered a fully native light-grey/black/square button inside the
+  // dark app (gui-design.md rules 3 and 8). Only visible in a real browser -
+  // jsdom parses but never paints, so every DOM test passed on it.
+  const btn = el("button", "btn-secondary", "Warm up now");
   btn.type = "button";
   const status = el("span", "embedding-warmup-status sub");
   row.appendChild(btn);

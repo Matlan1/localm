@@ -5,7 +5,7 @@ professional dark app. The file/folder picker (`app/picker.js`) and the grouped
 settings page (`pages/settings.js`) are the reference surfaces: match them.
 
 This is the checklist. When you add or touch a GUI surface, it should already
-follow these eight rules. Everything here uses tokens and helpers that already
+follow these nine rules. Everything here uses tokens and helpers that already
 exist, so "consistent" is almost never "new CSS".
 
 ## 1. Icons are inline SVG, never emoji
@@ -102,6 +102,37 @@ next" hint), never a blank scroll area or a lone `.sub` line. Use the
 8px for controls and rows, 12px for cards, generous section padding. Radii come
 from the token scale (8px controls, 12px cards). No one-off `7px` selects or
 bespoke badge radii.
+
+## 9. Help text says what the control does, and what changes if you alter it
+
+Nothing else. Rationale, threat models, upstream issue numbers, history and
+"why it is off by default" belong in a code comment beside the field, or in the
+docs. A control's help is read while deciding; a paragraph is not read at all,
+so a 452-character warning protects nobody.
+
+- **Target 150 characters. Hard cap 200**, enforced over `CORE_FIELDS`,
+  `MEDIA_PLUGIN_FIELDS` and `TTS_FIELDS` by `tests/test_settings_help_budget.py`.
+  The cap covers `HIDDEN` fields too: HIDDEN is a rendering decision that gets
+  reversed, and a field that becomes visible must not bring a wall of text with
+  it.
+- **Lead with the consequence.** "Lowering this risks a native crash" before the
+  explanation of what the number reserves. If the reader stops after one
+  sentence, that sentence should be the one that matters.
+- **Name the setting you mean, never its position.** No "the option above", no
+  "the toggles below". `.settings-fields` is a two-column grid, so the next
+  field renders to the *right*; and a setting can move to another nav group
+  entirely. Positional copy is false the moment anything moves, and it has been
+  false while standing still.
+- **Do not explain the UI's own gating to the only people who can read it.**
+  "Shown only when more than one GPU is detected", rendered under a control that
+  appears only on a multi-GPU box, tells its whole audience what they already
+  know.
+- **A shared explanation goes in the panel intro once**, not repeated per field.
+  Five load/timeout fields once carried the same paragraph five times.
+
+When you cut, move the removed reasoning into a why-comment at the schema site.
+It is usually the most valuable text in the field; it was just in the wrong
+place.
 
 ---
 

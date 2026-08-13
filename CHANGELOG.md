@@ -12,6 +12,26 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Changed
+- **Settings help text is much shorter, and says what a setting does instead of
+  arguing for its default.** Thirty fields carried a paragraph each, the longest
+  at 559 characters, so the page took three screens of scrolling for eleven
+  controls and the warnings that mattered were buried in the ones that did not.
+  Help is now capped at 200 characters and leads with the consequence; the
+  reasoning it used to carry is kept in full beside the code. Settings that
+  referred to "the option above" or "the toggles below" now name the setting
+  they mean, which was already wrong in a two-column layout and wrong again
+  after settings moved between tabs.
+- **Live tuning, the GPU rows and two empty lists now match the rest of the
+  Settings page.** The Live tuning controls ran their label and description
+  together on one line, unlike every panel above them; "GPU layers" and "Context
+  window" appeared twice in the same section with no way to tell the persisted
+  setting from the one that applies right now, and are now marked "(next load)"
+  and "(running model)". On a multi-GPU machine the note about device numbering
+  was printed twice, and both GPU rows explained that they are "shown only when
+  more than one GPU is detected" to the only people who could ever read it.
+  Deleting all conversations is now styled as the destructive action it is, and
+  the Issues and Uploaded files lists say they are empty instead of showing
+  nothing at all.
 - **localm now installs a llama.cpp build it has actually tested, instead of
   whatever was published most recently.** Until now every `setup-llama` asked
   GitHub for the newest llama.cpp release and installed that - on released
