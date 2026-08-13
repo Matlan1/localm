@@ -1,9 +1,20 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// NEW-SETTINGS-IA-REVIEW: a plugin-owned field can declare group="Privacy" (or
-// any other core group) while still being filed under its OWNER's plugin tab
-// (settingsSectionOf routes by owner, not group, for owner != "core" - deliberate,
-// see settings.js's own comment). Browsing the core Privacy section must not look
-// like "that is everything" when related toggles live elsewhere.
+// NEW-SETTINGS-IA-REVIEW, resolved 2026-08-13.
+//
+// This file used to pin the MITIGATION: settingsSectionOf routed by `owner`, so a
+// plugin-owned field declaring group="Privacy" rendered on its plugin's tab, and
+// the core Privacy panel carried a "Related settings also live on plugin tabs: ..."
+// line so browsing Privacy did not look like the whole story.
+//
+// The root cause is now fixed instead. `group` is the single source of truth for
+// placement, so those fields render IN Privacy & data and there is nothing left to
+// cross-reference - a section pointing at itself would be worse than saying nothing.
+// These tests therefore pin the REUNION, and that the note is gone.
+//
+// Privacy was the case that justified the whole change: measured on master, its nine
+// fields had FOUR different owners (core 2, memory 5, chat 1, coder 1), so seven of
+// them left the Privacy panel. It is the only genuinely cross-cutting group in the
+// schema; every other displaced group was simply a plugin's name spelled twice.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadAppWithPages, runScript } from "./harness.mjs";
@@ -13,16 +24,19 @@ const SCHEMA = {
     { key: "mode", widget: "select", label: "Session persistence",
       help: "how much is saved", group: "Privacy", owner: "core",
       options: ["privacy", "log", "full"], default: "log" },
-    // Plugin-owned but group="Privacy" - the case under test.
+    // Plugin-owned but group="Privacy" - the case the whole overhaul is about.
     { key: "chat_mode", widget: "select", label: "Chat persistence override",
       help: "Overrides the global persistence for chat only.", group: "Privacy",
       owner: "chat", options: ["", "privacy", "log", "full"], default: "" },
     { key: "coder_mode", widget: "select", label: "Coder persistence override",
       help: "Overrides the global persistence for the coder only.", group: "Privacy",
       owner: "coder", options: ["", "privacy", "log", "full"], default: "" },
-    // A plain plugin field whose group MATCHES its own plugin label - must NOT
-    // trigger a cross-reference note (no core "Engine"-owned-by-chat mismatch
-    // to point out; this exercises that the note is not just "any plugin field").
+    // memory-owned, and now grouped as Memory: still under the Privacy & data NAV
+    // group, but its own panel.
+    { key: "memory_recall_in_privacy", widget: "toggle",
+      label: "Allow memory recall in privacy mode", help: "", group: "Memory",
+      owner: "memory", default: false },
+    // A generation default: owner chat, group Chat -> Model, not Plugins.
     { key: "temperature", widget: "number", label: "Temperature", help: "",
       group: "Chat", owner: "chat", min: 0, max: 2, default: 0.8 },
   ],
@@ -42,66 +56,66 @@ function makeFetch() {
 
 async function render(win) {
   runScript(win, "refreshSettingsPage();");
-  await new Promise((r) => setTimeout(r, 0));
+  for (let i = 0; i < 8; i++) await new Promise((r) => setTimeout(r, 0));
 }
 
-test("core Privacy section points to plugin tabs holding related Privacy-group fields", async () => {
+test("the persistence parent and BOTH its overrides render in one Privacy section", async () => {
   const { window: win } = loadAppWithPages({ fetchImpl: makeFetch() });
   await render(win);
   const doc = win.document;
 
   const privacySec = doc.getElementById("settings-sec-core-Privacy");
-  assert.ok(privacySec, "core Privacy section renders");
-  // chat_mode/coder_mode themselves must NOT be inside the Privacy section -
-  // confirms the routing-by-owner behavior this note exists to compensate for.
-  assert.equal(privacySec.querySelector('[data-key="chat_mode"]'), null);
-  assert.equal(privacySec.querySelector('[data-key="coder_mode"]'), null);
+  assert.ok(privacySec, "the Privacy section renders");
 
-  const note = privacySec.textContent;
-  assert.match(note, /Related settings also live on plugin tabs/);
-  assert.match(note, /Chat/);
-  assert.match(note, /Coder/);
+  for (const key of ["mode", "chat_mode", "coder_mode"]) {
+    const node = doc.querySelector(`[data-field-key="${key}"]`);
+    assert.ok(node, `${key} renders`);
+    assert.equal(node.closest(".settings-section"), privacySec,
+      `${key} must render INSIDE the Privacy section - an override is unreadable `
+      + "away from the setting it overrides, and its help says so");
+  }
+  assert.equal(privacySec.dataset.group, "privacy",
+    "the Privacy section sits in the Privacy & data nav group");
 });
 
-test("chat_mode and coder_mode actually render on their own plugin tabs", async () => {
+test("memory keys sit in their own panel but the SAME nav group as privacy", async () => {
   const { window: win } = loadAppWithPages({ fetchImpl: makeFetch() });
   await render(win);
   const doc = win.document;
 
-  const chatSec = doc.getElementById("settings-sec-plugin-chat");
-  const coderSec = doc.getElementById("settings-sec-plugin-coder");
-  assert.ok(chatSec.querySelector('[data-key="chat_mode"]'), "chat_mode lives on the Chat plugin tab");
-  assert.ok(coderSec.querySelector('[data-key="coder_mode"]'), "coder_mode lives on the Coder plugin tab");
+  const mem = doc.querySelector('[data-field-key="memory_recall_in_privacy"]');
+  assert.ok(mem, "the memory toggle renders");
+  const memSec = mem.closest(".settings-section");
+  assert.equal(memSec.dataset.group, "privacy",
+    "a user opening Privacy & data to check memory recall now finds it there");
+  assert.notEqual(memSec, doc.getElementById("settings-sec-core-Privacy"),
+    "it is still its own panel, not dumped into the persistence block");
 });
 
-test("a plugin section whose fields all match its own group gets no cross-reference note", async () => {
+test("the cross-reference note is gone - nothing is filed away from its group", async () => {
   const { window: win } = loadAppWithPages({ fetchImpl: makeFetch() });
   await render(win);
   const doc = win.document;
-  const chatSec = doc.getElementById("settings-sec-plugin-chat");
-  // Plugin sections never get the note (only CORE sections do) - this is a
-  // Privacy-browsing aid, not a general "this field is elsewhere" annotator.
-  assert.doesNotMatch(chatSec.textContent, /Related settings also live/);
+
+  // Scope to the RENDERED sections, not document.body: the harness inlines the
+  // module source into the page, so body.textContent also contains settings.js's
+  // own comments - including the one explaining why this note was removed. That
+  // false positive is what the first version of this assertion tripped on.
+  const rendered = [...doc.querySelectorAll("section.settings-section")]
+    .map((s) => s.textContent).join("\n");
+  assert.ok(rendered.length > 0, "sections rendered (guard: the check below is "
+    + "vacuous against an empty page)");
+  assert.doesNotMatch(rendered, /Related settings also live/,
+    "with placement following `group`, no section is missing part of itself, so "
+    + "the mitigation note must not appear in any rendered section");
 });
 
-test("a core section with no cross-filed plugin fields gets no note (e.g. Security)", async () => {
-  const schema = {
-    fields: [
-      { key: "require_auth", widget: "toggle", label: "Require an API key",
-        help: "", group: "Security", owner: "core", default: false },
-    ],
-  };
-  const fetchImpl = async (url) => {
-    if (url === "/v1/config/schema") {
-      return { ok: true, status: 200, json: async () => schema, text: async () => "" };
-    }
-    return {
-      ok: true, status: 200, text: async () => "",
-      json: async () => ({ models: [], active: "", conversations: [], plugins: [] }),
-    };
-  };
-  const { window: win } = loadAppWithPages({ fetchImpl });
+test("a plugin-owned generation default files under Model, not Plugins", async () => {
+  const { window: win } = loadAppWithPages({ fetchImpl: makeFetch() });
   await render(win);
-  const sec = win.document.getElementById("settings-sec-core-Security");
-  assert.doesNotMatch(sec.textContent, /Related settings also live/);
+  const doc = win.document;
+
+  const sec = doc.querySelector('[data-field-key="temperature"]').closest(".settings-section");
+  assert.equal(sec.dataset.group, "model",
+    "owner=chat must not drag a sampling knob into the optional-plugins drawer");
 });

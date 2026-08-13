@@ -90,25 +90,38 @@ test("settings renders a typed control per schema field, split into sections", a
   assert.equal(doc.querySelector('[data-key="plugins_enabled"]'), null,
     "hidden fields are not rendered");
 
-  // The web-owned field is in its OWN plugin section, each section has a Save.
+  // PLACEMENT IS BY `group`, NOT BY `owner`. net_allow is owner="web" but
+  // group="Network", so it files under Server & network > Outbound access - it is
+  // a host-wide egress policy, not a web-plugin preference. Before 2026-08-13 the
+  // owner won and this rendered under Plugins > Web access.
   const webInput = doc.querySelector('input[data-key="net_allow"]');
   const webSec = webInput.closest(".settings-section");
   assert.ok(webSec.querySelector(".settings-section-save"),
     "each section has its own Save button");
-  assert.ok(/web/i.test(webSec.querySelector(".settings-section-head").textContent),
-    "web plugin has its own section heading");
-  // n_ctx (core Engine) is a DIFFERENT section from net_allow (web plugin).
+  assert.match(webSec.querySelector(".settings-section-head").textContent,
+    /outbound/i, "a Network-group field is headed by its GROUP, not its owner");
+  assert.equal(webSec.dataset.group, "server",
+    "group=Network routes to Server & network, not to Plugins");
+  // n_ctx (Engine) is still a DIFFERENT section from net_allow (Network).
   assert.notEqual(nctx.closest(".settings-section"), webSec,
-    "core and plugin settings live in separate sections");
+    "different groups are different sections");
 
-  // Left nav lists the 7 top-level GROUPS (not one link per section); the web
-  // plugin's section lives INSIDE the Plugins group.
+  // Same rule for chat: owner="chat" but group="Chat", so the generation defaults
+  // sit under Model, not beside optional installable plugins.
+  const chatSec = doc.querySelector('[data-key="chat_system_prompt"]')
+    .closest(".settings-section");
+  assert.equal(chatSec.dataset.group, "model",
+    "chat generation defaults belong to Model, not Plugins");
+  assert.notEqual(chatSec, nctx.closest(".settings-section"),
+    "Generation defaults is its own section within Model");
+
+  // Nav lists one link per top-level group that actually HAS a section. This
+  // schema has nothing owned by a plugin-nav group, so Plugins is absent.
   const navLabels = [...doc.querySelectorAll("#settings-nav .settings-nav-link")]
     .map((l) => l.textContent);
-  assert.deepEqual(navLabels,
-    ["Model", "Server & network", "Security", "Plugins", "Media", "Privacy & data", "System"],
-    "nav shows one link per top-level group");
-  assert.equal(webSec.dataset.group, "plugins", "the web plugin section is in the Plugins group");
+  assert.ok(navLabels.includes("Server & network"), "Server & network is listed");
+  assert.ok(navLabels.includes("Privacy & data"), "Privacy & data is listed");
+  assert.equal(new Set(navLabels).size, navLabels.length, "no duplicate nav links");
   // A group shows all its sections stacked; only ONE group is active at a time.
   const active = [...doc.querySelectorAll("#settings-content .settings-section.active")];
   assert.ok(active.length >= 1, "the default group shows its section(s)");
@@ -123,13 +136,15 @@ test("group nav shows all of a group's sections; require_auth + keys live in Sec
   await drain();
   const doc = win.document;
 
-  // Click the Plugins group -> the web plugin section becomes visible.
+  // Click Server & network -> the Outbound access section (net_allow) becomes
+  // visible. It used to live under Plugins; placement now follows `group`.
   const links = [...doc.querySelectorAll("#settings-nav .settings-nav-link")];
-  const plugins = links.find((l) => l.textContent === "Plugins");
-  assert.ok(plugins, "Plugins group link exists");
-  plugins.click();
+  const server = links.find((l) => l.textContent === "Server & network");
+  assert.ok(server, "Server & network group link exists");
+  server.click();
   const webSec = doc.querySelector('input[data-key="net_allow"]').closest(".settings-section");
-  assert.ok(webSec.classList.contains("active"), "clicking Plugins shows the web section");
+  assert.ok(webSec.classList.contains("active"),
+    "clicking Server & network shows the Outbound access section");
   // The require_auth toggle (core Security) and the keys card share the Security group.
   const reqSec = doc.querySelector('input[data-key="require_auth"]').closest(".settings-section");
   assert.equal(reqSec.dataset.group, "security", "require_auth is in the Security group");

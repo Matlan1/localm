@@ -84,20 +84,68 @@ export function settingsSectionHead(heading, groupId) {
 // directly with dataset.group = "media", not looked up here). Anything unmapped
 // falls back to "system" (the residual app drawer), so a new core group never
 // vanishes.
+// TOTAL, deliberately: every `group` the schema can produce is listed. It used to
+// map nine names and fall back to "system" for the rest, which was safe only
+// because `owner` intercepted the six missing ones before they ever reached here.
+// Now that `group` alone decides placement (see settingsSectionOf), a missing entry
+// would silently drop a whole section into System - the same "renders somewhere
+// nobody looks" failure this overhaul exists to remove. Unmapped is therefore LOUD
+// (see settingsTopGroupFor), never a quiet default.
 export const CORE_GROUP_TO_TOP = {
-  Engine: "model", Models: "model", Sampling: "model",
-  Server: "server", Security: "security", Privacy: "privacy",
-  Plugins: "plugins", General: "system", "Bug reports": "system",
+  Engine: "model", Timeouts: "model", Chat: "model", Models: "model",
+  Embeddings: "model",
+  Server: "server", Network: "server",
+  Security: "security",
+  Plugins: "plugins", Coder: "plugins", Knowledge: "plugins", Voice: "plugins",
+  Privacy: "privacy", Memory: "privacy", Diagnostics: "privacy",
+  Updates: "system", "Bug reports": "system", General: "system",
+  Media: "media",
 };
+
+/** The nav group for a core section, complaining loudly about an unmapped group
+ *  instead of quietly parking it in System. A new schema group with no entry above
+ *  is a bug in this file, and it should be visible the first time it renders. */
+export function settingsTopGroupFor(group) {
+  const top = CORE_GROUP_TO_TOP[group];
+  if (top) return top;
+  console.warn(`[settings] group "${group}" has no CORE_GROUP_TO_TOP entry; `
+    + `showing it under System. Add it to CORE_GROUP_TO_TOP.`);
+  return "system";
+}
 
 // Friendlier per-section headings once grouped (the schema `group` string is left
 // unchanged, so section ids + validation are untouched - this is display only). An
 // empty string means render NO heading: used for the lone require_auth toggle and
 // the Privacy persistence block, which are the primary content of their group and
 // would only repeat the group name.
+// Every group gets a REAL heading. The two empty strings that used to live here
+// (Security, Privacy) meant settings.js:1133 appended no .card-head at all, so the
+// canon surface violated its own design rule 4 ("no card shows a bare grey title")
+// in exactly the two sections this overhaul splits. An empty heading is no longer
+// representable: each group below is named for what is under it.
+//
+// Note Server's heading is no longer "Network". That collided with the group
+// literally CALLED Network (the net_* egress policy), so the page had two different
+// panels a user could reasonably call Network and the search box indexed both.
 export const CORE_SECTION_HEADING = {
-  Engine: "Runtime & GPU", Models: "Library", Sampling: "Generation",
-  Server: "Network", Security: "", Privacy: "", Plugins: "Plugin management",
+  Engine: "Runtime & GPU",
+  Timeouts: "Timeouts & limits",
+  Chat: "Generation defaults",
+  Models: "Library",
+  Embeddings: "Embeddings",
+  Server: "Server",
+  Network: "Outbound access",
+  Security: "Access",
+  Plugins: "Plugin management",
+  Privacy: "Session persistence",
+  Memory: "Memory",
+  Diagnostics: "Diagnostics",
+  Updates: "Updates",
+  "Bug reports": "Bug reports",
+  General: "Appearance",
+  Coder: "Coder",
+  Knowledge: "Knowledge (RAG)",
+  Voice: "Voice",
 };
 
 /** The top-level group id a section element belongs to (defaults to "system"). */
@@ -797,17 +845,27 @@ export const PLUGIN_SECTION_LABEL = {
   mcp: "MCP", chat: "Chat",
 };
 
-/** Which settings section a field belongs to: each core `group` is its own
- *  section; each plugin (owner != core) is its own section (its own tab). */
+/** Which settings section a field belongs to: its `group`, always.
+ *
+ *  This used to route by `owner` whenever owner != "core", so a plugin's whole
+ *  config landed on one tab and the schema's `group` tag stopped predicting
+ *  anything. Measured 2026-08-13: 49 of the 84 visible fields rendered in a nav
+ *  group their group label did not predict. Worse, the two are not equivalent -
+ *  `owner` says who OWNS the code, `group` says what the setting is ABOUT, and a
+ *  user searches by the second. The Privacy group was the casualty: its nine
+ *  fields have four different owners, so seven of them left the Privacy panel
+ *  entirely and a user could not find "does memory still recall in privacy mode"
+ *  under Privacy & data.
+ *
+ *  `owner` keeps its real jobs - which plugin's config a key migrates to, and the
+ *  scope gate. Both are server-side. Placement is a display concern and is now
+ *  decided by the display tag alone.
+ *
+ *  A group may legitimately hold fields from several owners (Privacy holds core,
+ *  chat, coder and memory keys). That is safe for saving: every CORE_FIELDS key
+ *  lives in the flat config - DEFAULT_CONFIG and CORE_FIELDS are the same 99 keys -
+ *  so one PATCH /v1/config saves a mixed-owner section exactly like any other. */
 export function settingsSectionOf(field) {
-  if (field.owner && field.owner !== "core") {
-    return {
-      id: "plugin-" + field.owner,
-      label: PLUGIN_SECTION_LABEL[field.owner]
-        || (field.owner.charAt(0).toUpperCase() + field.owner.slice(1)),
-      plugin: true,
-    };
-  }
   return { id: "core-" + field.group, label: field.group, plugin: false };
 }
 
@@ -1102,22 +1160,19 @@ export async function refreshSettingsPage() {
   await capsReady;
   if (myToken !== _settingsRenderToken) return;  // awaiting is a suspension point
 
-  // One section per core group and per plugin. Core sections first (in field
-  // order), then plugin sections (each its own tab with its own Save button).
+  // One section per `group`, in schema order. There is no longer a separate
+  // per-plugin section: a plugin-owned field renders under the category it
+  // declares, so Coder/Knowledge/Voice still get their own panels (their group IS
+  // that name) while Privacy finally keeps its memory and per-surface toggles.
+  //
+  // The old crossFiledInto map, and the "Related settings also live on plugin
+  // tabs: ..." line it produced, are GONE. That line existed only to paper over
+  // owner-first routing: it told a user browsing Privacy that the rest of Privacy
+  // was somewhere else. With the fields back where their group says they belong
+  // there is nothing to point at, and keeping it would have every section
+  // cheerfully cross-referencing itself.
   const controls = [];
   const sections = new Map();        // id -> { id, label, plugin, ctrls: [] }
-  // A plugin-owned field is filed under its OWNER's section (settingsSectionOf),
-  // never under its declared `group` - deliberate, so a plugin's whole config
-  // lives on one tab. But a field can ALSO belong to a cross-cutting core
-  // category (Privacy is the real case today: chat_mode/coder_mode/memory's
-  // privacy-recall toggles all declare group="Privacy" while living on their
-  // own plugin's tab) - a user browsing that core section would see nothing
-  // about them. Tracked by EXCLUSION (any owner!=core field whose group MATCHES
-  // an existing core section), not a hand-listed set of owners, so a future
-  // field does not need a second place remembering it belongs here too - see
-  // filterTextOf's docstring above for the same principle, earned the same way
-  // (a hand-maintained list going stale is how settings render nowhere).
-  const crossFiledInto = new Map();  // "core-<group>" -> Map(owner -> count)
   for (const field of fields) {
     // Media (ComfyUI) config is rendered in its own Media section below, one
     // subsection per plugin (image/music/video), edited per-plugin via the
@@ -1129,27 +1184,20 @@ export async function refreshSettingsPage() {
     const s = settingsSectionOf(field);
     if (!sections.has(s.id)) sections.set(s.id, { ...s, ctrls: [] });
     sections.get(s.id).ctrls.push(ctrl);
-    if (field.owner && field.owner !== "core") {
-      const coreId = "core-" + field.group;
-      if (!crossFiledInto.has(coreId)) crossFiledInto.set(coreId, new Map());
-      const owners = crossFiledInto.get(coreId);
-      owners.set(field.owner, (owners.get(field.owner) || 0) + 1);
-    }
   }
   _settingsControls = controls;
 
-  const ordered = [...sections.values()]
-    .sort((a, b) => (a.plugin ? 1 : 0) - (b.plugin ? 1 : 0));   // core first, stable
+  // Schema order, which is the display order the schema already documents.
+  const ordered = [...sections.values()];
 
   form.replaceChildren();
   for (const sec of ordered) {
-    // Heading: plugin sections keep "<name> plugin"; core sections use the
-    // friendlier grouped heading (schema `group` unchanged), and a blank heading
-    // (the lone require_auth toggle, the Privacy block) renders no <h3> at all so
-    // it does not just echo its group name.
-    const heading = sec.plugin ? (sec.label + " plugin")
-      : (sec.label in CORE_SECTION_HEADING ? CORE_SECTION_HEADING[sec.label] : sec.label);
-    const topGroup = sec.plugin ? "plugins" : (CORE_GROUP_TO_TOP[sec.label] || "system");
+    // Every group has a real heading now (CORE_SECTION_HEADING is total, and an
+    // empty string is no longer representable), so a section can never render as
+    // a bare grey block again - design rule 4.
+    const heading = (sec.label in CORE_SECTION_HEADING)
+      ? CORE_SECTION_HEADING[sec.label] : sec.label;
+    const topGroup = settingsTopGroupFor(sec.label);
     const panel = el("section", "card settings-section");
     panel.id = "settings-sec-" + sec.id;
     panel.dataset.sec = sec.id;
@@ -1159,17 +1207,6 @@ export async function refreshSettingsPage() {
     const grid = el("div", "settings-fields");
     for (const c of sec.ctrls) grid.appendChild(c.node);
     panel.appendChild(grid);
-    // Point to any plugin tabs holding a field that ALSO declares this core
-    // group (see crossFiledInto above) - browsing here must not look like
-    // "that is everything", when e.g. Privacy has more related toggles on the
-    // Chat/Coder/Memory plugin tabs.
-    if (!sec.plugin && crossFiledInto.has(sec.id)) {
-      const names = [...crossFiledInto.get(sec.id).keys()]
-        .map((owner) => PLUGIN_SECTION_LABEL[owner]
-          || (owner.charAt(0).toUpperCase() + owner.slice(1)));
-      panel.appendChild(el("div", "sub",
-        `Related settings also live on plugin tabs: ${names.join(", ")}.`));
-    }
     const actions = el("div", "actions");
     const save = el("button", "btn-primary settings-section-save", "Save " + (heading || sec.label));
     save.dataset.sec = sec.id;
