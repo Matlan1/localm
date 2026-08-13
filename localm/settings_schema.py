@@ -264,7 +264,7 @@ CORE_FIELDS: list = [
                  "process before it is treated as hung and cancelled. Raise this "
                  "only if a genuinely huge model on slow storage needs longer "
                  "than the default.",
-                 group="Engine", min=10, step=60),
+                 group="Timeouts", min=10, step=60),
     SettingField("gguf_first_token_timeout_s", Widget.NUMBER,
                  "First-token timeout (s)",
                  "How long a reply may take to produce its first token before "
@@ -273,14 +273,14 @@ CORE_FIELDS: list = [
                  "with most layers off the GPU, or with a very long prompt, that "
                  "can legitimately take minutes. Raise it only if a slow machine "
                  "needs longer than the default.",
-                 group="Engine", min=10, step=60),
+                 group="Timeouts", min=10, step=60),
     SettingField("hf_load_timeout_s", Widget.NUMBER,
                  "HuggingFace load timeout (s)",
                  "How long a HuggingFace-format model load may run in its "
                  "isolated worker process before it is treated as hung and "
                  "cancelled. Raise this only if a genuinely huge model on slow "
                  "storage needs longer than the default.",
-                 group="Engine", min=10, step=60),
+                 group="Timeouts", min=10, step=60),
     SettingField("hf_first_token_timeout_s", Widget.NUMBER,
                  "HuggingFace first-token timeout (s)",
                  "How long a HuggingFace-format model's reply may take to "
@@ -288,14 +288,14 @@ CORE_FIELDS: list = [
                  "covers reading your whole prompt, not one token, so it is "
                  "generous by default. Raise it only if a slow machine needs "
                  "longer than the default.",
-                 group="Engine", min=10, step=60),
+                 group="Timeouts", min=10, step=60),
     SettingField("hf_embed_timeout_s", Widget.NUMBER,
                  "HuggingFace embed timeout (s)",
                  "How long a HuggingFace-format model's embedding request may "
                  "run in its isolated worker process before it is treated as "
                  "hung. Raise this if you regularly embed large batches of "
                  "text against a HuggingFace embedding model.",
-                 group="Engine", min=10, step=60),
+                 group="Timeouts", min=10, step=60),
     SettingField("hf_embed_max_texts", Widget.NUMBER,
                  "HuggingFace embed batch cap (texts)",
                  "Maximum number of texts accepted in one /v1/embeddings "
@@ -303,13 +303,13 @@ CORE_FIELDS: list = [
                  "embed runs one text at a time with no batching, so a very "
                  "large request can take a long time; raise this only if "
                  "you understand that cost.",
-                 group="Engine", min=1, step=1),
+                 group="Timeouts", min=1, step=1),
     SettingField("hf_embed_max_chars", Widget.NUMBER,
                  "HuggingFace embed batch cap (characters)",
                  "Maximum total characters, summed across every text, "
                  "accepted in one /v1/embeddings request against a "
                  "HuggingFace-format model.",
-                 group="Engine", min=1, step=1000),
+                 group="Timeouts", min=1, step=1000),
     SettingField("import_max_depth", Widget.NUMBER, "Folder import depth",
                  "Subfolder levels `localm add <dir>` scans for models.",
                  group="Models", min=1, max=10, step=1),
@@ -398,7 +398,7 @@ CORE_FIELDS: list = [
                  "execution on this machine, so it is off by default and a model "
                  "needing it is refused with an explanation. Turn on only for a "
                  "model from a source you trust.",
-                 group="Security", applies=Applies.NEXT_LOAD, admin_only=True),
+                 group="Engine", applies=Applies.NEXT_LOAD, admin_only=True),
     # ---- Interface ----
     # HIDDEN: chosen with the logo picker in the GUI (Settings -> GUI), not a
     # form control. Accepted by PATCH /v1/config so the launcher stays in sync.
@@ -435,31 +435,31 @@ CORE_FIELDS: list = [
                  "each chat turn. Off = keep the facts but stop recalling them. "
                  "Privacy mode disables memory entirely unless the privacy-recall "
                  "option below is turned on.",
-                 group="Privacy", owner="memory"),
+                 group="Memory", owner="memory"),
     SettingField("memory_auto_consolidate", Widget.TOGGLE, "Grow memory automatically",
                  "After a chat turn, quietly distil durable facts from the "
                  "conversation into memory in the background, so it accumulates "
                  "with no manual step. Always blocked in privacy mode (no new "
                  "traces). Turn this off to grow memory only via the 'Synthesize "
                  "now' button or a scheduled memory job.",
-                 group="Privacy", owner="memory"),
+                 group="Memory", owner="memory"),
     SettingField("memory_recall_in_privacy", Widget.TOGGLE,
                  "Allow memory recall in privacy mode",
                  "Privacy mode normally turns memory off entirely. Turn this on to "
                  "still READ your existing memories into the prompt while in privacy "
                  "mode - writing new memories stays off, so no new trace is ever "
                  "created. Use the per-surface toggles below to choose where.",
-                 group="Privacy", owner="memory"),
+                 group="Memory", owner="memory"),
     SettingField("memory_recall_in_privacy_chat", Widget.TOGGLE,
                  "...in privacy mode: chat",
                  "When the option above is on, recall chat memory during "
                  "privacy-mode chats (read-only).",
-                 group="Privacy", owner="memory"),
+                 group="Memory", owner="memory"),
     SettingField("memory_recall_in_privacy_coder", Widget.TOGGLE,
                  "...in privacy mode: coder",
                  "When the option above is on, recall the coder's past-session "
                  "lessons during privacy-mode coder sessions (read-only).",
-                 group="Privacy", owner="memory"),
+                 group="Memory", owner="memory"),
     SettingField("keep_diagnostics", Widget.TOGGLE,
                  "Keep diagnostics for bug reports",
                  "Privacy mode writes nothing automatically - including the "
@@ -468,7 +468,7 @@ CORE_FIELDS: list = [
                  "debug log) even in privacy mode, so an intermittent freeze or "
                  "crash leaves something to attach. Code stacks and operational "
                  "logs only, never your chat content.",
-                 group="Privacy", admin_only=True),
+                 group="Diagnostics", admin_only=True),
     # ---- Models ----
     SettingField("embedding_model", Widget.TEXT, "Embedding model",
                  "Small on-device model for semantic search in memory and RAG "
@@ -513,7 +513,7 @@ CORE_FIELDS: list = [
                  # proven exploit and no demonstrated parser memory-safety bug.
                  # binary_dir is the only field in this sweep to call an escalation.
                  # Do not flatten the two to one severity in a write-up.
-                 group="Models", applies=Applies.NEXT_LOAD, admin_only=True),
+                 group="Embeddings", applies=Applies.NEXT_LOAD, admin_only=True),
     SettingField("embedding_pooling", Widget.SELECT, "Embedding pooling",
                  "How the embedding model's token states become one vector. "
                  "mean suits bge/nomic (the default) and matches everything you "
@@ -522,7 +522,7 @@ CORE_FIELDS: list = [
                  "mean: choose last, or auto to follow whatever the model "
                  "declares. Changing this invalidates existing document "
                  "collections and memory vectors - re-index after you change it.",
-                 group="Models", applies=Applies.NEXT_LOAD,
+                 group="Embeddings", applies=Applies.NEXT_LOAD,
                  options=_EMBEDDING_POOLING),
     SettingField("embedding_gpu_layers", Widget.NUMBER, "Embedder GPU layers",
                  "GPU layers for the embedding model. Empty = automatic: full "
@@ -530,7 +530,7 @@ CORE_FIELDS: list = [
                  "loaded chat model is not slowed by VRAM oversubscription "
                  "when a large embedder shares one card. 0 forces CPU; 99 "
                  "forces full GPU offload regardless of free VRAM.",
-                 group="Models", applies=Applies.NEXT_LOAD,
+                 group="Embeddings", applies=Applies.NEXT_LOAD,
                  min=0, max=999, step=1),
     SettingField("confirm_remove", Widget.TOGGLE,
                  "Confirm before deleting models",
@@ -583,11 +583,11 @@ CORE_FIELDS: list = [
     SettingField("update_url", Widget.HIDDEN, "Update endpoint URL",
                  "Override for the updater's Worker base (defaults to the bug-report "
                  "URL when blank). Set in config.json, not here.",
-                 group="Bug reports", admin_only=True),
+                 group="Updates", admin_only=True),
     SettingField("update_token", Widget.HIDDEN, "Update endpoint token",
                  "Override shared secret for the updater (defaults to the bug-report "
                  "token when blank). Set in config.json, not here.",
-                 group="Bug reports", admin_only=True),
+                 group="Updates", admin_only=True),
     # admin_only: this decides WHICH BUILDS the updater will suggest installing on
     # this machine - the same "widens trust reach" reasoning as update_url/
     # update_token/bugreport_upload_url right above (all admin_only in this same
@@ -605,7 +605,7 @@ CORE_FIELDS: list = [
                  "and verified the same way as a stable release, but is less "
                  "field-tested. Turn this on only if you want to help test rc "
                  "builds.",
-                 group="Bug reports", admin_only=True),
+                 group="Updates", admin_only=True),
     # admin_only: this EXEMPTS the update channel from net_mode - the same
     # "widens network reach" reasoning as update_url/update_token/
     # bugreport_upload_url and update_allow_prerelease right above (all
@@ -618,7 +618,7 @@ CORE_FIELDS: list = [
                  "The update check normally obeys the Network access setting "
                  "above, so setting that to Off also turns off update checks. "
                  "Turn this on to let the update channel through regardless.",
-                 group="Bug reports", admin_only=True),
+                 group="Updates", admin_only=True),
     SettingField("plugins", Widget.HIDDEN, "Per-plugin config",
                  "Per-plugin settings (e.g. media output dirs). Managed by the "
                  "Plugins/Settings pages and plugin backends, not edited here.",
