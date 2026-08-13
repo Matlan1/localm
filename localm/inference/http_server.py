@@ -4018,7 +4018,23 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
     # attributes throughout, style injection is not script execution, and closing
     # it would mean rewriting every one. The remaining directives are unchanged
     # from the report-only policy and were each confirmed against a live GUI.
-    _CSP_PREFIX = "default-src 'self'; script-src 'self' 'nonce-"
+    #
+    # script-src MUST list cdn.jsdelivr.net, and connect-src alone is NOT enough.
+    # The tts plugin's Kokoro bundle pulls the onnxruntime-web backend with a
+    # dynamic import() (ort-wasm-simd-threaded.jsep.mjs). A dynamic import is a
+    # MODULE SCRIPT, so it is governed by script-src; connect-src only covers
+    # fetch/XHR. Measured 2026-08-13 from a live page: fetch() of that exact URL
+    # returned 200 while import() of it was refused, and Kokoro died with "no
+    # available backend found" - i.e. neural TTS was completely dead. It was
+    # invisible until this policy started ENFORCING, because Report-Only blocks
+    # nothing, and a live-GUI check cannot catch it: the backend is fetched
+    # lazily on the FIRST SPEAK, by a plugin that must be installed first.
+    # FOLLOW-UP (not done here, it is a maintainer call): vendoring onnxruntime
+    # locally would drop this origin entirely and make TTS work offline, which is
+    # what rule 4 wants - but ort-wasm-simd-threaded.jsep.wasm is 21.6 MB, so
+    # whether that belongs in the repo, in the installer, or as a first-run
+    # download is a product decision. See dev-notes/TTS-ROOT-CAUSE-2026-08-13.md.
+    _CSP_PREFIX = "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net 'nonce-"
     _CSP_SUFFIX = (
         "'; "
         "style-src 'self' 'unsafe-inline'; "

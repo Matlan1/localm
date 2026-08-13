@@ -77,6 +77,50 @@ def test_csp_enforcing_and_locked_down():
     assert "huggingface.co" in csp
 
 
+def _directive(csp: str, name: str) -> str:
+    """The source list for one CSP directive, or "" when it is absent.
+
+    Membership has to be tested PER DIRECTIVE. `"x" in csp` is true when x sits
+    in any directive at all, which is exactly how the outage below survived a
+    green test.
+    """
+    for part in csp.split(";"):
+        part = part.strip()
+        if part == name or part.startswith(name + " "):
+            return part[len(name):].strip()
+    return ""
+
+
+def test_script_src_admits_the_onnx_runtime_origin_not_just_connect_src():
+    """The onnxruntime backend is a MODULE SCRIPT, so it needs script-src.
+
+    REGRESSION, live 2026-08-13: cdn.jsdelivr.net was listed in connect-src only.
+    The tts plugin's Kokoro bundle pulls the backend with a dynamic import(),
+    which is governed by script-src, so the browser refused it and Kokoro died
+    with "no available backend found" - neural TTS was completely dead. Measured
+    from a live page: fetch() of that exact URL returned 200 (connect-src) while
+    import() of the same URL was blocked (script-src).
+
+    The pre-existing assertion above could not catch it: `"huggingface.co" in csp`
+    is true no matter which directive the host sits in, and says nothing about
+    jsdelivr - yet its comment claimed this very property ("so enforcing does not
+    break TTS"). Hence a directive-scoped check.
+    """
+    with TestClient(create_app(_engine())) as c:
+        r = c.get("/health")
+    csp = r.headers.get("Content-Security-Policy", "")
+    script_src = _directive(csp, "script-src")
+    assert script_src, f"no script-src at all: {csp!r}"
+    assert "https://cdn.jsdelivr.net" in script_src, (
+        "the onnxruntime backend origin must be in script-src, not only "
+        f"connect-src - a dynamic import() is a module script. script-src={script_src!r}"
+    )
+    # And the fetch side must keep working too: the model weights come over
+    # fetch/XHR, which is connect-src's job.
+    connect_src = _directive(csp, "connect-src")
+    assert "https://huggingface.co" in connect_src, connect_src
+
+
 def test_csp_nonce_is_per_request_not_per_process():
     """A nonce reused across requests is worth little: an attacker who learns it
     once could reuse it forever."""
