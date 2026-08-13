@@ -364,6 +364,18 @@ export async function refreshModelsPage() {
             });
             const data = await r.json().catch(() => ({}));
             if (!r.ok) { toast(data.detail || "Unload failed", true); return; }
+            // unload_one_model() (http_server.py) answers HTTP 200 for an in-use
+            // engine too - a legitimate "not done yet, not an error" outcome (a
+            // request is mid-generation against it right now), not the same
+            // thing as a real unload. Reporting "Unloaded" here regardless of
+            // `status` would claim a VRAM release that did not happen (AGENTS.md
+            // rule 5). Mirrors the sidebar quick-unload handler's fix
+            // (models-sidebar.js sidebarUnloadBtn.onclick).
+            if (data.status === "in_use") {
+              toast(`'${m.name}' is still generating - try again once it finishes`, true);
+              refreshModelsPage();
+              return;
+            }
             toast(`Unloaded '${m.name}'`);
             refreshModelsPage();
             refreshPerfEstimate();
@@ -1819,7 +1831,23 @@ if (unloadAllBtn) {
       // via embedder_unloaded, so count it too or a resident embedder alone
       // reports "Nothing was loaded" despite actually freeing VRAM.
       const n = (data.unloaded_models || []).length + (data.embedder_unloaded ? 1 : 0);
-      toast(n ? `Unloaded ${n} model(s)` : "Nothing was loaded");
+      // unload_all_models() (http_server.py) reports any pinned (mid-generation)
+      // engine in skipped_in_use rather than unloading it - it was loaded, just
+      // not released. Folding that into the same "Nothing was loaded" (nothing
+      // WAS loaded) or a bare "Unloaded n model(s)" (silently drops the skip)
+      // would misstate what happened either way (AGENTS.md rule 5), so name it.
+      const skipped = Array.isArray(data.skipped_in_use) ? data.skipped_in_use : [];
+      let msg;
+      if (n && skipped.length) {
+        msg = `Unloaded ${n} model(s); ${skipped.length} still generating - try again once finished`;
+      } else if (n) {
+        msg = `Unloaded ${n} model(s)`;
+      } else if (skipped.length) {
+        msg = `${skipped.length} model(s) still generating - try again once finished`;
+      } else {
+        msg = "Nothing was loaded";
+      }
+      toast(msg, skipped.length > 0);
       refreshModelsPage();
       refreshPerfEstimate();
     } catch (e) {
