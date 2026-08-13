@@ -11,6 +11,7 @@ import { $, GIB, authHeaders, el, fmtDuration, instanceCacheTrusted, openModal, 
 import { refreshPerfEstimate } from "./settings-perf.js";
 
 export const modelSelect = $("model-select");
+export const sidebarUnloadBtn = $("sidebar-unload-btn");
 
 // ADR-0008 U4: tracks whether the dot is CURRENTLY showing a caller's deliberate
 // busy state (e.g. switchModel's "loading X…"), so refreshModels()'s periodic
@@ -745,6 +746,28 @@ export async function refreshModels() {
     // Don't rebuild the select while the user has it open
     if (document.activeElement !== modelSelect) {
       modelSelect.innerHTML = "";
+      // NEW-MODEL-DROPDOWN-SHOWS-A-MODEL-THAT-IS-NOT-LOADED: without an
+      // explicit placeholder, `opt.selected = true` below is set ONLY for the
+      // active model - so when nothing is active, no <option> is ever marked
+      // selected and the browser falls back to displaying OPTION INDEX 0 (an
+      // arbitrary registered model) as if it were loaded. That also made the
+      // most natural recovery a silent no-op: reopening the dropdown and
+      // picking the model it already (wrongly) showed left `.value` unchanged,
+      // so `change` never fired and nothing loaded.
+      //
+      // JUDGEMENT CALL: this option is DISABLED, i.e. purely a display state,
+      // never an action - it never loads (there is nothing to load) and it
+      // never unloads (that would make one option's meaning depend on
+      // whether a model happens to be active, and an arrow-key slip while
+      // browsing could then silently free VRAM). The dedicated Unload button
+      // below is the actual affordance for that, and it is unambiguous in
+      // both states: present only when there is something to unload.
+      const placeholder = document.createElement("option");
+      placeholder.value = "";
+      placeholder.textContent = "No model loaded";
+      placeholder.disabled = true;
+      if (!modelCache.active) placeholder.selected = true;
+      modelSelect.appendChild(placeholder);
       for (const m of modelCache.models) {
         const opt = document.createElement("option");
         opt.value = m.name;
@@ -758,6 +781,10 @@ export async function refreshModels() {
     // still in flight) - this 30s poll has no idea one is running and used to
     // overwrite it unconditionally every time it landed mid-load.
     if (!_statusBusy) setStatus("ok", data.active || "no model");
+    // Present only when there is something to unload - not merely a courtesy,
+    // the model this targets (modelCache.active) is the ONLY thing that makes
+    // its click handler well-defined.
+    if (sidebarUnloadBtn) sidebarUnloadBtn.hidden = !modelCache.active;
     renderModelSplitLine(data.active_gpu_split);
     // The active model can change from OUTSIDE this tab too - another tab,
     // another device, the CLI, an MCP client - while Settings is already open. A
@@ -850,6 +877,11 @@ export function toastLoadResult(res, model) {
 
 modelSelect.onchange = async () => {
   const model = modelSelect.value;
+  // The placeholder option (value "") is disabled, so a real browser never
+  // lets a user pick it - but this guard makes that inert semantics a
+  // property of the CODE, not just of the DOM attribute, so it holds even if
+  // something else ever forces the select's value.
+  if (!model) return;
   try {
     const res = await switchModel(model);
     // Superseded: a newer selection is now loading - stay quiet and let its own
@@ -868,4 +900,64 @@ modelSelect.onchange = async () => {
     refreshModels();
   }
 };
+
+// Sidebar quick-unload (NEW-MODEL-DROPDOWN-SHOWS-A-MODEL-THAT-IS-NOT-LOADED,
+// second ask): until now the only Unload control lived on the Models page,
+// away from the CPU/RAM/VRAM line where a user actually notices a model is
+// still resident. Targets modelCache.active specifically - the one model this
+// sidebar shows - not "unload everything"; that broader action already
+// exists as the Models page's own "Unload all" and would be a surprising
+// thing for this control to do silently to OTHER loaded-but-inactive models
+// the sidebar cannot even show.
+if (sidebarUnloadBtn) {
+  sidebarUnloadBtn.onclick = async () => {
+    const model = modelCache.active;
+    if (!model) return;   // hidden whenever there's nothing to unload; guard anyway
+    sidebarUnloadBtn.disabled = true;
+    setStatus("busy", "unloading " + model + "…");
+    try {
+      const r = await fetch("/api/models/unload", {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ model }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        setStatus("err", "unload failed");
+        toast(data.detail || "Unload failed", true);
+        return;
+      }
+      // unload_one_model() (http_server.py) answers HTTP 200 for an in-use
+      // engine too - it is a legitimate "not done yet, not an error" outcome
+      // (a request is mid-generation against it right now), not the same
+      // thing as a real unload. Reporting "Unloaded" here regardless of
+      // `status` would claim a VRAM release that did not happen (AGENTS.md
+      // rule 5). Reset the status line here too (still the same model,
+      // still busy) - skip it and _statusBusy stays true forever, which
+      // would leave refreshModels()'s own status write gated off below.
+      if (data.status === "in_use") {
+        setStatus("ok", model);
+        toast(`'${model}' is still generating - try again once it finishes`, true);
+        refreshModels();
+        return;
+      }
+      toast(`Unloaded '${model}'`);
+      // Publish immediately, same reasoning as switchModel's own comment
+      // above (REG-471): without this the dropdown/status would keep
+      // showing `model` as active until the next 30s poll. setStatus also
+      // resets _statusBusy, which refreshModels()'s own "ok" write is
+      // gated on - skip it and the status line would stay stuck on
+      // "unloading ...".
+      modelCache.active = "";
+      setStatus("ok", "no model");
+      refreshModels();
+      refreshPerfEstimate();
+    } catch (e) {
+      setStatus("err", "unload failed");
+      toast("Unload failed: " + e.message, true);
+    } finally {
+      sidebarUnloadBtn.disabled = false;
+    }
+  };
+}
 

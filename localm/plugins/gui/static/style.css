@@ -340,6 +340,7 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
   text-overflow: ellipsis;
 }
 .hw-stats[hidden] { display: none; }
+#sidebar-unload-btn { width: 100%; margin-top: 6px; padding: 5px 8px; font-size: 12px; }
 /* Subtle VRAM-fullness tint, shown ONLY when a trustworthy used/total is known
    (renderHwStats sets .vram-usage then; a stale/blind or total-only reading gets
    no colour). "how full": calm with headroom, warmer as it fills - kept faint to
