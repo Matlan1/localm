@@ -636,6 +636,36 @@ class TestFsRename:
         assert src.is_dir(), "the source must be untouched on refusal"
         assert (dst / "keep.txt").read_text(encoding="utf-8") == "do not touch"
 
+    def test_never_overwrites_even_if_the_os_rename_call_would_silently_succeed(
+            self, fs_app, tmp_path, monkeypatch):
+        """POSIX rename(2) SILENTLY REPLACES an existing FILE target instead of
+        raising - that is documented rename(2) behavior, unlike Windows, which
+        refuses on its own. The two test_never_overwrites_* tests above pass on
+        THIS platform (Windows) regardless of whether fs_rename's explicit
+        `new_path.exists()` pre-check is present, because Path.rename() itself
+        already refuses here - so they cannot tell the pre-check apart from
+        incidental OS behavior (measured: removing the pre-check left them
+        green). This test makes Path.rename behave like POSIX's rename(2) on
+        EVERY platform, so only the explicit pre-check - never the OS call - can
+        be what refuses the overwrite."""
+        src = tmp_path / "source.txt"
+        src.write_text("SOURCE", encoding="utf-8")
+        dst = tmp_path / "target.txt"
+        dst.write_text("TARGET - must survive", encoding="utf-8")
+        key = _cfgwrite_key()
+
+        def posix_style_rename(self, target):
+            Path(target).write_bytes(self.read_bytes())
+            self.unlink()
+        monkeypatch.setattr(Path, "rename", posix_style_rename)
+
+        with TestClient(fs_app) as c:
+            r = c.post("/api/fs/rename",
+                       json={"path": str(src), "new_name": "target.txt"},
+                       headers=_hdr(key))
+        assert r.status_code == 409, r.text
+        assert dst.read_text(encoding="utf-8") == "TARGET - must survive"
+
     def test_missing_source_is_404(self, fs_app, tmp_path):
         with TestClient(fs_app) as c:
             r = c.post("/api/fs/rename",
