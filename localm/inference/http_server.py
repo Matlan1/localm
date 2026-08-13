@@ -4034,7 +4034,20 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
     # what rule 4 wants - but ort-wasm-simd-threaded.jsep.wasm is 21.6 MB, so
     # whether that belongs in the repo, in the installer, or as a first-run
     # download is a product decision. See dev-notes/TTS-ROOT-CAUSE-2026-08-13.md.
-    _CSP_PREFIX = "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net 'nonce-"
+    #
+    # The 'wasm-unsafe-eval' token is REQUIRED and is a SECOND, INDEPENDENT block.
+    # Allowing the origin above only gets the backend DOWNLOADED; instantiating it
+    # then failed on its own, measured live:
+    #     CompileError: WebAssembly.instantiate() violates the following Content
+    #     Security policy directive ... is not an allowed source of script
+    # Compiling ANY WebAssembly needs an explicit grant, and onnxruntime-web is
+    # WebAssembly on BOTH its wasm and webgpu paths, so without this no backend
+    # can start at all. That token is the narrow CSP3 source for exactly this
+    # case: it permits WebAssembly compilation only, and does NOT permit dynamic
+    # evaluation of JavaScript, so it is strictly tighter than the broader token
+    # the browser error text names. Do not widen it to that broader one.
+    _CSP_PREFIX = ("default-src 'self'; "
+                   "script-src 'self' https://cdn.jsdelivr.net 'wasm-unsafe-eval' 'nonce-")
     _CSP_SUFFIX = (
         "'; "
         "style-src 'self' 'unsafe-inline'; "

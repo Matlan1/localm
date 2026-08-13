@@ -121,6 +121,37 @@ def test_script_src_admits_the_onnx_runtime_origin_not_just_connect_src():
     assert "https://huggingface.co" in connect_src, connect_src
 
 
+def test_script_src_allows_webassembly_compilation():
+    """onnxruntime-web is WebAssembly, and compiling it needs its own CSP grant.
+
+    SECOND, INDEPENDENT block found live 2026-08-13 only after fixing the origin
+    above: with the backend downloadable but WebAssembly compilation still
+    refused, the load died with
+
+        CompileError: WebAssembly.instantiate() violates the following Content
+        Security policy directive ... is not an allowed source of script
+
+    so NO backend could start - neither wasm nor webgpu, since onnxruntime-web is
+    WebAssembly on both paths. The narrow CSP3 token for this permits WebAssembly
+    compilation WITHOUT permitting dynamic JavaScript evaluation, so it must be
+    the one present and the broader token must NOT be.
+    """
+    with TestClient(create_app(_engine())) as c:
+        r = c.get("/health")
+    csp = r.headers.get("Content-Security-Policy", "")
+    script_src = _directive(csp, "script-src")
+    assert "'wasm-unsafe-eval'" in script_src, (
+        "WebAssembly cannot be compiled without this grant, so every ONNX "
+        f"backend fails to start. script-src={script_src!r}"
+    )
+    # The broader grant would also make WebAssembly work, and would additionally
+    # re-admit dynamic JS evaluation - which is most of what an enforcing CSP is
+    # for. Keep the narrow one.
+    assert "'unsafe-eval'" not in script_src.replace("'wasm-unsafe-eval'", ""), (
+        f"script-src must not widen to full dynamic evaluation: {script_src!r}"
+    )
+
+
 def test_csp_nonce_is_per_request_not_per_process():
     """A nonce reused across requests is worth little: an attacker who learns it
     once could reuse it forever."""
