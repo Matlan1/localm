@@ -1902,3 +1902,76 @@ def test_real_gguf_overlong_texts_not_identical():
         assert cos < 0.999, f"over-long texts still collide (cos={cos})"
     finally:
         e.close()
+
+
+# --------------------------------------------------------------------------
+# THE EMBEDDING CONTEXT MUST USE ONE SHARED KV CACHE.
+#
+# Reported live against 0.1.5rc3 (issue #1320): every re-embed returned 503,
+#
+#     find_slot: n_tokens = 284 > size = 256
+#     decode: failed to find a memory slot for batch of size 1988
+#
+# llama.cpp's default carves n_ctx into n_seq_max private slices, so at
+# n_ctx=2048 / n_seq_max=32 each sequence gets 64 tokens (padded to 256 cells).
+# _pack_groups bounds a group by its SUMMED tokens against n_ctx, which is the
+# right budget for a SHARED cache and far too generous for a sliced one - so any
+# ordinary RAG chunk (300-650 tokens) overflowed its own slice while the group
+# still looked legal.
+#
+# WHY NO EXISTING TEST CAUGHT IT, and why this one asserts on the PARAMS rather
+# than by embedding: the bundled default (bge-small) is a BERT-style ENCODER.
+# llama.cpp routes it through encode(), which has no KV cache, so the slicing
+# cannot bite and every test against it passes. Reproducing the failure for real
+# needs a DECODER-based embedding model - a 531 MB download, which does not
+# belong in this suite. The context parameter is the durable, free check, and it
+# is the one that would have caught this.
+
+def test_embedding_context_requests_a_shared_kv_cache(monkeypatch):
+    from localm.inference import embedder as em
+
+    seen = {}
+
+    class _FakeCP:
+        def __init__(self):
+            self.n_ctx = 0
+            self.n_batch = 0
+            self.n_ubatch = 0
+            self.n_seq_max = 0
+            self.kv_unified = False
+            self.embeddings = False
+            self.pooling_type = 0
+
+    def _fake_init(model, cp):
+        seen["kv_unified"] = cp.kv_unified
+        seen["n_ctx"] = cp.n_ctx
+        seen["n_seq_max"] = cp.n_seq_max
+        return None                      # refuse the context; we only want cp
+
+    # GGUFEmbedder imports the native binding INSIDE __init__
+    # (`from ...llamacpp import _api as api`), so the module that has to be
+    # patched is _api itself, not the embedder module.
+    from localm.inference.backends.llamacpp import _api as real_api
+
+    sentinel = object()
+    monkeypatch.setattr(real_api, "llama_context_default_params", _FakeCP)
+    monkeypatch.setattr(real_api, "llama_init_from_model", _fake_init)
+    monkeypatch.setattr(real_api, "llama_model_n_ctx_train", lambda m: 32768)
+    monkeypatch.setattr(real_api, "llama_free_model", lambda m: None)
+    # Everything before context creation, so no real GGUF is needed.
+    monkeypatch.setattr(real_api, "llama_load_model_from_file", lambda *a, **k: sentinel)
+    monkeypatch.setattr(real_api, "llama_model_get_vocab", lambda m: sentinel)
+    monkeypatch.setattr(real_api, "llama_model_n_embd", lambda m: 896)
+    monkeypatch.setattr(real_api, "llama_model_default_params", _FakeCP)
+    monkeypatch.setattr(em, "declared_pooling_type", lambda m, a: 1)
+
+    with pytest.raises(Exception):
+        em.GGUFEmbedder("does-not-matter.gguf")
+
+    assert seen.get("kv_unified") is True, (
+        "the embedding context must share ONE KV cache across the sequences of a "
+        "batch. Without it llama.cpp gives each sequence n_ctx/n_seq_max tokens "
+        f"(here {seen.get('n_ctx', 0) // max(seen.get('n_seq_max', 1), 1)}), and "
+        "every RAG chunk overflows its own slice while _pack_groups still "
+        "considers the group legal - issue #1320."
+    )

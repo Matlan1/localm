@@ -731,6 +731,30 @@ class GGUFEmbedder:
             # the wrong (n_seq_max, n_ubatch) pairing).
             self._n_seq_max = _choose_n_seq_max(self.n_ctx)
             cp.n_seq_max = self._n_seq_max
+            # ONE SHARED KV cache across the sequences of a batch, instead of
+            # llama.cpp's default of carving n_ctx into n_seq_max private
+            # slices. _pack_groups already bounds a group by its SUMMED token
+            # count against n_ctx, which is the correct budget for a shared
+            # cache and far too generous for a sliced one: at n_ctx=2048 and
+            # n_seq_max=32 each slice is 64 tokens (padded to 256 cells), so
+            # ANY ordinary RAG chunk overflows its own slice while the group
+            # still looks legal. Measured on the model this was reported
+            # against (KaLM-embedding-multilingual-mini-instruct-v2.5, a
+            # Qwen2-based CAUSAL embedder):
+            #
+            #   find_slot: n_tokens = 284 > size = 256
+            #   decode: failed to find a memory slot for batch of size 1988
+            #
+            # which surfaced to the user as a 503 on every re-embed.
+            #
+            # WHY THIS HID: the bundled default (bge-small) is a BERT-style
+            # ENCODER. llama.cpp routes it through encode(), which has no KV
+            # cache at all ("cannot decode batches with this context (calling
+            # encode() instead)"), so the slicing simply does not apply and
+            # every test against it passes. Only a DECODER-based embedding
+            # model reaches decode() and the cache. The tests were not thin;
+            # the model they used could not produce the failure.
+            cp.kv_unified = True
             cp.embeddings = True
             cp.pooling_type = self.pooling_type
             self._ctx = api.llama_init_from_model(self._model, cp)
