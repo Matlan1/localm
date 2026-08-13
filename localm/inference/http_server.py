@@ -4046,8 +4046,21 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
     # case: it permits WebAssembly compilation only, and does NOT permit dynamic
     # evaluation of JavaScript, so it is strictly tighter than the broader token
     # the browser error text names. Do not widen it to that broader one.
+    # `blob:` in script-src is REQUIRED once the page is cross-origin isolated,
+    # and it only became necessary then. Isolation gives onnxruntime-web
+    # SharedArrayBuffer, so it switches to its THREADED build, which loads its
+    # worker as a blob: module. Without this the load dies with
+    #     no available backend found. ERR: [wasm] TypeError: Failed to fetch
+    #     dynamically imported module: blob:http://.../<uuid>
+    # i.e. adding the isolation headers alone breaks TTS in a NEW way, while
+    # every unit test stays green - measured live 2026-08-13. `worker-src 'self'
+    # blob:` was already present and is NOT sufficient: the dynamic import of the
+    # blob module is governed by script-src.
+    # On the security trade: a blob: URL can only be minted by same-origin script
+    # that is already executing, so this does not give an INJECTED script a new
+    # way in - the nonce still gates what may execute in the first place.
     _CSP_PREFIX = ("default-src 'self'; "
-                   "script-src 'self' https://cdn.jsdelivr.net 'wasm-unsafe-eval' 'nonce-")
+                   "script-src 'self' blob: https://cdn.jsdelivr.net 'wasm-unsafe-eval' 'nonce-")
     _CSP_SUFFIX = (
         "'; "
         "style-src 'self' 'unsafe-inline'; "
