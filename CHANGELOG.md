@@ -889,6 +889,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   setting it to off would be respected. The underlying library reacts to the
   setting being present at all rather than to its value, so switching it off
   disabled exactly what it was meant to keep. Off now means off.
+- **Unloading a model that was still generating reported success without
+  freeing anything.** Pressing Unload on the Models page while a request was
+  running against that model said "Unloaded" even though the model stayed
+  resident and no video memory was released. Unload all got it wrong from the
+  other side: it counted only what it had actually freed, so a run where
+  everything was busy read as "Nothing was loaded". Both now say plainly that
+  the model is still generating and to try again once it finishes, and Unload
+  all names how many it had to skip.
 
 ### Security
 - **The GUI's Content-Security-Policy now actually blocks, instead of only
@@ -928,6 +936,18 @@ permanent public record of what shipped and are never rewritten; the in-progress
   every non-alphanumeric character, so a pattern keyed on punctuation was
   probed with inputs that could never trigger it and was let through. The
   derived inputs now keep punctuation.
+- **Privacy mode left three kinds of trace behind when you used the coder.**
+  Turning privacy mode on for the coder alone did not stop the debug log, if
+  you had it switched on, from recording prompt and reply content: the check
+  that gates this looked only at the chat and server settings, while the coder
+  produces its replies through the same shared path. The coder's project
+  index, which records your project's file paths and the names it pulled out
+  of them, was written into localm's data directory whatever the mode. And
+  checking a Python file for syntax errors before writing it compiled the
+  content through a temporary copy, leaving a compiled form of your code in
+  the machine's shared temporary folder that nothing ever removed, in any
+  mode. All three are fixed: the log content is suppressed, the project index
+  stays in memory, and the syntax check no longer writes anything to disk.
 
 ## [0.1.5rc2] - 2026-08-08
 
