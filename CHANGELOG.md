@@ -84,6 +84,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   `?api_key=...`/`?token=...` (or pasted in from an `X-Api-Key:` header) was
   not. Both shapes are now redacted by name, keeping the rest of the address
   visible so the report stays useful.
+- **A fenced code block in a model reply could freeze the chat tab.** localm
+  vendors highlight.js to color code blocks; upstream fixed two denial-of-
+  service bugs in its C/C++ and XML tokenizers (a runaway regex triggered by
+  ordinary-looking source) with no CVE and no security advisory of any kind,
+  so nothing could have flagged the vulnerable copy that shipped here.
+  highlight.js is now 11.12.0, and the fix is covered by a test so a future
+  bump cannot silently lose it.
 
 ### Added
 - **A coder skill's `allowed-tools` is now enforced, not just displayed.** A

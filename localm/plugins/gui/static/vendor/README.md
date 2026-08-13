@@ -40,8 +40,19 @@ CVE-2025-23207 / GHSA-cg87-wmx4-v546 and nothing noticed.
 a real QR symbol with the vendored bytes - a hash alone would pass on a file that
 parses but cannot decode.
 
-`marked` and `highlight.js` still have no guard. Until they do, check them by
-hand when you touch this directory.
+`tests-js/vendor-highlightjs.test.mjs` does the same for highlight.js. It pins
+the version and content hash, actually highlights real code, and asserts a
+GROWTH-SHAPE property rather than a version floor alone: highlight.js 11.12.0
+fixed two ReDoS bugs (a c/cpp type-token regex, issue #4362, and a recursive
+xml sublanguage reference) with no CVE and no GHSA advisory for either, so no
+scanner anywhere could ever have flagged the vulnerable 11.9.0 build that
+shipped here. `app/helpers.js` calls `hljs.highlightElement` synchronously on
+the main thread for every `pre code` block, and the language comes straight
+off a model-emitted fenced code block, so this was a real, reachable
+main-thread freeze from ordinary model output, not a theoretical one.
+
+`marked` still has no guard. Until it does, check it by hand when you touch
+this directory.
 
 ### Two things the KaTeX guard had to do differently
 
@@ -120,6 +131,20 @@ Check `package/dist/fonts/` against `vendor/fonts/` when you bump KaTeX. All 20
 woff2 files were byte-identical between 0.16.11 and 0.18.4, so that directory has
 not needed to move so far, but the CSS references them by name and a font
 revision would.
+
+```
+npm pack @highlightjs/cdn-assets@<version>   # npm verifies the registry integrity hash
+tar -xzf highlightjs-cdn-assets-<version>.tgz
+cp package/highlight.min.js localm/plugins/gui/static/vendor/highlight.min.js
+npm test    # then update VENDORED_VERSION + PINNED_HASH in tests-js/vendor-highlightjs.test.mjs
+```
+
+`highlight.min.js` ships from the PACKAGE ROOT of `@highlightjs/cdn-assets`, not
+from `es/`, which is a separate ES-module build of the same version and is NOT
+what `index.html` loads as a classic script. Check `package/styles/github-dark.min.css`
+against the vendored copy too (CRLF-normalised) before assuming it needs
+re-vendoring: 11.9.0 to 11.12.0 changed nothing in that file, so it was left
+alone for that bump, but a future release may not be so quiet.
 
 You do not need to touch the service worker. `sw.js`'s `CACHE` constant is a
 content digest computed per request over every cacheable asset under
