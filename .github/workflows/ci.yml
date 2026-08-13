@@ -81,6 +81,27 @@ on:
   # Tests was red, every open PR silently skipped coverage floors, the jsdom
   # GUI tests and ruff. A green Tests step is a precondition for the trigger
   # telling you anything about the rest of the pipeline.
+  # RE-ENABLED 2026-08-13 on the maintainer's explicit instruction ("re-enable ci
+  # runs"). This is the same switch the comments above describe being flipped
+  # several times; it is his call, and the reasoning against it is preserved
+  # rather than deleted because it is still accurate about the COST.
+  #
+  # What it buys, and the 2026-08-12 window is the evidence: within minutes of
+  # being on, it surfaced a red on master that had been invisible for six weeks
+  # (a stale assertion from #1179), because with no push and no pull_request
+  # trigger NOTHING ever reads master. The three axes a local run cannot see -
+  # platform, dependency set, dependency version - are the same ones that let a
+  # Linux-only regression land in #845.
+  #
+  # What it costs: roughly 7 minutes per side, two platforms, on every PR.
+  # If that becomes unwanted again, remove this key alone - the comments above
+  # stay true and nothing else here depends on it.
+  #
+  # READ THE JOB CONCLUSIONS, NOT THE RUN CONCLUSION: the steps run in order and
+  # stop at the first failure, so a red Tests step silently skips the coverage
+  # floors, the jsdom GUI tests and ruff. A green Tests step is a PRECONDITION
+  # for this trigger telling you anything about the rest of the pipeline.
+  pull_request:
   workflow_dispatch:
     inputs:
       run_abi:
