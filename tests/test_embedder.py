@@ -1902,3 +1902,56 @@ def test_real_gguf_overlong_texts_not_identical():
         assert cos < 0.999, f"over-long texts still collide (cos={cos})"
     finally:
         e.close()
+
+
+# --------------------------------------------------------------------------
+# THE EMBEDDING CONTEXT MUST USE ONE SHARED KV CACHE.
+#
+# Reported live against 0.1.5rc3 (issue #1320): every re-embed returned 503,
+#
+#     find_slot: n_tokens = 284 > size = 256
+#     decode: failed to find a memory slot for batch of size 1988
+#
+# llama.cpp's default carves n_ctx into n_seq_max private slices, so at
+# n_ctx=2048 / n_seq_max=32 each sequence gets 64 tokens (padded to 256 cells).
+# _pack_groups bounds a group by its SUMMED tokens against n_ctx, which is the
+# right budget for a SHARED cache and far too generous for a sliced one - so any
+# ordinary RAG chunk (300-650 tokens) overflowed its own slice while the group
+# still looked legal.
+#
+# WHY NO EXISTING TEST CAUGHT IT, and why this one asserts on the PARAMS rather
+# than by embedding: the bundled default (bge-small) is a BERT-style ENCODER.
+# llama.cpp routes it through encode(), which has no KV cache, so the slicing
+# cannot bite and every test against it passes. Reproducing the failure for real
+# needs a DECODER-based embedding model - a 531 MB download, which does not
+# belong in this suite. The context parameter is the durable, free check, and it
+# is the one that would have caught this.
+
+def test_embedding_context_requests_a_shared_kv_cache():
+    """Drives the pure params function, so it needs NO native runtime.
+
+    The first version of this test drove the whole GGUFEmbedder and passed on a
+    machine with llama.cpp provisioned while failing on CI, where __init__ raised
+    before it ever reached context creation and the pytest.raises() around it hid
+    that. A parameter check must not depend on whether a GPU runtime exists.
+    """
+    from localm.inference.embedder import configure_embed_context
+
+    class _CP:
+        pass
+
+    cp = configure_embed_context(_CP(), n_ctx=2048, n_seq_max=32, pooling_type=1)
+
+    assert cp.kv_unified is True, (
+        "the embedding context must share ONE KV cache across the sequences of a "
+        "batch. Without it llama.cpp gives each sequence n_ctx/n_seq_max tokens "
+        f"(here {2048 // 32}), and every RAG chunk overflows its own slice while "
+        "_pack_groups still considers the group legal - issue #1320."
+    )
+    # The rest of the shape the batcher relies on, pinned in the same place.
+    assert cp.n_ctx == cp.n_batch == cp.n_ubatch == 2048, (
+        "non-causal encode needs n_ubatch >= the longest sequence, so these move "
+        "together"
+    )
+    assert cp.n_seq_max == 32
+    assert cp.embeddings is True

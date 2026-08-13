@@ -280,10 +280,43 @@ def update_managed_comfy(cfg: Optional[dict] = None, *, on_progress: ProgressCb 
         #    the S2 copy path 'origin' is the user's local dir, so fetch the canonical
         #    ComfyUI repo explicitly). A fetch failure is not yet destructive.
         _say(f"Fetching ComfyUI updates from {repo} ...")
-        ok, out = _run(["git", "-C", str(root), "fetch", "--quiet", repo],
+        # ASK FOR THE COMMIT BY NAME. A bare `git fetch <url>` uses the default
+        # refspec, which brings the remote's current branch tip and nothing else -
+        # no tags, and no guarantee the PINNED commit is in the resulting pack.
+        # Reported live on 0.1.5rc3 (#1321): the fetch reported success, then
+        #
+        #     fatal: unable to read tree (fe4195f7f427...)
+        #
+        # i.e. git had the commit object but not the tree it points at, so the
+        # checkout failed mid-update. GitHub allows fetching an exact sha
+        # (uploadpack.allowReachableSHA1InWant), which is both precise and
+        # smaller than pulling every branch.
+        ok, out = _run(["git", "-C", str(root), "fetch", "--quiet", repo, target],
                        on_progress=on_progress, timeout=1800)
         if not ok:
+            # A server that refuses a by-sha fetch is a normal configuration, not
+            # an error - fall back to everything, tags included, so a pin that
+            # lives on a tag or a non-default branch still resolves.
+            ok, out2 = _run(["git", "-C", str(root), "fetch", "--quiet", "--tags",
+                             repo, "+refs/heads/*:refs/remotes/comfy-upstream/*"],
+                            on_progress=on_progress, timeout=1800)
+            out = out + "\n" + out2
+        if not ok:
             return _rollback(f"Could not fetch ComfyUI updates: {_tail(out)}")
+
+        # PROVE the target is completely present BEFORE anything destructive runs.
+        # `checkout --force` discards our patch edits on its way to failing, so
+        # discovering an incomplete object graph from the checkout itself means
+        # the working tree has already been disturbed. Resolving the commit's own
+        # tree is the cheap check that the pack really arrived.
+        ok, out = _run(["git", "-C", str(root), "rev-parse", "--quiet", "--verify",
+                        f"{target}^{{tree}}"], on_progress=None, timeout=60)
+        if not ok:
+            return _rollback(
+                f"ComfyUI {target[:12]} did not download completely - its contents "
+                f"are missing from the local clone, so the update was not started. "
+                f"Your ComfyUI is untouched. Re-run the update to try again."
+            )
 
         # Heads-up (before we move) when the pin changes ComfyUI's dependencies.
         deps_changed = _requirements_changed(root, prev_commit, target)

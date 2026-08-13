@@ -916,6 +916,19 @@ permanent public record of what shipped and are never rewritten; the in-progress
   treated as a failure rather than as something to wait for. It now waits, up to
   the same limit as any other busy collection, and says the collection is in use
   if it never clears.
+- **Re-embedding a knowledge collection failed with an embedding model that is
+  built on a chat model.** Every re-embed stopped with an error. Localm packs
+  several chunks into one call and sized that batch against the whole context
+  window, while the model was actually given a small slice of it per chunk, so
+  any ordinary chunk was too big. Models of this kind (the multilingual and
+  Qwen-based embedders) now work; the bundled default was never affected, which
+  is why this went unnoticed. Embedding also uses about a quarter of the video
+  memory it did before.
+- **Updating localm's own ComfyUI could stop with "unable to read tree".** The
+  update did not ask for the exact version it was moving to, so the download
+  could arrive without it. It now requests that version specifically, and checks
+  the download is complete before touching your install rather than discovering
+  it half way through.
 
 ### Security
 - **The GUI's Content-Security-Policy now actually blocks, instead of only
