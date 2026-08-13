@@ -584,9 +584,13 @@
             <section class="card settings-section" id="sec-performance" data-group="model" data-sec-label="Live tuning">
               <div class="card-head"><span class="ic cat-ic cat-blue" data-icon="sliders"></span>
                 <div class="card-head-text"><h3>Live tuning (apply now)</h3></div></div>
+              <!-- Named, not placed: "the settings above" was the last positional
+                   reference on the page (D3), and it is redundant now that the two
+                   pairs of controls self-distinguish as "(next load)" vs
+                   "(running model)". -->
               <div class="sub">Adjust the running model without a reload: how much of it is on the GPU,
-              and how large its context window is. The Runtime &amp; GPU settings above are the persisted
-              next-load defaults; these apply right now. The VRAM figure is an estimate.</div>
+              and how large its context window is. Runtime &amp; GPU holds the persisted next-load
+              defaults; these apply right now. The VRAM figure is an estimate.</div>
               <div id="perf-backend-row" class="sub perf-backend-row" hidden>Backend: <span id="perf-backend-value">-</span></div>
               <div id="perf-backend-hint" class="perf-backend-hint" hidden>
                 <span>An NVIDIA GPU was detected; the CUDA backend usually performs better than the

@@ -1327,7 +1327,8 @@ export function openMemoryModal() {
           toast("Save failed: " + e.message, true);
         }
       };
-      const synth = el("button", "btn", "Synthesize now");
+      // btn-secondary: `.btn` has no rule in style.css and rendered native.
+      const synth = el("button", "btn-secondary", "Synthesize now");
       synth.title = "Distil durable facts from your recent chats into memory now";
       synth.onclick = async () => {
         synth.disabled = true;
@@ -1375,7 +1376,10 @@ export function openMemoryModal() {
             ta.value = memory.text;              // an applied update changes the list
             renderCorrections();
           };
-          const rej = el("button", "btn", "Keep as is");
+          // btn-secondary: the decline half of the primary/secondary pair. With
+          // the old `.btn` (no rule in style.css) this rendered as a native OS
+          // button directly beside the accent-filled primary above it.
+          const rej = el("button", "btn-secondary", "Keep as is");
           rej.onclick = async () => {
             rej.disabled = true;
             await resolveCorrection(c.id, false);
