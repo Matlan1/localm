@@ -22,25 +22,24 @@ from localm import settings_schema as ss
 # docs/gui-design.md rule 9.
 MAX_HELP_CHARS = 200
 
-# The seven admin_only fields whose help is effectively a threat model. Decision
-# D2 caps them at 200 like every other field, but decision D8 requires the
-# MAINTAINER to sign off on the exact replacement wording before it ships:
-# tightening prose is safe to do unilaterally, deciding which risk a warning
-# communicates is not.
+# admin_only fields whose help is effectively a threat model go here while
+# awaiting the MAINTAINER's sign-off on the exact replacement wording (decision
+# D8): tightening prose is safe to do unilaterally, deciding which risk a
+# warning communicates is not. Decision D2 still caps them at 200 like every
+# other field once signed off.
+#
+# EMPTY as of 2026-08-13: the seven fields that lived here
+# (coder_reviewer, keep_diagnostics, coder_untrusted_provenance,
+# rag_indexing_mode, embedding_model, hf_trust_remote_code,
+# update_allow_prerelease) were all signed off and rewritten - see
+# dev-notes/settings-ia-2026-08-13/09-ADMIN-COPY-PROPOSALS.md for the approved
+# text and dev-notes/ for the applied why-comments. The mechanism stays for the
+# next trust-boundary field that needs the same treatment.
 #
 # This is a shrinking list, not a permanent carve-out, and
 # test_pending_signoff_list_is_exact below is what stops it rotting into one -
-# an entry that has been trimmed but not deleted from here FAILS. Proposed
-# rewrites for all seven: dev-notes/settings-ia-2026-08-13/09-ADMIN-COPY-PROPOSALS.md
-PENDING_SIGNOFF = frozenset({
-    "coder_reviewer",
-    "keep_diagnostics",
-    "coder_untrusted_provenance",
-    "rag_indexing_mode",
-    "embedding_model",
-    "hf_trust_remote_code",
-    "update_allow_prerelease",
-})
+# an entry that has been trimmed but not deleted from here FAILS.
+PENDING_SIGNOFF = frozenset()
 
 # A positional reference ("the maximum below", "the global mode above") is false
 # the moment anything moves, and .settings-fields is a TWO-COLUMN grid, so the
@@ -131,14 +130,24 @@ def test_no_positional_references_in_labels_or_help():
 
 
 @pytest.mark.parametrize("key", sorted(PENDING_SIGNOFF))
-def test_pending_signoff_fields_are_still_the_documented_seven(key):
-    """Pin WHICH fields are exempt, one assertion each, so a future edit that
-    quietly adds an eighth has to change this file and say why."""
+def test_pending_signoff_fields_are_admin_only_and_over_budget(key):
+    """Pin WHY each pending field is exempt, one assertion each, so a future
+    edit that quietly adds one has to change this file and say why. Currently
+    parametrizes over zero keys (PENDING_SIGNOFF is empty) - that is expected,
+    not a gap: this activates again the moment a new entry is added."""
     by_key = {f.key: f for _, f in _all_fields()}
     assert by_key[key].admin_only
     assert len(by_key[key].help or "") > MAX_HELP_CHARS
 
 
-def test_exactly_seven_fields_await_signoff():
-    """A count, so adding an exemption is a visible, deliberate act."""
-    assert len(PENDING_SIGNOFF) == 7
+def test_pending_signoff_count_is_tracked():
+    """A count, so adding an exemption is a visible, deliberate act.
+
+    All seven fields that once lived in PENDING_SIGNOFF were signed off and
+    rewritten 2026-08-13 (dev-notes/settings-ia-2026-08-13/09-ADMIN-COPY-
+    PROPOSALS.md), so the tracked count is now 0. Anyone adding a new
+    trust-boundary exemption must bump this assertion in the same diff and
+    say why in the PENDING_SIGNOFF comment above - a silent bump is exactly
+    what this test exists to prevent.
+    """
+    assert len(PENDING_SIGNOFF) == 0

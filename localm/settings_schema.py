@@ -414,13 +414,15 @@ CORE_FIELDS: list = [
     # bundled Python inside the localm process, which is arbitrary code execution
     # as the server user. Only an owner may make that call, never a config:write
     # key. See routes/config.py admin_only gate and hf.py's refusal path.
+    # Removed from help (D2/D8 trust-boundary trim), kept as the WHY: the
+    # mechanism is the model directory's 'auto_map' custom code; a model
+    # needing it is refused WITH AN EXPLANATION rather than failing opaquely.
     SettingField("hf_trust_remote_code", Widget.TOGGLE,
                  "Allow model-bundled custom code",
-                 "Let a HuggingFace model directory import and run its OWN Python "
-                 "when loading (its 'auto_map' custom code). This is arbitrary code "
-                 "execution on this machine, so it is off by default and a model "
-                 "needing it is refused with an explanation. Turn on only for a "
-                 "model from a source you trust.",
+                 "Arbitrary code execution on this machine: lets a HuggingFace "
+                 "model directory run its own Python when loading. Off by "
+                 "default; a model needing it is refused. Turn on only for a "
+                 "source you trust.",
                  group="Engine", applies=Applies.NEXT_LOAD, admin_only=True),
     # ---- Interface ----
     # HIDDEN: chosen with the logo picker in the GUI (Settings -> GUI), not a
@@ -489,22 +491,26 @@ CORE_FIELDS: list = [
                  "past-session lessons during privacy-mode coder sessions "
                  "(read-only).",
                  group="Memory", owner="memory"),
+    # Removed from help (D2/D8 trust-boundary trim), kept as the WHY: privacy
+    # mode's contract is that nothing is written automatically, and the
+    # crash/hang diagnostics a bug report needs are part of what that
+    # suppresses - which is why this opt-in exists at all.
     SettingField("keep_diagnostics", Widget.TOGGLE,
                  "Keep diagnostics for bug reports",
-                 "Privacy mode writes nothing automatically - including the "
-                 "crash/hang diagnostics a bug report needs. Turn this on to keep "
-                 "those (a hang stack trace, the restart breadcrumb log, and a "
-                 "debug log) even in privacy mode, so an intermittent freeze or "
-                 "crash leaves something to attach. Code stacks and operational "
-                 "logs only, never your chat content.",
+                 "Writes crash and hang diagnostics (stack traces, restart "
+                 "breadcrumbs, a debug log) even in privacy mode, so a freeze "
+                 "leaves something to attach. Code and operational logs only, "
+                 "never chat content.",
                  group="Diagnostics", admin_only=True),
     # ---- Models ----
+    # Removed from help (D2/D8 trust-boundary trim), kept as the WHY: it is a
+    # small on-device model loaded separately from the chat model;
+    # nomic-embed-text-v1.5 is the other known key (besides bge-small-en-v1.5).
     SettingField("embedding_model", Widget.TEXT, "Embedding model",
-                 "Small on-device model for semantic search in memory and RAG "
-                 "(loaded separately from the chat model). A known key "
-                 "(bge-small-en-v1.5, nomic-embed-text-v1.5), a registered model "
-                 "name, or a path to a GGUF. Run 'localm setup-embeddings' to fetch "
-                 "it; until then, memory/RAG use lexical search.",
+                 "Until this is fetched, memory and RAG fall back to lexical "
+                 "search. Run 'localm setup-embeddings' to get one. Accepts a "
+                 "known key (bge-small-en-v1.5), a registered name, or a GGUF "
+                 "path.",
                  # Owner-only because branch 1 of resolve_embedding_model_path()
                  # (embedder.py:262-264) returns a CALLER-CHOSEN filesystem path with
                  # no confined_* check, and that path is then handed to llama.cpp's
@@ -633,11 +639,9 @@ CORE_FIELDS: list = [
     # default-on one - see dev-notes/self-updater-design (prerelease channel).
     SettingField("update_allow_prerelease", Widget.TOGGLE,
                  "Offer prerelease updates",
-                 "Also offer release-candidate builds (not just stable releases) "
-                 "when checking for updates. Off by default: a prerelease is signed "
-                 "and verified the same way as a stable release, but is less "
-                 "field-tested. Turn this on only if you want to help test rc "
-                 "builds.",
+                 "Also offer release-candidate builds when checking for updates. "
+                 "A prerelease is signed and verified like a stable release but is "
+                 "less field-tested. Turn on only to help test rc builds.",
                  group="Updates", admin_only=True),
     # admin_only: this EXEMPTS the update channel from net_mode - the same
     # "widens network reach" reasoning as update_url/update_token/
@@ -713,13 +717,16 @@ CORE_FIELDS: list = [
     # says "leave ON unless you have a specific reason", so a non-owner turning
     # it off re-opens the indirect-prompt-injection boundary for the OWNER's
     # coder - the delegate weakens a defense it does not bear the consequence of.
+    # Removed from help (D2/D8 trust-boundary trim), kept as the WHY: the attack
+    # class is indirect prompt injection; the mechanism is marking results as
+    # DATA rather than instructions and hardening the result boundary; it is
+    # defense in depth and blocks no legitimate use.
     SettingField("coder_untrusted_provenance", Widget.TOGGLE,
                  "Tag untrusted external content",
-                 "Mark coder tool results from the web, web search, and external "
-                 "MCP servers as untrusted DATA (not instructions) and harden the "
-                 "result boundary, so a fetched page cannot inject commands into "
-                 "the agent (indirect prompt injection). Defense in depth - it "
-                 "blocks nothing. Leave ON unless you have a specific reason.",
+                 "Marks coder tool results from the web, web search and external "
+                 "MCP servers as untrusted data, so a fetched page cannot inject "
+                 "commands into the agent. Leave on unless you have a specific "
+                 "reason.",
                  group="Coder", owner="coder", applies=Applies.NEXT_LOAD,
                  admin_only=True),
     SettingField("coder_review", Widget.TOGGLE,
@@ -734,15 +741,17 @@ CORE_FIELDS: list = [
                  # coder_reviewer / coder_reviewer_model ARE owner-only because they
                  # choose WHICH backend or model file reviews (a URL or a path).
                  group="Coder", owner="coder", applies=Applies.NEXT_LOAD),
+    # Removed from help (D2/D8 trust-boundary trim), kept as the WHY: 'local' is
+    # heterogeneous and private but adds CPU latency (the model is set via
+    # coder_reviewer_model below); an http(s) URL is a second OpenAI-compatible
+    # endpoint, e.g. a second local server; a network reviewer is skipped in
+    # privacy mode and for shared keys (it would send the diff off-machine) and
+    # those review with the local model instead.
     SettingField("coder_reviewer", Widget.TEXT,
                  "Reviewer model target",
-                 "Who reviews: blank = the agent's own model (local, private); "
-                 "'local' = a different small model on CPU in the coder's own process "
-                 "(heterogeneous + private; set the model below; adds CPU latency); "
-                 "'openai'/'anthropic' = a cloud model; an http(s) URL = a second "
-                 "OpenAI-compatible endpoint (e.g. a 2nd local server). A network "
-                 "reviewer is skipped in privacy mode and for shared keys (it would "
-                 "send the diff off-machine) - those review with the local model.",
+                 "Sends your diff off-machine unless left blank or set to "
+                 "'local'. Values: blank = the agent's own model; local = a "
+                 "small CPU model; openai; anthropic; or an http(s) URL.",
                  group="Coder", owner="coder", applies=Applies.NEXT_LOAD,
                  admin_only=True),
     # Gated together with coder_reviewer on purpose: gating the SELECTOR while
@@ -761,11 +770,10 @@ CORE_FIELDS: list = [
     # may read (a filesystem-read boundary). The localm data folder and credential
     # folders (.ssh, .aws, ...) are refused in BOTH modes regardless - a hard floor.
     SettingField("rag_indexing_mode", Widget.SELECT, "Indexing folder rule",
-                 "How localm decides which folders document (RAG) indexing may "
-                 "read. whitelist = only your home folder, the working directory, "
-                 "and the allowed folders below. blacklist = any folder except the "
-                 "denied folders below. Your data folder and credential folders "
-                 "(.ssh, .aws, ...) are always refused either way.",
+                 "Which folders document indexing may read. whitelist = home, "
+                 "the working directory and Allowed folders only. blacklist = "
+                 "anything except Denied folders. Data and credential folders "
+                 "are always refused.",
                  group="Knowledge", owner="rag", admin_only=True,
                  options=["whitelist", "blacklist"]),
     SettingField("rag_allowed_roots", Widget.PATHLIST, "Allowed folders",
