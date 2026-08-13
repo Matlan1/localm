@@ -927,6 +927,20 @@ if (sidebarUnloadBtn) {
         toast(data.detail || "Unload failed", true);
         return;
       }
+      // unload_one_model() (http_server.py) answers HTTP 200 for an in-use
+      // engine too - it is a legitimate "not done yet, not an error" outcome
+      // (a request is mid-generation against it right now), not the same
+      // thing as a real unload. Reporting "Unloaded" here regardless of
+      // `status` would claim a VRAM release that did not happen (AGENTS.md
+      // rule 5). Reset the status line here too (still the same model,
+      // still busy) - skip it and _statusBusy stays true forever, which
+      // would leave refreshModels()'s own status write gated off below.
+      if (data.status === "in_use") {
+        setStatus("ok", model);
+        toast(`'${model}' is still generating - try again once it finishes`, true);
+        refreshModels();
+        return;
+      }
       toast(`Unloaded '${model}'`);
       // Publish immediately, same reasoning as switchModel's own comment
       // above (REG-471): without this the dropdown/status would keep

@@ -143,3 +143,46 @@ test("the sidebar Unload button is hidden when nothing is active", async () => {
   const btn = win.document.getElementById("sidebar-unload-btn");
   assert.equal(btn.hidden, true);
 });
+
+test("an in-use engine (HTTP 200, status 'in_use') is NOT reported as unloaded", async () => {
+  // unload_one_model() (http_server.py) answers 200 for a model that is mid-
+  // generation right now - a legitimate "not done, not an error" outcome,
+  // distinct from a real unload. r.ok alone cannot tell them apart.
+  const models = [{ name: "model-a", size_bytes: 1000 }];
+  const calls = [];
+  const fetchImpl = async (url, opts = {}) => {
+    const u = String(url);
+    if (u.startsWith("/api/models/unload")) {
+      calls.push({ url: u, body: opts.body ? JSON.parse(opts.body) : {} });
+      return {
+        ok: true, status: 200,
+        json: async () => ({ status: "in_use", model: "model-a", vram_freed: 0 }),
+        text: async () => "",
+      };
+    }
+    if (u.startsWith("/api/models?type=llm")) {
+      return {
+        ok: true, status: 200,
+        json: async () => ({ models: models.map((m) => ({ ...m, active: true })), active: "model-a" }),
+        text: async () => "",
+      };
+    }
+    return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
+  };
+  const { window: win } = loadApp({ fetchImpl });
+  await render(win);
+
+  const select = win.document.getElementById("model-select");
+  const btn = win.document.getElementById("sidebar-unload-btn");
+  assert.equal(select.value, "model-a", "precondition: model-a is active");
+
+  btn.click();
+  for (let i = 0; i < 8; i++) await new Promise((r) => setTimeout(r, 0));
+
+  assert.equal(calls.length, 1, "exactly one unload POST was attempted");
+  assert.equal(select.value, "model-a",
+    "the dropdown must NOT revert to the placeholder - the model is still loaded");
+  assert.equal(btn.hidden, false, "the unload button stays visible - there is still something to unload");
+  assert.notEqual(win.document.getElementById("status-text").textContent, "unloading model-a…",
+    "the status line must not stay stuck on the busy message");
+});
