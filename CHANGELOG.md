@@ -11,86 +11,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
-### Changed
-- **Settings help text is much shorter, and says what a setting does instead of
-  arguing for its default.** Thirty fields carried a paragraph each, the longest
-  at 559 characters, so the page took three screens of scrolling for eleven
-  controls and the warnings that mattered were buried in the ones that did not.
-  Help is now capped at 200 characters and leads with the consequence; the
-  reasoning it used to carry is kept in full beside the code. Settings that
-  referred to "the option above" or "the toggles below" now name the setting
-  they mean, which was already wrong in a two-column layout and wrong again
-  after settings moved between tabs.
-- **Live tuning, the GPU rows and two empty lists now match the rest of the
-  Settings page.** The Live tuning controls ran their label and description
-  together on one line, unlike every panel above them; "GPU layers" and "Context
-  window" appeared twice in the same section with no way to tell the persisted
-  setting from the one that applies right now, and are now marked "(next load)"
-  and "(running model)". On a multi-GPU machine the note about device numbering
-  was printed twice, and both GPU rows explained that they are "shown only when
-  more than one GPU is detected" to the only people who could ever read it.
-  Deleting all conversations is now styled as the destructive action it is, and
-  the Issues and Uploaded files lists say they are empty instead of showing
-  nothing at all.
-- **localm now installs a llama.cpp build it has actually tested, instead of
-  whatever was published most recently.** Until now every `setup-llama` asked
-  GitHub for the newest llama.cpp release and installed that - on released
-  copies of localm too - so a build nobody had ever run could arrive on your
-  machine with no localm update involved, and a release that did not match this
-  code left a fresh install unable to load anything. localm now ships a specific
-  release that was downloaded, loaded and made to generate text before being
-  chosen, and installs exactly that. If you want upstream's newest anyway,
-  `localm setup-llama --tag latest` opts in and says plainly that the build is
-  untested; `--tag default` comes back. Nothing about naming an exact build with
-  `--tag b10355` or `--rollback` changes.
-- **A runtime localm's own compatibility check refuses is no longer replaced
-  with an older, less-tested one.** When that check rejects a build, setup-llama
-  now installs the tested build instead - and only if you had opted in to
-  tracking upstream. If the tested build is the one being refused, it says so,
-  names it as a fault in localm rather than in the release, and stops rather
-  than quietly reaching for something older. It previously tried up to three
-  earlier releases and kept whichever one loaded, which could leave you on a
-  build that had never been tested at all, reported as a success.
-- **Offline and rate-limited installs are checksum-verified again for every
-  backend.** When the release listing cannot be reached, setup-llama builds the
-  download URL itself; that guess was constructed from a naming convention
-  upstream has since changed, so the AMD ROCm downloads on Windows and Linux
-  resolved to filenames that no longer exist (a 404) and, being unrecognised,
-  carried no checksum. The known asset names of the shipped build are now used
-  directly, so this path names a real file and verifies it.
-
-### Security
-- **The GUI's Content-Security-Policy now actually blocks, instead of only
-  reporting.** It shipped in report-only mode, which never stops anything, so
-  the HTML sanitiser was the only thing standing between a malicious model reply
-  and script execution in the app - if it were ever bypassed, nothing was behind
-  it. The policy now enforces: scripts must come from localm itself and carry a
-  one-time-per-page marker, so injected script cannot run even if it reaches the
-  page. Plugins, embedded objects and framing the app from another site are
-  refused outright. Rendering an artifact still works exactly as before, and it
-  remains sealed off from the rest of the app and from the network.
-- **On Linux and macOS, the files holding your browser-session records and a
-  running instance's attach token were briefly readable by other accounts on
-  the machine while being written.** Each was created with the system's default
-  permissions, filled with its contents, and only then restricted to your
-  account, so the whole payload sat unprotected for the length of the write.
-  They are now created already restricted, which closes the window rather than
-  shortening it. Windows was not affected here: on that platform the
-  restriction was always applied before the file was moved into place.
-- **A bug report could leak a credential carried in a configured URL's query
-  string.** The search, ComfyUI and code-review endpoint URLs you configure are
-  echoed into a report to help diagnose setup problems; a credential written as
-  `user:pass@` in one of those was already redacted, but one passed as
-  `?api_key=...`/`?token=...` (or pasted in from an `X-Api-Key:` header) was
-  not. Both shapes are now redacted by name, keeping the rest of the address
-  visible so the report stays useful.
-- **A fenced code block in a model reply could freeze the chat tab.** localm
-  vendors highlight.js to color code blocks; upstream fixed two denial-of-
-  service bugs in its C/C++ and XML tokenizers (a runaway regex triggered by
-  ordinary-looking source) with no CVE and no security advisory of any kind,
-  so nothing could have flagged the vulnerable copy that shipped here.
-  highlight.js is now 11.12.0, and the fix is covered by a test so a future
-  bump cannot silently lose it.
+## [0.1.5rc3] - 2026-08-13
 
 ### Added
 - **A coder skill's `allowed-tools` is now enforced, not just displayed.** A
@@ -103,7 +24,6 @@ permanent public record of what shipped and are never rewritten; the in-progress
   further, a sub-agent the skill spawns inherits it, and nothing the model itself
   can call lifts it - your next request does. Skills that declare no
   `allowed-tools` are unrestricted, exactly as before.
-
 - **The llama.cpp compatibility check now catches an upstream change that
   redefines a VALUE, not just one that moves a field.** The check compared where
   each field sits in memory, which cannot see a change to which values are legal
@@ -162,7 +82,6 @@ permanent public record of what shipped and are never rewritten; the in-progress
   uploading it from your device has no copy on the server to rebuild from, so
   repair says so plainly and fixes what it can rather than reporting success
   for a run that changed nothing.
-
 - **The Models page now shows which of your models can accept images.** localm
   already worked this out internally - it is how an attached image gets routed
   to a model that can read it - but nothing ever showed you, so the only way to
@@ -171,6 +90,83 @@ permanent public record of what shipped and are never rewritten; the in-progress
   window. A model localm could not check, because its file is on a drive or
   network share that is not currently reachable, simply shows no pill: it is
   never labelled as text-only on the strength of a file nobody could open.
+- **Changing the embedding model from the config API or the CLI now warns you
+  what it will cost first, the same way the Knowledge page already did.**
+  Switching embedders makes every existing collection unreadable until it is
+  re-embedded, and only the GUI picker said so. `PATCH /v1/config` and
+  `localm setup-embeddings` now produce the same pre-switch report, naming the
+  collections that would be affected, and ask for confirmation before going
+  ahead.
+
+### Changed
+- **Settings help text is much shorter, and says what a setting does instead of
+  arguing for its default.** Thirty fields carried a paragraph each, the longest
+  at 559 characters, so the page took three screens of scrolling for eleven
+  controls and the warnings that mattered were buried in the ones that did not.
+  Help is now capped at 200 characters and leads with the consequence; the
+  reasoning it used to carry is kept in full beside the code. Settings that
+  referred to "the option above" or "the toggles below" now name the setting
+  they mean, which was already wrong in a two-column layout and wrong again
+  after settings moved between tabs.
+- **Live tuning, the GPU rows and two empty lists now match the rest of the
+  Settings page.** The Live tuning controls ran their label and description
+  together on one line, unlike every panel above them; "GPU layers" and "Context
+  window" appeared twice in the same section with no way to tell the persisted
+  setting from the one that applies right now, and are now marked "(next load)"
+  and "(running model)". On a multi-GPU machine the note about device numbering
+  was printed twice, and both GPU rows explained that they are "shown only when
+  more than one GPU is detected" to the only people who could ever read it.
+  Deleting all conversations is now styled as the destructive action it is, and
+  the Issues and Uploaded files lists say they are empty instead of showing
+  nothing at all.
+- **localm now installs a llama.cpp build it has actually tested, instead of
+  whatever was published most recently.** Until now every `setup-llama` asked
+  GitHub for the newest llama.cpp release and installed that - on released
+  copies of localm too - so a build nobody had ever run could arrive on your
+  machine with no localm update involved, and a release that did not match this
+  code left a fresh install unable to load anything. localm now ships a specific
+  release that was downloaded, loaded and made to generate text before being
+  chosen, and installs exactly that. If you want upstream's newest anyway,
+  `localm setup-llama --tag latest` opts in and says plainly that the build is
+  untested; `--tag default` comes back. Nothing about naming an exact build with
+  `--tag b10355` or `--rollback` changes.
+- **A runtime localm's own compatibility check refuses is no longer replaced
+  with an older, less-tested one.** When that check rejects a build, setup-llama
+  now installs the tested build instead - and only if you had opted in to
+  tracking upstream. If the tested build is the one being refused, it says so,
+  names it as a fault in localm rather than in the release, and stops rather
+  than quietly reaching for something older. It previously tried up to three
+  earlier releases and kept whichever one loaded, which could leave you on a
+  build that had never been tested at all, reported as a success.
+- **Offline and rate-limited installs are checksum-verified again for every
+  backend.** When the release listing cannot be reached, setup-llama builds the
+  download URL itself; that guess was constructed from a naming convention
+  upstream has since changed, so the AMD ROCm downloads on Windows and Linux
+  resolved to filenames that no longer exist (a 404) and, being unrecognised,
+  carried no checksum. The known asset names of the shipped build are now used
+  directly, so this path names a real file and verifies it.
+- **localm's own managed ComfyUI now installs v0.31.1**, up from v0.9.2. The
+  pinned version had not moved since July and was roughly 21 releases behind
+  upstream, which is why "Split media across GPUs (experimental)" reported that
+  localm's own ComfyUI was too old to offer per component placement. It now
+  offers it. That setting still needs two or more graphics cards, so it
+  continues to decline on a single card machine, but for a reason about your
+  hardware rather than about the version localm ships.
+
+  **If you already have a localm managed ComfyUI, run `localm comfy update
+  --reinstall-requirements` when you update.** v0.31.1 needs several packages
+  the old version did not, so a plain `localm comfy update` moves the checkout
+  without installing them. The command does say so when it runs, but it is easy
+  to miss. A fresh install is unaffected and needs nothing extra.
+- **Neural text-to-speech now runs multi-threaded, and is roughly two and a
+  half times faster.** The speech backend needs cross-origin isolation before
+  the browser will give it the shared memory that threading requires, and the
+  GUI did not send the two headers that switch it on, so it ran on a single
+  core. Measured on the same sentence (6.3 seconds of audio, warm, median of
+  three): 12.9 seconds before, 5.1 seconds after, on a twelve-core machine.
+  Because isolation changes how the page is allowed to load anything from
+  another origin, every subresource the GUI fetches is now served in a way
+  that keeps working under it.
 
 ### Fixed
 - **Two things localm could fail at and then say nothing about are now
@@ -520,23 +516,6 @@ permanent public record of what shipped and are never rewritten; the in-progress
   the reply's count and never shown, so a share store that still held your
   files looked exactly like an emptied one. The GUI now tells you how many
   items could not be cleared.
-
-### Changed
-- **localm's own managed ComfyUI now installs v0.31.1**, up from v0.9.2. The
-  pinned version had not moved since July and was roughly 21 releases behind
-  upstream, which is why "Split media across GPUs (experimental)" reported that
-  localm's own ComfyUI was too old to offer per component placement. It now
-  offers it. That setting still needs two or more graphics cards, so it
-  continues to decline on a single card machine, but for a reason about your
-  hardware rather than about the version localm ships.
-
-  **If you already have a localm managed ComfyUI, run `localm comfy update
-  --reinstall-requirements` when you update.** v0.31.1 needs several packages
-  the old version did not, so a plain `localm comfy update` moves the checkout
-  without installing them. The command does say so when it runs, but it is easy
-  to miss. A fresh install is unaffected and needs nothing extra.
-
-### Fixed
 - **A malformed request with deeply nested JSON now gets the clear rejection it
   should, instead of a generic server error.** Building the validation message
   walked the offending value without any limit on how deep it went, so a small
@@ -810,6 +789,145 @@ permanent public record of what shipped and are never rewritten; the in-progress
   reason is the operating system's own short message: it never includes the
   file's location or your account name, and a log that was read normally and
   had nothing notable in it still adds nothing to the report.
+- **An attached file was silently cut to about its first 24,000 characters.**
+  Attaching a document to a chat or coder message sent only the opening of it,
+  so a question about anything past that point was answered confidently from
+  text the model had never seen. The whole file is now attached, for every file
+  attached. A caller that genuinely wants an excerpt can still ask for one.
+- **Text-to-speech was completely broken and now works.** The security policy
+  the GUI started enforcing this cycle blocked speech at two independent
+  points: the script that runs the neural voice was refused because its source
+  was allowed for data but not for code, and compiling the voice model needed a
+  permission that was never granted, so no backend could start even once
+  downloaded. Both are now allowed explicitly, and the audio the browser
+  produces is used unmodified rather than being re-assembled, which was
+  corrupting longer replies while short ones happened to sound fine.
+- **The sidebar's model dropdown could show a model that was not loaded.** With
+  nothing active, no entry was marked as selected, so the browser fell back to
+  displaying whichever model happened to be first in the list as though it were
+  in use, while the line underneath correctly read "no model". The dropdown now
+  shows an explicit placeholder whenever nothing is loaded, and the sidebar has
+  its own Unload button for the model that is.
+- **The Settings page could lose its whole Knowledge section on a cold load,
+  making RAG indexing unreachable from the GUI.** Settings decided which fields
+  needed a Browse button by guessing from their names, and six fields that are
+  not paths matched. A path field stays hidden until the server reports what it
+  supports, so on a cold render each of those vanished, taking the section
+  around them with it, and the two-column layout appeared to reorder between
+  reloads. Browse buttons are now attached only to fields actually declared as
+  paths, and the page waits for a real answer from the server rather than for a
+  timeout.
+- **Settings > Show changelog listed changes that were not in the build you
+  were running.** The in-progress section was served along with the released
+  history, so it advertised work that had not shipped, including security fixes
+  described before they were available. Only released sections are served now.
+  The file itself is unchanged, and published prereleases still appear.
+- **The web UI could stutter because reading system stats re-probed the GPU
+  every time.** Each stats poll ran the full out-of-process VRAM probe, which
+  takes seconds on a cold call, so a page that polls regularly paid it over and
+  over. The reading is now refreshed in the background and shared between
+  callers. A probe that fails is never cached as a confirmed empty reading.
+- **localm no longer overwrites a file it could not read.** Your saved prompt
+  library, the config file and the model registry were each treated as empty
+  when they existed but could not be read or parsed. Every save is a
+  read-then-write, so the next save replaced the whole file with just the entry
+  being added, losing everything else. Each of those now refuses the write and
+  says why, so an unreadable file stays intact instead of being replaced.
+- **A `.localcoder/config.toml` that could not be parsed was treated as absent,
+  silently dropping your safety settings.** Two of the keys lost that way are
+  not preferences: the setting that makes the coder ask before running a shell
+  command, and the one that limits where it may write. An unreadable project
+  config is now refused with the parse error, rather than quietly falling back
+  to defaults that permit more than you asked for.
+- **A model that failed to load left its worker process behind.** Only a load
+  that timed out was cleaned up; a load that was cancelled or that raised an
+  error tore down nothing, so a model that keeps failing to load accumulated
+  one stranded process per attempt, each holding memory. The worker is now
+  reaped on every failure path.
+- **Loading a vision model dumped raw native output into the console and hid
+  the reason when it failed.** Unlike every other native call, the image half
+  of a vision model was loaded without capturing its output, so the loader's
+  tensor dump reached your terminal; and when it could not be opened, the
+  actual reason was dropped and only a generic message survived. The output is
+  now captured like everywhere else, and a genuine failure reports what the
+  library said instead of silently falling back to text-only.
+- **The coder could not force a tool call on a model served through the
+  HuggingFace backend.** The check for grammar support only recognised GGUF
+  models, so an HF-backed model never got the constrained output that makes it
+  produce a valid tool call, even where the backend supports it. It is now
+  asked what it supports rather than assumed.
+- **The coder's approval preview could not tell a new file from one it could
+  not read.** Both looked like empty content, so a write over a file that was
+  locked or unreadable was previewed as though it were creating something from
+  nothing, and you approved a replacement without being shown what it replaced.
+  The preview now says when the existing content could not be read.
+- **The update health check went through your HTTP proxy.** After applying an
+  update, localm checks that the instance it just restarted is answering. That
+  check targets this machine's own port, so a proxy is never right for it, and
+  honouring one made the check fail on machines where a proxy is configured.
+  It now connects directly.
+- **Setting an API key got slower every time you set one.** Saving a key
+  re-verified every historical key record it keeps, and that verification is
+  deliberately expensive, so the cost grew with each rotation until the call
+  took long enough to look like a hang. It now does only the work the save
+  actually needs.
+- **localm could misidentify what kind of device a graphics backend reported.**
+  One of the constants describing device types was fixed at a value that
+  upstream llama.cpp has since moved, because a new type was inserted ahead of
+  it, so a device could be read as the wrong kind. The value is no longer
+  declared where it could be wrong.
+- **The file and folder picker could not browse into a dot-directory.** Folders
+  that other tools use for models, such as `~/.ollama`, `~/.lmstudio` and
+  `~/.cache/huggingface`, were skipped from every listing, so they could not be
+  reached by clicking. A "Hidden" toggle now shows them, off by default so an
+  ordinary pick is not buried in `.cache` and `.config`, and it switches itself
+  on when you land inside one. Typing or pasting a dot-path always worked and
+  is unchanged.
+- **The setting that keeps graphics memory host-visible did the opposite of
+  what it said.** The opt-out is there for machines that share memory between
+  the processor and the graphics chip, and its own documentation promised that
+  setting it to off would be respected. The underlying library reacts to the
+  setting being present at all rather than to its value, so switching it off
+  disabled exactly what it was meant to keep. Off now means off.
+
+### Security
+- **The GUI's Content-Security-Policy now actually blocks, instead of only
+  reporting.** It shipped in report-only mode, which never stops anything, so
+  the HTML sanitiser was the only thing standing between a malicious model reply
+  and script execution in the app - if it were ever bypassed, nothing was behind
+  it. The policy now enforces: scripts must come from localm itself and carry a
+  one-time-per-page marker, so injected script cannot run even if it reaches the
+  page. Plugins, embedded objects and framing the app from another site are
+  refused outright. Rendering an artifact still works exactly as before, and it
+  remains sealed off from the rest of the app and from the network.
+- **On Linux and macOS, the files holding your browser-session records and a
+  running instance's attach token were briefly readable by other accounts on
+  the machine while being written.** Each was created with the system's default
+  permissions, filled with its contents, and only then restricted to your
+  account, so the whole payload sat unprotected for the length of the write.
+  They are now created already restricted, which closes the window rather than
+  shortening it. Windows was not affected here: on that platform the
+  restriction was always applied before the file was moved into place.
+- **A bug report could leak a credential carried in a configured URL's query
+  string.** The search, ComfyUI and code-review endpoint URLs you configure are
+  echoed into a report to help diagnose setup problems; a credential written as
+  `user:pass@` in one of those was already redacted, but one passed as
+  `?api_key=...`/`?token=...` (or pasted in from an `X-Api-Key:` header) was
+  not. Both shapes are now redacted by name, keeping the rest of the address
+  visible so the report stays useful.
+- **A fenced code block in a model reply could freeze the chat tab.** localm
+  vendors highlight.js to color code blocks; upstream fixed two denial-of-
+  service bugs in its C/C++ and XML tokenizers (a runaway regex triggered by
+  ordinary-looking source) with no CVE and no security advisory of any kind,
+  so nothing could have flagged the vulnerable copy that shipped here.
+  highlight.js is now 11.12.0, and the fix is covered by a test so a future
+  bump cannot silently lose it.
+- **A pattern using punctuation could slip past the check that rejects
+  regular expressions capable of hanging the tokenizer.** The check derives
+  test inputs from the pattern itself, and the step that built them discarded
+  every non-alphanumeric character, so a pattern keyed on punctuation was
+  probed with inputs that could never trigger it and was let through. The
+  derived inputs now keep punctuation.
 
 ## [0.1.5rc2] - 2026-08-08
 
