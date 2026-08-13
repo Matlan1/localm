@@ -929,6 +929,21 @@ export const pluginCommands = { map: {}, suggest: true };
 // "none" (safe) until the first capabilities load resolves it.
 export const caps = { fsAccess: "none" };
 
+// Resolves once the FIRST /api/capabilities load has finished, whatever it found.
+// `caps` starts at the SAFE default, so a consumer that reads it before that load
+// cannot tell "this key may not touch host paths" from "nobody has asked yet" - and
+// the settings form used to treat the second as the first, silently rendering no
+// control at all for every host-path field on a cold page load (the whole Knowledge
+// section among them). Gate on this promise instead of on the default, so the
+// decision is made from an ANSWER rather than from an absence.
+//
+// Resolved in a `finally` so it settles on every exit path, including a non-ok
+// response and an unreachable server: a consumer awaiting a promise that never
+// resolves would hang the page forever, which is a worse failure than the one this
+// fixes.
+let _markCapsReady;
+export const capsReady = new Promise((resolve) => { _markCapsReady = resolve; });
+
 // R50: signal other same-origin tabs that the installed/enabled plugin set
 // changed (a new value is required for the storage event to fire, so use the
 // clock). The writing tab refreshes itself directly; other tabs react to the
@@ -974,6 +989,7 @@ export async function refreshPluginCommands() {
     if (isSec) isSec.hidden = !data.issues_available;
     renderNav();
   } catch { /* server unreachable; fall back to plain unknown-command */ }
+  finally { _markCapsReady(); }   // see capsReady: must settle on EVERY exit path
 }
 
 // One quiet update check per ~6h (a startup auto-surface). Calls the check only -
