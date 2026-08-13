@@ -9,7 +9,7 @@
 import { pickDirectory, pickFile } from "../app/picker.js";
 import { $, authHeaders, confirmDanger, el, openModal, streamJob, toast } from "../app/helpers.js";
 import { emptyState } from "../app/icons.js";
-import { applyServerTtsConfig, browserVoiceOverride, caps, clearBrowserVoiceOverride } from "../app/settings-perf.js";
+import { applyServerTtsConfig, browserVoiceOverride, caps, capsReady, clearBrowserVoiceOverride } from "../app/settings-perf.js";
 
 /* ================================================================ */
 /*  Settings page                                                    */
@@ -382,12 +382,28 @@ export function buildSettingControl(field) {
   };
   // FOLDER / PATH fields get a "Browse..." button wired to the existing
   // directory picker, so the user does not have to type a path by hand (U10).
-  const lbl = (field.label || field.key).toLowerCase();
-  // An explicit schema flag (widget:"path"/"folder" or accepts_path/accepts_dir)
-  // forces the Browse button for a path field whose key/label match none of the
-  // naming tokens below - so tagging beats guessing (NEW-M-BROWSE).
-  const isPath = field.widget === "path" || field.accepts_path || field.key.endsWith("_path") || field.key.endsWith("_file") || lbl.includes("file") || lbl.includes("path") || lbl.includes("cmd");
-  const isDir = field.widget === "folder" || field.accepts_dir || field.key.endsWith("_dir") || lbl.includes("folder") || lbl.includes("dir");
+  // TAGGING ONLY - never guess from the label or the key spelling (NEW-M-BROWSE
+  // said "tagging beats guessing"; the guessing was left in as a fallback and
+  // over-matched into six fields that are not paths at all).
+  //
+  // The old heuristic also matched `lbl.includes("file"/"folder"/"dir"/"cmd")` and
+  // the key suffixes `_path`/`_file`/`_dir`. Measured 2026-08-13, that flagged
+  // import_max_depth (number, "Folder import depth"), autoprune_missing_models
+  // (toggle, "...missing files"), coder_grep_max_per_file (number - matched the
+  // KEY suffix as well as the label), coder_grep_max_file_bytes (number),
+  // rag_indexing_mode (select, "Indexing folder rule") and
+  // rag_classify_unknown_files (toggle). Each got a "Browse..." button it has no
+  // use for, and - because the gate below hides a path field until capabilities
+  // load - each vanished entirely from a cold render, taking the whole Knowledge
+  // section with it.
+  //
+  // A widget/accepts_* flag is the field's own declaration and cannot drift with
+  // wording, so the set is exactly right by construction: only path, folder and
+  // pathlist widgets browse. Verified this loses no control that has a picker
+  // today (binary_dir, rag_allowed_roots, rag_denied_roots, comfy_workdir,
+  // comfy_output_dir all declare a path widget).
+  const isPath = field.widget === "path" || !!field.accepts_path;
+  const isDir = field.widget === "folder" || !!field.accepts_dir;
   // A host-path / folder field is server-side config: hide it entirely from a
   // caller without host filesystem access - they cannot (and should not) browse
   // or set paths on the server disk. The server still enforces on /api/fs/* and
@@ -1076,6 +1092,15 @@ export async function refreshSettingsPage() {
     return;
   }
   if (myToken !== _settingsRenderToken) return;  // a newer refresh superseded us
+
+  // Host-path fields (folder/path/pathlist) are hidden from a caller without host
+  // filesystem access, and that decision reads caps.fsAccess - which starts at the
+  // SAFE default until /api/capabilities lands, and is only populated by a
+  // fire-and-forget call in init.js. Rendering before it resolves cannot tell "may
+  // not" from "do not know yet", so a cold load silently dropped every path field
+  // and the whole Knowledge section with it. Wait for the ANSWER, then decide.
+  await capsReady;
+  if (myToken !== _settingsRenderToken) return;  // awaiting is a suspension point
 
   // One section per core group and per plugin. Core sections first (in field
   // order), then plugin sections (each its own tab with its own Save button).
