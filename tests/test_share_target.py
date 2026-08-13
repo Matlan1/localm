@@ -249,3 +249,84 @@ class TestShareInboxOwnership:
         monkeypatch.setenv("LOCALM_API_KEY", "ownersecret")   # owner = admin
         items = share_app.get("/api/share/pending", headers=_h("ownersecret")).json()["items"]
         assert any(it["name"] == "photo.png" for it in items)
+
+
+# --- RULE 5: a delete that FAILED must not read as a clean sweep --------- #
+# Before this, share_clear caught OSError and left `removed` unchanged - the
+# exact same observable as an entry the caller never asked about. On a
+# PRIVACY-adjacent store that means the user is told their shared content is
+# gone from the server while it is still sitting there. chat.js already reads a
+# `failed` field, logs it and toasts the user; the server simply never sent it.
+
+def _inject_unlink_failure(monkeypatch, fail_on_name_containing: str):
+    """Make Path.unlink raise OSError for matching entries only.
+
+    A raising side_effect is legitimate HERE because it is the FAULT being
+    injected, not an assertion - share_clear catches OSError by design, so an
+    AssertionError raised from inside would be swallowed as an input and the
+    test would pass in both directions (diff-review item 13).
+    """
+    real_unlink = Path.unlink
+
+    def fake_unlink(self, *a, **kw):
+        if fail_on_name_containing in self.name:
+            raise OSError(13, "Permission denied")
+        return real_unlink(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "unlink", fake_unlink)
+
+
+def test_share_clear_reports_a_delete_that_failed(share_client, monkeypatch):
+    share_client.post("/share-target", files={"files": ("locked.png", _PNG, "image/png")})
+    assert len(share_client.get("/api/share/pending").json()["items"]) == 1
+
+    _inject_unlink_failure(monkeypatch, "locked")
+    body = share_client.post("/api/share/clear", json={}).json()
+
+    # ASSERT ON THE DATA FIRST. If the injection silently failed to match, the
+    # entry would be gone and this fails with a statement about the WORLD ("the
+    # item was deleted") rather than a number you could talk yourself out of.
+    still_there = share_client.get("/api/share/pending").json()["items"]
+    assert len(still_there) == 1, "the entry was deleted, so no fault was injected"
+
+    assert body["failed"] == 1, f"a failed delete was not reported: {body}"
+    assert body["removed"] == 0
+
+
+def test_share_clear_reports_zero_failed_on_a_clean_sweep(share_client):
+    """The field is ALWAYS present, so a client can trust its absence-of-failure."""
+    share_client.post("/share-target", files={"files": ("ok.png", _PNG, "image/png")})
+    body = share_client.post("/api/share/clear", json={}).json()
+    assert body["removed"] == 1
+    assert body["failed"] == 0
+    assert share_client.get("/api/share/pending").json()["items"] == []
+
+
+def test_share_clear_partial_failure_reports_both_counts(share_client, monkeypatch):
+    """The case the old code collapsed: some deleted, some not."""
+    for nm in ("good.png", "bad.png"):
+        share_client.post("/share-target", files={"files": (nm, _PNG, "image/png")})
+    assert len(share_client.get("/api/share/pending").json()["items"]) == 2
+
+    _inject_unlink_failure(monkeypatch, "bad")
+    body = share_client.post("/api/share/clear", json={}).json()
+
+    left = share_client.get("/api/share/pending").json()["items"]
+    assert len(left) == 1 and "bad" in left[0]["name"], f"wrong entry survived: {left}"
+    assert body["removed"] == 1
+    assert body["failed"] == 1
+
+
+def test_share_clear_logs_the_path_of_a_failed_delete(share_client, monkeypatch, caplog):
+    """A count tells the user; the log tells whoever has to diagnose it.
+
+    Asserted from OUTSIDE via caplog rather than by raising inside the handler,
+    which catches broadly and would absorb an assertion as an ordinary input.
+    """
+    import logging
+    share_client.post("/share-target", files={"files": ("noisy.png", _PNG, "image/png")})
+    _inject_unlink_failure(monkeypatch, "noisy")
+    with caplog.at_level(logging.WARNING):
+        share_client.post("/api/share/clear", json={})
+    assert any("noisy" in r.getMessage() for r in caplog.records), \
+        f"the failed path was not logged: {[r.getMessage() for r in caplog.records]}"
