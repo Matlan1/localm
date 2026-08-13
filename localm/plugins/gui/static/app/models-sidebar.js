@@ -487,7 +487,7 @@ export function loadJsQR() {
   if (_jsqrPromise) return _jsqrPromise;
   _jsqrPromise = new Promise((resolve, reject) => {
     const s = document.createElement("script");
-    s.src = "/vendor/jsQR.min.js";
+    s.src = "/vendor/jsQR.js";
     s.onload = () => resolve(window.jsQR);
     s.onerror = () => { _jsqrPromise = null; reject(new Error("jsQR failed to load")); };
     document.head.appendChild(s);

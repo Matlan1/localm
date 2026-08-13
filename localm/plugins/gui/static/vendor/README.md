@@ -36,8 +36,12 @@ shell (the shell's CSP is still report-only). KaTeX has its own guard for the
 same reason DOMPurify does: it sat on 0.16.11 for the whole affected range of
 CVE-2025-23207 / GHSA-cg87-wmx4-v546 and nothing noticed.
 
-`marked`, `highlight.js` and `jsQR` still have no guard. Until they do, check
-them by hand when you touch this directory.
+`tests-js/vendor-jsqr.test.mjs` does the same for jsQR, and additionally decodes
+a real QR symbol with the vendored bytes - a hash alone would pass on a file that
+parses but cannot decode.
+
+`marked` and `highlight.js` still have no guard. Until they do, check them by
+hand when you touch this directory.
 
 ### Two things the KaTeX guard had to do differently
 
@@ -45,15 +49,30 @@ them by hand when you touch this directory.
 `katex.version`, but `auto-render.min.js` and `katex.min.css` carry no version
 string at all, and none of the three has a banner comment. Those two are pinned
 by recorded content hash instead, which is the only thing that can say which
-upstream build they came from. `jsQR.min.js` has the same problem in a worse
-form (no version string and no upstream minified artefact to hash against).
+upstream build they came from. `jsQR.js` has no version string either and is
+pinned the same way.
+
+**jsQR used to be UNPINNABLE, and the fix was to change which artefact ships.**
+It was `jsQR.min.js`, and npm publishes only an UNMINIFIED `dist/jsQR.js` - so
+the vendored bytes had come from a CDN's own minifier, which is not
+reproducible. Measured 2026-08-13: the shipped file matched NO published
+artefact, and jsdelivr's current 1.3.0 / 1.3.1 / 1.4.0 minified builds all
+differed from it and from each other even after normalising line endings and
+stripping the `sourceMappingURL` comment. Its provenance was genuinely
+unrecoverable. It was replaced with npm's own `dist/jsQR.js` (tarball verified
+against the registry shasum), which is unminified and therefore named honestly.
+That costs 126 KB on an asset `models-sidebar.js` loads LAZILY - only when a
+scan starts on a browser without a native `BarcodeDetector` - so most users
+never fetch it. **If you are tempted to re-minify it for size, you would be
+trading a verifiable artefact for an unverifiable one, which is the exact
+problem this replaced.**
 
 **A content hash must be taken over CRLF-normalised bytes.** This repo has
 `core.autocrlf=true` and no `.gitattributes` rule covering this directory, so
 any vendored file containing a newline is checked out with different bytes than
 the blob git stores. Measured: `katex.min.css` is 23335 B in git and 23336 B in
-a Windows working tree; `jsQR.min.js` 130469 vs 130470; `highlight.min.js`
-121727 vs 122939. Only `katex.min.js` and `auto-render.min.js` contain no
+a Windows working tree; the old `jsQR.min.js` 130469 vs 130470;
+`highlight.min.js` 121727 vs 122939. Only `katex.min.js` and `auto-render.min.js` contain no
 newline at all, so only those two hash identically either way. A raw-byte hash
 would pass on one platform and fail on the other, and the failure would read as
 a corrupted vendor drop rather than a line-ending artefact.
@@ -70,6 +89,14 @@ npm pack dompurify@<version>          # npm verifies the registry integrity hash
 tar -xzf dompurify-<version>.tgz
 cp package/dist/purify.min.js localm/plugins/gui/static/vendor/purify.min.js
 npm test                              # the vendor guard runs here
+```
+
+```
+npm pack jsqr@<version>
+tar -xzf jsqr-<version>.tgz
+cp package/dist/jsQR.js  localm/plugins/gui/static/vendor/jsQR.js
+cp package/LICENSE       localm/plugins/gui/static/vendor/LICENSE.jsqr
+npm test    # then update VENDORED_VERSION + PINNED_JSQR in tests-js/vendor-jsqr.test.mjs
 ```
 
 KaTeX is three files that MUST move together, from one release. A half-bump
