@@ -19,6 +19,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import RedirectResponse
 
 import localm.plugins.gui.web as _web
+from localm.debuglog import logger
 from localm.inference.http_server import _require_auth, job_owner_ok, principal_id
 from localm.plugins.gui.web import ShareClearRequest
 
@@ -112,6 +113,7 @@ def register(app: FastAPI, ctx) -> None:
         inbox = _web._share_inbox()
         keep = set(req.ids)
         removed = 0
+        failed = 0
         for p in inbox.glob("*__*"):
             fid, owner, _name = _web._parse_share_entry(p)
             if not job_owner_ok(request, owner):
@@ -120,6 +122,25 @@ def register(app: FastAPI, ctx) -> None:
                 try:
                     p.unlink()
                     removed += 1
-                except OSError:
-                    pass
-        return {"removed": removed}
+                except OSError as e:
+                    # RULE 5: a delete that FAILED must not be indistinguishable
+                    # from an entry the caller never asked about. Before this,
+                    # both simply left `removed` unchanged, so a locked or
+                    # permission-denied file reported exactly like a clean sweep
+                    # on a PRIVACY-adjacent store - the user believes shared
+                    # content is gone from the server and it is still there.
+                    #
+                    # Non-fatal rather than a 500, deliberately, and NOT the
+                    # sibling shape: chat's conversation_delete unlinks bare so
+                    # an OSError becomes a 500, which is right there because the
+                    # deletion IS the request's whole outcome. Here the clear is
+                    # cleanup riding on a share INGEST that has already
+                    # succeeded client-side, and the client re-sends the same ids
+                    # on the next ingest, so this self-heals; raising would fail
+                    # an operation that actually worked.
+                    failed += 1
+                    logger.warning("share-inbox clear could not delete %s: %s", p.name, e)
+        # `failed` is not decoration: chat.js already reads it, logs it and
+        # toasts the user (see the share-clear handler there, which documents
+        # this exact contract and defaults to 0 for a server that omits it).
+        return {"removed": removed, "failed": failed}
