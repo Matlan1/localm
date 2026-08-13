@@ -180,6 +180,18 @@ test("an in-use engine (HTTP 200, status 'in_use') is NOT reported as unloaded",
   for (let i = 0; i < 8; i++) await new Promise((r) => setTimeout(r, 0));
 
   assert.equal(calls.length, 1, "exactly one unload POST was attempted");
+  // The GET /api/models mock always answers "model-a is active" (truthfully -
+  // it never was unloaded), so refreshModels() alone would make the dropdown
+  // LOOK right even if the click handler wrongly believed it had succeeded.
+  // The discriminator that only the correct code path can produce is what
+  // the handler itself SAID happened, before any reconciling refresh: the
+  // toast text. A wrong implementation (falling through to the plain success
+  // branch on any r.ok) prints "Unloaded 'model-a'" here instead.
+  const toastText = win.document.getElementById("toast").textContent;
+  assert.match(toastText, /still generating/,
+    "the toast must say the model is still in use, not claim it was unloaded");
+  assert.doesNotMatch(toastText, /^Unloaded/,
+    "must never claim success for an unload that did not happen");
   assert.equal(select.value, "model-a",
     "the dropdown must NOT revert to the placeholder - the model is still loaded");
   assert.equal(btn.hidden, false, "the unload button stays visible - there is still something to unload");
