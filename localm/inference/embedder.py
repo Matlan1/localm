@@ -175,6 +175,32 @@ def _resolve_embed_ctx(native_ctx_train: int) -> int:
 _EMBED_BATCH_TARGET = 32
 
 
+def configure_embed_context(cp, n_ctx: int, n_seq_max: int, pooling_type: int):
+    """Fill a llama_context_params for EMBEDDING and return it.
+
+    A plain function taking the params object rather than code inline in
+    __init__, so the settings below are testable WITHOUT a native runtime. The
+    first version of the kv_unified test drove the whole GGUFEmbedder and passed
+    on a dev box while failing on CI: with no llama.cpp provisioned, __init__
+    raised long before it reached context creation, the pytest.raises() around
+    it swallowed that, and the assertion then read an unset value. A test for a
+    parameter should not depend on whether a GPU runtime exists.
+
+    kv_unified: ONE shared KV cache across the sequences of a batch, instead of
+    llama.cpp's default of carving n_ctx into n_seq_max private slices. See
+    _pack_groups, which bounds a group by its SUMMED token count against n_ctx -
+    the correct budget for a shared cache and far too generous for a sliced one.
+    """
+    cp.n_ctx = n_ctx
+    cp.n_batch = n_ctx
+    cp.n_ubatch = n_ctx      # non-causal encode needs ubatch >= seq len
+    cp.n_seq_max = n_seq_max
+    cp.kv_unified = True
+    cp.embeddings = True
+    cp.pooling_type = pooling_type
+    return cp
+
+
 def _choose_n_seq_max(n_ubatch: int, target_max: int = _EMBED_BATCH_TARGET) -> int:
     """How many sequences a multi-sequence embed batch may use, for a context
     whose n_ubatch is *n_ubatch*.
@@ -722,41 +748,13 @@ class GGUFEmbedder:
                     "embedder %s: native training window %d token(s), using %d",
                     Path(model_path).name, native_ctx, self.n_ctx)
             cp = api.llama_context_default_params()
-            cp.n_ctx = self.n_ctx
-            cp.n_batch = self.n_ctx
-            cp.n_ubatch = self.n_ctx      # non-causal encode needs ubatch >= seq len
             # How many texts embed() may pack into one native decode call -
             # see _choose_n_seq_max's own docstring for why this cannot be a
             # flat constant (a hard native crash, not a graceful error, for
             # the wrong (n_seq_max, n_ubatch) pairing).
             self._n_seq_max = _choose_n_seq_max(self.n_ctx)
-            cp.n_seq_max = self._n_seq_max
-            # ONE SHARED KV cache across the sequences of a batch, instead of
-            # llama.cpp's default of carving n_ctx into n_seq_max private
-            # slices. _pack_groups already bounds a group by its SUMMED token
-            # count against n_ctx, which is the correct budget for a shared
-            # cache and far too generous for a sliced one: at n_ctx=2048 and
-            # n_seq_max=32 each slice is 64 tokens (padded to 256 cells), so
-            # ANY ordinary RAG chunk overflows its own slice while the group
-            # still looks legal. Measured on the model this was reported
-            # against (KaLM-embedding-multilingual-mini-instruct-v2.5, a
-            # Qwen2-based CAUSAL embedder):
-            #
-            #   find_slot: n_tokens = 284 > size = 256
-            #   decode: failed to find a memory slot for batch of size 1988
-            #
-            # which surfaced to the user as a 503 on every re-embed.
-            #
-            # WHY THIS HID: the bundled default (bge-small) is a BERT-style
-            # ENCODER. llama.cpp routes it through encode(), which has no KV
-            # cache at all ("cannot decode batches with this context (calling
-            # encode() instead)"), so the slicing simply does not apply and
-            # every test against it passes. Only a DECODER-based embedding
-            # model reaches decode() and the cache. The tests were not thin;
-            # the model they used could not produce the failure.
-            cp.kv_unified = True
-            cp.embeddings = True
-            cp.pooling_type = self.pooling_type
+            configure_embed_context(cp, self.n_ctx, self._n_seq_max,
+                                    self.pooling_type)
             self._ctx = api.llama_init_from_model(self._model, cp)
             if not self._ctx:
                 api.llama_free_model(self._model)
