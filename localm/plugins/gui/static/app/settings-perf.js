@@ -374,7 +374,13 @@ window.confirmWebRequest = confirmWebRequest;
 export const WEB_TOOL_PROMPT =
   "You can access the internet through tools. For current or uncertain " +
   "info (news, prices, versions, anything after your training cutoff), " +
-  "get it from the web instead of guessing. Reply with ONLY ONE tool call " +
+  "get it from the web instead of guessing.\n" +
+  "DO NOT SEARCH when the request needs no outside information. Greeting " +
+  "someone, writing, rephrasing, translating, summarising text already in " +
+  "the conversation, chatting, or anything you can simply do - do it and " +
+  "reply normally. An unnecessary search wastes time and buries the answer " +
+  "that was asked for.\n" +
+  "When you do search, reply with ONLY ONE tool call " +
   "block and nothing else - a second call in the same reply is not run:\n" +
   '<tool_call>{"name": "web_search", "args": {"query": "..."}}</tool_call>\n' +
   "To read a specific page:\n" +

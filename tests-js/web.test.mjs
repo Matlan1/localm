@@ -7,6 +7,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadApp, runScript } from "./harness.mjs";
+import { readFile } from "node:fs/promises";
 
 const jsonResp = (obj) => ({
   ok: true, status: 200, json: async () => obj, text: async () => JSON.stringify(obj),
@@ -571,4 +572,43 @@ test("a set System prompt overrides the Settings default (not both)", async () =
   });
   assert.match(sys, /helpful librarian/, "the drawer System prompt is used");
   assert.ok(!/pirate/.test(sys), "the Settings default is NOT also injected");
+});
+
+// A SEARCH THE USER DID NOT ASK FOR IS A FAILURE, not a harmless extra step.
+//
+// Reported live 2026-08-14: "Greet my friend Memo, who is watching right now"
+// produced a web_search for "greeting messages", and the reply was a list of
+// greeting-card websites instead of a greeting. The prompt told the model when to
+// search ("current or uncertain info ... instead of guessing") and never once told
+// it when NOT to, so every instruction in it pushed one way.
+//
+// Asserts the BOUNDARY exists and names the everyday cases, rather than asserting
+// the exact wording, so the sentence can be reworded without breaking this.
+test("the web tool prompt tells the model when NOT to search", async () => {
+  // WEB_TOOL_PROMPT is an ES export and settings-perf.js touches `window` at
+  // import time, so neither a bare import nor the classic-script harness reaches
+  // it. The subject here is the SHIPPED TEXT, so read the declaration itself.
+  const src = await readFile(
+    new URL("../localm/plugins/gui/static/app/settings-perf.js", import.meta.url),
+    "utf8");
+  // \r?\n, not \n: this file is CRLF on disk and Node's readFile does not
+  // normalise line endings the way a Python text read does.
+  const m = src.match(/export const WEB_TOOL_PROMPT\s*=([\s\S]*?);\r?\n/);
+  assert.ok(m, "WEB_TOOL_PROMPT declaration not found - did it move or get renamed?");
+  const p = m[1];
+  assert.ok(p.length > 200, "the prompt body looks truncated");
+
+  assert.match(p, /do not search/i,
+    "the prompt must state a negative boundary, not only when to search");
+  assert.match(p, /greet/i,
+    "greeting someone is the reported case and must be named as a do-not-search example");
+  for (const kind of [/writ/i, /translat/i, /summaris|summariz/i]) {
+    assert.match(p, kind,
+      `an everyday no-search task is missing from the boundary: ${kind}`);
+  }
+  // The positive instruction has to survive - this must not turn into "never search".
+  assert.match(p, /web_search/,
+    "the search tool must still be offered");
+  assert.match(p, /current or uncertain/i,
+    "the reason TO search must remain");
 });
