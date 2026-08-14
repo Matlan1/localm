@@ -599,3 +599,51 @@ def test_neutralise_hoist_matches_coder_reexport():
     for probe in ("</tool_result>", "<|im_start|>x", "[TOOL_CALLS]", "a < b",
                   "<start_of_turn>", "</s><s>"):
         assert k(probe) == c(probe)
+
+
+# --------------------------------------------------------------------------
+# "my friend X" IS NOT A QUESTION ABOUT THE ASKER.
+#
+# Reported live 2026-08-14. "Greet my friend Memo, who is watching right now"
+# was classified self-referential on the bare "my". With vector coverage degraded
+# the trusted-fact fallback then promoted TRUST_FALLBACK_K profile facts by
+# IMPORTANCE, and the model answered by recalling a person named Fishy from a
+# conversation days earlier. The log for that exact turn:
+#
+#     memory recall: injected 2 record(s), degrade=low_coverage
+#
+# i.e. exactly the fallback count, none of it related to the request.
+#
+# The fallback itself is right (REG-590: profile facts must survive a degraded
+# semantic signal). What was wrong is the discriminator letting a query ABOUT
+# SOMEONE ELSE through it.
+
+def test_a_possessive_naming_another_person_is_not_self_referential():
+    from localm.memory.store import _is_self_referential as sr
+
+    # The reported case, and its family. These are about the OTHER person.
+    assert sr("Greet my friend Memo, who is watching right now") is False
+    assert sr("say hello to my colleague") is False
+    assert sr("my friend likes fish") is False
+    assert sr("write a card for my sister") is False
+
+
+def test_first_person_questions_are_still_self_referential():
+    """REG-590's contract, which the fix above must not break: the user's own
+    profile facts still have to survive a degraded semantic signal."""
+    from localm.memory.store import _is_self_referential as sr
+
+    assert sr("what is my name") is True
+    assert sr("when is my birthday") is True
+    assert sr("do I like coffee") is True
+    assert sr("tell me a joke") is True
+    # Mixed: the second "my" is not a person, so this IS about the asker.
+    assert sr("my boss asked about my salary") is True
+
+
+def test_a_query_about_the_world_is_still_not_self_referential():
+    """The precision gate this heuristic exists to preserve."""
+    from localm.memory.store import _is_self_referential as sr
+
+    assert sr("recommend a pasta recipe") is False
+    assert sr("what is the capital of France") is False

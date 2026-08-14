@@ -138,11 +138,53 @@ def _content_tokens(text: str) -> set:
 # substitute for a working embedder.
 _SELF_REF = frozenset({"i", "me", "my", "mine", "myself"})
 
+# "my" does NOT mean "about me" when it introduces ANOTHER PERSON. Reported live
+# 2026-08-14: "Greet my friend Memo, who is watching right now" was classified
+# self-referential on the bare "my", and with coverage degraded the fallback below
+# promoted two unrelated profile facts by importance - so a greeting turned into
+# the model recalling a person named Fishy from a conversation days earlier. The
+# log for that turn reads
+#
+#     memory recall: injected 2 record(s), degrade=low_coverage
+#
+# i.e. exactly TRUST_FALLBACK_K records, none of them related to the request.
+#
+# A possessive naming a RELATIONSHIP is about that other person, so it must not
+# open the profile-fact fallback. "my name", "my birthday", "my preference" are
+# untouched and still self-referential, which is what REG-590 needs.
+_OTHER_PERSON = frozenset({
+    "friend", "friends", "colleague", "colleagues", "coworker", "coworkers",
+    "boss", "manager", "neighbour", "neighbor", "neighbours", "neighbors",
+    "wife", "husband", "partner", "spouse", "girlfriend", "boyfriend",
+    "mother", "mum", "mom", "father", "dad", "parents", "brother", "sister",
+    "sibling", "siblings", "son", "daughter", "child", "children", "kids",
+    "cousin", "uncle", "aunt", "nephew", "niece", "grandma", "grandmother",
+    "grandpa", "grandfather", "family", "mate", "buddy", "pal", "team",
+    "guest", "visitor", "client", "customer", "student", "teacher", "doctor",
+})
+_POSSESSIVE = frozenset({"my", "mine"})
+
 
 def _is_self_referential(text: str) -> bool:
     """True when *text* refers to the asker in the first person, i.e. the query is
-    plausibly ABOUT the user rather than about the world."""
-    return bool(_SELF_REF & set(_tokenize(text or "")))
+    plausibly ABOUT the user rather than about the world.
+
+    A possessive immediately followed by a word naming ANOTHER PERSON ("my friend",
+    "my boss") does not count: that query is about them, not about the asker, so it
+    must not pull the asker's profile facts in behind it."""
+    toks = _tokenize(text or "")
+    hits = _SELF_REF & set(toks)
+    if not hits:
+        return False
+    # Every first-person token is a possessive introducing someone else -> not about
+    # the asker. A bare "I"/"me"/"myself" anywhere still counts.
+    for i, t in enumerate(toks):
+        if t not in _SELF_REF:
+            continue
+        if t in _POSSESSIVE and i + 1 < len(toks) and toks[i + 1] in _OTHER_PERSON:
+            continue                      # "my friend ..." - about them
+        return True
+    return False
 
 # ---- forgetting ----------------------------------------------------------- #
 PRUNE_FLOOR = 0.02         # decayed(importance*recency) below this is forgettable
