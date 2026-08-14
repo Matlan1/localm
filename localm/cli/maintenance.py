@@ -187,12 +187,48 @@ def setup_embeddings(model, yes=False):
         from ..debuglog import logger as _logger
         _logger.debug("setup-embeddings: could not sync into the model registry (%s)", e)
 
+    # Memory records written before an embedder existed carry NO vector, and
+    # nothing else fills them in: backfill_vectors' only other caller is the
+    # consolidation pass, which is optional and may never run. Below
+    # VEC_COVERAGE the semantic gate is unusable, so recall falls back to
+    # promoting profile facts by IMPORTANCE - which is how "greet my friend
+    # Memo" was answered with an unrelated person from days earlier
+    # (2026-08-14). Claiming "memory now retrieves semantically" without doing
+    # this was untrue for every record already stored, while the very next
+    # sentence correctly warned that RAG stays lexical until re-embedded.
+    # Do the work, then say what actually happened.
+    mem_note = ""
+    try:
+        from ..inference.embedder import embed_texts
+        from ..memory.backfill import backfill_all, vectorless_total
+        from ..memory.store import _memory_root as _mem_root
+
+        _root = _mem_root(None)
+        pending = vectorless_total(_root)
+        if pending:
+            console.print(f"  Embedding {pending} stored memory item(s) ...")
+            res = backfill_all(_root, embed_texts)
+            if res["remaining"]:
+                mem_note = (f"\nMemory: embedded {res['embedded']} item(s); "
+                            f"{res['remaining']} could not be embedded and stay "
+                            "lexical - re-run to retry.")
+            elif res["embedded"]:
+                mem_note = (f"\nMemory: {res['embedded']} stored item(s) embedded, "
+                            "so recall is semantic for those too.")
+    except Exception as e:
+        # Never fail the install over the backfill - but never claim it happened
+        # either (AGENTS.md rule 5).
+        from ..debuglog import logger as _logger
+        _logger.debug("setup-embeddings: memory vector backfill skipped (%s)", e)
+        mem_note = ("\nMemory: stored items could not be embedded just now, so "
+                    "recall stays lexical for them until this succeeds.")
+
     console.print(
-        f"[green]Embedding model ready:[/green] {path}{synced_note}\n"
-        "Memory now retrieves semantically. Existing RAG collections stay lexical "
-        "(BM25) until re-embedded: run `localm rag reembed <name>` for each (works "
-        "from the chunk text already stored, no original files needed), or click "
-        "'re-embed' on the Knowledge page.")
+        f"[green]Embedding model ready:[/green] {path}{synced_note}{mem_note}\n"
+        "New memory items are embedded as they are written. Existing RAG "
+        "collections stay lexical (BM25) until re-embedded: run `localm rag reembed "
+        "<name>` for each (works from the chunk text already stored, no original "
+        "files needed), or click 're-embed' on the Knowledge page.")
 
 
 @main.command("make-launcher")

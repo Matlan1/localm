@@ -333,6 +333,43 @@ class MemoryStore:
             self._load()
 
     # ----------------------------------------------------------------- IO -- #
+    @classmethod
+    def open_file(cls, path: Path) -> "MemoryStore":
+        """Open an EXISTING namespace file directly, without knowing the
+        (principal, agent, scope_key) that produced it.
+
+        A namespace file is named for its hash, and that hash is exactly the key
+        every mutating method locks on - so a store opened this way locks
+        identically to one opened the normal way, and cannot race a concurrent
+        writer of the same namespace. Needed by the vector backfill, which walks
+        the memory root and must reach EVERY namespace including key-scoped ones,
+        whose principal is a bearer-key hash that cannot be reconstructed from
+        disk.
+
+        Deliberately not a general constructor: it does no path-safety derivation
+        because it takes an already-resolved file the caller enumerated from the
+        memory root itself.
+        """
+        obj = cls.__new__(cls)
+        obj.principal = ""
+        obj.agent = path.parent.name
+        obj.scope_key = ""
+        obj._ns_hash = path.stem
+        obj._records = []
+        obj._vectors = {}
+        obj._dim = None
+        obj._bm25 = None
+        obj.last_evicted_user = []
+        obj._file = path
+        with _namespace_lock(obj._ns_hash):
+            obj._load()
+        return obj
+
+    def vectorless_count(self) -> int:
+        """How many records still have no vector. The honest denominator for a
+        backfill that reports what it did NOT finish."""
+        return sum(1 for r in self._records if r.id not in self._vectors)
+
     @property
     def path(self) -> Path:
         return self._file
@@ -604,11 +641,17 @@ class MemoryStore:
         This is how semantic recall turns on RETROACTIVELY: a user who chats
         before installing an embedding model has memories with no vectors, and
         nothing re-embedded them, so recall stayed lexical forever even after
-        'localm setup-embeddings' (memory-audit 2026-07-02 F8). A regular
-        background pass calls this so coverage climbs to the point where the
-        cosine signal kicks in. Bounded per call so a large store backfills
-        over several passes instead of one long stall. Best-effort: an embed
-        failure for one record is skipped, not fatal.
+        'localm setup-embeddings' (memory-audit 2026-07-02 F8).
+
+        BOUNDED per call on purpose, so a large store never stalls one caller.
+        That means a single call does NOT get coverage up on its own - drive it
+        to completion with ``memory.backfill.backfill_all``, which is what
+        setup-embeddings uses. An earlier version of this docstring claimed "a
+        regular background pass calls this so coverage climbs"; there was no
+        such pass, the consolidation hook was the only caller, and on an install
+        where auto-consolidation never ran coverage stayed at zero forever - the
+        2026-08-14 low_coverage report. Best-effort: an embed failure for one
+        record is skipped, not fatal.
 
         CHK-MEM-LOCK: locked and re-loaded like the other mutating methods, so a
         backfill pass started from a stale snapshot cannot silently clobber a
