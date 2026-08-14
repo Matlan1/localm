@@ -647,3 +647,91 @@ def test_a_query_about_the_world_is_still_not_self_referential():
 
     assert sr("recommend a pasta recipe") is False
     assert sr("what is the capital of France") is False
+
+
+# --------------------------------------------------------------------------
+# A LEXICAL HIT SAYS WHAT THE QUERY IS ABOUT. Do not pad cosine-only records
+# in behind it.
+#
+# Reported 2026-08-14: "Greet my friend Memo, who is watching right now" also
+# injected "User once discussed a person named Fishy", which measured cos=0.5584
+# against a REL_COS_MIN of 0.55 - over the floor by 0.008.
+#
+# WHY NOT JUST RAISE THE FLOOR: measured on real bge-small over 16 query/record
+# pairs, no absolute threshold separates the two sets. The lowest TRUE pair was
+# 0.4480 ("what do I do for work" vs "User works on localm"); the highest FALSE
+# pair was 0.5965 ("what is my name" vs "User has a friend called Memo"). Raising
+# REL_COS_MIN drops a genuine hit before it drops a wrong one, and a
+# relative-to-best gate fails too (that false pair is 91% of its query's best).
+# Lexical overlap over the same 16 pairs: FP=0. It is never wrong; it just misses
+# paraphrases, which is what cosine is for.
+
+def _cos_embed(query, cosines):
+    """An embed_fn where *query* sits at angle 0 and each record sits at the angle
+    whose cosine to it is the MEASURED value.
+
+    Keyed to ONE query on purpose: cos(a, b) here is the cosine of the angle
+    DIFFERENCE, so a table shared across several queries silently produces
+    similarities nobody chose. Anything unlisted is far away (0.05).
+    """
+    import math
+
+    def embed(texts):
+        one = not isinstance(texts, list)
+        items = [texts] if one else texts
+        out = []
+        for t in items:
+            key = t.strip().lower()
+            c = 1.0 if key == query.strip().lower() else cosines.get(key, 0.05)
+            out.append([c, math.sqrt(max(0.0, 1.0 - c * c)), 0.0])
+        return out[0] if one else out
+    return embed
+
+
+# Measured on real bge-small, 2026-08-14, for these exact strings.
+_GREET = "Greet my friend Memo, who is watching right now"
+_GREET_COS = {
+    "user has a friend called memo": 0.7586,
+    "user once discussed a person named fishy": 0.5584,
+    "user prefers concise answers": 0.4681,
+}
+
+
+def _store_with(tmp_path, texts, embed):
+    from localm.memory.record import MemoryRecord
+    from localm.memory.store import MemoryStore
+    st = MemoryStore("owner", "chat", "", root=tmp_path / "memory")
+    for t in texts:
+        st.add(MemoryRecord(text=t, source="user"), embed_fn=embed)
+    return st
+
+
+def test_a_marginal_cosine_record_does_not_ride_in_behind_a_lexical_hit(tmp_path):
+    embed = _cos_embed(_GREET, _GREET_COS)
+    st = _store_with(tmp_path, ["User has a friend called Memo",
+                                "User once discussed a person named Fishy"], embed)
+    texts = [r.text for r in st.recall(_GREET, embed_fn=embed)]
+    assert "User has a friend called Memo" in texts, "the right record must survive"
+    assert "User once discussed a person named Fishy" not in texts, (
+        "cos 0.5584 clears REL_COS_MIN by 0.008 but shares no content word with "
+        "the query - it must not be injected behind a lexical hit (reported "
+        "2026-08-14: a greeting answered with an unrelated person)")
+
+
+def test_cosine_still_carries_a_paraphrase_when_nothing_matches_lexically(tmp_path):
+    """The bar must not become 'lexical only': with NO lexical hit at all the
+    semantic gate still answers, which is REG-590's contract."""
+    q = "what is my name"
+    embed = _cos_embed(q, {"user is called sam": 0.6526})
+    st = _store_with(tmp_path, ["User is called Sam"], embed)
+    assert [r.text for r in st.recall(q, embed_fn=embed)] == ["User is called Sam"], (
+        "a paraphrase sharing no content word must still recall semantically")
+
+
+def test_an_unrelated_query_still_recalls_nothing(tmp_path):
+    """The precision gate this whole mechanism exists for."""
+    q = "recommend a pasta recipe"
+    embed = _cos_embed(q, {})          # nothing is near it
+    st = _store_with(tmp_path, ["User has a friend called Memo",
+                                "User once discussed a person named Fishy"], embed)
+    assert st.recall(q, embed_fn=embed) == []

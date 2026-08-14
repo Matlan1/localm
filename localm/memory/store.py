@@ -809,12 +809,41 @@ class MemoryStore:
             if qv and len(qv) == stored_dim:
                 cos = [(_cosine(qv, self._vectors[r.id]) if r.id in self._vectors
                         else 0.0) for r in self._records]
-        out = []
-        for i, r in enumerate(self._records):
-            lex = bool(q_tokens & _content_tokens(r.text))
-            sem = cos is not None and cos[i] >= REL_COS_MIN
-            out.append(lex or sem)
-        return out
+        lex_hits = [bool(q_tokens & _content_tokens(r.text)) for r in self._records]
+        sem_hits = [cos is not None and cos[i] >= REL_COS_MIN
+                    for i in range(len(self._records))]
+        # A LEXICAL HIT RAISES THE BAR FOR EVERYTHING ELSE. When the query shares a
+        # content word with some record, that word says what the query is about, so
+        # a cosine-only record riding in behind it must be strongly similar, not
+        # merely over the floor.
+        #
+        # Reported 2026-08-14: "Greet my friend Memo, who is watching right now"
+        # also injected "User once discussed a person named Fishy" - cos 0.5584
+        # against a REL_COS_MIN of 0.55, over by 0.008 - so a greeting was answered
+        # with an unrelated person from days earlier.
+        #
+        # WHY NOT RAISE REL_COS_MIN: measured on real bge-small over 16 pairs, no
+        # absolute floor separates true from false. Lowest TRUE 0.4480 ("what do I
+        # do for work" vs "User works on localm"); highest FALSE 0.5965 ("what is
+        # my name" vs "User has a friend called Memo"). Raising it drops a genuine
+        # hit first.
+        #
+        # WHY NOT EXCLUDE COSINE-ONLY RECORDS OUTRIGHT: that breaks a measured
+        # contract - test_relevance_weights_semantic_over_lexical pins that a
+        # semantic-only record OUT-RANKS a lexical-only one, a tuning that tripled
+        # recall@1 on the memory benchmark. A strong paraphrase must still win.
+        #
+        # WHERE THE NUMBER COMES FROM: among queries that HAVE a lexical hit - the
+        # only population this rule touches - every cosine-only record measured was
+        # a false positive, the highest at 0.5584 (the Fishy case). The true
+        # cosine-only companion in the benchmark test sits at ~1.0 (cosine-identical
+        # by construction). 0.75 sits between them with margin on both sides, and is
+        # deliberately well ABOVE the 0.5965 worst false pair measured anywhere.
+        REL_COS_COMPANION = 0.75
+        if any(lex_hits) and cos is not None:
+            return [lex_hits[i] or cos[i] >= REL_COS_COMPANION
+                    for i in range(len(self._records))]
+        return [lex_hits[i] or sem_hits[i] for i in range(len(self._records))]
 
     def recall(self, query: str, *, k: int = 6, embed_fn: Optional[EmbedFn] = None,
                reinforce: bool = False, now: Optional[float] = None,
