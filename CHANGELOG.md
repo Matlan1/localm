@@ -929,6 +929,25 @@ permanent public record of what shipped and are never rewritten; the in-progress
   could arrive without it. It now requests that version specifically, and checks
   the download is complete before touching your install rather than discovering
   it half way through.
+- **A simple request could be answered with something unrelated you talked about
+  days ago.** Asking localm to greet a friend could produce a reply about a
+  different person entirely. Three things combined to cause it: stored memories
+  were never given the data semantic search needs, so recall fell back to
+  offering whatever it considered most important rather than what was relevant;
+  a request about somebody else ("greet my friend...") was read as a question
+  about you, which opened that fallback; and a memory that merely mentioned some
+  other person was close enough to count as related. All three are fixed, so a
+  request now recalls what it is actually about, or nothing.
+- **Memories saved before you installed the search model are now included.**
+  `localm setup-embeddings` said memory would retrieve semantically, but nothing
+  ever went back and processed what you had already saved, so it stayed keyword
+  only, sometimes indefinitely. Setting up the model now processes those saved
+  memories and tells you how many, including any it could not.
+- **localm no longer searches the web for things it can just do.** Asking it to
+  greet someone could produce a web search for greeting messages and a list of
+  websites instead of a greeting. It is now told plainly not to search for
+  writing, greeting, rephrasing, translating or summarising something already in
+  the conversation. Searching for genuinely current information is unchanged.
 
 ### Security
 - **The GUI's Content-Security-Policy now actually blocks, instead of only
