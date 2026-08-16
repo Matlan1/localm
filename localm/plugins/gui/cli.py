@@ -452,8 +452,23 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
                 # loopback auto-seed exists in every version. The app ignores the
                 # stray param.
                 import secrets as _secrets
+                from localm import appface
                 sep = "&" if "?" in url else "?"
-                webbrowser.open(f"{url}{sep}lm={_secrets.token_hex(3)}")
+                open_url = f"{url}{sep}lm={_secrets.token_hex(3)}"
+                # run_native_window BLOCKS this thread until the window closes -
+                # correct here: main() is already this process's actual main
+                # thread, and this attach-only invocation starts no server of
+                # its own to keep the process alive, so blocking here IS what
+                # keeps a native window's host process running for as long as
+                # the window stays open (see run_native_window's docstring for
+                # why it must run on the main thread specifically).
+                # hide_on_close=False: this invocation owns no server of its
+                # own to keep alive (it only ever attached to one already
+                # running elsewhere) - closing this window is this whole
+                # process's purpose, so it should just close for real, not
+                # hide to a tray this invocation never creates.
+                if not appface.run_native_window(open_url, hide_on_close=False):
+                    webbrowser.open(open_url)
             return
 
     from localm.config import PortInUseError, load_registry, pick_port
@@ -768,10 +783,15 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     console.print(f"  [dim]Open the GUI:[/dim] [cyan]{open_url}[/cyan]", soft_wrap=True)
 
     def _open_when_ready(url: str, port: int, timeout: float = 20.0) -> None:
-        """Open the browser only once the server actually ACCEPTS a connection, so a
-        fresh launch never lands the user on the "Can't reach the server /
-        reconnecting" overlay because the tab beat the listener (the cold-start
-        race). Polls the loopback port; opens anyway after *timeout* as a fallback."""
+        """Open the browser tab only once the server actually ACCEPTS a
+        connection, so a fresh launch never lands the user on the "Can't
+        reach the server / reconnecting" overlay because the tab beat the
+        listener (the cold-start race). Polls the loopback port; opens
+        anyway after *timeout* as a fallback. Only ever used when a native
+        window will NOT be used this run (see want_native below) - when it
+        will, the equivalent poll-then-open happens inline further down,
+        because opening the native window has to block THIS process's own
+        main thread, not a background one."""
         import socket
         import time as _time
         deadline = _time.monotonic() + timeout
@@ -786,7 +806,18 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
         except Exception:
             pass
 
-    if _should_auto_open_browser(no_browser):
+    from localm import appface
+    # pywebview's webview.start() has a hard, unconditional requirement -
+    # verified against the installed 6.2.1 source, not assumed - to be
+    # called from the process's actual main thread. That thread is normally
+    # occupied by hs.run_advertised() below (it blocks until Ctrl+C), so
+    # deciding to use a native window means giving IT the main thread instead
+    # and moving the server to a background one - see the branch after the
+    # tray/status-window setup. Decided once, up front, so every "who opens
+    # what, on which thread" choice below stays consistent.
+    want_native = _should_auto_open_browser(no_browser) and appface.native_window_available()
+
+    if _should_auto_open_browser(no_browser) and not want_native:
         threading.Thread(target=_open_when_ready, args=(open_url, chosen_port),
                          daemon=True, name="open-browser").start()
 
@@ -797,7 +828,7 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     # Advertise this server in the instance registry (H6 phase 3/4) as a "full"
     # surface (API + GUI) so a future launch in the same dir can discover and
     # attach to it. --isolated keeps it invisible to discovery.
-    from localm import appface, debuglog
+    from localm import debuglog
     from localm.config import home_dir as _home_dir
     # Tray control surface (Windows): Open / Copy address / View logs / Restart /
     # Stop, so the running server is a real background app, not just a console.
@@ -838,20 +869,78 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
                 hide_console()
         threading.Thread(target=_mark_ready_when_listening,
                          name="localm-ready", daemon=True).start()
-    try:
+
+    def _serve():
         # The advertise + run_server tail is identical to http_server.serve()'s
         # (CF-6): shared via run_advertised so there is one implementation of
         # that sequence, not two hand-maintained copies. The app object itself
         # is still built above (not inside serve()) since the GUI needs it
         # ready earlier to wire attach_gui/grants/etc. before this point.
-        hs.run_advertised(app, host, chosen_port,
-                          mode="api" if api_mode else "full",
-                          ssl_certfile=ssl_certfile, ssl_keyfile=ssl_keyfile,
-                          project=project, isolated=isolated, log_level="warning")
-    finally:
-        if app_face is not None:
-            app_face.close()
-        if mdns_advertiser is not None:
-            mdns_advertiser.close()
-        if manager is not None:
-            manager.close_all()
+        try:
+            hs.run_advertised(app, host, chosen_port,
+                              mode="api" if api_mode else "full",
+                              ssl_certfile=ssl_certfile, ssl_keyfile=ssl_keyfile,
+                              project=project, isolated=isolated, log_level="warning")
+        finally:
+            # Runs once the SERVER has actually stopped - on the main thread
+            # in the browser-tab case, on the background server thread in the
+            # native-window case (want_native below) - never merely once a
+            # native window has closed, which can happen long before the
+            # server does (closing the window must not tear down what is
+            # still serving requests in the background).
+            if app_face is not None:
+                app_face.close()
+            if mdns_advertiser is not None:
+                mdns_advertiser.close()
+            if manager is not None:
+                manager.close_all()
+            # No-op when want_native is False (no native window this run).
+            # When it IS true, the window only ever hides on its own close
+            # button (appface.run_native_window's _on_closing) - this is
+            # what lets it actually be destroyed, so run_native_window's
+            # blocking webview.start() call returns and the process can
+            # exit, now that the server it was fronting has genuinely
+            # stopped.
+            appface.close_native_window()
+
+    if want_native:
+        # Give this thread to the server (non-daemon: closing the native
+        # window must NOT kill a still-running server, matching today's
+        # "closing a browser tab doesn't stop the server" behavior - Ctrl+C
+        # or the tray Stop button is still how you actually stop it) and
+        # hand the process's real main thread to the window instead, since
+        # that is the one thread pywebview will accept.
+        server_thread = threading.Thread(target=_serve, name="localm-server",
+                                        daemon=False)
+        server_thread.start()
+        import socket as _socket
+        import time as _time3
+        _deadline = _time3.monotonic() + 20.0
+        while _time3.monotonic() < _deadline:
+            try:
+                with _socket.create_connection(("127.0.0.1", chosen_port), 0.5):
+                    break
+            except OSError:
+                _time3.sleep(0.25)
+        # on_quit=on_stop: the SAME callable the tray's Stop button already
+        # uses (_tray_callbacks above) - when the "quit when the app window
+        # is closed" setting is on, closing the window stops the server
+        # exactly like clicking Stop would, instead of just hiding it.
+        if not appface.run_native_window(open_url, on_quit=on_stop):
+            webbrowser.open(open_url)
+        # MUST join here, not just rely on server_thread being non-daemon:
+        # confirmed live (a real crash, then reproduced and root-caused in
+        # isolation) that concurrent.futures.thread registers its shutdown
+        # via CPython's internal threading._register_atexit(), which fires
+        # as soon as THIS (main) thread's top-level code finishes - BEFORE
+        # Python waits for non-daemon threads to actually join. Without this
+        # join, main() returning the instant the window closed flipped the
+        # shared plugin executor's global shutdown flag while the server
+        # thread was still fully alive, and every in-flight request relying
+        # on get_plugin_executor() (e.g. GET /api/models) started raising
+        # "cannot schedule new futures after shutdown" for as long as the
+        # server kept running. Joining keeps this thread's own top-level code
+        # "still running" for exactly as long as the server actually is.
+        server_thread.join()
+    else:
+        _serve()

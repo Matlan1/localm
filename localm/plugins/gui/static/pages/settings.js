@@ -99,7 +99,7 @@ export const CORE_GROUP_TO_TOP = {
   Plugins: "plugins", Coder: "plugins", Knowledge: "plugins", Voice: "plugins",
   Privacy: "privacy", Memory: "privacy", Diagnostics: "privacy",
   Updates: "system", "Bug reports": "system", General: "system",
-  Media: "media",
+  Media: "media", Desktop: "system",
 };
 
 /** The nav group for a core section, complaining loudly about an unmapped group
@@ -146,6 +146,7 @@ export const CORE_SECTION_HEADING = {
   Coder: "Coder",
   Knowledge: "Knowledge (RAG)",
   Voice: "Voice",
+  Desktop: "Desktop app",
 };
 
 /** The top-level group id a section element belongs to (defaults to "system"). */

@@ -431,6 +431,15 @@ CORE_FIELDS: list = [
                  "Sidebar wordmark, chosen with the logo picker and shared with "
                  "the desktop launcher.",
                  group="General"),
+    SettingField("desktop_window_quit_on_close", Widget.TOGGLE,
+                 "Quit when the app window is closed",
+                 "Only applies when using the standalone app window "
+                 "(localm[desktop]). Off (default): the close button hides "
+                 "the window and the server keeps running in the background "
+                 "- same as closing a browser tab - use Stop to actually "
+                 "quit. On: the close button quits the app and stops the "
+                 "server.",
+                 group="Desktop"),
     # ---- Privacy ----
     # REC-MEDIA-CMD sweep: these three decide WHETHER LOCALM WRITES THE USER'S
     # CONTENT TO DISK. Turning privacy off starts persisting transcripts and an
