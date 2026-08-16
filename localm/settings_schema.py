@@ -431,6 +431,13 @@ CORE_FIELDS: list = [
                  "Sidebar wordmark, chosen with the logo picker and shared with "
                  "the desktop launcher.",
                  group="General"),
+    SettingField("desktop_window_mode", Widget.SELECT, "Default window mode",
+                 "How `localm gui` opens when the standalone-window extra "
+                 "(localm[desktop]) is installed. auto: use the app window "
+                 "when available, otherwise the browser (default). browser: "
+                 "always use the browser tab even when the app window is "
+                 "available.",
+                 group="Desktop", options=["auto", "browser"]),
     SettingField("desktop_window_quit_on_close", Widget.TOGGLE,
                  "Quit when the app window is closed",
                  "Only applies when using the standalone app window "

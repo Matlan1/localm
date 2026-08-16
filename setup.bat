@@ -247,6 +247,27 @@ echo  Environment ready.
 type nul > ".venv\.localm-venv"
 :venv_done
 
+rem ---- browser tab or standalone app window? ---------------------------------
+rem  Decides whether the `desktop` extra (pywebview) gets installed at all - a
+rem  NEW dependency (pythonnet) every fresh install would otherwise take on
+rem  unasked. Default stays Browser for exactly that reason (AGENTS.md rule
+rem  1/5: no surprise new deps, no silent behavior change). Runtime override
+rem  without re-running setup: Settings -> Desktop app -> Default window mode
+rem  (config key desktop_window_mode, "auto" - use it if installed - or
+rem  "browser"). Leaving that key at its "auto" default here is deliberate:
+rem  once the extra IS installed, "auto" already means "use it", so setup
+rem  needs no config.json write of its own.
+echo.
+echo  Open localm's GUI as its own app window, or in your browser?
+echo    [1] Browser    - opens in your default browser (no extra install)
+echo    [2] App window - its own window, no browser tab (installs localm[desktop])
+set "WPICK="
+call :flush
+set /p "WPICK=  Pick 1 or 2 [1]: "
+if not defined WPICK set "WPICK=1"
+set "EXTRAS=coder,voice,monitor"
+if "%WPICK%"=="2" set "EXTRAS=coder,voice,monitor,desktop"
+
 rem ---- install localm (editable) into the venv ------------------------------
 rem  Base install first: GGUF chat needs no PyTorch, so this alone is a working
 rem  install. The GPU/torch stack for HuggingFace models is added below to match
@@ -254,10 +275,10 @@ rem  the detected vendor. [voice] ships speech-to-text; its Whisper model is onl
 rem  downloaded after the user consents in the GUI.
 echo.
 echo  Installing localm into .venv ...
-uv pip install -p .venv -e ".[coder,voice,monitor]"
+uv pip install -p .venv -e ".[%EXTRAS%]"
 if not errorlevel 1 goto install_ok
 echo  [!] Install failed - see the error above.
-call :offer_report "localm install failed during setup" "uv pip install -e .[coder,voice,monitor] failed - see the error output above."
+call :offer_report "localm install failed during setup" "uv pip install -e .[%EXTRAS%] failed - see the error output above."
 pause
 exit /b 1
 :install_ok

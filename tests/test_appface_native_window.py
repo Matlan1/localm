@@ -59,7 +59,46 @@ def test_native_window_available_false_when_not_installed(monkeypatch):
 def test_native_window_available_true_when_importable(monkeypatch):
     monkeypatch.delitem(sys.modules, "pytest", raising=False)
     monkeypatch.setitem(sys.modules, "webview", MagicMock())
+    monkeypatch.setattr("localm.config.load_config",
+                        lambda: {"desktop_window_mode": "auto"})
     assert appface.native_window_available() is True
+
+
+def test_native_window_available_false_when_mode_is_browser(monkeypatch):
+    """The explicit opt-out: even with pywebview genuinely importable, the
+    user's desktop_window_mode="browser" preference must win."""
+    monkeypatch.delitem(sys.modules, "pytest", raising=False)
+    monkeypatch.setitem(sys.modules, "webview", MagicMock())
+    monkeypatch.setattr("localm.config.load_config",
+                        lambda: {"desktop_window_mode": "browser"})
+    assert appface.native_window_available() is False
+
+
+def test_native_window_allowed_defaults_true_when_config_read_fails(monkeypatch):
+    """A config problem must never silently disable a feature the user did
+    not ask to disable - same posture as the quit_on_close read."""
+    monkeypatch.delitem(sys.modules, "pytest", raising=False)
+    monkeypatch.setitem(sys.modules, "webview", MagicMock())
+
+    def _boom():
+        raise RuntimeError("disk on fire")
+
+    monkeypatch.setattr("localm.config.load_config", _boom)
+    assert appface.native_window_available() is True
+
+
+def test_run_native_window_returns_false_when_mode_is_browser(monkeypatch):
+    """Covers the attach-path call site directly: it calls run_native_window
+    without ever going through native_window_available(), so the preference
+    check has to live here too, not only in the other function."""
+    monkeypatch.delitem(sys.modules, "pytest", raising=False)
+    fake = MagicMock()
+    monkeypatch.setitem(sys.modules, "webview", fake)
+    monkeypatch.setattr("localm.config.load_config",
+                        lambda: {"desktop_window_mode": "browser"})
+
+    assert appface.run_native_window("http://127.0.0.1:8642/") is False
+    fake.create_window.assert_not_called()
 
 
 def test_run_native_window_returns_false_under_pytest_guard_even_if_webview_would_succeed():
