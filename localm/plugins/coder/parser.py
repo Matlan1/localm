@@ -49,6 +49,19 @@ class ToolCall:
     raw:   str      # the original matched text (for replacement)
     start: int      # char offset in the full response
     end:   int
+    # True when this call was recovered ONLY via a name-gated fallback path
+    # (a bare top-level JSON object, or a ```json/bare ``` fence) that carries
+    # no marker of its own signalling the model intended to call a tool at
+    # all - it is accepted purely because its shape happens to match a real
+    # tool name. False (the default) for every path that DOES carry such a
+    # marker, however mangled: the canonical <tool_call> XML wrapper, an
+    # explicit ```tool_call/```tool_code fence, and marker-variant dialects
+    # like <|tool_call>. See parse_tool_calls's docstring for why this
+    # distinction exists - execution.py's confirmation gate keys on it to
+    # require a human look at a destructive call the grammar never had a
+    # chance to constrain, since a model that skips every intent marker also
+    # skipped whatever the lazy-grammar trigger was waiting for.
+    lenient: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -578,7 +591,9 @@ def parse_tool_calls(text: str, tool_names: Optional[set] = None) -> list[ToolCa
 
     Passing *tool_names* is how the agent opts into the lenient, name-gated
     formats; callers that omit it get only the explicit wrappers (preserving
-    the original behaviour).
+    the original behaviour). Every call recovered via one of those two
+    name-gated formats has ``ToolCall.lenient`` set True - see that field's
+    own comment for why.
     """
     calls: list[ToolCall] = []
     seen_spans: list[tuple[int, int]] = []
@@ -586,8 +601,10 @@ def parse_tool_calls(text: str, tool_names: Optional[set] = None) -> list[ToolCa
     def _overlaps(start: int, end: int) -> bool:
         return any(s < end and e > start for s, e in seen_spans)
 
-    def _accept(name: str, args: dict, raw: str, start: int, end: int) -> None:
-        calls.append(ToolCall(name=name, args=args, raw=raw, start=start, end=end))
+    def _accept(name: str, args: dict, raw: str, start: int, end: int,
+                lenient: bool = False) -> None:
+        calls.append(ToolCall(name=name, args=args, raw=raw, start=start,
+                               end=end, lenient=lenient))
         seen_spans.append((start, end))
 
     # 1. Canonical XML wrapper
@@ -608,7 +625,8 @@ def parse_tool_calls(text: str, tool_names: Optional[set] = None) -> list[ToolCa
             continue
         explicit = (lang or "").lower() in _EXPLICIT_FENCE_LANGS
         if explicit or (tool_names is not None and parsed[0] in tool_names):
-            _accept(parsed[0], parsed[1], text[start:end], start, end)
+            _accept(parsed[0], parsed[1], text[start:end], start, end,
+                    lenient=not explicit)
 
     # The final "}" in the response, computed once and shared by passes 3 and 4:
     # it bounds every body scan, so text with no closing brace costs nothing.
@@ -637,7 +655,7 @@ def parse_tool_calls(text: str, tool_names: Optional[set] = None) -> list[ToolCa
                 continue
             parsed = _try_parse_body(chunk, None)
             if parsed is not None and parsed[0] in tool_names:
-                _accept(parsed[0], parsed[1], chunk, start, end)
+                _accept(parsed[0], parsed[1], chunk, start, end, lenient=True)
 
     # Sort by position in the response
     calls.sort(key=lambda c: c.start)

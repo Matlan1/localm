@@ -488,9 +488,33 @@ class _ExecutionMixin:
         # tool that opts in via ask_by_default (e.g. rag_search: content not
         # scoped to the coder's cwd can otherwise enter the model's context
         # unprompted - see ToolDef.ask_by_default's own comment, registry.py).
+        #
+        # call.lenient forces confirmation too, same as always_confirm: a call
+        # recovered only via parser.py's name-gated fallback (a bare JSON
+        # object or an unlabelled fence, with no marker of its own signalling
+        # the model meant to call a tool at all) never had the lazy-grammar
+        # trigger engage, so nothing constrained its content - the model could
+        # be free-generating garbage that merely happens to parse. auto_approve
+        # is exactly the setting meant to skip a human look, and exactly the
+        # one an ungated hallucination must not be allowed to ride past on a
+        # destructive/network/ask-by-default tool. See ToolCall.lenient.
+        #
+        # isinstance-gated, not a bare call.lenient or getattr(call, "lenient",
+        # False): many tests build a ToolCall-shaped MagicMock() with only
+        # .name/.args ever set, and MagicMock auto-vivifies ANY attribute
+        # access - including through getattr's default arg, which only ever
+        # applies on a genuine AttributeError - as a fresh, TRUTHY MagicMock.
+        # A bare `call.lenient` (or `getattr(call, "lenient", False)`, which
+        # does not help here) would therefore read True on every one of those
+        # doubles and demand confirmation across unrelated tests that never
+        # touch the real parser. Only a genuine ToolCall's lenient field
+        # (dataclass default False) is trusted; anything else defaults to
+        # non-lenient, which is the correct assumption for a test double that
+        # predates this field.
         needs_confirm = (
             (tool_def.destructive or net_mode == "ask" or tool_def.ask_by_default) and (
                 not self.auto_approve or call.name in self.always_confirm
+                or (isinstance(call, ToolCall) and call.lenient)
             )
         )
         if needs_confirm:
