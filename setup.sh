@@ -326,13 +326,39 @@ else
   create_venv
 fi
 
+# ---- browser tab or standalone app window? -----------------------------------
+# Decides whether the `desktop` extra (pywebview) gets installed at all - a NEW
+# dependency (pythonnet on Windows; WebKitGTK + PyGObject system packages on
+# Linux, which this installer does not provision) that every fresh install
+# would otherwise take on unasked. Default stays Browser for exactly that
+# reason (AGENTS.md rule 1/5: no surprise new deps, no silent behavior change).
+# Runtime override without re-running setup: Settings -> Desktop app -> Default
+# window mode (config key desktop_window_mode, "auto" - use it if installed -
+# or "browser"). Leaving that key at its "auto" default here is deliberate:
+# once the extra IS installed, "auto" already means "use it", so setup needs
+# no config.json write of its own.
+say ""
+say "  Open localm's GUI as its own app window, or in your browser?"
+say "    [1] Browser    - opens in your default browser (no extra install)"
+say "    [2] App window - its own window, no browser tab (installs localm[desktop])"
+wpick="$(ask "  Pick 1 or 2 [1]: " 1)"
+EXTRAS="coder,voice,monitor"
+if [ "$wpick" = 2 ]; then
+  EXTRAS="${EXTRAS},desktop"
+  if [ "$(uname -s)" = "Linux" ]; then
+    say "  [i] The app window also needs WebKitGTK installed via your system"
+    say "      package manager (Debian/Ubuntu: python3-gi gir1.2-webkit2-4.1)."
+    say "      Without it, localm gui still works - just via the browser."
+  fi
+fi
+
 # ---- install localm (editable) ----------------------------------------------
 say "  Installing localm into .venv ..."
 # Catch a hard install failure (set -e would otherwise abort silently) so we can
 # offer a bug report before exiting - and still exit non-zero, never masking it.
-uv pip install -p .venv -e ".[coder,voice,monitor]" || {
+uv pip install -p .venv -e ".[${EXTRAS}]" || {
   say "  [!] Installing localm failed - see the error above."
-  offer_report "localm install failed during setup" "uv pip install -e .[coder,voice,monitor] failed - see the error output above."
+  offer_report "localm install failed during setup" "uv pip install -e .[${EXTRAS}] failed - see the error output above."
   exit 1
 }
 
@@ -354,7 +380,7 @@ if [ ! -x .venv/bin/localm ]; then
   # fix), and the rest of this script does not depend on the entry point (see the
   # block comment above). Without this guard, a non-zero retry under
   # `set -euo pipefail` kills setup mid-way and that warning never prints.
-  uv pip install -p .venv -e ".[coder,voice,monitor]" || true
+  uv pip install -p .venv -e ".[${EXTRAS}]" || true
   if [ ! -x .venv/bin/localm ]; then
     say ""
     say "  [!!] .venv/bin/localm is STILL missing after a retry."
@@ -362,7 +388,7 @@ if [ ! -x .venv/bin/localm ]; then
     say "       this is fixed; the graphical launcher (./localm-launcher.sh) is"
     say "       unaffected."
     say "       Fix it yourself with:"
-    say "         uv pip install -p .venv -e \".[coder,voice,monitor]\" --reinstall"
+    say "         uv pip install -p .venv -e \".[${EXTRAS}]\" --reinstall"
     say "       Seen specifically on a WSL2 clone under a Windows-drive mount"
     say "       (/mnt/c, /mnt/d, ...) - cloning into a native Linux path (e.g."
     say "       ~/localm) instead avoids that filesystem bridge entirely."

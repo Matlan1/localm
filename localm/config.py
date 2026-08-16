@@ -336,6 +336,14 @@ DEFAULT_CONFIG: dict = {
     # than default since it is a behavior change from what shipped before.
     # No effect when localm opens in a browser tab.
     "desktop_window_quit_on_close": False,
+    # "auto" (default): use the standalone app window (localm[desktop]) when
+    # it is installed, otherwise the browser tab - unchanged from what
+    # ships when the extra is present. "browser": always use the browser
+    # tab even when the extra IS installed - an explicit opt-out (e.g. to
+    # keep browser bookmarks/extensions). No "always window" value:
+    # run_native_window's fallback-on-failure is a safety net and a setting
+    # must never be able to defeat it.
+    "desktop_window_mode": "auto",
     "import_max_depth": 3,    # `localm add <dir>` recurses up to this many levels
     "port": 8642,             # default inference server port (auto-bumps if busy; an explicit --port does not)
     "cors_origins": None,     # None = localhost only; list of origins; or "*"

@@ -60,9 +60,25 @@ def copy_to_clipboard(text: str) -> bool:
     return False
 
 
+def _native_window_allowed_by_preference() -> bool:
+    """Has the user explicitly turned the app window off (config key
+    desktop_window_mode == "browser")? Defaults to True (allowed) on any
+    read failure - a config problem must never silently disable a feature
+    the user did not ask to disable, same posture run_native_window's own
+    desktop_window_quit_on_close read already uses. Never raises."""
+    try:
+        from localm.config import load_config
+        return load_config().get("desktop_window_mode", "auto") != "browser"
+    except Exception:
+        logger.debug("appface: reading desktop_window_mode failed, "
+                     "defaulting to allowed", exc_info=True)
+        return True
+
+
 def native_window_available() -> bool:
     """Cheap, side-effect-free probe: is the optional ``localm[desktop]``
-    extra (pywebview) installed at all?
+    extra (pywebview) installed AND has the user not turned it off via the
+    desktop_window_mode setting?
 
     Used ONLY to decide, before anything else starts, whether the caller
     should hand this process's actual main thread to the native window loop
@@ -77,7 +93,7 @@ def native_window_available() -> bool:
         import webview  # noqa: F401
     except ImportError:
         return False
-    return True
+    return _native_window_allowed_by_preference()
 
 
 # The single active native window, if any - module state because the tray's
@@ -141,6 +157,11 @@ def run_native_window(url: str, name: str = "LocaLM", *,
     """
     global _native_window
     if "pytest" in sys.modules:
+        return False
+    if not _native_window_allowed_by_preference():
+        # The user set desktop_window_mode="browser" - covers the
+        # attach-to-an-already-running-instance call site, which never
+        # calls native_window_available() and would otherwise bypass this.
         return False
     try:
         import webview
