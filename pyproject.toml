@@ -109,17 +109,34 @@ coder = [
 ]
 
 # Standalone app window instead of a browser tab (ADR-0011) - `localm gui`
-# opens in a native OS webview window (WebView2 / WebKitGTK / WKWebView) when
-# this extra is installed, falling back to the browser tab otherwise
-# (localm/appface.py open_native_window - never a hard requirement, always a
-# best-effort upgrade). Optional, not core: on Windows it pulls in pythonnet
-# (a real, non-trivial transitive dep - it hosts WebView2 via .NET/WinForms,
-# not a bare ctypes binding) and on Linux it needs WebKitGTK + PyGObject
-# system packages localm's installer does not provision - fine to be opt-in,
-# wrong to force on every install the way core deps are.
+# opens in a native OS webview window when this extra is installed, falling
+# back to the browser tab otherwise (localm/appface.py run_native_window -
+# never a hard requirement, always a best-effort upgrade). Optional, not
+# core: on Windows it pulls in pythonnet (a real, non-trivial transitive
+# dep - it hosts WebView2 via .NET/WinForms, not a bare ctypes binding).
+#
+# Linux gets a DIFFERENT backend than Windows/macOS on purpose: pywebview's
+# default Linux backend (GTK, via the `gi` GObject-Introspection bindings)
+# does a plain `import gi` with no venv fallback (verified against pywebview's
+# own webview/platforms/gtk.py source) - it can ONLY see a SYSTEM-installed
+# python3-gi, and this project's venvs are never created with
+# --system-site-packages (setup.sh's `uv venv` call), so an apt-installed
+# python3-gi would be invisible to it regardless. The `[qt]` extra
+# (qtpy + PyQt6 + PyQt6-WebEngine) sidesteps this: verified live in a real,
+# fully isolated venv on Linux (WSL2/Ubuntu, zero apt packages, zero sudo) -
+# pip install alone gets a working pywebview window all the way through
+# webview.start(gui="qt"). The one residual gap, also verified live: the
+# underlying Qt/XCB windowing layer can still want a couple of small base
+# system libraries (e.g. libxcb-cursor0) that are not part of any Python
+# package - commonly already present on a real desktop install (virtually
+# every desktop environment already depends on some X11/XCB client library
+# stack) but not on a minimal/headless box, which is exactly why
+# run_native_window's browser-tab fallback stays load-bearing on Linux, not
+# a formality. See appface.py's Linux gui="qt" forcing for the other half.
 # Install with:  uv pip install -e ".[desktop]"
 desktop = [
-    "pywebview>=6.2.1",
+    "pywebview>=6.2.1; sys_platform == 'win32' or sys_platform == 'darwin'",
+    "pywebview[qt]>=6.2.1; sys_platform == 'linux'",
 ]
 
 # AMD RDNA2 (RX 6xxx) GPU stack - ROCm 7.13.0, Python 3.12, Windows
