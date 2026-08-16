@@ -179,6 +179,74 @@ class TestNameGatedLenientFormats:
         assert names == ["read_file", "tree"]
 
 
+class TestLenientFlag:
+    """ToolCall.lenient marks a call recovered ONLY because its JSON shape
+    happened to match a real tool name, with no marker of its own signalling
+    the model intended to call a tool at all (a bare top-level JSON object,
+    or a ```json/bare ``` fence). Every OTHER recognised shape carries such a
+    marker, however mangled, and must stay unflagged - execution.py keys a
+    confirmation requirement on this, so a false positive here would demand
+    confirmation on ordinary, already-trusted tool calls, and a false
+    negative would silently reopen the gap this exists to close."""
+
+    TOOLS = {"read_file", "write_file", "edit_files", "run_shell", "tree"}
+
+    def test_bare_json_object_is_lenient(self):
+        text = '{"name": "read_file", "args": {"path": "a.py"}}'
+        calls = parse_tool_calls(text, tool_names=self.TOOLS)
+        assert calls[0].lenient is True
+
+    def test_bare_triple_fence_is_lenient(self):
+        text = '```\n{"name": "read_file", "args": {"path": "x"}}\n```'
+        calls = parse_tool_calls(text, tool_names=self.TOOLS)
+        assert calls[0].lenient is True
+
+    def test_json_fence_is_lenient(self):
+        text = '```json\n{"name": "tree", "args": {}}\n```'
+        calls = parse_tool_calls(text, tool_names=self.TOOLS)
+        assert calls[0].lenient is True
+
+    def test_canonical_xml_wrapper_not_lenient(self):
+        text = '<tool_call>\n{"name": "read_file", "args": {"path": "a.py"}}\n</tool_call>'
+        calls = parse_tool_calls(text, tool_names=self.TOOLS)
+        assert calls[0].lenient is False
+
+    def test_explicit_tool_call_fence_not_lenient(self):
+        text = '```tool_call\n{"name": "tree", "args": {}}\n```'
+        calls = parse_tool_calls(text, tool_names=self.TOOLS)
+        assert calls[0].lenient is False
+
+    def test_explicit_tool_code_fence_not_lenient(self):
+        text = '```tool_code\n{"name": "run_shell", "args": {"command": "ls"}}\n```'
+        calls = parse_tool_calls(text, tool_names=self.TOOLS)
+        assert calls[0].lenient is False
+
+    def test_marker_variant_not_lenient(self):
+        # Mangled <|tool_call> dialect - malformed wrapper, but a wrapper.
+        text = ('<|tool_call>call:tool_call\n'
+                '{"name": "read_file", "args": {"path": "package.json"}}\n'
+                '<tool_call|>')
+        calls = parse_tool_calls(text, tool_names=self.TOOLS)
+        assert calls[0].lenient is False
+
+    def test_hallucinated_lorem_ipsum_edit_files_call_is_lenient(self):
+        # Shape observed live: a model with no <tool_call> training free-runs
+        # past an unfired grammar trigger, opens its own "## toolname" heading
+        # instead of the real wrapper, and the JSON body is still recovered by
+        # the bare-object fallback - this is the exact case that must be
+        # flagged so execution.py can require a human look at it.
+        text = (
+            '## edit_files\n'
+            '{"name": "edit_files", "args": {"edits": ['
+            '{"path": "./my_new_folder/file1.txt", "old": "", '
+            '"new": "Lorem ipsum dolor sit amet."}]}}'
+        )
+        calls = parse_tool_calls(text, tool_names=self.TOOLS)
+        assert len(calls) == 1
+        assert calls[0].name == "edit_files"
+        assert calls[0].lenient is True
+
+
 class TestLooksLikeToolAttempt:
     def test_marker_flagged(self):
         assert looks_like_tool_attempt("<|tool_call>garbage<tool_call|>")
