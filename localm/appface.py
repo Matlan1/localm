@@ -60,6 +60,212 @@ def copy_to_clipboard(text: str) -> bool:
     return False
 
 
+def native_window_available() -> bool:
+    """Cheap, side-effect-free probe: is the optional ``localm[desktop]``
+    extra (pywebview) installed at all?
+
+    Used ONLY to decide, before anything else starts, whether the caller
+    should hand this process's actual main thread to the native window loop
+    instead of the server - see run_native_window's docstring for why that
+    matters. The real question of whether a window actually opens and loads
+    is answered by run_native_window's own return value, not this. Never
+    raises.
+    """
+    if "pytest" in sys.modules:
+        return False
+    try:
+        import webview  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+# The single active native window, if any - module state because the tray's
+# "Open" action (show_native_window) and the server's real shutdown
+# (close_native_window) are separate call sites from run_native_window
+# itself, on separate threads, and pywebview only ever supports one
+# Application/window loop per process. Only one run_native_window() call is
+# ever active at a time (the same one-window-loop-per-process constraint), so
+# a plain global needs no extra locking beyond the pointer read/write itself.
+_native_window = None
+_native_window_may_really_close = threading.Event()
+
+
+def run_native_window(url: str, name: str = "LocaLM", *,
+                      hide_on_close: bool = True,
+                      on_quit: Optional[Callable] = None) -> bool:
+    """Open *url* in a native OS webview window, BLOCKING the calling thread
+    for the lifetime of the app.
+
+    MUST be called from the process's actual main thread. This is not a
+    convention this codebase chose - it is pywebview's own hard requirement,
+    confirmed against the installed 6.2.1 source (webview/__init__.py):
+    ``if threading.current_thread().name != 'MainThread': raise
+    WebViewException(...)``, unconditional, no override flag. A caller that
+    wants this AND has something else already occupying the main thread (the
+    server, in gui/cli.py's fresh-launch path) must move that something else
+    to its own background thread first - see that call site's comment for
+    how localm does it.
+
+    *hide_on_close* (default True - the fresh-launch, this-process-owns-the-
+    server case): the window's own close button HIDES it instead of
+    destroying it - matching this module's existing _StatusWindow/_WinTray
+    precedent ("closing the window never stops the server: hide to tray...
+    Stop is the deliberate quit") - so a later show_native_window() (the
+    tray/status "Open" action) can bring the SAME window back, rather than
+    needing a second webview.start() call this codebase has no free main
+    thread to run (the caller of show_native_window is the tray/Tk thread,
+    never the main thread). The user's own "quit when the app window is
+    closed" preference (config key desktop_window_quit_on_close, off by
+    default) overrides this per close: when on, the window closes for real
+    and *on_quit* (if given - the same action the tray's Stop button
+    triggers) is invoked. Pass False for a window that owns no server of its
+    own to keep alive (gui/cli.py's attach-to-an-already-running-instance
+    path) - it then just closes normally on its own close button, no
+    hiding, no setting lookup, no on_quit: closing it is that process's
+    entire purpose. This function only actually returns once the window is
+    genuinely destroyed - via close_native_window() (normally the server's
+    own shutdown path, once it has genuinely stopped), the user's own close
+    with the quit preference on, or hide_on_close=False's plain close - or
+    the window fails to load at all.
+
+    Returns True only once the window actually LOADED the page (via
+    pywebview's own ``window.events.loaded``, confirmed against the real
+    installed API to wrap a plain threading.Event with .wait(timeout) - not
+    merely "pywebview imported and create_window() didn't raise"), watched
+    from a short-lived helper thread since the calling thread itself is busy
+    inside the blocking webview.start() call by the time loading happens.
+    Returns False whenever a real, loaded window cannot be confirmed (extra
+    absent, WebView2/WebKitGTK missing or broken, window never loaded) so the
+    caller can fall back to webbrowser.open. NEVER raises.
+    """
+    global _native_window
+    if "pytest" in sys.modules:
+        return False
+    try:
+        import webview
+    except ImportError:
+        # Extra not installed - the expected, common case, not a failure.
+        return False
+    try:
+        window = webview.create_window(name, url, width=1280, height=860,
+                                       min_size=(760, 500))
+    except Exception:
+        logger.debug("appface: native window creation failed", exc_info=True)
+        return False
+    if window is None:
+        return False
+
+    if hide_on_close:
+        _native_window_may_really_close.clear()
+
+        def _on_closing():
+            # Return value convention confirmed against the installed source
+            # (webview/platforms/winforms.py on_closing): False here means
+            # "veto the close" (args.Cancel = True), matching Tk's
+            # WM_DELETE_WINDOW override this module already uses elsewhere.
+            if _native_window_may_really_close.is_set():
+                return True
+            try:
+                from localm.config import load_config
+                quit_on_close = bool(
+                    load_config().get("desktop_window_quit_on_close", False))
+            except Exception:
+                logger.debug("appface: reading desktop_window_quit_on_close "
+                             "failed, defaulting to hide", exc_info=True)
+                quit_on_close = False
+            if quit_on_close:
+                if on_quit is not None:
+                    # Off the closing-event's own thread, matching how
+                    # _WinTray/_StatusWindow already run on_restart/on_stop
+                    # ("so the menu closes first" - same reasoning applies to
+                    # not blocking the window's own close here).
+                    threading.Thread(target=on_quit, daemon=True).start()
+                return True   # allow the real close - the app is stopping
+            window.hide()
+            return False
+
+        window.events.closing += _on_closing
+
+    loaded = {"v": False}
+
+    def _watch_loaded():
+        # window.show()'s real implementation (winforms.py) also calls
+        # .Activate() - a plain WinForms .Show() on first creation does not
+        # reliably grab OS foreground focus for a window created by a
+        # background-launched process. Force it once the page is actually
+        # up, the same call the tray's "Open" reuses.
+        #
+        # Deliberately NOT also toggling window.on_top here: confirmed live
+        # that pywebview's winforms backend sets TopMost directly with no
+        # thread-marshaling (unlike .show()/.hide(), which wrap their real
+        # work in Control.Invoke) - webview/platforms/winforms.py's
+        # set_on_top() is plain `i.TopMost = on_top`, no .Invoke() at all.
+        # Calling it from this background thread is an unsafe cross-thread
+        # WinForms operation and produced a real, reproduced hang (the
+        # window opened but the process stopped responding entirely and the
+        # server stopped answering requests). .show() alone is the safe,
+        # thread-marshaled call; Windows' foreground-lock protection may
+        # still keep a background-launched window from stealing focus, and
+        # that residual gap is accepted rather than worked around unsafely.
+        if window.events.loaded.wait(timeout=8.0):
+            loaded["v"] = True
+            try:
+                window.show()
+            except Exception:
+                logger.debug("appface: native window foreground-activate "
+                             "failed (non-fatal)", exc_info=True)
+
+    threading.Thread(target=_watch_loaded, name="localm-webview-confirm",
+                     daemon=True).start()
+    _native_window = window
+    try:
+        # private_mode=False: a real app window should keep its login cookie
+        # across restarts like the browser tab it replaces, not start
+        # incognito-fresh every launch (pywebview's own default). Blocks
+        # until the window is actually destroyed (see _on_closing above).
+        webview.start(icon=icon_path(), private_mode=False)
+    except Exception:
+        logger.debug("appface: native window loop failed", exc_info=True)
+        return False
+    finally:
+        _native_window = None
+    return loaded["v"]
+
+
+def show_native_window() -> bool:
+    """Thread-safe: re-show (and foreground-activate) the currently open
+    native window, for the tray/status "Open" action. Returns False - the
+    caller should fall back to webbrowser.open - when no native window is
+    active this run (this platform/launch used a browser tab instead, or the
+    window failed to load in the first place). NEVER raises."""
+    window = _native_window
+    if window is None:
+        return False
+    try:
+        window.show()
+        return True
+    except Exception:
+        logger.debug("appface: show_native_window failed", exc_info=True)
+        return False
+
+
+def close_native_window() -> None:
+    """Thread-safe: let the native window ACTUALLY close now (not just
+    hide), so run_native_window's blocking webview.start() call finally
+    returns and the process can exit. Call this once the server has
+    genuinely stopped - never merely because the window was hidden. A no-op
+    when no native window is active. NEVER raises."""
+    window = _native_window
+    if window is None:
+        return
+    _native_window_may_really_close.set()
+    try:
+        window.destroy()
+    except Exception:
+        logger.debug("appface: close_native_window failed", exc_info=True)
+
+
 def open_logs(logfile) -> None:
     """Open the server logfile in the OS default viewer (best-effort)."""
     try:
@@ -149,7 +355,15 @@ class _StatusWindow(AppFace):
     # actions (run in the Tk thread)
     def _open(self):
         try:
-            webbrowser.open(self.url)
+            # Re-show the existing native window (if this run has one -
+            # show_native_window is a no-op-returning-False otherwise)
+            # rather than opening a browser tab: a second webview.start()
+            # call has no free main thread to run on, and the point of
+            # hide-on-close is exactly so "Open" can bring the SAME window
+            # back. Falls back to the browser when there is no native
+            # window this run (extra not installed, or it never loaded).
+            if not show_native_window():
+                webbrowser.open(self.url)
         except Exception:
             pass
 
@@ -450,7 +664,15 @@ class _WinTray(AppFace):
     # ---- actions ----
     def _open(self):
         try:
-            webbrowser.open(self.url)
+            # Re-show the existing native window (if this run has one -
+            # show_native_window is a no-op-returning-False otherwise)
+            # rather than opening a browser tab: a second webview.start()
+            # call has no free main thread to run on, and the point of
+            # hide-on-close is exactly so "Open" can bring the SAME window
+            # back. Falls back to the browser when there is no native
+            # window this run (extra not installed, or it never loaded).
+            if not show_native_window():
+                webbrowser.open(self.url)
         except Exception:
             pass
 

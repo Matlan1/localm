@@ -11,6 +11,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+### Added
+- **`localm gui` can now open as its own app window instead of a browser
+  tab.** Install the new optional `localm[desktop]` extra and it opens in a
+  dedicated window (no address bar, no other tabs) the next time you launch;
+  without the extra, nothing changes - it still opens in your browser exactly
+  as before. By default the window's close button hides it to the tray and
+  the server keeps running, same as closing a browser tab - a new Settings
+  toggle ("Quit when the app window is closed", under Desktop app) makes it
+  quit the whole app instead.
+
 ## [0.1.5rc3] - 2026-08-13
 
 ### Added

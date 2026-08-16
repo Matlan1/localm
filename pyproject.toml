@@ -108,6 +108,20 @@ coder = [
     "requests>=2.31",
 ]
 
+# Standalone app window instead of a browser tab (ADR-0011) - `localm gui`
+# opens in a native OS webview window (WebView2 / WebKitGTK / WKWebView) when
+# this extra is installed, falling back to the browser tab otherwise
+# (localm/appface.py open_native_window - never a hard requirement, always a
+# best-effort upgrade). Optional, not core: on Windows it pulls in pythonnet
+# (a real, non-trivial transitive dep - it hosts WebView2 via .NET/WinForms,
+# not a bare ctypes binding) and on Linux it needs WebKitGTK + PyGObject
+# system packages localm's installer does not provision - fine to be opt-in,
+# wrong to force on every install the way core deps are.
+# Install with:  uv pip install -e ".[desktop]"
+desktop = [
+    "pywebview>=6.2.1",
+]
+
 # AMD RDNA2 (RX 6xxx) GPU stack - ROCm 7.13.0, Python 3.12, Windows
 # Install with:  uv pip install -e ".[gpu]"  (requires Python 3.12 venv)
 gpu = [

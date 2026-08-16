@@ -328,6 +328,14 @@ DEFAULT_CONFIG: dict = {
     # loca-lm (Loca white + LM blue), localm (lowercase, m blue). Console
     # command, app icon, and shortcut are fixed regardless.
     "logo_style": "local-m",
+    # Standalone app window (ADR-0011, localm[desktop] extra): its own close
+    # button hides it to the tray by default, matching how closing a browser
+    # tab has always left the server running (Stop is the deliberate quit).
+    # True makes the close button quit the whole app and stop the server
+    # instead - the more conventional desktop-app expectation, opt-in rather
+    # than default since it is a behavior change from what shipped before.
+    # No effect when localm opens in a browser tab.
+    "desktop_window_quit_on_close": False,
     "import_max_depth": 3,    # `localm add <dir>` recurses up to this many levels
     "port": 8642,             # default inference server port (auto-bumps if busy; an explicit --port does not)
     "cors_origins": None,     # None = localhost only; list of origins; or "*"
