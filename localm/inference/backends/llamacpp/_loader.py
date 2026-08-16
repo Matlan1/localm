@@ -549,6 +549,32 @@ def load_lib() -> ctypes.CDLL:
         _add_to_search_path(d)
     _ensure_rocblas_tensile_path()
 
+    # Before anything below dlopens by directory glob: on POSIX, the runtime
+    # ships one libggml-cpu-<tier>.so per x86 microarchitecture, and EVERY
+    # tier's .so exports identically-named global C symbols (llamafile_sgemm,
+    # ggml_backend_cpu_init, ...) - so if more than one is ever simultaneously
+    # dlopen'd with RTLD_GLOBAL (which the preload below does unconditionally),
+    # a call meant for the compatible tier can resolve into an incompatible
+    # tier's copy of the same function and execute an illegal instruction.
+    # Verified live: a real embed() call crashed with SIGILL inside a matmul
+    # kernel gdb attributed to a tier ggml's own compatibility check had
+    # already rejected. cpu_backend_select prunes every tier but the one
+    # actually safe for this machine BEFORE the glob below can see them, so
+    # there is nothing left to collide with. Windows has no equivalent hazard
+    # (PE/DLL symbol resolution is per-import-table, not a flat global table -
+    # see cpu_backend_select's own module docstring), so this is POSIX-only.
+    if sys.platform != "win32":
+        from localm.cpu_backend_select import ensure_cpu_tier_selected
+        try:
+            ensure_cpu_tier_selected(binary_dir)
+        except Exception as e:
+            # Best-effort: a failure here must not block a load that might
+            # otherwise succeed (e.g. a single-tier install with nothing to
+            # prune) - fall through and let the ordinary load path surface
+            # whatever the real problem is.
+            logger.warning("CPU backend tier selection failed in %s: %s",
+                           binary_dir, e)
+
     # Pre-load ggml deps (dependency order: base < cpu < hip/vulkan < ggml,
     # which sorts correctly since '-'/'.' precede the suffix) by absolute path,
     # so the main library resolves them even without a manifest.
