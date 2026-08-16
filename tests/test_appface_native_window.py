@@ -169,6 +169,35 @@ def test_run_native_window_returns_true_when_the_window_actually_loads(monkeypat
     window.show.assert_called_once()
 
 
+def test_run_native_window_forces_qt_backend_on_linux(monkeypatch):
+    """pywebview's default Linux order tries GTK first (webview/guilib.py),
+    which this project deliberately never installs (see pyproject.toml's
+    desktop extra comment) - forcing gui="qt" skips a guaranteed GTK-import
+    failure and goes straight to the backend the extra actually installs
+    there (verified live: pywebview[qt], pip-only, no system packages)."""
+    monkeypatch.delitem(sys.modules, "pytest", raising=False)
+    fake, _ = _fake_webview(loaded=True)
+    monkeypatch.setitem(sys.modules, "webview", fake)
+    monkeypatch.setattr(appface.sys, "platform", "linux")
+
+    assert appface.run_native_window("http://127.0.0.1:8642/") is True
+    fake.start.assert_called_once()
+    assert fake.start.call_args.kwargs.get("gui") == "qt"
+
+
+def test_run_native_window_does_not_force_gui_on_windows(monkeypatch):
+    """Windows keeps pywebview's own default (WinForms) - forcing anything
+    here would be solving a problem this platform does not have."""
+    monkeypatch.delitem(sys.modules, "pytest", raising=False)
+    fake, _ = _fake_webview(loaded=True)
+    monkeypatch.setitem(sys.modules, "webview", fake)
+    monkeypatch.setattr(appface.sys, "platform", "win32")
+
+    assert appface.run_native_window("http://127.0.0.1:8642/") is True
+    fake.start.assert_called_once()
+    assert "gui" not in fake.start.call_args.kwargs
+
+
 def test_run_native_window_returns_false_when_the_window_never_reports_loaded(monkeypatch):
     """Fires-control for the success test above: a window pywebview happily
     "creates" and "starts" but that never actually finishes loading

@@ -245,7 +245,23 @@ def run_native_window(url: str, name: str = "LocaLM", *,
         # across restarts like the browser tab it replaces, not start
         # incognito-fresh every launch (pywebview's own default). Blocks
         # until the window is actually destroyed (see _on_closing above).
-        webview.start(icon=icon_path(), private_mode=False)
+        #
+        # gui="qt" on Linux specifically: pywebview's default Linux order
+        # tries GTK first (webview/guilib.py) and this project deliberately
+        # never installs the GTK extra (see pyproject.toml's desktop extra
+        # comment - GTK's `import gi` cannot see a system-installed
+        # python3-gi from this project's always-isolated venvs anyway).
+        # Forcing qt skips a guaranteed, noisy GTK-import failure and goes
+        # straight to the backend the `desktop` extra actually installs on
+        # Linux (verified live: pip install -e ".[desktop]" pulls in
+        # qtpy+PyQt6+PyQt6-WebEngine there, and a real window opened,
+        # rendered, and closed cleanly through it with zero system
+        # packages). Windows/macOS omit gui= and keep pywebview's own
+        # default (WinForms / Cocoa - the only real backend either has).
+        start_kwargs = {"icon": icon_path(), "private_mode": False}
+        if sys.platform.startswith("linux"):
+            start_kwargs["gui"] = "qt"
+        webview.start(**start_kwargs)
     except Exception:
         logger.debug("appface: native window loop failed", exc_info=True)
         return False

@@ -328,15 +328,17 @@ fi
 
 # ---- browser tab or standalone app window? -----------------------------------
 # Decides whether the `desktop` extra (pywebview) gets installed at all - a NEW
-# dependency (pythonnet on Windows; WebKitGTK + PyGObject system packages on
-# Linux, which this installer does not provision) that every fresh install
-# would otherwise take on unasked. Default stays Browser for exactly that
-# reason (AGENTS.md rule 1/5: no surprise new deps, no silent behavior change).
-# Runtime override without re-running setup: Settings -> Desktop app -> Default
-# window mode (config key desktop_window_mode, "auto" - use it if installed -
-# or "browser"). Leaving that key at its "auto" default here is deliberate:
-# once the extra IS installed, "auto" already means "use it", so setup needs
-# no config.json write of its own.
+# dependency every fresh install would otherwise take on unasked (pythonnet on
+# Windows; qtpy + PyQt6 + PyQt6-WebEngine on Linux - see pyproject.toml's
+# desktop extra comment for why Linux gets Qt, not GTK, and why that is
+# entirely pip-installable, no system package manager involved). Default
+# stays Browser for exactly that reason (AGENTS.md rule 1/5: no surprise new
+# deps, no silent behavior change). Runtime override without re-running
+# setup: Settings -> Desktop app -> Default window mode (config key
+# desktop_window_mode, "auto" - use it if installed - or "browser"). Leaving
+# that key at its "auto" default here is deliberate: once the extra IS
+# installed, "auto" already means "use it", so setup needs no config.json
+# write of its own.
 say ""
 say "  Open localm's GUI as its own app window, or in your browser?"
 say "    [1] Browser    - opens in your default browser (no extra install)"
@@ -346,9 +348,18 @@ EXTRAS="coder,voice,monitor"
 if [ "$wpick" = 2 ]; then
   EXTRAS="${EXTRAS},desktop"
   if [ "$(uname -s)" = "Linux" ]; then
-    say "  [i] The app window also needs WebKitGTK installed via your system"
-    say "      package manager (Debian/Ubuntu: python3-gi gir1.2-webkit2-4.1)."
-    say "      Without it, localm gui still works - just via the browser."
+    # No apt/dnf/pacman step needed here on purpose - verified live (a real,
+    # fully isolated venv, zero system packages, zero sudo) that pip alone
+    # gets a working window through pywebview's Qt backend. The one
+    # residual gap, also verified live rather than assumed: the underlying
+    # Qt/XCB windowing layer can still want a couple of small base system
+    # libraries (e.g. libxcb-cursor0) that no Python package provides -
+    # commonly already present on a real desktop install, not on a
+    # minimal/headless one.
+    say "  [i] On Linux the app window needs a couple of small base Qt/X11"
+    say "      runtime libraries (e.g. libxcb-cursor0) that are commonly"
+    say "      already present on a desktop install. If the window fails to"
+    say "      open, localm gui still works - just via the browser."
   fi
 fi
 
