@@ -289,7 +289,109 @@ test("installing -> no action button, no dead 409-bound Set-up click available",
   assert.ok(!doc.querySelector(".comfy-managed-repair-btn"), "no Repair button while installing");
   assert.ok(!doc.querySelector(".comfy-managed-remove-btn"), "no Remove button while installing");
   const panel = doc.querySelector(".media-comfy-box");
-  assert.match(panel.textContent, /currently running/i);
+  assert.match(panel.textContent, /in progress/i);
+  assert.doesNotMatch(panel.textContent, /another tab or session/i,
+    "must not assert who started it - this page cannot know, and it is often this "
+    + "very tab after a navigate-away-and-back losing its local job id");
+});
+
+// #1332 follow-up: the panel used to show a static "please wait" for an
+// "installing" state with no way to tell it apart from a genuinely stuck job -
+// reported live when switching Settings tabs away and back showed the exact
+// same message with no progress, indistinguishable from a hang. ADR-0008's
+// /api/activity is the one route that finds a running job without already
+// holding its id; the panel should use it to re-attach a live log, exactly
+// like the Setup button's own click flow does for a job it started itself.
+
+// NOTE: these two tests need a custom streamJob stub in effect for the very
+// FIRST render (the "installing" panel attaches during renderManagedComfyPanel
+// itself, not from a later click), so they cannot use the shared render()
+// helper above - render() unconditionally re-stubs streamJob to its own
+// Promise.resolve({status:"done"}) default immediately before calling
+// refreshSettingsPage(), which would silently clobber a stub set beforehand.
+// (First version of this test did exactly that: the clobbered default made
+// streamJob resolve instantly, and since the mocked managed-status never
+// leaves "installing", the fix's own "re-render on success" then recursed
+// forever - a real infinite loop caught by CPU time, not a settings.js bug.)
+async function renderNoStreamStub(win) {
+  runScript(win, "refreshSettingsPage();");
+  for (let i = 0; i < 16; i++) await new Promise((r) => setTimeout(r, 0));
+}
+
+test("installing -> finds the running job via /api/activity and streams its real output", async () => {
+  const calls = [];
+  const activityOp = { id: "job-reattach-1", kind: "comfy-setup", status: "running",
+    label: "ComfyUI setup", created_at: 1000 };
+  const fetchImpl = async (url, opts = {}) => {
+    const u = String(url);
+    if (u === "/api/activity")
+      return { ok: true, status: 200, text: async () => "",
+               json: async () => ({ now: 1010, operations: [activityOp] }) };
+    return makeFetch(calls, { state: "installing" })(url, opts);
+  };
+  const { window: win } = loadAppWithPages({ fetchImpl });
+  runScript(win, `streamJob = (id, onLine) => {
+    window.__streamedJobId = id;
+    onLine("Cloning ComfyUI ...");
+    onLine("Installing requirements ...");
+    return new Promise(() => {});   // never resolves - job still running
+  };`);
+  await renderNoStreamStub(win);
+  assert.equal(win.__streamedJobId, "job-reattach-1",
+    "attached to the actual running job found via /api/activity, not a guess");
+  const panel = win.document.querySelector(".media-comfy-box");
+  assert.match(panel.textContent, /Cloning ComfyUI/, "real job output is shown, not a static message");
+  assert.match(panel.textContent, /Installing requirements/);
+});
+
+test("installing -> when the job later finishes, the panel re-renders into the installed view", async () => {
+  const calls = [];
+  const activityOp = { id: "job-reattach-2", kind: "comfy-setup", status: "running",
+    label: "ComfyUI setup", created_at: 1000 };
+  // Flips true from INSIDE the streamJob stub, at the moment it resolves -
+  // not before render() starts - so the test actually exercises "state was
+  // installing at attach time, then flips once the job ends", rather than
+  // starting already-installed and never touching the reattach path at all.
+  let installedNow = false;
+  const fetchImpl = async (url, opts = {}) => {
+    const u = String(url);
+    if (u === "/api/activity")
+      return { ok: true, status: 200, text: async () => "",
+               json: async () => ({ now: 1010, operations: [activityOp] }) };
+    if (u === "/api/comfy/managed-status")
+      return { ok: true, status: 200, text: async () => "",
+               json: async () => (installedNow ? INSTALLED : INSTALLING) };
+    return makeFetch(calls, {})(url, opts);
+  };
+  const { window: win } = loadAppWithPages({ fetchImpl });
+  win.__finishSetup = () => { installedNow = true; };
+  runScript(win, `streamJob = () => {
+    window.__finishSetup();
+    return Promise.resolve({ status: "done" });
+  };`);
+  await renderNoStreamStub(win);
+  assert.equal(installedNow, true, "the stub actually ran (proves streamJob was really invoked)");
+  assert.ok(win.document.querySelector(".comfy-managed-remove-btn"),
+    "re-rendered into the normal installed/Remove view once the job it attached to ended");
+});
+
+test("installing -> /api/activity finds no matching job (e.g. owned by another key) -> says so, does not loop", async () => {
+  const calls = [];
+  const fetchImpl = async (url, opts = {}) => {
+    const u = String(url);
+    if (u === "/api/activity")
+      return { ok: true, status: 200, text: async () => "",
+               json: async () => ({ now: 1010, operations: [] }) };
+    return makeFetch(calls, { state: "installing" })(url, opts);
+  };
+  const { window: win } = loadAppWithPages({ fetchImpl });
+  await render(win);
+  const panel = win.document.querySelector(".media-comfy-box");
+  assert.match(panel.textContent, /not available/i);
+  // Must NOT keep re-fetching forever - state stays "installing" every time,
+  // so a recursive re-render here would be an unbounded loop.
+  const statusCalls = calls.filter((c) => c.url === "/api/comfy/managed-status").length;
+  assert.ok(statusCalls <= 1, `must not loop re-checking status: saw ${statusCalls} calls`);
 });
 
 // --------------------------------------------------------------------------- //
