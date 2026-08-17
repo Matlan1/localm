@@ -1943,19 +1943,59 @@ export async function renderManagedComfyPanel(host, toggleFields) {
   }
 
   // "installing": a setup job is genuinely running right now (checked by
-  // reading the actual job registry, not inferred) - most likely another
-  // browser tab/session started it, or this page was reloaded mid-setup, so
-  // there is no local job id to re-attach a live log to here. Say so plainly
-  // rather than offering a Set-up button that would just 409.
+  // reading the actual job registry, not inferred). This page has no local
+  // job id for it - it may have been started from this very tab moments ago
+  // (a navigate-away-and-back resets the local `jobId` variable the click
+  // handler below uses) just as easily as from another tab/session, so the
+  // message must not guess which. Look the running job up via /api/activity
+  // (ADR-0008 - the one route that finds a job without already holding its
+  // id) and re-attach a live log to it, same as the Setup button's own flow,
+  // instead of leaving the user with a static "please wait".
   pill.textContent = st.state === "installing" ? "installing..." : "not set up";
+  if (st.state === "installing") {
+    host.appendChild(el("div", "sub",
+      "A setup is already in progress - showing its live output below."));
+    const log = el("pre", "comfy-managed-log");
+    host.appendChild(log);
+    let jobId = null;
+    try {
+      const r = await fetch("/api/activity", { headers: authHeaders() });
+      if (r.ok) {
+        const d = await r.json();
+        const op = (d.operations || [])
+          .find((o) => o.kind === "comfy-setup" && o.status === "running");
+        if (op) jobId = op.id;
+      }
+    } catch (e) { /* fall through to the not-found message below */ }
+    if (!jobId) {
+      // Not found is not necessarily stale: /api/activity is owner-filtered
+      // (KEY-SCOPE-2), so on a keyed server with distinct principals this is
+      // the expected, PERSISTENT result for a job another key started - state
+      // will keep reading "installing" on every future check too. Do NOT
+      // recurse into another render here: state staying "installing" forever
+      // would turn that into an unbounded fetch loop. Say plainly that the
+      // live log is unavailable and stop; the pill above already shows
+      // "installing...", and revisiting this page later re-checks fresh.
+      log.textContent = "(its live output is not available from here - check back "
+        + "later, or from wherever the setup was started)";
+      return;
+    }
+    const end = await streamJob(jobId, (line) => {
+      log.textContent += line + "\n";
+      log.scrollTop = log.scrollHeight;
+    });
+    const ok = !!(end && end.status === "done");
+    toast(ok ? "localm's ComfyUI is ready" : "Setup did not finish (see the log)", !ok);
+    // Same reasoning as the Set-up flow below: only re-render on success. On
+    // failure, renderManagedComfyPanel's host.replaceChildren() would destroy
+    // the log this toast just told the user to check, the instant it appears.
+    if (ok) renderManagedComfyPanel(host, toggleFields);
+    return;
+  }
   host.appendChild(el("div", "sub",
-    st.state === "installing"
-      ? "A setup is currently running (started from another tab or session) - "
-        + "this will update once it finishes."
-      : "Optional: let localm run its OWN ComfyUI under the localm data folder so it "
-        + "can pin a known-good version and carry fixes. Off by default; your own "
-        + "ComfyUI is never modified."));
-  if (st.state === "installing") return;
+    "Optional: let localm run its OWN ComfyUI under the localm data folder so it "
+    + "can pin a known-good version and carry fixes. Off by default; your own "
+    + "ComfyUI is never modified."));
 
   // Not installed: offer to set it up. Provisioning is long (multi-GB), so it runs
   // as a background job whose log streams into <pre> below - the request never blocks.
