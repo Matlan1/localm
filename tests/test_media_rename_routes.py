@@ -114,6 +114,12 @@ class TestMediaRename:
             api, ext = MEDIA[kind]["api"], MEDIA[kind]["ext"]
             gallery_dir = old.parent
 
+            # NOTE ON THIS TEST'S OWN CONTROL: the >= 400 bound below is
+            # deliberately loose, so this test alone CANNOT tell a working
+            # guard from a missing route (deleting the route yields 405, which
+            # also satisfies it). Its real control is replacing confined_name
+            # with a naive `dir / new_name` join, which turns the
+            # "moved the source" assertion red. Measured, both directions.
             for attempt in ("../escaped" + ext,
                             "../../escaped" + ext,
                             "sub/escaped" + ext):
