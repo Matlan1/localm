@@ -19,7 +19,7 @@ from ..audit import SessionMode
 from .constants import (
     _ACTION_VERBS, _MAX_NOCALL_ESCALATIONS, _MAX_TOOL_REPAIRS,
     _REPEAT_HISTORY_MAX, _REPEAT_RESPONSE_ABORT, _REPEAT_SIMILARITY,
-    _WORKSPACE_HINT,
+    _SKILL_STATE_TOOLS, _WORKSPACE_HINT,
 )
 
 _RE_WORKSPACE = None      # compiled on first use
@@ -1107,19 +1107,62 @@ class _LoopMixin:
         calls relative to non-destructive ones: given [read, read, write, read],
         the two leading reads run in parallel, then the write runs alone, then
         the final read runs alone.  This is conservative but safe.
+
+        A call that ARMS a dispatch-time restriction runs alone too, whatever its
+        destructive flag says.  See the segmentation below for why.
         """
         TOOL_REGISTRY = _agent.TOOL_REGISTRY  # live: honour a patched agent.TOOL_REGISTRY
         result_blocks: list[str] = []
 
-        # Split into segments: each segment is (is_destructive, [calls])
+        # Split into segments: each segment is (is_destructive, [calls]).
+        #
+        # A call that ARMS this session's active-skill restriction (use_skill,
+        # _SKILL_STATE_TOOLS) is a segment boundary on BOTH sides, so it runs
+        # alone despite being non-destructive. Without that, one model reply of
+        # [use_skill, read_env] put both calls in the same parallel group, and
+        # the sibling could clear the dispatch gate (execution._execute_tool)
+        # before _activate_skill had armed it - a skill's allowed-tools escaped
+        # by whichever thread started first. The gate was never wrong; its ARMING
+        # raced.
+        #
+        # THE ORDERING GUARANTEE THIS BUYS, written down because it is exactly
+        # the kind of property that otherwise holds only by accident of the
+        # execution model and disappears silently when someone regroups these
+        # segments: everything emitted BEFORE the arming call has finished before
+        # it runs, and nothing emitted AFTER it starts until the restriction is
+        # armed. Narrowing therefore applies FORWARD ONLY, which is the same
+        # sequential reading the paragraph above already promises to preserve - a
+        # call the model emitted before any skill was loaded is not refused
+        # retroactively.
+        #
+        # Why here and not elsewhere. Marking use_skill destructive would also
+        # serialise it, but `destructive` is the CONFIRMATION axis (it drives the
+        # user prompt, the undo snapshot and the dry-run skip), so it would put a
+        # confirmation card in front of a read - see skills.py for why both skill
+        # tools are deliberately non-destructive. Arming at PARSE time would have
+        # to re-decide, from the call args alone, what tool_use_skill decides at
+        # execution time: that a file= read arms nothing, that an unknown skill
+        # arms nothing, that an absent allowed-tools arms nothing. A second
+        # derivation of the same decision diverges exactly where it costs most.
+        #
+        # WHAT THIS GIVES UP, stated rather than glossed: a singleton segment runs
+        # serially and so has no batch deadline, and splitting here turns some
+        # previously-batched calls into singletons. It widens an existing hole by
+        # one shape rather than opening a new one - a lone call was already
+        # undeadlined - and use_skill is bounded local file IO (_MAX_BODY), with
+        # no network and no subprocess.
         segments: list[tuple[bool, list]] = []
+        extendable = False              # may the last segment take another call?
         for call in calls:
             td = TOOL_REGISTRY.get(call.name)
             destructive = td.destructive if td else True
-            if segments and segments[-1][0] == destructive:
+            solo = call.name in _SKILL_STATE_TOOLS
+            if (extendable and not solo
+                    and segments and segments[-1][0] == destructive):
                 segments[-1][1].append(call)
             else:
                 segments.append((destructive, [call]))
+            extendable = not solo
 
         # Non-destructive peers abandoned at a batch deadline, as (future, tool
         # name). A destructive tool is marked destructive precisely so it runs

@@ -170,6 +170,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   context-window figure out of its usage report even though streaming
   replies always included it, so the gauge only ever drew for a streamed
   answer. Both reply modes now report it the same way.
+- **A coder skill's `allowed-tools` can no longer be outrun by the same reply
+  that loads the skill.** The restriction was applied when `use_skill` finished,
+  but the coder runs several read-only tools from one reply at the same time, so
+  a tool the skill does not declare could be started alongside `use_skill` and
+  finish before the restriction took hold. Loading a skill now happens on its
+  own: anything the model asked for beforehand completes first, and nothing
+  after it starts until the declared `allowed-tools` are in force.
 
 ## [0.1.5rc3] - 2026-08-13
 
