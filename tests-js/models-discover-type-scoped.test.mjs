@@ -95,19 +95,25 @@ test("discover-filters: each chip's active .on class stays in sync with its chec
   assert.equal(vae.classList.contains("on"), true, "re-checking restores the .on class (chip recolours)");
 });
 
-test("discover-filters: filters stay visible regardless of the active Registered-models tab", async () => {
+test("discover-filters: filters stay visible regardless of the Registered-models type filter", async () => {
   const { window } = loadAppWithPages({ fetchImpl: makeFetch() });
   await window.refreshModelsPage();
   await tick();
-  for (const type of ["all", ...ALL_TYPES]) {
-    const btn = window.document.querySelector(`#models-tab-nav .tab-btn[data-type="${type}"]`);
-    if (!btn) continue;
-    btn.click();
+  for (const type of ALL_TYPES) {
+    // Narrow the Registered table to one type at a time. The two rows share a
+    // chip component but not a state, so this must not touch the search row.
+    for (const b of window.document.querySelectorAll(".reg-type")) {
+      b.checked = (b.value === type);
+      b.dispatchEvent(new window.Event("change"));
+    }
     await tick();
     assert.notEqual(window.document.getElementById("disc-type-filter").style.display, "none",
-      `Types filter visible on the "${type}" tab`);
+      `Types filter visible with the table narrowed to "${type}"`);
     assert.notEqual(window.document.getElementById("disc-formats").style.display, "none",
-      `Format filter visible on the "${type}" tab`);
+      `Format filter visible with the table narrowed to "${type}"`);
+    assert.deepEqual([...window.document.querySelectorAll(".disc-type")]
+        .filter((b) => b.checked).map((b) => b.value).sort(), [...ALL_TYPES].sort(),
+      `the search row is untouched by narrowing the table to "${type}"`);
   }
 });
 

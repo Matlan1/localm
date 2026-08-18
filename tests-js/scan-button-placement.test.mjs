@@ -54,29 +54,39 @@ test("scan-placement: the Scan button sits inside the Add-a-model card, not the 
   assert.ok(addCard.contains(btn),
     "the scan button lives in the same card as the HuggingFace/URL/path add fields");
 
-  const tabNav = window.document.getElementById("models-tab-nav");
-  assert.ok(!tabNav.closest(".card").contains(btn),
-    "the scan button is no longer inside the Registered-models tab-gated card");
+  const typeFilter = window.document.getElementById("models-type-filter");
+  assert.ok(!typeFilter.closest(".card").contains(btn),
+    "the scan button is no longer inside the Registered-models type-filtered card");
 });
 
-test("scan-placement: the Scan button is visible on initial load (the All tab)", async () => {
+test("scan-placement: the Scan button is visible on initial load (all types ticked)", async () => {
   const { window } = loadAppWithPages({ fetchImpl: okFetch });
   await window.refreshModelsPage();
   const btn = window.document.getElementById("models-scan-btn");
   assert.ok(isVisible(btn), "visible by default, not hidden until a tab switch");
 });
 
-test("scan-placement: the Scan button stays visible across every Registered-models tab", async () => {
+test("scan-placement: the Scan button stays visible across every Registered-models type filter", async () => {
   const { window } = loadAppWithPages({ fetchImpl: okFetch });
-  const tabNav = window.document.getElementById("models-tab-nav");
   const btn = window.document.getElementById("models-scan-btn");
 
-  for (const tabBtn of tabNav.querySelectorAll(".tab-btn")) {
-    tabBtn.click();
+  // Narrow to each single type in turn, then to none at all - the button lives
+  // outside the filtered card, so no selection may take it away.
+  for (const box of window.document.querySelectorAll(".reg-type")) {
+    for (const b of window.document.querySelectorAll(".reg-type")) {
+      b.checked = (b === box);
+      b.dispatchEvent(new window.Event("change"));
+    }
     await new Promise((r) => setTimeout(r, 0));
     assert.ok(isVisible(btn),
-      `scan button stays visible on the "${tabBtn.dataset.type}" tab (it used to vanish on All/LLMs)`);
+      `scan button stays visible with only "${box.value}" ticked (it used to vanish on All/LLMs)`);
   }
+  for (const b of window.document.querySelectorAll(".reg-type")) {
+    b.checked = false;
+    b.dispatchEvent(new window.Event("change"));
+  }
+  await new Promise((r) => setTimeout(r, 0));
+  assert.ok(isVisible(btn), "scan button stays visible with no type ticked at all");
 });
 
 test("scan-placement: the button carries an icon and copy that differentiates it from its sibling Import button", async () => {

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// The Models page "Embedding" tab: a dedicated tab-nav button that filters the
-// table to embedding models (data-type="embedding"), plus the per-row set-type
-// <select> offering "embedding" as one of the selectable model types. Mirrors
-// tests-js/models-set-type.test.mjs (same page, same harness/fetch-mock style).
+// The Models page "Embedding" type chip: a dedicated .reg-type chip that filters
+// the table to embedding models (data-type="embedding"), plus the per-row
+// set-type <select> offering "embedding" as one of the selectable model types.
+// Mirrors tests-js/models-set-type.test.mjs (same page, harness, fetch-mock).
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -30,42 +30,59 @@ function makeFetch(models, calls) {
   };
 }
 
-test("models-embedding-tab: the Embedding tab button exists with the right data-type and label", async () => {
+test("models-embedding-tab: the Embedding type chip exists with the right data-type and label", async () => {
   const { window } = loadAppWithPages({ fetchImpl: makeFetch([], []) });
 
-  const nav = window.document.querySelector("#models-tab-nav");
-  assert.ok(nav, "the tab-nav container exists");
-  const btn = nav.querySelector('.tab-btn[data-type="embedding"]');
-  assert.ok(btn, "a tab-btn with data-type=\"embedding\" exists in the nav");
-  assert.equal(btn.textContent.trim(), "Embedding", "the tab is labelled 'Embedding'");
+  const row = window.document.querySelector("#models-type-filter");
+  assert.ok(row, "the Registered-models type filter row exists");
+  const chip = row.querySelector('.filter-chip[data-type="embedding"]');
+  assert.ok(chip, "a chip with data-type=\"embedding\" exists in the row");
+  assert.ok(chip.querySelector('input.reg-type[value="embedding"]'),
+    "the chip wraps a real checkbox, so it is keyboard-focusable and multi-select");
+  // The count <i> rides inside the pill, so read the label text without it.
+  assert.equal(chip.querySelector("span").firstChild.textContent.trim(), "Embedding",
+    "the chip is labelled 'Embedding'");
 });
 
-test("models-embedding-tab: clicking the Embedding tab activates it and re-fetches type=embedding", async () => {
-  const calls = [];
-  const { window } = loadAppWithPages({ fetchImpl: makeFetch([], calls) });
+test("models-embedding-tab: narrowing to the Embedding chip leaves only embedding rows in the table", async () => {
+  // This used to assert the request URL carried ?type=embedding. The filter is
+  // multi-select now and narrows client-side, so the URL no longer says
+  // anything - and the RENDERED TABLE is the property that actually mattered.
+  // Asserting on what the user sees also survives the next transport change.
+  const models = [
+    { name: "bge-small", active: false, loaded: false, model_type: "embedding", size_bytes: 1000 },
+    { name: "qwen-7b", active: false, loaded: false, model_type: "llm", size_bytes: 2000 },
+  ];
+  const { window } = loadAppWithPages({ fetchImpl: makeFetch(models, []) });
   await window.refreshModelsPage();
   await new Promise((r) => setTimeout(r, 0));
 
-  const nav = window.document.querySelector("#models-tab-nav");
-  const allBtn = nav.querySelector('.tab-btn[data-type="all"]');
-  const embeddingBtn = nav.querySelector('.tab-btn[data-type="embedding"]');
-  assert.ok(allBtn.classList.contains("active"), "the All tab starts active");
-  assert.ok(!embeddingBtn.classList.contains("active"), "the Embedding tab starts inactive");
+  const names = () => [...window.document.querySelectorAll("#models-table tbody tr .name")]
+    .map((n) => n.textContent);
+  assert.deepEqual(names().sort(), ["bge-small", "qwen-7b"], "every type ticked shows both rows");
 
-  calls.length = 0;   // only care about what the click itself triggers
-  embeddingBtn.click();
+  // .reg-chip, not a bare .filter-chip[data-type=]: the search row and this row
+  // share the component AND the data-type values, so an unscoped selector picks
+  // up whichever comes first in the DOM (the search chip).
+  const chip = window.document.querySelector('.reg-chip[data-type="embedding"]');
+  const box = chip.querySelector("input.reg-type");
+  assert.ok(box.checked, "the Embedding chip starts ticked (the default is every type)");
+
+  for (const b of window.document.querySelectorAll(".reg-type")) {
+    b.checked = (b.value === "embedding");
+    b.dispatchEvent(new window.Event("change"));
+  }
   await new Promise((r) => setTimeout(r, 0));
 
-  assert.ok(embeddingBtn.classList.contains("active"), "clicking the Embedding tab marks it active");
-  assert.ok(!allBtn.classList.contains("active"), "clicking the Embedding tab deactivates its sibling (All)");
-  for (const b of nav.querySelectorAll(".tab-btn")) {
-    if (b !== embeddingBtn) {
-      assert.ok(!b.classList.contains("active"), `sibling tab '${b.dataset.type}' is not active`);
-    }
+  assert.ok(chip.classList.contains("on"),
+    "the ticked chip carries the .on class the CSS colours on");
+  for (const other of window.document.querySelectorAll(".reg-chip")) {
+    if (other === chip) continue;
+    assert.ok(!other.classList.contains("on"),
+      `unticked chip '${other.dataset.type}' is not shown as active`);
   }
-
-  assert.ok(calls.includes("/api/models?type=embedding"),
-    "the click re-fetched the models list filtered to type=embedding");
+  assert.deepEqual(names(), ["bge-small"],
+    "the table now shows the embedding row and nothing else");
 });
 
 test("models-embedding-tab: an embedding-type row renders and its set-type control offers 'embedding'", async () => {

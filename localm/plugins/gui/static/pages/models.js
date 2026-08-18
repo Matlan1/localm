@@ -30,11 +30,48 @@ export function fmtModelDate(mtime) {
   catch (_) { return ""; }
 }
 
-// The Registered-models table tab (All/LLMs/Embedding/...). Scopes only the
-// installed-models TABLE below - the HuggingFace SEARCH has its own explicit,
-// always-visible Type checkboxes (discTypes()), so what the search covers is
-// never inferred silently from this tab.
-let currentTypeFilter = "all";
+// The Registered-models TYPE chips. The same .filter-chip component, the same
+// per-type hues and the same multi-select interaction as the HuggingFace
+// search's Type chips (discTypes()) - it is the same taxonomy, so it is one
+// widget rather than two.
+//
+// The WIDGET is shared; the STATE is deliberately NOT. Neither row reads the
+// other, so what the search covers is never inferred silently from what the
+// table is showing (an earlier design scoped the search by the active table
+// tab, which was invisible to the user). Unifying the look must not quietly
+// re-couple the two - tests-js/models-discover-type-scoped.test.mjs guards it.
+//
+// Unlike the discovery chips this selection is NOT persisted. A search scope is
+// a query input worth remembering; this is a view over what you actually own,
+// and a hidden-rows state restored on a later visit makes the app look like it
+// lost your models.
+const ALL_REG_TYPES =
+  ["llm", "embedding", "diffusion-unet", "text-encoder", "vae", "lora", "unknown"];
+
+export function regTypes() {
+  // Absent chips (older DOM) means every type, never an empty set: a missing
+  // filter must not silently hide the whole library. Empty (none ticked) is a
+  // real state the caller surfaces, same as the discovery row.
+  const boxes = [...document.querySelectorAll(".reg-type")];
+  if (!boxes.length) return ALL_REG_TYPES.slice();
+  return boxes.filter((b) => b.checked).map((b) => b.value);
+}
+
+// Which chip a registry row belongs under. Two things are load-bearing here:
+//
+//  - The "llm" default MUST match the server's (routes/models.py defaults a
+//    model_type-less entry to "llm") and the Role badge's below. Drop it and
+//    every legacy untyped entry vanishes from every filtered view.
+//  - MODEL_TYPES (registry.py) carries values with no chip of their own -
+//    "mmproj" today, and whatever is added next. Those bucket into "Other"
+//    rather than matching nothing, so no registered model can ever fall
+//    through the filter and disappear from the default all-ticked view. Under
+//    the old tab strip an mmproj row was reachable from "All" only; now it has
+//    a chip that actually shows it.
+export function regTypeBucket(model) {
+  const t = (model && model.model_type) || "llm";
+  return ALL_REG_TYPES.includes(t) ? t : "unknown";
+}
 // Set when a discovery result is chosen, cleared on a successful add or a spec
 // edit. {spec, type} - the Add handler only attaches model_type when spec still
 // matches exactly what was prefilled, so a hand-edited spec silently falls back
@@ -120,10 +157,14 @@ export async function refreshModelsPage() {
   if (myGen !== _modelsRenderGen) return;
   box.replaceChildren();
 
-  const typeParam = currentTypeFilter === "all" ? "" : "?type=" + currentTypeFilter;
+  // Fetched UNFILTERED and narrowed below in the browser. The type chips are
+  // multi-select and /api/models?type= takes exactly one value, so one request
+  // cannot express the selection; fetching the whole registry also gives the
+  // per-chip counts for free and drops a round trip per chip toggle. The
+  // ?type= parameter stays on the route for API consumers.
   let models = [];
   try {
-    const r = await fetch("/api/models" + typeParam, { headers: authHeaders() });
+    const r = await fetch("/api/models", { headers: authHeaders() });
     if (r.status === 401) {
       // Expired/absent session (e.g. a network bind whose loopback key was never
       // seeded): the JSON error body parses fine, so the models=[] fallback below
@@ -150,12 +191,36 @@ export async function refreshModelsPage() {
     return;
   }
 
+  if (myGen !== _modelsRenderGen) return;
+  // Counts come from the WHOLE registry, so a chip keeps showing what ticking
+  // it would reveal even while it is unticked.
+  syncRegChipCounts(models);
+
   if (!models.length) {
-    if (myGen !== _modelsRenderGen) return;
     box.appendChild(emptyState("models", "No models yet",
       "Pull a model above, or search HuggingFace to add your first one."));
     return;
   }
+
+  // Three outcomes that must never be collapsed into one (AGENTS.md rule 5):
+  // an empty registry (handled above), a filter that selects nothing, and a
+  // selection that happens to match no row. Rendering all three as a bare
+  // empty table would tell a user with a filter on that they own no models.
+  const selected = regTypes();
+  if (!selected.length) {
+    box.appendChild(el("div", "sub",
+      "No types selected - tick at least one type above to see your models."));
+    return;
+  }
+  const shown = models.filter((m) => selected.includes(regTypeBucket(m)));
+  if (!shown.length) {
+    box.appendChild(el("div", "sub",
+      `No models of the selected type${selected.length > 1 ? "s" : ""}. `
+      + `${models.length} registered model${models.length > 1 ? "s" : ""} `
+      + "are hidden by this filter."));
+    return;
+  }
+  models = shown;
 
   models = sortModels(models, currentSortKey, currentSortDir);
 
@@ -907,7 +972,12 @@ $("disc-query").addEventListener("keydown", (e) => {
 // is what style.css colours (a CSS :checked-combinator does not repaint on a
 // programmatic toggle in every engine - see the .disc-chip comment there).
 function _syncChip(box) {
-  const chip = box.closest(".disc-chip");
+  // .filter-chip, not .disc-chip: the discovery row and the Registered-models
+  // row share one chip component, and .disc-chip is only the discovery-scoped
+  // hook. Matching the narrower class here would leave every Registered chip
+  // stuck grey while its box was checked - a silent visual failure, since
+  // nothing else writes the `.on` class the CSS actually colours on.
+  const chip = box.closest(".filter-chip");
   if (chip) chip.classList.toggle("on", box.checked);
 }
 
@@ -1580,19 +1650,52 @@ $("pull-start").onclick = async () => {
 };
 
 
-// Bind tab click handlers
-const tabNav = $("models-tab-nav");
-if (tabNav) {
-  for (const btn of tabNav.querySelectorAll(".tab-btn")) {
-    btn.onclick = () => {
-      for (const b of tabNav.querySelectorAll(".tab-btn")) {
-        b.classList.remove("active");
-      }
-      btn.classList.add("active");
-      currentTypeFilter = btn.dataset.type;
-      refreshModelsPage();
-    };
+// Registered-models TYPE chips. Same _syncChip contract as the discovery chips
+// (the `.on` class is the visual state, not a CSS :checked selector), minus the
+// localStorage write - see the ALL_REG_TYPES comment for why this one does not
+// persist.
+export function syncRegChipCounts(models) {
+  const counts = new Map();
+  for (const m of models || []) {
+    const b = regTypeBucket(m);
+    counts.set(b, (counts.get(b) || 0) + 1);
   }
+  for (const box of document.querySelectorAll(".reg-type")) {
+    const chip = box.closest(".filter-chip");
+    if (!chip) continue;
+    const n = counts.get(box.value) || 0;
+    const slot = chip.querySelector(".chip-count");
+    if (slot) slot.textContent = n ? String(n) : "";
+    chip.classList.toggle("chip-empty", n === 0);
+  }
+}
+
+function syncRegResetVisibility() {
+  const btn = $("models-type-reset");
+  if (!btn) return;
+  const boxes = [...document.querySelectorAll(".reg-type")];
+  btn.hidden = boxes.every((b) => b.checked);
+}
+
+for (const box of document.querySelectorAll(".reg-type")) {
+  _syncChip(box);
+  box.addEventListener("change", () => {
+    _syncChip(box);
+    syncRegResetVisibility();
+    refreshModelsPage();
+  });
+}
+syncRegResetVisibility();
+
+if ($("models-type-reset")) {
+  $("models-type-reset").onclick = () => {
+    for (const box of document.querySelectorAll(".reg-type")) {
+      box.checked = true;
+      _syncChip(box);
+    }
+    syncRegResetVisibility();
+    refreshModelsPage();
+  };
 }
 
 // Turn a ComfyUI ScanResult (added / skipped / method) into a human toast. The
