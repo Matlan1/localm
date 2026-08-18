@@ -72,6 +72,35 @@ function cardHead(iconName, cat, tag, text) {
   return head;
 }
 
+// --- GUI shell helpers ------------------------------------------------------
+// app/main.js defines window.<name> as a live getter for every export of the GUI
+// modules, so a client plugin reaches iconEl (app/icons.js) and confirmDanger
+// (app/helpers.js) through window rather than importing across the GUI's own file
+// layout - helpers.js wires the shared modal at import time and would throw in a
+// document that has none. Each bridge below degrades the same way emptyStateEl
+// does: the isolated jsdom unit test loads this module with no GUI shell, and the
+// fallback keeps the affordance real there instead of silently dropping it.
+
+// A row's leading content-type icon. Without the shell there is no SVG to draw, so
+// the placeholder keeps the .name-cell layout identical and the name still renders.
+function iconElFor(name, cls) {
+  if (typeof window !== "undefined" && typeof window.iconEl === "function") {
+    return window.iconEl(name, cls);
+  }
+  return el("span", cls);
+}
+
+// Confirm a destructive action with the app's own themed modal. The native
+// confirm() fallback is the pre-existing behaviour, kept only for the no-shell
+// case: it still blocks the action, so a delete is never silently unconfirmed.
+function confirmDangerous(title, message, confirmLabel, onConfirm) {
+  if (typeof window !== "undefined" && typeof window.confirmDanger === "function") {
+    window.confirmDanger(title, message, confirmLabel, onConfirm);
+    return;
+  }
+  if (confirm(`${title} ${message}`)) onConfirm();
+}
+
 // --- schedule / time formatting -------------------------------------------
 function fmtSchedule(job) {
   if (job.schedule_kind === "cron") return `cron: ${job.schedule}`;
@@ -160,6 +189,11 @@ export function register(ctx) {
     }
   }
 
+  // The jobs list is a <table class="data-table">, the same primitive Models,
+  // Knowledge and Plugins use, so it inherits that pattern's row hover, name-cell
+  // icon layout and mobile card stacking instead of restating them (JOBS-DATA-TABLE).
+  const JOB_COLUMNS = ["Name", "State", "Schedule", "Task", "Last run", ""];
+
   function renderList(jobs) {
     clear(listEl);
     if (!jobs.length) {
@@ -167,61 +201,75 @@ export function register(ctx) {
         "Add one above to schedule a recurring task."));
       return;
     }
-    for (const job of jobs) listEl.appendChild(renderJob(job));
+    const table = el("table", "data-table");
+    const thead = el("thead");
+    const hr = el("tr");
+    for (const h of JOB_COLUMNS) hr.appendChild(el("th", "", h));
+    thead.appendChild(hr);
+    table.appendChild(thead);
+    const tbody = el("tbody");
+    for (const job of jobs) tbody.appendChild(renderJob(job));
+    table.appendChild(tbody);
+    listEl.appendChild(table);
+  }
+
+  // A row action button. Inside a dense .data-table the compact `.data-table
+  // button` styling wins, so the tier is spelled .primary / .secondary / .danger
+  // rather than .btn-* (docs/gui-design.md rule 3). data-action / data-id state
+  // the row's intent for tests and for anything reading the DOM.
+  function rowBtn(action, job, cls, label) {
+    const b = el("button", cls, label);
+    b.dataset.action = action;
+    b.dataset.id = job.id;
+    return b;
   }
 
   function renderJob(job) {
-    const row = el("div", "job-row");
+    const tr = el("tr");
 
-    const head = el("div", "job-head");
-    head.appendChild(el("span", "job-name", job.name));
-    head.appendChild(el("span", "job-state " + (job.enabled ? "on" : "off"),
+    // Name cell: content-type icon then the name (gui-design.md rule 1). `clock`
+    // is the jobs surface's own icon (plugin.toml), so a row leads with the same
+    // mark as the tab it lives under.
+    const nameTd = el("td", "name-cell");
+    nameTd.appendChild(iconElFor("clock", "ic ic-job"));
+    nameTd.appendChild(el("span", "name", job.name));
+    tr.appendChild(nameTd);
+
+    // Whether the schedule is armed, then the last run's outcome as a colored
+    // pill (green ok / red error / amber skipped) - two independent facts, so
+    // two pills rather than one merged word.
+    const stateTd = el("td");
+    stateTd.appendChild(el("span", "job-state " + (job.enabled ? "on" : "off"),
       job.enabled ? "enabled" : "disabled"));
-    // The last run's outcome as a colored pill (green ok / red error / amber skipped)
-    // instead of a parenthetical in the meta line.
-    if (job.last_status) head.appendChild(statusPill(job.last_status));
-    row.appendChild(head);
+    if (job.last_status) stateTd.appendChild(statusPill(job.last_status));
+    tr.appendChild(stateTd);
 
-    const meta = el("div", "job-meta sub");
-    meta.appendChild(el("span", null, fmtSchedule(job)));
-    meta.appendChild(el("span", null, "task: " + job.task_kind));
+    tr.appendChild(el("td", "mono", fmtSchedule(job)));
+
     // Which collection a rag job re-syncs is the one thing that distinguishes
     // two otherwise identical rows, so show it rather than making the user open
     // the job to find out.
+    const taskTd = el("td", "", job.task_kind);
     if (job.task_kind === "rag" && job.collection) {
-      meta.appendChild(el("span", null, "collection: " + job.collection));
+      taskTd.appendChild(el("div", "sub", "collection: " + job.collection));
     }
-    meta.appendChild(el("span", null, "last run: " + fmtTime(job.last_run)));
-    row.appendChild(meta);
+    tr.appendChild(taskTd);
 
-    const actions = el("div", "job-actions");
+    tr.appendChild(el("td", "mono", fmtTime(job.last_run)));
 
-    const run = el("button", "btn-secondary", "Run now");
-    run.dataset.action = "run";
-    run.dataset.id = job.id;
+    const actionsTd = el("td");
+    const run = rowBtn("run", job, "primary", "Run now");
     run.onclick = (e) => runNow(job, e.currentTarget);
-    actions.appendChild(run);
-
-    const toggle = el("button", "btn-secondary", job.enabled ? "Disable" : "Enable");
-    toggle.dataset.action = "toggle";
-    toggle.dataset.id = job.id;
+    const toggle = rowBtn("toggle", job, "secondary", job.enabled ? "Disable" : "Enable");
     toggle.onclick = () => setEnabled(job, !job.enabled);
-    actions.appendChild(toggle);
-
-    const results = el("button", "btn-secondary", "Results");
-    results.dataset.action = "results";
-    results.dataset.id = job.id;
+    const results = rowBtn("results", job, "secondary", "Results");
     results.onclick = () => showResults(job);
-    actions.appendChild(results);
-
-    const del = el("button", "btn-danger", "Delete");
-    del.dataset.action = "delete";
-    del.dataset.id = job.id;
+    const del = rowBtn("delete", job, "danger", "Delete");
     del.onclick = () => remove(job);
-    actions.appendChild(del);
+    for (const b of [run, toggle, results, del]) actionsTd.appendChild(b);
+    tr.appendChild(actionsTd);
 
-    row.appendChild(actions);
-    return row;
+    return tr;
   }
 
   async function runNow(job, btn) {
@@ -258,15 +306,21 @@ export function register(ctx) {
     refresh();
   }
 
-  async function remove(job) {
-    if (!confirm(`Delete job "${job.name}"? This also removes its results.`)) return;
-    try {
-      await api(`/${encodeURIComponent(job.id)}`, { method: "DELETE" });
-      toast(`Job "${job.name}" deleted`);
-    } catch (e) {
-      toast(`Delete failed: ${e.message}`, true);
-    }
-    refresh();
+  // Deleting is confirmed with the app's themed modal, like every other
+  // destructive action in the GUI. window.confirm() is suppressed outright by
+  // some mobile / PWA browsers, which would have made this delete fire with no
+  // prompt at all on exactly those clients.
+  function remove(job) {
+    confirmDangerous(`Delete job "${job.name}"?`, "This also removes its results.",
+      "Delete", async () => {
+        try {
+          await api(`/${encodeURIComponent(job.id)}`, { method: "DELETE" });
+          toast(`Job "${job.name}" deleted`);
+        } catch (e) {
+          toast(`Delete failed: ${e.message}`, true);
+        }
+        refresh();
+      });
   }
 
   async function showResults(job) {
