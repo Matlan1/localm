@@ -171,8 +171,8 @@ gpu = [
     # on psutil today, so this path has been working on a transitive dep by luck;
     # declare what we actually import so an accelerate change cannot break it.
     "psutil>=7.2.2",
-    "torch==2.9.1+rocm7.13.0; sys_platform == 'win32'",
-    "torchvision==0.24.0+rocm7.13.0; sys_platform == 'win32'",
+    "torch==2.11.0+rocm7.13.0; sys_platform == 'win32'",
+    "torchvision==0.26.0+rocm7.13.0; sys_platform == 'win32'",
     "rocm; sys_platform == 'win32'",
     "rocm-sdk-core; sys_platform == 'win32'",
     "rocm-sdk-libraries-gfx103x-all; sys_platform == 'win32'",
@@ -274,10 +274,10 @@ explicit = true
 
 [tool.uv.sources]
 torch = [
-  { url = "https://repo.amd.com/rocm/whl/gfx103X-all/torch-2.9.1%2Brocm7.13.0-cp312-cp312-win_amd64.whl", marker = "sys_platform == 'win32' and python_version == '3.12'" },
+  { url = "https://repo.amd.com/rocm/whl/gfx103X-all/torch-2.11.0%2Brocm7.13.0-cp312-cp312-win_amd64.whl", marker = "sys_platform == 'win32' and python_version == '3.12'" },
 ]
 torchvision = [
-  { url = "https://repo.amd.com/rocm/whl/gfx103X-all/torchvision-0.24.0%2Brocm7.13.0-cp312-cp312-win_amd64.whl", marker = "sys_platform == 'win32' and python_version == '3.12'" },
+  { url = "https://repo.amd.com/rocm/whl/gfx103X-all/torchvision-0.26.0%2Brocm7.13.0-cp312-cp312-win_amd64.whl", marker = "sys_platform == 'win32' and python_version == '3.12'" },
 ]
 rocm = [
   { index = "rocm-gfx1030", marker = "sys_platform == 'win32'" },
