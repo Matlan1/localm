@@ -58,25 +58,32 @@ def backfill_all(root: Path, embed_fn: Optional[Callable], *,
                  on_progress: Optional[Callable] = None) -> dict:
     """Embed every vectorless record in every namespace under *root*.
 
-    Returns ``{"namespaces": n, "embedded": n, "remaining": n}``. ``remaining``
-    is non-zero only when a namespace hit ``_MAX_PASSES_PER_NS`` or an embed call
-    kept failing - it is reported rather than hidden, so a caller can say so
-    instead of claiming completion it did not reach (AGENTS.md rule 5).
+    Returns ``{"namespaces": n, "embedded": n, "remaining": n, "unreadable": n}``.
+    ``remaining`` is non-zero only when a namespace hit ``_MAX_PASSES_PER_NS`` or
+    an embed call kept failing - it is reported rather than hidden, so a caller
+    can say so instead of claiming completion it did not reach (AGENTS.md rule
+    5). ``unreadable`` counts namespaces that could not even be opened (corrupt
+    JSONL, a locked file) - kept separate from ``remaining`` because such a
+    namespace's true vectorless count is unknown, not zero, so folding it into
+    "remaining" (or dropping it) would read as a clean pass.
     """
     if embed_fn is None:
-        return {"namespaces": 0, "embedded": 0, "remaining": 0}
+        return {"namespaces": 0, "embedded": 0, "remaining": 0, "unreadable": 0}
 
     from localm.memory.store import MemoryStore
 
     embedded = 0
     remaining = 0
+    unreadable = 0
     seen = 0
     for path in _namespaces(root):
         try:
             store = MemoryStore.open_file(path)
-        except Exception:
-            # An unreadable namespace is reported through "remaining" via the
-            # count it never contributes, not swallowed as a success.
+        except Exception as e:
+            unreadable += 1
+            from localm.debuglog import logger as _dbg
+            _dbg.warning("memory backfill: could not open namespace %s (%s)",
+                         path, e)
             continue
         seen += 1
         for _ in range(_MAX_PASSES_PER_NS):
@@ -92,18 +99,38 @@ def backfill_all(root: Path, embed_fn: Optional[Callable], *,
             if on_progress:
                 on_progress(embedded)
         remaining += store.vectorless_count()
-    return {"namespaces": seen, "embedded": embedded, "remaining": remaining}
+    return {"namespaces": seen, "embedded": embedded, "remaining": remaining,
+            "unreadable": unreadable}
+
+
+def vectorless_scan(root: Path) -> tuple[int, int]:
+    """Count vectorless records across every namespace under *root*, and count
+    namespaces that could not even be opened (corrupt JSONL, a locked or
+    unreadable file). Returns ``(total, unreadable)``.
+
+    An unreadable namespace previously contributed 0 to ``total`` - exactly
+    what a fully embedded namespace also contributes - so a root where every
+    vectorless namespace happened to be unreadable looked identical to one
+    with nothing left to do. Reporting the two counts separately makes that
+    shortfall visible to callers instead of silently absorbing it.
+    """
+    from localm.memory.store import MemoryStore
+
+    total = 0
+    unreadable = 0
+    for path in _namespaces(root):
+        try:
+            total += MemoryStore.open_file(path).vectorless_count()
+        except Exception as e:
+            unreadable += 1
+            from localm.debuglog import logger as _dbg
+            _dbg.warning("memory backfill: could not open namespace %s (%s)",
+                         path, e)
+    return total, unreadable
 
 
 def vectorless_total(root: Path) -> int:
     """How many records across every namespace still lack a vector. Used to
     decide whether a backfill is worth announcing, and to report honestly."""
-    from localm.memory.store import MemoryStore
-
-    total = 0
-    for path in _namespaces(root):
-        try:
-            total += MemoryStore.open_file(path).vectorless_count()
-        except Exception:
-            continue
+    total, _unreadable = vectorless_scan(root)
     return total

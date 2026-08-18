@@ -18,7 +18,11 @@ and `setup-embeddings` had told the user "Memory now retrieves semantically".
 
 from pathlib import Path
 
-from localm.memory.backfill import _namespaces, backfill_all, vectorless_total
+import pytest
+
+from localm.memory.backfill import (
+    _namespaces, backfill_all, vectorless_scan, vectorless_total,
+)
 from localm.memory.record import MemoryRecord
 from localm.memory.store import MemoryStore
 
@@ -73,7 +77,7 @@ def test_no_embedder_is_a_no_op_not_a_claim(tmp_path):
     root = tmp_path / "memory"
     _seed(root, "owner", 4)
     res = backfill_all(root, None)
-    assert res == {"namespaces": 0, "embedded": 0, "remaining": 0}
+    assert res == {"namespaces": 0, "embedded": 0, "remaining": 0, "unreadable": 0}
     assert vectorless_total(root) == 4
 
 
@@ -93,3 +97,76 @@ def test_vectors_clear_the_low_coverage_degrade(tmp_path):
     usable_after, reason_after = st2._vector_status(_fake_embed)
     assert usable_after is True, (
         f"the semantic gate must be usable after a backfill, got {reason_after!r}")
+
+
+# --------------------------------------------------------------------------- #
+#  An unreadable namespace must be COUNTED, never silently absorbed as a       #
+#  clean pass. Previously a namespace MemoryStore.open_file could not open    #
+#  contributed 0 to every counter - exactly what a fully embedded namespace   #
+#  also contributes.                                                          #
+# --------------------------------------------------------------------------- #
+
+def _write_unreadable_namespace(root: Path, agent: str = "chat") -> Path:
+    """A namespace file whose bytes are not valid UTF-8, so MemoryStore._load's
+    ``self._file.read_text(encoding="utf-8")`` raises UnicodeDecodeError before
+    the per-line tolerant JSON parsing (which only guards json.loads) ever
+    runs."""
+    ns_dir = root / agent
+    ns_dir.mkdir(parents=True, exist_ok=True)
+    bad_path = ns_dir / ("0" * 16 + ".jsonl")
+    bad_path.write_bytes(b'{"id":"a"}\n\xff\xfe not utf-8\n')
+    return bad_path
+
+
+def test_unreadable_namespace_fault_actually_fires(tmp_path):
+    """Precondition for the tests below: prove the corrupt fixture really makes
+    MemoryStore.open_file raise, rather than silently decoding. A fixture that
+    happens to decode injects no fault at all, and every test below would pass
+    with the bug fully in place."""
+    root = tmp_path / "memory"
+    bad_path = _write_unreadable_namespace(root)
+    with pytest.raises(UnicodeDecodeError):
+        MemoryStore.open_file(bad_path)
+
+
+def test_backfill_all_counts_an_unreadable_namespace_not_silently(tmp_path):
+    """A root whose only namespace cannot be opened must report that shortfall,
+    not read as a clean pass with nothing left to do."""
+    root = tmp_path / "memory"
+    _write_unreadable_namespace(root)
+
+    res = backfill_all(root, _fake_embed)
+
+    assert res["unreadable"] == 1, (
+        f"an unopenable namespace must be counted, not silently skipped: {res!r}")
+    assert res["namespaces"] == 0
+    assert res["embedded"] == 0
+    assert res["remaining"] == 0
+
+
+def test_backfill_all_embeds_the_good_namespace_despite_a_bad_sibling(tmp_path):
+    """One namespace failing to open must not stop the rest of the root from
+    being backfilled in full."""
+    root = tmp_path / "memory"
+    _seed(root, "owner", 5)
+    _write_unreadable_namespace(root)
+
+    res = backfill_all(root, _fake_embed)
+
+    assert res["namespaces"] == 1
+    assert res["embedded"] == 5
+    assert res["remaining"] == 0
+    assert res["unreadable"] == 1
+
+
+def test_vectorless_scan_reports_unreadable_separately_from_total(tmp_path):
+    """vectorless_scan is what lets a caller distinguish 'nothing left to
+    embed' from 'could not even check' - vectorless_total alone cannot."""
+    root = tmp_path / "memory"
+    _seed(root, "owner", 3)
+    _write_unreadable_namespace(root)
+
+    total, unreadable = vectorless_scan(root)
+
+    assert total == 3, "the good namespace's real vectorless count must still show"
+    assert unreadable == 1
