@@ -434,7 +434,10 @@ export function musicPreview(item, ctx) {
   const stop = () => {
     if (!player) return;
     player.pause();
-    if (player.dataset.url) URL.revokeObjectURL(player.dataset.url);
+    if (player.dataset.url) {
+      URL.revokeObjectURL(player.dataset.url);
+      _cardURLs.delete(player.dataset.url);
+    }
     player.remove();
     player = null;
     play.replaceChildren(iconEl("play", "btn-ic"));
@@ -451,6 +454,7 @@ export function musicPreview(item, ctx) {
       player.controls = true;
       player.autoplay = true;
       player.dataset.url = url;
+      _cardURLs.add(url);
       player.className = "audio-inline";
       player.onclick = (ev) => ev.stopPropagation();
       reportMediaLoadFailure(player, "the track", stop);
@@ -464,8 +468,6 @@ export function musicPreview(item, ctx) {
       play.disabled = false;
     }
   };
-
-
   wrap.appendChild(play);
 
   const badge = durationLabel(item);
@@ -489,8 +491,15 @@ export function durationLabel(item) {
    when any gallery re-renders. Bounded at one live URL, deterministically. */
 let _detailURL = null;
 
+/* Card players are torn down by grid.replaceChildren() on the next render,
+   which fires no event and runs no cleanup - so their URLs are tracked here and
+   released with the render rather than left to leak one per playback. */
+const _cardURLs = new Set();
+
 export function releaseDetailURL() {
   if (_detailURL) { URL.revokeObjectURL(_detailURL); _detailURL = null; }
+  for (const u of _cardURLs) URL.revokeObjectURL(u);
+  _cardURLs.clear();
 }
 
 /** Modal preview for a playable medium: a real, controllable player. */
