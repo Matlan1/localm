@@ -180,7 +180,7 @@ audio = [
 # a package; txt/md/docx/html/code extraction is stdlib.
 # Install with:  pip install "localm[rag]"
 rag = [
-    "pypdf>=6.15.0",
+    "pypdf>=6.16.1",
 ]
 # Speech-to-text for the GUI mic button (Whisper, CPU int8 - no torch).
 # Install with:  pip install "localm[voice]"
@@ -233,7 +233,7 @@ dev = [
     # when the optional extra is absent (the default install is .[coder,voice,
     # monitor], no rag). pypdf gates tests/test_rag.py's real PDF round-trip; keep
     # it here so the PDF path (incl. its hardening) is actually exercised in dev/CI.
-    "pypdf>=6.15.0",
+    "pypdf>=6.16.1",
     # Same rationale as pypdf, one step worse: these tests FAIL rather than skip
     # without it. tests/test_hf_device_map.py drives hf.py's _cpu_budget() and
     # tests/test_spawn_worker_dies_with_parent.py imports psutil at module scope, but
