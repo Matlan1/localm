@@ -150,3 +150,8 @@ scripts/codeql/
 scripts/tier2_gpu_split/
 tests/test_release_manifest.py
 tests/test_make_release.py
+
+# Full internal changelog. CHANGELOG.md is served to users by the in-app
+# changelog button, so it carries RELEASED, user-facing entries only; anything
+# unreleased or internal is recorded here instead and promoted at release time.
+CHANGELOG-full.md
