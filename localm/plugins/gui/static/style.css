@@ -733,7 +733,8 @@ pre:hover .canvas-btn { opacity: 1; }
 #coder-setup .row { display: flex; gap: 8px; align-items: center; }
 #coder-setup .row input[type="text"] { flex: 1; width: auto; }
 #coder-setup .row .btn-secondary { flex-shrink: 0; }
-#coder-setup input[type="text"], #coder-setup select {
+#coder-setup input[type="text"], #coder-setup input[type="number"],
+#coder-setup select, #coder-setup textarea {
   width: 100%;
   background: var(--bg-input);
   border: 1px solid var(--border);
@@ -741,7 +742,9 @@ pre:hover .canvas-btn { opacity: 1; }
   color: var(--text);
   padding: 9px 11px;
   font-size: 14px;
+  font-family: var(--sans);
 }
+#coder-setup textarea { resize: vertical; }
 #coder-setup .checks { display: flex; gap: 22px; margin-top: 16px; font-size: 13.5px; }
 #coder-setup .checks label { display: flex; align-items: center; gap: 7px; margin: 0; cursor: pointer; }
 #coder-setup .actions { margin-top: 24px; }
@@ -907,6 +910,16 @@ pre:hover .canvas-btn { opacity: 1; }
   color: var(--text);
   font-size: 13px;
 }
+/* knowledge collection search modal query box - a bare ad-hoc input, no card scope */
+.kb-search-input {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  padding: 8px 10px;
+  font-size: 13.5px;
+  font-family: var(--sans);
+}
 .files-diff { margin-top: 12px; }
 .files-diff pre.diff {
   background: var(--code-bg);
@@ -1015,7 +1028,7 @@ pre:hover .canvas-btn { opacity: 1; }
 .card h3 { margin: 0 0 12px; font-size: 15px; }
 .card label { display: block; font-size: 12.5px; color: var(--text-dim); margin: 10px 0 4px; }
 .card input[type="text"], .card input[type="number"], .card input[type="password"],
-.card select, .card textarea {
+.card input[type="time"], .card select, .card textarea {
   width: 100%;
   background: var(--bg-input);
   border: 1px solid var(--border);

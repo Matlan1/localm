@@ -859,6 +859,7 @@ export function kbSearchModal(name) {
     const row = el("div", "row");
     const input = document.createElement("input");
     input.type = "text";
+    input.className = "kb-search-input";
     input.placeholder = "test query…";
     input.style.flex = "1";
     const go = el("button", "btn-primary", "Search");
