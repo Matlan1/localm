@@ -244,11 +244,14 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
   justify-content: space-between;
   align-items: center;
 }
-#conversations h3 button {
+/* Ghost icon button in a list-section head (new conversation / new coder
+   session): shared by #conversations and #coder-sessions, both plain <h3>
+   affordances rather than a data row or a form action. */
+.section-head-btn {
   background: none; border: none; color: var(--text-dim);
   cursor: pointer; font-size: 16px; padding: 0 2px;
 }
-#conversations h3 button:hover { color: var(--accent); }
+.section-head-btn:hover { color: var(--accent); }
 
 .conv-item {
   display: flex;
@@ -433,11 +436,7 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
   color: var(--text-dim); margin: 4px 8px 8px;
   display: flex; justify-content: space-between; align-items: center;
 }
-#coder-sessions h3 button {
-  background: none; border: none; color: var(--text-dim);
-  cursor: pointer; font-size: 16px; padding: 0 2px;
-}
-#coder-sessions h3 button:hover { color: var(--accent); }
+/* button styling shared with #conversations h3 via .section-head-btn */
 .coder-session-item {
   display: flex; align-items: center; gap: 6px;
   padding: 9px 10px; border-radius: 7px; cursor: pointer;
@@ -683,11 +682,11 @@ pre:hover .canvas-btn { opacity: 1; }
   font-size: 12px;
   color: var(--text-dim);
 }
-.composer-row button {
+.composer-row .composer-action {
   background: none; border: none; color: var(--text-dim);
   cursor: pointer; font-size: 12px; padding: 0;
 }
-.composer-row button:hover { color: var(--accent); }
+.composer-row .composer-action:hover { color: var(--accent); }
 
 /* params drawer */
 
@@ -1431,6 +1430,11 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
   margin-left: 6px;
 }
 .data-table button:hover { color: var(--text); border-color: var(--text-dim); }
+/* Default row action (info / alias / rename / unload / search / add docs):
+   identical to the base button above, named explicitly so every button in a
+   dense table states its tier instead of relying on an implicit classless
+   fallback (gui-design.md rule 3). */
+.data-table button.secondary { color: var(--text-dim); border-color: var(--border); }
 .data-table button.danger:hover { color: #fff; background: var(--red); border-color: var(--red); }
 /* Primary row action (use / install / enable): accent outline that fills on
    hover, staying compact - the two-tier button vocabulary inside a dense table. */
@@ -1499,11 +1503,6 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
   border-radius: 8px;
 }
 #img-bulk .count { font-size: 13px; color: var(--text-dim); }
-#img-bulk button.danger {
-  background: none; border: 1px solid var(--red); color: var(--red);
-  border-radius: 6px; padding: 4px 10px; cursor: pointer; font-size: 12.5px;
-}
-#img-bulk button.danger:hover { background: var(--red); color: #fff; }
 
 /* show-all toggle spans the grid */
 .img-show-all { grid-column: 1 / -1; }

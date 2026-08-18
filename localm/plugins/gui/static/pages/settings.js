@@ -1084,7 +1084,7 @@ function confirmEmbeddingModelSwitch(model, report) {
       const row = el("div", "actions");
       const cancel = el("button", "btn-secondary", "Cancel");
       cancel.onclick = () => { $("modal").style.display = "none"; resolve(false); };
-      const ok = el("button", "btn-secondary btn-primary", "Switch anyway");
+      const ok = el("button", "btn-primary", "Switch anyway");
       ok.onclick = () => { $("modal").style.display = "none"; resolve(true); };
       row.append(cancel, ok);
       body.appendChild(row);

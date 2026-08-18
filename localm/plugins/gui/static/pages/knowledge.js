@@ -149,11 +149,11 @@ export async function refreshKnowledgePage() {
       actions.appendChild(repair);
     }
 
-    const add = el("button", "", "add docs");
+    const add = el("button", "secondary", "add docs");
     add.onclick = () => kbAddDocs(c.name);
     actions.appendChild(add);
 
-    const reembed = el("button", needsReembed ? "warn" : "",
+    const reembed = el("button", needsReembed ? "warn" : "secondary",
       needsReembed ? "re-embed needed" : "re-embed");
     reembed.title = "Recompute this collection's vectors with the embedding "
       + "model currently set in Settings, from the text already stored here - "
@@ -164,11 +164,11 @@ export async function refreshKnowledgePage() {
     reembed.onclick = () => kbReembedCollection(c.name);
     actions.appendChild(reembed);
 
-    const search = el("button", "", "search");
+    const search = el("button", "secondary", "search");
     search.onclick = () => kbSearchModal(c.name);
     actions.appendChild(search);
 
-    const info = el("button", "", "info");
+    const info = el("button", "secondary", "info");
     info.onclick = () => kbInfoModal(c.name);
     actions.appendChild(info);
 
@@ -356,7 +356,7 @@ export function kbConfirmEmbeddingSwitch(model, report) {
       const row = el("div", "actions");
       const cancel = el("button", "btn-secondary", "Cancel");
       cancel.onclick = () => { $("modal").style.display = "none"; resolve(false); };
-      const ok = el("button", "btn-secondary btn-primary", "Switch anyway");
+      const ok = el("button", "btn-primary", "Switch anyway");
       ok.onclick = () => { $("modal").style.display = "none"; resolve(true); };
       row.append(cancel, ok);
       body.appendChild(row);
@@ -366,7 +366,7 @@ export function kbConfirmEmbeddingSwitch(model, report) {
 
 function offerInternalFallback() {
   if ($("kb-embed-fallback")) return;
-  const btn = el("button", "", `Use internal instead (${INTERNAL_DEFAULT})`);
+  const btn = el("button", "btn-secondary", `Use internal instead (${INTERNAL_DEFAULT})`);
   btn.id = "kb-embed-fallback";
   btn.style.marginTop = "8px";
   btn.onclick = () => {
@@ -552,7 +552,7 @@ export function kbConfirmReembed(name) {
       const row = el("div", "actions");
       const cancel = el("button", "btn-secondary", "Cancel");
       cancel.onclick = () => { $("modal").style.display = "none"; resolve(false); };
-      const ok = el("button", "btn-secondary btn-primary", "Re-embed");
+      const ok = el("button", "btn-primary", "Re-embed");
       ok.onclick = () => { $("modal").style.display = "none"; resolve(true); };
       row.append(cancel, ok);
       body.appendChild(row);
@@ -578,7 +578,7 @@ function kbConfirmRepair(name, detail) {
       const row = el("div", "actions");
       const cancel = el("button", "btn-secondary", "Cancel");
       cancel.onclick = () => { $("modal").style.display = "none"; resolve(false); };
-      const ok = el("button", "btn-secondary btn-primary", "Repair anyway");
+      const ok = el("button", "btn-primary", "Repair anyway");
       ok.onclick = () => { $("modal").style.display = "none"; resolve(true); };
       row.append(cancel, ok);
       body.appendChild(row);
@@ -637,7 +637,7 @@ export function kbConfirmAddRoots(folders) {
       const row = el("div", "actions");
       const cancel = el("button", "btn-secondary", "Cancel");
       cancel.onclick = () => { $("modal").style.display = "none"; resolve(false); };
-      const ok = el("button", "btn-secondary btn-primary", "Add and index");
+      const ok = el("button", "btn-primary", "Add and index");
       ok.onclick = () => { $("modal").style.display = "none"; resolve(true); };
       row.append(cancel, ok);
       body.appendChild(row);

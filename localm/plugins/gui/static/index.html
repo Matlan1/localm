@@ -91,7 +91,7 @@
     </nav>
 
     <div id="conversations">
-      <h3>Conversations <button id="new-conv" data-icon="plus" title="New conversation"></button></h3>
+      <h3>Conversations <button id="new-conv" class="section-head-btn" data-icon="plus" title="New conversation"></button></h3>
       <input type="text" id="conv-search" placeholder="search chats…" spellcheck="false">
       <div id="conv-list"></div>
     </div>
@@ -168,11 +168,11 @@
         </div>
         <div class="composer-row">
           <span>
-            <button id="toggle-params"><span class="btn-ic" data-icon="sliders"></span>parameters</button>
+            <button id="toggle-params" class="composer-action"><span class="btn-ic" data-icon="sliders"></span>parameters</button>
             &nbsp;&nbsp;
-            <button id="export-conv" title="Download this conversation"><span class="btn-ic" data-icon="export"></span>export</button>
+            <button id="export-conv" class="composer-action" title="Download this conversation"><span class="btn-ic" data-icon="export"></span>export</button>
             &nbsp;&nbsp;
-            <button id="compact-conv" title="Summarise older messages to free context"><span class="btn-ic" data-icon="compact"></span>compact</button>
+            <button id="compact-conv" class="composer-action" title="Summarise older messages to free context"><span class="btn-ic" data-icon="compact"></span>compact</button>
           </span>
           <span id="chat-usage"></span>
         </div>
@@ -262,7 +262,7 @@
       </div>
       </div>
       <aside id="coder-sessions">
-        <h3>Open sessions <button id="coder-new-session" data-icon="plus" title="Start a new coder session"></button></h3>
+        <h3>Open sessions <button id="coder-new-session" class="section-head-btn" data-icon="plus" title="Start a new coder session"></button></h3>
         <div id="coder-session-list"></div>
       </aside>
     </section>
