@@ -83,6 +83,18 @@ permanent public record of what shipped and are never rewritten; the in-progress
   instead, and the address it was given was discarded, so reloading did not help
   it either. Those links now land where they point. A link to a page that does
   not exist still falls back to Models.
+- **Hybrid models (Qwen3-Next, Granite 4 H, LFM2, Jamba, Falcon-H1 and
+  similar) are no longer charged several times too much VRAM for their
+  context.** These architectures use a growing KV cache on only some of their
+  layers; the rest keep a fixed-size state that costs nothing per token.
+  localm charged every layer, so on a real Qwen3-Next it asked for 4x the KV
+  cache actually needed (12 GB instead of 3 GB at a 128k context). Nothing
+  failed visibly - localm just quietly put the cache in system RAM, or
+  offloaded fewer layers to the GPU, on models that would have fit. localm now
+  works out which layers actually hold a cache by reading the model file, so
+  these models get the exact figure rather than an estimate. If a particular
+  file does not record enough to tell, localm falls back to its general
+  estimate instead of using a number it knows is wrong.
 - **The "reload chat model after generation" toggle now applies only to the page
   you set it on.** It sat on the Images page but wrote a single shared setting,
   so turning it off there silently turned off the VRAM handover for Music and

@@ -248,8 +248,40 @@ def llama_model_n_head(model: ctypes.c_void_p) -> int:
 def llama_model_n_head_kv(model: ctypes.c_void_p) -> int:
     """Number of key/value heads - fewer than n_head under grouped-query
     attention, which is exactly what makes the KV cache smaller than a naive
-    n_head estimate. Only call after has_kv_head_api()."""
+    n_head estimate. Only call after has_kv_head_api().
+
+    REPORTS LAYER 0 ONLY. Upstream's llama_model_n_head_kv calls
+    llama_hparams::n_head_kv(), whose il parameter defaults to 0 (verified in
+    llama.cpp's own llama-hparams.cpp/llama-model.cpp). On a UNIFORM stack every
+    layer agrees, so layer 0 speaks for all of them; on a HYBRID one it does not,
+    and multiplying this by the layer count over-charges. Callers doing that must
+    gate on has_hybrid_api()/llama_model_is_hybrid first."""
     return _bind("llama_model_n_head_kv", ctypes.c_int32, LlamaModel)(model)
+
+
+def has_hybrid_api() -> bool:
+    """True when this llama.dll exports llama_model_is_recurrent +
+    llama_model_is_hybrid, so a caller can tell whether the stack mixes attention
+    layers with recurrent ones (whose fixed-size state is NOT a per-token KV
+    cache) instead of assuming every layer attends. Probed as bindable on the
+    shipped runtime; the guard lets an exotic stripped build degrade rather than
+    raise AttributeError - same pattern as has_kv_head_api()/has_memory_api()."""
+    lib = load_lib()
+    return all(hasattr(lib, fn)
+               for fn in ("llama_model_is_recurrent", "llama_model_is_hybrid"))
+
+
+def llama_model_is_recurrent(model: ctypes.c_void_p) -> bool:
+    """True for a fully recurrent architecture (Mamba, RWKV ...), which keeps a
+    fixed-size state and no growing KV cache. Only call after has_hybrid_api()."""
+    return bool(_bind("llama_model_is_recurrent", ctypes.c_bool, LlamaModel)(model))
+
+
+def llama_model_is_hybrid(model: ctypes.c_void_p) -> bool:
+    """True for a hybrid architecture (Qwen3-Next, Granite 4 H, LFM2, Jamba,
+    Falcon-H1 ...), where only SOME layers attend and the rest keep a fixed-size
+    recurrent state. Only call after has_hybrid_api()."""
+    return bool(_bind("llama_model_is_hybrid", ctypes.c_bool, LlamaModel)(model))
 
 
 # ---------------------------------------------------------------------------

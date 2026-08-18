@@ -82,9 +82,17 @@ def _bare_model(n_layers=32, model_ptr=111) -> LlamaCpp:
     return llm
 
 
-def _fake_api(*, has=True, n_embd=4096, n_head=32, n_head_kv=8):
+def _fake_api(*, has=True, n_embd=4096, n_head=32, n_head_kv=8,
+              has_hybrid=True, hybrid=False, recurrent=False):
+    """A UNIFORM stack by default. hybrid/recurrent must be set explicitly, and
+    must never be left to MagicMock's auto-attribute: a bare MagicMock returns a
+    truthy Mock for llama_model_is_hybrid(), which would make every test here
+    silently exercise the hybrid refusal path instead of the formula."""
     m = MagicMock()
     m.has_kv_head_api.return_value = has
+    m.has_hybrid_api.return_value = has_hybrid
+    m.llama_model_is_hybrid.return_value = hybrid
+    m.llama_model_is_recurrent.return_value = recurrent
     m.llama_model_n_embd.return_value = n_embd
     m.llama_model_n_head.return_value = n_head
     m.llama_model_n_head_kv.return_value = n_head_kv
@@ -453,3 +461,96 @@ def test_real_runtime_gpu_memory_query(monkeypatch):
     assert mem is not None, "single GPU present but gpu_memory() returned None"
     free, total = mem
     assert 0 < free <= total and total > 512 * 1024 ** 2   # sane, > 512 MiB card
+
+
+# --------------------------------------------------------------------------- #
+#  The same defect, post-load: n_layers * n_head_kv on a HYBRID stack          #
+#                                                                              #
+#  llama_model_n_head_kv reports LAYER 0 only - upstream llama_hparams::       #
+#  n_head_kv() takes an il parameter defaulting to 0, and the exported wrapper  #
+#  passes nothing. On a uniform stack layer 0 speaks for every layer; on a      #
+#  hybrid one (Qwen3-Next, Granite 4 H, LFM2, Jamba ...) most layers keep a     #
+#  fixed-size recurrent state and hold no KV cache at all, so multiplying by    #
+#  the layer count over-charges and there is nothing here to sum over.         #
+# --------------------------------------------------------------------------- #
+
+class TestHasHybridApi:
+    def test_true_when_both_symbols_present(self):
+        fake_lib = MagicMock(spec=["llama_model_is_recurrent",
+                                   "llama_model_is_hybrid"])
+        with patch(_LOAD_LIB, return_value=fake_lib):
+            assert _api.has_hybrid_api() is True
+
+    def test_false_when_one_is_absent(self):
+        # A partial export is unusable: without both, a hybrid stack cannot be
+        # told apart from a uniform one.
+        fake_lib = MagicMock(spec=["llama_model_is_recurrent"])
+        with patch(_LOAD_LIB, return_value=fake_lib):
+            assert _api.has_hybrid_api() is False
+
+    def test_false_when_both_absent(self):
+        with patch(_LOAD_LIB, return_value=MagicMock(spec=[])):
+            assert _api.has_hybrid_api() is False
+
+
+class TestHybridBindings:
+    def test_is_hybrid_calls_through_and_returns_a_real_bool(self):
+        fake_fn = MagicMock(return_value=1)
+        fake_lib = MagicMock(spec=["llama_model_is_hybrid"])
+        fake_lib.llama_model_is_hybrid = fake_fn
+        with patch(_LOAD_LIB, return_value=fake_lib):
+            got = _api.llama_model_is_hybrid(1234)
+        assert got is True                     # a real bool, not ctypes' 1
+        fake_fn.assert_called_once_with(1234)
+
+    def test_is_recurrent_calls_through_and_returns_a_real_bool(self):
+        fake_fn = MagicMock(return_value=0)
+        fake_lib = MagicMock(spec=["llama_model_is_recurrent"])
+        fake_lib.llama_model_is_recurrent = fake_fn
+        with patch(_LOAD_LIB, return_value=fake_lib):
+            got = _api.llama_model_is_recurrent(1234)
+        assert got is False
+        fake_fn.assert_called_once_with(1234)
+
+
+class TestHybridStackIsRefused:
+    def test_hybrid_returns_zero_instead_of_the_over_charged_product(self):
+        # A Qwen3-Next shape: 48 layers, only 12 of which attend. The formula
+        # would charge all 48 and be 4x high; 0 means "no signal", which sends
+        # the caller to the GGUF header probe that can read the per-layer truth.
+        llm = _bare_model(n_layers=48)
+        with patch(_API, _fake_api(n_embd=2048, n_head=16, n_head_kv=2,
+                                   hybrid=True)):
+            assert llm._read_kv_bytes_per_token() == 0
+
+    def test_recurrent_returns_zero(self):
+        # Mamba/RWKV: no growing KV cache anywhere in the stack.
+        llm = _bare_model(n_layers=48)
+        with patch(_API, _fake_api(n_embd=2048, n_head=16, n_head_kv=2,
+                                   recurrent=True)):
+            assert llm._read_kv_bytes_per_token() == 0
+
+    def test_the_same_shape_still_computes_when_the_stack_is_uniform(self):
+        # The control. Without it, a version that returned 0 unconditionally
+        # would pass both tests above and look like a working fix.
+        llm = _bare_model(n_layers=48)
+        with patch(_API, _fake_api(n_embd=2048, n_head=16, n_head_kv=2)):
+            assert llm._read_kv_bytes_per_token() == 48 * 2 * 128 * 2 * 2
+
+    def test_a_build_without_the_predicates_keeps_the_old_answer(self):
+        # An exotic stripped build that cannot answer "is this hybrid?" must
+        # degrade to the previous behaviour rather than refuse everything, which
+        # would drop every model back onto the size-class heuristic.
+        llm = _bare_model(n_layers=48)
+        with patch(_API, _fake_api(n_embd=2048, n_head=16, n_head_kv=2,
+                                   has_hybrid=False, hybrid=True)):
+            assert llm._read_kv_bytes_per_token() == 48 * 2 * 128 * 2 * 2
+
+    def test_the_hybrid_check_is_not_consulted_before_the_kv_head_api(self):
+        # Ordering guard: has_kv_head_api() gates the whole block, so a build
+        # without the head accessors must answer 0 without ever probing hybrid.
+        api_mock = _fake_api(has=False, hybrid=True)
+        llm = _bare_model(n_layers=48)
+        with patch(_API, api_mock):
+            assert llm._read_kv_bytes_per_token() == 0
+        api_mock.llama_model_is_hybrid.assert_not_called()

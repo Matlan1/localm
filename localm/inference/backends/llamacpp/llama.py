@@ -1210,9 +1210,22 @@ class LlamaCpp:
         times 2 bytes/element (the f16 KV cache, llama.cpp's default type_k/type_v).
         head_dim = n_embd / n_head. n_head_kv (fewer than n_head under grouped-query
         attention) is exactly why the true KV cost is smaller than a naive n_head
-        estimate - and why estimating it from file size alone is unreliable."""
+        estimate - and why estimating it from file size alone is unreliable.
+
+        REFUSES on a hybrid/recurrent stack. That formula assumes every layer holds
+        a KV cache, which is false for Qwen3-Next, Granite 4 H, LFM2, Jamba and the
+        rest, where most layers keep a FIXED-size recurrent state instead and cost
+        no per-token KV at all. The exported llama_model_n_head_kv reports LAYER 0
+        only (upstream n_head_kv() defaults il=0), so there is nothing here to sum
+        over - and answering anyway over-charges by the ratio of attending layers
+        to all layers. Returning 0 hands the question to the caller's next source,
+        the GGUF header probe, which CAN read the exact per-layer array."""
         try:
             if self.n_layers and api.has_kv_head_api():
+                if api.has_hybrid_api() and (
+                        api.llama_model_is_hybrid(self._model_ptr)
+                        or api.llama_model_is_recurrent(self._model_ptr)):
+                    return 0
                 n_embd    = int(api.llama_model_n_embd(self._model_ptr))
                 n_head    = int(api.llama_model_n_head(self._model_ptr))
                 n_head_kv = int(api.llama_model_n_head_kv(self._model_ptr))
