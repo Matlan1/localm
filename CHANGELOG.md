@@ -165,6 +165,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   first. It now only reports a `localm` that is genuinely on your PATH, and
   when there is one it asks whether this install or the existing one should
   run, instead of deciding for you and telling you to reorder PATH yourself.
+- **The context-usage gauge now shows up on ordinary chat replies, not only
+  while streaming.** A non-streaming `/v1/chat/completions` reply left the
+  context-window figure out of its usage report even though streaming
+  replies always included it, so the gauge only ever drew for a streamed
+  answer. Both reply modes now report it the same way.
 
 ## [0.1.5rc3] - 2026-08-13
 
