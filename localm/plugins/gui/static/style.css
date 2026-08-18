@@ -1200,6 +1200,21 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
 .comfy-managed-log {
   margin-top: 8px; max-height: 220px; overflow: auto;
 }
+/* "Still working" indicator for a long-running Set-up/Update/Repair job (or a
+   reattached one after a reload): a spinner next to the button/pill label
+   plus a live readout above the log, so a quiet stretch (a large git clone,
+   pip install, or a multi-GB download with no per-line progress) never
+   reads as an indistinguishable-from-hung silence. Same rotating-ring
+   technique as .reconnect-spinner (reuses its keyframe), sized to sit
+   inline with text instead of as a full-page overlay. */
+.comfy-managed-spinner {
+  display: inline-block; width: 11px; height: 11px; margin-left: 8px;
+  vertical-align: -1px;
+  border-radius: 50%;
+  border: 2px solid var(--border); border-top-color: var(--accent);
+  animation: reconnect-spin 0.9s linear infinite;
+}
+.comfy-managed-elapsed { margin-top: 8px; }
 
 /* Per-plugin workflow panel (Image/Music/Video pages). */
 .workflow-list { display: flex; flex-direction: column; gap: 4px; margin: 6px 0; }
