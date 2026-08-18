@@ -8,7 +8,7 @@
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { addMessageRow, lsSetScoped } from "./chat.js";
 import { $, authHeaders, autoGrow, el, nearBottom, openModal, readSSE, renderMarkdown, toast } from "./helpers.js";
-import { iconEl } from "./icons.js";
+import { emptyState, iconEl } from "./icons.js";
 import { modelCache, refreshModels } from "./models-sidebar.js";
 import { pickDirectory } from "./picker.js";
 import { composerEnterToSend } from "./settings-perf.js";
@@ -863,7 +863,10 @@ export function showAuditModal(title, data) {
         r.row.style.display = !q || r.text.includes(q) ? "" : "none";
       }
     });
-    if (!data.entries.length) body.appendChild(el("div", "sub", "(empty)"));
+    if (!data.entries.length) {
+      body.appendChild(emptyState("clock", "No entries yet",
+        "Tool calls and events for this session appear here as they happen."));
+    }
   });
 }
 
@@ -883,7 +886,8 @@ export async function openFilesModal() {
   }
   openModal("Files changed - " + sessionLabel(s.info), (body) => {
     if (!data.files.length) {
-      body.appendChild(el("div", "sub", "No files changed this session."));
+      body.appendChild(emptyState("file", "No files changed",
+        "Edits the agent makes this session appear here."));
       return;
     }
     const diffBox = el("div", "files-diff");
@@ -1014,9 +1018,8 @@ export async function openSessionHistory() {
         "is from earlier log/full-mode sessions."));
     }
     if (!data.logs.length) {
-      body.appendChild(el("div", "sub",
-        "No session logs yet - start a session with persistence set to " +
-        "log or full, and its audit trail will appear here."));
+      body.appendChild(emptyState("book", "No session logs yet",
+        "Start a session with persistence set to log or full to keep an audit trail here."));
       return;
     }
     for (const item of data.logs) {

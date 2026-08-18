@@ -140,7 +140,7 @@ export function register(ctx) {
       renderList((data && data.jobs) || []);
     } catch (e) {
       clear(listEl);
-      listEl.appendChild(el("div", "sub", "Could not load jobs: " + e.message));
+      listEl.appendChild(emptyStateEl("warning", "Could not load jobs", e.message));
     }
   }
 
@@ -291,7 +291,7 @@ export function register(ctx) {
       }
     } catch (e) {
       clear(body);
-      body.appendChild(el("div", "sub", "Could not load results: " + e.message));
+      body.appendChild(emptyStateEl("warning", "Could not load results", e.message));
     }
   }
 

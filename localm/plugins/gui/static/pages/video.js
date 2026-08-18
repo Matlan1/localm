@@ -106,7 +106,7 @@ export async function refreshVideoHistory() {
     if (!r.ok) throw new Error(r.statusText);
     data = await r.json();
   } catch (e) {
-    box.appendChild(el("div", "sub", "Could not load history: " + e.message));
+    box.appendChild(emptyState("warning", "Could not load history", e.message));
     return;
   }
   if (!data.videos.length) {
@@ -202,7 +202,7 @@ export async function refreshMusicHistory() {
     if (!r.ok) throw new Error(r.statusText);
     data = await r.json();
   } catch (e) {
-    box.appendChild(el("div", "sub", "Could not load history: " + e.message));
+    box.appendChild(emptyState("warning", "Could not load history", e.message));
     return;
   }
   if (!data.tracks.length) {
