@@ -1213,6 +1213,12 @@ def test_hygiene_main_warns_on_a_new_duplicate(tmp_path, monkeypatch, capsys):
     # Unstubbed, these tests passed only on a machine that happens to have a
     # gitignored file, and could never pass on the one environment that gates a merge.
     monkeypatch.setattr(ch, "_release_manifest_gate", lambda: ([], []))
+    # Same isolation, one gate over: check 4c forbids an [Unreleased] SECTION in
+    # CHANGELOG.md outright, and these fixtures deliberately contain one because
+    # a draft section is the very thing 4b polices. Left live, 4c fails every
+    # fixture here for a reason that has nothing to do with the drop/duplicate
+    # detection under test.
+    monkeypatch.setattr(ch, "_changelog_released_only", lambda: [])
     monkeypatch.delenv("LOCALM_HYGIENE_STRICT", raising=False)
     _init_changelog_repo(tmp_path, _DRAFT_BASE)
     (tmp_path / "CHANGELOG.md").write_text(
@@ -1253,6 +1259,12 @@ def test_hygiene_main_warns_but_passes_on_a_draft_drop(tmp_path, monkeypatch, ca
     # Unstubbed, these tests passed only on a machine that happens to have a
     # gitignored file, and could never pass on the one environment that gates a merge.
     monkeypatch.setattr(ch, "_release_manifest_gate", lambda: ([], []))
+    # Same isolation, one gate over: check 4c forbids an [Unreleased] SECTION in
+    # CHANGELOG.md outright, and these fixtures deliberately contain one because
+    # a draft section is the very thing 4b polices. Left live, 4c fails every
+    # fixture here for a reason that has nothing to do with the drop/duplicate
+    # detection under test.
+    monkeypatch.setattr(ch, "_changelog_released_only", lambda: [])
     monkeypatch.delenv("LOCALM_HYGIENE_STRICT", raising=False)
     _init_changelog_repo(tmp_path, _DRAFT_BASE)
 
@@ -1384,6 +1396,12 @@ def test_added_note_is_report_only_and_rides_along_with_a_warning(
     # Unstubbed, these tests passed only on a machine that happens to have a
     # gitignored file, and could never pass on the one environment that gates a merge.
     monkeypatch.setattr(ch, "_release_manifest_gate", lambda: ([], []))
+    # Same isolation, one gate over: check 4c forbids an [Unreleased] SECTION in
+    # CHANGELOG.md outright, and these fixtures deliberately contain one because
+    # a draft section is the very thing 4b polices. Left live, 4c fails every
+    # fixture here for a reason that has nothing to do with the drop/duplicate
+    # detection under test.
+    monkeypatch.setattr(ch, "_changelog_released_only", lambda: [])
     monkeypatch.delenv("LOCALM_HYGIENE_STRICT", raising=False)
     _init_changelog_repo(tmp_path, _DRAFT_BASE)
 
@@ -1429,6 +1447,12 @@ def test_added_note_does_not_inflate_the_strict_failure_count(
     # Unstubbed, these tests passed only on a machine that happens to have a
     # gitignored file, and could never pass on the one environment that gates a merge.
     monkeypatch.setattr(ch, "_release_manifest_gate", lambda: ([], []))
+    # Same isolation, one gate over: check 4c forbids an [Unreleased] SECTION in
+    # CHANGELOG.md outright, and these fixtures deliberately contain one because
+    # a draft section is the very thing 4b polices. Left live, 4c fails every
+    # fixture here for a reason that has nothing to do with the drop/duplicate
+    # detection under test.
+    monkeypatch.setattr(ch, "_changelog_released_only", lambda: [])
     monkeypatch.delenv("LOCALM_HYGIENE_STRICT", raising=False)
     _init_changelog_repo(tmp_path, _DRAFT_BASE)
     (tmp_path / "CHANGELOG.md").write_text(
@@ -1512,3 +1536,71 @@ def test_baseline_ref_is_the_merge_base_not_the_moving_tip(monkeypatch):
     ref = ch._changelog_baseline_ref()
     assert calls and calls[0] == ("merge-base", "HEAD", "origin/master"), calls
     assert ref == "cafebabecafebabecafebabecafebabecafebabe"
+
+
+# ---- check 4c: the shipped changelog carries RELEASED versions only ---------
+
+_RELEASED_ONLY = """# Changelog
+
+## [0.1.5] - 2026-08-18
+
+### Fixed
+- **Something that shipped.** And what it means for you.
+"""
+
+
+def test_released_only_gate_rejects_an_unreleased_section(tmp_path, monkeypatch):
+    """The section must not be in the file at all: CHANGELOG.md ships verbatim
+    inside the release build, so an [Unreleased] section is written to every
+    user's disk describing changes their build does not have."""
+    ch = _load_check_hygiene()
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    (tmp_path / "CHANGELOG.md").write_text(
+        "# Changelog\n\n## [Unreleased]\n\n### Added\n- **A thing.** Not shipped.\n"
+        "\n## [0.1.5] - 2026-08-18\n\n### Fixed\n- **Shipped.** Yes.\n",
+        encoding="utf-8")
+    problems = ch._changelog_released_only()
+    assert len(problems) == 1
+    assert "CHANGELOG-FULL.md" in problems[0], "the failure must name the remedy"
+
+
+def test_released_only_gate_rejects_the_link_reference_too(tmp_path, monkeypatch):
+    """A dangling [Unreleased]: link definition points at a section that is no
+    longer served - the same stale pointer, one line lower."""
+    ch = _load_check_hygiene()
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    (tmp_path / "CHANGELOG.md").write_text(
+        _RELEASED_ONLY + "\n[Unreleased]: https://example.invalid/compare/v0.1.5...HEAD\n",
+        encoding="utf-8")
+    assert len(ch._changelog_released_only()) == 1
+
+
+def test_released_only_gate_passes_a_released_only_changelog(tmp_path, monkeypatch):
+    ch = _load_check_hygiene()
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    (tmp_path / "CHANGELOG.md").write_text(_RELEASED_ONLY, encoding="utf-8")
+    assert ch._changelog_released_only() == []
+
+
+def test_released_only_gate_matches_the_heading_not_the_word(tmp_path, monkeypatch):
+    """THE CASE THAT MAKES THIS GATE SAFE TO HAVE. A shipped 0.1.5rc1 entry says
+    "see the corrected `[Unreleased]` entry above" in its prose. That is the
+    permanent public record of a release. A content match would demand editing
+    text out of shipped release notes to satisfy a lint - the assertion applying
+    pressure to corrupt the record, rather than the record being wrong."""
+    ch = _load_check_hygiene()
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    (tmp_path / "CHANGELOG.md").write_text(
+        _RELEASED_ONLY + "- **Correction:** superseded, see the corrected "
+                         "`[Unreleased]` entry above.\n",
+        encoding="utf-8")
+    assert ch._changelog_released_only() == [], \
+        "prose inside a shipped release must never trip the gate"
+
+
+def test_the_real_shipped_changelog_carries_no_unreleased_section():
+    """Bound to the REAL file, not a fixture. A fixture only ever proves the
+    matcher works on input its author imagined; this is the artefact that
+    actually ships, and it is the one that has to be clean."""
+    ch = _load_check_hygiene()
+    assert ch._changelog_released_only() == []

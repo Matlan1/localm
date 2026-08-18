@@ -141,6 +141,7 @@ AGENTS.md
 RELEASE.md
 release-manifest.toml
 TODO.md
+CHANGELOG-FULL.md
 scripts/build_release.py
 scripts/make_release.py
 scripts/sign_release.py

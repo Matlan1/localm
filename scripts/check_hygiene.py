@@ -396,6 +396,19 @@ def _changelog_append_only() -> list[str]:
 
 
 # ---- check 4b: [Unreleased] draft corruption (warn-only) --------------------
+# NOW LARGELY INERT, and deliberately kept. Check 4c below forbids an [Unreleased]
+# SECTION in CHANGELOG.md outright, so once that lands there is no draft here left
+# to drop or duplicate and this check finds nothing. It stays because it is the
+# backstop for the case where someone re-adds a section anyway, and because
+# deleting a working guard to tidy up is how the next regression gets in.
+#
+# THE HAZARD IT GUARDED DID NOT GO AWAY - IT MOVED OUT OF GIT'S REACH. Draft
+# bullets now accumulate in CHANGELOG-FULL.md, which is gitignored, so there is no
+# baseline to diff against and no mechanical protection against one branch's entry
+# being lost. That is a real cost of the move, stated rather than papered over: the
+# discipline there is the same one the per-worktree codeql dispositions need - the
+# MAIN CHECKOUT's copy is the single source of truth, diff before writing, append
+# your own entry, never overwrite the file wholesale.
 # The append-only gate above deliberately exempts the [Unreleased] draft: it is
 # freely rewritable until cut. That exemption has a blind spot: when parallel
 # branches all add draft bullets, a sibling branch's bullet can disappear around
@@ -1605,6 +1618,53 @@ def _release_manifest_gate() -> tuple[list[str], list[str]]:
     return list(cm.check_manifest()), []
 
 
+# ---- check 4c: the shipped changelog carries RELEASED versions only ---------
+# CHANGELOG.md ships VERBATIM inside every release build (it is a manifest
+# release-include, and the release tooling never generates or truncates it) AND it
+# is what GET /api/changelog serves behind the app's "Show changelog" button. So an
+# [Unreleased] section is not a staging area - it is written to disk on every
+# user's machine, describing changes their build does not have, and on a
+# security-fix day describing those fixes in detail before they ship.
+#
+# _strip_unreleased() in admin.py removes the section before SERVING it. That is a
+# backstop for one reader, and it was mistaken for a solution: it does nothing
+# about the copy on disk in the release, and nothing about the file on GitHub.
+# So the section must not be in the file at all.
+#
+# In-progress entries accumulate in CHANGELOG-FULL.md (gitignored); cutting a
+# release promotes them into CHANGELOG.md under the new version heading.
+#
+# MATCHES THE HEADING, NEVER THE WORD. A shipped 0.1.5rc1 entry legitimately says
+# "see the corrected `[Unreleased]` entry above" in its prose, and that is the
+# permanent public record of a release - a content match would demand deleting text
+# out of shipped release notes to satisfy a lint, which is an assertion applying
+# pressure to corrupt the record rather than the record being wrong. Measured: the
+# word-matching version turns the real-file test red on exactly that line.
+_UNRELEASED_HEAD = re.compile(r"^##\s+\[Unreleased\]", re.I)
+_UNRELEASED_LINK = re.compile(r"^\[Unreleased\]:\s*\S+", re.I)
+
+
+def _changelog_released_only() -> list[str]:
+    """CHANGELOG.md must carry no [Unreleased] SECTION (heading or link ref)."""
+    path = REPO / "CHANGELOG.md"
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    hits = [i + 1 for i, ln in enumerate(lines)
+            if _UNRELEASED_HEAD.match(ln) or _UNRELEASED_LINK.match(ln)]
+    if not hits:
+        return []
+    where = ", ".join("line %d" % n for n in hits)
+    return ["CHANGELOG.md carries an [Unreleased] section (%s). That file ships "
+            "verbatim inside the release build and is what the app shows under "
+            "'Show changelog', so it must document RELEASED versions only - nothing "
+            "unreleased, nothing internal, nothing a user of the running build "
+            "cannot see or test. Move those entries to CHANGELOG-FULL.md "
+            "(gitignored) and promote them here under a version heading when the "
+            "release is cut." % where]
+
+
 def main(argv: list[str]) -> int:
     if "--install-hook" in argv:
         return _install_hook()
@@ -1624,6 +1684,7 @@ def main(argv: list[str]) -> int:
     for f in tracked:
         problems.extend(_scan(f))
     problems.extend(_changelog_append_only())
+    problems.extend(_changelog_released_only())
     problems.extend(_raw_accessor_violations(tracked))
     problems.extend(_big_test_write_violations(tracked))
     problems.extend(_sw_cache_derivation_violations())

@@ -1289,9 +1289,12 @@ export async function runtimeUpdateApply() {
 if ($("runtime-update-check")) $("runtime-update-check").onclick = runtimeUpdateCheck;
 if ($("runtime-update-apply")) $("runtime-update-apply").onclick = runtimeUpdateApply;
 
-// Changelog: show the RELEASED history (newest first) in the shared modal. The
-// endpoint strips the in-progress [Unreleased] section before serving, so this
-// never shows changes that are not in the running build.
+// Changelog: show the RELEASED history (newest first) in the shared modal.
+// CHANGELOG.md carries released versions only (enforced by check_hygiene), and
+// the endpoint ALSO strips any [Unreleased] section before serving. That strip is
+// a backstop, not the guarantee, and reading it as the guarantee is what once let
+// unreleased entries into the published file: it protects this one reader, while
+// the file still ships verbatim inside the build and is public on GitHub.
 // Fetched from /api/changelog and rendered via renderMarkdown - the same
 // DOMPurify(marked) path chat uses, so it is XSS-safe. Always available (it ships
 // in every build); a missing/failed fetch is shown in the modal, never left blank.
