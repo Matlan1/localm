@@ -231,8 +231,13 @@ export function register(ctx) {
     // is the jobs surface's own icon (plugin.toml), so a row leads with the same
     // mark as the tab it lives under.
     const nameTd = el("td", "name-cell");
-    nameTd.appendChild(iconElFor("clock", "ic ic-job"));
-    nameTd.appendChild(el("span", "name", job.name));
+    // The flex line lives on this inner span, never on the td: a display:flex td
+    // stops being a table-cell, so its border-bottom draws under its own content
+    // instead of at the row's foot and breaks the separator (style.css).
+    const nameLine = el("span", "cell-line");
+    nameTd.appendChild(nameLine);
+    nameLine.appendChild(iconElFor("clock", "ic ic-job"));
+    nameLine.appendChild(el("span", "name", job.name));
     tr.appendChild(nameTd);
 
     // Whether the schedule is armed, then the last run's outcome as a colored
@@ -244,20 +249,20 @@ export function register(ctx) {
     if (job.last_status) stateTd.appendChild(statusPill(job.last_status));
     tr.appendChild(stateTd);
 
-    tr.appendChild(el("td", "mono", fmtSchedule(job)));
+    tr.appendChild(el("td", "mono shrink-cell", fmtSchedule(job)));
 
     // Which collection a rag job re-syncs is the one thing that distinguishes
     // two otherwise identical rows, so show it rather than making the user open
     // the job to find out.
-    const taskTd = el("td", "", job.task_kind);
+    const taskTd = el("td", "grow-cell", job.task_kind);
     if (job.task_kind === "rag" && job.collection) {
       taskTd.appendChild(el("div", "sub", "collection: " + job.collection));
     }
     tr.appendChild(taskTd);
 
-    tr.appendChild(el("td", "mono", fmtTime(job.last_run)));
+    tr.appendChild(el("td", "mono shrink-cell", fmtTime(job.last_run)));
 
-    const actionsTd = el("td");
+    const actionsTd = el("td", "actions-cell");
     const run = rowBtn("run", job, "primary", "Run now");
     run.onclick = (e) => runNow(job, e.currentTarget);
     const toggle = rowBtn("toggle", job, "secondary", job.enabled ? "Disable" : "Enable");

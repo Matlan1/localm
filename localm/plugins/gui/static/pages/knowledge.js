@@ -100,11 +100,16 @@ export async function refreshKnowledgePage() {
     });
 
     const nameTd = el("td", "name-cell");
-    nameTd.appendChild(iconEl("book", "ic ic-doc"));
-    nameTd.appendChild(el("span", "name", c.name));
+    // The flex icon/name/badge line lives on this inner span, never on the td:
+    // a display:flex td stops being a table-cell and its border-bottom then
+    // draws under its own content, breaking the row separator (style.css).
+    const nameLine = el("span", "cell-line");
+    nameTd.appendChild(nameLine);
+    nameLine.appendChild(iconEl("book", "ic ic-doc"));
+    nameLine.appendChild(el("span", "name", c.name));
     tr.appendChild(nameTd);
-    tr.appendChild(el("td", "mono", String(c.n_docs)));
-    tr.appendChild(el("td", "mono", String(c.n_chunks)));
+    tr.appendChild(el("td", "mono shrink-cell", String(c.n_docs)));
+    tr.appendChild(el("td", "mono shrink-cell", String(c.n_chunks)));
     const retrievalTd = el("td", "mono", c.has_vectors ? "hybrid" : "BM25");
     if (needsReembed) {
       const badge = el("span", "retrieval-badge job-state st-skipped", "re-embed needed");
@@ -137,8 +142,7 @@ export async function refreshKnowledgePage() {
       retrievalTd.appendChild(badge);
     }
     tr.appendChild(retrievalTd);
-    const actions = el("td");
-    actions.style.textAlign = "right";
+    const actions = el("td", "actions-cell");
 
     if (c.corrupt) {
       const repair = el("button", "corrupt-fix", "repair");

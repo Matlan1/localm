@@ -341,7 +341,15 @@ test("the name cell leads with the shared icon helper", async () => {
     [{ name: "clock", cls: "ic ic-job" }],
     "the row icon comes from window.iconEl, using the jobs surface's own clock icon,"
     + " exactly once for the one job");
-  assert.equal(nameTd.firstElementChild.dataset.iconName, "clock",
+  // The icon/name line sits on an inner .cell-line span, not on the <td>: the flex
+  // row has to live on a child, because a display:flex <td> stops being a
+  // table-cell and its border-bottom then draws under its own content instead of
+  // at the row's foot, breaking the separator partway across the row.
+  const line = nameTd.querySelector(":scope > .cell-line");
+  assert.ok(line, "the name cell wraps its contents in a .cell-line");
+  assert.equal(nameTd.children.length, 1,
+    "the .cell-line is the name cell's only child, so the flex row is never on the td");
+  assert.equal(line.firstElementChild.dataset.iconName, "clock",
     "the icon LEADS the name cell");
   assert.equal(nameTd.querySelector(".name").textContent, JOB.name,
     "the name follows it in a .name span");

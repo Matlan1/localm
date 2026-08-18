@@ -1107,10 +1107,22 @@ pre:hover .canvas-btn { opacity: 1; }
 .ic-audio  { color: var(--ic-audio); }
 .ic-video  { color: var(--ic-video); }
 .ic-code   { color: var(--ic-code); }
-/* a data-table name cell that leads with a colored content icon */
-.data-table .name-cell { display: flex; align-items: center; gap: 9px; }
+/* A data-table name cell that leads with a colored content icon.
+   The flex row lives on the INNER .cell-line, never on the <td> itself: a td with
+   display:flex stops being a table-cell, so the browser wraps it in an anonymous
+   cell and the real td no longer stretches to the row height - its border-bottom
+   then draws under its own content instead of at the row's foot, leaving the
+   separator visibly broken partway across every row (measured: 82px above the
+   other cells' border on a tall row). Keeping the td a table-cell and flexing a
+   child gets the same icon/name/badge line with one continuous row rule. */
+.data-table .name-cell .cell-line { display: flex; align-items: center; gap: 9px; }
 .data-table .name-cell .ic { flex: 0 0 auto; }
 .data-table .name-cell .ic svg { width: 16px; height: 16px; }
+/* The name is the only part allowed to wrap; badges keep their own line. break-word
+   (not anywhere) so the flex item's min-content stays the longest word - `anywhere`
+   lets it collapse to one character per line, which it did: a 593px-tall row. */
+.data-table .name-cell .cell-line .name { min-width: 0; overflow-wrap: break-word; }
+.data-table .name-cell .cell-line > :not(.name) { flex: 0 0 auto; }
 /* A real section header inside a card: leading icon + title + one-line description, so no page
    shows a bare grey h3. Use .card-head { icon + .card-head-text { h3 + .card-desc } }. */
 .card-head { display: flex; align-items: center; gap: 10px; margin: 0 0 14px;
@@ -1435,16 +1447,33 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
   background: color-mix(in srgb, var(--cat-cyan) 15%, transparent); }
 .type-badge.type-unknown { color: var(--yellow); border-color: var(--yellow);
   background: color-mix(in srgb, var(--yellow) 15%, transparent); }
-/* The per-row model type <select> in the Models table actions cell. */
-.model-type-select {
-  font-size: 11px;
-  padding: 2px 4px;
-  margin: 0 2px;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  background: var(--surface, transparent);
-  color: var(--text);
+/* The per-row model type <select>, which sits in the Role column and IS that
+   column's type pill - one control that both shows the type and changes it, rather
+   than a read-only badge plus a separate select elsewhere in the row. It takes its
+   colour from the .type-<name> classes above, so the column still scans by colour.
+   .card select sets width:100% and a 13.5px/8px-10px form-input box, and beats a
+   lone class on specificity - which is why the compact styling written here never
+   applied and the control rendered 36px tall and full-cell wide. Both are pinned
+   below; the width reset is on `.data-table select` so the next row control to
+   appear does not walk into the same trap. */
+.data-table select { width: auto; }
+.data-table select.model-type-select {
+  appearance: none; -webkit-appearance: none;
+  font-family: var(--mono); font-size: 11px; line-height: 1.5;
+  padding: 2px 20px 2px 8px; height: auto; margin: 0;
+  border-radius: 999px; cursor: pointer;
+  /* Two 4px triangles form the caret; no background-image asset, and it inherits
+     currentColor so it matches whichever type colour the pill is wearing. */
+  background-image:
+    linear-gradient(45deg, transparent 50%, currentColor 50%),
+    linear-gradient(135deg, currentColor 50%, transparent 50%);
+  background-position: calc(100% - 11px) calc(50% + 1px), calc(100% - 7px) calc(50% + 1px);
+  background-size: 4px 4px, 4px 4px;
+  background-repeat: no-repeat;
 }
+/* The popup list is drawn by the OS, not by the pill: without this it inherits the
+   pill's type colour on its own text and is unreadable on several platforms. */
+.data-table select.model-type-select option { color: var(--text); background: var(--bg-input); }
 .job-state.st-running { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
 /* pending / paused: quiet neutral (base pill look), named so the vocabulary is complete. */
 .job-state.st-pending, .job-state.st-paused { color: var(--text-dim); }
@@ -1485,8 +1514,32 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
 .data-table th.sortable:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .data-table th .sort-arrow { margin-left: 4px; color: var(--accent); }
 .data-table th .sort-arrow.sort-desc svg { transform: rotate(180deg); }
-.data-table td { padding: 8px 10px; border-bottom: 1px solid var(--border); }
+.data-table td { padding: 8px 10px; border-bottom: 1px solid var(--border);
+  vertical-align: middle; }
 .data-table tr:last-child td { border-bottom: none; }
+/* One record is one row. The actions cell never wraps its controls onto a second
+   line (they used to stack one per line, turning a single model into a 163px-tall
+   block), and the columns that hold reference text rather than identity shrink to
+   their content so the name column keeps the slack. */
+.data-table .actions-cell { white-space: nowrap; text-align: right; }
+.data-table .shrink-cell { white-space: nowrap; width: 1%; }
+/* A long hf: source or path is reference text, not the row's identity - clipping it
+   with an ellipsis (full value on the element's title) keeps the row one line high.
+   Deliberately NOT applied to the name column: a model name's tail carries the quant
+   level, which is exactly what a reader compares between two rows. */
+.data-table .clip-cell {
+  max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* Keeping every record on one line gives the table a floor width. In a window too
+   narrow for it (but still above the mobile card breakpoint) the table scrolls
+   inside its own card rather than pushing the whole page sideways - the row stays
+   intact and the card keeps its edges. */
+div:has(> .data-table) { overflow-x: auto; }
+/* The one column that should absorb the slack rather than shrink to its content.
+   The floor stops it collapsing into a column one word wide when the row's other
+   columns are all at their natural width - past that point the table scrolls (rule
+   above) instead, which reads far better than a paragraph broken one word per line. */
+.data-table .grow-cell { width: 100%; min-width: 240px; }
 /* Row hover + the active model's row highlighted with the inset accent bar, like
    the picker rows - so the table reads as interactive, not a static grid. */
 .data-table tbody tr:hover { background: var(--bg-input); }
@@ -2442,6 +2495,18 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
   .data-table td:empty { display: none; }
   .data-table .name { font-size: 15px; }
   .data-table button { margin-left: 0; margin-top: 6px; min-height: 36px; }
+  /* The desktop one-row rules are the opposite of what a stacked card wants: here
+     the row IS allowed to use several lines, so the action buttons wrap, the
+     shrink-to-content columns go full width again, and the clipped source shows in
+     full rather than ending in an ellipsis with nowhere to hover for the title. */
+  .data-table .actions-cell { white-space: normal; text-align: left; }
+  .data-table .shrink-cell { width: 100%; white-space: normal; }
+  .data-table .clip-cell {
+    max-width: none; overflow: visible; text-overflow: clip; white-space: normal;
+  }
+  /* The name line keeps its icon+name+badges flex, but badges drop under a long
+     name instead of forcing a horizontal pan. */
+  .data-table .name-cell .cell-line { flex-wrap: wrap; }
 }
 
 /* Unified Model Browser Tab Navigation */
