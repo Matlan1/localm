@@ -69,10 +69,24 @@ export function renderHwStats(data) {
     if (cls) s.className = cls;
     spans.push(s);
   };
+  // ORDER: CPU, RAM, GPU, VRAM - two pairs, each "load, then memory". At the
+  // sidebar's width the row wraps after two metrics, so this reads as a 2x2:
+  // the system on the first line, the graphics card on the second. The previous
+  // order (CPU, RAM, VRAM, GPU) split the card's pair across the wrap.
   if (data && data.cpu && typeof data.cpu.percent === "number")
     add(`CPU ${Math.round(data.cpu.percent)}%`);
-  if (data && data.ram && typeof data.ram.percent === "number")
-    add(`RAM ${Math.round(data.ram.percent)}%`);
+  // RAM as used/total GB, matching the VRAM figure it now sits above - a bare
+  // percentage next to "3.6/16.0 GB" was the odd one out, and the absolute
+  // number is what tells you whether another model will fit. sysstats sends
+  // used/total/percent together or omits `ram` entirely; the percent branch is
+  // the fallback for an older server or a proxy returning a partial payload.
+  if (data && data.ram) {
+    const r = data.ram;
+    if (r.used != null && r.total) add(`RAM ${gib(r.used)}/${gib(r.total)} GB`);
+    else if (typeof r.percent === "number") add(`RAM ${Math.round(r.percent)}%`);
+  }
+  if (data && data.gpu && typeof data.gpu.percent === "number")
+    add(`GPU ${Math.round(data.gpu.percent)}%`);
   if (data && data.vram && data.vram.total) {
     const v = data.vram;
     if (v.used != null) {
@@ -83,8 +97,6 @@ export function renderHwStats(data) {
       add(`VRAM ${gib(v.total)} GB`);
     }
   }
-  if (data && data.gpu && typeof data.gpu.percent === "number")
-    add(`GPU ${Math.round(data.gpu.percent)}%`);
   el.textContent = "";
   if (spans.length) {
     // No separator TEXT NODES between the spans: the row wraps now (it used to
@@ -788,25 +800,41 @@ export async function refreshModels() {
       // browsing could then silently free VRAM). The dedicated Unload button
       // below is the actual affordance for that, and it is unambiguous in
       // both states: present only when there is something to unload.
+      // `resumable` is the model an unnamed request would reload and be served
+      // by (set by the server after an idle-unload, which keeps the Engine for
+      // lazy reload). It is NOT resident, but it IS what the next message will
+      // use, so it selects like the active model rather than falling through to
+      // the placeholder - "No model loaded" would be the wrong answer to "what
+      // serves my next message", and it is what made chat look broken whenever
+      // idle_unload_seconds was enabled.
+      //
+      // This is the SAME shape the server is already in at startup, where the
+      // configured model reports active with loaded false and the first message
+      // loads it. Idle-unload returns the server to that state, so the sidebar
+      // now renders it the same way instead of as a dead end.
+      const willServe = modelCache.active || modelCache.resumable || "";
       const placeholder = document.createElement("option");
       placeholder.value = "";
       placeholder.textContent = "No model loaded";
       placeholder.disabled = true;
-      if (!modelCache.active) placeholder.selected = true;
+      if (!willServe) placeholder.selected = true;
       modelSelect.appendChild(placeholder);
       for (const m of modelCache.models) {
         const opt = document.createElement("option");
         opt.value = m.name;
         const size = m.size_bytes ? ` (${(m.size_bytes / GIB).toFixed(1)} GB)` : "";
         opt.textContent = m.name + size;
-        if (m.active) opt.selected = true;
+        if (m.active || (!modelCache.active && m.name === willServe)) opt.selected = true;
         modelSelect.appendChild(opt);
       }
     }
     // ADR-0008 U4: do not clobber a deliberate busy state (e.g. a model load
     // still in flight) - this 30s poll has no idea one is running and used to
     // overwrite it unconditionally every time it landed mid-load.
-    if (!_statusBusy) setStatus("ok", data.active || "no model");
+    // "no model" only when nothing will serve the next message either - a
+    // resumable model reloads on it, so reporting "no model" would contradict
+    // both the dropdown above and what the server actually does.
+    if (!_statusBusy) setStatus("ok", data.active || data.resumable || "no model");
     // Present only when there is something to unload - not merely a courtesy,
     // the model this targets (modelCache.active) is the ONLY thing that makes
     // its click handler well-defined.
@@ -975,7 +1003,15 @@ if (sidebarUnloadBtn) {
       // gated on - skip it and the status line would stay stuck on
       // "unloading ...".
       modelCache.active = "";
-      setStatus("ok", "no model");
+      // The unload button's own tooltip promises "it reloads automatically on
+      // the next chat request", and the server does exactly that (the Engine
+      // stays in _engines for lazy reload). Publish that immediately alongside
+      // clearing `active`, for the same reason the line above exists: until the
+      // next poll lands, the chat gate would otherwise read no active and no
+      // resumable model and refuse to send - turning the button's promise into
+      // "load a model on the sidebar before chatting".
+      modelCache.resumable = model;
+      setStatus("ok", model);
       refreshModels();
       refreshPerfEstimate();
     } catch (e) {

@@ -351,16 +351,20 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
      Wrapping to a second line costs a few pixels of a sidebar that has room. */
   display: flex;
   flex-wrap: wrap;
-  column-gap: 5px;
+  column-gap: 9px;
   row-gap: 2px;
 }
 /* Each metric is an unbreakable unit, so a wrap can never split "3.6/16.0 GB"
-   across two lines. The separator is drawn by CSS INSIDE the following metric
-   rather than as a text node between them: as a text node it can be left
-   stranded at the end of a wrapped line, and inside the span it always travels
-   with the metric it introduces. */
+   across two lines.
+
+   SEPARATION IS THE GAP, NOT A "·" GLYPH, and that is a consequence of wrapping
+   rather than a taste call: an inline separator has to attach to one side, and
+   once the row can wrap, BOTH sides are wrong somewhere. As a text node after a
+   metric it strands at the end of a wrapped line; moved into the next metric's
+   ::before (tried, and visibly wrong in the browser) it leads the wrapped line
+   with an orphan "· VRAM ...". A gap cannot be orphaned because it collapses at
+   a line break. */
 .hw-stats > span { white-space: nowrap; }
-.hw-stats > span + span::before { content: "· "; }
 .hw-stats[hidden] { display: none; }
 #sidebar-unload-btn { width: 100%; margin-top: 6px; padding: 5px 8px; font-size: 12px; }
 /* Subtle VRAM-fullness tint, shown ONLY when a trustworthy used/total is known

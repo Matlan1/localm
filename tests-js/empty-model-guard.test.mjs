@@ -50,3 +50,45 @@ test("sendChat proceeds past the guard when a model IS loaded", async () => {
   assert.ok(chatReqs.length >= 1,
     "a chat request fires past the guard when a model is loaded");
 });
+
+// --------------------------------------------------------------------------- //
+//  ...but "nothing is resident" is NOT the same state as "nothing to load".    //
+//                                                                              //
+//  An idle-unload, and the sidebar's own Unload button, both leave the server  //
+//  with no ACTIVE model while keeping the Engine for lazy reload - and both    //
+//  tell the user it "reloads on the next chat request" (the idle-unload log    //
+//  line, and the button's tooltip). The server honours that: an unnamed        //
+//  request reloads and is served. The guard above used to refuse anyway,       //
+//  because modelCache.active is "" in that state too - so the promise was      //
+//  false and chat looked permanently broken until a model was re-picked.       //
+//                                                                              //
+//  /api/models now reports `resumable` for exactly that state, mirroring what  //
+//  /health already resolves. The guard must tell the two apart.                //
+// --------------------------------------------------------------------------- //
+
+test("sendChat SENDS when the model is unloaded but resumable (idle-unload / Unload button)", async () => {
+  const { window } = loadApp();
+  runScript(window, "modelCache.active = ''; modelCache.resumable = 'my-model';");
+  window.document.getElementById("chat-input").value = "hello there";
+  const calls = _fetchRecorder(window);
+
+  await window.sendChat().catch(() => {});
+
+  const chatReqs = calls.filter((u) => u.includes("/chat/completions"));
+  assert.ok(chatReqs.length >= 1,
+    "the request that triggers the promised reload must not be blocked");
+});
+
+test("sendChat still refuses when there is nothing to resume either", async () => {
+  const { window } = loadApp();
+  // The genuine dead end: no active model AND nothing the server could resolve.
+  runScript(window, "modelCache.active = ''; modelCache.resumable = '';");
+  window.document.getElementById("chat-input").value = "hello there";
+  const calls = _fetchRecorder(window);
+
+  await window.sendChat();
+
+  const chatReqs = calls.filter((u) => u.includes("/chat/completions"));
+  assert.equal(chatReqs.length, 0,
+    "an empty-model request with nothing to resolve to is still a client bug");
+});
