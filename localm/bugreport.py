@@ -295,9 +295,38 @@ def _scrub_url_creds(text: str) -> str:
 # endpoint it is - only the value must go. Do not widen this by adding more
 # value-shape regexes (sk-..., 24-char-opaque, ...): that chases formats
 # forever and still misses the next one; the name is the durable signal.
+#
+# The name may sit ANYWHERE a ``name=value`` pair can appear, not only right
+# after a ``?`` or ``&``: a user pasting a .env fragment or a shell line into a
+# report writes ``api_key=...`` at the start of a line, and a prefixed name
+# (``OPENAI_API_KEY=``, ``pull_token=``) never touches a query delimiter at all.
+# Hence three branches, all feeding ONE capture group so the substitution keeps
+# the name and drops only the value:
+#
+#   1. after a literal ?/& - the historic set, unchanged, so a bare ``?key=``
+#      or ``?sig=`` in a URL still redacts exactly as it always has;
+#   2. anywhere else, bare or prefixed - the names that mean a credential and
+#      nothing else (api_key, token, secret, password, passwd, pwd, ...);
+#   3. anywhere else, PREFIXED ONLY - the short generic names (key, auth, sig).
+#
+# Branch 3 is the deliberate decision here, and it exists because BOTH failure
+# directions are real. Admitting ``key``/``auth``/``sig`` bare outside a URL
+# would eat an ordinary ``key=value`` line out of a pasted config dump, an
+# ``auth=none`` out of a log, and (with the prefix allowed) ``monkey=13``;
+# dropping them entirely instead would leave ``SECRET_KEY=``, ``PRIVATE_KEY=``,
+# ``APP_KEY=``, ``x-auth=`` and ``req_sig=`` in the clear, and those are among
+# the commonest credential names a .env carries. Requiring a prefix plus a
+# separator keeps both: ``SECRET_KEY=`` redacts, ``key=`` and ``monkey=`` do not.
 _QUERY_SECRET_RE = re.compile(
-    r"(?i)([?&](?:api[_-]?key|key|token|secret|password|passwd|pwd|auth"
-    r"|access[_-]?token|sig|signature)=)[^&\s#\"'\)\]\}]*"
+    r"(?i)((?:"
+    r"(?<=[?&])(?:api[_-]?key|key|token|secret|password|passwd|pwd|auth"
+    r"|access[_-]?token|sig|signature)"
+    r"|(?<![A-Za-z0-9])(?:"
+    r"[A-Za-z0-9]*[_-]?(?:api[_-]?key|token|secret|password|passwd|pwd"
+    r"|access[_-]?token|signature)"
+    r"|[A-Za-z0-9]+[_-](?:key|auth|sig)"
+    r")"
+    r")=)[^&\s#\"'\)\]\}]*"
 )
 
 # The same credential can arrive as a pasted HTTP header line instead of a URL

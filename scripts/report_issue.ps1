@@ -42,12 +42,20 @@ function Scrub([string]$t) {
   if (-not $t) { return $t }
   # Mirror scripts/report_issue.py scrub() / localm/bugreport.py _scrub_secrets: strip
   # the account name from any home path AND obvious credentials, so nothing this
-  # reporter files carries a username or a pasted secret.
+  # reporter files carries a username or a pasted secret. Every strip the Python
+  # reporters apply is applied here too, in the same order: a fallback reporter that
+  # scrubs LESS than the in-app one is the shape that leaks.
   $ic = [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
   # Home-path username strip (Windows C:\Users\<name>, plus /home/ and /Users/ forms).
   $t = [regex]::Replace($t, '([A-Za-z]:[\\/]Users[\\/]|/home/|/Users/)[^\\/\r\n]+', '${1}<redacted>', $ic)
   # user:pass@ credentials in any URL-ish value (a comfy/searx/remote-server URL).
   $t = [regex]::Replace($t, '(://)[^/@\s]+@', '${1}<redacted>@')
+  # Credential-named assignments (a URL query parameter, a .env line, a shell line)
+  # and pasted HTTP header lines. .NET ports of _QUERY_SECRET_RE / _HEADER_SECRET_RE
+  # in localm/bugreport.py; the three-branch reasoning is documented there. Applied
+  # in the same order as scripts/report_issue.py, so all three reporters agree.
+  $t = [regex]::Replace($t, '(?i)((?:(?<=[?&])(?:api[_-]?key|key|token|secret|password|passwd|pwd|auth|access[_-]?token|sig|signature)|(?<![A-Za-z0-9])(?:[A-Za-z0-9]*[_-]?(?:api[_-]?key|token|secret|password|passwd|pwd|access[_-]?token|signature)|[A-Za-z0-9]+[_-](?:key|auth|sig)))=)[^&\s#"''\)\]\}]*', '${1}<redacted>')
+  $t = [regex]::Replace($t, '(?i)((?:x-)?(?:api[_-]key|api[_-]token|auth[_-]token)\s*:\s*)\S+', '${1}<redacted>')
   # Bearer tokens and OpenAI-style / localm API keys.
   $t = [regex]::Replace($t, '(?i)(bearer\s+)[A-Za-z0-9._\-]{8,}', '${1}<redacted>')
   $t = [regex]::Replace($t, '(?i)\b(?:sk|localm[_-]sk)-[A-Za-z0-9._\-]{12,}', '<redacted>')

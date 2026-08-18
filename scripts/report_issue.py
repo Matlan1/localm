@@ -132,11 +132,19 @@ _APIKEY_RE = re.compile(r"(?i)\b(?:sk|localm[_-]sk)-[A-Za-z0-9._\-]{12,}")
 # credential is at least as often carried as a URL query parameter
 # (?api_key=...) or a pasted header line (X-Api-Key: ...) as via user:pass@
 # syntax. Redact by NAME, never by guessing the value's format - see the
-# sibling comment in bugreport.py for why. Keep these two byte-identical to
-# their bugreport.py counterparts.
+# sibling comment in bugreport.py for why, including why the short generic
+# names (key/auth/sig) are admitted only with a prefix outside a query string.
+# Keep these two byte-identical to their bugreport.py counterparts.
 _QUERY_SECRET_RE = re.compile(
-    r"(?i)([?&](?:api[_-]?key|key|token|secret|password|passwd|pwd|auth"
-    r"|access[_-]?token|sig|signature)=)[^&\s#\"'\)\]\}]*"
+    r"(?i)((?:"
+    r"(?<=[?&])(?:api[_-]?key|key|token|secret|password|passwd|pwd|auth"
+    r"|access[_-]?token|sig|signature)"
+    r"|(?<![A-Za-z0-9])(?:"
+    r"[A-Za-z0-9]*[_-]?(?:api[_-]?key|token|secret|password|passwd|pwd"
+    r"|access[_-]?token|signature)"
+    r"|[A-Za-z0-9]+[_-](?:key|auth|sig)"
+    r")"
+    r")=)[^&\s#\"'\)\]\}]*"
 )
 _HEADER_SECRET_RE = re.compile(
     r"(?i)((?:x-)?(?:api[_-]key|api[_-]token|auth[_-]token)\s*:\s*)\S+"

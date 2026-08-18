@@ -96,6 +96,31 @@ def test_scrub_strips_query_string_and_header_credentials():
     assert "q=hello" in out  # non-credential param left intact
 
 
+def test_scrub_strips_bare_and_prefixed_credential_assignments():
+    """Mirrors the bare-name widening of _QUERY_SECRET_RE in
+    localm/bugreport.py. A credential written as a plain name=value line (a .env
+    fragment, a shell line) or behind a prefix (OPENAI_API_KEY=, pull_token=)
+    reaches this reporter exactly as it reaches the in-app one, and a fallback
+    reporter that scrubs LESS than the in-app one is the shape that leaks.
+
+    Both directions are asserted in one block on purpose: a widening that eats
+    ordinary config text out of a report is a real failure, not a cosmetic one,
+    and nothing else in this file would catch it."""
+    out = ri.scrub(
+        "pasted from my .env:\napi_key=CANARYBARE7Q4M\n"
+        "OPENAI_API_KEY=CANARYBARE1AAA\nSECRET_KEY=CANARYBARE2BBB\n"
+        "n_gpu_layers=35 key=value monkey=13\n")
+    assert "CANARYBARE7Q4M" not in out
+    assert "CANARYBARE1AAA" not in out
+    assert "CANARYBARE2BBB" not in out
+    assert "api_key=<redacted>" in out
+    assert "OPENAI_API_KEY=<redacted>" in out
+    assert "SECRET_KEY=<redacted>" in out
+    assert "n_gpu_layers=35" in out
+    assert "key=value" in out
+    assert "monkey=13" in out
+
+
 def test_scrub_empty_is_safe():
     assert ri.scrub("") == ""
     assert ri.scrub(None) is None

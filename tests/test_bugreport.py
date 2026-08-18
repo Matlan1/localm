@@ -173,6 +173,80 @@ def test_scrub_secrets_query_and_header_redaction_is_idempotent():
     assert "CANARY1" not in once and "CANARY2" not in once
 
 
+# The credential NAME does not have to sit right after a ? or & - a user pasting
+# a .env fragment, a shell line or a printed launcher URL into a report writes it
+# at the start of a line, or behind a prefix (OPENAI_API_KEY=, pull_token=) that
+# never touches a query delimiter at all. Every one of those shipped verbatim
+# until _QUERY_SECRET_RE grew its bare-name branches.
+#
+# CANARY CHOICE IS LOAD-BEARING: these canaries match none of the OTHER scrubbers
+# in the chain. An sk- shaped canary would be eaten by _APIKEY_RE and make the
+# test pass on the unfixed pattern - green for a reason unrelated to the fix.
+def test_scrub_secrets_redacts_bare_credential_assignment_outside_a_url():
+    out = bugreport._scrub_secrets(
+        "pasted from my .env:\napi_key=CANARYBARE7Q4M\ntoken=CANARYBARE9VLM\n")
+    # The DATA first: a regression must report "the canary survived", which is a
+    # statement about the world. Leading with the <redacted> marker would read as
+    # an adjustable formatting nit and invite someone to edit the assertion.
+    assert "CANARYBARE7Q4M" not in out
+    assert "CANARYBARE9VLM" not in out
+    # The marker second - the name still shows THAT a credential was there.
+    assert "api_key=<redacted>" in out
+    assert "token=<redacted>" in out
+
+
+def test_scrub_secrets_redacts_prefixed_credential_names():
+    """SECRET_KEY / PRIVATE_KEY / OPENAI_API_KEY are the shapes a .env actually
+    carries, and none of them can reach the ?/& anchored form."""
+    out = bugreport._scrub_secrets(
+        "OPENAI_API_KEY=CANARYBARE1AAA SECRET_KEY=CANARYBARE2BBB "
+        "PRIVATE_KEY=CANARYBARE3CCC x-auth=CANARYBARE4DDD")
+    for canary in ("CANARYBARE1AAA", "CANARYBARE2BBB",
+                   "CANARYBARE3CCC", "CANARYBARE4DDD"):
+        assert canary not in out
+    assert "OPENAI_API_KEY=<redacted>" in out
+    assert "SECRET_KEY=<redacted>" in out
+    assert "x-auth=<redacted>" in out
+
+
+def test_scrub_secrets_redacts_launch_grants_in_a_printed_gui_url():
+    """``localm gui`` puts its pull/launch grants in the URL it prints to the
+    console, so this is the one shape known to reach a report carrying a real
+    (short-lived, single-use) credential. It has a prefixed parameter name, so
+    the ?/& anchored form left the whole line untouched."""
+    out = bugreport._scrub_secrets(
+        "opening https://127.0.0.1:8080/?view=models&pull=owner%2Frepo"
+        "&pull_token=CANARYBARE5EEE&localm_token=CANARYBARE6FFF")
+    assert "CANARYBARE5EEE" not in out
+    assert "CANARYBARE6FFF" not in out
+    assert "pull_token=<redacted>" in out
+    assert "localm_token=<redacted>" in out
+    assert "pull=owner%2Frepo" in out
+
+
+def test_scrub_secrets_leaves_non_credential_bare_assignments_intact():
+    """The OTHER failure direction, and the one with no natural signal: an
+    over-broad pattern ships green and silently eats diagnostic text out of every
+    report. These are what a pasted config dump or log line is made of.
+
+    ``key=`` / ``auth=`` / ``sig=`` are in here deliberately. The short generic
+    names redact only when prefixed (SECRET_KEY=, x-auth=) or inside a query
+    string (?key=, asserted above); bare, they are ordinary config vocabulary.
+    ``monkey`` / ``hotkey`` guard the prefix branch against matching a name that
+    merely ENDS in one of them."""
+    text = ("n_gpu_layers=35 port=8080 n_ctx=4096 max_tokens=512 model=llama "
+            "monkey=13 hotkey=f1 key=value auth=none sig=short")
+    assert bugreport._scrub_secrets(text) == text
+
+
+def test_scrub_secrets_bare_assignment_redaction_is_idempotent():
+    once = bugreport._scrub_secrets(
+        "api_key=CANARYBARE7Q4M SECRET_KEY=CANARYBARE2BBB n_ctx=4096")
+    twice = bugreport._scrub_secrets(once)
+    assert once == twice
+    assert "CANARYBARE7Q4M" not in once and "CANARYBARE2BBB" not in once
+
+
 def test_build_report_no_secret_when_none_given():
     text = bugreport.build_report("x")
     assert "## Error detail" not in text
