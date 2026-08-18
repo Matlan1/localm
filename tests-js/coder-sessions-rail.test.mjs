@@ -25,7 +25,8 @@ test("R17: the coder open-sessions rail lists sessions and marks the active one"
   assert.ok(items[0].classList.contains("active"), "the active session is highlighted");
   assert.ok(!items[1].classList.contains("active"), "the inactive session is not");
   assert.match(items[0].textContent, /alpha/, "labelled by its project directory");
-  assert.match(items[1].textContent, /⏳/, "a busy session shows the working badge");
+  assert.ok(items[1].querySelector('.badge [data-icon-name="clock"]'),
+    "a busy session shows the working badge");
 });
 
 test("R17: clicking a rail item activates that session", () => {

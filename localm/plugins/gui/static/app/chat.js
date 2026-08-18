@@ -7,6 +7,7 @@
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { $, authHeaders, autoGrow, confirmDanger, el, fetchImageURL, INSTANCE_SCOPED_KEYS, readStoredJSON, reconcileInstanceId, renderMarkdown, scrubMarkers, stripThink, toast } from "./helpers.js";
+import { iconEl } from "./icons.js";
 import { modelCache, modelSelect } from "./models-sidebar.js";
 import { openMemoryModal, runCompletion, speak, setWebAskSession } from "./settings-perf.js";
 import { showView } from "./tabs.js";
@@ -655,7 +656,8 @@ export function buildConvItem(conv, snippet) {
   };
   item.appendChild(title);
 
-  const pin = el("button", "del" + (conv.pinned ? " pinned-btn" : ""), "📌");
+  const pin = el("button", "del" + (conv.pinned ? " pinned-btn" : ""));
+  pin.appendChild(iconEl("pin", "ic"));
   pin.title = conv.pinned ? "Unpin" : "Pin to top";
   pin.onclick = (e) => {
     e.stopPropagation();
@@ -666,7 +668,8 @@ export function buildConvItem(conv, snippet) {
   };
   item.appendChild(pin);
 
-  const fold = el("button", "del", "📁");
+  const fold = el("button", "del");
+  fold.appendChild(iconEl("folder", "ic"));
   fold.title = conv.folder ? `Folder: ${conv.folder} (click to change)`
                            : "Move to a folder";
   fold.onclick = (e) => {
@@ -736,12 +739,15 @@ export function renderConvList() {
     }
   }
 
-  const addGroup = (label, key, items) => {
+  const addGroup = (icon, label, key, items) => {
     if (!items.length) return;
     if (label) {
       // While searching, groups stay expanded so matches are never hidden
       const collapsed = !term && convUI.collapsed.has(key);
-      const head = el("div", "conv-group", (collapsed ? "▸ " : "▾ ") + label);
+      const head = el("div", "conv-group");
+      head.appendChild(document.createTextNode(collapsed ? "▸ " : "▾ "));
+      if (icon) head.appendChild(iconEl(icon, "btn-ic"));
+      head.appendChild(document.createTextNode(label));
       head.onclick = () => {
         if (convUI.collapsed.has(key)) convUI.collapsed.delete(key);
         else convUI.collapsed.add(key);
@@ -754,11 +760,11 @@ export function renderConvList() {
     for (const v of items) list.appendChild(buildConvItem(v.conv, v.snippet));
   };
 
-  addGroup(pinned.length ? "📌 pinned" : "", "::pinned", pinned);
+  addGroup("pin", pinned.length ? "pinned" : "", "::pinned", pinned);
   for (const name of [...folders.keys()].sort()) {
-    addGroup("📁 " + name, "f:" + name, folders.get(name));
+    addGroup("folder", name, "f:" + name, folders.get(name));
   }
-  addGroup((pinned.length || folders.size) && loose.length ? "chats" : "",
+  addGroup(null, (pinned.length || folders.size) && loose.length ? "chats" : "",
            "::chats", loose);
 
   if (term && !visible.length) {
@@ -854,13 +860,15 @@ const MEMORY_DEGRADE_LABELS = {
   query_embed_failed: "keyword match only - could not embed this message",
 };
 
-/** F11: build the "🧠 N" chip for an assistant turn - how many remembered facts
- *  the server injected into that reply. Click opens the memory modal so a wrong or
- *  stale fact steering an answer is correctable in place. The tooltip lists the
- *  facts used and any recall degrade reason. */
+/** F11: build the memory-icon "N" chip for an assistant turn - how many
+ *  remembered facts the server injected into that reply. Click opens the memory
+ *  modal so a wrong or stale fact steering an answer is correctable in place.
+ *  The tooltip lists the facts used and any recall degrade reason. */
 export function buildMemoryChip(mem) {
   const n = mem.n | 0;
-  const chip = el("button", "mem-chip", "🧠 " + n);
+  const chip = el("button", "mem-chip");
+  chip.appendChild(iconEl("memory", "btn-ic"));
+  chip.appendChild(document.createTextNode(String(n)));
   const facts = (mem.items || []).map((it) => it && it.text).filter(Boolean);
   const reason = MEMORY_DEGRADE_LABELS[mem.degrade];
   chip.title = [
@@ -967,8 +975,10 @@ export function addMessageRow(container, role, text, opts = {}) {
     nav.appendChild(next);
     meta.appendChild(nav);
   }
-  for (const [label, fn] of opts.actions || []) {
-    const btn = el("button", "action", label);
+  for (const [label, fn, icon] of opts.actions || []) {
+    const btn = el("button", "action");
+    if (icon) { btn.appendChild(iconEl(icon, "ic")); btn.title = label; }
+    else btn.textContent = label;
     btn.onclick = fn;
     meta.appendChild(btn);
   }
@@ -1061,7 +1071,7 @@ export function renderChat() {
       actions.push(["revert", () => revertTo(conv, i)]);
     }
     if (m.role === "assistant" && !tag) {
-      actions.push(["🔊", () => speak(msgText(m), { toggle: true })]);
+      actions.push(["Speak this reply aloud", () => speak(msgText(m), { toggle: true }), "speak"]);
     }
     if (m.role === "assistant" && i === conv.messages.length - 1 && !chat.abort) {
       actions.push(["regenerate", () => regenerate(conv)]);
@@ -1079,7 +1089,7 @@ export function renderChat() {
       };
     }
     const noteSuffix = m.truncated
-      ? "\n\n*[stopped at the max-tokens limit - raise “Max tokens” in ⚙ parameters, or reply “continue”]*"
+      ? "\n\n*[stopped at the max-tokens limit - raise “Max tokens” in parameters, or reply “continue”]*"
       : m.stopped
       ? "\n\n*[stopped]*"
       : "";
@@ -1323,7 +1333,8 @@ export function renderAttachChips() {
   });
   chat.docs.forEach((doc, i) => {
     const chip = el("span", "chip");
-    chip.appendChild(el("span", "", "📄 " + doc.name +
+    chip.appendChild(iconEl("file", "ic"));
+    chip.appendChild(el("span", "", doc.name +
       ` (${(doc.chars / 1000).toFixed(1)}k chars${doc.truncated ? ", trimmed" : ""})`));
     const rm = el("button", "", "×");
     rm.onclick = () => { chat.docs.splice(i, 1); renderAttachChips(); };

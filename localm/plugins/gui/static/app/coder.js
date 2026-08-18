@@ -8,6 +8,7 @@
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { addMessageRow, lsSetScoped } from "./chat.js";
 import { $, authHeaders, autoGrow, el, nearBottom, openModal, readSSE, renderMarkdown, toast } from "./helpers.js";
+import { iconEl } from "./icons.js";
 import { modelCache, refreshModels } from "./models-sidebar.js";
 import { pickDirectory } from "./picker.js";
 import { composerEnterToSend } from "./settings-perf.js";
@@ -81,7 +82,12 @@ export function renderCoderSessionList() {
   for (const [id, s] of coder.sessions) {
     const item = el("div", "coder-session-item" + (id === coder.activeId ? " active" : ""));
     item.appendChild(el("span", "title", sessionLabel(s.info)));
-    if (s.busy) item.appendChild(el("span", "badge", "⏳"));
+    if (s.busy) {
+      const badge = el("span", "badge");
+      badge.appendChild(iconEl("clock", "ic"));
+      badge.title = "Busy";
+      item.appendChild(badge);
+    }
     item.onclick = () => activateSession(id);
     list.appendChild(item);
   }
@@ -259,9 +265,11 @@ export function resolveConfirmCard(s, confirmId, approved, timedOut) {
   const entry = s.confirmCards.get(confirmId);
   if (!entry || entry.card.classList.contains("answered")) return;
   entry.card.classList.add("answered");
-  entry.title.textContent = timedOut
-    ? "✗ Timed out - rejected " + entry.tool
-    : (approved ? "✓ Approved " : "✗ Rejected ") + entry.tool;
+  entry.title.replaceChildren();
+  entry.title.appendChild(iconEl(!timedOut && approved ? "check" : "close", "btn-ic"));
+  entry.title.appendChild(document.createTextNode(timedOut
+    ? "Timed out - rejected " + entry.tool
+    : (approved ? "Approved " : "Rejected ") + entry.tool));
 }
 
 export function buildConfirmCard(s, ev) {
@@ -643,7 +651,8 @@ export function renderCoderAttachChips() {
   box.replaceChildren();
   coder.docs.forEach((doc, i) => {
     const chip = el("span", "chip");
-    chip.appendChild(el("span", "", "📄 " + doc.name +
+    chip.appendChild(iconEl("file", "ic"));
+    chip.appendChild(el("span", "", doc.name +
       ` (${(doc.chars / 1000).toFixed(1)}k chars${doc.truncated ? ", trimmed" : ""})`));
     const rm = el("button", "", "×");
     rm.onclick = () => { coder.docs.splice(i, 1); renderCoderAttachChips(); };

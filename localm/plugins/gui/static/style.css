@@ -1415,7 +1415,8 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
 .data-table th.sortable { cursor: pointer; user-select: none; }
 .data-table th.sortable:hover { color: var(--text); }
 .data-table th.sortable:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-.data-table th .sort-arrow { margin-left: 4px; font-size: 9px; color: var(--accent); }
+.data-table th .sort-arrow { margin-left: 4px; color: var(--accent); }
+.data-table th .sort-arrow.sort-desc svg { transform: rotate(180deg); }
 .data-table td { padding: 8px 10px; border-bottom: 1px solid var(--border); }
 .data-table tr:last-child td { border-bottom: none; }
 /* Row hover + the active model's row highlighted with the inset accent bar, like

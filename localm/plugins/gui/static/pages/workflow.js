@@ -7,6 +7,7 @@
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { $, authHeaders, confirmDanger, el, toast } from "../app/helpers.js";
+import { iconEl } from "../app/icons.js";
 import { loginWithKey } from "../app/models-sidebar.js";
 import { MEDIA_PLUGIN_ORDER } from "./settings.js";
 
@@ -169,7 +170,9 @@ async function comfyModelPicker(media) {
 
 export function workflowRow(media, name, label, active, deletable) {
   const row = el("div", "workflow-row" + (active ? " active" : ""));
-  const pick = el("button", "workflow-pick", (active ? "● " : "○ ") + label);
+  const pick = el("button", "workflow-pick");
+  pick.appendChild(iconEl(active ? "dot" : "ring", "btn-ic"));
+  pick.appendChild(document.createTextNode(label));
   pick.type = "button";
   pick.title = active ? "In use" : "Use this workflow";
   pick.onclick = () => selectWorkflow(media, name);
