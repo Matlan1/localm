@@ -11,7 +11,7 @@ import { populateSetupModels, reattachSessions } from "./coder.js";
 import { $, authHeaders, el, instanceCacheTrusted, refreshCsrf, sentShellToken } from "./helpers.js";
 import { syncLogoStyleFromConfig } from "./logo.js";
 import { addRevealToggle, applyInstallGateUI, dismissInstallGate, isIOSSafari, reattachActivity, refreshModels, shouldShowInstallGate, showInstallGate, showKeyGate, startHwStats, startQrScan, stopQrScan, submitKeyGate } from "./models-sidebar.js";
-import { loadClientPlugins, onVoicePick, populateVoicePicker, refreshKbSelect, refreshMemory, refreshPersonas, refreshPluginCommands, refreshVoiceStatus, setupPerfCard } from "./settings-perf.js";
+import { capsReady, loadClientPlugins, onVoicePick, populateVoicePicker, refreshKbSelect, refreshMemory, refreshPersonas, refreshPluginCommands, refreshVoiceStatus, setupPerfCard } from "./settings-perf.js";
 import { VIEWS, showView } from "./tabs.js";
 
 // CSRF self-heal: a cookie-authed write can 403 if the in-memory CSRF token went
@@ -442,7 +442,9 @@ window.bootAuthProbe = bootAuthProbe;
   refreshPersonas();
   refreshMemory();
   refreshVoiceStatus();
-  loadClientPlugins();
+  // Kept (not fired and forgotten) because the `?view=` deep link below has to
+  // wait for the plugin tabs' view sections to exist before it can land on one.
+  const clientPluginsReady = loadClientPlugins();
   refreshPluginCommands();
   setInterval(refreshModels, 30000);
   startHwStats();   // live CPU/RAM/VRAM/GPU readout in the status bar
@@ -501,6 +503,28 @@ window.bootAuthProbe = bootAuthProbe;
   } else if (pullSpec || viewParam) {
     // Strip the query so a reload doesn't restart the download.
     history.replaceState(null, "", location.pathname);
+    // A plugin tab (coder/images/music/video/knowledge/jobs) is NOT in VIEWS at
+    // module-eval time: tabs.js seeds VIEWS with CORE_VIEWS alone, and
+    // rebuildViews() appends the plugin tabs only once /api/capabilities has
+    // been read. Deciding before that lands makes a perfectly valid tab fail the
+    // includes() test below and silently become "models" - and the line above
+    // has already stripped the query, so nothing can retry it. `localm gui`
+    // prints /?view=models, a CORE view, which is why this never showed up in
+    // normal use.
+    //
+    // So wait for the ANSWER instead of deciding from an absence, exactly as
+    // pages/settings.js waits on capsReady before reading caps.fsAccess. BOTH
+    // signals are needed and they are not the same one: capsReady covers VIEWS
+    // (refreshPluginCommands -> renderNav -> rebuildViews, all inside the try
+    // whose `finally` resolves it), while #view-jobs is built by the jobs client
+    // entry itself and is reached only through loadClientPlugins()'s dynamic
+    // imports - without that second wait showView() finds no #view-jobs and
+    // falls back to chat. Neither promise can reject, and capsReady resolves in
+    // a `finally` on every exit path, so an unreachable server degrades to the
+    // "models" fallback below rather than hanging here.
+    //
+    // Gated on viewParam so a bare `?pull=` keeps its current timing.
+    if (viewParam) await Promise.allSettled([capsReady, clientPluginsReady]);
     showView(VIEWS.includes(viewParam) ? viewParam : "models");
     if (pullSpec) {
       const specInput = $("pull-spec");
@@ -552,6 +576,15 @@ window.bootAuthProbe = bootAuthProbe;
     // mismatch branch (showView("chat")) once the round trip confirms
     // otherwise - never trust this read as a real per-backend confirmation on
     // its own.
+    //
+    // NOT deferred the way the `?view=` branch above is, and that asymmetry is
+    // deliberate. chat.js's confirmed-mismatch correction (showView("chat"),
+    // AUD-INSTANCEID residual 1) is written on the premise that nothing
+    // re-asserts the view after it runs. Awaiting the plugin set here would let
+    // this restore land AFTER that correction and put a foreign install's
+    // last-open page back on screen - reintroducing the exact leftover that
+    // branch exists to clear. A `?view=` deep link carries no such residue: it
+    // is an explicit request in THIS url, not cached state from another backend.
     const savedView = _instanceTrusted ? localStorage.getItem("localm.activeView") : null;
     if (savedView && savedView !== "chat") showView(savedView);
   }
