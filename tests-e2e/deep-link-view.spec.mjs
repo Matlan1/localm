@@ -85,6 +85,16 @@ for (const tab of PLUGIN_TABS) {
     const children = await page.locator(`#view-${tab} *`).count();
     expect(children, `#view-${tab} should render content`).toBeGreaterThan(3);
 
+    // ...and it must STILL hold once the whole boot has settled. Every test here
+    // runs in a fresh context, so reconcileInstanceId sees a never-paired origin,
+    // returns "mismatched" and chat.js calls showView("chat") when /v1/config
+    // lands. Without this re-check a pass could be a transient caught before that
+    // correction fired, which is the one way this test could go green on a deep
+    // link that a real user still loses.
+    await page.waitForTimeout(4000);
+    expect(await activeViewId(page),
+      `#view-${tab} should STILL be active after the boot settles`).toBe(`view-${tab}`);
+
     expect(pageErrors, "no uncaught JS errors during a deep-linked boot").toEqual([]);
   });
 }

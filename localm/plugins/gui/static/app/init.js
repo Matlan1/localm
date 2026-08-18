@@ -523,8 +523,23 @@ window.bootAuthProbe = bootAuthProbe;
     // a `finally` on every exit path, so an unreachable server degrades to the
     // "models" fallback below rather than hanging here.
     //
+    // convReady is the THIRD signal and it is about precedence, not readiness.
+    // Every browser that has never paired with this backend reconciles as
+    // "mismatched" (helpers.js reconcileInstanceId - a brand-new origin counts,
+    // not just a genuinely foreign one), and chat.js answers that by calling
+    // showView("chat") to drop a saved view restored from another install. That
+    // correction lands whenever /v1/config resolves, so without waiting for it
+    // the deep link and the correction race: MEASURED here as a real
+    // intermittent, ?view=knowledge landing on view-chat in one run of three
+    // while passing in the other two. Waiting makes the explicit url win
+    // deterministically instead of usually. It does not weaken the correction -
+    // every instance-scoped wipe it performs still happens, and a `?view=` in
+    // THIS url is not the foreign-install leftover that branch exists to clear.
+    //
     // Gated on viewParam so a bare `?pull=` keeps its current timing.
-    if (viewParam) await Promise.allSettled([capsReady, clientPluginsReady]);
+    if (viewParam) {
+      await Promise.allSettled([capsReady, clientPluginsReady, convReady]);
+    }
     showView(VIEWS.includes(viewParam) ? viewParam : "models");
     if (pullSpec) {
       const specInput = $("pull-spec");
