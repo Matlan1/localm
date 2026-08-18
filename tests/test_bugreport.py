@@ -264,6 +264,13 @@ _NON_SECRET_ASSIGNMENTS = (
     "auth_token=none",
     "api_key=disabled",
     "pull_token=null",
+    # A report is prose, so the same flag arrives wrapped in markup. Found by a
+    # test bound to the real docs, which write it as markdown inline code - the
+    # first version of the suppressor missed every one of these.
+    "`require_auth=1`",
+    "(require_auth=1)",
+    "`LOCALM_REQUIRE_AUTH=1`",
+    "set `require_auth=true` to fail closed",
 )
 
 
@@ -293,6 +300,25 @@ def test_scrub_secrets_still_redacts_a_secret_that_starts_with_a_literal(line, c
     assert "=<redacted>" in out       # marker second
 
 
+@pytest.mark.parametrize("line", [
+    "api_key=1)SECRETLEAK",
+    'api_key=1"SECRETLEAK',
+    "token=true]MORESECRET",
+])
+def test_the_non_secret_suppressor_does_not_fire_when_more_value_follows(line):
+    """Tolerating closing markup must not become a bypass. ``(require_auth=1)``
+    is a flag; ``api_key=1)SECRET`` is not, and the difference is whether
+    anything other than whitespace follows the markup.
+
+    The value itself still ends at the first ``)`` / quote, because that is what
+    has always bounded a value here - this test is about the SUPPRESSOR declining
+    to fire, which is why it asserts the redaction marker rather than the absence
+    of the trailing text."""
+    out = bugreport._scrub_secrets(line)
+    assert "=<redacted>" in out, (
+        f"the suppressor swallowed a credential assignment: {out!r}")
+
+
 def test_scrub_secrets_never_eats_a_non_secret_value_out_of_the_real_docs():
     """Bound to the SHIPPED artefact, not to a fixture. A fixture only ever
     contains values its author thought of; the real docs contain the ones nobody
@@ -308,14 +334,25 @@ def test_scrub_secrets_never_eats_a_non_secret_value_out_of_the_real_docs():
 
     literals = {"true", "false", "none", "null", "nil", "yes", "no",
                 "on", "off", "enabled", "disabled", "0", "1"}
-    eaten = []
+    seen, eaten = 0, []
     for f in files:
         text = f.read_text(encoding="utf-8", errors="replace")
         for m in bugreport._QUERY_SECRET_RE.finditer(text):
-            value = m.group(0)[len(m.group(1)):]
-            if value.lower() in literals:
+            seen += 1
+            # The docs write flags as markdown inline code, so the captured value
+            # is ``1` `` and not ``1`` (a backtick does not terminate the value).
+            # Comparing the RAW value made this test unable to fail: it passed
+            # with the suppressor removed. Strip the surrounding markup first.
+            value = m.group(0)[len(m.group(1)):].strip("`*_.,;:)]}").lower()
+            if value in literals:
                 line_no = text.count("\n", 0, m.start()) + 1
                 eaten.append(f"{f.name}:{line_no} {m.group(0)!r}")
+    # Prove the scan can see anything at all. If the docs ever stop containing a
+    # credential-named assignment, this test becomes vacuous, and it should say
+    # so loudly rather than keep reporting a green it did not earn.
+    assert seen > 0, (
+        "no credential-named assignment found anywhere in the docs - this test "
+        "can no longer detect the regression it exists for")
     assert eaten == [], (
         "the scrub redacted a value that cannot be a secret, out of real shipped "
         f"docs: {eaten}")

@@ -346,10 +346,17 @@ _QUERY_SECRET_RE = re.compile(
     # eats ``LOCALM_REQUIRE_AUTH=1``, ``require_auth=true``,
     # ``digital_signature=True`` and ``has_token=false`` out of a report - and
     # hiding whether auth was ON is exactly the diagnostic a reader needs when
-    # the bug IS about auth. The inner lookahead pins the literal to the WHOLE
-    # value, so ``api_key=truesecret123`` and ``api_key=10`` still redact.
+    # the bug IS about auth.
+    #
+    # The literal has to be the WHOLE value, so ``api_key=truesecret123`` and
+    # ``api_key=10`` still redact. Closing markup may follow it, because a
+    # report carries prose: ``(require_auth=1)`` and ``` `require_auth=1` ```
+    # are the same flag. But something else after that markup is NOT a flag,
+    # so ``api_key=1)SECRET`` stays redacted - measured identical to the
+    # no-suppressor behaviour on every credential shape, which is the bar this
+    # has to clear: a false-positive fix must not open a true-negative.
     r"(?!(?:true|false|none|null|nil|yes|no|on|off|enabled|disabled|[01])"
-    r"(?![^&\s#\"'\)\]\}]))"
+    r"[`\"'\)\]\}]{0,4}(?:[\s&#]|$))"
     r"[^&\s#\"'\)\]\}]*"
 )
 
