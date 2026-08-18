@@ -270,6 +270,11 @@ def console_main() -> None:
     SEPARATE from ``main`` so in-process callers - the test suite's CliRunner and
     the ``localm coder`` route - invoke the group directly without the venv gate;
     only the stray-global-exe path (a separate ``pip install``) hits it (NEW-J)."""
+    # Source check FIRST: running the wrong checkout makes every later message,
+    # including the venv one, describe a tree the caller is not editing. Inert
+    # unless two source checkouts are in play, so a normal install never sees it.
+    from localm._srcguard import require_own_source
+    require_own_source()
     from localm._venvguard import require_venv
     require_venv()
     main()
