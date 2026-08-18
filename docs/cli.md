@@ -550,6 +550,9 @@ localm setup-llama --backend cuda        # NVIDIA  /  --backend amd-rocm (AMD)  
 localm setup-llama --from <build-dir>    # or copy your own llama.cpp build
 localm setup-embeddings                  # install the on-device embedding model (semantic memory + RAG)
 
+localm make-launcher                     # build the native LocaLM app launcher (see docs/native-app.md)
+localm make-launcher --force             # rebuild it (use after a Python upgrade)
+
 localm doctor                            # check Python, llama.dll, GPU driver, VRAM, packages
 localm info                              # data directory, config file, registry, registry file
 localm status                            # show the localm server serving this directory, if any
