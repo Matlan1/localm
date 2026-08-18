@@ -33,7 +33,7 @@ from pydantic import BaseModel
 from localm.inference.http_server import principal_id
 from localm.media import gallery
 from localm.media import paths as media_paths
-from localm.pathsafe import confined_file
+from localm.pathsafe import confined_file, confined_name
 from localm.selfclient import resolve_self_url
 from . import backend as _backend
 
@@ -55,6 +55,8 @@ class MusicRequest(BaseModel):
 
 class MoveFileRequest(BaseModel):
     dest: str                         # destination directory on this machine
+class RenameFileRequest(BaseModel):
+    new_name: str                     # new filename (extension kept if omitted)
 
 
 def _music_dir() -> Path:
@@ -244,6 +246,32 @@ async def music_move(name: str, req: MoveFileRequest, request: Request):
         shutil.move(str(sidecar), str(dest_dir / sidecar.name))
     gallery.forget_owner("music", name)     # left the gallery dir
     return {"status": "moved", "path": str(target)}
+
+
+@_router.post("/api/music/file/{name}/rename",
+              dependencies=[Depends(gallery.require_owner("music"))])
+async def music_rename(name: str, req: RenameFileRequest):
+    """Rename a generated track (and its metadata sidecar) in place.
+
+    Mirrors the image plugin's rename: confined_name re-confines the CALLER's
+    string to the gallery dir, so a traversal or absolute path is rejected
+    rather than escaping it - require_owner proves ownership of the source
+    artifact, never authority over the destination path."""
+    path = _music_path(name)
+    new_name = req.new_name.strip()
+    if not new_name:
+        raise HTTPException(400, "Empty name")
+    if not new_name.lower().endswith(path.suffix.lower()):
+        new_name += path.suffix          # keep the extension
+    target = confined_name(_music_dir(), new_name)
+    if target.exists():
+        raise HTTPException(409, f"Already exists: {new_name}")
+    path.rename(target)
+    sidecar = path.with_suffix(path.suffix + ".json")
+    if sidecar.is_file():
+        sidecar.rename(target.with_suffix(target.suffix + ".json"))
+    gallery.rename_owner("music", name, target.name)
+    return {"status": "renamed", "name": target.name}
 
 
 @_router.get("/api/music/history")
