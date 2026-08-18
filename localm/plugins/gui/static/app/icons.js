@@ -49,6 +49,7 @@ const APP_ICONS = {
   camera:   iconMarkup('<path d="M4 8h3l2-2h6l2 2h3v11H4z"/><path d="M12 16a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"/>'),
   send:     iconMarkup('<path d="M4 12l16-7-7 16-2.5-6.5z"/><path d="M10.5 14.5L20 5"/>'),
   stop:     iconMarkup('<path d="M7 7h10v10H7z" fill="currentColor" stroke="none"/>'),
+  play:     iconMarkup('<path d="M8 5.5v13l11-6.5z" fill="currentColor" stroke="none"/>'),
   // --- chat params + composer row ---
   web:      iconMarkup('<path d="M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18z"/><path d="M3 12h18"/><path d="M12 3a13 13 0 0 1 0 18 13 13 0 0 1 0-18z"/>'),
   memory:   iconMarkup('<path d="M9 4a3 3 0 0 0-3 3 3 3 0 0 0-1 5.8V16a3 3 0 0 0 4 2.8V4z"/><path d="M15 4a3 3 0 0 1 3 3 3 3 0 0 1 1 5.8V16a3 3 0 0 1-4 2.8V4z"/>'),

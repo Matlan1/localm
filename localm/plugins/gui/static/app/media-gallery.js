@@ -413,12 +413,61 @@ export function videoPreview(item, ctx) {
 }
 
 /** Music: no frame exists. Lead with what identifies a track - its tags - and
- *  a play affordance. Deliberately NOT a waveform (see the module header). */
+ *  a play control. Deliberately NOT a waveform (see the module header).
+ *
+ *  The play button is on the CARD, not only in the detail view, because the old
+ *  list had one-click playback and audio has no preview at all without it: for
+ *  an image or a clip you can see what you have, for a track you cannot. Making
+ *  someone open a modal to hear three seconds would be a regression wearing a
+ *  redesign. */
 export function musicPreview(item, ctx) {
   const wrap = el("div", "thumb-face thumb-audio");
   wrap.appendChild(iconEl("music", "audio-ic"));
   const tags = item.meta?.tags || item.name;
   wrap.appendChild(el("div", "audio-tags", tags));
+
+  let player = null;
+  const play = el("button", "audio-play");
+  play.type = "button";
+  play.title = "Play this track";
+  play.appendChild(iconEl("play", "btn-ic"));
+  const stop = () => {
+    if (!player) return;
+    player.pause();
+    if (player.dataset.url) URL.revokeObjectURL(player.dataset.url);
+    player.remove();
+    player = null;
+    play.replaceChildren(iconEl("play", "btn-ic"));
+    play.title = "Play this track";
+  };
+  play.onclick = async (e) => {
+    e.stopPropagation();               // the card itself opens the detail view
+    if (player) { stop(); return; }
+    play.disabled = true;
+    try {
+      const url = await fetchImageURL(
+        `/api/${ctx.slug}/file/${encodeURIComponent(item.name)}`);
+      player = document.createElement("audio");
+      player.controls = true;
+      player.autoplay = true;
+      player.dataset.url = url;
+      player.className = "audio-inline";
+      player.onclick = (ev) => ev.stopPropagation();
+      reportMediaLoadFailure(player, "the track", stop);
+      player.src = url;
+      wrap.appendChild(player);
+      play.replaceChildren(iconEl("stop", "btn-ic"));
+      play.title = "Stop";
+    } catch (err) {
+      toast("Could not load the track: " + err.message, true);
+    } finally {
+      play.disabled = false;
+    }
+  };
+
+
+  wrap.appendChild(play);
+
   const badge = durationLabel(item);
   if (badge) wrap.appendChild(el("span", "thumb-badge", badge));
   return wrap;

@@ -330,3 +330,32 @@ for (const kind of [
       "a failed preview must say so, not sit blank");
   });
 }
+
+/* ------------------------------------------------ 6. audio keeps one-click play */
+
+/* The old Music list played a track in one click. Audio is the one medium with
+   NO preview at all - you cannot tell two tracks apart by looking - so making
+   someone open the detail view to hear three seconds would be a regression
+   dressed as a redesign. The card keeps a play control. */
+test("music: a card plays in one click, without opening the detail view", async () => {
+  const { window: win } = setup({ tracks: [track("song.flac", { tags: "ZZ-TAGS-4417" })] });
+  runScript(win, "refreshMusicHistory();");
+  await settle();
+
+  const card = win.document.getElementById("music-history").querySelector(".thumb");
+  const play = card.querySelector(".audio-play");
+  assert.ok(play, "the audio card carries its own play control");
+  assert.equal(card.querySelector("audio"), null, "nothing is playing yet");
+
+  play.click();
+  await settle(6);
+
+  assert.ok(card.querySelector("audio"), "clicking play attaches a player to the CARD");
+  assert.equal(win.getComputedStyle(win.document.getElementById("modal")).display, "none",
+    "play must not open the detail view - that is the extra click being avoided");
+
+  // and it toggles back off, releasing the object URL rather than leaking it
+  play.click();
+  await tick();
+  assert.equal(card.querySelector("audio"), null, "clicking again stops and removes the player");
+});
