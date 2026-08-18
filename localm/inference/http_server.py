@@ -2130,6 +2130,174 @@ def _start_hang_watchdog(threshold: float, trace_path, *, poll: float = 1.0):
     return stop, t
 
 
+# Human-facing hooks for the hang ALARM (ADR-0012; localm/inference/
+# _hang_alarm.py - the detect/surface/recover pipeline, distinct from the
+# forensic stack-dump thread above). The GUI replaces these with the native
+# status window's own red-error/ready transitions via set_hang_surface();
+# headless serve keeps the console default so the terminal running the
+# server still shows the state change. logger.critical is already emitted by
+# the alarm itself before calling these, so the hooks only need to be the
+# human-visible half.
+def _default_hang_surface(text: str) -> None:
+    try:
+        from localm.console import console
+        console.print(f"[bold red]HANG ALARM:[/bold red] {text}")
+    except Exception:
+        pass
+
+
+def _default_hang_recovered() -> None:
+    try:
+        from localm.console import console
+        console.print("[green]Hang alarm cleared - server responding again.[/green]")
+    except Exception:
+        pass
+
+
+_hang_surface_hooks: dict = {
+    "surface": _default_hang_surface,
+    "recovered": _default_hang_recovered,
+}
+
+
+def set_hang_surface(surface, recovered) -> None:
+    """Route hang-alarm surfacing somewhere a user actually looks (the GUI
+    wires the native status window here). Must be thread-safe callables: the
+    alarm invokes them from its own daemon thread."""
+    _hang_surface_hooks["surface"] = surface
+    _hang_surface_hooks["recovered"] = recovered
+
+
+# The running event loop, captured at lifespan startup for _hang_dump's
+# async-task section (a plain thread cannot resolve it on its own).
+_hang_dump_loop = None
+
+
+def _hang_dump(reason: str) -> None:
+    """Forensic stack snapshot on a NEW hang incident, into the same
+    per-run trace file the stall watchdog uses - under the same privacy gate
+    (_diagnostics_allowed), because it writes stack frames to disk. The alarm
+    calls this once per distinct incident; detection/surfacing themselves are
+    NOT gated on this (they write nothing sensitive anywhere).
+
+    Two sections: every THREAD (faulthandler - where the 2026-08-18
+    incident's wedged executor jobs were visible), then every asyncio TASK
+    with its await stack - because a purely-async wedge (a coroutine parked
+    on an await that never completes) does not exist on any thread and is
+    invisible to faulthandler. The task section is gathered ON the loop
+    (call_soon_threadsafe) with a short wait: in the starvation class the
+    loop is healthy by definition so it returns instantly, and in the
+    frozen-loop class it times out and is skipped - the thread section
+    already shows the freeze itself."""
+    if not _diagnostics_allowed():
+        return
+    import faulthandler
+    from localm.debuglog import hang_trace_path
+    with open(hang_trace_path(), "a", encoding="utf-8",
+              errors="backslashreplace") as fh:
+        fh.write(f"\n===== LOCALM HANG ALARM: {reason} (pid {os.getpid()}, "
+                 f"{time.strftime('%Y-%m-%d %H:%M:%S')}) =====\n")
+        faulthandler.dump_traceback(file=fh, all_threads=True)
+        loop = _hang_dump_loop
+        if loop is None or loop.is_closed():
+            return
+        lines: list = []
+        done = threading.Event()
+
+        def _capture_tasks() -> None:
+            # Task.get_stack() reports only the OUTERMOST coroutine's
+            # suspension frame (it never follows cr_await), which for a
+            # wedged request shows the middleware wrapper and hides the
+            # handler line that actually matters. Walk the await chain by
+            # hand so the record ends at the exact line the coroutine is
+            # parked on, plus the primitive it is awaiting.
+            try:
+                for task in asyncio.all_tasks(loop):
+                    lines.append(f"\n--- task {task.get_name()} ---\n")
+                    obj = task.get_coro()
+                    depth = 0
+                    while obj is not None and depth < 40:
+                        frame = (getattr(obj, "cr_frame", None)
+                                 or getattr(obj, "gi_frame", None)
+                                 or getattr(obj, "ag_frame", None))
+                        if frame is not None:
+                            code = frame.f_code
+                            lines.append('  File "%s", line %d, in %s\n' % (
+                                code.co_filename, frame.f_lineno,
+                                code.co_name))
+                        nxt = (getattr(obj, "cr_await", None)
+                               or getattr(obj, "gi_yieldfrom", None)
+                               or getattr(obj, "ag_await", None))
+                        if nxt is None and frame is None:
+                            lines.append(f"  awaiting: {obj!r}\n")
+                        obj = nxt
+                        depth += 1
+            except Exception:
+                lines.append("    (task capture failed)\n")
+            finally:
+                done.set()
+
+        try:
+            loop.call_soon_threadsafe(_capture_tasks)
+        except RuntimeError:
+            return   # loop shutting down
+        if done.wait(2.0):
+            fh.write("\n----- asyncio tasks (await stacks) -----\n")
+            fh.writelines(lines)
+        else:
+            fh.write("\n----- asyncio tasks: NOT CAPTURED (loop did not "
+                     "respond in 2s - consistent with a frozen loop; see "
+                     "the thread section above) -----\n")
+
+
+def _hang_restart_action(app) -> None:
+    """Recovery action for the hang alarm: the same in-place re-exec restart
+    as the tray Restart button (_do_restart), hardened for a process that is
+    currently misbehaving. The graceful path (engine unloads, embedder
+    release, VRAM-release wait) is deliberately lock-free/bounded by design,
+    but "bounded" is a claim about code on a box that is provably wedged -
+    so it gets a hard window, after which the re-exec happens anyway with
+    only the steps that cannot block: the lock-free embedder-worker release
+    (an orphaned worker survives execv holding VRAM - REG-650), the crash-
+    marker disarm (so the next boot does not misreport this recovery as a
+    crash), and a log flush."""
+    port = getattr(app.state, "instance_port", None)
+    instance_id = getattr(app.state, "instance_id", None)
+
+    def _graceful() -> None:
+        try:
+            _do_restart(port=port, instance_id=instance_id)
+        except Exception:
+            _dbg_swallow("graceful restart during hang recovery failed; "
+                         "forcing re-exec", level="warning")
+
+    t = threading.Thread(target=_graceful, name="localm-hang-restart",
+                         daemon=True)
+    t.start()
+    t.join(45.0)
+    # _do_restart ends in os.execv, which never returns - so reaching this
+    # line at all means the graceful path raised or wedged. Force it.
+    from localm.debuglog import logger as _dbg
+    _dbg.critical("graceful restart did not complete in 45s; forcing re-exec")
+    try:
+        from localm.inference import embedder as _embedder_mod
+        _embedder_mod.release_for_exit()
+    except Exception:
+        _dbg_swallow("embedder release during forced restart failed")
+    try:
+        from localm import bugreport
+        bugreport.disarm_crash_guard(instance_id=instance_id)
+    except Exception:
+        _dbg_swallow("crash-guard disarm during forced restart failed")
+    try:
+        from localm.debuglog import flush_log_handlers
+        flush_log_handlers()
+    except Exception:
+        pass
+    os.environ["LOCALM_RESTART_IN_PROGRESS"] = "1"
+    os.execv(sys.executable, _restart_argv(port))
+
+
 def _diagnostics_allowed() -> bool:
     """Whether localm may write an AUTOMATIC diagnostic trace right now. True in
     the log/full session modes; in privacy mode ONLY when the user opted into
@@ -3395,6 +3563,50 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
                 _dbg.debug("executor saturation watch startup failed "
                           "(continuing): %s", e)
 
+        # Hang ALARM (ADR-0012): detect a hung server, surface it where a
+        # user actually looks, and (by default) auto-restart when the hang is
+        # provably a defect. Complements - does not replace - the forensic
+        # stack-dump watchdog above: that one is privacy-gated because it
+        # writes stacks to disk; this one writes nothing sensitive anywhere,
+        # so it runs in every mode (LOCALM_HANG_RECOVERY=off opts out).
+        # Skipped under pytest like its siblings; tests drive HangAlarm
+        # directly.
+        hang_alarm = None
+        if "pytest" not in sys.modules:
+            try:
+                from localm.debuglog import hang_watchdog_threshold
+                from localm.inference import _hang_alarm as _ha
+
+                def _alarm_probe_target():
+                    port = getattr(app.state, "instance_port", None)
+                    if not port:
+                        return None
+                    host = _ha._probe_host(getattr(app.state, "bind_host", None))
+                    return host, int(port)
+
+                _mode_now = _ha.recovery_mode()
+                if _mode_now != "off":
+                    global _hang_dump_loop
+                    _hang_dump_loop = asyncio.get_running_loop()
+                    hang_alarm = _ha.HangAlarm(
+                        heartbeat_gap=lambda: (
+                            None if _hb_monotonic is None
+                            else time.monotonic() - _hb_monotonic),
+                        inflight=_ha.tracker().observe,
+                        probe_target=_alarm_probe_target,
+                        surface=lambda text: _hang_surface_hooks["surface"](text),
+                        recovered=lambda: _hang_surface_hooks["recovered"](),
+                        restart=lambda reason: _hang_restart_action(app),
+                        dump=_hang_dump,
+                        surface_after=hang_watchdog_threshold(),
+                        restart_after=_ha.restart_after_seconds(),
+                        starvation_after=_ha.starvation_seconds(),
+                        allow_restart=(_mode_now == "restart"),
+                    ).start()
+            except Exception as e:
+                from localm.debuglog import logger as _dbg
+                _dbg.debug("hang alarm startup failed (continuing): %s", e)
+
         # Cross-install GPU/VRAM coordination (see localm.gpu_registry): register
         # this instance in the machine-wide registry, but ONLY for a real,
         # non-isolated, advertise()'d server (instance_id + port/scheme are set by
@@ -3448,6 +3660,8 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
                 sat_stop.set()
                 if sat_thread is not None:
                     sat_thread.join(timeout=2)
+            if hang_alarm is not None:
+                hang_alarm.stop()
             if gpu_task is not None:
                 gpu_task.cancel()
                 try:
@@ -4149,6 +4363,12 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
     # OUTSIDE the BaseHTTPMiddleware handlers that otherwise mask http.disconnect
     # from the non-streaming inference path (see the class + _generate_full).
     app.add_middleware(_DisconnectSignalMiddleware)
+    # Outermost of all: in-flight/progress bookkeeping for the hang alarm's
+    # starvation detector (ADR-0012). Pure ASGI and content-free (counts and
+    # clocks only); sits outside everything so a request wedged in ANY inner
+    # layer still shows as in flight.
+    from localm.inference._hang_alarm import RequestProgressMiddleware
+    app.add_middleware(RequestProgressMiddleware)
 
     # Route groups (extracted to localm/inference/routes/*.py).
     # The engine + inference semaphore are module globals read live by the route

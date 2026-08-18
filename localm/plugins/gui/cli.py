@@ -869,6 +869,16 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
                 hide_console()
         threading.Thread(target=_mark_ready_when_listening,
                          name="localm-ready", daemon=True).start()
+        # ADR-0012: route hang-alarm surfacing into the native status window.
+        # set_error turns the status red AND un-hides the window from the tray
+        # (see _StatusWindow._poll's "error" branch), so a hung server is
+        # unmissable instead of a log line nobody tails; set_ready restores
+        # the normal Running state if the condition clears. Both are
+        # queue-based and thread-safe - the alarm calls them from its own
+        # daemon thread.
+        hs.set_hang_surface(
+            lambda text: app_face.set_error(f"Server problem: {text}"),
+            app_face.set_ready)
 
     def _serve():
         # The advertise + run_server tail is identical to http_server.serve()'s
