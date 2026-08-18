@@ -179,17 +179,23 @@ CORE_FIELDS: list = [
     # positional reference in this schema was replaced with the setting's NAME
     # (gui-design.md rule 9 / decision D3) - a name survives a reflow, a position
     # does not.
+    # max is a sanity bound, not a capability claim - generous enough for any
+    # real long-context model (1M+ token models exist), just large enough to
+    # keep an absurd value from reaching the native ctypes layer unbounded.
     SettingField("n_ctx", Widget.NUMBER, "Context window (initial)",
                  "Tokens of history the model starts with; it grows on demand up "
                  "to Context window (max).",
-                 group="Engine", applies=Applies.NEXT_LOAD, min=512, step=512),
+                 group="Engine", applies=Applies.NEXT_LOAD, min=512, max=1048576,
+                 step=512),
     SettingField("n_ctx_max", Widget.NUMBER, "Context window (max)",
                  "Largest the context window may grow to (0 = unlimited); bigger "
                  "needs more VRAM.",
-                 group="Engine", applies=Applies.NEXT_LOAD, min=0, step=512),
+                 group="Engine", applies=Applies.NEXT_LOAD, min=0, max=1048576,
+                 step=512),
     SettingField("n_ctx_grow", Widget.NUMBER, "Context growth step",
                  "When the window fills, it expands by this many tokens at a time.",
-                 group="Engine", applies=Applies.NEXT_LOAD, min=256, step=256),
+                 group="Engine", applies=Applies.NEXT_LOAD, min=256, max=1048576,
+                 step=256),
     SettingField("ctx_auto", Widget.TOGGLE, "Auto-size context from VRAM",
                  "Pick the context ceiling from free GPU memory at load time "
                  "instead of the fixed Context window (max).",

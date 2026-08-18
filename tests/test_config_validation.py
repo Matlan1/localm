@@ -51,6 +51,25 @@ class TestValidateUpdate:
             ss.validate_update({"n_gpu_layers": 1111})
         assert ss.validate_update({"n_gpu_layers": 99}) == {"n_gpu_layers": 99}
 
+    def test_n_ctx_out_of_range(self):
+        # n_ctx/n_ctx_max/n_ctx_grow had a floor but no ceiling, so an absurd
+        # value sailed unbounded to the native ctypes layer. Same defect as
+        # n_gpu_layers above.
+        #
+        # ACCEPT a real long-context value first: this assertion is what goes
+        # red if the ceiling is set too tight, and a ceiling that breaks real
+        # models is worse than no ceiling.
+        assert ss.validate_update({"n_ctx": 131072}) == {"n_ctx": 131072}
+        with pytest.raises(ValueError, match="above the maximum"):
+            ss.validate_update({"n_ctx": 10**18})
+        with pytest.raises(ValueError, match="above the maximum"):
+            ss.validate_update({"n_ctx_max": 10**18})
+        # 0 = unlimited sentinel must still survive a ceiling on the top end.
+        assert ss.validate_update({"n_ctx_max": 0}) == {"n_ctx_max": 0}
+        with pytest.raises(ValueError, match="above the maximum"):
+            ss.validate_update({"n_ctx_grow": 10**18})
+        assert ss.validate_update({"n_ctx_grow": 4096}) == {"n_ctx_grow": 4096}
+
     @pytest.mark.parametrize("value", ["1", 1])
     def test_main_gpu_index_coerces_to_int(self, value):
         # `localm config main_gpu_index 1` arrives as the string "1" (HIDDEN
