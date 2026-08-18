@@ -64,11 +64,20 @@ def _allowed() -> bool:
     return os.environ.get(ENV_ALLOW, "").strip().lower() in _TRUE
 
 
+def _plain(path: str) -> str:
+    """Cheap comparison form: case-folded and normalised, but no filesystem I/O."""
+    return os.path.normcase(os.path.normpath(os.path.abspath(path)))
+
+
 def _key(path: str) -> str:
-    """Comparison form of a path. Windows paths are case-insensitive, and one
-    directory reaches us spelled ``D:\\x``, ``D:/x`` or (under MSYS) ``/d/x``; a
-    worktree may also sit behind a junction. normcase+realpath collapses all of
-    that, so two spellings of one checkout never read as two different ones."""
+    """Thorough comparison form. One directory reaches us spelled ``D:\\x``,
+    ``D:/x`` or (under MSYS) ``/d/x``, and a worktree may sit behind a junction,
+    so realpath is needed to be sure two spellings are not one checkout.
+
+    Only used when :func:`_plain` has already said the paths DIFFER. realpath
+    walks the filesystem per component, which is the whole cost of this module
+    and can be slow (or hang) on a network path or a stale junction. Since this
+    runs at every ``import localm``, the normal case must not pay for it."""
     return os.path.normcase(os.path.realpath(path))
 
 
@@ -131,6 +140,12 @@ def foreign_source(cwd: str | None = None) -> tuple[str, str] | None:
         return None
     standing = _standing_root(here)
     if standing is None:
+        return None
+    # Fast path first: identical spellings are the normal case and settle it
+    # without touching the filesystem. Only a genuine difference pays for
+    # realpath, which is what makes a junction or an MSYS-style path still
+    # compare equal rather than reading as a second checkout.
+    if _plain(running) == _plain(standing):
         return None
     if _key(running) == _key(standing):
         return None

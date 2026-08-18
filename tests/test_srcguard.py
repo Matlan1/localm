@@ -117,6 +117,26 @@ class TestForeignSourceDecision:
         assert Path(running).resolve() == REPO_ROOT
         assert Path(standing).resolve() == other.resolve()
 
+    @pytest.mark.skipif(os.name != "nt", reason="junctions are a Windows shape")
+    def test_same_checkout_reached_through_a_junction_is_silent(self, tmp_path):
+        """One checkout, two spellings, via a directory junction.
+
+        This is the ONLY case that exercises the realpath comparison: the cheap
+        string compare says these differ, and only resolving them shows they are
+        one tree. Worktrees do sit behind junctions on this platform, and reading
+        that as a second checkout would refuse a perfectly correct launch.
+        """
+        link = tmp_path / "linked"
+        made = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(REPO_ROOT)],
+                              capture_output=True, text=True, timeout=60)
+        if made.returncode != 0:
+            pytest.skip("could not create a junction: %s" % made.stderr.strip())
+        # Guard the guard: if realpath does not actually collapse the junction,
+        # this test would pass for the wrong reason on a future Python.
+        assert os.path.realpath(str(link)).lower() == str(REPO_ROOT).lower(), (
+            "realpath did not resolve the junction, so this test proves nothing")
+        assert _srcguard.foreign_source(cwd=str(link)) is None
+
     def test_escape_hatch_silences_it(self, tmp_path, monkeypatch):
         other = _make_checkout(tmp_path / "elsewhere")
         assert _srcguard.foreign_source(cwd=str(other)) is not None
