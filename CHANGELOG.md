@@ -12,6 +12,21 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Images a model links in a reply can now be displayed, without the site that
+  hosts them learning anything about you.** Until now a linked image showed as
+  broken: localm refuses to let the page load anything from the internet. Other
+  local-AI apps just let your browser fetch it, which tells that site your IP
+  address, your browser and which page you were on. There is now a setting,
+  **Settings > Network > "Show remote images in replies"**, which is **off by
+  default**. Turned on, localm fetches the picture itself and hands it to the
+  page, so your browser never contacts the remote site at all, and the request
+  obeys the same protections as every other one localm makes (no local or
+  private addresses, size limit, and your allowed/denied domain lists). Worth
+  knowing before you turn it on, because it is the reason it ships off: a linked
+  image is also how a model could smuggle information out, since the web address
+  itself can carry it and it is fetched the moment the reply appears. Turning
+  this on does not stop that, it only makes the request come from this machine
+  instead of your browser.
 - **Answers built on your indexed documents and remembered facts are now
   checked against the evidence they were given.** localm gains a regression
   check that indexes an invented fact, asks about it, then flips that fact and

@@ -1006,6 +1006,26 @@ CORE_FIELDS: list = [
                  "A SearXNG JSON search endpoint for web search. Blank uses "
                  "DuckDuckGo (no key needed).",
                  group="Network", owner="web", admin_only=True),
+    # owner="core", not "web": this is the GUI's own renderer, so it must stay
+    # visible on an install with no web plugin. admin_only for the same reason
+    # net_search_url is - it decides whether rendering a reply causes an outbound
+    # request at all, which is a "where does data go" boundary, and a non-owner
+    # config:write key must not be able to switch it on.
+    SettingField("gui_proxy_remote_images", Widget.TOGGLE,
+                 "Show remote images in replies (fetched by this machine)",
+                 "Off by default, and the trade is worth knowing. A remote image "
+                 "a model links is how data can be smuggled out: the address "
+                 "itself carries it, and the fetch happens the moment the reply "
+                 "renders. Turning this on does NOT stop that - it moves the "
+                 "request from your browser to this server, so the remote site "
+                 "never learns your IP, browser or which page you were on, and "
+                 "the request obeys the same SSRF guard and domain lists as any "
+                 "other. Leave it off unless you want linked images to display.",
+                 # Reachable in the default keyless install regardless: the schema
+                 # route treats open mode as owner (is_owner = held is None or
+                 # ADMIN in held), so admin_only hides this from a SCOPED key, not
+                 # from the ordinary single-user GUI.
+                 group="Network", admin_only=True),
     # ---- Voice (plugin) ----
     SettingField("voice_stt_model", Widget.SELECT, "Speech-to-text model",
                  "Whisper model size for the microphone button. Larger is more "

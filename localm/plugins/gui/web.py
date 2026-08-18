@@ -776,6 +776,8 @@ def attach_gui(
     _routes_system.register(app, ctx)
     from .routes import pairing as _routes_pairing
     _routes_pairing.register(app, ctx)
+    from .routes import imgproxy as _routes_imgproxy
+    _routes_imgproxy.register(app, ctx)
     from .routes import admin as _routes_admin
     _routes_admin.register(app, ctx)
     if _job_routes_unregistered:
