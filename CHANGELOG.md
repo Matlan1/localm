@@ -12,6 +12,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Answers built on your indexed documents and remembered facts are now
+  checked against the evidence they were given.** localm gains a regression
+  check that indexes an invented fact, asks about it, then flips that fact and
+  asks again: a correct answer has to change with it. It covers both the RAG
+  retrieval path and the memory recall the assistant receives each turn, and it
+  runs against a real model, so a future change to how retrieved text is
+  presented cannot quietly leave answers relying on what the model already knew
+  instead of on what you gave it.
 - **Music and Video now have the same library as Images.** Generated tracks and
   clips were a plain list of filenames with play, move and delete. They are now
   a grid of cards you can tick to select, with bulk move and bulk delete, and a
