@@ -99,7 +99,7 @@ function installStubs(win, { fetchImpl } = {}) {
 // one global lexical environment so cross-section references resolve as before.
 const APP_SCRIPTS = [
   "client-log", "helpers", "icons", "picker", "theme", "logo", "tabs", "models-sidebar",
-  "chat", "cmdk", "settings-perf", "coder", "slash", "init",
+  "chat", "media-gallery", "cmdk", "settings-perf", "coder", "slash", "init",
 ];
 
 /**

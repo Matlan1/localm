@@ -409,7 +409,7 @@
           <div class="actions">
             <button class="btn-primary" id="img-generate">Generate</button>
             <button class="btn-secondary" id="img-stop" style="display:none" title="Stop this generation and free the GPU">Stop</button>
-            <label class="inline-check" title="When off, ComfyUI stays loaded for fast batch generation; the chat model reloads on the next chat message.">
+            <label class="inline-check" title="Applies to image generation only. When off, ComfyUI stays loaded for fast batch generation; the chat model reloads on the next chat message.">
               <input type="checkbox" id="img-reload-llm" checked> reload chat model after generation
             </label>
           </div>
@@ -421,8 +421,8 @@
             <div class="card-head-text"><h3>History</h3></div></div>
           <div class="sub">Tick thumbnails to select for bulk actions; click one for
           details, metadata, and per-image actions.</div>
-          <div id="img-bulk" style="display:none"></div>
-          <div id="img-history" class="img-grid"></div>
+          <div id="img-bulk" class="media-bulk" style="display:none"></div>
+          <div id="img-history" class="media-grid"></div>
         </div>
         <div class="card">
           <div class="card-head"><span class="ic cat-ic cat-violet" data-icon="sliders"></span>
@@ -464,6 +464,9 @@
           <div class="actions">
             <button class="btn-primary" id="music-generate">Generate</button>
             <button class="btn-secondary" id="music-stop" style="display:none" title="Stop this generation and free the GPU">Stop</button>
+            <label class="inline-check" title="Applies to music generation only. When off, ComfyUI stays loaded for fast batch generation; the chat model reloads on the next chat message.">
+              <input type="checkbox" id="music-reload-llm" checked> reload chat model after generation
+            </label>
           </div>
           <pre id="music-log" class="job-log" style="display:none"></pre>
           <div id="music-result"></div>
@@ -471,7 +474,10 @@
         <div class="card">
           <div class="card-head"><span class="ic cat-ic cat-violet" data-icon="music"></span>
             <div class="card-head-text"><h3>History</h3></div></div>
-          <div id="music-history"></div>
+          <div class="sub">Tick a card to select it for bulk actions; click one for
+          details, metadata, and per-track actions.</div>
+          <div id="music-bulk" class="media-bulk" style="display:none"></div>
+          <div id="music-history" class="media-grid"></div>
         </div>
         <div class="card">
           <div class="card-head"><span class="ic cat-ic cat-violet" data-icon="sliders"></span>
@@ -521,6 +527,9 @@
           <div class="actions">
             <button class="btn-primary" id="video-generate">Generate</button>
             <button class="btn-secondary" id="video-stop" style="display:none" title="Stop this generation and free the GPU">Stop</button>
+            <label class="inline-check" title="Applies to video generation only. When off, ComfyUI stays loaded for fast batch generation; the chat model reloads on the next chat message.">
+              <input type="checkbox" id="video-reload-llm" checked> reload chat model after generation
+            </label>
           </div>
           <pre id="video-log" class="job-log" style="display:none"></pre>
           <div id="video-result"></div>
@@ -528,7 +537,10 @@
         <div class="card">
           <div class="card-head"><span class="ic cat-ic cat-violet" data-icon="video"></span>
             <div class="card-head-text"><h3>History</h3></div></div>
-          <div id="video-history"></div>
+          <div class="sub">Tick a card to select it for bulk actions; click one for
+          details, metadata, and per-clip actions.</div>
+          <div id="video-bulk" class="media-bulk" style="display:none"></div>
+          <div id="video-history" class="media-grid"></div>
         </div>
         <div class="card">
           <div class="card-head"><span class="ic cat-ic cat-violet" data-icon="sliders"></span>

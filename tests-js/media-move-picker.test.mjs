@@ -6,6 +6,13 @@ import { loadAppWithPages, runScript } from "./harness.mjs";
 // rec#210: the music/video history "move..." button used window.prompt(), which
 // mobile/PWA browsers suppress - so the button was dead there. It now uses the
 // in-page pickDirectory() modal, exactly like the image page already does.
+//
+// The BUTTON moved (music/video history is a selectable card grid now, and
+// per-item actions live in the detail modal), but the PROPERTY did not: move
+// must never reach window.prompt(). So this drives the new path rather than
+// dropping the guard - the mobile/PWA regression it exists to catch is
+// unchanged, and deleting it because the selector moved would have retired a
+// live guard for a cosmetic reason.
 
 function setup() {
   const calls = [];
@@ -29,9 +36,15 @@ function setup() {
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
+/** Open the first card's detail modal and return its "move to folder..."
+ *  button - the per-item move affordance in the current UI. */
 function moveButton(win, boxId) {
   const box = win.document.getElementById(boxId);
-  return [...box.querySelectorAll("button")].find(
+  const card = box.querySelector(".thumb");
+  if (!card) return undefined;
+  card.click();                       // -> showDetail() -> openModal()
+  const body = win.document.getElementById("modal-body");
+  return [...body.querySelectorAll("button")].find(
     (b) => b.textContent.startsWith("move"));
 }
 
@@ -57,7 +70,7 @@ for (const kind of KINDS) {
     await tick();
 
     const btn = moveButton(win, kind.box);
-    assert.ok(btn, "move button rendered in history");
+    assert.ok(btn, "move button rendered in the detail modal");
     btn.click();
     await tick();
     await tick();

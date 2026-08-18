@@ -1,42 +1,64 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-/* localm GUI - Video page (split from pages.js). Classic script: it
-   shares the one global lexical environment with app.js and the other
-   page scripts, so the helpers it uses ($, el, authHeaders, toast, ...)
-   resolve by bare name exactly as before. */
+/* localm GUI - Video page. The library (grid, selection, bulk actions, detail
+   modal, rename/move/delete) is the shared engine in app/media-gallery.js; only
+   the medium-specific bits live here.
+
+   refreshMusicHistory used to live in this file, which meant the Music page
+   imported its own history renderer from video.js. Each page owns its own
+   library now. */
+
 "use strict";
 
-// --- ES module imports (auto-generated boundary; bodies unchanged) ---
-import { lsSetScoped } from "../app/chat.js";
-import { $, MIB, authHeaders, checkModelsBeforeGenerate, confirmDanger, el, fetchImageURL, jobStatusWord, streamJob, toast } from "../app/helpers.js";
-import { emptyState } from "../app/icons.js";
+import { MIB, $, authHeaders, checkModelsBeforeGenerate, fetchImageURL, jobStatusWord, streamJob, toast } from "../app/helpers.js";
+import { bindReloadToggle, createGallery, playerDetail, reportMediaLoadFailure, videoPreview, refreshReloadToggle } from "../app/media-gallery.js";
 import { hideStop, showStop } from "./images.js";
-import { pickDirectory } from "../app/picker.js";
 import { modelOverrides } from "./workflow.js";
 
-/* A media element reports a failed src by firing an ERROR EVENT on itself, not
-   by throwing and not by rejecting - so a try/catch around `player.src = url`
-   is structurally unable to see it. Without this the player just sits there
-   dead and the user gets nothing at all, which is how a CSP that blocked every
-   blob: media URL survived unnoticed: the success path still ran and still
-   flipped the button to "hide".
+/* ================================================================ */
+/*  Video library                                                    */
+/* ================================================================ */
 
-   Call this on any media element BEFORE assigning src. */
-function reportMediaLoadFailure(player, what, onFail) {
-  player.addEventListener("error", () => {
-    const err = player.error;
-    const why = {
-      1: "loading was aborted",
-      2: "a network error",
-      3: "the file could not be decoded",
-      4: "this browser refused the source",
-    }[err && err.code] || "an unknown error";
-    toast(`Could not play ${what}: ${why}.`, true);
-    if (onFail) onFail();
-  });
-}
+const videoGallery = createGallery({
+  slug: "video",
+  listKey: "videos",
+  noun: "clip",
+  plural: "clips",
+  gridId: "video-history",
+  bulkId: "video-bulk",
+  moveDestKey: "localm.videoMoveDest",
+  emptyIcon: "video",
+  emptyTitle: "No clips yet",
+  emptyHint: "Generate one above; your clips appear here.",
+
+  beforeRefresh: () => refreshReloadToggle("video", "video-reload-llm"),
+
+  buildPreview: videoPreview,
+  buildDetailPreview: playerDetail("video", "clip"),
+  caption: (item) => (item.meta?.prompt
+    ? item.meta.prompt.slice(0, 60)
+    : `${item.name} · ${(item.size_bytes / MIB).toFixed(1)} MB`),
+
+  reuse: (item) => {
+    const m = item.meta || {};
+    $("video-prompt").value = m.prompt || "";
+    $("video-negative").value = m.negative_prompt || "";
+    $("video-image").value = m.input_image || "";
+    $("video-seconds").value = m.seconds ?? "";
+    $("video-fps").value = m.fps ?? "";
+    $("video-width").value = m.width ?? "";
+    $("video-height").value = m.height ?? "";
+    $("video-seed").value = m.seed ?? "";
+    $("video-steps").value = m.steps ?? "";
+    $("video-cfg").value = m.cfg ?? "";
+  },
+});
+
+export const refreshVideoHistory = videoGallery.refresh;
+
+bindReloadToggle("video", "video-reload-llm");
 
 /* ================================================================ */
-/*  Video page                                                       */
+/*  Generation                                                       */
 /* ================================================================ */
 
 $("video-generate").onclick = async () => {
@@ -80,10 +102,9 @@ $("video-generate").onclick = async () => {
       const player = document.createElement("video");
       player.controls = true;
       player.style.width = "100%";
-      const url = await fetchImageURL(
-        "/api/video/file/" + encodeURIComponent(end.result));
       reportMediaLoadFailure(player, "the clip");
-      player.src = url;
+      player.src = await fetchImageURL(
+        "/api/video/file/" + encodeURIComponent(end.result));
       $("video-result").appendChild(player);
       refreshVideoHistory();
     } else {
@@ -96,196 +117,3 @@ $("video-generate").onclick = async () => {
     hideStop("video-stop");
   }
 };
-
-export async function refreshVideoHistory() {
-  const box = $("video-history");
-  box.replaceChildren();
-  let data;
-  try {
-    const r = await fetch("/api/video/history", { headers: authHeaders() });
-    if (!r.ok) throw new Error(r.statusText);
-    data = await r.json();
-  } catch (e) {
-    box.appendChild(emptyState("warning", "Could not load history", e.message));
-    return;
-  }
-  if (!data.videos.length) {
-    box.appendChild(emptyState("video", "No clips yet",
-      "Generate one above; your clips appear here."));
-    return;
-  }
-  for (const item of data.videos) {
-    const row = el("div", "disc-repo");
-    const head = el("div", "head");
-    head.appendChild(iconEl("video", "ic ic-video"));
-    head.appendChild(el("span", "name", item.name));
-    const bits = [];
-    if (item.meta?.prompt) bits.push(item.meta.prompt.slice(0, 60));
-    if (item.meta?.seconds) bits.push(`${item.meta.seconds}s`);
-    bits.push(`${(item.size_bytes / MIB).toFixed(1)} MB`);
-    head.appendChild(el("span", "meta", bits.join(" · ")));
-
-    const play = el("button", "btn-secondary", "play");
-    let player = null;
-    play.onclick = async () => {
-      if (player) { player.remove(); player = null; play.textContent = "play"; return; }
-      play.disabled = true;
-      try {
-        const url = await fetchImageURL(
-          "/api/video/file/" + encodeURIComponent(item.name));
-        player = document.createElement("video");
-        player.controls = true;
-        player.autoplay = true;
-        player.style.width = "100%";
-        reportMediaLoadFailure(player, "the clip", () => {
-          if (player) { player.remove(); player = null; }
-          play.textContent = "play";
-        });
-        player.src = url;
-        row.appendChild(player);
-        play.textContent = "hide";
-      } catch (e) {
-        toast("Could not load clip: " + e.message, true);
-      } finally {
-        play.disabled = false;
-      }
-    };
-    head.appendChild(play);
-
-    const move = el("button", "btn-secondary", "move…");
-    move.onclick = async () => {
-      // pickDirectory (in-page browser modal) instead of prompt(): mobile/PWA
-      // browsers suppress window.prompt(), which left the move button dead there
-      // - the image page already uses this picker.
-      const dest = await pickDirectory("Move video to…",
-        localStorage.getItem("localm.videoMoveDest") || "");
-      if (!dest) return;
-      const r = await fetch(
-        `/api/video/file/${encodeURIComponent(item.name)}/move`, {
-          method: "POST", headers: authHeaders(),
-          body: JSON.stringify({ dest }),
-        });
-      const data2 = await r.json();
-      if (r.ok) {
-        lsSetScoped("localm.videoMoveDest", dest);
-        toast("Moved to " + data2.path);
-        refreshVideoHistory();
-      } else {
-        toast(data2.detail || "Move failed", true);
-      }
-    };
-    head.appendChild(move);
-
-    const del = el("button", "btn-secondary btn-danger", "delete");
-    del.onclick = () => {
-      confirmDanger(`Delete "${item.name}"?`, "This removes the file from disk.",
-        "Delete", async () => {
-          const r = await fetch("/api/video/file/" + encodeURIComponent(item.name),
-                                { method: "DELETE", headers: authHeaders() });
-          if (r.ok) { toast("Deleted"); refreshVideoHistory(); }
-          else toast("Delete failed", true);
-        });
-    };
-    head.appendChild(del);
-
-    row.appendChild(head);
-    box.appendChild(row);
-  }
-}
-
-export async function refreshMusicHistory() {
-  const box = $("music-history");
-  box.replaceChildren();
-  let data;
-  try {
-    const r = await fetch("/api/music/history", { headers: authHeaders() });
-    if (!r.ok) throw new Error(r.statusText);
-    data = await r.json();
-  } catch (e) {
-    box.appendChild(emptyState("warning", "Could not load history", e.message));
-    return;
-  }
-  if (!data.tracks.length) {
-    box.appendChild(emptyState("music", "No tracks yet",
-      "Generate one above; your tracks appear here."));
-    return;
-  }
-  for (const item of data.tracks) {
-    const row = el("div", "disc-repo");
-    const head = el("div", "head");
-    head.appendChild(iconEl("music", "ic ic-audio"));
-    head.appendChild(el("span", "name", item.name));
-    const bits = [];
-    if (item.meta?.tags) bits.push(item.meta.tags.slice(0, 60));
-    if (item.meta?.duration_seconds) bits.push(`${item.meta.duration_seconds}s`);
-    bits.push(`${(item.size_bytes / MIB).toFixed(1)} MB`);
-    head.appendChild(el("span", "meta", bits.join(" · ")));
-
-    const play = el("button", "btn-secondary", "play");
-    let player = null;
-    play.onclick = async () => {
-      if (player) { player.remove(); player = null; play.textContent = "play"; return; }
-      play.disabled = true;
-      try {
-        const url = await fetchImageURL(
-          "/api/music/file/" + encodeURIComponent(item.name));
-        player = document.createElement("audio");
-        player.controls = true;
-        player.autoplay = true;
-        player.style.width = "100%";
-        reportMediaLoadFailure(player, "the track", () => {
-          if (player) { player.remove(); player = null; }
-          play.textContent = "play";
-        });
-        player.src = url;
-        row.appendChild(player);
-        play.textContent = "hide";
-      } catch (e) {
-        toast("Could not load track: " + e.message, true);
-      } finally {
-        play.disabled = false;
-      }
-    };
-    head.appendChild(play);
-
-    const move = el("button", "btn-secondary", "move…");
-    move.onclick = async () => {
-      // pickDirectory (in-page browser modal) instead of prompt(): mobile/PWA
-      // browsers suppress window.prompt(), which left the move button dead there
-      // - the image page already uses this picker.
-      const dest = await pickDirectory("Move track to…",
-        localStorage.getItem("localm.musicMoveDest") || "");
-      if (!dest) return;
-      const r = await fetch(
-        `/api/music/file/${encodeURIComponent(item.name)}/move`, {
-          method: "POST", headers: authHeaders(),
-          body: JSON.stringify({ dest }),
-        });
-      const data2 = await r.json();
-      if (r.ok) {
-        lsSetScoped("localm.musicMoveDest", dest);
-        toast("Moved to " + data2.path);
-        refreshMusicHistory();
-      } else {
-        toast(data2.detail || "Move failed", true);
-      }
-    };
-    head.appendChild(move);
-
-    const del = el("button", "btn-secondary btn-danger", "delete");
-    del.onclick = () => {
-      confirmDanger(`Delete "${item.name}"?`, "This removes the file from disk.",
-        "Delete", async () => {
-          const r = await fetch("/api/music/file/" + encodeURIComponent(item.name),
-                                { method: "DELETE", headers: authHeaders() });
-          if (r.ok) { toast("Deleted"); refreshMusicHistory(); }
-          else toast("Delete failed", true);
-        });
-    };
-    head.appendChild(del);
-
-    row.appendChild(head);
-    box.appendChild(row);
-  }
-}
-
