@@ -26,6 +26,7 @@ const FS = {
       { name: "HEAD", is_dir: false, size: 21, mtime: 1700000000 },
     ],
   },
+  "/root/Fresh": { path: "/root/Fresh", parent: "/root", entries: [] },
   "": { path: "", parent: null, entries: [
     { name: "/", is_dir: true, size: null, mtime: null },
   ] },
@@ -235,4 +236,233 @@ test("pickDirectory / pickFile keep their string|null contract", async () => {
   rowNamed(win, "apple.md").click();
   await ticks();
   assert.equal(win.__f, "/root/apple.md", "pickFile resolves the clicked file");
+});
+
+// --------------------------------------------------------------------------- //
+//  New Folder                                                                  //
+// --------------------------------------------------------------------------- //
+
+test("New Folder button is disabled at the drive-list root, enabled inside a real folder", async () => {
+  const { window: win } = loadApp({ fetchImpl });
+  start(win, `{ mode: "dir", startPath: "" }`);
+  await ticks();
+  const btn = body(win).querySelector('button[title="New folder"]');
+  assert.ok(btn, "New folder button renders");
+  assert.equal(btn.disabled, true, "disabled at the drive-list root");
+
+  rowNamed(win, "/").click();
+  await ticks();
+  assert.equal(btn.disabled, false, "enabled once a real directory is loaded");
+});
+
+test("New Folder creates a folder with the typed name and navigates into it", async () => {
+  const mkdirCalls = [];
+  const customFetch = (url, opts = {}) => {
+    const u = String(url);
+    if (u.includes("/api/fs/mkdir")) {
+      const b = JSON.parse(opts.body);
+      mkdirCalls.push(b);
+      return Promise.resolve(json({ path: "/root/" + b.name, parent: "/root", name: b.name }));
+    }
+    return fetchImpl(url, opts);
+  };
+  const { window: win } = loadApp({ fetchImpl: customFetch });
+  start(win, `{ mode: "dir", startPath: "/root" }`);
+  await ticks();
+
+  const btn = body(win).querySelector('button[title="New folder"]');
+  btn.click();
+  await ticks(1);
+  const inp = body(win).querySelector(".picker-inline-input");
+  assert.ok(inp, "an inline name input appears");
+  assert.equal(inp.value, "New folder", "prefilled with a default name");
+  inp.value = "Fresh";
+  inp.dispatchEvent(new win.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  await ticks(3);
+
+  assert.deepEqual(mkdirCalls, [{ path: "/root", name: "Fresh" }],
+    "sent the currently-browsed path and the typed name");
+  assert.ok(body(win).querySelector(".picker-crumb-cur").textContent === "Fresh",
+    "navigated into the newly created folder");
+  const backBtn = body(win).querySelector('button[title="Back"]');
+  assert.equal(backBtn.disabled, false, "Back is enabled - the prior folder was pushed to history");
+});
+
+test("New Folder surfaces the server's real refusal reason and reverts", async () => {
+  const customFetch = (url, opts = {}) => {
+    const u = String(url);
+    if (u.includes("/api/fs/mkdir")) {
+      return Promise.resolve({
+        ok: false, status: 409,
+        json: async () => ({ detail: "'sub' already exists" }),
+        text: async () => "",
+      });
+    }
+    return fetchImpl(url, opts);
+  };
+  const { window: win } = loadApp({ fetchImpl: customFetch });
+  start(win, `{ mode: "dir", startPath: "/root" }`);
+  await ticks();
+
+  body(win).querySelector('button[title="New folder"]').click();
+  await ticks(1);
+  const inp = body(win).querySelector(".picker-inline-input");
+  inp.value = "sub";
+  inp.dispatchEvent(new win.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  await ticks(3);
+
+  const toastEl = win.document.getElementById("toast");
+  assert.ok(toastEl.textContent.includes("already exists"),
+    "the real server refusal reason is surfaced, not a generic message");
+  assert.ok(toastEl.className.includes("error"), "shown as an error toast");
+  assert.equal(body(win).querySelector(".picker-inline-input"), null,
+    "the inline editor is gone - reverted to the normal listing");
+  assert.ok(rowNamed(win, "sub"), "back to the normal folder listing, nothing navigated");
+});
+
+test("Escape cancels New Folder without calling the server", async () => {
+  let called = false;
+  const customFetch = (url, opts = {}) => {
+    if (String(url).includes("/api/fs/mkdir")) { called = true; return Promise.resolve(json({})); }
+    return fetchImpl(url, opts);
+  };
+  const { window: win } = loadApp({ fetchImpl: customFetch });
+  start(win, `{ mode: "dir", startPath: "/root" }`);
+  await ticks();
+
+  body(win).querySelector('button[title="New folder"]').click();
+  await ticks(1);
+  const inp = body(win).querySelector(".picker-inline-input");
+  inp.dispatchEvent(new win.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  await ticks(1);
+
+  assert.equal(body(win).querySelector(".picker-inline-input"), null, "editor closed");
+  assert.equal(called, false, "no request was sent");
+  assert.ok(rowNamed(win, "sub"), "back to the normal listing");
+});
+
+// --------------------------------------------------------------------------- //
+//  Rename                                                                      //
+// --------------------------------------------------------------------------- //
+
+test("rename affordance is offered only for real entries, never the drive list", async () => {
+  const { window: win } = loadApp({ fetchImpl });
+  start(win, `{ mode: "dir", startPath: "" }`);
+  await ticks();
+  const driveRow = rowNamed(win, "/");
+  assert.equal(driveRow.querySelector(".picker-row-rename"), null,
+    "no rename affordance at the drive-list root");
+
+  driveRow.click();
+  await ticks();
+  const subRow = rowNamed(win, "sub");
+  assert.ok(subRow.querySelector(".picker-row-rename"), "rename affordance inside a real folder");
+});
+
+test("Rename commits a new name and refreshes the listing", async () => {
+  const renameCalls = [];
+  let dirsRefetches = 0;
+  const customFetch = (url, opts = {}) => {
+    const u = String(url);
+    if (u.includes("/api/fs/rename")) {
+      const b = JSON.parse(opts.body);
+      renameCalls.push(b);
+      return Promise.resolve(json({ path: "/root/" + b.new_name, parent: "/root", name: b.new_name }));
+    }
+    if (u.includes("/api/fs/dirs")) dirsRefetches++;
+    return fetchImpl(url, opts);
+  };
+  const { window: win } = loadApp({ fetchImpl: customFetch });
+  start(win, `{ mode: "dir", startPath: "/root" }`);
+  await ticks();
+  const dirsBeforeRename = dirsRefetches;
+
+  const row = rowNamed(win, "apple.md");
+  const renameBtn = row.querySelector(".picker-row-rename");
+  assert.ok(renameBtn, "rename affordance present on a file row");
+  renameBtn.click();
+  await ticks(1);
+  const inp = row.querySelector(".picker-inline-input");
+  assert.ok(inp, "row switches to an inline name input");
+  assert.equal(inp.value, "apple.md", "prefilled with the current name");
+  inp.value = "renamed.md";
+  inp.dispatchEvent(new win.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  await ticks(3);
+
+  assert.deepEqual(renameCalls, [{ path: "/root/apple.md", new_name: "renamed.md" }]);
+  assert.ok(dirsRefetches > dirsBeforeRename, "the listing was refetched after the rename");
+});
+
+test("Rename on a folder selects the whole name; on a file it selects the stem only", async () => {
+  const { window: win } = loadApp({ fetchImpl });
+  start(win, `{ mode: "dir", startPath: "/root" }`);
+  await ticks();
+
+  const fileRow = rowNamed(win, "apple.md");
+  fileRow.querySelector(".picker-row-rename").click();
+  await ticks(1);
+  const fileInp = fileRow.querySelector(".picker-inline-input");
+  assert.equal(fileInp.selectionStart, 0);
+  assert.equal(fileInp.selectionEnd, "apple".length, "stem selected, extension left alone");
+  fileInp.dispatchEvent(new win.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  await ticks(1);
+
+  const dirRow = rowNamed(win, "sub");
+  dirRow.querySelector(".picker-row-rename").click();
+  await ticks(1);
+  const dirInp = dirRow.querySelector(".picker-inline-input");
+  assert.equal(dirInp.selectionStart, 0);
+  assert.equal(dirInp.selectionEnd, "sub".length, "whole folder name selected");
+});
+
+test("Rename surfaces the server's real refusal reason and reverts", async () => {
+  const customFetch = (url, opts = {}) => {
+    const u = String(url);
+    if (u.includes("/api/fs/rename")) {
+      return Promise.resolve({
+        ok: false, status: 409,
+        json: async () => ({ detail: "'photo.png' already exists" }),
+        text: async () => "",
+      });
+    }
+    return fetchImpl(url, opts);
+  };
+  const { window: win } = loadApp({ fetchImpl: customFetch });
+  start(win, `{ mode: "dir", startPath: "/root" }`);
+  await ticks();
+
+  const row = rowNamed(win, "apple.md");
+  row.querySelector(".picker-row-rename").click();
+  await ticks(1);
+  const inp = row.querySelector(".picker-inline-input");
+  inp.value = "photo.png";
+  inp.dispatchEvent(new win.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  await ticks(3);
+
+  const toastEl = win.document.getElementById("toast");
+  assert.ok(toastEl.textContent.includes("already exists"),
+    "the real server refusal reason is surfaced, not a generic message");
+  assert.ok(toastEl.className.includes("error"), "shown as an error toast");
+  assert.ok(rowNamed(win, "apple.md"), "reverted - the original name is back");
+});
+
+test("Escape cancels Rename without calling the server", async () => {
+  let called = false;
+  const customFetch = (url, opts = {}) => {
+    if (String(url).includes("/api/fs/rename")) { called = true; return Promise.resolve(json({})); }
+    return fetchImpl(url, opts);
+  };
+  const { window: win } = loadApp({ fetchImpl: customFetch });
+  start(win, `{ mode: "dir", startPath: "/root" }`);
+  await ticks();
+
+  const row = rowNamed(win, "apple.md");
+  row.querySelector(".picker-row-rename").click();
+  await ticks(1);
+  const inp = row.querySelector(".picker-inline-input");
+  inp.dispatchEvent(new win.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  await ticks(1);
+
+  assert.equal(called, false, "no request was sent");
+  assert.ok(rowNamed(win, "apple.md"), "row reverted to its display name");
 });

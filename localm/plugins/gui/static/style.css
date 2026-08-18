@@ -1745,6 +1745,28 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
 .picker-row.unselectable:hover { background: none; }
 .picker-row.unselectable .picker-name,
 .picker-row.unselectable .picker-ic { opacity: 0.45; }
+.picker-row-rename {
+  flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px; padding: 0; border: none; border-radius: 5px;
+  background: none; color: var(--text-dim); cursor: pointer; opacity: 0;
+}
+.picker-row:hover .picker-row-rename, .picker-row-rename:focus-visible { opacity: 1; }
+.picker-row-rename:hover { color: var(--accent); background: var(--bg-input); }
+.picker-row-rename .picker-svg svg { width: 13px; height: 13px; }
+.picker-row-editing { cursor: default; }
+.picker-row-editing:hover { background: none; }
+.picker-inline-input {
+  flex: 1 1 auto; min-width: 0; background: var(--bg-input);
+  border: 1px solid var(--accent); border-radius: 5px;
+  padding: 3px 7px; color: var(--text); font-size: 13px; font-family: var(--sans);
+  outline: none;
+}
+.picker-inline-btn {
+  flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center;
+  width: 24px; height: 24px; padding: 0; border: none; border-radius: 6px;
+  background: none; color: var(--text-dim); cursor: pointer;
+}
+.picker-inline-btn:hover { color: var(--accent); background: var(--bg-raised); }
 .picker-empty { padding: 26px 12px; text-align: center; font-size: 12.5px; color: var(--text-dim); }
 .picker-trunc {
   padding: 8px 12px; font-size: 11.5px; color: var(--yellow);

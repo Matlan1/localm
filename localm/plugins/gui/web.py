@@ -504,6 +504,16 @@ class LogExportRequest(BaseModel):
     dest: str = ""
 
 
+class FsMkdirRequest(BaseModel):
+    path: str = ""
+    name: str = ""
+
+
+class FsRenameRequest(BaseModel):
+    path: str = ""
+    new_name: str = ""
+
+
 # Image types accepted from a phone share-sheet into the chat composer.
 _SHARE_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".heic", ".heif"}
 

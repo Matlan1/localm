@@ -20,6 +20,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   same as closing a browser tab - another toggle ("Quit when the app window
   is closed") makes it quit the whole app instead. On Linux this installs
   entirely via pip - no system packages, no `sudo` needed.
+- **The file/folder picker used throughout the GUI can now create a new folder
+  and rename a file or folder.** A "New folder" button creates a folder in the
+  location you are browsing and opens it; each listed file and folder has a
+  rename control. Renaming never overwrites an existing file or folder with the
+  same name.
 
 ## [0.1.5rc3] - 2026-08-13
 
