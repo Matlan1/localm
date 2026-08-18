@@ -37,7 +37,7 @@ function goodFetch(calls = []) {
   };
 }
 
-test("renderHwStats writes a compact CPU/RAM/VRAM/GPU line and unhides", () => {
+test("renderHwStats writes a compact CPU/RAM/GPU/VRAM line and unhides", () => {
   const { window } = loadApp({ fetchImpl: goodFetch() });
   assert.equal(typeof window.renderHwStats, "function", "renderHwStats on window");
   const el = window.document.getElementById("hw-stats");
@@ -45,9 +45,39 @@ test("renderHwStats writes a compact CPU/RAM/VRAM/GPU line and unhides", () => {
   window.renderHwStats(STATS);
   assert.equal(el.hidden, false, "shown when there is data");
   assert.match(el.textContent, /CPU 12%/);
-  assert.match(el.textContent, /RAM 50%/);
-  assert.match(el.textContent, /VRAM 2\.0\/16\.0 GB/);
+  assert.match(el.textContent, /RAM 4\.0\/8\.0 GB/, "RAM reads as used/total, matching VRAM");
   assert.match(el.textContent, /GPU 30%/);
+  assert.match(el.textContent, /VRAM 2\.0\/16\.0 GB/);
+});
+
+test("renderHwStats orders the metrics CPU, RAM, GPU, VRAM", () => {
+  const { window } = loadApp({ fetchImpl: goodFetch() });
+  const el = window.document.getElementById("hw-stats");
+  window.renderHwStats(STATS);
+  // The row wraps after two metrics at the sidebar's width, so this order is
+  // what puts the system on line one and the graphics card on line two. The
+  // old order (CPU, RAM, VRAM, GPU) split the card's pair across the wrap.
+  assert.deepEqual(
+    [...el.querySelectorAll("span")].map((s) => s.textContent.split(" ")[0]),
+    ["CPU", "RAM", "GPU", "VRAM"]);
+});
+
+test("renderHwStats falls back to RAM percent when used/total are absent", () => {
+  const { window } = loadApp({ fetchImpl: goodFetch() });
+  const el = window.document.getElementById("hw-stats");
+  // An older server, or a proxy returning a partial payload: the readout must
+  // still show RAM rather than dropping the metric silently.
+  window.renderHwStats({ ram: { percent: 61.4 } });
+  assert.match(el.textContent, /RAM 61%/);
+  assert.equal(el.hidden, false);
+});
+
+test("renderHwStats omits RAM entirely when the payload carries no memory data", () => {
+  const { window } = loadApp({ fetchImpl: goodFetch() });
+  const el = window.document.getElementById("hw-stats");
+  window.renderHwStats({ ram: {}, cpu: { percent: 7 } });
+  assert.doesNotMatch(el.textContent, /RAM/, "no RAM span when there is nothing to report");
+  assert.match(el.textContent, /CPU 7%/, "the other metrics still render");
 });
 
 test("renderHwStats hides the readout when nothing is measurable", () => {

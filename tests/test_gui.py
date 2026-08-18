@@ -1419,6 +1419,54 @@ class TestModelEndpoints:
         assert data["active"] == "model-a"
         active = next(m for m in data["models"] if m["active"])
         assert active["name"] == "model-a"
+        # Nothing to resume while a model IS active - the key is absent, not
+        # null, so an older client sees the exact pre-existing payload shape.
+        assert "resumable" not in data
+
+    @staticmethod
+    def _app_with_no_active_model():
+        """A GUI app whose active_model() reports nothing resident - the state an
+        idle-unload or the sidebar Unload button leaves behind."""
+        app = FastAPI()
+
+        async def switch_model(name):
+            return {"status": "loaded", "model": name}
+
+        attach_gui(app, self_url="http://127.0.0.1:9/v1",
+                   switch_model=switch_model, active_model=lambda: "")
+        return app
+
+    def test_models_reports_resumable_when_unloaded_but_reloadable(self):
+        """After an unload the Engine is kept for lazy reload and its name is
+        recorded, so the next unnamed request reloads it - which is what the
+        idle-unload log line and the Unload button's tooltip both promise.
+
+        Without this field the client cannot tell that state from "no model at
+        all": both report active == "". They need OPPOSITE handling, and the
+        GUI's chat gate refused both, making the promise false."""
+        from localm.inference import http_server as _hs
+        app = self._app_with_no_active_model()
+        with patch("localm.config.load_registry", return_value=_FAKE_REGISTRY), \
+             patch.object(_hs, "_last_active_model_name", "model-a"):
+            with TestClient(app) as client:
+                data = client.get("/api/models").json()
+        assert data["active"] == ""          # honestly: nothing is resident
+        assert data["resumable"] == "model-a"  # ...but this serves the next message
+
+    def test_models_omits_resumable_at_a_genuine_dead_end(self):
+        """The negative case, which is what keeps the client's guard meaningful:
+        no active model AND nothing the server could resolve to. The key must be
+        absent so an empty-model request is still refused locally."""
+        from localm.inference import http_server as _hs
+        app = self._app_with_no_active_model()
+        with patch("localm.config.load_registry", return_value=_FAKE_REGISTRY), \
+             patch.object(_hs, "_last_active_model_name", None), \
+             patch.object(_hs, "_active_model_name", None), \
+             patch.object(_hs, "_default_model_name", None):
+            with TestClient(app) as client:
+                data = client.get("/api/models").json()
+        assert data["active"] == ""
+        assert "resumable" not in data
 
     def test_models_filter_by_type(self, gui_app):
         # Regression guard for #435. The `type` query param must resolve its
