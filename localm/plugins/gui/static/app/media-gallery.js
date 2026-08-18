@@ -358,13 +358,28 @@ export function createGallery(cfg) {
 
 /* ---- preview builders, one per medium ---------------------------------- */
 
+/* A preview that cannot be shown must SAY SO (AGENTS.md rule 5). Two distinct
+   failures both used to end as a silent blank or black rectangle: the fetch
+   rejecting, and the media element refusing to decode what it got (which fires
+   an error EVENT on the element, not an exception, so no try/catch can see it).
+   Either way the card STAYS - it still carries the checkbox, the metadata and
+   the delete/move/rename actions, and removing it would hide an item the user
+   may specifically want to get rid of. */
+function previewFailed(wrap, why) {
+  wrap.replaceChildren();
+  wrap.classList.add("thumb-failed");
+  wrap.appendChild(iconEl("warning", "audio-ic"));
+  wrap.appendChild(el("div", "audio-tags", why));
+}
+
 /** Image: the file IS the thumbnail. */
 export function imagePreview(item, ctx) {
   const wrap = el("div", "thumb-face");
   const img = document.createElement("img");
+  img.addEventListener("error", () => previewFailed(wrap, "Preview unavailable"));
   ctx.fileURL(item.name, img, "load")
     .then((url) => (img.src = url))
-    .catch(() => wrap.remove());
+    .catch(() => previewFailed(wrap, "Could not load this image"));
   wrap.appendChild(img);
   return wrap;
 }
@@ -386,9 +401,10 @@ export function videoPreview(item, ctx) {
       try { v.currentTime = Math.min(0.1, v.duration / 2); } catch (e) { /* keep frame 0 */ }
     }
   });
+  v.addEventListener("error", () => previewFailed(wrap, "Preview unavailable"));
   ctx.fileURL(item.name, v, "loadeddata")
     .then((url) => (v.src = url))
-    .catch(() => wrap.remove());
+    .catch(() => previewFailed(wrap, "Could not load this clip"));
   wrap.appendChild(v);
   wrap.appendChild(el("span", "thumb-badge", durationLabel(item) || "clip"));
   return wrap;

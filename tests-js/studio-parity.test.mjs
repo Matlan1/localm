@@ -279,3 +279,32 @@ test("video cards carry a real <video> preview; music cards carry no fake image"
       "the track's tags are what identify it, so they lead the card");
     assert.match(mcard.textContent, /2:17/, "duration is rendered as a badge");
   });
+
+/* ------------------------------------------------- 5. failures stay visible */
+
+/* A media element reports a refused source by firing an ERROR EVENT on itself,
+   not by throwing - so nothing above it can catch this. Before, that left a
+   silent black rectangle; the card must say the preview failed AND must stay,
+   because a clip you cannot preview is exactly one you may want to delete. */
+for (const kind of [
+  { name: "video", listKey: "videos", box: "video-history", refresh: "refreshVideoHistory",
+    file: "broken.mp4", sel: "video" },
+  { name: "images", listKey: "images", box: "img-history", refresh: "refreshImageHistory",
+    file: "broken.png", sel: "img" },
+]) {
+  test(`${kind.name}: an undecodable file says so and keeps its card`, async () => {
+    const { window: win } = setup({ [kind.listKey]: [track(kind.file)] });
+    runScript(win, `${kind.refresh}();`);
+    await settle();
+
+    const card = win.document.getElementById(kind.box).querySelector(".thumb");
+    assert.ok(card, "card rendered");
+    card.querySelector(kind.sel).dispatchEvent(new win.Event("error"));
+    await tick();
+
+    assert.ok(win.document.getElementById(kind.box).querySelector(".thumb"),
+      "the card must SURVIVE a failed preview - it is how the file gets deleted");
+    assert.match(card.textContent, /Preview unavailable/,
+      "a failed preview must say so, not sit blank");
+  });
+}
