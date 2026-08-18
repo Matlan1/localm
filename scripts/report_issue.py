@@ -150,8 +150,8 @@ _QUERY_SECRET_RE = re.compile(
     #    separator here would be a polynomial-backtracking shape, since the
     #    names themselves start with an alnum). This is also the branch that
     #    admits the short generic names, per the reasoning above.
-    r"|(?<![A-Za-z0-9])[A-Za-z0-9]+[_-](?:api[_-]?key|token|secret"
-    r"|password|passwd|pwd|access[_-]?token|signature|key|auth|sig)"
+    r"|(?<=[A-Za-z0-9])[_-](?:api[_-]?key|token|secret|password|passwd|pwd"
+    r"|access[_-]?token|signature|key|auth|sig)"
     r")=)[^&\s#\"'\)\]\}]*"
 )
 _HEADER_SECRET_RE = re.compile(

@@ -307,8 +307,9 @@ def _scrub_url_creds(text: str) -> str:
 #      or ``?sig=`` in a URL still redacts exactly as it always has;
 #   2. anywhere else, UNPREFIXED - only the names that mean a credential and
 #      nothing else (api_key, token, secret, password, passwd, pwd, ...);
-#   3. anywhere else, PREFIXED - the same names PLUS the short generic ones
-#      (key, auth, sig), which are admitted only behind a prefix.
+#   3. anywhere else, PREFIXED (matched from the separator) - the same names
+#      PLUS the short generic ones (key, auth, sig), admitted only behind a
+#      prefix.
 #
 # Where the short generic names go is the deliberate decision here, and it is a
 # decision because BOTH failure directions are real. Admitting ``key``/``auth``/
@@ -327,14 +328,15 @@ _QUERY_SECRET_RE = re.compile(
     #    and nothing else.
     r"|(?<![A-Za-z0-9])(?:api[_-]?key|token|secret|password|passwd|pwd"
     r"|access[_-]?token|signature)"
-    # 3. Anywhere else, PREFIXED. The separator is mandatory and disjoint
-    #    from the run before it, so there is exactly ONE way to split the
-    #    prefix and the engine never backtracks through it (an optional
-    #    separator here would be a polynomial-backtracking shape, since the
-    #    names themselves start with an alnum). This is also the branch that
-    #    admits the short generic names, per the reasoning above.
-    r"|(?<![A-Za-z0-9])[A-Za-z0-9]+[_-](?:api[_-]?key|token|secret"
-    r"|password|passwd|pwd|access[_-]?token|signature|key|auth|sig)"
+    # 3. Anywhere else, PREFIXED - matched from the SEPARATOR rather than
+    #    from the prefix, so the whole pattern carries no repetition for a
+    #    backtracking engine to walk. The prefix is never consumed and simply
+    #    survives outside the match, which leaves the result identical:
+    #    ``SECRET_KEY=x`` matches ``_KEY=x`` and reads back as
+    #    ``SECRET_KEY=<redacted>``. This is also the branch that admits the
+    #    short generic names, per the reasoning above.
+    r"|(?<=[A-Za-z0-9])[_-](?:api[_-]?key|token|secret|password|passwd|pwd"
+    r"|access[_-]?token|signature|key|auth|sig)"
     r")=)[^&\s#\"'\)\]\}]*"
 )
 
