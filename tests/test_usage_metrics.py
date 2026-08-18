@@ -183,6 +183,19 @@ class TestUsageMetricsInResponses:
         assert usage["ttft_ms"] is not None
         assert usage["ttft_ms"] >= 0
 
+    def test_chat_reports_same_context_capacity_streaming_and_not(self):
+        eng = _make_engine()
+        # MUST be set explicitly: a bare MagicMock coerces to 1 through pydantic's
+        # __int__ path (measured), so an unset fixture would compare 1 to 1 and
+        # prove nothing.
+        eng.context_capacity.return_value = 65536
+        with TestClient(create_app(eng)) as client:
+            ns = client.post("/v1/chat/completions", json=CHAT_PAYLOAD).json()["usage"]
+            st = _final_usage(client.post(
+                "/v1/chat/completions", json={**CHAT_PAYLOAD, "stream": True}))
+        assert ns["context_capacity"] == 65536
+        assert ns["context_capacity"] == st["context_capacity"]
+
     def test_streaming_chat_final_chunk_has_ttft(self):
         with TestClient(create_app(_make_engine())) as client:
             r = client.post(

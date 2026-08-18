@@ -5257,6 +5257,7 @@ async def _complete(
         ttft_ms=_ttft_ms(gen_start, first_token_at),
         tokens_per_sec=_tokens_per_sec(
             completion_tokens, _decode_elapsed(first_token_at, gen_end)),
+        context_capacity=capacity,
     )
 
     response = ChatResponse(
