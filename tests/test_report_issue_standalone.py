@@ -96,6 +96,31 @@ def test_scrub_strips_query_string_and_header_credentials():
     assert "q=hello" in out  # non-credential param left intact
 
 
+def test_scrub_strips_bare_and_prefixed_credential_assignments():
+    """Mirrors the bare-name widening of _QUERY_SECRET_RE in
+    localm/bugreport.py. A credential written as a plain name=value line (a .env
+    fragment, a shell line) or behind a prefix (OPENAI_API_KEY=, pull_token=)
+    reaches this reporter exactly as it reaches the in-app one, and a fallback
+    reporter that scrubs LESS than the in-app one is the shape that leaks.
+
+    Both directions are asserted in one block on purpose: a widening that eats
+    ordinary config text out of a report is a real failure, not a cosmetic one,
+    and nothing else in this file would catch it."""
+    out = ri.scrub(
+        "pasted from my .env:\napi_key=CANARYBARE7Q4M\n"
+        "OPENAI_API_KEY=CANARYBARE1AAA\nSECRET_KEY=CANARYBARE2BBB\n"
+        "n_gpu_layers=35 key=value monkey=13\n")
+    assert "CANARYBARE7Q4M" not in out
+    assert "CANARYBARE1AAA" not in out
+    assert "CANARYBARE2BBB" not in out
+    assert "api_key=<redacted>" in out
+    assert "OPENAI_API_KEY=<redacted>" in out
+    assert "SECRET_KEY=<redacted>" in out
+    assert "n_gpu_layers=35" in out
+    assert "key=value" in out
+    assert "monkey=13" in out
+
+
 def test_scrub_empty_is_safe():
     assert ri.scrub("") == ""
     assert ri.scrub(None) is None
@@ -299,3 +324,21 @@ def test_powershell_reporter_scrubs_title_and_credentials():
     # Scrub covers URL user:pass@ credentials and sk-/localm-sk API keys.
     assert r"(://)[^/@\s]+@" in text
     assert "localm[_-]sk" in text
+def test_powershell_reporter_scrubs_credential_named_assignments():
+    """Same static-guard reasoning as the test above, applied to the query and
+    header scrub. This one is worth pinning precisely: the .ps1 comment claimed
+    to mirror _scrub_secrets while the function carried NO query or header scrub
+    at all, so what rotted was the CLAIM, and nothing in either suite noticed.
+
+    The last two assertions are the load-bearing ones. A port that only handled
+    the old ?/&-anchored form would satisfy a laxer test while leaving the
+    fallback reporter weaker than the in-app one, which is the shape that
+    leaks."""
+    ps1 = _MOD_PATH.parent / "report_issue.ps1"
+    text = ps1.read_text(encoding="utf-8")
+    # The header-line port.
+    assert r"(?:x-)?(?:api[_-]key|api[_-]token|auth[_-]token)" in text
+    # All three branches of the query port, not just the historic one.
+    assert r"(?<=[?&])" in text
+    assert r"(?<![A-Za-z0-9])" in text
+    assert r"(?<=[A-Za-z0-9])[_-](?:api[_-]?key" in text

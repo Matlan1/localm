@@ -295,9 +295,49 @@ def _scrub_url_creds(text: str) -> str:
 # endpoint it is - only the value must go. Do not widen this by adding more
 # value-shape regexes (sk-..., 24-char-opaque, ...): that chases formats
 # forever and still misses the next one; the name is the durable signal.
+#
+# The name may sit ANYWHERE a ``name=value`` pair can appear, not only right
+# after a ``?`` or ``&``: a user pasting a .env fragment or a shell line into a
+# report writes ``api_key=...`` at the start of a line, and a prefixed name
+# (``OPENAI_API_KEY=``, ``pull_token=``) never touches a query delimiter at all.
+# Hence three branches, all feeding ONE capture group so the substitution keeps
+# the name and drops only the value:
+#
+#   1. after a literal ?/& - the historic set, unchanged, so a bare ``?key=``
+#      or ``?sig=`` in a URL still redacts exactly as it always has;
+#   2. anywhere else, UNPREFIXED - only the names that mean a credential and
+#      nothing else (api_key, token, secret, password, passwd, pwd, ...);
+#   3. anywhere else, PREFIXED (matched from the separator) - the same names
+#      PLUS the short generic ones (key, auth, sig), admitted only behind a
+#      prefix.
+#
+# Where the short generic names go is the deliberate decision here, and it is a
+# decision because BOTH failure directions are real. Admitting ``key``/``auth``/
+# ``sig`` UNPREFIXED (branch 2) would eat an ordinary ``key=value`` line out of a
+# pasted config dump and an ``auth=none`` out of a log; dropping them from branch
+# 3 as well would leave ``SECRET_KEY=``, ``PRIVATE_KEY=``, ``APP_KEY=``,
+# ``x-auth=`` and ``req_sig=`` in the clear, and those are among the commonest
+# credential names a .env carries. Putting them in branch 3 only keeps both:
+# ``SECRET_KEY=`` redacts, ``key=`` and ``monkey=`` do not.
 _QUERY_SECRET_RE = re.compile(
-    r"(?i)([?&](?:api[_-]?key|key|token|secret|password|passwd|pwd|auth"
-    r"|access[_-]?token|sig|signature)=)[^&\s#\"'\)\]\}]*"
+    r"(?i)((?:"
+    # 1. Immediately after a query delimiter: the historic set, unchanged.
+    r"(?<=[?&])(?:api[_-]?key|key|token|secret|password|passwd|pwd|auth"
+    r"|access[_-]?token|sig|signature)"
+    # 2. Anywhere else, UNPREFIXED: only the names that mean a credential
+    #    and nothing else.
+    r"|(?<![A-Za-z0-9])(?:api[_-]?key|token|secret|password|passwd|pwd"
+    r"|access[_-]?token|signature)"
+    # 3. Anywhere else, PREFIXED - matched from the SEPARATOR rather than
+    #    from the prefix, so the whole pattern carries no repetition for a
+    #    backtracking engine to walk. The prefix is never consumed and simply
+    #    survives outside the match, which leaves the result identical:
+    #    ``SECRET_KEY=x`` matches ``_KEY=x`` and reads back as
+    #    ``SECRET_KEY=<redacted>``. This is also the branch that admits the
+    #    short generic names, per the reasoning above.
+    r"|(?<=[A-Za-z0-9])[_-](?:api[_-]?key|token|secret|password|passwd|pwd"
+    r"|access[_-]?token|signature|key|auth|sig)"
+    r")=)[^&\s#\"'\)\]\}]*"
 )
 
 # The same credential can arrive as a pasted HTTP header line instead of a URL
