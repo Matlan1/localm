@@ -586,11 +586,52 @@ _GGUF_KV_SHAPE_SUFFIXES = (
     ".attention.value_length",
 )
 
+# The one shape key a hybrid architecture states PER LAYER rather than once for
+# the whole stack, so it needs an array read the others do not.
+_GGUF_KV_HEADS_SUFFIX = ".attention.head_count_kv"
+
+# Integer element types a per-layer array may use, keyed identically to
+# _GGUF_FIXED_TYPE_SIZES. Real files write int32 (type 5); the smaller widths
+# are accepted because nothing stops a writer using them. Floats, bools and
+# strings are deliberately ABSENT: an array of those is not a head count, and
+# reading it as one would be the silent mis-read this module refuses to do.
+_GGUF_INT_ARRAY_FORMATS = {
+    0: "<B", 1: "<b", 2: "<H", 3: "<h", 4: "<I", 5: "<i", 10: "<Q", 11: "<q",
+}
+
+# Upper bound on a per-layer array, as a mis-parse guard. llama.cpp's own
+# LLAMA_MAX_LAYERS is 512, so anything past this many entries is a wrong offset
+# rather than a real model, and we must not allocate a list from a bogus count.
+_GGUF_MAX_LAYER_ARRAY = 4096
+
+# Mis-parse guards for the tensor-info walk, generous against any real model.
+_GGUF_MAX_TENSOR_COUNT = 1_000_000
+_GGUF_MAX_TENSOR_DIMS = 8
+
+# Key families that mark an architecture as keeping a FIXED-size recurrent state
+# (state-space / linear attention / short convolution) in place of a growing KV
+# cache on some layers. Matched as "<arch>" + infix so an mmproj's or another
+# tower's keys can never vote, exactly like the shape keys above.
+#
+# Deliberately a marker, NOT an architecture-name table: a name list goes stale
+# every time upstream adds a family. Its miss mode is also the safe one - an
+# unmarked hybrid simply keeps today's behaviour, it is never made worse. NOTE
+# that ".ssm." alone is NOT sufficient: lfm2 is hybrid via short convolution and
+# declares no ssm.* key at all (measured on a real LFM2-1.2B header).
+_GGUF_RECURRENT_KEY_INFIXES = (".ssm.", ".shortconv.")
+
 # Bounded read for the metadata probe: real GGUF writers put general.* and
 # <arch>.pooling_type keys before the (often large) tokenizer vocab arrays and
 # all tensor data, so a few MB is always enough; this guarantees the probe
 # never reads a multi-GB model file just to classify it.
 _GGUF_META_PROBE_BYTES = 4 * 1024 * 1024
+
+# A SECOND, larger bound used only for the tensor-name pass below. The tensor
+# list sits after the whole metadata block (tokenizer vocab included), so it is
+# past the budget above - measured 5.71 MiB into a real Qwen3-Next file. This is
+# paid ONLY by a hybrid that states a single head count, never on the common
+# path, and it is still a bounded prefix rather than a multi-GB model read.
+_GGUF_TENSOR_PROBE_BYTES = 32 * 1024 * 1024
 
 
 def _gguf_read_string(buf: bytes, off: int):
@@ -647,6 +688,96 @@ def _gguf_read_scalar(buf: bytes, off: int, vtype: int):
     return val, off + _GGUF_FIXED_TYPE_SIZES[vtype]
 
 
+def _gguf_read_int_array(buf: bytes, off: int):
+    """Read a GGUF array of FIXED-WIDTH INTEGERS at *off*; returns (list, new_offset).
+
+    Exists because a hybrid architecture states ``attention.head_count_kv`` as one
+    entry PER LAYER, and those entries are the exact per-layer truth - a 0 marks a
+    layer that keeps a fixed-size recurrent state and holds no KV cache at all.
+    ``_gguf_read_scalar`` deliberately REFUSES an array so a per-layer value can
+    never be silently read as a whole-stack one, so reading it needs its own
+    function rather than a relaxation of that contract.
+
+    Raises struct.error for a non-integer element type, an implausible length, or
+    a count running past the bounded read, rather than guessing. Callers catch and
+    treat that as 'no signal'."""
+    (elem_type,) = struct.unpack_from("<I", buf, off)
+    (count,) = struct.unpack_from("<Q", buf, off + 4)
+    off += 12
+    fmt = _GGUF_INT_ARRAY_FORMATS.get(elem_type)
+    if fmt is None:
+        raise struct.error(f"gguf array element type {elem_type} is not an integer")
+    size = _GGUF_FIXED_TYPE_SIZES[elem_type]
+    # Bounds BEFORE building the list, so a bogus count can never allocate.
+    if count > _GGUF_MAX_LAYER_ARRAY or size * count > len(buf) - off:
+        raise struct.error("gguf array implausibly long or out of bounds")
+    return ([struct.unpack_from(fmt, buf, off + i * size)[0] for i in range(count)],
+            off + size * count)
+
+
+def _gguf_attending_layer_count(path: Path, n_layers: int) -> int:
+    """How many of *n_layers* blocks actually hold a KV cache, read from the
+    file's TENSOR NAMES. Returns 0 - never raises - when that cannot be
+    determined, which callers treat as 'no signal'.
+
+    A hybrid that states ONE head_count_kv for a stack whose layers differ does
+    not record which layers attend anywhere in its metadata (verified against a
+    real Qwen3-Next file: 44 keys, none naming the pattern). The tensor list does
+    record it, unambiguously and with NO architecture table: an attending layer
+    carries blk.<i>.attn_k / attn_v weights, and a linear-attention, state-space
+    or short-convolution layer does not.
+
+    Keyed on attn_k/attn_v SPECIFICALLY, never on a bare "attn": all three real
+    hybrids measured carry blk.<i>.attn_norm.weight on every layer whether it
+    attends or not, so matching the norm tensor would count the whole stack and
+    silently reproduce the very over-charge this exists to remove.
+
+    Cross-checked against the per-layer head_count_kv array on the two real files
+    that publish both, where the two independent sources agree exactly (Granite
+    4.0 H Tiny: layers 5/15/25/35; LFM2-1.2B: 2/5/8/10/12/14)."""
+    try:
+        with open(path, "rb") as f:
+            buf = f.read(_GGUF_TENSOR_PROBE_BYTES)
+    except OSError:
+        return 0
+    try:
+        if buf[:4] != b"GGUF":
+            return 0
+        tensor_count, kv_count = struct.unpack_from("<QQ", buf, 8)
+        if tensor_count > _GGUF_MAX_TENSOR_COUNT:
+            return 0            # a mis-parse, not a real model
+        off = 24
+        for _ in range(kv_count):           # skip the whole metadata block
+            _key, off = _gguf_read_string(buf, off)
+            (vtype,) = struct.unpack_from("<I", buf, off)
+            off = _gguf_skip_value(buf, off + 4, vtype)
+        attending = set()
+        for _ in range(tensor_count):
+            name, off = _gguf_read_string(buf, off)
+            (n_dims,) = struct.unpack_from("<I", buf, off)
+            if n_dims > _GGUF_MAX_TENSOR_DIMS:
+                return 0
+            # n_dims (u32) + dims (u64 each) + ggml type (u32) + offset (u64)
+            off += 4 + 8 * n_dims + 4 + 8
+            if not name.startswith("blk."):
+                continue
+            if ".attn_k." not in name and ".attn_v." not in name:
+                continue
+            try:
+                attending.add(int(name.split(".")[1]))
+            except ValueError:
+                return 0        # an unexpected layout - refuse rather than guess
+    except (struct.error, IndexError, UnicodeDecodeError):
+        # Ran past the bounded read, or a malformed layout. Unlike the metadata
+        # walk this CANNOT answer from a partial result: a truncated tensor list
+        # under-counts attending layers, which would UNDER-charge the KV cache
+        # and let it overflow VRAM. Refusing is the only safe partial answer.
+        return 0
+    # More attending layers than the stack has means the two disagree about what
+    # they describe, so neither can be trusted.
+    return len(attending) if 0 < len(attending) <= n_layers else 0
+
+
 def gguf_kv_bytes_per_token(path: Path) -> int:
     """f16 KV-cache bytes per token, computed from *path*'s own GGUF header.
 
@@ -659,8 +790,24 @@ def gguf_kv_bytes_per_token(path: Path) -> int:
     under-charged (~2.6x low on a 12B) and could be judged to fit when its KV
     cache actually overflows VRAM.
 
-    K and V cache = n_layers * n_head_kv * head_dim, times 2 (K and V) and times
-    2 bytes/element (llama.cpp's default f16 type_k/type_v). head_dim comes from
+    K and V cache = (total KV heads across all layers) * head_dim, times 2 (K and
+    V) and times 2 bytes/element (llama.cpp's default f16 type_k/type_v).
+
+    "Across all layers" is the part a plain n_layers * n_head_kv gets wrong on a
+    HYBRID architecture (Qwen3-Next, Granite 4 H, LFM2, Jamba, Falcon-H1 ...),
+    where most layers use linear attention / a state-space model / a short
+    convolution and keep a FIXED-size recurrent state instead of a KV cache that
+    grows with the context. Those layers cost no per-token KV at all, so charging
+    every layer over-charges by the ratio of attention layers to total layers -
+    measured 4.0x on a real Qwen3-Next header (12 of its 48 layers attend).
+
+    Such a file states head_count_kv one entry PER LAYER, and that array is the
+    exact truth rather than an estimate, zeros included, so it is summed. When a
+    hybrid instead states a single scalar (Qwen3-Next does) the file simply does
+    not record which layers attend, so this returns 0 rather than a number that
+    is confidently wrong.
+
+    head_dim comes from
     the explicit ``attention.key_length``/``value_length`` keys when present
     (several architectures set a head_dim that is NOT n_embd/n_head) and falls
     back to n_embd // n_head otherwise.
@@ -677,6 +824,8 @@ def gguf_kv_bytes_per_token(path: Path) -> int:
 
     architecture = None
     vals: dict = {}
+    per_layer_kv: dict = {}
+    recurrent_keys: set = set()
     try:
         if buf[:4] != b"GGUF":
             return 0
@@ -695,12 +844,25 @@ def gguf_kv_bytes_per_token(path: Path) -> int:
             # Collect by FULL key and resolve against the architecture at the
             # end, so key order does not matter and an mmproj's parallel
             # "clip.*" attention block can never be mistaken for the LLM's.
+            # A hybrid stack states head_count_kv once PER LAYER. Read it -
+            # skipping it would throw away the only exact answer in the file.
+            if key.endswith(_GGUF_KV_HEADS_SUFFIX) and vtype == _GGUF_TYPE_ARRAY:
+                try:
+                    per_layer_kv[key], off = _gguf_read_int_array(buf, off)
+                    continue
+                except struct.error:
+                    pass        # not an integer array - skip it normally
             if any(key.endswith(s) for s in _GGUF_KV_SHAPE_SUFFIXES):
                 try:
                     vals[key], off = _gguf_read_scalar(buf, off, vtype)
                     continue
                 except struct.error:
                     pass        # not a scalar (array/string) - skip it normally
+            # Note (by NAME only, no value read) that this file declares a
+            # recurrent-state layer family, resolved against the architecture at
+            # the end like everything else here.
+            if any(infix in key for infix in _GGUF_RECURRENT_KEY_INFIXES):
+                recurrent_keys.add(key)
             off = _gguf_skip_value(buf, off, vtype)
     except (struct.error, IndexError, UnicodeDecodeError):
         # Truncated inside the bounded read, or a malformed layout. Fall through
@@ -716,13 +878,41 @@ def gguf_kv_bytes_per_token(path: Path) -> int:
         return int(v) if isinstance(v, int) and v > 0 else 0
 
     n_layers = _get(".block_count")
-    n_head_kv = _get(".attention.head_count_kv")
-    if not n_layers or not n_head_kv:
-        return 0
+
+    # Total KV heads summed over the whole stack. Every layer contributes on a
+    # uniform architecture; on a hybrid only the attending layers do.
+    per_layer = per_layer_kv.get(f"{architecture}{_GGUF_KV_HEADS_SUFFIX}")
+    if per_layer is not None:
+        # The array is the per-layer truth, so this is exact. Require it to
+        # describe the same stack block_count does: a length mismatch means one
+        # of the two is not what we think it is, and answering anyway would be
+        # the confidently-wrong number this function exists to refuse.
+        if not n_layers or len(per_layer) != n_layers:
+            return 0
+        total_kv_heads = sum(v for v in per_layer if v > 0)
+    else:
+        n_head_kv = _get(_GGUF_KV_HEADS_SUFFIX)
+        if not n_layers or not n_head_kv:
+            return 0
+        if any(k.startswith(f"{architecture}{infix}")
+               for infix in _GGUF_RECURRENT_KEY_INFIXES for k in recurrent_keys):
+            # Hybrid, but stated as ONE number for a stack whose layers differ,
+            # so n_layers is the wrong multiplier and the metadata block does not
+            # say what the right one is. The TENSOR NAMES do, exactly, so ask
+            # them rather than either guessing or giving up.
+            attending = _gguf_attending_layer_count(path, n_layers)
+            if not attending:
+                return 0        # could not tell - no signal, caller falls back
+            total_kv_heads = attending * n_head_kv
+        else:
+            total_kv_heads = n_layers * n_head_kv
+    if total_kv_heads <= 0:
+        return 0                # e.g. a fully recurrent stack: no KV cache
+
     k_len = _get(".attention.key_length")
     v_len = _get(".attention.value_length")
     if k_len and v_len:
-        return n_layers * n_head_kv * (k_len + v_len) * 2
+        return total_kv_heads * (k_len + v_len) * 2
     n_embd = _get(".embedding_length")
     n_head = _get(".attention.head_count")
     if not n_embd or not n_head:
@@ -730,7 +920,7 @@ def gguf_kv_bytes_per_token(path: Path) -> int:
     head_dim = n_embd // n_head
     if head_dim <= 0:
         return 0
-    return n_layers * n_head_kv * head_dim * 2 * 2
+    return total_kv_heads * head_dim * 2 * 2
 
 
 def gguf_expert_count(path: Path) -> int:
