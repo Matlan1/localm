@@ -15,7 +15,8 @@ import { refreshKnowledgePage } from "./knowledge.js";
 import { refreshModelsPage, refreshUploadsList } from "./models.js";
 import { refreshPluginsPage, renderCatalogPlugins } from "./plugins.js";
 import { refreshSettingsPage } from "./settings.js";
-import { refreshMusicHistory, refreshVideoHistory } from "./video.js";
+import { refreshMusicHistory } from "./music.js";
+import { refreshVideoHistory } from "./video.js";
 import { refreshWorkflowPanel } from "./workflow.js";
 
 /** Fire-and-forget prime of the backend ComfyUI readiness cache on media-module

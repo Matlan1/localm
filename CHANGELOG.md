@@ -12,6 +12,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Music and Video now have the same library as Images.** Generated tracks and
+  clips were a plain list of filenames with play, move and delete. They are now
+  a grid of cards you can tick to select, with bulk move and bulk delete, and a
+  detail view holding the full generation metadata plus download, copy path,
+  rename, move and delete. "Reuse settings" refills the form from any track or
+  clip you already made, opening the Advanced section when it restores anything
+  hidden there. A clip's card shows a real frame from just past the start; a
+  track's card leads with its style tags and length, since audio has no frame to
+  show, and plays in place from the card in one click. Long libraries show the
+  newest 24 with a "show all" toggle.
 - **Registering models found in a ComfyUI folder now shows real progress.**
   The guided "Import from ComfyUI..." wizard and the "Re-scan ComfyUI folder"
   button used to sit there with no feedback (or just a static "Scanning..."
@@ -64,6 +74,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   labeled parts, instead of three separate panels.
 
 ### Fixed
+- **The "reload chat model after generation" toggle now applies only to the page
+  you set it on.** It sat on the Images page but wrote a single shared setting,
+  so turning it off there silently turned off the VRAM handover for Music and
+  Video too, with nothing on those pages to say so or change it back. Each of
+  the three pages now has its own toggle writing its own setting. An existing
+  setting keeps its meaning: a generator you have never set individually still
+  follows the shared default.
+- **A generated file whose preview cannot be shown now says so.** A file the
+  browser refused to decode left a silent blank tile; it now reads "Preview
+  unavailable" and keeps its card, so you can still open, move or delete it.
 - **The Images/Music/Video workflow panel now matches the rest of the GUI.**
   The pick/delete buttons used one-off styling instead of the shared button
   classes, and hovering or selecting a workflow row showed no feedback.

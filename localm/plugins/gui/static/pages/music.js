@@ -1,18 +1,64 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-/* localm GUI - Music page (split from pages.js). Classic script: it
-   shares the one global lexical environment with app.js and the other
-   page scripts, so the helpers it uses ($, el, authHeaders, toast, ...)
-   resolve by bare name exactly as before. */
+/* localm GUI - Music page. The library (grid, selection, bulk actions, detail
+   modal, rename/move/delete) is the shared engine in app/media-gallery.js; only
+   the medium-specific bits live here.
+
+   Audio has no frame, so the card is text-forward: the tags are what identify a
+   track, and they are text. See media-gallery.js for why a waveform thumbnail
+   is deliberately not rendered. */
+
 "use strict";
 
-// --- ES module imports (auto-generated boundary; bodies unchanged) ---
-import { $, authHeaders, checkModelsBeforeGenerate, fetchImageURL, jobStatusWord, streamJob, toast } from "../app/helpers.js";
+import { $, authHeaders, checkModelsBeforeGenerate, fetchImageURL, jobStatusWord, revealFilledAdvanced, streamJob, toast } from "../app/helpers.js";
+import { bindReloadToggle, createGallery, musicPreview, playerDetail, reportMediaLoadFailure, refreshReloadToggle } from "../app/media-gallery.js";
 import { hideStop, showStop } from "./images.js";
-import { refreshMusicHistory } from "./video.js";
 import { modelOverrides } from "./workflow.js";
 
 /* ================================================================ */
-/*  Music page                                                       */
+/*  Music library                                                    */
+/* ================================================================ */
+
+const musicGallery = createGallery({
+  slug: "music",
+  listKey: "tracks",
+  noun: "track",
+  plural: "tracks",
+  gridId: "music-history",
+  bulkId: "music-bulk",
+  moveDestKey: "localm.musicMoveDest",
+  emptyIcon: "music",
+  emptyTitle: "No tracks yet",
+  emptyHint: "Generate one above; your tracks appear here.",
+  cardClass: "thumb-track",
+
+  beforeRefresh: () => refreshReloadToggle("music", "music-reload-llm"),
+
+  buildPreview: musicPreview,
+  buildDetailPreview: playerDetail("audio", "track"),
+  caption: (item) => item.name,
+
+  reuse: (item) => {
+    const m = item.meta || {};
+    $("music-tags").value = m.tags || "";
+    $("music-lyrics").value = m.lyrics || "";
+    $("music-duration").value = m.duration_seconds ?? "";
+    $("music-seed").value = m.seed ?? "";
+    $("music-steps").value = m.steps ?? "";
+    $("music-cfg").value = m.cfg ?? "";
+    // Most of these fields live behind this page's Advanced fold. Restoring
+    // into a CLOSED fold means the toast claims the settings came back while
+    // they sit invisible behind a shut triangle - the same trap the Images
+    // page documents, and the seed is the whole reason anyone reuses settings.
+    revealFilledAdvanced($("view-music"));
+  },
+});
+
+export const refreshMusicHistory = musicGallery.refresh;
+
+bindReloadToggle("music", "music-reload-llm");
+
+/* ================================================================ */
+/*  Generation                                                       */
 /* ================================================================ */
 
 $("music-generate").onclick = async () => {
@@ -54,9 +100,9 @@ $("music-generate").onclick = async () => {
       const player = document.createElement("audio");
       player.controls = true;
       player.style.width = "100%";
-      const url = await fetchImageURL(
+      reportMediaLoadFailure(player, "the track");
+      player.src = await fetchImageURL(
         "/api/music/file/" + encodeURIComponent(end.result));
-      player.src = url;
       $("music-result").appendChild(player);
       refreshMusicHistory();
     } else {
@@ -69,4 +115,3 @@ $("music-generate").onclick = async () => {
     hideStop("music-stop");
   }
 };
-

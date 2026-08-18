@@ -1528,14 +1528,18 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
 .data-table button.corrupt-fix { color: var(--red); border-color: var(--red); }
 .data-table button.corrupt-fix:hover { color: #fff; background: var(--red); border-color: var(--red); }
 
-/* image generation */
+/* media generation galleries (image / music / video)
 
-.img-grid {
+   .img-grid is kept as an alias of .media-grid so anything still targeting the
+   original class - other stylesheets, a user script, an old cached shell -
+   keeps rendering. The three Studio pages all emit .media-grid. */
+
+.media-grid, .img-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
   gap: 12px;
 }
-.img-grid .thumb {
+.media-grid .thumb, .img-grid .thumb {
   position: relative;
   border: 1px solid var(--border);
   border-radius: 12px;
@@ -1543,11 +1547,60 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
   cursor: pointer;
   background: var(--code-bg);
 }
-.img-grid .thumb.selected { border-color: var(--accent); }
-.img-grid .thumb img { width: 100%; display: block; aspect-ratio: 1; object-fit: cover; }
-.img-grid .thumb .cap {
+.media-grid .thumb.selected, .img-grid .thumb.selected { border-color: var(--accent); }
+.media-grid .thumb .cap, .img-grid .thumb .cap {
   font-size: 11px; color: var(--text-dim); padding: 5px 8px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* The square preview area. Image and video fill it edge to edge; audio has no
+   frame to show, so its face is a text-forward card instead (see
+   media-gallery.js for why a waveform is deliberately not rendered). */
+.thumb-face { position: relative; display: block; }
+.thumb-face img, .thumb-face video {
+  width: 100%; display: block; aspect-ratio: 1; object-fit: cover;
+  background: var(--code-bg);
+}
+.thumb-audio {
+  aspect-ratio: 1;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 8px; padding: 14px; text-align: center;
+  background: linear-gradient(150deg, var(--accent-soft), var(--code-bg));
+}
+.thumb-audio .audio-ic svg { width: 26px; height: 26px; opacity: 0.75; }
+.thumb-audio .audio-tags {
+  font-size: 12px; line-height: 1.35; color: var(--text);
+  display: -webkit-box; -webkit-line-clamp: 4; line-clamp: 4;
+  -webkit-box-orient: vertical; overflow: hidden;
+}
+
+/* play control on an audio card: audio has no frame, so this is the only way to
+   tell two tracks apart without opening the detail view */
+.audio-play {
+  background: var(--bg-input); color: var(--text);
+  border: 1px solid var(--border); border-radius: 999px;
+  width: 34px; height: 34px; cursor: pointer; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.audio-play:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
+.audio-play svg { width: 15px; height: 15px; }
+.audio-play[disabled] { opacity: 0.5; cursor: default; }
+.thumb-audio .audio-inline { width: 100%; height: 30px; margin-top: 2px; }
+
+/* a preview that could not be shown - says so instead of sitting blank */
+.thumb-failed {
+  aspect-ratio: 1;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 8px; padding: 14px; text-align: center;
+  background: var(--code-bg); color: var(--text-dim);
+}
+.thumb-failed .audio-ic svg { width: 22px; height: 22px; opacity: 0.7; }
+
+/* duration badge, bottom-right of the preview */
+.thumb-badge {
+  position: absolute; right: 6px; bottom: 6px;
+  background: rgba(0, 0, 0, 0.62); color: #fff;
+  font-size: 10px; line-height: 1; padding: 3px 5px; border-radius: 4px;
 }
 
 /* selection checkbox - hidden until hover, stays while checked */
@@ -1575,17 +1628,17 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
 .thumb-acts button:hover { background: var(--accent); }
 .thumb-acts button.danger:hover { background: var(--red); }
 
-/* bulk actions bar */
-#img-bulk {
-  display: flex; align-items: center; gap: 10px;
+/* bulk actions bar - one per media page, shown only while a selection exists */
+.media-bulk, #img-bulk {
+  align-items: center; gap: 10px;
   padding: 8px 12px; margin-bottom: 12px;
   background: var(--bg-input); border: 1px solid var(--border);
   border-radius: 8px;
 }
-#img-bulk .count { font-size: 13px; color: var(--text-dim); }
+.media-bulk .count, #img-bulk .count { font-size: 13px; color: var(--text-dim); }
 
 /* show-all toggle spans the grid */
-.img-show-all { grid-column: 1 / -1; }
+.media-show-all, .img-show-all { grid-column: 1 / -1; }
 #img-result { margin-top: 14px; }
 #img-result img {
   max-width: 100%; border-radius: 10px; border: 1px solid var(--border);
