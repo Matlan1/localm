@@ -64,13 +64,14 @@ and on the endpoint:
 | | `prompt/completion/total_tokens` | `tokens_per_sec` | `ttft_ms` | `context_capacity` |
 |---|---|---|---|---|
 | `/v1/chat/completions`, streaming | yes | yes | yes | yes |
-| `/v1/chat/completions`, non-streaming | yes | yes | no | no |
+| `/v1/chat/completions`, non-streaming | yes | yes | yes | yes |
 | `/v1/completions`, streaming | yes | yes | yes | no |
 | `/v1/completions`, non-streaming | yes | no | no | no |
 
-`ttft_ms` (time to first token) is reported on streaming responses only.
+`ttft_ms` (time to first token) is reported on streaming responses and on
+non-streaming chat completions.
 `context_capacity` (the model's total context window in tokens) is reported
-only on streaming chat completions.
+on both streaming and non-streaming chat completions.
 
 #### How a generation failure is reported
 
