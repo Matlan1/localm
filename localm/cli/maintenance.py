@@ -235,7 +235,11 @@ def setup_embeddings(model, yes=False):
 @click.option("--force", is_flag=True,
               help="Rebuild the launcher even if it already exists (use after a "
                    "Python upgrade to refresh the copied interpreter).")
-def make_launcher_cmd(force: bool) -> None:
+@click.option("--quiet", is_flag=True,
+              help="Only report problems. For callers that print their own next "
+                   "steps (setup), so this step does not hand out a competing "
+                   "way to start localm.")
+def make_launcher_cmd(force: bool, quiet: bool) -> None:
     """Build the native app launcher so the server runs as LocaLM, not python.
 
     Windows: creates <venv>\\localm-app\\LocaLM.exe (a branded copy of the venv
@@ -252,8 +256,10 @@ def make_launcher_cmd(force: bool) -> None:
         console.print("[yellow]Could not build the native launcher.[/yellow] "
                       "`localm gui` still works.")
         sys.exit(1)
+    if quiet:
+        return
     if res.path:
-        console.print(f"[green]Launcher ready:[/green] {res.path}")
+        console.print(f"[green]App executable ready:[/green] {res.path}")
     if res.desktop_file:
         console.print(f"[dim]Desktop entry:[/dim] {res.desktop_file}")
     if sys.platform == "win32" and res.path:
