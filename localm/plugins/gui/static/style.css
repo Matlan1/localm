@@ -1081,6 +1081,9 @@ pre:hover .canvas-btn { opacity: 1; }
 .card-head .settings-section-head { border: 0; padding: 0; margin: 0; }
 /* Plugin rows: content icon takes the plugins category hue (violet). */
 .ic-plugin { color: var(--cat-violet); }
+/* Job rows: content icon takes the jobs category hue (teal), same borrow-an-existing
+   -token shape as .ic-plugin above rather than minting another --ic-* pair. */
+.ic-job { color: var(--cat-teal); }
 /* Leading content icon inside a mono .log-entry (e.g. the Knowledge doc list). */
 .log-entry .log-ic { margin-right: 6px; vertical-align: -0.15em; }
 /* Quiet motion on interactive rows/buttons; reduced-motion fully respected. */
@@ -1313,9 +1316,11 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
 .upload-list .upload-name { font-family: var(--mono); font-size: 12px;
   overflow-wrap: anywhere; }
 
-/* jobs list: without these rules the name/state and schedule/task/last-run
-   spans collapse together ("look up the weatherenabled", "every 1mtask: chat"). */
-.jobs-list { display: flex; flex-direction: column; gap: 10px; }
+/* The jobs LIST is a .data-table now; these card rules serve the two surfaces that
+   still stack a head + meta + log vertically: the activity panel
+   (app/models-sidebar.js) and the jobs plugin's own results panel. Without them the
+   name/state and schedule/last-run spans collapse together ("look up the
+   weatherenabled"). */
 .job-row {
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -1397,8 +1402,6 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
   align-items: center;
   margin-top: 6px;
 }
-.job-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
-
 .job-log {
   background: var(--code-bg);
   border: 1px solid var(--border);
