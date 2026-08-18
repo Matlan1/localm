@@ -139,19 +139,29 @@
               <button class="btn-secondary" id="persona-delete" title="Delete the selected persona">delete</button>
             </div>
           </div>
+          <div class="full"><label>System prompt <span class="sub">(blank = your Settings &rsaquo; Chat default)</span></label><textarea id="p-system" rows="3" placeholder="Blank = use your default from Settings"></textarea></div>
           <div><label>Temperature</label><input id="p-temperature" type="number" step="0.05" min="0" max="2" placeholder="default"></div>
-          <div><label>Top-p</label><input id="p-top-p" type="number" step="0.05" min="0" max="1" placeholder="default"></div>
-          <div><label>Top-k</label><input id="p-top-k" type="number" step="1" min="1" placeholder="default"></div>
-          <div><label>Repeat penalty</label><input id="p-repeat-penalty" type="number" step="0.05" min="0.5" max="2" placeholder="default"></div>
-          <div><label>Max tokens</label><input id="p-max-tokens" type="number" step="64" min="1" placeholder="default"></div>
-          <div><label>Seed</label><input id="p-seed" type="number" step="1" placeholder="random"></div>
           <div class="full check-row"><label title="Lets the model search the web and read pages mid-conversation (uses the server's network policy). Off = fully offline chat."><input type="checkbox" id="p-web"> <span class="lbl-ic" data-icon="web"></span> Web access - the model may search and read pages</label></div>
           <div class="full check-row"><label title="Recall the durable facts localm has learned about you and add them to the prompt (server-side, query-aware). Add facts with /remember, view or edit with /memory. Growing memory is blocked in privacy mode."><input type="checkbox" id="p-memory" checked> <span class="lbl-ic" data-icon="memory"></span> Memory - remind the model what it knows about you</label></div>
           <div class="full check-row"><label title="Reads each finished reply aloud. Install the tts plugin for neural Kokoro voices; otherwise the browser's built-in offline voice is used. Every assistant message also has a speaker button."><input type="checkbox" id="p-speak"> <span class="lbl-ic" data-icon="speak"></span> Speak replies aloud</label></div>
           <div class="full" id="voice-row" style="display:none"><label title="Which voice reads replies aloud. Remembered in THIS browser and overrides the server-side default in Settings &rsaquo; Text-to-speech. With the tts plugin installed these are neural Kokoro voices; otherwise your browser's local (offline) voices."><span class="lbl-ic" data-icon="voice"></span> Voice <span class="sub">(this browser)</span></label><select id="p-voice"></select></div>
           <div class="full"><label><span class="lbl-ic" data-icon="book"></span> Knowledge - ground replies in an indexed collection (manage on the Knowledge page)</label><select id="p-kb"><option value="">(none)</option></select></div>
-          <div class="full"><label>System prompt <span class="sub">(blank = your Settings &rsaquo; Chat default)</span></label><textarea id="p-system" rows="3" placeholder="Blank = use your default from Settings"></textarea></div>
-          <div class="full"><label>GBNF grammar (constrains output; local models only)</label><textarea id="p-grammar" rows="3" placeholder='root ::= "yes" | "no"' spellcheck="false"></textarea></div>
+          <!-- Sampling knobs whose blank state already means "use the tuned
+               default", plus the grammar box. Folded away so Temperature and the
+               system prompt are not buried among six numbers nobody sets.
+               Programmatic writers (applyPersona, /persona) call
+               revealFilledAdvanced so a restored value is never left hidden. -->
+          <details class="adv-fold full" id="p-advanced">
+            <summary>Advanced <span class="adv-fold-hint">sampling, seed, grammar</span><span class="job-state adv-fold-count" hidden></span></summary>
+            <div class="adv-fold-body">
+              <div><label>Top-p</label><input id="p-top-p" type="number" step="0.05" min="0" max="1" placeholder="default"></div>
+              <div><label>Top-k</label><input id="p-top-k" type="number" step="1" min="1" placeholder="default"></div>
+              <div><label>Repeat penalty</label><input id="p-repeat-penalty" type="number" step="0.05" min="0.5" max="2" placeholder="default"></div>
+              <div><label>Max tokens</label><input id="p-max-tokens" type="number" step="64" min="1" placeholder="default"></div>
+              <div><label>Seed</label><input id="p-seed" type="number" step="1" placeholder="random"></div>
+              <div class="full"><label>GBNF grammar (constrains output; local models only)</label><textarea id="p-grammar" rows="3" placeholder='root ::= "yes" | "no"' spellcheck="false"></textarea></div>
+            </div>
+          </details>
         </div>
         <div id="attach-chips"></div>
         <div class="composer">
@@ -375,18 +385,27 @@
           <textarea id="img-prompt" rows="3" placeholder="a watercolor fox in a snowy forest"></textarea>
           <div class="grid2">
             <div><label>Negative prompt</label><input type="text" id="img-negative" placeholder="optional"></div>
-            <div><label>Seed</label><input type="number" id="img-seed" placeholder="random"></div>
-            <div><label>Guidance</label><input type="number" id="img-guidance" step="0.1" placeholder="default (~3.5)"></div>
-            <div><label>Denoise (img2img)</label><input type="number" id="img-denoise" step="0.05" min="0" max="1" placeholder="default"></div>
-          </div>
-          <div class="grid2">
             <div><label>LoRA</label><select id="img-lora"><option value="">None</option></select></div>
-            <div></div>
-            <div><label>LoRA strength (model)</label><input type="number" id="img-lora-strength-model" step="0.05" placeholder="default (1.0)"></div>
-            <div><label>LoRA strength (CLIP)</label><input type="number" id="img-lora-strength-clip" step="0.05" placeholder="default (0.5)"></div>
           </div>
           <label>Input image path (optional, img2img)</label>
           <input type="text" id="img-input" placeholder="path to a base image" spellcheck="false">
+          <!-- Every knob here is placeholder-defaulted: blank already means "use
+               the tuned default". "reuse settings" on a history item writes into
+               them, so it calls revealFilledAdvanced and this opens itself. -->
+          <details class="adv-fold" id="img-advanced">
+            <summary>Advanced <span class="adv-fold-hint">seed, guidance, denoise, LoRA strength</span><span class="job-state adv-fold-count" hidden></span></summary>
+            <div class="adv-fold-body grid2">
+              <div><label>Seed</label><input type="number" id="img-seed" placeholder="random"></div>
+              <div><label>Guidance</label><input type="number" id="img-guidance" step="0.1" placeholder="default (~3.5)"></div>
+              <div><label>Denoise (img2img)</label><input type="number" id="img-denoise" step="0.05" min="0" max="1" placeholder="default"></div>
+              <!-- Spacer: fills the odd cell so the two LoRA strengths sit on one
+                   row as the pair they are, instead of straddling two. It did the
+                   same job before the fold; it is kept, not inherited. -->
+              <div></div>
+              <div><label>LoRA strength (model)</label><input type="number" id="img-lora-strength-model" step="0.05" placeholder="default (1.0)"></div>
+              <div><label>LoRA strength (CLIP)</label><input type="number" id="img-lora-strength-clip" step="0.05" placeholder="default (0.5)"></div>
+            </div>
+          </details>
           <div class="actions">
             <button class="btn-primary" id="img-generate">Generate</button>
             <button class="btn-secondary" id="img-stop" style="display:none" title="Stop this generation and free the GPU">Stop</button>
@@ -431,10 +450,17 @@
           <textarea id="music-lyrics" rows="4" placeholder="[verse]&#10;Neon lights across the bay…"></textarea>
           <div class="grid2">
             <div><label>Duration (seconds)</label><input type="number" id="music-duration" value="120" min="5" max="3600" step="5"></div>
-            <div><label>Seed</label><input type="number" id="music-seed" placeholder="random"></div>
-            <div><label>Steps</label><input type="number" id="music-steps" placeholder="default (50)"></div>
-            <div><label>CFG</label><input type="number" id="music-cfg" step="0.5" placeholder="default (5.0)"></div>
           </div>
+          <!-- Duration stays out: it ships a real value="120" the form expects you
+               to read and change. These three are placeholder-defaulted. -->
+          <details class="adv-fold" id="music-advanced">
+            <summary>Advanced <span class="adv-fold-hint">seed, steps, CFG</span><span class="job-state adv-fold-count" hidden></span></summary>
+            <div class="adv-fold-body grid2">
+              <div><label>Seed</label><input type="number" id="music-seed" placeholder="random"></div>
+              <div><label>Steps</label><input type="number" id="music-steps" placeholder="default (50)"></div>
+              <div><label>CFG</label><input type="number" id="music-cfg" step="0.5" placeholder="default (5.0)"></div>
+            </div>
+          </details>
           <div class="actions">
             <button class="btn-primary" id="music-generate">Generate</button>
             <button class="btn-secondary" id="music-stop" style="display:none" title="Stop this generation and free the GPU">Stop</button>
@@ -476,13 +502,22 @@
           <div class="grid2">
             <div><label>Duration (seconds)</label><input type="number" id="video-seconds" value="5" min="1" max="20" step="1"></div>
             <div><label>FPS</label><input type="number" id="video-fps" value="24" min="8" max="60" step="1"></div>
-            <div><label>Width</label><input type="number" id="video-width" step="16" placeholder="default (1280, native)"></div>
-            <div><label>Height</label><input type="number" id="video-height" step="16" placeholder="default (704, native)"></div>
-            <div><label>Seed</label><input type="number" id="video-seed" placeholder="random"></div>
-            <div><label>Steps</label><input type="number" id="video-steps" placeholder="default (30)"></div>
-            <div><label>CFG</label><input type="number" id="video-cfg" step="0.5" placeholder="default (5.0)"></div>
             <div><label>Start image (optional, image-to-video)</label><input type="text" id="video-image" placeholder="path on this machine" spellcheck="false"></div>
           </div>
+          <!-- Width and Height are folded even though they look load-bearing: the
+               blurb above this form tells you to KEEP the native 1280x704 and
+               iterate on duration and steps instead. A field the page tells you
+               not to touch is the definition of rarely touched. -->
+          <details class="adv-fold" id="video-advanced">
+            <summary>Advanced <span class="adv-fold-hint">resolution, seed, steps, CFG</span><span class="job-state adv-fold-count" hidden></span></summary>
+            <div class="adv-fold-body grid2">
+              <div><label>Width</label><input type="number" id="video-width" step="16" placeholder="default (1280, native)"></div>
+              <div><label>Height</label><input type="number" id="video-height" step="16" placeholder="default (704, native)"></div>
+              <div><label>Seed</label><input type="number" id="video-seed" placeholder="random"></div>
+              <div><label>Steps</label><input type="number" id="video-steps" placeholder="default (30)"></div>
+              <div><label>CFG</label><input type="number" id="video-cfg" step="0.5" placeholder="default (5.0)"></div>
+            </div>
+          </details>
           <div class="actions">
             <button class="btn-primary" id="video-generate">Generate</button>
             <button class="btn-secondary" id="video-stop" style="display:none" title="Stop this generation and free the GPU">Stop</button>

@@ -8,7 +8,7 @@
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { chat, lsSetScoped, renderAttachChips } from "../app/chat.js";
 import { pickDirectory } from "../app/picker.js";
-import { $, authHeaders, cancelJob, checkModelsBeforeGenerate, confirmDanger, el, fetchImageURL, jobStatusWord, openModal, streamJob, toast } from "../app/helpers.js";
+import { $, authHeaders, cancelJob, checkModelsBeforeGenerate, confirmDanger, el, fetchImageURL, jobStatusWord, openModal, revealFilledAdvanced, streamJob, toast } from "../app/helpers.js";
 import { emptyState } from "../app/icons.js";
 import { showView } from "../app/tabs.js";
 import { modelOverrides } from "./workflow.js";
@@ -256,6 +256,11 @@ export function showImageDetail(item) {
         $("img-lora").value = item.meta.lora_name || "";
         $("img-lora-strength-model").value = item.meta.lora_strength_model ?? "";
         $("img-lora-strength-clip").value = item.meta.lora_strength_clip ?? "";
+        // Five of those nine ids live behind this page's Advanced fold. Without
+        // this the toast below claims the settings were restored while the seed,
+        // guidance, denoise and both LoRA strengths sit invisible behind a closed
+        // triangle - and the seed is the whole reason anyone reuses settings.
+        revealFilledAdvanced($("view-images"));
         closeModal();
         toast("Settings restored - tweak and generate");
       };
