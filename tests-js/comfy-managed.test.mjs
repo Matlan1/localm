@@ -540,3 +540,147 @@ test("a retried update does not stack the previous failure's reason", async () =
   assert.ok(errs[0].textContent.includes("second"), errs[0].textContent);
   assert.ok(!errs[0].textContent.includes("first"), "a stale reason must not survive");
 });
+
+// --------------------------------------------------------------------------- //
+//  "Still working" indicator: spinner + elapsed readout while a job runs      //
+// --------------------------------------------------------------------------- //
+// A long silent stretch in the streamed log (a large git clone, a slow pip
+// install, a multi-GB download with no per-line progress) used to look
+// identical to a hung job - the disabled button and a static log gave no
+// "still alive" signal. Covers both ways a job can be in flight: a fresh
+// click, and the reattach-after-reload path exercised above (INSTALLING).
+
+test("Set up: a spinner and elapsed readout appear on the button while the job runs", async () => {
+  const calls = [];
+  const { window: win } = loadAppWithPages({ fetchImpl: makeFetch(calls, { installed: false }) });
+  await render(win);
+  runScript(win, "streamJob = () => new Promise(() => {});");   // never resolves - job still running
+  win.document.querySelector(".comfy-managed-setup-btn").onclick();
+  for (let i = 0; i < 4; i++) await new Promise((r) => setTimeout(r, 0));
+  const btn = win.document.querySelector(".comfy-managed-setup-btn");
+  assert.ok(btn.disabled, "button disabled while the job runs");
+  assert.ok(btn.querySelector(".comfy-managed-spinner"), "spinner shown on the button");
+  const readout = win.document.querySelector(".comfy-managed-elapsed");
+  assert.ok(readout, "elapsed readout rendered");
+  assert.match(readout.textContent, /still working/i);
+});
+
+test("Set up: a failed job removes the spinner and elapsed readout (no re-render to clear them)", async () => {
+  const calls = [];
+  const { window: win } = loadAppWithPages({ fetchImpl: makeFetch(calls, { installed: false }) });
+  await render(win);
+  runScript(win, `streamJob = (id, onLine) => {
+    onLine("some output");
+    return Promise.resolve({ status: "failed" });
+  };`);
+  win.document.querySelector(".comfy-managed-setup-btn").onclick();
+  for (let i = 0; i < 6; i++) await new Promise((r) => setTimeout(r, 0));
+  const btn = win.document.querySelector(".comfy-managed-setup-btn");
+  assert.equal(btn.disabled, false, "button re-enabled after failure");
+  assert.ok(!btn.querySelector(".comfy-managed-spinner"), "spinner removed after failure");
+  assert.ok(!win.document.querySelector(".comfy-managed-elapsed"), "elapsed readout removed after failure");
+  assert.match(win.document.querySelector(".comfy-managed-log").textContent, /some output/,
+    "the log itself stays visible - only the indicator is torn down");
+});
+
+test("Set up: a successful job leaves no spinner or elapsed readout behind (panel re-renders into the installed view)", async () => {
+  const calls = [];
+  let installedNow = false;
+  const fetchImpl = async (url, opts = {}) => {
+    if (String(url) === "/api/comfy/managed-status") {
+      const body = installedNow ? { installed: true, state: "installed", path: "/x", target: "own", managed_active: false }
+                                 : { installed: false, state: "not_installed", path: null, target: "own", managed_active: false };
+      return { ok: true, status: 200, text: async () => "", json: async () => body };
+    }
+    return makeFetch(calls, {})(url, opts);
+  };
+  const { window: win } = loadAppWithPages({ fetchImpl });
+  win.__markInstalled = () => { installedNow = true; };
+  await render(win);   // render() always resets streamJob to its own default stub -
+  // set the custom one AFTER, or it gets clobbered right back (see the big
+  // comment above renderNoStreamStub explaining exactly this gotcha).
+  runScript(win, `streamJob = () => { window.__markInstalled(); return Promise.resolve({ status: "done" }); };`);
+  win.document.querySelector(".comfy-managed-setup-btn").onclick();
+  for (let i = 0; i < 8; i++) await new Promise((r) => setTimeout(r, 0));
+  assert.ok(win.document.querySelector(".comfy-managed-remove-btn"), "re-rendered into the installed view");
+  assert.ok(!win.document.querySelector(".comfy-managed-spinner"), "no leftover spinner");
+  assert.ok(!win.document.querySelector(".comfy-managed-elapsed"), "no leftover elapsed readout");
+});
+
+test("Update: a spinner and elapsed readout appear on the button while the job runs", async () => {
+  const calls = [];
+  const { window: win } = loadAppWithPages({
+    fetchImpl: makeFetch(calls, { installed: true, statusExtra: UPDATE_DUE }) });
+  await render(win);
+  runScript(win, "streamJob = () => new Promise(() => {});");
+  win.document.querySelector(".comfy-managed-update-btn").onclick();
+  for (let i = 0; i < 4; i++) await new Promise((r) => setTimeout(r, 0));
+  const btn = win.document.querySelector(".comfy-managed-update-btn");
+  assert.ok(btn.querySelector(".comfy-managed-spinner"), "spinner shown while updating");
+  assert.match(win.document.querySelector(".comfy-managed-elapsed").textContent, /still working/i);
+});
+
+test("Update: the spinner and elapsed readout are removed once a failed update resolves", async () => {
+  const calls = [];
+  const { window: win } = loadAppWithPages({
+    fetchImpl: makeFetch(calls, { installed: true, statusExtra: UPDATE_DUE }) });
+  await render(win);
+  runScript(win, `streamJob = (id, onLine) => { onLine("boom"); return Promise.resolve({ status: "failed" }); };`);
+  win.document.querySelector(".comfy-managed-update-btn").onclick();
+  for (let i = 0; i < 6; i++) await new Promise((r) => setTimeout(r, 0));
+  const btn = win.document.querySelector(".comfy-managed-update-btn");
+  assert.ok(!btn.querySelector(".comfy-managed-spinner"), "spinner gone after the update settles");
+  assert.ok(!win.document.querySelector(".comfy-managed-elapsed"), "elapsed readout gone after the update settles");
+});
+
+test("Repair: a spinner and elapsed readout appear on the button while the job runs", async () => {
+  const calls = [];
+  const { window: win } = loadAppWithPages({ fetchImpl: makeFetch(calls, { state: "corrupt" }) });
+  await render(win);
+  runScript(win, "confirmDanger = (t, m, l, onConfirm) => onConfirm();");
+  runScript(win, "streamJob = () => new Promise(() => {});");
+  win.document.querySelector(".comfy-managed-repair-btn").onclick();
+  for (let i = 0; i < 4; i++) await new Promise((r) => setTimeout(r, 0));
+  const btn = win.document.querySelector(".comfy-managed-repair-btn");
+  assert.ok(btn.querySelector(".comfy-managed-spinner"), "spinner shown while repairing");
+  assert.match(win.document.querySelector(".comfy-managed-elapsed").textContent, /still working/i);
+});
+
+test("Repair: the spinner is removed once a failed repair resolves", async () => {
+  const calls = [];
+  const { window: win } = loadAppWithPages({ fetchImpl: makeFetch(calls, { state: "corrupt" }) });
+  await render(win);
+  runScript(win, "confirmDanger = (t, m, l, onConfirm) => onConfirm();");
+  runScript(win, `streamJob = (id, onLine) => { onLine("boom"); return Promise.resolve({ status: "failed" }); };`);
+  win.document.querySelector(".comfy-managed-repair-btn").onclick();
+  for (let i = 0; i < 6; i++) await new Promise((r) => setTimeout(r, 0));
+  const btn = win.document.querySelector(".comfy-managed-repair-btn");
+  assert.ok(!btn.querySelector(".comfy-managed-spinner"), "spinner gone after the repair settles");
+  assert.ok(!win.document.querySelector(".comfy-managed-elapsed"), "elapsed readout gone after the repair settles");
+});
+
+test("Reattach to an in-progress setup (installing state): a spinner appears next to the status pill", async () => {
+  // No button exists in the "installing" reattach state (see the test above
+  // asserting exactly that), so the indicator must anchor somewhere else -
+  // the status pill - rather than silently not showing at all.
+  const calls = [];
+  const activityOp = { id: "job-reattach-spinner", kind: "comfy-setup", status: "running",
+    label: "ComfyUI setup", created_at: 1000 };
+  const fetchImpl = async (url, opts = {}) => {
+    const u = String(url);
+    if (u === "/api/activity")
+      return { ok: true, status: 200, text: async () => "",
+               json: async () => ({ now: 1010, operations: [activityOp] }) };
+    return makeFetch(calls, { state: "installing" })(url, opts);
+  };
+  const { window: win } = loadAppWithPages({ fetchImpl });
+  runScript(win, `streamJob = (id, onLine) => {
+    onLine("Cloning ComfyUI ...");
+    return new Promise(() => {});   // never resolves - job still running
+  };`);
+  await renderNoStreamStub(win);
+  const pill = win.document.querySelector(".comfy-pill");
+  assert.ok(pill.querySelector(".comfy-managed-spinner"),
+    "spinner shown next to the pill (there is no button in this state)");
+  assert.match(win.document.querySelector(".comfy-managed-elapsed").textContent, /still working/i);
+});

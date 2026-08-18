@@ -1663,6 +1663,46 @@ export async function saveTtsSettings() {
   refreshSettingsPage();
 }
 
+/** Starts a "still working" indicator for a long-running comfy job (Set up,
+ *  Update, Repair, or a reattach to one already running after a reload): a
+ *  small spinner appended to *anchorEl* (the disabled button, or the status
+ *  pill when there is no button to disable) plus a live "still working"
+ *  readout inserted just above *logEl*. Without this, a quiet stretch in the
+ *  streamed log - a large git clone, a slow pip install, a multi-GB download
+ *  with no per-line progress - looks identical to a hung job, because the
+ *  only signal so far was a disabled button and a static log.
+ *
+ *  Shared by every call site that starts or attaches to one of these jobs
+ *  (both a fresh click and the reattach-after-reload path) so the start/stop
+ *  bookkeeping - and the interval it owns - lives in one place. Returns
+ *  { onLine, stop }: call onLine() whenever a log line arrives (it resets
+ *  the "ago" clock so the readout reflects real silence, not wall-clock
+ *  runtime) and stop() once the job settles, success or failure - every call
+ *  site must call stop() on every exit path or the interval leaks. */
+function startComfyJobIndicator(anchorEl, logEl) {
+  const spinner = el("span", "comfy-managed-spinner");
+  anchorEl.appendChild(spinner);
+  const readout = el("div", "sub comfy-managed-elapsed");
+  logEl.insertAdjacentElement("beforebegin", readout);
+  let lastOutput = Date.now();
+  const tick = () => {
+    const secs = Math.max(0, Math.round((Date.now() - lastOutput) / 1000));
+    readout.textContent = secs < 2
+      ? "Still working..."
+      : `Still working... (no new output for ${secs}s)`;
+  };
+  tick();
+  const timer = setInterval(tick, 1000);
+  return {
+    onLine: () => { lastOutput = Date.now(); },
+    stop: () => {
+      clearInterval(timer);
+      spinner.remove();
+      readout.remove();
+    },
+  };
+}
+
 /** (Re)render the compact "localm's own ComfyUI" box in *host*: read
  *  /api/comfy/managed-status, then show either a Set-up button (not installed
  *  yet, so the coexistence field below would be inert - progressive
@@ -1824,6 +1864,7 @@ export async function renderManagedComfyPanel(host, toggleFields) {
       // reason above the fresh one and the user reads the wrong failure.
       for (const old of host.querySelectorAll(".comfy-managed-update-error")) old.remove();
       const resetUpdate = () => { update.disabled = false; update.textContent = "Update"; };
+      const indicator = startComfyJobIndicator(update, ulog);
       let jobId;
       try {
         const q = depsBox.checked ? "?reinstall_requirements=true" : "";
@@ -1832,6 +1873,7 @@ export async function renderManagedComfyPanel(host, toggleFields) {
         const d = await r.json().catch(() => ({}));
         if (!r.ok) {
           toast(d.detail || "Update failed", true);
+          indicator.stop();
           resetUpdate();
           ulog.style.display = "none";
           return;
@@ -1839,11 +1881,13 @@ export async function renderManagedComfyPanel(host, toggleFields) {
         jobId = d.job_id;
       } catch (e) {
         toast("Update failed", true);
+        indicator.stop();
         resetUpdate();
         return;
       }
       const tail = [];
       const end = await streamJob(jobId, (line) => {
+        indicator.onLine();
         ulog.textContent += line + "\n";
         // Keep a short TAIL, not just the last line: update_managed_comfy's failure
         // messages are long sentences and the console wraps them, so the final line
@@ -1851,6 +1895,7 @@ export async function renderManagedComfyPanel(host, toggleFields) {
         if (line && line.trim()) { tail.push(line.trim()); if (tail.length > 6) tail.shift(); }
         ulog.scrollTop = ulog.scrollHeight;
       });
+      indicator.stop();
       const ok = !!(end && end.status === "done");
       const reason = tail.join(" ").trim();
       if (!ok) {
@@ -1905,6 +1950,7 @@ export async function renderManagedComfyPanel(host, toggleFields) {
         repair.textContent = "Repairing...";
         log.style.display = "";
         log.textContent = "";
+        const indicator = startComfyJobIndicator(repair, log);
         let jobId;
         try {
           const r = await fetch("/api/comfy/repair",
@@ -1912,6 +1958,7 @@ export async function renderManagedComfyPanel(host, toggleFields) {
           const d = await r.json().catch(() => ({}));
           if (!r.ok) {
             toast(d.detail || "Repair failed", true);
+            indicator.stop();
             repair.disabled = false;
             repair.textContent = "Repair";
             log.style.display = "none";
@@ -1920,14 +1967,17 @@ export async function renderManagedComfyPanel(host, toggleFields) {
           jobId = d.job_id;
         } catch (e) {
           toast("Repair failed", true);
+          indicator.stop();
           repair.disabled = false;
           repair.textContent = "Repair";
           return;
         }
         const end = await streamJob(jobId, (line) => {
+          indicator.onLine();
           log.textContent += line + "\n";
           log.scrollTop = log.scrollHeight;
         });
+        indicator.stop();
         const ok = !!(end && end.status === "done");
         toast(ok ? "localm's ComfyUI is ready" : "Repair did not finish (see the log)", !ok);
         if (ok) {
@@ -1980,10 +2030,16 @@ export async function renderManagedComfyPanel(host, toggleFields) {
         + "later, or from wherever the setup was started)";
       return;
     }
+    // No button exists in this branch (an "installing" state deliberately
+    // offers no action button - see the test asserting that), so the
+    // indicator's spinner anchors to the status pill instead.
+    const indicator = startComfyJobIndicator(pill, log);
     const end = await streamJob(jobId, (line) => {
+      indicator.onLine();
       log.textContent += line + "\n";
       log.scrollTop = log.scrollHeight;
     });
+    indicator.stop();
     const ok = !!(end && end.status === "done");
     toast(ok ? "localm's ComfyUI is ready" : "Setup did not finish (see the log)", !ok);
     // Same reasoning as the Set-up flow below: only re-render on success. On
@@ -2017,6 +2073,7 @@ export async function renderManagedComfyPanel(host, toggleFields) {
     setup.textContent = "Setting up...";
     log.style.display = "";
     log.textContent = "";
+    const indicator = startComfyJobIndicator(setup, log);
     let jobId;
     try {
       const r = await fetch("/api/comfy/setup",
@@ -2024,6 +2081,7 @@ export async function renderManagedComfyPanel(host, toggleFields) {
       const d = await r.json().catch(() => ({}));
       if (!r.ok) {
         toast(d.detail || "Setup failed", true);
+        indicator.stop();
         reset();
         log.style.display = "none";
         return;
@@ -2031,13 +2089,16 @@ export async function renderManagedComfyPanel(host, toggleFields) {
       jobId = d.job_id;
     } catch (e) {
       toast("Setup failed", true);
+      indicator.stop();
       reset();
       return;
     }
     const end = await streamJob(jobId, (line) => {
+      indicator.onLine();
       log.textContent += line + "\n";
       log.scrollTop = log.scrollHeight;
     });
+    indicator.stop();
     const ok = !!(end && end.status === "done");
     toast(ok ? "localm's ComfyUI is ready" : "Setup did not finish (see the log)", !ok);
     if (ok) {

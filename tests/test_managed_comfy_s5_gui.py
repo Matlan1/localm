@@ -130,6 +130,20 @@ def test_setup_conflicts_when_already_installed(home, app, no_subprocess):
     assert no_subprocess == []
 
 
+def test_setup_refuses_a_second_concurrent_setup(home, app, no_subprocess, monkeypatch):
+    """Two overlapping "Set up" clicks (e.g. two browser tabs) must not double-launch
+    the setup CLI onto the same target checkout. The on-disk existence check alone
+    cannot catch this - the checkout directory does not exist yet for the first few
+    moments of a fresh setup - so this needs its OWN has_running guard, same shape as
+    comfy_update/comfy_repair's existing guards against a concurrent comfy-setup."""
+    monkeypatch.setattr(gui_jobs.JobManager, "has_running",
+                        lambda self, kind: kind == "comfy-setup")
+    with TestClient(app) as client:
+        r = client.post("/api/comfy/setup")
+    assert r.status_code == 409, r.text
+    assert no_subprocess == []
+
+
 # --------------------------------------------------------------------------- #
 #  GET /api/comfy/managed-status : reflects is_managed_comfy_installed()        #
 # --------------------------------------------------------------------------- #

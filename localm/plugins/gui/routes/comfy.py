@@ -167,12 +167,22 @@ def register(app: FastAPI, ctx) -> None:
         block the request). Streams progress via /api/jobs/{id}/events, like a model
         pull. Refuses (409) when a managed instance already exists - the user removes
         it first (or uses /api/comfy/repair for an incomplete one - see
-        comfy_managed_status's "corrupt" state); we never silently clobber."""
+        comfy_managed_status's "corrupt" state); we never silently clobber.
+
+        Also refuses (409) when a setup job is ALREADY running: the on-disk check
+        alone is not enough, since the checkout directory does not exist yet for the
+        first few moments of a fresh setup - two overlapping "Set up" clicks (e.g.
+        two browser tabs) would both pass that check and double-launch the setup CLI
+        onto the same target checkout. comfy_update and comfy_repair already guard
+        this way against a concurrent comfy-setup job; this closes the same race for
+        comfy-setup against itself."""
         from localm.media.managed_comfy import managed_comfy_paths
         if managed_comfy_paths().root.exists():
             raise HTTPException(
                 409, "A managed ComfyUI already exists. Remove it first, then set up "
                 "again.")
+        if jobs.has_running("comfy-setup"):
+            raise HTTPException(409, "A ComfyUI setup is already running.")
         job = _start_setup_job(request, copy_custom_nodes)
         return {"job_id": job.id}
 
