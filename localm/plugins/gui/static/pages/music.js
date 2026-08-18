@@ -9,7 +9,7 @@
 
 "use strict";
 
-import { $, authHeaders, checkModelsBeforeGenerate, fetchImageURL, jobStatusWord, streamJob, toast } from "../app/helpers.js";
+import { $, authHeaders, checkModelsBeforeGenerate, fetchImageURL, jobStatusWord, revealFilledAdvanced, streamJob, toast } from "../app/helpers.js";
 import { bindReloadToggle, createGallery, musicPreview, playerDetail, reportMediaLoadFailure, refreshReloadToggle } from "../app/media-gallery.js";
 import { hideStop, showStop } from "./images.js";
 import { modelOverrides } from "./workflow.js";
@@ -45,6 +45,11 @@ const musicGallery = createGallery({
     $("music-seed").value = m.seed ?? "";
     $("music-steps").value = m.steps ?? "";
     $("music-cfg").value = m.cfg ?? "";
+    // Most of these fields live behind this page's Advanced fold. Restoring
+    // into a CLOSED fold means the toast claims the settings came back while
+    // they sit invisible behind a shut triangle - the same trap the Images
+    // page documents, and the seed is the whole reason anyone reuses settings.
+    revealFilledAdvanced($("view-music"));
   },
 });
 

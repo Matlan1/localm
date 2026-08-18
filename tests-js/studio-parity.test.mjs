@@ -201,8 +201,19 @@ test("music: reuse settings restores every field from the sidecar", async () => 
   const reuse = [...win.document.getElementById("modal-body").querySelectorAll("button")]
     .find((b) => b.textContent === "reuse settings");
   assert.ok(reuse, "reuse settings offered when a sidecar exists");
+
+  // Most of these fields live behind the Advanced fold. Asserting the VALUES
+  // alone cannot see a restore into a CLOSED fold - the values are set either
+  // way - so the fold state is asserted too, and it starts shut.
+  const fold = win.document.getElementById("music-advanced");
+  assert.ok(fold, "the Advanced fold exists");
+  assert.equal(fold.open, false, "fold starts closed");
+
   reuse.click();
   await tick();
+
+  assert.equal(fold.open, true,
+    "restoring values into a closed fold tells the user it worked while hiding it");
 
   const $v = (id) => win.document.getElementById(id).value;
   assert.equal($v("music-tags"), MUSIC_META.tags);
@@ -222,8 +233,19 @@ test("video: reuse settings restores every field from the sidecar", async () => 
   const reuse = [...win.document.getElementById("modal-body").querySelectorAll("button")]
     .find((b) => b.textContent === "reuse settings");
   assert.ok(reuse, "reuse settings offered when a sidecar exists");
+
+  // Most of these fields live behind the Advanced fold. Asserting the VALUES
+  // alone cannot see a restore into a CLOSED fold - the values are set either
+  // way - so the fold state is asserted too, and it starts shut.
+  const fold = win.document.getElementById("video-advanced");
+  assert.ok(fold, "the Advanced fold exists");
+  assert.equal(fold.open, false, "fold starts closed");
+
   reuse.click();
   await tick();
+
+  assert.equal(fold.open, true,
+    "restoring values into a closed fold tells the user it worked while hiding it");
 
   const $v = (id) => win.document.getElementById(id).value;
   assert.equal($v("video-prompt"), VIDEO_META.prompt);

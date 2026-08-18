@@ -118,6 +118,11 @@ const imageGallery = createGallery({
 
 export const refreshImageHistory = imageGallery.refresh;
 
+/* Kept as a named export: it is this page's detail-view entry point and other
+   code (and the Advanced-disclosure tests) drive the reuse flow through it.
+   The shared engine owns the implementation now; this is the stable name. */
+export const showImageDetail = (item) => imageGallery.showDetail(item);
+
 bindReloadToggle("image", "img-reload-llm");
 
 /* LoRA picker - populated from ComfyUI's live-installed LoRA files (the same
