@@ -629,8 +629,19 @@ pre:hover .canvas-btn { opacity: 1; }
   border-radius: 12px;
   display: flex;
   align-items: flex-end;
-  padding: 8px;
+  padding: 8px 12px;
   gap: 8px;
+  /* position/overflow/transition: the context-gauge overlay (an absolutely
+     positioned bar) needs a clipping, animatable host. These used to live in
+     a SECOND ".composer" rule declared later in this file (after the Images
+     bulk-actions block), which silently broke the background above - an
+     undefined --bg-card token made that duplicate rule's `background`
+     declaration invalid, and at equal specificity the later rule wins, so
+     the composer rendered fully transparent instead of --bg-input. Merged
+     into one rule so there is only ever one place this can drift again. */
+  position: relative;
+  overflow: hidden;
+  transition: border-color 0.15s, box-shadow 0.15s;
 }
 .composer:focus-within { border-color: var(--accent); }
 .composer textarea {
@@ -1506,16 +1517,6 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
 #attach-chips, #coder-attach-chips {
   max-width: var(--thread-max); margin: 0 auto 6px;
   display: flex; gap: 8px; flex-wrap: wrap;
-}
-.composer {
-  display: flex; align-items: flex-end; gap: 8px;
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 8px 12px;
-  transition: border-color 0.15s, box-shadow 0.15s;
-  position: relative;
-  overflow: hidden;
 }
 
 .context-gauge-container {
