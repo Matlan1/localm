@@ -41,6 +41,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   longer highlights its row like) the one actually active, and a missing
   Studio model file no longer shows a color that ignores your light/dark theme.
 
+### Fixed
+- **The Images/Music/Video workflow panel now matches the rest of the GUI.**
+  The pick/delete buttons used one-off styling instead of the shared button
+  classes, and hovering or selecting a workflow row showed no feedback.
+
 ## [0.1.5rc3] - 2026-08-13
 
 ### Added
