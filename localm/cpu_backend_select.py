@@ -58,7 +58,6 @@ does not apply there by construction. Do not call this on Windows.
 from __future__ import annotations
 
 import contextlib
-import ctypes
 import json
 import os
 import shutil
