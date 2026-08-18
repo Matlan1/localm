@@ -953,11 +953,6 @@ def console_main() -> None:
     SEPARATE from ``main`` so the ``localm coder`` route and the test suite invoke
     the command directly, without the venv gate; only a stray global ``localcoder``
     (a separate ``pip install``) hits it (NEW-J / NEW-J-CODER)."""
-    # Source check FIRST, same reasoning as the localm console script: a
-    # wrong-checkout launch makes every later observation describe a tree the
-    # caller is not editing. See localm/_srcguard.py.
-    from localm._srcguard import require_own_source
-    require_own_source()
     from localm._venvguard import require_venv
     require_venv()
     main()
