@@ -54,7 +54,7 @@ function Scrub([string]$t) {
   # and pasted HTTP header lines. .NET ports of _QUERY_SECRET_RE / _HEADER_SECRET_RE
   # in localm/bugreport.py; the three-branch reasoning is documented there. Applied
   # in the same order as scripts/report_issue.py, so all three reporters agree.
-  $t = [regex]::Replace($t, '(?i)((?:(?<=[?&])(?:api[_-]?key|key|token|secret|password|passwd|pwd|auth|access[_-]?token|sig|signature)|(?<![A-Za-z0-9])(?:[A-Za-z0-9]*[_-]?(?:api[_-]?key|token|secret|password|passwd|pwd|access[_-]?token|signature)|[A-Za-z0-9]+[_-](?:key|auth|sig)))=)[^&\s#"''\)\]\}]*', '${1}<redacted>')
+  $t = [regex]::Replace($t, '(?i)((?:(?<=[?&])(?:api[_-]?key|key|token|secret|password|passwd|pwd|auth|access[_-]?token|sig|signature)|(?<![A-Za-z0-9])(?:api[_-]?key|token|secret|password|passwd|pwd|access[_-]?token|signature)|(?<![A-Za-z0-9])[A-Za-z0-9]+[_-](?:api[_-]?key|token|secret|password|passwd|pwd|access[_-]?token|signature|key|auth|sig))=)[^&\s#\"''\)\]\}]*', '${1}<redacted>')
   $t = [regex]::Replace($t, '(?i)((?:x-)?(?:api[_-]key|api[_-]token|auth[_-]token)\s*:\s*)\S+', '${1}<redacted>')
   # Bearer tokens and OpenAI-style / localm API keys.
   $t = [regex]::Replace($t, '(?i)(bearer\s+)[A-Za-z0-9._\-]{8,}', '${1}<redacted>')

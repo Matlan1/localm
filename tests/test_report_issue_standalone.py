@@ -341,4 +341,4 @@ def test_powershell_reporter_scrubs_credential_named_assignments():
     # All three branches of the query port, not just the historic one.
     assert r"(?<=[?&])" in text
     assert r"(?<![A-Za-z0-9])" in text
-    assert r"[A-Za-z0-9]+[_-](?:key|auth|sig)" in text
+    assert r"[A-Za-z0-9]+[_-](?:api[_-]?key" in text

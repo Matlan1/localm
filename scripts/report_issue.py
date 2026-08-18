@@ -137,13 +137,21 @@ _APIKEY_RE = re.compile(r"(?i)\b(?:sk|localm[_-]sk)-[A-Za-z0-9._\-]{12,}")
 # Keep these two byte-identical to their bugreport.py counterparts.
 _QUERY_SECRET_RE = re.compile(
     r"(?i)((?:"
+    # 1. Immediately after a query delimiter: the historic set, unchanged.
     r"(?<=[?&])(?:api[_-]?key|key|token|secret|password|passwd|pwd|auth"
     r"|access[_-]?token|sig|signature)"
-    r"|(?<![A-Za-z0-9])(?:"
-    r"[A-Za-z0-9]*[_-]?(?:api[_-]?key|token|secret|password|passwd|pwd"
+    # 2. Anywhere else, UNPREFIXED: only the names that mean a credential
+    #    and nothing else.
+    r"|(?<![A-Za-z0-9])(?:api[_-]?key|token|secret|password|passwd|pwd"
     r"|access[_-]?token|signature)"
-    r"|[A-Za-z0-9]+[_-](?:key|auth|sig)"
-    r")"
+    # 3. Anywhere else, PREFIXED. The separator is mandatory and disjoint
+    #    from the run before it, so there is exactly ONE way to split the
+    #    prefix and the engine never backtracks through it (an optional
+    #    separator here would be a polynomial-backtracking shape, since the
+    #    names themselves start with an alnum). This is also the branch that
+    #    admits the short generic names, per the reasoning above.
+    r"|(?<![A-Za-z0-9])[A-Za-z0-9]+[_-](?:api[_-]?key|token|secret"
+    r"|password|passwd|pwd|access[_-]?token|signature|key|auth|sig)"
     r")=)[^&\s#\"'\)\]\}]*"
 )
 _HEADER_SECRET_RE = re.compile(
