@@ -384,9 +384,18 @@ function stampArtifactNonce(code) {
  *  images are allowed, everything else is denied. */
 export function artifactSrcdoc(code, lang) {
   code = stampArtifactNonce(code);
+  // form-action 'none' is NOT redundant with default-src 'none', and leaving it
+  // out made this function's own "blocks ALL network" claim untrue. form-action
+  // is a NAVIGATION directive: it has no default-src fallback, so an unset
+  // form-action allows submission to ANY origin. An artifact is model-authored
+  // HTML, so <form action="https://elsewhere/"> was a way for the pane to send
+  // whatever a user typed into it off the machine - no script, so the sandbox
+  // and the nonce were never in that path. Measured on the shell's own policy
+  // 2026-08-18 (same defect, fixed alongside in http_server.py's _CSP_SUFFIX).
   const csp = '<meta http-equiv="Content-Security-Policy" content="'
     + "default-src 'none'; img-src data: blob:; media-src data: blob:; "
-    + "style-src 'unsafe-inline'; script-src 'unsafe-inline'; font-src data:;\">";
+    + "style-src 'unsafe-inline'; script-src 'unsafe-inline'; font-src data:; "
+    + "form-action 'none';\">";
   if (lang === "svg" || /^\s*<svg[\s>]/i.test(code)) {
     return "<!doctype html><html><head><meta charset=\"utf-8\">" + csp
       + "<style>html,body{margin:0;height:100%}svg{max-width:100%;height:auto;display:block}</style>"

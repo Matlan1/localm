@@ -31,9 +31,15 @@ the real vendored bytes and assert both a version floor and the actual security
 behaviour. They are the only things in the repo that read a vendored file, and
 they run under `npm test`.
 
-DOMPurify matters most because it is the sole enforcing XSS barrier on the main
-shell (the shell's CSP is still report-only). KaTeX has its own guard for the
-same reason DOMPurify does: it sat on 0.16.11 for the whole affected range of
+DOMPurify matters most because it is the FIRST barrier on the main shell, and
+for a long time it was the only enforcing one. That is no longer true: the
+shell's CSP now ENFORCES with a per-request script-src nonce (PR #1291), so a
+sanitizer bypass has something behind it. Both were measured separately in a
+real browser on 2026-08-18: with the sanitizer in place an injected handler is
+stripped before the browser ever sees it (no CSP violation is raised at all),
+and with the sanitizer removed the same payload reaches the DOM and the CSP
+refuses to run it. Two independent barriers, so do not read either one as
+optional. KaTeX has its own guard for the same reason DOMPurify does: it sat on 0.16.11 for the whole affected range of
 CVE-2025-23207 / GHSA-cg87-wmx4-v546 and nothing noticed.
 
 `tests-js/vendor-jsqr.test.mjs` does the same for jsQR, and additionally decodes
@@ -51,8 +57,26 @@ the main thread for every `pre code` block, and the language comes straight
 off a model-emitted fenced code block, so this was a real, reachable
 main-thread freeze from ordinary model output, not a theoretical one.
 
-`marked` still has no guard. Until it does, check it by hand when you touch
-this directory.
+`tests-js/vendor-marked.test.mjs` closes the last gap: marked used to be the one
+library with no guard at all. It is pinned differently from the others out of
+necessity - MEASURED, `window.marked.version` is undefined on this build, so
+there is no runtime version to assert and no banner-vs-runtime cross-check to
+make. It pins the banner plus a content hash instead (the same treatment
+auto-render.min.js, katex.min.css and jsQR.js get), asserts marked still parses
+real markdown, and asserts the option set helpers.js applies at load. One test
+asserts the version field is still ABSENT, so if upstream ever adds one the
+guard fails and gets upgraded to a real floor rather than quietly pinning bytes
+forever.
+
+It also pins the pipeline's actual contract: marked does NOT sanitize. Its own
+`sanitize` option was removed upstream in v7 and it passes raw HTML through by
+design, which is precisely why DOMPurify has to run on its OUTPUT. Advisory
+status for 12.0.2 was established from affected-VERSION RANGES rather than by
+reading upstream code for a quoted function, against two independent sources
+each with a control query that returned a known-positive: OSV reports 0 vulns,
+and all 18 marked advisories in the GitHub advisory database were range-tested
+against 12.0.2 with none matching (every one is bounded above by 4.0.10 or
+lower, except GHSA-6v9c-7cg6-27q7 which is >= 18.0.0).
 
 ### Two things the KaTeX guard had to do differently
 
@@ -138,6 +162,18 @@ tar -xzf highlightjs-cdn-assets-<version>.tgz
 cp package/highlight.min.js localm/plugins/gui/static/vendor/highlight.min.js
 npm test    # then update VENDORED_VERSION + PINNED_HASH in tests-js/vendor-highlightjs.test.mjs
 ```
+
+```
+npm pack marked@<version>             # npm verifies the registry integrity hash
+tar -xzf marked-<version>.tgz
+cp package/marked.min.js localm/plugins/gui/static/vendor/marked.min.js
+npm test    # then update VENDORED_VERSION + PINNED_HASH in tests-js/vendor-marked.test.mjs
+```
+
+`marked.min.js` ships from the PACKAGE ROOT of `marked`, NOT from `lib/`.
+`lib/marked.umd.js` is a different artefact of the same version and is not what
+`index.html` loads. Re-check the advisory ranges when you bump: the guard pins
+bytes, which cannot tell you a newer version is safe.
 
 `highlight.min.js` ships from the PACKAGE ROOT of `@highlightjs/cdn-assets`, not
 from `es/`, which is a separate ES-module build of the same version and is NOT
