@@ -4031,6 +4031,11 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
     # protected the moment it is added. Non-browser clients (CLI / SDK) send no
     # Origin; "cors_origins": "*" opts out entirely.
     _UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+    # Every entry below is a full route path, not a directory prefix - matched
+    # with str.startswith(), so a prefix entry would silently exempt every
+    # FUTURE route added under it too. Exempting a new sibling route must be a
+    # deliberate addition here, not an inheritance. Keep in sync with
+    # _BESPOKE_GATED_ROUTES in tests/test_kernel_routes_scope_contract.py.
     _CROSS_ORIGIN_OK = (
         "/v1/chat/completions", "/v1/completions", "/v1/embeddings",
         # Surface management (phase 5 on-demand GUI mount) is driven by a local
@@ -4039,13 +4044,17 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
         # attach token, or an owner API key) - that, not the same-origin gate, is
         # the real credential, so it is exempt. A cross-origin page still cannot
         # set Authorization without a secret it cannot read, so no CSRF surface.
-        "/v1/surfaces/",
+        # Also listed in _BESPOKE_GATED_ROUTES,
+        # tests/test_kernel_routes_scope_contract.py - keep both in sync.
+        "/v1/surfaces/gui",
         # Multi-instance GPU coordination (localm.gpu_registry): a SIBLING localm
         # instance calls this loopback-only, like surface-management above - no
         # Origin, no shell_token (different process). Its own coordination_token
         # (never the API key/shell token) is the real credential, checked in the
         # route, so the same-origin gate is exempt for the same reason.
-        "/v1/instances/",
+        # Also listed in _BESPOKE_GATED_ROUTES,
+        # tests/test_kernel_routes_scope_contract.py - keep both in sync.
+        "/v1/instances/cooperate-unload",
     )
     _cors_allowlist = frozenset(cors_cfg) if isinstance(cors_cfg, list) else frozenset()
     _cors_wildcard = cors_cfg == "*"
