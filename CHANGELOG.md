@@ -19,8 +19,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   rename, move and delete. "Reuse settings" refills the form from any track or
   clip you already made, opening the Advanced section when it restores anything
   hidden there. A clip's card shows a real frame from just past the start; a
-  track's card leads with its style tags and length, since audio has no frame
-  to show. Long libraries show the newest 24 with a "show all" toggle.
+  track's card leads with its style tags and length, since audio has no frame to
+  show, and plays in place from the card in one click. Long libraries show the
+  newest 24 with a "show all" toggle.
 - **Registering models found in a ComfyUI folder now shows real progress.**
   The guided "Import from ComfyUI..." wizard and the "Re-scan ComfyUI folder"
   button used to sit there with no feedback (or just a static "Scanning..."
