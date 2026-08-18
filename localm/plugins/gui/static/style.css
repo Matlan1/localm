@@ -1218,17 +1218,9 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
   display: flex; align-items: center; gap: 8px;
   padding: 4px 6px; border-radius: 6px;
 }
-.workflow-row.active { background: var(--bg-elevated, rgba(127,127,127,0.08)); }
-.workflow-pick {
-  flex: 1; text-align: left; background: none; border: none;
-  color: var(--text); cursor: pointer; padding: 4px 2px; font-size: 13px;
-}
-.workflow-pick:hover { color: var(--accent); }
-.workflow-del {
-  background: none; border: 1px solid var(--border); color: var(--text-dim);
-  border-radius: 6px; padding: 2px 8px; cursor: pointer; font-size: 12px;
-}
-.workflow-del:hover { color: var(--danger, #d66); border-color: var(--danger, #d66); }
+.workflow-row:hover, .workflow-row.active { background: var(--bg-input); }
+.workflow-row.active { box-shadow: inset 2px 0 0 var(--accent); }
+.workflow-pick { flex: 1; text-align: left; }
 .workflow-upload { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
 .comfy-launch-row { margin-top: 10px; }
 .comfy-model-picker { margin-top: 10px; }
@@ -1241,7 +1233,7 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
 }
 .comfy-model-label { flex: 0 0 auto; min-width: 110px; color: var(--text-dim); }
 .comfy-model-select { flex: 1; min-width: 0; }
-.comfy-model-missing { color: var(--danger, #d66); }
+.comfy-model-missing { color: var(--red); }
 /* docs/gui-design.md rule 6: state renders as a .job-state pill (job-state
    st-error supplies the color, no longer the undefined --danger token which
    always fell back to a hardcoded hex regardless of theme). A pill that grows

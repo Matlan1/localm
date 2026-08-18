@@ -170,7 +170,7 @@ async function comfyModelPicker(media) {
 
 export function workflowRow(media, name, label, active, deletable) {
   const row = el("div", "workflow-row" + (active ? " active" : ""));
-  const pick = el("button", "workflow-pick");
+  const pick = el("button", "btn-secondary workflow-pick");
   pick.appendChild(iconEl(active ? "dot" : "ring", "btn-ic"));
   pick.appendChild(document.createTextNode(label));
   pick.type = "button";
@@ -178,7 +178,7 @@ export function workflowRow(media, name, label, active, deletable) {
   pick.onclick = () => selectWorkflow(media, name);
   row.appendChild(pick);
   if (deletable) {
-    const del = el("button", "workflow-del", "Delete");
+    const del = el("button", "btn-secondary btn-danger workflow-del", "Delete");
     del.type = "button";
     del.title = "Delete this workflow file";
     del.onclick = () => deleteWorkflow(media, name);
