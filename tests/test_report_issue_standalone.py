@@ -182,6 +182,20 @@ def test_powershell_scrub_behaves_when_actually_executed(tmp_path):
     assert "n_gpu_layers=35" in out, f"the PowerShell scrub ate a setting: {out}"
 
 
+def test_scrub_strips_a_quoted_credential_value():
+    """Mirrors the quoted-value fix in localm/bugreport.py. A .env writes the
+    value quoted more often than bare, and stopping at the opening quote left
+    the secret in the report next to a marker claiming it had gone."""
+    out = ri.scrub(
+        'my .env has API_KEY="RIQUOTED1" and SECRET_KEY=\'RIQUOTED2\' '
+        'and require_auth="true" and n_gpu_layers=35')
+    assert "RIQUOTED1" not in out
+    assert "RIQUOTED2" not in out
+    assert '<redacted>"' not in out
+    assert 'require_auth="true"' in out
+    assert "n_gpu_layers=35" in out
+
+
 def test_scrub_empty_is_safe():
     assert ri.scrub("") == ""
     assert ri.scrub(None) is None

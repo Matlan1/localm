@@ -157,9 +157,9 @@ _QUERY_SECRET_RE = re.compile(
     # so a config or flag line survives in a report. The literal has to be the
     # whole value, closing markup aside, so api_key=truesecret123 and
     # api_key=1)SECRET both still redact. See the sibling in bugreport.py.
-    r"(?!(?:true|false|none|null|nil|yes|no|on|off|enabled|disabled|[01])"
+    r"(?![\"']?(?:true|false|none|null|nil|yes|no|on|off|enabled|disabled|[01])"
     r"[`\"'\)\]\}]{0,4}(?:[\s&#]|$))"
-    r"[^&\s#\"'\)\]\}]*"
+    r"(?:\"[^\"\r\n]*\"?|'[^'\r\n]*'?|[^&\s#\"'\)\]\}]*)"
 )
 _HEADER_SECRET_RE = re.compile(
     r"(?i)((?:x-)?(?:api[_-]key|api[_-]token|auth[_-]token)\s*:\s*)\S+"
