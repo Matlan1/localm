@@ -17,6 +17,7 @@ setlocal EnableDelayedExpansion
 set LOCALM_SETUP=1
 cd /d "%~dp0"
 title LocaLM setup
+set "HBSEQ=0"
 
 echo.
 echo  LocaLM setup - self-contained install in: %CD%
@@ -204,11 +205,19 @@ rem  behind an IT-provisioned proxy both verify immediately, so this never shows
 rem  the user anything beyond the line above. Capturing costs nothing observable
 rem  even when the rare fallback below IS needed: a rejected TLS handshake fails
 rem  in well under a second, and a real download still completes normally, just
-rem  without a live byte-progress readout.
+rem  without a live byte-progress readout. A periodic heartbeat line (see
+rem  :heartbeat_start below) covers the case that genuinely does take a while -
+rem  a fresh machine downloading uv's managed Python - so that never looks
+rem  like a hang.
 :venv_retry
 if exist "%TEMP%\localm_uv_err.txt" del "%TEMP%\localm_uv_err.txt"
+call :heartbeat_start 15 "  ... still creating the environment (this can take a few minutes on a slow connection)"
 uv venv --python %PYVER% %PYPREF% --clear .venv >"%TEMP%\localm_uv_err.txt" 2>&1
-if not errorlevel 1 goto venv_create_ok
+if not errorlevel 1 (
+    call :heartbeat_stop
+    goto venv_create_ok
+)
+call :heartbeat_stop
 
 rem  Failed silently so far. Only ever falls back once: if UV_SYSTEM_CERTS is
 rem  already empty, the fallback was already tried - show it for real below
@@ -275,8 +284,13 @@ rem  the detected vendor. [voice] ships speech-to-text; its Whisper model is onl
 rem  downloaded after the user consents in the GUI.
 echo.
 echo  Installing localm into .venv ...
+call :heartbeat_start 15 "  ... still installing (this can take a few minutes on a slow connection)"
 uv pip install -p .venv -e ".[%EXTRAS%]"
-if not errorlevel 1 goto install_ok
+if not errorlevel 1 (
+    call :heartbeat_stop
+    goto install_ok
+)
+call :heartbeat_stop
 echo  [!] Install failed - see the error above.
 call :offer_report "localm install failed during setup" "uv pip install -e .[%EXTRAS%] failed - see the error output above."
 pause
@@ -360,18 +374,25 @@ set "TORCHSPEC="
 if exist "%TEMP%\localm_torch.txt" for /f "usebackq delims=" %%a in ("%TEMP%\localm_torch.txt") do set "TORCHSPEC=%%a"
 del "%TEMP%\localm_torch.txt" 2>nul
 echo.
+rem  :heartbeat_start/:heartbeat_stop print a periodic "still working" line
+rem  while the install(s) below run, since PyTorch alone can be a
+rem  gigabyte-plus download with nothing printed in between otherwise.
 if not defined TORCHSPEC (
     echo  Skipping the PyTorch/transformers stack ^(not needed for GGUF chat^).
 ) else if "%TORCHSPEC%"=="-e .[gpu]" (
     rem  gfx103X (RX 6000): the bundled self-contained build carries torch + the HF
     rem  stack + the ROCm runtime; add audio (soundfile) for unified-audio models.
     echo  Installing PyTorch ^(AMD ROCm, gfx103X^) + transformers ...
+    call :heartbeat_start 15 "  ... still installing PyTorch and transformers (this can take a few minutes on a slow connection)"
     uv pip install -p .venv -e ".[gpu,audio]" || echo  [!] ROCm torch install failed. GGUF chat still works.
+    call :heartbeat_stop
 ) else (
     echo  Installing PyTorch + transformers ...
 
+    call :heartbeat_start 15 "  ... still installing PyTorch and transformers (this can take a few minutes on a slow connection)"
     uv pip install -p .venv %TORCHSPEC% || echo  [!] torch install failed. GGUF chat still works.
     uv pip install -p .venv "transformers[kernels]~=5.12" "tokenizers==0.22.2" "accelerate>=1.0" "pillow>=10.0" "soundfile>=0.12" || echo  [!] transformers install failed. GGUF chat still works.
+    call :heartbeat_stop
 )
 
 rem ---- provision the native llama.cpp binaries ------------------------------
@@ -582,6 +603,37 @@ echo.
 echo  Done. To reinstall: setup.bat
 pause
 exit /b 0
+
+rem ===========================================================================
+rem  :heartbeat_start SECS "MESSAGE" / :heartbeat_stop - print MESSAGE every
+rem  SECS seconds while a following long, quiet step is still running (a uv
+rem  download, a venv build, a torch install), so it never looks identical to
+rem  a hung terminal. The real command still runs completely unchanged in the
+rem  foreground - same errorlevel, same output - because only the heartbeat
+rem  itself is backgrounded, as a detached PowerShell loop watching a flag
+rem  file (there is no simple, reliable way to background and later reap the
+rem  REAL command's own exit code in cmd.exe, so the real command stays
+rem  synchronous and only the heartbeat is async).
+rem
+rem  Each call gets its OWN flag file (an HBSEQ counter suffix), never a
+rem  shared/reused path: the venv-creation retry loop can call
+rem  :heartbeat_start more than once per run (retry after a certificate
+rem  fallback), and a shared path lets a still-sleeping OLD loop see a
+rem  just-recreated file disappear again and keep printing after the NEW step
+rem  already finished - measured live while building this, it doubles every
+rem  heartbeat line after the first retry.
+rem ===========================================================================
+:heartbeat_start
+set /a HBSEQ+=1
+set "HBFLAG=%TEMP%\localm_setup_hb.%HBSEQ%.flag"
+if exist "%HBFLAG%" del "%HBFLAG%" >nul 2>nul
+start "" /b powershell -NoProfile -Command ^
+  "while (-not (Test-Path -LiteralPath '%HBFLAG%')) { Start-Sleep -Seconds %~1; if (-not (Test-Path -LiteralPath '%HBFLAG%')) { Write-Host '%~2' } }"
+goto :eof
+
+:heartbeat_stop
+if defined HBFLAG type nul > "%HBFLAG%" 2>nul
+goto :eof
 
 rem ===========================================================================
 rem  :offer_report "summary" "detail" - offer to file a bug report for a setup
