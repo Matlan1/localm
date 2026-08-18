@@ -187,6 +187,18 @@ permanent public record of what shipped and are never rewritten; the in-progress
   own: anything the model asked for beforehand completes first, and nothing
   after it starts until the declared `allowed-tools` are in force.
 
+### Security
+- **A form inside a model's reply can no longer send anything off your
+  machine.** Replies are rendered as HTML, so a reply could draw a form, and
+  the app's security policy did not say where forms were allowed to be
+  submitted. That is a separate setting from the one covering scripts, images
+  and network requests, and it was not set, which left submission unrestricted.
+  A reply that drew a convincing "confirm your key" box could therefore have
+  sent whatever you typed into it to any address on the internet, and because
+  no script is involved, neither the HTML sanitiser nor the script rules
+  applied. Nothing in localm submits a form, so form submission is now refused
+  outright, in the chat view and in the artifact pane alike.
+
 ## [0.1.5rc3] - 2026-08-13
 
 ### Added
