@@ -59,6 +59,30 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **The Images/Music/Video workflow panel now matches the rest of the GUI.**
   The pick/delete buttons used one-off styling instead of the shared button
   classes, and hovering or selecting a workflow row showed no feedback.
+- **Setup's download progress bars no longer come out garbled.** While it
+  installed PyTorch and the other Python packages, setup printed a periodic
+  "still working" line straight over the live download progress, which left
+  half-finished progress bars stranded up the screen and made it look like
+  something had gone wrong. That line is now only used for the one step that
+  really is silent (creating the environment), so every install that shows its
+  own progress renders normally.
+- **The desktop-shortcut question at the end of setup now explains itself.**
+  "Launcher" and "Web GUI directly" never said what either one actually opens,
+  and "Web GUI" was simply wrong if you had chosen the app window earlier in
+  setup. Both options now describe what they do, and the one that skips the
+  menu names the window mode you picked. The closing "how to start" line
+  follows your answer instead of always naming the launcher script, and a
+  shortcut that could not be created is no longer described as though it
+  exists. The step that builds the branded app executable no longer calls
+  itself "the launcher" too, which is what made that screen so confusing.
+- **Setup no longer invents a clash with an existing `localm` command.** On
+  Windows, answering yes to "Make 'localm' runnable from any terminal?"
+  warned that a `localm` command already existed and added this install at
+  lower priority anyway. There was no other command: it had found this
+  install's own launcher file, because Windows looks in the current folder
+  first. It now only reports a `localm` that is genuinely on your PATH, and
+  when there is one it asks whether this install or the existing one should
+  run, instead of deciding for you and telling you to reorder PATH yourself.
 
 ## [0.1.5rc3] - 2026-08-13
 
