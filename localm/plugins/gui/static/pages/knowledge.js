@@ -8,7 +8,7 @@
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { chat, lsSetScoped } from "../app/chat.js";
 import { $, authHeaders, confirmDanger, el, jobStatusWord, openModal, streamJob, toast } from "../app/helpers.js";
-import { emptyState } from "../app/icons.js";
+import { emptyState, iconEl } from "../app/icons.js";
 import { pickPath } from "../app/picker.js";
 import { caps, refreshKbSelect } from "../app/settings-perf.js";
 
@@ -760,6 +760,15 @@ export function fileToB64(file) {
   });
 }
 
+/** A "sub" line prefixed with the warning icon, tinted `color`. */
+function warnLine(text, color) {
+  const warn = el("div", "sub");
+  warn.appendChild(iconEl("warning", "btn-ic"));
+  warn.appendChild(document.createTextNode(text));
+  warn.style.color = color;
+  return warn;
+}
+
 export async function kbInfoModal(name) {
   const r = await fetch("/api/rag/collections/" + encodeURIComponent(name),
                         { headers: authHeaders() });
@@ -776,12 +785,10 @@ export async function kbInfoModal(name) {
     // malformed-line count when the server can (chunks.jsonl only - see the
     // table badge above), falls back to generic wording for the other two.
     if (data.corrupt) {
-      const warn = el("div", "sub",
-        "⚠ " + (data.chunks_bad_lines > 0
-          ? `${data.chunks_bad_lines} malformed chunk line(s) in this collection's index.`
-          : "Part of this collection's index is corrupt or malformed on disk."));
-      warn.style.color = "var(--red)";
-      body.appendChild(warn);
+      body.appendChild(warnLine(data.chunks_bad_lines > 0
+        ? `${data.chunks_bad_lines} malformed chunk line(s) in this collection's index.`
+        : "Part of this collection's index is corrupt or malformed on disk.",
+        "var(--red)"));
       const repair = el("button", "btn-secondary btn-danger", "Repair");
       repair.style.marginTop = "4px";
       repair.onclick = () => kbRepairCollection(name);
@@ -790,34 +797,31 @@ export async function kbInfoModal(name) {
     // Surface a degraded semantic index instead of silently answering lexically
     // (AGENTS rule 5). The server sets this when vectors are corrupt/stale/mismatched.
     if (data.vector_degrade_reason) {
-      const warn = el("div", "sub",
-        "⚠ Semantic search fell back to BM25: " + data.vector_degrade_reason);
-      warn.style.color = "var(--yellow)";
-      body.appendChild(warn);
+      body.appendChild(warnLine(
+        "Semantic search fell back to BM25: " + data.vector_degrade_reason,
+        "var(--yellow)"));
     }
     // Same best-effort signal as the collections table's "re-embed needed"
     // badge (#1078 post-merge review) - a collection can report has_vectors
     // and still silently drop to BM25 at query time if its stored vectors
     // were built under a different embedding model than the one active now.
     if (data.dim_mismatch === true) {
-      const warn = el("div", "sub",
-        "⚠ Stored vectors were built under a different embedding model than "
+      body.appendChild(warnLine(
+        "Stored vectors were built under a different embedding model than "
         + "the one currently active - queries here fall back to BM25 until "
-        + "you click 're-embed'.");
-      warn.style.color = "var(--yellow)";
-      body.appendChild(warn);
+        + "you click 're-embed'.",
+        "var(--yellow)"));
     }
     // A re-sync flags documents whose source file has vanished rather than
     // deleting them, so the index can be ahead of the disk. Say so here, where
     // the documents are listed - otherwise the only place it surfaces is the
     // job's run output (AGENTS rule 5).
     if (data.n_missing) {
-      const gone = el("div", "sub",
-        `⚠ ${data.n_missing} document(s) are no longer on disk. They are still ` +
+      body.appendChild(warnLine(
+        `${data.n_missing} document(s) are no longer on disk. They are still ` +
         "indexed and searchable, flagged rather than deleted, so nothing is " +
-        "lost if that was temporary. Remove one below when you are sure.");
-      gone.style.color = "var(--yellow)";
-      body.appendChild(gone);
+        "lost if that was temporary. Remove one below when you are sure.",
+        "var(--yellow)"));
     }
     for (const d of data.docs) {
       const row = el("div", "log-entry");

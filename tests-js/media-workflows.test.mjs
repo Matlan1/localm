@@ -53,9 +53,11 @@ test("workflow panel renders default + uploaded, and select round-trips", async 
 
   const rows = box.querySelectorAll(".workflow-row");
   assert.equal(rows.length, 2, "Built-in default + one uploaded workflow");
-  const picks = [...box.querySelectorAll(".workflow-pick")].map((p) => p.textContent);
-  assert.ok(picks.some((t) => /Built-in default/.test(t)), "default row present");
-  assert.ok(picks.some((t) => /● a\.json/.test(t)), "a.json marked active");
+  const picks = [...box.querySelectorAll(".workflow-pick")];
+  assert.ok(picks.some((p) => /Built-in default/.test(p.textContent)), "default row present");
+  const activePick = picks.find((p) => /a\.json/.test(p.textContent));
+  assert.ok(activePick, "a.json row present");
+  assert.ok(activePick.querySelector('[data-icon-name="dot"]'), "a.json marked active with a filled dot");
 
   // Switch to the built-in default (sends name: null).
   [...box.querySelectorAll(".workflow-pick")]

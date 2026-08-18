@@ -48,6 +48,7 @@ const APP_ICONS = {
   mic:      iconMarkup('<path d="M12 4a2.5 2.5 0 0 1 2.5 2.5v5a2.5 2.5 0 0 1-5 0v-5A2.5 2.5 0 0 1 12 4z"/><path d="M6 11a6 6 0 0 0 12 0"/><path d="M12 17v3"/>'),
   camera:   iconMarkup('<path d="M4 8h3l2-2h6l2 2h3v11H4z"/><path d="M12 16a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"/>'),
   send:     iconMarkup('<path d="M4 12l16-7-7 16-2.5-6.5z"/><path d="M10.5 14.5L20 5"/>'),
+  stop:     iconMarkup('<path d="M7 7h10v10H7z" fill="currentColor" stroke="none"/>'),
   // --- chat params + composer row ---
   web:      iconMarkup('<path d="M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18z"/><path d="M3 12h18"/><path d="M12 3a13 13 0 0 1 0 18 13 13 0 0 1 0-18z"/>'),
   memory:   iconMarkup('<path d="M9 4a3 3 0 0 0-3 3 3 3 0 0 0-1 5.8V16a3 3 0 0 0 4 2.8V4z"/><path d="M15 4a3 3 0 0 1 3 3 3 3 0 0 1 1 5.8V16a3 3 0 0 1-4 2.8V4z"/>'),
@@ -69,6 +70,15 @@ const APP_ICONS = {
   file:     iconMarkup('<path d="M14 3v5h5"/><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/>'),
   key:      iconMarkup('<path d="M14 7a4 4 0 1 0 0 8 4 4 0 0 0-3.9-3H4v3H2"/><path d="M10 12H8v2"/>'),
   heart:    iconMarkup('<path d="M12 20l-6.8-6.8a4 4 0 0 1 5.7-5.7l1.1 1.1 1.1-1.1a4 4 0 0 1 5.7 5.7z"/>'),
+  pin:      iconMarkup('<path d="M12 21s7-7.5 7-12a7 7 0 1 0-14 0c0 4.5 7 12 7 12z"/><path d="M12 11a2 2 0 1 0 0-4 2 2 0 0 0 0 4z"/>'),
+  // --- status / markers ---
+  warning:  iconMarkup('<path d="M12 3L22 21H2Z"/><path d="M12 9v5"/><path d="M12 17h.01"/>'),
+  check:    iconMarkup('<path d="M5 12l4 4 10-10"/>'),
+  // Filled/outline pair sharing one geometry so they align pixel-for-pixel when
+  // swapped in place (active/inactive markers, radio-style selection).
+  dot:      iconMarkup('<path d="M12 18a6 6 0 1 0 0-12 6 6 0 0 0 0 12z" fill="currentColor" stroke="none"/>'),
+  ring:     iconMarkup('<path d="M12 18a6 6 0 1 0 0-12 6 6 0 0 0 0 12z"/>'),
+  caret:    iconMarkup('<path d="M12 8l5 8H7z" fill="currentColor" stroke="none"/>'),
 };
 
 /** The raw SVG string for `name` (falls back to a generic file icon). */

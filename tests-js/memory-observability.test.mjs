@@ -39,7 +39,8 @@ test("F11: buildMemoryChip shows count + facts + degrade reason and opens the mo
     n: 2, degrade: "no_embedder",
     items: [{ id: "a", text: "User prefers metric units" }],
   });
-  assert.equal(chip.textContent, "🧠 2");
+  assert.equal(chip.textContent, "2");
+  assert.ok(chip.querySelector('[data-icon-name="memory"]'), "shows the memory icon");
   assert.match(chip.title, /2 remembered facts/);
   assert.match(chip.title, /User prefers metric units/);
   assert.match(chip.title, /keyword match only/);   // degrade label surfaced
@@ -59,7 +60,7 @@ test("F11: addMessageRow renders the chip only when memory.n > 0", () => {
   const boxN = doc.createElement("div");
   window.addMessageRow(boxN, "assistant", "hi", { memory: { n: 3, items: [], degrade: null } });
   assert.equal(boxN.querySelectorAll("button.mem-chip").length, 1);
-  assert.equal(boxN.querySelector("button.mem-chip").textContent, "🧠 3");
+  assert.equal(boxN.querySelector("button.mem-chip").textContent, "3");
 
   const boxZero = doc.createElement("div");
   window.addMessageRow(boxZero, "assistant", "hi", { memory: { n: 0, items: [] } });
@@ -83,5 +84,5 @@ test("F11: renderChat surfaces the chip from a persisted assistant message", () 
   `);
   const chips = window.document.querySelectorAll("#chat-messages button.mem-chip");
   assert.equal(chips.length, 1);
-  assert.equal(chips[0].textContent, "🧠 1");
+  assert.equal(chips[0].textContent, "1");
 });

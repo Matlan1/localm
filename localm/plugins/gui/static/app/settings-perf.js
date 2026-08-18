@@ -28,14 +28,17 @@ export async function refreshPerfEstimate() {
     const r = await fetch("/api/vram-estimate?" + q.toString(), { headers: authHeaders() });
     if (!r.ok) { out.textContent = "estimate unavailable"; return; }
     const d = await r.json();
-    let text = `~${_perfGiB(d.needed)} GB needed `
+    const text = `~${_perfGiB(d.needed)} GB needed `
       + `(weights ${_perfGiB(d.weights)} · context ${_perfGiB(d.kv_cache)} `
       + `· overhead ${_perfGiB(d.overhead)})`;
-    if (typeof d.free === "number")
-      text += ` · ${_perfGiB(d.free)} GB free - ` + (d.fits ? "fits ✓" : "may not fit ⚠");
-    else
-      text += " · free VRAM unknown";
-    out.textContent = text;
+    out.replaceChildren();
+    if (typeof d.free === "number") {
+      out.appendChild(document.createTextNode(text + ` · ${_perfGiB(d.free)} GB free - `));
+      out.appendChild(iconEl(d.fits ? "check" : "warning", "btn-ic"));
+      out.appendChild(document.createTextNode(d.fits ? "fits" : "may not fit"));
+    } else {
+      out.appendChild(document.createTextNode(text + " · free VRAM unknown"));
+    }
     out.classList.toggle("perf-warn", d.fits === false);
   } catch (e) {
     out.textContent = "estimate unavailable";
@@ -729,12 +732,12 @@ export async function toggleMic() {
       toast("Transcription failed: " + e.message, true);
     } finally {
       btn.disabled = false;
-      btn.textContent = "🎤";
+      btn.replaceChildren(iconEl("mic", "ic"));
     }
   };
   voice.rec.start();
   btn.classList.add("recording");
-  toast("Recording - click 🎤 again to stop");
+  toast("Recording - click the mic again to stop");
 }
 
 $("chat-mic").onclick = toggleMic;
@@ -763,7 +766,7 @@ export function selectedBrowserVoice() {
   return speechSynthesis.getVoices().find((v) => v.name === want) || null;
 }
 
-/** Read text aloud. With toggle: true (the 🔊 button) a second call stops
+/** Read text aloud. With toggle: true (the speak action) a second call stops
  *  instead; auto-speak replaces the current utterance. */
 export function speak(text, opts = {}) {
   const clean = stripThink(text).replace(/[*_`#>\[\]()]/g, " ").trim();
@@ -1263,7 +1266,7 @@ export async function rememberFact(fact) {
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);
     await refreshMemory();
-    toast("Remembered ✓");
+    toast("Remembered");
   } catch (e) {
     toast("Could not save: " + e.message, true);
   }
@@ -1302,10 +1305,10 @@ export function openMemoryModal() {
   openModal("Memory - what the model knows about you", (body) => {
     body.appendChild(el("div", "sub", memory.writable
       ? "Durable facts localm remembers about you, added to the prompt while the " +
-        "🧠 toggle is on. Memory grows automatically as you chat; edit freely - " +
+        "memory toggle is on. Memory grows automatically as you chat; edit freely - " +
         "one fact per line; Save replaces the list."
       : "Read-only: privacy mode blocks memory writes (no new traces). " +
-        "Existing memory is still recalled while the 🧠 toggle is on."));
+        "Existing memory is still recalled while the memory toggle is on."));
     const ta = document.createElement("textarea");
     ta.value = memory.text;
     ta.rows = 14;
@@ -1609,7 +1612,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   const sendBtn = $("chat-send");
   const input = $("chat-input");
   sendBtn.classList.add("stop");
-  sendBtn.textContent = "■";
+  sendBtn.replaceChildren(iconEl("stop", "ic"));
   chat.abort = new AbortController();
   input.disabled = true;
   document.querySelectorAll(".message-actions button").forEach(b => b.disabled = true);
@@ -1697,7 +1700,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   } finally {
     chat.abort = null;
     sendBtn.classList.remove("stop");
-    sendBtn.textContent = "➤";
+    sendBtn.replaceChildren(iconEl("send", "ic"));
     input.disabled = false;
     document.querySelectorAll(".message-actions button").forEach(b => b.disabled = false);
   }
@@ -1780,7 +1783,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   if (finishReason === "length") {
     // The reply was cut by the max-tokens budget, not finished by the model.
     reply.truncated = true;
-    toast("Reply hit the max-tokens limit - raise “Max tokens” in ⚙ parameters, or reply “continue”", true);
+    toast("Reply hit the max-tokens limit - raise “Max tokens” in parameters, or reply “continue”", true);
   }
   // F11: record which remembered facts steered this reply so the transcript can
   // show a "used N memories" chip (survives reload; opens the memory modal).

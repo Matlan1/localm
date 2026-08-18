@@ -9,7 +9,7 @@
 import { pickDirectory } from "../app/picker.js";
 import { $, GIB, authHeaders, confirmDanger, downloadRate, el, fmtBytes, fmtDuration, openModal, renderMarkdown, streamJob, toast } from "../app/helpers.js";
 import { onServerUnreachable } from "../app/init.js";
-import { emptyState } from "../app/icons.js";
+import { emptyState, iconEl } from "../app/icons.js";
 import { modelCache, refreshModels, showKeyGate, switchModel, toastLoadResult } from "../app/models-sidebar.js";
 import { refreshPerfEstimate } from "../app/settings-perf.js";
 
@@ -171,7 +171,7 @@ export async function refreshModelsPage() {
       const active = col.key === currentSortKey;
       th.setAttribute("aria-sort", active ? (currentSortDir === "asc" ? "ascending" : "descending") : "none");
       if (active) {
-        th.appendChild(el("span", "sort-arrow", currentSortDir === "asc" ? "▲" : "▼"));
+        th.appendChild(iconEl("caret", "ic sort-arrow" + (currentSortDir === "desc" ? " sort-desc" : "")));
       }
       const activate = () => {
         if (currentSortKey === col.key) {

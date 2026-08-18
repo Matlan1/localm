@@ -7,7 +7,7 @@
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { $, authHeaders, confirmDanger, el, readSSE, toast } from "../app/helpers.js";
-import { emptyState } from "../app/icons.js";
+import { emptyState, iconEl } from "../app/icons.js";
 import { refreshPluginCommands } from "../app/settings-perf.js";
 
 /* ================================================================ */
@@ -26,6 +26,14 @@ export let _catalogStaggerMs = 24;
 // Mirrors the auto_install_plugin_deps setting from the last /api/plugins fetch,
 // so an install/enable can auto-kick the host-side dependency install.
 export let _autoInstallDeps = true;
+
+/** A "sub" line reporting a plugin load error, prefixed with the warning icon. */
+function pluginErrorLine(name, err) {
+  const line = el("div", "sub");
+  line.appendChild(iconEl("warning", "btn-ic"));
+  line.appendChild(document.createTextNode(`${name}: ${err}`));
+  return line;
+}
 
 export function _catalogRow(p) {
   const tr = el("tr");
@@ -143,7 +151,7 @@ export async function renderCatalogPlugins() {
     const names = new Set(plugins.map((p) => p.name));
     for (const [name, err] of Object.entries(data.errors)) {
       if (!names.has(name)) continue;
-      box.appendChild(el("div", "sub", `⚠ ${name}: ${err}`));
+      box.appendChild(pluginErrorLine(name, err));
     }
   }
 }
@@ -359,7 +367,7 @@ export async function refreshPluginsPage() {
       box.appendChild(table);
     }
     for (const [name, err] of data.errors) {
-      box.appendChild(el("div", "sub", `⚠ ${name}: ${err}`));
+      box.appendChild(pluginErrorLine(name, err));
     }
   } catch (e) {
     box.appendChild(el("div", "sub", "Could not load plugins: " + e.message));
