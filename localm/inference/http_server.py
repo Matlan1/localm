@@ -2192,7 +2192,6 @@ def _hang_dump(reason: str) -> None:
     if not _diagnostics_allowed():
         return
     import faulthandler
-    import traceback
     from localm.debuglog import hang_trace_path
     with open(hang_trace_path(), "a", encoding="utf-8",
               errors="backslashreplace") as fh:

@@ -13,7 +13,6 @@ DETECTS and ACTS within its thresholds, not that os.execv works.
 from __future__ import annotations
 
 import asyncio
-import os
 import socket
 import threading
 import time
