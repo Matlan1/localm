@@ -40,6 +40,14 @@ from typing import Optional
 # defense-in-depth reasoning as gpu_split_indices above.
 MAX_GPU_SPLIT_INDEX = 127
 
+# Sanity ceiling for cors_origins: a browser-origin allowlist has no legitimate
+# reason to carry more than a few hundred entries, so a longer one is a config
+# error (garbage input or a malformed import), not a real deployment. Without
+# a cap the raw list is handed straight to starlette's CORSMiddleware
+# (allow_origins) and to the membership-tested _cors_allowlist in
+# localm/inference/http_server.py, both scanned on relevant requests.
+MAX_CORS_ORIGINS = 500
+
 
 class Widget:
     TEXT     = "text"       # free-form single line (urls, names)
@@ -1246,8 +1254,17 @@ def _validate_one(key: str, val, field: "SettingField", default):
     if key == "cors_origins":
         # None | "*" | list of origins; a comma string becomes a list so the
         # server's CORS handling (which only honours "*"/list) actually applies.
+        # A list is validated here rather than via _to_str_list (which str()-
+        # coerces non-strings and has no length cap) because this allowlist is
+        # security-relevant and _to_str_list's coercion is depended on by other
+        # callers (gpu_split_indices/gpu_split_ratios feed it numeric tokens).
         if isinstance(val, (list, tuple)):
-            return _to_str_list(key, val)
+            if len(val) > MAX_CORS_ORIGINS:
+                raise ValueError(
+                    f"{key}: too many origins ({len(val)}), max {MAX_CORS_ORIGINS}")
+            if not all(isinstance(s, str) for s in val):
+                raise ValueError(f"{key}: expected a list of strings, got {val!r}")
+            return [s.strip() for s in val if s.strip()]
         s = str(val).strip()
         if not s:
             return None

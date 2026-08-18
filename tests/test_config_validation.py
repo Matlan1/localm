@@ -196,6 +196,32 @@ class TestValidateUpdate:
         assert ss.validate_update({"cors_origins": "*"}) == {"cors_origins": "*"}
         assert ss.validate_update({"cors_origins": "https://a, https://b"}) == {
             "cors_origins": ["https://a", "https://b"]}
+        assert ss.validate_update({"cors_origins": ["*"]}) == {"cors_origins": ["*"]}
+
+    def test_cors_origins_rejects_non_string_members(self):
+        with pytest.raises(ValueError, match="expected a list of strings"):
+            ss.validate_update({"cors_origins": [1, None, {}]})
+
+    def test_cors_origins_rejects_too_many(self):
+        with pytest.raises(ValueError, match="too many"):
+            ss.validate_update(
+                {"cors_origins": ["http://x"] * (ss.MAX_CORS_ORIGINS + 1)})
+
+    def test_cors_origins_allows_cap_boundary(self):
+        origins = ["http://x"] * ss.MAX_CORS_ORIGINS
+        assert ss.validate_update({"cors_origins": origins}) == {
+            "cors_origins": origins}
+
+    def test_gpu_split_neighbor_contract_unaffected_by_cors_fix(self):
+        # Guards against a wrong fix shape: tightening the shared _to_str_list
+        # helper itself (instead of the cors_origins branch alone) would break
+        # these two callers, which depend on its str()-coercion of a native
+        # JSON list of numbers before _to_number parses each token.
+        assert ss.validate_update({"gpu_split_indices": [0, 1]}) == {
+            "gpu_split_indices": [0, 1]}
+        result = ss.validate_update({"gpu_split_ratios": [0.6, 0.4]})
+        assert result == {"gpu_split_ratios": [0.6, 0.4]}
+        assert all(isinstance(r, float) for r in result["gpu_split_ratios"])
 
     def test_plugins_dict_roundtrips_scalar_rejected(self):
         assert ss.validate_update({"plugins": {"image": {"x": 1}}}) == {

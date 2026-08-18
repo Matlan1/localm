@@ -4047,7 +4047,7 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
         # route, so the same-origin gate is exempt for the same reason.
         "/v1/instances/",
     )
-    _cors_allowlist = cors_cfg if isinstance(cors_cfg, list) else []
+    _cors_allowlist = frozenset(cors_cfg) if isinstance(cors_cfg, list) else frozenset()
     _cors_wildcard = cors_cfg == "*"
 
     # LM-PT-002 (CWE-200): a short list of UNAUTHENTICATED GETs that disclose host
