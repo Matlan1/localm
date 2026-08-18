@@ -291,6 +291,30 @@ def register(app: FastAPI, ctx) -> None:
                 row_out["vision"] = _vis
             models.append(row_out)
         out = {"models": models, "active": current}
+        # The model an UNNAMED request would resolve to when none is currently
+        # active. After an idle-unload the Engine is deliberately kept in
+        # _engines for lazy reload and _last_active_model_name records its name,
+        # so the very next chat message reloads it and is served - which is
+        # exactly what the idle-unload log line promises the user.
+        #
+        # Without this field the client cannot tell that state apart from "no
+        # model at all": both report active == "". They need OPPOSITE handling -
+        # one is a dead end, the other is one keystroke from working - and the
+        # GUI's chat gate refused BOTH, so enabling idle_unload_seconds made
+        # chat appear permanently broken until the model was re-picked by hand,
+        # while the server stood ready to reload it.
+        #
+        # /health already resolves through the same chain for the same reason
+        # ("must not report 'no model' for a state chat already knows how to fix
+        # on the next request"); this makes /api/models agree with it instead of
+        # contradicting it. Emitted ONLY when there is no active model and a
+        # resumable one exists - absent, not null, so an older client receives
+        # the exact pre-existing payload shape (same discipline as `vision` and
+        # `active_gpu_split`).
+        if not current:
+            resumable = _hs._resolve_unnamed_model_name()
+            if resumable:
+                out["resumable"] = resumable
         # The multi-GPU split distribution the ACTIVE model's load actually
         # applied (GgufBackend.applied_gpu_split - auto free-VRAM-proportional,
         # pinned, or the equal fallback), for the sidebar's loaded-model

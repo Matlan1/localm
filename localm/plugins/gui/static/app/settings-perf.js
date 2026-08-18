@@ -1976,7 +1976,18 @@ export async function sendChat() {
   // this is the client-side gate the empty-model design discussion agreed on -
   // an empty-model request is a client bug, caught here instead of round-tripped
   // (AUDIT). Slash commands (handled above) still work with no model.
-  if (!modelCache.active) {
+  // `resumable` is the model an unnamed request reloads and is served by, which
+  // is the state an idle-unload or the sidebar's Unload button leaves behind -
+  // both of which tell the user, in the log line and in the button's tooltip
+  // respectively, that it "reloads on the next chat request". Refusing here
+  // made that promise false and left chat looking permanently broken, since
+  // nothing recovers `active` until a model is picked by hand.
+  //
+  // The guard itself stays: an empty-model request with nothing to resolve to
+  // IS a client bug and is still caught here rather than round-tripped for a
+  // 503. The two states just needed telling apart - one is a dead end, the
+  // other is one keystroke from working.
+  if (!modelCache.active && !modelCache.resumable) {
     toast("No model loaded - load a model on the sidebar before chatting.", true);
     return;
   }
