@@ -120,10 +120,14 @@ export async function refreshModelsPage() {
   if (myGen !== _modelsRenderGen) return;
   box.replaceChildren();
 
-  const typeParam = currentTypeFilter === "all" ? "" : "?type=" + currentTypeFilter;
+  // Fetched unfiltered and narrowed to the active tab below. The tabs carry a
+  // per-type count, and a count of a type you are NOT looking at cannot come
+  // from a ?type= response. Same cost as the default All tab, which already
+  // asks for the whole registry; what each tab SHOWS is unchanged, because the
+  // filter below is the same comparison the route makes.
   let models = [];
   try {
-    const r = await fetch("/api/models" + typeParam, { headers: authHeaders() });
+    const r = await fetch("/api/models", { headers: authHeaders() });
     if (r.status === 401) {
       // Expired/absent session (e.g. a network bind whose loopback key was never
       // seeded): the JSON error body parses fine, so the models=[] fallback below
@@ -150,8 +154,19 @@ export async function refreshModelsPage() {
     return;
   }
 
+  if (myGen !== _modelsRenderGen) return;
+  // Counts come from the WHOLE registry, so a tab keeps showing how many it
+  // holds while you are looking at a different one.
+  syncTabCounts(models);
+  // Narrow to the active tab. Deliberately the SAME comparison the /api/models
+  // route makes (its own "llm" default for an entry with no recorded type, and
+  // an exact match otherwise), so every tab shows exactly the rows it showed
+  // when the route did the filtering.
+  if (currentTypeFilter !== "all") {
+    models = models.filter((m) => (m.model_type || "llm") === currentTypeFilter);
+  }
+
   if (!models.length) {
-    if (myGen !== _modelsRenderGen) return;
     box.appendChild(emptyState("models", "No models yet",
       "Pull a model above, or search HuggingFace to add your first one."));
     return;
@@ -1579,6 +1594,35 @@ $("pull-start").onclick = async () => {
   }
 };
 
+
+// Per-tab counts. The tab's own label is left alone and the number rides in a
+// trailing span, so the text a click handler or a test reads by dataset.type is
+// untouched. A type with nothing registered shows no number rather than a "0",
+// which would add noise to six tabs on a fresh install; "All" carries the total.
+//
+// The per-type numbers can legitimately sum to LESS than All: a registry entry
+// whose model_type has no tab of its own (mmproj) is reachable from All only.
+// That is the same set of rows each tab has always shown, now visible.
+export function syncTabCounts(models) {
+  const nav = $("models-tab-nav");
+  if (!nav) return;
+  const counts = new Map();
+  for (const m of models || []) {
+    const t = m.model_type || "llm";
+    counts.set(t, (counts.get(t) || 0) + 1);
+  }
+  for (const btn of nav.querySelectorAll(".tab-btn")) {
+    const n = btn.dataset.type === "all"
+      ? (models || []).length
+      : (counts.get(btn.dataset.type) || 0);
+    let slot = btn.querySelector(".tab-count");
+    if (!slot) {
+      slot = el("span", "tab-count");
+      btn.appendChild(slot);
+    }
+    slot.textContent = n ? String(n) : "";
+  }
+}
 
 // Bind tab click handlers
 const tabNav = $("models-tab-nav");

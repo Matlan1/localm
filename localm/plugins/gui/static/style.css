@@ -2365,6 +2365,13 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
   background: var(--bg-input);
   color: var(--text);
 }
+/* Per-tab count. Sits inside the .tab-btn flex row (which already sets a 6px
+   gap), so it needs no margin of its own. Quieted against the label, and it
+   picks up the accent on the active tab for free by inheriting `color`. */
+.tab-count {
+  font-size: 11px; font-variant-numeric: tabular-nums; opacity: 0.6;
+}
+.tab-count:empty { display: none; }
 .tab-btn.active {
   background: color-mix(in srgb, var(--accent) 15%, transparent);
   color: var(--accent);

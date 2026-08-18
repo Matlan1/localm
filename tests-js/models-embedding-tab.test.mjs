@@ -64,8 +64,13 @@ test("models-embedding-tab: clicking the Embedding tab activates it and re-fetch
     }
   }
 
-  assert.ok(calls.includes("/api/models?type=embedding"),
-    "the click re-fetched the models list filtered to type=embedding");
+  // The tabs carry a per-type count now, so the page asks for the whole registry
+  // once and narrows to the active tab itself - a count of a type you are not
+  // looking at cannot come out of a ?type= response. What the tab SHOWS is the
+  // property that matters and the one asserted here; the URL was only ever how
+  // it was achieved.
+  assert.ok(calls.includes("/api/models"),
+    "the click re-fetched the models list");
 });
 
 test("models-embedding-tab: an embedding-type row renders and its set-type control offers 'embedding'", async () => {
