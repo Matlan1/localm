@@ -118,11 +118,22 @@ test("Ctrl+S from inside the merged card saves the toggles, never the pending ap
   // button if #update-toggles-save were missing its .settings-section-save class.
   const { window, doc, patches } = await setup({ updateAvailable: true });
 
+  // The "Updates" card lives in the "system" nav group, which is not the
+  // default active group (SETTINGS_GROUPS puts "model" first) - without this,
+  // saveActiveSettingsSection()'s savable() check would reject #sec-updates for
+  // lacking .active and silently fall back to whatever group IS active,
+  // making the test pass or fail for a reason that has nothing to do with the
+  // hazard it exists to catch.
+  runScript(window, 'showSettingsGroup("system");');
+  assert.ok(doc.getElementById("sec-updates").classList.contains("active"),
+    "precondition: the Updates card is the active section under test");
+
   let applyClicked = false;
   doc.getElementById("update-apply").onclick = () => { applyClicked = true; };
 
   const toggle = doc.querySelector(
     '#settings-sec-core-Updates [data-field-key="update_ignore_net_policy"] input');
+  toggle.checked = true;
   toggle.focus();
   const saved = window.saveActiveSettingsSection();
   await drain();
@@ -130,5 +141,7 @@ test("Ctrl+S from inside the merged card saves the toggles, never the pending ap
   assert.equal(saved, true, "a save target was found");
   assert.equal(applyClicked, false,
     "Ctrl+S must never trigger the app-update apply button as a side effect");
-  assert.equal(patches.length, 1, "the toggles' own save ran instead");
+  assert.equal(patches.length, 1, "exactly one PATCH was sent");
+  assert.equal(patches[0].update_ignore_net_policy, true,
+    "and it is the toggles' own save (the field the user actually touched)");
 });
