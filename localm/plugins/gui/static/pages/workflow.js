@@ -144,7 +144,7 @@ async function comfyModelPicker(media) {
       // No live choices to render - a <select> with zero <option>s would show
       // blank and unusable. Name the workflow's own current value instead so
       // the user knows exactly what file to install.
-      row.appendChild(el("span", "comfy-model-missing-value", `${slot.current} (not installed)`));
+      row.appendChild(el("span", "comfy-model-missing-value job-state st-error", `${slot.current} (not installed)`));
       wrap.appendChild(row);
       continue;
     }

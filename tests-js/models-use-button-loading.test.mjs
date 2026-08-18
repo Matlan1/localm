@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // NEW-MODELSWITCH-INDICATOR: the Models-page "use" button calls the SAME
 // switchModel() the sidebar dropdown uses (models-sidebar.js), which already
-// drives the sidebar's #status-dot/#status-text for the real load duration -
+// drives the sidebar's #status-text pill for the real load duration -
 // but that status line lives inside the off-canvas #sidebar (invisible on
 // mobile, easy to miss on desktop) and the button itself gave no feedback of
 // its own beyond `disabled`. These tests drive the REAL button click ->

@@ -13,16 +13,22 @@ import { refreshPerfEstimate } from "./settings-perf.js";
 export const modelSelect = $("model-select");
 export const sidebarUnloadBtn = $("sidebar-unload-btn");
 
-// ADR-0008 U4: tracks whether the dot is CURRENTLY showing a caller's deliberate
-// busy state (e.g. switchModel's "loading X…"), so refreshModels()'s periodic
-// "ok" write does not clobber it - the pre-existing race this fix closes.
+// ADR-0008 U4: tracks whether the status pill is CURRENTLY showing a caller's
+// deliberate busy state (e.g. switchModel's "loading X…"), so refreshModels()'s
+// periodic "ok" write does not clobber it - the pre-existing race this fix closes.
 // Generic on purpose (any future busy-setter is covered), not tied to one
 // specific caller.
 let _statusBusy = false;
 
+// docs/gui-design.md rule 6: state renders as a .job-state pill, not a bare
+// colored dot. busy maps to st-running (accent) rather than a bespoke yellow -
+// "loading/unloading" is the same "work in progress" semantic job-state already
+// uses for st-running elsewhere (e.g. the activity pill).
+const STATUS_STATE_CLASS = { ok: "st-ok", busy: "st-running", err: "st-error" };
+
 export function setStatus(state, text) {
   _statusBusy = state === "busy";
-  $("status-dot").className = "dot " + state;
+  $("status-text").className = "job-state " + (STATUS_STATE_CLASS[state] || "");
   $("status-text").textContent = text;
 }
 

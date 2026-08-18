@@ -113,12 +113,12 @@ function makeModelsFetch() {
   };
 }
 
-test("refreshModels: does not clobber a deliberately-set busy status dot", async () => {
+test("refreshModels: does not clobber a deliberately-set busy status pill", async () => {
   const { window: win } = loadApp({ fetchImpl: makeModelsFetch() });
   win.setStatus("busy", "loading something…");
   await win.refreshModels();
 
-  assert.equal(win.document.getElementById("status-dot").className, "dot busy",
+  assert.equal(win.document.getElementById("status-text").className, "job-state st-running",
     "the 30s poll must not overwrite an in-flight busy state");
   assert.equal(win.document.getElementById("status-text").textContent, "loading something…");
 });
@@ -127,7 +127,7 @@ test("refreshModels: still sets 'ok' normally when nothing is busy (unchanged be
   const { window: win } = loadApp({ fetchImpl: makeModelsFetch() });
   await win.refreshModels();
 
-  assert.equal(win.document.getElementById("status-dot").className, "dot ok");
+  assert.equal(win.document.getElementById("status-text").className, "job-state st-ok");
   assert.equal(win.document.getElementById("status-text").textContent, "some-model");
 });
 

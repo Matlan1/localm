@@ -33,6 +33,19 @@ export function sessionLabel(info) {
   return `${dir} (${info.id.slice(0, 6)})`;
 }
 
+// docs/gui-design.md rule 6: state renders as a .job-state pill. "working…"
+// maps to st-running, "idle" to st-pending (existing neutral variant), "error"
+// to st-error; the empty string (setup mode, no active session) gets no
+// variant, matching the base pill's dim/no-background look.
+function setCoderState(text) {
+  const node = $("coder-state");
+  node.textContent = text;
+  node.className = "job-state" + (
+    text === "working…" ? " st-running" :
+    text === "idle" ? " st-pending" :
+    text === "error" ? " st-error" : "");
+}
+
 export function renderSessionSelect() {
   const sel = $("session-select");
   sel.replaceChildren();
@@ -89,7 +102,7 @@ export function showCoderUI(hasSession) {
     for (const [, s] of coder.sessions) s.feedEl.classList.remove("active");
     coder.activeId = null;
     $("coder-cwd").textContent = "";
-    $("coder-state").textContent = "";
+    setCoderState("");
     $("coder-usage").textContent = "";
     renderSessionSelect();
     refreshResumable();   // reveal "Continue last session" if the cwd has one (CODER-2)
@@ -106,7 +119,7 @@ export function activateSession(id) {
   const s = coder.sessions.get(id);
   if (s) {
     $("coder-cwd").textContent = s.info.cwd;
-    $("coder-state").textContent = s.busy ? "working…" : "idle";
+    setCoderState(s.busy ? "working…" : "idle");
     $("coder-usage").textContent = s.info.total_tokens
       ? `${s.info.total_tokens} tok · turn ${s.info.turns}` : "";
   }
@@ -219,7 +232,9 @@ export function buildToolCard(ev) {
   const hintVal = ev.args?.path || ev.args?.command || ev.args?.pattern
     || ev.args?.url || todoHint(ev.args?.items) || "";
   head.appendChild(el("span", "hint", String(hintVal).slice(0, 120)));
-  head.appendChild(el("span", "state", "…"));
+  // docs/gui-design.md rule 6: state renders as a .job-state pill. A just-created
+  // card is actively executing (result not back yet), so st-running until it lands.
+  head.appendChild(el("span", "state job-state st-running", "…"));
   const body = el("div", "body");
   if (ev.diff) {
     const rest = slimArgs(ev.args);
@@ -359,7 +374,7 @@ export function handleCoderEvent(s, ev) {
       s.info.turns = ev.turn;
       s.info.total_tokens = ev.total_tokens;
       if (s.info.id === coder.activeId) {
-        $("coder-state").textContent = "working…";
+        setCoderState("working…");
         const ctx = ev.ctx_ratio ? ` · ctx ${Math.round(ev.ctx_ratio * 100)}%` : "";
         if (ev.total_tokens)
           $("coder-usage").textContent = `${ev.total_tokens} tok · turn ${ev.turn}${ctx}`;
@@ -385,7 +400,7 @@ export function handleCoderEvent(s, ev) {
         const took = typeof ev.duration_s === "number"
           ? ` · ${ev.duration_s.toFixed(1)}s` : "";
         state.textContent = (ev.summary || (ev.ok ? "ok" : "failed")) + took;
-        state.className = "state " + (ev.ok ? "ok" : "fail");
+        state.className = "state job-state " + (ev.ok ? "st-ok" : "st-error");
         if (ev.output && !card.querySelector(".body .diff")) {
           card.querySelector(".body").textContent = ev.output;
         }
@@ -443,7 +458,7 @@ export function handleCoderEvent(s, ev) {
       s.busy = false;
       s.info.turns = ev.turns;
       s.info.total_tokens = ev.total_tokens;
-      if (s.info.id === coder.activeId) $("coder-state").textContent = "idle";
+      if (s.info.id === coder.activeId) setCoderState("idle");
       renderSessionSelect();
       // "inconclusive" means the check could not run or collected nothing, so
       // an unqualified "Task finished" would claim a verification that never
@@ -461,7 +476,7 @@ export function handleCoderEvent(s, ev) {
     case "error": {
       flushAssistantBlock(s);
       s.busy = false;
-      if (s.info.id === coder.activeId) $("coder-state").textContent = "error";
+      if (s.info.id === coder.activeId) setCoderState("error");
       toast("Agent error: " + ev.text, true);
       break;
     }
@@ -698,7 +713,7 @@ export async function sendCoderTask() {
       toast("Queued - the agent picks it up at the next turn");
     } else {
       s.busy = true;
-      $("coder-state").textContent = "working…";
+      setCoderState("working…");
       renderSessionSelect();
     }
     // The user message arrives back through the event stream (so replay

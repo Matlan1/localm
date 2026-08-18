@@ -219,12 +219,16 @@ export async function refreshModelsPage() {
     }
     const visBadge = visionBadge(m.vision);
     if (visBadge) nameTd.appendChild(visBadge);
-    if (m.active) nameTd.appendChild(el("span", "active-tag", "active"));
+    if (m.active) nameTd.appendChild(el("span", "active-tag job-state st-ok", "active"));
     // Independent of "active": a model can sit resident in VRAM without being
     // the one currently serving requests - surfaced so a background-loaded
     // model is never invisible/indistinguishable from one that was never
-    // loaded at all.
-    else if (m.loaded) nameTd.appendChild(el("span", "active-tag loaded-tag", "loaded"));
+    // loaded at all. Deliberately NOT the active-tag class here (it used to be,
+    // which made "loaded" render identically to "active" - .loaded-tag had no
+    // CSS of its own - and incorrectly triggered the tr:has(.active-tag) row
+    // highlight for a merely-resident model); job-state's "on" variant gives it
+    // its own distinct look instead.
+    else if (m.loaded) nameTd.appendChild(el("span", "loaded-tag job-state on", "loaded"));
     tr.appendChild(nameTd);
     
     // Role column (using job-state badge layout). An 'unknown'-type model (its
@@ -279,7 +283,7 @@ export async function refreshModelsPage() {
       if (!m.active) {
         const use = el("button", "primary", "use");
         use.onclick = async () => {
-          // switchModel() already drives the sidebar's #status-dot/#status-text
+          // switchModel() already drives the sidebar's #status-text pill
           // for the real load duration (a genuine blocking VRAM-check/evict/
           // load, not fire-and-forget) - but that status line lives inside the
           // off-canvas #sidebar, invisible on mobile until the drawer opens, and
