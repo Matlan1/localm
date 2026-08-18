@@ -34,18 +34,18 @@ The detectors, and the honesty boundary between them:
   see. Surfaces after 4 consecutive failures, restarts after 8.
 * REQUEST STARVATION (detector S): the 2026-08-18 class - handlers wedged
   on something (a lock, an executor) while the loop itself stays healthy.
-  Fires when at least one request has been in flight longer than
-  LOCALM_HANG_STARVATION_SECS (300s default) AND nothing at all has made
-  response progress for that long. SURFACE ONLY, never auto-restart: unlike
-  A and C there is no threshold that separates this state from legitimate
-  long work with certainty (a model download inside get_embedder, an
-  hour-long non-streaming generation, a five-minute ComfyUI launch are all
-  real), so the honest action is a loud red "N request(s) stuck for M
-  minutes" with the already-working Restart button one click away, not a
-  guessed kill. Once fired it HOLDS while the stuck requests remain stuck
-  (other traffic completing does not clear it - in the live incident the
-  wedged polls sat next to perfectly healthy /health responses) and clears
-  itself when they drain.
+  Observes when requests have been in flight longer than
+  LOCALM_HANG_STARVATION_SECS (600s default) while nothing at all makes
+  response progress. LOG-ONLY FORENSICS, by explicit maintainer directive
+  (2026-08-18): no threshold separates this state from legitimate long
+  silent work with certainty (model downloads, non-streaming generations,
+  the 300s ComfyUI launch), and anything user-facing must have zero false
+  positives - so S never touches the window, never warns, never restarts.
+  What it produces instead is the record the real incident's investigation
+  had to reconstruct by hand: which requests (method + path + age), proof
+  of total starvation, an immediate stack snapshot of every thread, and a
+  follow-up snapshot one window later so identical blocked frames prove
+  "genuinely wedged" over "merely idle".
 
 Detection and surfacing are NOT privacy-gated: nothing here writes chat
 content or paths anywhere - the surface text is generic, the CRITICAL line
@@ -101,14 +101,15 @@ def restart_after_seconds() -> float:
 
 
 def starvation_seconds() -> float:
-    """Detector S's window. 0 disables it. The default deliberately sits above
-    every bounded long operation this codebase knows about on a request path
-    (the 300s comfy-launch wait is the longest) - S is for the unbounded
-    wedge, not for slow-but-finite work."""
+    """Detector S's window. 0 disables it. The default deliberately sits WELL
+    above every bounded long operation this codebase knows about on a request
+    path (the ~330s comfy-launch worst case is the longest) - S is for the
+    unbounded wedge, not for slow-but-finite work, and even its log-only
+    record should stay quiet for anything that could be legitimate."""
     try:
-        return max(0.0, float(os.environ.get(_STARVATION_SECS_ENV, "300")))
+        return max(0.0, float(os.environ.get(_STARVATION_SECS_ENV, "600")))
     except ValueError:
-        return 300.0
+        return 600.0
 
 
 class RequestProgress:
@@ -122,14 +123,18 @@ class RequestProgress:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._next_id = 0
-        self._inflight: dict[int, float] = {}
+        # token -> (start_monotonic, "METHOD /path"). Method+path so a
+        # starvation record can name WHICH requests are stuck (the same
+        # granularity the debug request log already records); never bodies,
+        # never query strings, never chat content.
+        self._inflight: dict[int, tuple[float, str]] = {}
         self._last_progress = time.monotonic()
 
-    def start(self) -> int:
+    def start(self, label: str = "?") -> int:
         with self._lock:
             self._next_id += 1
             token = self._next_id
-            self._inflight[token] = time.monotonic()
+            self._inflight[token] = (time.monotonic(), label)
             return token
 
     def progress(self) -> None:
@@ -147,18 +152,21 @@ class RequestProgress:
         now = time.monotonic()
         with self._lock:
             count = len(self._inflight)
-            oldest = min(self._inflight.values()) if self._inflight else now
+            oldest = (min(t for t, _ in self._inflight.values())
+                      if self._inflight else now)
             return count, now - oldest, now - self._last_progress
 
-    def observe(self) -> Tuple[Tuple[float, ...], float]:
-        """(per-request in-flight ages, seconds since the last response
-        progress) - the alarm's view. Per-request ages, not just the oldest,
-        so the surfaced message can count the requests that are actually
-        stuck rather than everything currently in flight."""
+    def observe(self) -> Tuple[Tuple[Tuple[float, str], ...], float]:
+        """(per-request (age, "METHOD /path") pairs, seconds since the last
+        response progress) - the starvation watch's view. Per-request, not
+        just the oldest, so a record can name exactly which requests are
+        stuck rather than claiming something vague about everything in
+        flight."""
         now = time.monotonic()
         with self._lock:
-            ages = tuple(now - t for t in self._inflight.values())
-            return ages, now - self._last_progress
+            entries = tuple((now - t, label)
+                            for t, label in self._inflight.values())
+            return entries, now - self._last_progress
 
 
 class RequestProgressMiddleware:
@@ -190,7 +198,8 @@ class RequestProgressMiddleware:
                 or scope.get("path") in self._EXCLUDED_PATHS):
             await self.app(scope, receive, send)
             return
-        token = self.tracker.start()
+        token = self.tracker.start(
+            f"{scope.get('method', '?')} {scope.get('path', '?')}")
 
         async def send_tracked(message):
             if message.get("type") == "http.response.body":
@@ -325,6 +334,9 @@ class HangAlarm:
         self._active: dict[str, str] = {}   # detector -> surfaced text
         self._restart_latched = False
         self._dumped: set[str] = set()
+        # Log-only starvation incident state (never enters _active).
+        self._starve_since: Optional[float] = None
+        self._starve_second_dump_due: Optional[float] = None
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -444,43 +456,73 @@ class HangAlarm:
             self._maybe_restart(
                 "%d consecutive self-probe failures" % self._probe_fails)
 
-    def _starve_text(self, stuck: int, oldest_age: float,
-                     progress_age: float) -> str:
-        """State the evidence, never a verdict the evidence does not carry
-        (maintainer correction, 2026-08-18: a red "server is likely hung"
-        over a server that was otherwise serving fine reads as a false
-        alarm and burns trust). "May be hung" appears only while NOTHING is
-        completing; once other traffic moves again the message downgrades
-        itself to the plain stuck-request fact it can still prove."""
-        mins = max(1.0, oldest_age / 60.0)
-        if progress_age > self.starvation_after:
-            return ("%d request(s) stuck for over %.0f minute(s) and nothing "
-                    "is completing - the server may be hung; use Restart if "
-                    "this persists" % (stuck, mins))
-        return ("%d request(s) stuck for over %.0f minute(s) (other requests "
-                "are completing) - use Restart if the app misbehaves"
-                % (stuck, mins))
-
     def _check_starvation(self) -> None:
+        """LOG-ONLY FORENSICS - never a user-facing warning, never a restart
+        trigger, by explicit maintainer directive (2026-08-18): anything
+        shown to a user must have zero false positives, and no threshold can
+        separate "requests wedged by a defect" from "legitimately slow work"
+        with certainty (a model download, an hour-long non-streaming
+        generation, and the 300s ComfyUI launch are all real and all
+        silent). The zero-false-positive detectors (loop freeze, transport
+        death) own the user-facing alarms and restarts; this one exists so
+        that when requests DO wedge the way the 2026-08-18 incident wedged
+        them, the log already holds what that investigation needed hours and
+        an external profiler to get: WHICH requests (method + path + age),
+        the proof they were starved (nothing at all completing), a stack
+        snapshot from the moment it began showing WHERE every thread was
+        blocked, a second snapshot one window later (identical blocked
+        frames = genuinely wedged, not idle), and what to do about it."""
         if self._inflight is None or self.starvation_after <= 0:
             return
-        ages, progress_age = self._inflight()
-        stuck = [a for a in ages if a > self.starvation_after]
-        if "starve" in self._active:
-            # HOLD while the stuck requests are still stuck: unrelated healthy
-            # traffic completing must not clear a real wedge (measured in the
-            # live incident: /health answered fine next to permanently wedged
-            # status polls). Clears only when the old in-flight work drains;
-            # meanwhile the text re-renders to whatever is currently true.
+        entries, progress_age = self._inflight()
+        stuck = sorted((e for e in entries if e[0] > self.starvation_after),
+                       reverse=True)
+        if self._starve_since is not None:
             if not stuck:
-                self._set_active("starve", None)
-            else:
-                self._set_active("starve", self._starve_text(
-                    len(stuck), max(stuck), progress_age))
+                logger.warning(
+                    "request-starvation watch cleared: the stuck requests "
+                    "finished after %.1f minutes",
+                    (time.monotonic() - self._starve_since) / 60.0)
+                self._starve_since = None
+                self._starve_second_dump_due = None
+            elif (self._starve_second_dump_due is not None
+                    and time.monotonic() >= self._starve_second_dump_due):
+                # The follow-up snapshot: compared with the first, identical
+                # blocked frames turn "might be stuck" into "provably has
+                # not moved for a full window".
+                self._starve_second_dump_due = None
+                self._try_dump("request starvation follow-up - compare with "
+                               "the first snapshot: identical frames for the "
+                               "listed requests mean they are genuinely "
+                               "wedged, not idle")
             return
         if stuck and progress_age > self.starvation_after:
-            self._set_active("starve", self._starve_text(
-                len(stuck), max(stuck), progress_age))
+            self._starve_since = time.monotonic()
+            self._starve_second_dump_due = (
+                self._starve_since + self.starvation_after)
+            listed = ", ".join(
+                f"{label} (in flight {age / 60.0:.1f} min)"
+                for age, label in stuck[:8])
+            if len(stuck) > 8:
+                listed += f", +{len(stuck) - 8} more"
+            logger.critical(
+                "%d request(s) stuck with nothing completing for over %.1f "
+                "minutes: %s. Writing a stack snapshot now and again in %.1f "
+                "minutes - identical blocked frames across the two mean these "
+                "are genuinely wedged. If the app is unusable, restart the "
+                "server and include the snapshots in a bug report. (log-only "
+                "diagnostic, ADR-0012)",
+                len(stuck), progress_age / 60.0, listed,
+                self.starvation_after / 60.0)
+            self._try_dump("request starvation: " + listed)
+
+    def _try_dump(self, reason: str) -> None:
+        if self._dump is None:
+            return
+        try:
+            self._dump(reason)
+        except Exception:
+            logger.debug("hang-alarm dump hook failed", exc_info=True)
 
     # -- main loop ---------------------------------------------------------
 

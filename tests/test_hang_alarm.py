@@ -246,12 +246,16 @@ def test_probe_healthy_server_never_fires():
 #  Detector S: request starvation (the 2026-08-18 incident class)              #
 # --------------------------------------------------------------------------- #
 
-def test_starvation_surfaces_holds_through_healthy_traffic_and_clears():
-    """The live-incident geometry: requests wedged forever while /health
-    answers fine. Must surface, must HOLD while the stuck requests remain
-    stuck even though other traffic is completing (progress_age small), must
-    clear once they drain - and must NEVER auto-restart (the one detector
-    whose condition legitimate long work can also produce)."""
+def test_starvation_is_log_only_forensics_never_user_facing():
+    """Maintainer directive (2026-08-18, after two live rounds of feedback):
+    anything user-facing must have ZERO false positives, and no threshold
+    separates "requests wedged by a defect" from "legitimately slow silent
+    work" with certainty - so the starvation watch must never surface, never
+    restart, never touch the window. What it must do instead is produce the
+    forensic record the real incident lacked: name the stuck requests
+    (method + path + age), take an immediate stack snapshot, and take a
+    follow-up snapshot one window later so identical frames prove
+    "genuinely wedged" over "merely idle"."""
     state = {"snap": ((), 0.0)}
     spy = _Spy()
     alarm = _make_alarm(
@@ -260,35 +264,37 @@ def test_starvation_surfaces_holds_through_healthy_traffic_and_clears():
         starvation_after=0.3,
     ).start()
     try:
-        # Wedged: two requests stuck beyond the window plus one young one,
-        # nothing progressing. The count must be the STUCK count (2), not
-        # everything in flight, and total starvation earns the "may be
-        # hung" phrasing.
-        state["snap"] = ((1.0, 0.9, 0.05), 1.0)
-        assert spy.wait_for("surface", 5), spy.events
-        first = spy.texts("surface")[0]
-        assert "2 request(s) stuck" in first, first
-        assert "may be hung" in first, first
-        # Healthy traffic resumes alongside the still-stuck requests (the
-        # incident's own /health behavior): progress_age tiny, stuck ones
-        # still ancient. The surface must HOLD (no recovered event) but the
-        # text must downgrade to the provable fact - no hang verdict while
-        # other requests are completing (maintainer correction 2026-08-18).
-        state["snap"] = ((2.0, 1.9), 0.01)
+        # The incident geometry: two requests wedged beyond the window plus
+        # one young one, nothing progressing at all.
+        state["snap"] = (
+            ((1.0, "GET /api/stats"), (0.9, "GET /api/models"),
+             (0.05, "GET /api/activity")), 1.0)
+        assert spy.wait_for("dump", 5), spy.events
+        first = spy.texts("dump")[0]
+        # WHICH requests: the stuck ones are named, the young one is not.
+        assert "GET /api/stats" in first and "GET /api/models" in first, first
+        assert "GET /api/activity" not in first, first
+        # The follow-up snapshot fires one window later while still stuck.
         deadline = time.monotonic() + 5
         while (time.monotonic() < deadline
-               and not any("other requests are completing" in t
-                           for t in spy.texts("surface"))):
+               and not any("follow-up" in t for t in spy.texts("dump"))):
             time.sleep(0.02)
-        assert any("other requests are completing" in t
-                   for t in spy.texts("surface")), spy.events
-        assert not any("may be hung" in t
-                       for t in spy.texts("surface")[1:]), spy.events
-        assert "recovered" not in spy.kinds(), spy.events
-        # The stuck requests drain: now it clears.
-        state["snap"] = ((0.05,), 0.01)
-        assert spy.wait_for("recovered", 5), spy.events
+        assert any("follow-up" in t for t in spy.texts("dump")), spy.events
+        # Log-only: none of the user-facing channels ever moved.
+        assert "surface" not in spy.kinds(), spy.events
         assert "restart" not in spy.kinds(), spy.events
+        assert "recovered" not in spy.kinds(), spy.events
+        # Draining closes the incident; a later, distinct wedge opens a
+        # fresh record (proves the clear actually reset the state).
+        state["snap"] = ((), 0.01)
+        time.sleep(0.2)
+        state["snap"] = (((1.0, "POST /api/imagine/comfy-launch"),), 1.0)
+        deadline = time.monotonic() + 5
+        while (time.monotonic() < deadline
+               and not any("comfy-launch" in t for t in spy.texts("dump"))):
+            time.sleep(0.02)
+        assert any("comfy-launch" in t for t in spy.texts("dump")), spy.events
+        assert "surface" not in spy.kinds(), spy.events
     finally:
         alarm.stop()
 
@@ -369,11 +375,14 @@ def test_middleware_tracks_inflight_and_progress():
             sent.append(message["type"])
 
         task = asyncio.ensure_future(
-            mw({"type": "http", "path": "/api/stats"}, receive, send))
+            mw({"type": "http", "path": "/api/stats", "method": "GET"},
+               receive, send))
         await asyncio.sleep(0.05)
         count, oldest_age, _ = tracker.snapshot()
         assert count == 1
         assert oldest_age >= 0.04
+        entries, _ = tracker.observe()
+        assert entries[0][1] == "GET /api/stats", entries
         gate.set()
         await task
         count, oldest_age, progress_age = tracker.snapshot()
