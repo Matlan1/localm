@@ -2206,14 +2206,33 @@ def _hang_dump(reason: str) -> None:
         done = threading.Event()
 
         def _capture_tasks() -> None:
+            # Task.get_stack() reports only the OUTERMOST coroutine's
+            # suspension frame (it never follows cr_await), which for a
+            # wedged request shows the middleware wrapper and hides the
+            # handler line that actually matters. Walk the await chain by
+            # hand so the record ends at the exact line the coroutine is
+            # parked on, plus the primitive it is awaiting.
             try:
                 for task in asyncio.all_tasks(loop):
-                    lines.append(f"\n--- task {task.get_name()}: {task!r}\n")
-                    frames = task.get_stack(limit=25)
-                    for frame in frames:
-                        lines.extend(traceback.format_stack(frame, limit=1))
-                    if not frames:
-                        lines.append("    (no Python frames: done/cancelled)\n")
+                    lines.append(f"\n--- task {task.get_name()} ---\n")
+                    obj = task.get_coro()
+                    depth = 0
+                    while obj is not None and depth < 40:
+                        frame = (getattr(obj, "cr_frame", None)
+                                 or getattr(obj, "gi_frame", None)
+                                 or getattr(obj, "ag_frame", None))
+                        if frame is not None:
+                            code = frame.f_code
+                            lines.append('  File "%s", line %d, in %s\n' % (
+                                code.co_filename, frame.f_lineno,
+                                code.co_name))
+                        nxt = (getattr(obj, "cr_await", None)
+                               or getattr(obj, "gi_yieldfrom", None)
+                               or getattr(obj, "ag_await", None))
+                        if nxt is None and frame is None:
+                            lines.append(f"  awaiting: {obj!r}\n")
+                        obj = nxt
+                        depth += 1
             except Exception:
                 lines.append("    (task capture failed)\n")
             finally:
