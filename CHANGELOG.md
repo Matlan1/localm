@@ -25,6 +25,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
   location you are browsing and opens it; each listed file and folder has a
   rename control. Renaming never overwrites an existing file or folder with the
   same name.
+- **localm now says so when it is running a different copy of its own source
+  than the folder you are standing in.** With an editable install, the `localm`
+  and `localcoder` commands resolve to whichever checkout they were installed
+  from, because a console script never puts the current directory on the import
+  path. Working in a second clone, you could edit one copy and run another
+  without any sign of it, so a fix you had just made looked like it had not
+  worked, or a change you had not applied looked like it already did. localm now
+  refuses to start in that situation and prints the command to run instead, and
+  warns if its code is imported that way. This only applies when you have two
+  source checkouts of localm on disk; a normal install is unaffected. Set
+  `LOCALM_ALLOW_FOREIGN_SRC=1` to run another checkout deliberately.
 
 ## [0.1.5rc3] - 2026-08-13
 
