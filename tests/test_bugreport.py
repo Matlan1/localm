@@ -10,6 +10,7 @@ offer routes to the chosen channel without leaking secrets.
 from __future__ import annotations
 
 import os
+import pathlib
 import stat
 import sys
 import threading
@@ -245,6 +246,116 @@ def test_scrub_secrets_bare_assignment_redaction_is_idempotent():
     twice = bugreport._scrub_secrets(once)
     assert once == twice
     assert "CANARYBARE7Q4M" not in once and "CANARYBARE2BBB" not in once
+
+
+# The name-based match is deliberately broad, so it needs a floor on the other
+# side. These values were NOT invented: they are the shapes a scan of this repo's
+# own tracked docs and sources found the name match eating before the non-secret
+# literal suppressor was added. Picking fixture values out of imagination is how
+# the over-redaction direction went untested in the first place.
+_NON_SECRET_ASSIGNMENTS = (
+    "LOCALM_REQUIRE_AUTH=1",
+    "require_auth=true",
+    "digital_signature=True",
+    "secret=True",
+    "has_token=false",
+    "password=None",
+    "signature=None",
+    "auth_token=none",
+    "api_key=disabled",
+    "pull_token=null",
+    # A report is prose, so the same flag arrives wrapped in markup. Found by a
+    # test bound to the real docs, which write it as markdown inline code - the
+    # first version of the suppressor missed every one of these.
+    "`require_auth=1`",
+    "(require_auth=1)",
+    "`LOCALM_REQUIRE_AUTH=1`",
+    "set `require_auth=true` to fail closed",
+)
+
+
+@pytest.mark.parametrize("line", _NON_SECRET_ASSIGNMENTS)
+def test_scrub_secrets_keeps_assignments_whose_value_cannot_be_a_secret(line):
+    """Over-redaction has no natural failure signal: an over-broad pattern ships
+    green and silently eats diagnostic text out of every report. Hiding whether
+    auth was ON is the worst case, because that is exactly what a reader needs
+    when the bug IS about auth."""
+    assert bugreport._scrub_secrets(line) == line
+
+
+# The suppressor must not become a bypass: a real secret that merely STARTS with
+# one of the literals has to keep going. The inner lookahead pins each literal to
+# the WHOLE value, and this is the test that holds it there.
+@pytest.mark.parametrize("line,canary", [
+    ("api_key=trueCANARYLIT1", "trueCANARYLIT1"),
+    ("token=noCANARYLIT2", "noCANARYLIT2"),
+    ("api_key=onCANARYLIT3", "onCANARYLIT3"),
+    ("SECRET_KEY=falseCANARYLIT4", "falseCANARYLIT4"),
+    ("api_key=0CANARYLIT5", "0CANARYLIT5"),
+    ("api_key=10", "10"),
+])
+def test_scrub_secrets_still_redacts_a_secret_that_starts_with_a_literal(line, canary):
+    out = bugreport._scrub_secrets(line)
+    assert canary not in out          # DATA first
+    assert "=<redacted>" in out       # marker second
+
+
+@pytest.mark.parametrize("line", [
+    "api_key=1)SECRETLEAK",
+    'api_key=1"SECRETLEAK',
+    "token=true]MORESECRET",
+])
+def test_the_non_secret_suppressor_does_not_fire_when_more_value_follows(line):
+    """Tolerating closing markup must not become a bypass. ``(require_auth=1)``
+    is a flag; ``api_key=1)SECRET`` is not, and the difference is whether
+    anything other than whitespace follows the markup.
+
+    The value itself still ends at the first ``)`` / quote, because that is what
+    has always bounded a value here - this test is about the SUPPRESSOR declining
+    to fire, which is why it asserts the redaction marker rather than the absence
+    of the trailing text."""
+    out = bugreport._scrub_secrets(line)
+    assert "=<redacted>" in out, (
+        f"the suppressor swallowed a credential assignment: {out!r}")
+
+
+def test_scrub_secrets_never_eats_a_non_secret_value_out_of_the_real_docs():
+    """Bound to the SHIPPED artefact, not to a fixture. A fixture only ever
+    contains values its author thought of; the real docs contain the ones nobody
+    thought of, which is the half that keeps going wrong here.
+
+    Asserts a STRUCTURAL property (no assignment whose value is a non-secret
+    literal is ever redacted) rather than specific content, so ordinary edits to
+    the docs cannot break it."""
+    docs = pathlib.Path(bugreport.__file__).resolve().parents[1] / "docs"
+    assert docs.is_dir(), f"docs/ not found next to the package: {docs}"
+    files = sorted(docs.rglob("*.md"))
+    assert len(files) > 5, f"instrument broken: only found {len(files)} docs"
+
+    literals = {"true", "false", "none", "null", "nil", "yes", "no",
+                "on", "off", "enabled", "disabled", "0", "1"}
+    seen, eaten = 0, []
+    for f in files:
+        text = f.read_text(encoding="utf-8", errors="replace")
+        for m in bugreport._QUERY_SECRET_RE.finditer(text):
+            seen += 1
+            # The docs write flags as markdown inline code, so the captured value
+            # is ``1` `` and not ``1`` (a backtick does not terminate the value).
+            # Comparing the RAW value made this test unable to fail: it passed
+            # with the suppressor removed. Strip the surrounding markup first.
+            value = m.group(0)[len(m.group(1)):].strip("`*_.,;:)]}").lower()
+            if value in literals:
+                line_no = text.count("\n", 0, m.start()) + 1
+                eaten.append(f"{f.name}:{line_no} {m.group(0)!r}")
+    # Prove the scan can see anything at all. If the docs ever stop containing a
+    # credential-named assignment, this test becomes vacuous, and it should say
+    # so loudly rather than keep reporting a green it did not earn.
+    assert seen > 0, (
+        "no credential-named assignment found anywhere in the docs - this test "
+        "can no longer detect the regression it exists for")
+    assert eaten == [], (
+        "the scrub redacted a value that cannot be a secret, out of real shipped "
+        f"docs: {eaten}")
 
 
 def test_build_report_no_secret_when_none_given():

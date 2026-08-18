@@ -7,6 +7,9 @@ config from source, and the report body."""
 from __future__ import annotations
 
 import importlib.util
+import os
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -119,6 +122,64 @@ def test_scrub_strips_bare_and_prefixed_credential_assignments():
     assert "n_gpu_layers=35" in out
     assert "key=value" in out
     assert "monkey=13" in out
+
+
+def test_scrub_keeps_assignments_whose_value_cannot_be_a_secret():
+    """Mirrors the non-secret-literal suppressor in localm/bugreport.py. Asserted
+    in the same block as a real redaction so a regression that deletes the
+    suppressor and one that deletes the scrub are both caught here."""
+    out = ri.scrub(
+        "LOCALM_REQUIRE_AUTH=1 require_auth=true has_token=false "
+        "digital_signature=True api_key=CANARYLIT9 api_key=trueCANARYLIT8")
+    assert "CANARYLIT9" not in out
+    assert "CANARYLIT8" not in out
+    assert "LOCALM_REQUIRE_AUTH=1" in out
+    assert "require_auth=true" in out
+    assert "has_token=false" in out
+    assert "digital_signature=True" in out
+
+
+@pytest.mark.skipif(os.name != "nt",
+                    reason="the PowerShell fallback reporter only runs on Windows")
+def test_powershell_scrub_behaves_when_actually_executed(tmp_path):
+    """The other ps1 test is a STATIC text guard: it asserts the file CONTAINS
+    the patterns. That would pass on a .ps1 whose regex is syntactically invalid
+    or whose replacement string is wrong, which is a real gap because nothing
+    else in either suite ever runs this file.
+
+    This one executes the shipped Scrub for real. It extracts the function by
+    AST so what runs is the file's own bytes, not a retyped copy, and asserts
+    BOTH directions in one call so a regression in either is caught."""
+    pwsh = shutil.which("powershell") or shutil.which("pwsh")
+    if not pwsh:
+        pytest.skip("no PowerShell interpreter on PATH")
+    ps1 = _MOD_PATH.parent / "report_issue.ps1"
+    driver = tmp_path / "drive_scrub.ps1"
+    driver.write_text(
+        "param([string]$Target)\n"
+        "$ast = [System.Management.Automation.Language.Parser]::ParseFile("
+        "$Target, [ref]$null, [ref]$null)\n"
+        "$fn = $ast.FindAll({ param($n) $n -is "
+        "[System.Management.Automation.Language.FunctionDefinitionAst] -and "
+        "$n.Name -eq 'Scrub' }, $true)\n"
+        "if ($fn.Count -ne 1) { Write-Output 'SCRUB-NOT-FOUND'; exit 1 }\n"
+        "Invoke-Expression $fn[0].Extent.Text\n"
+        "Write-Output (Scrub 'api_key=PSCANARY7Q4M require_auth=true "
+        "n_gpu_layers=35')\n",
+        encoding="utf-8")
+    proc = subprocess.run(
+        [pwsh, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+         "-File", str(driver), "-Target", str(ps1)],
+        capture_output=True, text=True, timeout=120)
+    out = (proc.stdout or "") + (proc.stderr or "")
+    assert "SCRUB-NOT-FOUND" not in out, out
+    assert proc.returncode == 0, f"driver failed ({proc.returncode}): {out}"
+    # DATA first: the canary must be gone.
+    assert "PSCANARY7Q4M" not in out, f"the PowerShell scrub shipped a secret: {out}"
+    assert "api_key=<redacted>" in out, out
+    # And the other direction, which no static guard can check.
+    assert "require_auth=true" in out, f"the PowerShell scrub ate a flag: {out}"
+    assert "n_gpu_layers=35" in out, f"the PowerShell scrub ate a setting: {out}"
 
 
 def test_scrub_empty_is_safe():

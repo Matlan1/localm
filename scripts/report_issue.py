@@ -152,7 +152,14 @@ _QUERY_SECRET_RE = re.compile(
     #    admits the short generic names, per the reasoning above.
     r"|(?<=[A-Za-z0-9])[_-](?:api[_-]?key|token|secret|password|passwd|pwd"
     r"|access[_-]?token|signature|key|auth|sig)"
-    r")=)[^&\s#\"'\)\]\}]*"
+    r")=)"
+    # Leave a value that cannot be a secret alone (true/false/none/0/1/...),
+    # so a config or flag line survives in a report. The literal has to be the
+    # whole value, closing markup aside, so api_key=truesecret123 and
+    # api_key=1)SECRET both still redact. See the sibling in bugreport.py.
+    r"(?!(?:true|false|none|null|nil|yes|no|on|off|enabled|disabled|[01])"
+    r"[`\"'\)\]\}]{0,4}(?:[\s&#]|$))"
+    r"[^&\s#\"'\)\]\}]*"
 )
 _HEADER_SECRET_RE = re.compile(
     r"(?i)((?:x-)?(?:api[_-]key|api[_-]token|auth[_-]token)\s*:\s*)\S+"
