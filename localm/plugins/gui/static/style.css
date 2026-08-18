@@ -1991,8 +1991,8 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
   margin: 10px 0 4px; padding: 10px 12px;
   background: var(--bg-input); border: 1px solid var(--border); border-radius: 8px;
 }
-.disc-formats, .disc-filters, .filter-chips { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
-.disc-filter-label, .filter-label {
+.disc-formats, .disc-filters { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
+.disc-filter-label {
   min-width: 58px; font-size: 11px; font-weight: 600; letter-spacing: 0.04em;
   text-transform: uppercase; color: var(--text-dim);
 }
@@ -2003,39 +2003,39 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
    we ship to do not recalc a :checked-combinator style on a programmatic toggle,
    which would leave a chip stuck in its coloured state. The JS class is
    engine-independent. */
-.filter-chip { display: inline-flex; align-items: center; cursor: pointer; user-select: none; }
-.filter-chip input { position: absolute; opacity: 0; width: 0; height: 0; margin: 0; }
-.filter-chip span {
+.disc-chip { display: inline-flex; align-items: center; cursor: pointer; user-select: none; }
+.disc-chip input { position: absolute; opacity: 0; width: 0; height: 0; margin: 0; }
+.disc-chip span {
   font-size: 12px; font-weight: 500; padding: 3px 11px; border-radius: 999px;
   border: 1px solid var(--border); color: var(--text-dim); background: transparent;
   transition: background 0.12s, border-color 0.12s, color 0.12s;
 }
-.filter-chip:hover span { border-color: var(--text-dim); color: var(--text); }
-.filter-chip input:focus-visible + span { box-shadow: 0 0 0 2px var(--accent-soft); }
+.disc-chip:hover span { border-color: var(--text-dim); color: var(--text); }
+.disc-chip input:focus-visible + span { box-shadow: 0 0 0 2px var(--accent-soft); }
 /* Checked base (format chips and the type fallback). */
-.filter-chip.on span {
+.disc-chip.on span {
   color: var(--accent); border-color: var(--accent);
   background: color-mix(in srgb, var(--accent) 15%, transparent);
 }
 /* Per-type checked hue - mirrors .type-badge.type-<type> exactly. */
-.filter-chip[data-type="llm"].on span { color: var(--cat-blue); border-color: var(--cat-blue);
+.disc-chip[data-type="llm"].on span { color: var(--cat-blue); border-color: var(--cat-blue);
   background: color-mix(in srgb, var(--cat-blue) 15%, transparent); }
-.filter-chip[data-type="embedding"].on span { color: var(--cat-teal); border-color: var(--cat-teal);
+.disc-chip[data-type="embedding"].on span { color: var(--cat-teal); border-color: var(--cat-teal);
   background: color-mix(in srgb, var(--cat-teal) 15%, transparent); }
-.filter-chip[data-type="diffusion-unet"].on span { color: var(--cat-violet); border-color: var(--cat-violet);
+.disc-chip[data-type="diffusion-unet"].on span { color: var(--cat-violet); border-color: var(--cat-violet);
   background: color-mix(in srgb, var(--cat-violet) 15%, transparent); }
-.filter-chip[data-type="text-encoder"].on span { color: var(--cat-amber); border-color: var(--cat-amber);
+.disc-chip[data-type="text-encoder"].on span { color: var(--cat-amber); border-color: var(--cat-amber);
   background: color-mix(in srgb, var(--cat-amber) 15%, transparent); }
-.filter-chip[data-type="vae"].on span { color: var(--cat-green); border-color: var(--cat-green);
+.disc-chip[data-type="vae"].on span { color: var(--cat-green); border-color: var(--cat-green);
   background: color-mix(in srgb, var(--cat-green) 15%, transparent); }
-.filter-chip[data-type="lora"].on span { color: var(--cat-cyan); border-color: var(--cat-cyan);
+.disc-chip[data-type="lora"].on span { color: var(--cat-cyan); border-color: var(--cat-cyan);
   background: color-mix(in srgb, var(--cat-cyan) 15%, transparent); }
-.filter-chip[data-type="unknown"].on span { color: var(--yellow); border-color: var(--yellow);
+.disc-chip[data-type="unknown"].on span { color: var(--yellow); border-color: var(--yellow);
   background: color-mix(in srgb, var(--yellow) 15%, transparent); }
 /* Format chips mirror the per-result .fmt-badge colors (gguf green, hf accent). */
-.filter-chip[data-fmt="gguf"].on span { color: var(--green); border-color: var(--green);
+.disc-chip[data-fmt="gguf"].on span { color: var(--green); border-color: var(--green);
   background: color-mix(in srgb, var(--green) 15%, transparent); }
-.filter-chip[data-fmt="hf"].on span { color: var(--accent); border-color: var(--accent);
+.disc-chip[data-fmt="hf"].on span { color: var(--accent); border-color: var(--accent);
   background: color-mix(in srgb, var(--accent) 15%, transparent); }
 /* legacy alias: older markup used .disc-fmt-toggle for the same toggles. */
 .disc-fmt-toggle { display: inline-flex; align-items: center; gap: 5px; font-size: 12.5px; cursor: pointer; }
@@ -2335,28 +2335,38 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
   .data-table button { margin-left: 0; margin-top: 6px; min-height: 36px; }
 }
 
-/* Registered-models TYPE filter row. Same .filter-chip component and the same
-   per-type hues as the HuggingFace search's Type chips one card above, because
-   it is the same taxonomy - one concept, one widget. The two rows are
-   deliberately NOT identical: only this one shows a per-type COUNT and dims a
-   type nothing is registered under, because a count is knowable here and is
-   not knowable before a search runs. That is the whole difference, and it
-   carries information rather than being a style choice. */
-#models-type-filter { margin-bottom: 14px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
-/* The count rides inside the pill; italics off (it is an <i> only to stay out
-   of the chip's own label text for a screen reader reading the <span>). */
-.chip-count { font-style: normal; font-variant-numeric: tabular-nums; opacity: 0.75;
-  margin-left: 6px; font-size: 11px; }
-.chip-count:empty { display: none; }
-/* A type with nothing registered under it: still tickable (so the filter's full
-   vocabulary stays visible and a later import is not a surprise), just quieted. */
-.filter-chip.chip-empty span { opacity: 0.45; }
-.filter-reset {
-  background: transparent; border: none; color: var(--text-dim); cursor: pointer;
-  font-size: 11.5px; padding: 3px 6px; border-radius: 6px; text-decoration: underline;
+/* Unified Model Browser Tab Navigation */
+.tab-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 16px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 10px;
 }
-.filter-reset:hover { color: var(--text); background: var(--bg-input); }
-.filter-reset[hidden] { display: none; }
+.tab-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  padding: 6px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  transition: all 0.2s ease;
+}
+.tab-btn:hover {
+  background: var(--bg-input);
+  color: var(--text);
+}
+.tab-btn.active {
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  color: var(--accent);
+  font-weight: 600;
+}
 .scan-row {
   display: flex;
   justify-content: flex-end;
