@@ -103,6 +103,13 @@ qa/
 dev-notes/
 scratch/
 _qa_scratch/
+# The internal changelog: the staging area for unreleased and internal-only
+# entries. CHANGELOG.md is a PRODUCT SURFACE (the Settings "Show changelog"
+# button serves it in-app), so it carries only shipped, user-visible entries and
+# everything else lives here. This file exists precisely to hold what must NOT be
+# published, so it must never become tracked - without this line it sits untracked
+# at the repo root, one `git add -A` away from being committed.
+CHANGELOG-internal.md
 *.worklog
 *.workorder
 *-worklog.md
