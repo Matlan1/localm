@@ -64,13 +64,61 @@ def _venv_localm(clone_root) -> Path:
     return root / ".venv" / "bin" / "localm"
 
 
-def existing_localm(our_shim: Path) -> Optional[str]:
-    """If a DIFFERENT ``localm`` already resolves on PATH, return its path so the
-    caller can warn the user. Returns None when there is none, or when the only
-    match is our own shim (so re-running setup is not reported as a conflict)."""
+def _norm(p) -> str:
+    """Lexical, I/O-free normalisation for comparing two directory strings."""
+    try:
+        return os.path.normcase(os.path.normpath(str(p)))
+    except Exception:
+        return str(p)
+
+
+def path_dirs(path_value: Optional[str] = None) -> list:
+    """The directories ON PATH, lexically normalised, in search order.
+
+    LEXICAL on purpose - no ``resolve()``, no stat, no filesystem I/O of any
+    kind. The question being asked is "is this directory one of the PATH
+    entries", which is a string question; resolving every entry would realpath
+    and stat real system directories on every call, for nothing. (``resolve()``
+    is not a read-only operation - it hits the filesystem - so anything that can
+    be decided lexically is decided lexically first.)"""
+    raw = os.environ.get("PATH", "") if path_value is None else path_value
+    return [_norm(e.strip().strip('"')) for e in _split_path(raw) if e.strip()]
+
+
+def existing_localm(our_shim: Path, clone_root=None) -> Optional[str]:
+    """If a DIFFERENT ``localm`` already resolves FROM PATH, return its path so
+    the caller can ask the user what to do. Returns None when there is none.
+
+    Three things are deliberately NOT a conflict:
+
+    - our own shim (so re-running setup never reports one);
+    - anything inside this clone (``clone_root``);
+    - a hit whose directory is not actually on PATH.
+
+    The last two exist because of a real, every-install false positive.
+    ``shutil.which`` on Windows searches the CURRENT DIRECTORY before PATH
+    (mirroring cmd.exe, gated on the ``NoDefaultCurrentDirectoryInExePath``
+    behaviour), setup runs this with the cwd set to the clone, and the clone
+    SHIPS its own ``localm.bat``. So the plain call found OUR OWN launcher and
+    reported it as somebody else's command - on every Windows install - after
+    which setup quietly demoted itself behind a rival that did not exist.
+    Passing ``path=`` does not help: the current-directory insert happens
+    whether or not a search path was supplied."""
     found = shutil.which("localm")
     if not found:
         return None
+    # Lexical rejections first - no filesystem I/O, and they cover the false
+    # positive that made this necessary.
+    absolute = os.path.abspath(found)          # cwd-relative -> absolute, no I/O
+    if clone_root is not None:
+        root = _norm(clone_root)
+        candidate = _norm(absolute)
+        if candidate == root or candidate.startswith(root + os.sep):
+            return None
+    if _norm(os.path.dirname(absolute)) not in path_dirs():
+        return None
+    # Only now spend the I/O: a symlinked shim needs a real resolve to be
+    # recognised as ours (the POSIX shim IS a symlink into the venv).
     try:
         if Path(found).resolve() == Path(our_shim).resolve():
             return None
@@ -135,14 +183,52 @@ def _same_dir(a: str, b: str) -> bool:
         return a == b
 
 
-def _win_path_add(dir_str: str) -> bool:
-    """Append *dir_str* to the USER PATH iff absent (idempotent). Returns True if
-    PATH changed. Registry write, no ``setx``, every existing entry preserved."""
+def _win_read_system_path() -> str:
+    """The RAW machine PATH, read-only. ``""`` when it cannot be read.
+
+    Windows composes a new process's PATH as SYSTEM entries first, then USER
+    entries. So a ``localm`` sitting in the system PATH can NEVER be out-ordered
+    by an edit to the user PATH - and we only ever edit the user PATH (writing
+    the machine one needs admin, and rule zero here is never damage the user's
+    setup). We read it purely so we can say that plainly instead of promising a
+    priority we cannot deliver."""
+    try:
+        import winreg
+
+        key = (r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment")
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key) as k:
+            value, _ = winreg.QueryValueEx(k, "Path")
+        return value or ""
+    except Exception:
+        return ""
+
+
+def conflict_outranks_user_path(conflict: str) -> bool:
+    """True when *conflict* lives in the machine PATH, so putting our directory
+    first in the USER PATH still will not make our command win."""
+    if sys.platform != "win32" or not conflict:
+        return False
+    parent = _norm(os.path.dirname(os.path.abspath(conflict)))
+    return parent in path_dirs(_win_read_system_path())
+
+
+def _win_path_add(dir_str: str, prepend: bool = False) -> bool:
+    """Put *dir_str* on the USER PATH. Returns True if PATH changed.
+
+    Registry write, no ``setx``, every existing entry preserved. With
+    *prepend*, our directory is moved to the FRONT of the user PATH (that is
+    what "make this install's localm the one that runs" means, and it is only
+    ever done because the user asked for it at the prompt)."""
     value, regtype = _win_read_user_path()
     entries = _split_path(value)
-    if any(_same_dir(e, dir_str) for e in entries):
+    present = [i for i, e in enumerate(entries) if _same_dir(e, dir_str)]
+    if present and (not prepend or present[0] == 0):
         return False
-    entries.append(dir_str)
+    entries = [e for e in entries if not _same_dir(e, dir_str)]
+    if prepend:
+        entries.insert(0, dir_str)
+    else:
+        entries.append(dir_str)
     _win_write_user_path(os.pathsep.join(entries), regtype)
     return True
 
@@ -181,7 +267,7 @@ def _posix_on_path(bindir: Path) -> bool:
     return any(_same_dir(p, str(bindir)) for p in _split_path(os.environ.get("PATH", "")))
 
 
-def _posix_ensure_on_path(bindir: Path):
+def _posix_ensure_on_path(bindir: Path, prepend: bool = False):
     """If *bindir* is not already on PATH, append an export line to the user's
     shell rc (pipx ``ensurepath`` style). ``~/.local/bin`` is usually already on
     PATH, so this is usually a no-op.
@@ -194,7 +280,11 @@ def _posix_ensure_on_path(bindir: Path):
       MUST NOT report as "already on PATH": we could not persist the change, so
       *note* names the manual step. A note, not a raise - startup must not abort
       over a PATH nicety (module header: never a silent false success)."""
-    if _posix_on_path(bindir):
+    # With *prepend* the rc line is written even when bindir is already on
+    # PATH: that line puts it FIRST, which is the only way to out-rank a
+    # `localm` an earlier PATH entry already provides. Only ever reached
+    # because the user picked it at the conflict prompt.
+    if _posix_on_path(bindir) and not prepend:
         return False, None
     line = f'\n{_RC_MARK}\nexport PATH="$HOME/.local/bin:$PATH"\n'
     edited = False
@@ -228,22 +318,29 @@ def _posix_ensure_on_path(bindir: Path):
 #  Public install / uninstall                                                   #
 # --------------------------------------------------------------------------- #
 
-def install(clone_root) -> dict:
+def install(clone_root, precedence: str = "append") -> dict:
     """Make ``localm`` available from any terminal. Non-destructive: creates our
-    shim and appends our one bin dir to the user PATH; never overwrites another
+    shim and puts our one bin dir on the user PATH; never overwrites another
     tool's command. Returns a dict the caller records in the install manifest:
-    ``{path_dir, shim, path_modified, conflict, path_note}`` (conflict = a
-    pre-existing ``localm`` on PATH, or None; path_note = a human note when the
-    shim was created but its dir could NOT be put on PATH, else None)."""
+    ``{path_dir, shim, path_modified, conflict, precedence, path_note}``
+    (conflict = a pre-existing ``localm`` on PATH, or None; path_note = a human
+    note when the shim was created but its dir could NOT be put on PATH).
+
+    *precedence* is ``"append"`` (default - behind anything already there, so
+    nothing that currently works changes) or ``"prepend"`` (this install's
+    command wins). It is the USER'S answer to the conflict prompt in ``main``,
+    never a guess made here: deciding it for them is the bug this parameter
+    exists to remove."""
     clone_root = Path(clone_root)
     d = bin_dir(clone_root)
     shim = shim_path(clone_root)
-    conflict = existing_localm(shim)
+    conflict = existing_localm(shim, clone_root)
     path_note = None
+    prepend = (precedence == "prepend")
 
     if sys.platform == "win32":
         _write_win_shim(shim)
-        changed = _win_path_add(str(d))
+        changed = _win_path_add(str(d), prepend=prepend)
     else:
         d.mkdir(parents=True, exist_ok=True)
         target = _venv_localm(clone_root)
@@ -253,13 +350,14 @@ def install(clone_root) -> dict:
         elif shim.exists():
             # Something that is not our symlink occupies the name - do not clobber.
             return {"path_dir": str(d), "shim": str(shim), "path_modified": False,
-                    "conflict": str(shim), "path_note": None}
+                    "conflict": str(shim), "precedence": precedence,
+                    "path_note": None}
         shim.symlink_to(target)
-        changed, path_note = _posix_ensure_on_path(d)
+        changed, path_note = _posix_ensure_on_path(d, prepend=prepend)
 
     return {"path_dir": str(d), "shim": str(shim),
             "path_modified": bool(changed), "conflict": conflict,
-            "path_note": path_note}
+            "precedence": precedence, "path_note": path_note}
 
 
 def uninstall_command(path_dir: str, shim: str) -> dict:
@@ -299,6 +397,58 @@ def uninstall_command(path_dir: str, shim: str) -> dict:
 #  CLI (invoked by setup.sh / setup.bat)                                        #
 # --------------------------------------------------------------------------- #
 
+def ask_conflict(conflict: str, clone_root, assume_yes: bool = False,
+                 ask=None) -> str:
+    """Ask which ``localm`` should run. Returns 'priority' | 'keep' | 'skip'.
+
+    This exists because the old behaviour DECIDED: it added this install behind
+    whatever it found, announced that the other one wins "until you reorder
+    PATH", and called that done. Reordering PATH is exactly the thing the user
+    was asking us to do, and nobody was asked which they wanted.
+
+    The DEFAULT is still 'keep' - pressing Enter changes nothing about a command
+    that already works (module rule zero). Non-interactive callers get 'keep'
+    too, and are told so rather than being silently prompted into a hang."""
+    out = []
+    out.append("  [!] A different 'localm' command already exists:")
+    out.append(f"        {conflict}")
+    if ask is None:
+        try:
+            interactive = sys.stdin is not None and sys.stdin.isatty()
+        except (AttributeError, ValueError, OSError):
+            interactive = False
+        ask = input if interactive else None
+    if ask is None:
+        out.append("      Leaving it in charge and adding this install behind it")
+        out.append("      (nothing to ask - this is not an interactive terminal).")
+        for line in out:
+            print(line)
+        return "keep"
+    if assume_yes:
+        out.append("      Leaving it in charge and adding this install behind it.")
+        for line in out:
+            print(line)
+        return "keep"
+    out.append("      Which one should run when you type 'localm'?")
+    out.append(f"        [1] This install  ({Path(clone_root).resolve()})")
+    out.append("        [2] Keep the existing one - add this install behind it")
+    out.append("        [3] Neither - do not touch my PATH")
+    if conflict_outranks_user_path(conflict):
+        # Never offer a priority we cannot actually deliver: Windows searches the
+        # machine PATH before the user PATH, and we only ever write the user one.
+        out.append("      Note: that one is in the SYSTEM PATH, which Windows searches")
+        out.append("      before your user PATH - so [1] cannot outrank it without an")
+        out.append("      administrator change. [1] will still add this install.")
+    for line in out:
+        print(line)
+    try:
+        answer = (ask("      Pick 1, 2 or 3 [2]: ") or "").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return "keep"
+    return {"1": "priority", "3": "skip"}.get(answer, "keep")
+
+
 def main(argv=None) -> int:
     import argparse
 
@@ -307,6 +457,9 @@ def main(argv=None) -> int:
 
     i = sub.add_parser("install", help="add a global `localm` command")
     i.add_argument("--root", default=".")
+    i.add_argument("--yes", action="store_true",
+                   help="do not prompt on a conflict; keep the existing command "
+                        "in charge and add this install behind it")
 
     u = sub.add_parser("uninstall", help="remove the global `localm` command")
     u.add_argument("--path-dir", default="")
@@ -325,18 +478,42 @@ def main(argv=None) -> int:
         print(shim_path(args.root))
         return 0
     if args.cmd == "install":
+        # Detect the conflict and ASK before touching anything: precedence is
+        # decided by the answer, so it cannot be asked after the fact.
         try:
-            res = install(args.root)
+            conflict = existing_localm(shim_path(args.root), args.root)
+        except Exception:
+            conflict = None
+        precedence = "append"
+        if conflict:
+            choice = ask_conflict(conflict, args.root, assume_yes=args.yes)
+            if choice == "skip":
+                print("      Nothing added. Your existing 'localm' is untouched, "
+                      "and this install is still usable via its own folder.")
+                return 30
+            precedence = "prepend" if choice == "priority" else "append"
+        try:
+            res = install(args.root, precedence=precedence)
         except Exception as e:
             # A real failure (cannot write the shim / edit PATH): report it clearly
             # and exit nonzero so the installer records NOTHING - the manifest must
             # never claim an install that did not happen (rules 6 + 11).
             print(f"  [!] Could not add the global command: {e}")
             return 1
-        if res.get("conflict"):
-            print(f"  [!] A 'localm' command already exists at {res['conflict']}. "
-                  "This clone's command was still added (lower precedence); the "
-                  "existing one takes priority until you reorder PATH.")
+        # Report what was DONE, per the answer given - never a generic claim.
+        if res.get("conflict") and res.get("precedence") == "prepend":
+            if conflict_outranks_user_path(res["conflict"]):
+                print("  [!] This install was put first in your user PATH, but "
+                      f"{res['conflict']} is in the system PATH, which Windows "
+                      "searches first - so that one still runs. Removing it, or "
+                      "an administrator PATH change, is the only way past that.")
+            else:
+                print("  This install's 'localm' now takes priority. Open a NEW "
+                      "terminal to use it.")
+        elif res.get("conflict"):
+            print(f"  Kept {res['conflict']} in charge, as you chose. This "
+                  "install was added behind it, so typing 'localm' still runs "
+                  "the existing one.")
         if res.get("path_modified"):
             print("  Added 'localm' to your PATH. Open a NEW terminal to use it.")
             return 0

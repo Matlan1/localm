@@ -276,6 +276,13 @@ set /p "WPICK=  Pick 1 or 2 [1]: "
 if not defined WPICK set "WPICK=1"
 set "EXTRAS=coder,voice,monitor"
 if "%WPICK%"=="2" set "EXTRAS=coder,voice,monitor,desktop"
+rem  WINMODE is that answer in words. The shortcut prompt and the closing
+rem  "how to start" lines below both describe what the GUI will actually do,
+rem  and that depends on THIS choice - `localm gui` opens a native window when
+rem  the desktop extra is installed and a browser tab when it is not. Saying
+rem  "Web GUI directly" to someone who picked the app window is simply wrong.
+set "WINMODE=in your browser"
+if "%WPICK%"=="2" set "WINMODE=in its own app window"
 
 rem ---- install localm (editable) into the venv ------------------------------
 rem  Base install first: GGUF chat needs no PyTorch, so this alone is a working
@@ -284,13 +291,17 @@ rem  the detected vendor. [voice] ships speech-to-text; its Whisper model is onl
 rem  downloaded after the user consents in the GUI.
 echo.
 echo  Installing localm into .venv ...
-call :heartbeat_start 15 "  ... still installing (this can take a few minutes on a slow connection)"
+rem  NO heartbeat here, deliberately. uv writes STRAIGHT TO THE CONSOLE at this
+rem  site, so it already draws a live byte-progress readout - and it redraws that
+rem  readout IN PLACE (cursor up N lines, rewrite). A second writer printing into
+rem  the same console desynchronises the redraw: uv's next frame lands a line low,
+rem  the previous frame is stranded on screen for good, and the heartbeat's own
+rem  line is overwritten by the redraw that follows it. Reported live as garbled
+rem  progress bars during the torch install. The heartbeat is ONLY correct where
+rem  uv's output is CAPTURED and the console would otherwise be silent - the ONE
+rem  such site is :venv_retry above. Do not copy it back here.
 uv pip install -p .venv -e ".[%EXTRAS%]"
-if not errorlevel 1 (
-    call :heartbeat_stop
-    goto install_ok
-)
-call :heartbeat_stop
+if not errorlevel 1 goto install_ok
 echo  [!] Install failed - see the error above.
 call :offer_report "localm install failed during setup" "uv pip install -e .[%EXTRAS%] failed - see the error output above."
 pause
@@ -374,25 +385,22 @@ set "TORCHSPEC="
 if exist "%TEMP%\localm_torch.txt" for /f "usebackq delims=" %%a in ("%TEMP%\localm_torch.txt") do set "TORCHSPEC=%%a"
 del "%TEMP%\localm_torch.txt" 2>nul
 echo.
-rem  :heartbeat_start/:heartbeat_stop print a periodic "still working" line
-rem  while the install(s) below run, since PyTorch alone can be a
-rem  gigabyte-plus download with nothing printed in between otherwise.
+rem  NO heartbeat around the installs below, deliberately - see the base install
+rem  above for the mechanism. uv's output goes straight to the console here, so it
+rem  already shows live per-package byte progress (which is exactly what a
+rem  gigabyte-plus torch download needs), and a second writer would corrupt that
+rem  in-place redraw rather than reassure anyone.
 if not defined TORCHSPEC (
     echo  Skipping the PyTorch/transformers stack ^(not needed for GGUF chat^).
 ) else if "%TORCHSPEC%"=="-e .[gpu]" (
     rem  gfx103X (RX 6000): the bundled self-contained build carries torch + the HF
     rem  stack + the ROCm runtime; add audio (soundfile) for unified-audio models.
     echo  Installing PyTorch ^(AMD ROCm, gfx103X^) + transformers ...
-    call :heartbeat_start 15 "  ... still installing PyTorch and transformers (this can take a few minutes on a slow connection)"
     uv pip install -p .venv -e ".[gpu,audio]" || echo  [!] ROCm torch install failed. GGUF chat still works.
-    call :heartbeat_stop
 ) else (
     echo  Installing PyTorch + transformers ...
-
-    call :heartbeat_start 15 "  ... still installing PyTorch and transformers (this can take a few minutes on a slow connection)"
     uv pip install -p .venv %TORCHSPEC% || echo  [!] torch install failed. GGUF chat still works.
     uv pip install -p .venv "transformers[kernels]~=5.12" "tokenizers==0.22.2" "accelerate>=1.0" "pillow>=10.0" "soundfile>=0.12" || echo  [!] transformers install failed. GGUF chat still works.
-    call :heartbeat_stop
 )
 
 rem ---- provision the native llama.cpp binaries ------------------------------
@@ -465,16 +473,16 @@ rem  and carries the LocaLM icon. It is a branded copy of the venv interpreter,
 rem  placed in .venv\localm-app, self-contained in this clone. `localm gui` still
 rem  works if this step fails; it never blocks the install.
 echo.
-echo  Building the LocaLM app launcher ...
-.venv\Scripts\python -m localm make-launcher --force
+echo  Branding the app executable ^(so it shows as LocaLM, not python^) ...
+.venv\Scripts\python -m localm make-launcher --force --quiet
 if errorlevel 1 echo  [!] Could not build LocaLM.exe - `localm gui` still works ^(shows python.exe^).
 
 rem ---- optional desktop shortcut ----------------------------------------------
 echo.
-echo  Create desktop shortcut?
-echo    [1] Launcher
-echo    [2] Web GUI directly
-echo    [3] None
+echo  Create a desktop shortcut?
+echo    [1] LocaLM launcher - choose GUI / chat / server / coder each time you start
+echo    [2] Straight to the GUI - skips that menu, opens %WINMODE%
+echo    [3] No shortcut
 rem  set /p for a consistent "type a number then Enter" across every menu.
 set "SCPICK="
 call :flush
@@ -492,6 +500,7 @@ if "%SCPICK%"=="1" (
         "$s.Description = 'LocaLM - open the launcher';" ^
         "$s.Save()"
     if not errorlevel 1 echo  Shortcut created: Desktop\LocaLM.lnk  ^(opens the launcher^)
+    if not errorlevel 1 set "SCMADE=1"
 )
 if "%SCPICK%"=="2" (
     powershell -NoProfile -Command ^
@@ -502,8 +511,12 @@ if "%SCPICK%"=="2" (
         "$s.Description = 'LocaLM - open the web GUI';" ^
         "$s.Save()"
     if not errorlevel 1 echo  Shortcut created: Desktop\LocaLM.lnk  ^(opens the GUI as LocaLM.exe^)
+    if not errorlevel 1 set "SCMADE=1"
 )
 if "%SCPICK%"=="3" echo  No shortcut created.
+rem  Asked for one but it did not get made: record NOTHING, so uninstall never
+rem  goes looking for a .lnk we did not write.
+if not defined SCMADE set "SCPATH="
 
 rem ---- optional: make `localm` runnable from any terminal --------------------
 rem  Adds a small `localm` shim in .\bin and appends ONLY .\bin to your USER PATH
@@ -556,7 +569,13 @@ if errorlevel 1 echo  [!] Could not record the install manifest (uninstall will 
 rem ---- done ------------------------------------------------------------------
 echo.
 echo  Done. Setup complete.
-echo  Run localm-launcher.bat to start.
+rem  Tell them how to start the way THEY chose - SCPICK 1/2 created a desktop
+rem  shortcut, so name that; only the "no shortcut" case falls back to the bat.
+if defined SCMADE if "%SCPICK%"=="1" echo  Start it from the LocaLM shortcut on your desktop.
+if defined SCMADE if "%SCPICK%"=="2" echo  Start it from the LocaLM shortcut on your desktop - it opens %WINMODE%.
+if not defined SCMADE echo  Run localm-launcher.bat to start.
+if defined SCMADE if "%SCPICK%"=="1" echo  Or run localm-launcher.bat from this folder.
+if defined SCMADE if "%SCPICK%"=="2" echo  For chat / server / coder mode, run localm-launcher.bat from this folder.
 echo.
 pause
 exit /b 0

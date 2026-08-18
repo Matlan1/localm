@@ -422,16 +422,20 @@ fi
 say "  Installing localm into .venv ..."
 # Catch a hard install failure (set -e would otherwise abort silently) so we can
 # offer a bug report before exiting - and still exit non-zero, never masking it.
-# heartbeat_start/heartbeat_stop print a periodic "still working" line while
-# this runs, since a full dependency resolve and download can take a while.
-heartbeat_start 15 "  ... still installing (this can take a few minutes on a slow connection)"
+# NO heartbeat here, deliberately. uv writes STRAIGHT TO THE TERMINAL at this
+# site, so it already draws a live byte-progress readout - and it redraws that
+# readout IN PLACE (cursor up N lines, rewrite). A second writer printing into
+# the same terminal desynchronises the redraw: uv's next frame lands a line low,
+# the previous frame is stranded on screen for good, and the heartbeat's own line
+# is overwritten by the redraw that follows it. Reported live as garbled progress
+# bars during the torch install. The heartbeat is ONLY correct where uv's output
+# is CAPTURED and the terminal would otherwise be silent - the ONE such site is
+# the create_venv retry loop above. Do not copy it back here.
 uv pip install -p .venv -e ".[${EXTRAS}]" || {
-  heartbeat_stop
   say "  [!] Installing localm failed - see the error above."
   offer_report "localm install failed during setup" "uv pip install -e .[${EXTRAS}] failed - see the error output above."
   exit 1
 }
-heartbeat_stop
 
 # Verify the CLI entry point actually landed. Reported live: on a WSL2 clone under
 # a Windows-drive mount (/mnt/c, /mnt/d, ...) the install can report success while
@@ -555,17 +559,17 @@ TORCHSPEC="$(.venv/bin/python -m localm.hwdetect torch-args "$BACKEND" 2>/dev/nu
 if [ -n "$TORCHSPEC" ]; then
   say ""
   say "  Installing PyTorch + transformers for HuggingFace models ..."
-  # heartbeat_start/heartbeat_stop print a periodic "still working" line while
-  # both installs below run, since PyTorch alone can be a gigabyte-plus
-  # download with nothing printed in between otherwise.
-  heartbeat_start 15 "  ... still installing PyTorch and transformers (this can take a few minutes on a slow connection)"
+  # NO heartbeat around the installs below, deliberately - see the base install
+  # above for the mechanism. uv's output goes straight to the terminal here, so it
+  # already shows live per-package byte progress (which is exactly what a
+  # gigabyte-plus torch download needs), and a second writer would corrupt that
+  # in-place redraw rather than reassure anyone.
   # TORCHSPEC is a multi-token pip arg list (e.g. "torch torchvision --index-url ...");
   # it is intentionally left unquoted so the words split into separate arguments.
   # shellcheck disable=SC2086
   uv pip install -p .venv $TORCHSPEC \
     || say "  [!] torch install failed - install a matching torch manually (see docs/gpu-setup.md)."
   uv pip install -p .venv "transformers[kernels]~=5.12" "tokenizers==0.22.2" "accelerate>=1.0" "pillow>=10.0" "soundfile>=0.12" || true
-  heartbeat_stop
 else
   say ""
   say "  Skipping the PyTorch/transformers stack (not needed for GGUF chat)."

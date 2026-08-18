@@ -83,11 +83,12 @@ def test_win_path_remove_only_ours(fake_path):
 
 
 def test_existing_localm_ignores_our_own_shim(monkeypatch, tmp_path):
+    other = tmp_path / "other" / "localm"
+    monkeypatch.setenv("PATH", os.pathsep.join([str(tmp_path), str(other.parent)]))
     shim = tmp_path / "localm.cmd"
     shim.write_text("x", encoding="utf-8")
     monkeypatch.setattr(gc.shutil, "which", lambda name: str(shim))
     assert gc.existing_localm(shim) is None            # our own -> not a conflict
-    other = tmp_path / "other" / "localm"
     monkeypatch.setattr(gc.shutil, "which", lambda name: str(other))
     assert gc.existing_localm(shim) == str(other)      # a different one -> reported
 
@@ -144,15 +145,15 @@ def test_install_cli_exit_code_reflects_path_modified(monkeypatch):
     """setup keys off this exit code to record --path-modified accurately: 0 =
     PATH changed, 20 = installed but PATH already set, 1 = failed. install() is
     mocked so no real PATH/registry is touched."""
-    monkeypatch.setattr(gc, "install", lambda root: {
+    monkeypatch.setattr(gc, "install", lambda root, precedence="append": {
         "path_dir": "d", "shim": "s", "path_modified": True, "conflict": None})
     assert gc.main(["install", "--root", "."]) == 0
 
-    monkeypatch.setattr(gc, "install", lambda root: {
+    monkeypatch.setattr(gc, "install", lambda root, precedence="append": {
         "path_dir": "d", "shim": "s", "path_modified": False, "conflict": None})
     assert gc.main(["install", "--root", "."]) == 20
 
-    def _boom(root):
+    def _boom(root, precedence="append"):
         raise OSError("cannot write shim")
     monkeypatch.setattr(gc, "install", _boom)
     assert gc.main(["install", "--root", "."]) == 1
@@ -189,7 +190,7 @@ def test_install_cli_surfaces_path_edit_failure(monkeypatch, capsys):
     """main() must NOT claim 'already on PATH' when the shim was created but its
     dir could not be added to PATH; it prints the manual-add note and still exits
     20 (installed, PATH not modified by us). Negative-tests the false success."""
-    monkeypatch.setattr(gc, "install", lambda root: {
+    monkeypatch.setattr(gc, "install", lambda root, precedence="append": {
         "path_dir": "/home/u/.local/bin", "shim": "s", "path_modified": False,
         "conflict": None,
         "path_note": "could not add /home/u/.local/bin to your PATH (could not "
