@@ -77,6 +77,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   labeled parts, instead of three separate panels.
 
 ### Fixed
+- **A link straight to a media or tool page now opens that page.** Opening the
+  GUI at a Images, Music, Video, Knowledge, Coder or Jobs link (for example a
+  bookmark or a link you shared with yourself) quietly showed a different page
+  instead, and the address it was given was discarded, so reloading did not help
+  it either. Those links now land where they point. A link to a page that does
+  not exist still falls back to Models.
 - **The "reload chat model after generation" toggle now applies only to the page
   you set it on.** It sat on the Images page but wrote a single shared setting,
   so turning it off there silently turned off the VRAM handover for Music and
