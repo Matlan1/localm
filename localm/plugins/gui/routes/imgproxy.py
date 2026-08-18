@@ -17,6 +17,19 @@ plainly what it does and does not buy: proxying decides WHO makes the request,
 not WHETHER it is made. A crafted URL still reaches the attacker's server the
 moment the reply renders. Closing that channel is a separate decision (a per-image
 affordance, or an allowlist) and is deliberately not attempted here.
+
+ONE INTERACTION WORTH KNOWING, recorded rather than left silent. The URL here
+comes straight off a query parameter, which makes this the first caller to feed
+`safe_fetch_bytes` a value the BROWSER chose rather than one the model or localm
+built. It is still bounded by exactly the same `netpolicy` decisions as every
+other outbound request, including the private-address guard - but that guard is
+what `net_allow_private` turns OFF. So an owner who has BOTH switched this on and
+separately disabled the SSRF guard (a setting whose own label reads "disables the
+SSRF guard") has a rendered reply able to make this machine fetch a private
+address. netpolicy is deliberately left as the single authority on that rather
+than second-guessing it here, because overriding a setting the owner explicitly
+chose is its own failure mode. If that combination should be refused outright,
+refuse it in ONE place - `check_url` - so every caller inherits it, not here.
 """
 
 from __future__ import annotations
