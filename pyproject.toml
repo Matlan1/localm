@@ -154,7 +154,7 @@ gpu = [
     # Lift the cap only once BOTH hold: transformers no longer hard-imports fsdp on the
     # tokenizer path, or the win32 torch wheel ships distributed. Re-verify with a cold
     # install, not the dev venv - the dev venv lags uv.lock and hid this regression.
-    "transformers[kernels]~=5.13.1",
+    "transformers[kernels]~=5.15.0",
     # Pin the transitive tokenizers so it does not flip between resolver passes
     # (the 0.23.1 <-> 0.22.2 churn on repeated setup runs). 0.22.2 is what
     # transformers 5.12 (tokenizers<=0.23.0,>=0.22.0) resolves to.
