@@ -1299,6 +1299,13 @@ class IsolatedEmbedder(VramSizingMixin):
 #  Process-wide singleton                                                      #
 # --------------------------------------------------------------------------- #
 
+# LOCK ORDER: engine._LOAD_LOCK (outer) -> _LOCK (inner), never the reverse.
+# The engine's load path holds _LOAD_LOCK for a whole model load and calls
+# loaded_path() here from its ctx sizing (#767), so acquiring _LOAD_LOCK -
+# directly or by starting a load - while holding _LOCK is an ABBA deadlock
+# against every concurrent model load. That exact inversion wedged the whole
+# server permanently on 2026-08-18 (see get_embedder, the one site that
+# needs both locks, which takes them in the legal order).
 _LOCK = threading.RLock()
 _EMBEDDER: Optional[IsolatedEmbedder] = None
 # A model that is present on disk but fails to LOAD (corrupt / OOM) is cached as
@@ -1565,61 +1572,74 @@ def get_embedder(*, on_progress: Optional[Callable[[str], None]] = None
     if placement_reason is not None:
         logger.warning("embedder placement: %s", placement_reason)
 
-    with _LOCK:
-        # Re-check: another thread may have completed (or failed) the load
-        # while this thread was outside the lock running the swap check -
-        # including latching a NEW failure this thread has not seen yet, for
-        # whatever spec is current now (re-derived, not the possibly-unset
-        # local above: another thread could have raced a config change too).
-        if _EMBEDDER is not None:
-            return _EMBEDDER
-        if _LOAD_FAILED_SPEC is not None:
-            if cur_spec is None:
-                cur_spec = _current_spec()
-            if _LOAD_FAILED_SPEC == cur_spec:
-                return None
-            _LOAD_FAILED_SPEC = None
-            _LAST_ERROR = None
-        try:
-            # The stated bound is the deadline this stage ACTUALLY runs under:
-            # _embedder_runner.LOAD_TIMEOUT_DEFAULT (300s), which applies because
-            # _reload's spawn_and_load() call passes no override. It said "up to a
-            # minute", understating its own ceiling 5x, so a user watching a slow
-            # first load had every reason to think it had hung. The OTHER 300s
-            # window this function can spend (vram.evict_chat_for_embedder) is
-            # already past by here, which is why this says five and not ten.
-            # test_get_embedder_progress_states_the_real_load_bound pins the two
-            # together, so changing the constant without the copy fails.
-            _emit_stage(on_progress,
-                       "Loading into memory (this can take up to five minutes)...")
-            from localm.inference.engine import _LOAD_LOCK
-            with _LOAD_LOCK:
+    # LOCK ORDER (fixes the 2026-08-18 whole-server deadlock): the engine's
+    # process-global load lock is acquired FIRST, strictly OUTSIDE _LOCK.
+    # Engine.load() holds _LOAD_LOCK across an entire model load, and its ctx
+    # sizing calls loaded_path() - which takes _LOCK - via
+    # _sizing.embedder_ctx_reservation_bytes (#767). This block used to take
+    # _LOAD_LOCK INSIDE _LOCK (#313), the opposite order, so a chat-model
+    # load racing a first embed deadlocked both threads permanently, and
+    # every later _LOCK caller (status probes, the GUI's models/stats
+    # fetches) wedged behind them until the whole server was unusable. The
+    # only permitted nesting is _LOAD_LOCK (outer) -> _LOCK (inner) - see
+    # both lock definitions. Side benefit: waiting here for a running chat
+    # load no longer holds _LOCK, so status probes stay responsive while
+    # this thread queues for its turn to load.
+    from localm.inference.engine import _LOAD_LOCK
+    with _LOAD_LOCK:
+        with _LOCK:
+            # Re-check: another thread may have completed (or failed) the load
+            # while this thread was outside the lock running the swap check -
+            # including latching a NEW failure this thread has not seen yet, for
+            # whatever spec is current now (re-derived, not the possibly-unset
+            # local above: another thread could have raced a config change too).
+            if _EMBEDDER is not None:
+                return _EMBEDDER
+            if _LOAD_FAILED_SPEC is not None:
+                if cur_spec is None:
+                    cur_spec = _current_spec()
+                if _LOAD_FAILED_SPEC == cur_spec:
+                    return None
+                _LOAD_FAILED_SPEC = None
+                _LAST_ERROR = None
+            try:
+                # The stated bound is the deadline this stage ACTUALLY runs under:
+                # _embedder_runner.LOAD_TIMEOUT_DEFAULT (300s), which applies because
+                # _reload's spawn_and_load() call passes no override. It said "up to a
+                # minute", understating its own ceiling 5x, so a user watching a slow
+                # first load had every reason to think it had hung. The OTHER 300s
+                # window this function can spend (vram.evict_chat_for_embedder) is
+                # already past by here, which is why this says five and not ten.
+                # test_get_embedder_progress_states_the_real_load_bound pins the two
+                # together, so changing the constant without the copy fails.
+                _emit_stage(on_progress,
+                           "Loading into memory (this can take up to five minutes)...")
                 _EMBEDDER = IsolatedEmbedder(
                     path, n_gpu_layers=ngl, pooling_type=pooling,
                     gpu_fallback_reason=placement_reason)
-            # getattr, not attribute access: this status line sits INSIDE the
-            # try below, so anything it raises would be caught as a LOAD failure
-            # and silently drop embeddings to lexical-only for the rest of the
-            # process. A line that merely describes the load must never be able
-            # to fail it.
-            logger.info("embedding model ready: %s (dim=%d, pooling=%s)", path,
-                        _EMBEDDER.dim,
-                        pooling_name(getattr(_EMBEDDER, "effective_pooling", None)))
-            _LAST_ERROR = None
-            _emit_stage(on_progress, f"Ready ({_EMBEDDER.dim}-dim).")
-            return _EMBEDDER
-        except Exception as e:
-            # Latch by SPEC, not a bare bool: what just failed to load is
-            # whatever embedding_model names right now, and that identity is
-            # what a later call must compare against to tell "still this
-            # exact broken model" from "the user already changed it" - see
-            # this global's own docstring and _set_resolve_outcome.
-            _LOAD_FAILED_SPEC = cur_spec if cur_spec is not None else _current_spec()
-            _LAST_ERROR = str(e)
-            logger.warning("could not load embedding model %s (%s); lexical-only",
-                           path, e)
-            _emit_stage(on_progress, f"Load failed: {e}")
-            return None
+                # getattr, not attribute access: this status line sits INSIDE the
+                # try below, so anything it raises would be caught as a LOAD failure
+                # and silently drop embeddings to lexical-only for the rest of the
+                # process. A line that merely describes the load must never be able
+                # to fail it.
+                logger.info("embedding model ready: %s (dim=%d, pooling=%s)", path,
+                            _EMBEDDER.dim,
+                            pooling_name(getattr(_EMBEDDER, "effective_pooling", None)))
+                _LAST_ERROR = None
+                _emit_stage(on_progress, f"Ready ({_EMBEDDER.dim}-dim).")
+                return _EMBEDDER
+            except Exception as e:
+                # Latch by SPEC, not a bare bool: what just failed to load is
+                # whatever embedding_model names right now, and that identity is
+                # what a later call must compare against to tell "still this
+                # exact broken model" from "the user already changed it" - see
+                # this global's own docstring and _set_resolve_outcome.
+                _LOAD_FAILED_SPEC = cur_spec if cur_spec is not None else _current_spec()
+                _LAST_ERROR = str(e)
+                logger.warning("could not load embedding model %s (%s); lexical-only",
+                               path, e)
+                _emit_stage(on_progress, f"Load failed: {e}")
+                return None
 
 
 def embed_texts(texts: List[str]) -> Optional[List[List[float]]]:

@@ -1955,3 +1955,169 @@ def test_embedding_context_requests_a_shared_kv_cache():
     )
     assert cp.n_seq_max == 32
     assert cp.embeddings is True
+
+
+# --------------------------------------------------------------------------- #
+#  Lock order vs engine._LOAD_LOCK (2026-08-18 whole-server deadlock)          #
+# --------------------------------------------------------------------------- #
+
+_LOCK_ORDER_SCENARIO = r'''
+import os
+import sys
+import threading
+import time
+
+import localm
+from localm.inference import embedder as emb
+from localm.inference import engine as eng
+
+# Provenance first, in every outcome: the parent asserts this child imported
+# the SAME tree it is testing (an editable-install .pth can silently resolve
+# a different checkout).
+print("localm-file:", localm.__file__)
+sys.stdout.flush()
+
+# Force get_embedder down its slow (load) path with every external effect
+# stubbed out: no filesystem, no network, no VRAM probe, no child process.
+# The two REAL locks and the real control flow between them are the subject.
+emb._EMBEDDER = None
+emb._LOAD_FAILED_SPEC = None
+emb._TRIED_DOWNLOAD = True
+emb.resolve_embedding_model_path = lambda **k: "/models/fake-embed.gguf"
+emb._maybe_swap_for_embedder = lambda *a, **k: None
+emb._choose_embedder_gpu_layers = lambda *a, **k: (0, None)
+
+import localm.config as _cfgmod
+_cfgmod.load_config = lambda: {"embedding_model": "fake", "net_mode": "off"}
+
+
+class _Ok:
+    dim = 5
+    model_path = "/models/fake-embed.gguf"
+
+    def __init__(self, *a, **k):
+        pass
+
+    def close(self):
+        pass
+
+
+emb.IsolatedEmbedder = _Ok
+
+real_load_lock = eng._LOAD_LOCK
+wants_load_lock = threading.Event()
+engine_holds_load_lock = threading.Event()
+
+
+class _SignallingLoadLock:
+    """Same underlying lock the engine thread holds, but announces the moment
+    get_embedder tries to take it (get_embedder re-imports engine._LOAD_LOCK
+    on every call, so this module-attribute swap reaches it)."""
+
+    def __enter__(self):
+        wants_load_lock.set()
+        real_load_lock.acquire()
+
+    def __exit__(self, *exc):
+        real_load_lock.release()
+
+
+eng._LOAD_LOCK = _SignallingLoadLock()
+
+res = {}
+
+
+def embedder_side():
+    res["embedder"] = emb.get_embedder()
+
+
+def engine_side():
+    # What Engine.load() does for the whole duration of a model load...
+    with real_load_lock:
+        engine_holds_load_lock.set()
+        if not wants_load_lock.wait(10):
+            res["harness"] = "get_embedder never tried to take _LOAD_LOCK"
+            return
+        # ...including calling this from ctx sizing (#767,
+        # _sizing.embedder_ctx_reservation_bytes). Pre-fix, get_embedder is
+        # holding _LOCK right now while waiting for _LOAD_LOCK, so this call
+        # never returns: the 2026-08-18 ABBA deadlock.
+        t0 = time.monotonic()
+        res["loaded_path"] = emb.loaded_path()
+        res["loaded_path_seconds"] = time.monotonic() - t0
+
+
+eng_t = threading.Thread(target=engine_side, daemon=True)
+emb_t = threading.Thread(target=embedder_side, daemon=True)
+eng_t.start()
+if not engine_holds_load_lock.wait(5):
+    print("VERDICT: HARNESS-BROKEN engine thread never took _LOAD_LOCK")
+    sys.stdout.flush()
+    os._exit(2)
+emb_t.start()
+
+eng_t.join(12)
+if eng_t.is_alive():
+    # loaded_path() has been blocked for 12s while get_embedder holds _LOCK
+    # and waits for _LOAD_LOCK: the deadlock this test exists to forbid.
+    print("VERDICT: DEADLOCK loaded_path() wedged against get_embedder "
+          "(_LOCK -> _LOAD_LOCK inversion)")
+    sys.stdout.flush()
+    os._exit(1)
+if res.get("harness"):
+    print("VERDICT: HARNESS-BROKEN", res["harness"])
+    sys.stdout.flush()
+    os._exit(2)
+emb_t.join(10)
+
+ok = (
+    not emb_t.is_alive()
+    and res.get("embedder") is not None
+    # The discriminating outcome ONLY the fixed order can produce: sizing's
+    # loaded_path() answered (None: nothing published yet) instantly while a
+    # get_embedder was queued waiting for the load lock. The broken order
+    # cannot produce this - it wedges instead.
+    and "loaded_path" in res
+    and res["loaded_path"] is None
+    and res.get("loaded_path_seconds", 99.0) < 5.0
+)
+print("VERDICT:", "OK" if ok else "UNEXPECTED %r" % (res,))
+sys.stdout.flush()
+os._exit(0 if ok else 3)
+'''
+
+
+def test_get_embedder_lock_order_cannot_deadlock_a_concurrent_engine_load(tmp_path):
+    """Regression for the 2026-08-18 whole-server hang: get_embedder() used to
+    acquire engine._LOAD_LOCK while holding embedder._LOCK (#313), while the
+    chat-load path holds _LOAD_LOCK and calls loaded_path() - which takes
+    _LOCK - from its ctx sizing (#767). A model preload racing a first embed
+    (the memory plugin's startup migration, in the live incident) deadlocked
+    both threads permanently, and every other _LOCK caller wedged behind
+    them until the GUI's whole connection pool was dead. Neither acquire has
+    a timeout, so the wedge held for over an hour at 0% CPU until the
+    process was killed.
+
+    Reconstructs that exact geometry with the REAL locks and the real
+    get_embedder()/loaded_path() control flow (externals stubbed), in a
+    SUBPROCESS: the pre-fix failure mode is a genuine permanent deadlock
+    holding module-level locks, which in-process would wedge this suite's
+    own teardown (reset_embedder takes _LOCK) instead of failing cleanly.
+    """
+    import subprocess
+    import sys as _sys
+
+    script = tmp_path / "lock_order_scenario.py"
+    script.write_text(_LOCK_ORDER_SCENARIO, encoding="utf-8")
+    repo_root = Path(emb.__file__).resolve().parents[2]
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(repo_root) + os.pathsep + env.get("PYTHONPATH", "")
+    proc = subprocess.run(
+        [_sys.executable, str(script)], capture_output=True, text=True,
+        timeout=60, env=env,
+    )
+    out = (proc.stdout or "") + (proc.stderr or "")
+    # The child must have imported THIS tree's localm, or the run proved
+    # nothing about the code under test.
+    assert str(repo_root).lower() in out.lower(), out
+    assert proc.returncode == 0 and "VERDICT: OK" in out, out

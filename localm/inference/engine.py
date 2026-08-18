@@ -23,6 +23,14 @@ from localm.textnorm import scrub_stream
 # only one model is ever loading at a time. Inference itself is NOT held here, only
 # the load. RLock (not Lock) so a re-entrant load on the same thread cannot
 # deadlock.
+#
+# LOCK ORDER with localm.inference.embedder._LOCK: _LOAD_LOCK is the OUTER
+# lock of the pair. The load path under this lock calls into embedder status
+# reads that take embedder._LOCK (backend ctx sizing -> loaded_path, #767),
+# so code holding embedder._LOCK must NEVER acquire _LOAD_LOCK or start a
+# load - that inversion deadlocked the whole server on 2026-08-18
+# (embedder.get_embedder held _LOCK and waited here while a chat preload
+# held this lock and waited on _LOCK; nothing had a timeout).
 _LOAD_LOCK = threading.RLock()
 
 
