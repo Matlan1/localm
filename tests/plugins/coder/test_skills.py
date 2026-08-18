@@ -412,3 +412,88 @@ def test_spawned_child_inherits_the_active_skill_restriction(skill_agent):
     assert "write_file" in child.disabled_tools     # narrowed
     assert "read_file" not in child.disabled_tools  # but not beyond the declaration
     assert "use_skill" not in child.disabled_tools  # bundled files stay reachable
+
+
+# --- the arming call must not run BESIDE the calls it restricts -------------- #
+#
+# These two drive _execute_tools (PLURAL), the real batching path. Dispatching
+# one call at a time through _execute_tool cannot see this defect at all: the
+# gate itself was always correct, it was its ARMING that raced.
+
+def _slow_arming(registry, gate):
+    """Hold ``use_skill``'s real work open until *gate* is set (bounded).
+
+    Makes the unfixed failure deterministic instead of a timing coin flip: the
+    arming call cannot finish until the sibling has actually run. Under the fix
+    the sibling is in a LATER segment and never starts, so the wait always
+    reaches its bound - one short pause, paid once.
+    """
+    import dataclasses
+    real = registry["use_skill"].fn
+
+    def _wrapped(cwd, **kw):
+        gate.wait(timeout=0.5)
+        return real(cwd, **kw)
+
+    registry["use_skill"] = dataclasses.replace(registry["use_skill"], fn=_wrapped)
+
+
+def test_a_batch_sibling_cannot_outrun_the_skill_restriction(skill_agent):
+    """THE RACE: use_skill plus a tool its skill forbids, in ONE model reply.
+
+    _execute_tools groups CONSECUTIVE NON-DESTRUCTIVE calls and runs the group
+    in parallel, and use_skill is non-destructive, so before the fix a sibling
+    could clear the dispatch gate before _activate_skill had armed it and run
+    completely unrestricted. read_env is the sibling because it is exactly what
+    a declaration of `allowed-tools: read_file` is meant to keep out: the
+    process environment, api keys and tokens included.
+    """
+    from unittest.mock import MagicMock
+    import threading
+    from localm.plugins.coder.tools import ToolResult
+
+    sibling_ran = threading.Event()
+    env = _counting_tool(TOOL_REGISTRY, "read_env")
+
+    def _mark(*_a, **_k):
+        sibling_ran.set()
+        return ToolResult.success("SECRET=1", summary="read_env")
+
+    env.side_effect = _mark
+    _slow_arming(TOOL_REGISTRY, sibling_ran)
+
+    # Preconditions, so a pass cannot come from the sibling being unreachable
+    # for some unrelated reason (item 24: prove the injection took).
+    assert "read_env" not in skill_agent.disabled_tools
+    assert skill_agent.active_skill_tools() is None
+    assert isinstance(env, MagicMock)
+
+    blocks = skill_agent._execute_tools(
+        [_tool_call("use_skill", name="narrow"), _tool_call("read_env")],
+        interactive=False)
+
+    # FIRST, and load-bearing: the forbidden tool did not execute. Asserted from
+    # OUTSIDE the call, never by raising from a side_effect, which the dispatcher
+    # would absorb as an ordinary tool failure.
+    env.assert_not_called()
+    # ... and the restriction really was armed, so the line above is a refusal
+    # rather than use_skill having quietly failed.
+    assert skill_agent.active_skill_tools() == frozenset({"read_file"})
+    assert len(blocks) == 2
+    assert "narrow" in blocks[1] and "read_env" in blocks[1]
+
+
+def test_a_batch_sibling_before_the_arming_call_still_runs(skill_agent):
+    """The boundary narrows FORWARD only, and this is a scope guard, not the
+    regression guard above: it passes on the unfixed code too. It exists so a
+    later, broader fix (arming at parse time, or restricting the whole batch)
+    cannot pass unnoticed - a call the model emitted BEFORE any skill was loaded
+    must not be refused retroactively.
+    """
+    env = _counting_tool(TOOL_REGISTRY, "read_env")
+    blocks = skill_agent._execute_tools(
+        [_tool_call("read_env"), _tool_call("use_skill", name="narrow")],
+        interactive=False)
+    env.assert_called_once()
+    assert skill_agent.active_skill_tools() == frozenset({"read_file"})
+    assert len(blocks) == 2
