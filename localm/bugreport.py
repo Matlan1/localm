@@ -361,9 +361,11 @@ _QUERY_SECRET_RE = re.compile(
     # than not. Stopping at the opening quote used to leave the secret sitting
     # in the report right next to a <redacted> marker claiming it had gone -
     # a privacy step reporting a success it did not achieve, which is the one
-    # thing rule 5 forbids outright. An unterminated quote still redacts to end
-    # of line: over-redacting the rest of a line that opened with a credential
-    # is the safe direction.
+    # thing rule 5 forbids outright. An unterminated quote redacts to the NEXT
+    # quote on the line, or to the end of the line when there is none, and never
+    # across a newline. Both land on over-redaction, which is the safe direction
+    # for a line that opened with a credential - but they are different spans, so
+    # do not reason about the boundary from the end-of-line case alone.
     r"(?:\"[^\"\r\n]*\"?|'[^'\r\n]*'?|[^&\s#\"'\)\]\}]*)"
 )
 
