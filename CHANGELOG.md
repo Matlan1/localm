@@ -40,6 +40,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   model that is merely loaded in memory no longer looks identical to (and no
   longer highlights its row like) the one actually active, and a missing
   Studio model file no longer shows a color that ignores your light/dark theme.
+- **Settings > System no longer shows "Updates" twice.** The app-update card,
+  the Runtime update card, and the update-behavior toggles (offer prereleases,
+  ignore network access) are now one "Updates" card with three clearly
+  labeled parts, instead of three separate panels.
 
 ### Fixed
 - **The Images/Music/Video workflow panel now matches the rest of the GUI.**
