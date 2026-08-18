@@ -56,6 +56,22 @@ function emptyStateEl(iconName, text, hint) {
   return box;
 }
 
+// A .card-head (category-hued icon + heading), matching every other GUI card
+// (docs/gui-design.md rule 4). Reuses the shared window.iconEl when present; the
+// isolated jsdom unit test loads this module without the GUI shell (no
+// window.iconEl), same blind spot as emptyStateEl above, so the heading still
+// renders on its own without an icon there.
+function cardHead(iconName, cat, tag, text) {
+  const head = el("div", "card-head");
+  if (typeof window !== "undefined" && typeof window.iconEl === "function") {
+    head.appendChild(window.iconEl(iconName, "ic cat-ic " + cat));
+  }
+  const txt = el("div", "card-head-text");
+  txt.appendChild(el(tag, null, text));
+  head.appendChild(txt);
+  return head;
+}
+
 // --- schedule / time formatting -------------------------------------------
 function fmtSchedule(job) {
   if (job.schedule_kind === "cron") return `cron: ${job.schedule}`;
@@ -102,7 +118,7 @@ export function register(ctx) {
   page.appendChild(buildForm());
   // Jobs list card.
   const listCard = el("div", "card");
-  listCard.appendChild(el("h3", null, "Scheduled jobs"));
+  listCard.appendChild(cardHead("clock", "cat-teal", "h3", "Scheduled jobs"));
   const listEl = el("div", "jobs-list");
   listCard.appendChild(listEl);
   page.appendChild(listCard);
@@ -298,7 +314,7 @@ export function register(ctx) {
   // --- add-job form ------------------------------------------------------
   function buildForm() {
     const card = el("div", "card");
-    card.appendChild(el("h3", null, "Add job"));
+    card.appendChild(cardHead("plus", "cat-teal", "h3", "Add job"));
 
     const name = inputRow("Name", "text", "jobs-name", "Nightly digest");
     const taskKind = selectRow("Task", "jobs-task", [

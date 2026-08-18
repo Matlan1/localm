@@ -199,7 +199,8 @@
       </div>
 
       <div id="coder-setup">
-        <h2>Coder session</h2>
+        <div class="card-head"><span class="ic cat-ic cat-green" data-icon="coder"></span>
+          <div class="card-head-text"><h2>Coder session</h2></div></div>
         <div class="sub">Run the localcoder agent against a project directory. The agent
         can read, write, and run code; destructive actions ask for your approval below
         unless you enable auto-approve.</div>
@@ -371,6 +372,8 @@
         unloaded automatically to hand VRAM to the image model, and reloads on the next
         chat request.</div>
         <div class="card">
+          <div class="card-head"><span class="ic cat-ic cat-violet" data-icon="image"></span>
+            <div class="card-head-text"><h3>Generate</h3></div></div>
           <label>Prompt</label>
           <textarea id="img-prompt" rows="3" placeholder="a watercolor fox in a snowy forest"></textarea>
           <div class="grid2">
@@ -423,6 +426,8 @@
         handover as image generation). Track length is arbitrary - long tracks just
         take proportionally longer.</div>
         <div class="card">
+          <div class="card-head"><span class="ic cat-ic cat-violet" data-icon="music"></span>
+            <div class="card-head-text"><h3>Generate</h3></div></div>
           <label>Style tags - genre, mood, instruments, BPM, vocal type</label>
           <textarea id="music-tags" rows="2" placeholder="synthwave, 80s, female vocals, 120 bpm, dreamy"></textarea>
           <label>Lyrics (optional - empty generates an instrumental; [verse] / [chorus] markers supported)</label>
@@ -465,6 +470,8 @@
         short durations and fewer steps instead (~5 s is the native length). Video
         is the slowest generator: minutes to hours per clip.</div>
         <div class="card">
+          <div class="card-head"><span class="ic cat-ic cat-violet" data-icon="video"></span>
+            <div class="card-head-text"><h3>Generate</h3></div></div>
           <label>Prompt - subject, motion, camera, lighting (motion verbs matter)</label>
           <textarea id="video-prompt" rows="2" placeholder="a red fox running through fresh snow, low camera tracking shot, golden hour"></textarea>
           <label>Negative prompt (optional - default suppresses blur/distortion/watermarks)</label>
