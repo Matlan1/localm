@@ -62,6 +62,19 @@ def _install_block() -> str:
     return src[start:end]
 
 
+def _heartbeat_functions() -> str:
+    # The install block calls heartbeat_start/heartbeat_stop, defined earlier
+    # in the real script (near ask()/offer_report()). Extract them the same
+    # way _install_block() extracts its own slice, so the synthetic script
+    # below actually has them - and stays in sync if the implementation
+    # changes - instead of failing on "heartbeat_start: command not found".
+    src = SETUP_SH.read_text(encoding="utf-8")
+    start = src.index("HB_SEQ=0")
+    stop_def = src.index("heartbeat_stop() {", start)
+    end = src.index("\n}\n", stop_def) + len("\n}\n")
+    return src[start:end]
+
+
 def _make_uv_stub(bin_dir: Path) -> None:
     # Records its own call count in a file RELATIVE to cwd (the test sets cwd
     # to tmp_path for the whole run, so both this stub and the extracted
@@ -96,6 +109,12 @@ def _run_install_block(tmp_path: Path, *, call_specs: dict[int, tuple[int, bool]
     script = (
         "set -euo pipefail\n"
         'say() { printf "%s\\n" "$*"; }\n'
+        # The real script sets EXTRAS earlier (the browser/app-window prompt,
+        # before this block), which the extracted block references via
+        # "${EXTRAS}" without setting it itself - under `set -u` above that is
+        # otherwise an unbound-variable error before uv is even reached.
+        'EXTRAS="coder,voice,monitor"\n'
+        + _heartbeat_functions()
         + _install_block()
         + '\nprintf "COMPLETED\\n"\n'
     )
@@ -151,10 +170,16 @@ def test_retry_itself_erroring_still_reaches_the_still_missing_warning(tmp_path)
 
 def test_retry_install_is_guarded_in_source():
     """Static backstop that holds even without bash on PATH: the retry
-    install must not be a bare command under `set -euo pipefail`."""
+    install must not be a bare command under `set -euo pipefail`.
+
+    setup.sh builds EXTRAS from a variable (coder,voice,monitor, optionally
+    plus desktop) rather than a hardcoded literal, so the source text always
+    reads `-e ".[${EXTRAS}]"` at both call sites, never the resolved value.
+    """
     block = _install_block()
-    first = block.index('uv pip install -p .venv -e ".[coder,voice,monitor]"')
-    second = block.index('uv pip install -p .venv -e ".[coder,voice,monitor]"', first + 1)
+    needle = 'uv pip install -p .venv -e ".[${EXTRAS}]"'
+    first = block.index(needle)
+    second = block.index(needle, first + 1)
     line_end = block.index("\n", second)
     retry_line = block[second:line_end]
     assert "||" in retry_line, "the retry install must be guarded (e.g. `|| true`)"

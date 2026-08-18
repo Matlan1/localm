@@ -43,6 +43,56 @@ ask() {  # ask "prompt" "default"  ->  echoes the answer (the default in --yes m
   read -r -p "$prompt" ans || ans=""
   echo "${ans:-$def}"
 }
+# heartbeat_start SECS "MESSAGE" / heartbeat_stop - print MESSAGE every SECS
+# seconds while a following long, quiet command is still running (a uv
+# download, a venv build, a torch install), so it never looks identical to a
+# hung terminal. The command itself runs completely unchanged - same
+# foreground process, same exit status, same output capture, same live
+# progress if it has any; only the heartbeat runs in the background.
+#
+# It watches a flag file rather than killing a PID (killing a backgrounded
+# subshell is not reliably instant on every shell, and even where `kill`
+# succeeds it only kills the subshell itself - its `sleep` child can survive
+# as an orphan holding the same stdout/stderr open). The loop polls the flag
+# every 1s (never sleeping for the full SECS at a stretch) and only PRINTS
+# once SECS worth of polls have passed - so the print cadence is unchanged,
+# but heartbeat_stop is noticed within about a second, not up to SECS later.
+# That matters beyond tidiness: an orphaned background writer keeps a PIPE's
+# write end open, so `setup.sh | tee log.txt` would otherwise hang for the
+# full SECS after setup itself finished, waiting on a heartbeat nobody reads
+# from - measured live at the original SECS-granularity poll before this.
+#
+# Each call gets its OWN flag file (a counter suffix), not a shared/reused
+# path: create_venv can call heartbeat_start more than once per run (retry
+# after a certificate fallback), and a shared path lets a still-sleeping OLD
+# loop see a just-recreated file disappear again and keep printing after the
+# NEW step already finished. The EXIT trap is a safety net for any exit path
+# that skips an explicit heartbeat_stop call, so a heartbeat never keeps
+# printing after setup itself has ended.
+HB_SEQ=0
+HB_FLAG=""
+trap '[ -n "$HB_FLAG" ] && { : > "$HB_FLAG" 2>/dev/null || true; }' EXIT
+heartbeat_start() {
+  local secs="$1" msg="$2"
+  HB_SEQ=$((HB_SEQ + 1))
+  HB_FLAG="${TMPDIR:-/tmp}/localm-setup-hb.$$.$HB_SEQ"
+  rm -f "$HB_FLAG"
+  (
+    n=0
+    while [ ! -e "$HB_FLAG" ]; do
+      sleep 1
+      n=$((n + 1))
+      if [ "$n" -ge "$secs" ]; then
+        n=0
+        [ -e "$HB_FLAG" ] || say "$msg"
+      fi
+    done
+  ) &
+}
+heartbeat_stop() {
+  [ -n "$HB_FLAG" ] && : > "$HB_FLAG"
+  return 0
+}
 offer_report() {  # offer_report "summary" "detail"
   # Offer to file a bug report for a setup failure via the standalone reporter
   # (report-issue.sh), which works even though setup did not finish (it needs no
@@ -266,18 +316,23 @@ create_venv() {
   # never shows the user anything beyond the line above. Capturing costs
   # nothing observable even when the rare fallback below IS needed: a rejected
   # TLS handshake fails in well under a second, and a real download still
-  # completes normally, just without a live byte-progress readout.
+  # completes normally, just without a live byte-progress readout. A periodic
+  # heartbeat line covers the case that genuinely does take a while - a fresh
+  # box downloading uv's managed Python - so that never looks like a hang.
   while : ; do
     # PYPREF is empty (shared) or "--python-preference only-managed" (portable);
     # left unquoted on purpose so an empty value expands to no argument. The
     # `if var=$(cmd); then` form (not a bare assignment) is required under
     # `set -e` - it is one of the contexts POSIX exempts from aborting on a
     # non-zero exit, so a failure here can be examined instead of killing setup.
+    heartbeat_start 15 "  ... still creating the environment (this can take a few minutes on a slow connection)"
     # shellcheck disable=SC2086
     if errtext="$(uv venv --python 3.12 $PYPREF --clear .venv 2>&1)"; then
+      heartbeat_stop
       : > .venv/.localm-venv   # marker: this venv was created by localm setup
       break
     fi
+    heartbeat_stop
     # Failed silently so far. Only ever falls back once: if UV_SYSTEM_CERTS is
     # already unset, the fallback was already tried - show it for real below
     # instead of guessing again. Applies in --yes mode too (fully automatic, no
@@ -367,11 +422,16 @@ fi
 say "  Installing localm into .venv ..."
 # Catch a hard install failure (set -e would otherwise abort silently) so we can
 # offer a bug report before exiting - and still exit non-zero, never masking it.
+# heartbeat_start/heartbeat_stop print a periodic "still working" line while
+# this runs, since a full dependency resolve and download can take a while.
+heartbeat_start 15 "  ... still installing (this can take a few minutes on a slow connection)"
 uv pip install -p .venv -e ".[${EXTRAS}]" || {
+  heartbeat_stop
   say "  [!] Installing localm failed - see the error above."
   offer_report "localm install failed during setup" "uv pip install -e .[${EXTRAS}] failed - see the error output above."
   exit 1
 }
+heartbeat_stop
 
 # Verify the CLI entry point actually landed. Reported live: on a WSL2 clone under
 # a Windows-drive mount (/mnt/c, /mnt/d, ...) the install can report success while
@@ -495,12 +555,17 @@ TORCHSPEC="$(.venv/bin/python -m localm.hwdetect torch-args "$BACKEND" 2>/dev/nu
 if [ -n "$TORCHSPEC" ]; then
   say ""
   say "  Installing PyTorch + transformers for HuggingFace models ..."
+  # heartbeat_start/heartbeat_stop print a periodic "still working" line while
+  # both installs below run, since PyTorch alone can be a gigabyte-plus
+  # download with nothing printed in between otherwise.
+  heartbeat_start 15 "  ... still installing PyTorch and transformers (this can take a few minutes on a slow connection)"
   # TORCHSPEC is a multi-token pip arg list (e.g. "torch torchvision --index-url ...");
   # it is intentionally left unquoted so the words split into separate arguments.
   # shellcheck disable=SC2086
   uv pip install -p .venv $TORCHSPEC \
     || say "  [!] torch install failed - install a matching torch manually (see docs/gpu-setup.md)."
   uv pip install -p .venv "transformers[kernels]~=5.12" "tokenizers==0.22.2" "accelerate>=1.0" "pillow>=10.0" "soundfile>=0.12" || true
+  heartbeat_stop
 else
   say ""
   say "  Skipping the PyTorch/transformers stack (not needed for GGUF chat)."
