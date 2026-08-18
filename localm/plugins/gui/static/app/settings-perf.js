@@ -8,7 +8,7 @@
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { iconEl } from "./icons.js";
 import { COMPACT_KEEP, addMessageRow, chat, chatParams, compactConversation, currentConv, lsSetScoped, maybeCompactConversation, msgImages, msgText, newConversation, noteLabel, renderAttachChips, renderChat, renderConvList, saveConversations, stripUserImages } from "./chat.js";
-import { $, GIB, authHeaders, autoGrow, confirmDanger, el, formatToolCalls, nearBottom, openModal, readSSE, renderMarkdown, stripThink, toast } from "./helpers.js";
+import { $, GIB, authHeaders, autoGrow, confirmDanger, el, formatToolCalls, nearBottom, openModal, readSSE, renderMarkdown, revealFilledAdvanced, stripThink, toast } from "./helpers.js";
 import { modelCache, modelSelect } from "./models-sidebar.js";
 import { execChatCommand, handleSlashSubmit } from "./slash.js";
 import { CORE_VIEWS, VIEWS, _applyActiveClasses, closeNav, showView } from "./tabs.js";
@@ -1459,6 +1459,11 @@ export function applyPersona(name) {
     $(id).value = p.params?.[key] ?? "";
   }
   $("p-persona").value = name;
+  // Four of those five ids live behind the drawer's Advanced fold. Without this
+  // the toast below claims the persona was applied while its top-k / top-p /
+  // repeat-penalty / max-tokens sit invisible behind a closed triangle. Keyed on
+  // the values, so a persona that sets only a temperature leaves the fold shut.
+  revealFilledAdvanced($("params"));
   toast(`Persona '${name}' applied`);
   return true;
 }

@@ -32,6 +32,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   same name.
 
 ### Changed
+- **The chat parameters drawer and the image, music and video generation forms
+  now keep their rarely-touched settings behind an "Advanced" section.** Chat
+  leads with the persona, the system prompt and temperature; the Studio forms
+  lead with the prompt and the settings that come with a real starting value.
+  Seed, sampling, resolution, steps, CFG, denoise, LoRA strengths and the GBNF
+  grammar fold away behind a single line that names what is inside, so you can
+  tell whether it is worth opening. It opens itself whenever something fills
+  those fields in - restoring an image's settings from history, or applying a
+  persona - and a collapsed section that still holds values says how many, so a
+  setting can never quietly change your output from behind a fold.
 - **Status indicators across the GUI (the chat connection line, the coder
   session and tool-call states, model and plugin status tags, the Knowledge
   and Studio badges, and the Settings ComfyUI indicator) now render

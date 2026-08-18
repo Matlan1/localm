@@ -479,6 +479,72 @@ export function autoGrow(textarea) {
   textarea.style.height = Math.min(textarea.scrollHeight, 220) + "px";
 }
 
+/* ---------------- the "Advanced" disclosure (.adv-fold) ---------------- */
+/* Chat's #params drawer and the three Studio forms fold their rarely-touched
+   knobs into a <details class="adv-fold">. Folding creates one hazard that did
+   not exist while everything was visible: a value can be SET and UNSEEN. These
+   two helpers are the whole answer to it. */
+
+/** Count the fields inside `fold` that currently hold a value. A checkbox counts
+ *  when checked; everything else when its trimmed value is non-empty, so a
+ *  <select> resting on its blank "None" option does not count. */
+function foldFilledCount(fold) {
+  let n = 0;
+  for (const f of fold.querySelectorAll("input, select, textarea")) {
+    const set = (f.type === "checkbox" || f.type === "radio")
+      ? f.checked : String(f.value ?? "").trim() !== "";
+    if (set) n++;
+  }
+  return n;
+}
+
+/** Refresh one fold's "n set" badge and return that count. A collapsed fold
+ *  holding live overrides would otherwise read as empty, which is the hidden
+ *  problem AGENTS.md rule 5 forbids; the badge says so without opening it. */
+export function updateAdvancedCount(fold) {
+  const n = foldFilledCount(fold);
+  const badge = fold.querySelector("summary .adv-fold-count");
+  if (badge) {
+    badge.textContent = n ? n + " set" : "";
+    badge.hidden = !n;
+  }
+  return n;
+}
+
+/** Open every `.adv-fold` under `root` that holds a value, and refresh all their
+ *  badges. Returns how many folds were opened.
+ *
+ *  CALL THIS AFTER ANY PROGRAMMATIC WRITE INTO FORM FIELDS. Two flows restore
+ *  values into fields that now live behind a fold - "reuse settings" on an image
+ *  history entry, and applyPersona (also reached by /persona) - and both then
+ *  report success. Without this they would report "Settings restored" while most
+ *  of what they restored sits behind a closed triangle.
+ *
+ *  It keys on the VALUE rather than on a list of ids on purpose: a writer that
+ *  later learns a new field is covered automatically, and a writer that set
+ *  nothing (a persona carrying only a temperature, a history entry whose
+ *  advanced values are all null) correctly leaves the fold shut. */
+export function revealFilledAdvanced(root) {
+  let opened = 0;
+  for (const fold of (root || document).querySelectorAll("details.adv-fold")) {
+    if (updateAdvancedCount(fold) && !fold.open) { fold.open = true; opened++; }
+  }
+  return opened;
+}
+
+// Typing into a folded field updates its badge, so collapsing afterwards still
+// tells the truth. Delegated from the document rather than bound per fold: the
+// folds are static markup in index.html, and this way a fold added later needs
+// no wiring. Guarded because helpers.js is also loaded in non-DOM contexts.
+if (typeof document !== "undefined" && document.addEventListener) {
+  const onFieldEdit = (e) => {
+    const fold = e.target && e.target.closest && e.target.closest("details.adv-fold");
+    if (fold) updateAdvancedCount(fold);
+  };
+  document.addEventListener("input", onFieldEdit);
+  document.addEventListener("change", onFieldEdit);
+}
+
 export function nearBottom(elm) {
   return elm.scrollHeight - elm.scrollTop - elm.clientHeight < 80;
 }

@@ -716,6 +716,18 @@ pre:hover .canvas-btn { opacity: 1; }
 }
 #params .full { grid-column: 1 / -1; }
 #params textarea { font-family: var(--mono); font-size: 12.5px; resize: vertical; }
+/* The Advanced fold spans the drawer (it carries .full) and rebuilds the drawer's
+   own column rhythm inside itself, so the folded numbers line up exactly where
+   they did when they sat in the outer grid.
+   auto-FILL, not the outer grid's auto-FIT, and the difference is deliberate:
+   auto-fit collapses tracks that nothing occupies or spans, which would stretch
+   a lone input across the whole fold. The outer grid is safe from that only
+   because nine .full rows span every one of its tracks; this inner grid has one
+   (the grammar box), so it does not rely on that. */
+#params .adv-fold-body {
+  display: grid; gap: 14px;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+}
 
 /* ---------------- coder ---------------- */
 
@@ -1030,6 +1042,47 @@ pre:hover .canvas-btn { opacity: 1; }
 .card .row input { flex: 1; }
 .card .actions { margin-top: 14px; display: flex; gap: 10px; }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 14px; }
+
+/* ---- the "Advanced" disclosure (one pattern, four surfaces) ---- */
+/* Chat's #params drawer and the three Studio generation forms each mix fields you
+   touch every time (the prompt, temperature) with tuning knobs you almost never
+   do (seed, cfg, denoise, grammar). This folds the second group away.
+
+   It is a native <details>, which is the app's THIRD use of that primitive
+   (.onboard-help, .think-block) rather than a new component family: the open
+   state, the keyboard affordance and the AT semantics all come from the platform
+   instead of hand-rolled aria-expanded bookkeeping.
+
+   Nothing here is a new visual idea. The chevron glyph, its rotation and the
+   0.12s ease are lifted verbatim from .nav-group-parent::after, the app's only
+   other disclosure control - which is also why it stays a CSS geometric
+   character instead of an APP_ICONS SVG (design-doc rule 1 bans EMOJI; matching
+   the one existing disclosure beats a second, differently-drawn arrow). The dim
+   summary that brightens on hover is .think-block summary's treatment. */
+.adv-fold { border-top: 1px solid var(--border); margin-top: 10px; padding-top: 8px; }
+.adv-fold > summary {
+  cursor: pointer; user-select: none; list-style: none;
+  display: flex; align-items: center; gap: 8px;
+  font-size: 12.5px; color: var(--text-dim);
+  padding: 2px 0;
+}
+.adv-fold > summary::-webkit-details-marker { display: none; }   /* Safari's own triangle */
+.adv-fold > summary::before {
+  content: "\25B8";                /* right-pointing triangle, as .nav-group-parent */
+  font-size: 11px; opacity: 0.7;
+  transition: transform 0.12s ease;
+}
+.adv-fold[open] > summary::before { transform: rotate(90deg); }
+.adv-fold > summary:hover { color: var(--text); }
+/* The hint names what is inside, so the fold can be judged without opening it. */
+.adv-fold-hint { color: var(--text-dim); opacity: 0.75; font-size: 12px; }
+/* A fold the user collapsed by hand can still hold values that change the
+   output. The count says so rather than letting a closed fold read as empty
+   (rule 5: we do not hide problems). It is the .job-state pill shape with an
+   accent tint - same construction as .st-ok's green one, not a new badge. */
+.adv-fold-count { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+.adv-fold[open] .adv-fold-count { display: none; }   /* open: the values speak for themselves */
+.adv-fold-body { margin-top: 10px; }
 
 /* ---- content coherence (direction A): content-type icons + card headers + motion ---- */
 /* Content icons take the TYPE hue on page rows/grids (distinct from the category-hued NAV
