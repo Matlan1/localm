@@ -1213,6 +1213,11 @@ def test_hygiene_main_warns_on_a_new_duplicate(tmp_path, monkeypatch, capsys):
     # Unstubbed, these tests passed only on a machine that happens to have a
     # gitignored file, and could never pass on the one environment that gates a merge.
     monkeypatch.setattr(ch, "_release_manifest_gate", lambda: ([], []))
+    # And the released-only policy gate: these fixtures NEED an [Unreleased]
+    # section (the drop/duplicate warn machinery under test only exists for
+    # one), which that gate hard-fails on. Its own coverage lives in
+    # test_changelog_tracked_file_rejects_an_unreleased_section.
+    monkeypatch.setattr(ch, "_changelog_no_unreleased_section", lambda: [])
     monkeypatch.delenv("LOCALM_HYGIENE_STRICT", raising=False)
     _init_changelog_repo(tmp_path, _DRAFT_BASE)
     (tmp_path / "CHANGELOG.md").write_text(
@@ -1253,6 +1258,11 @@ def test_hygiene_main_warns_but_passes_on_a_draft_drop(tmp_path, monkeypatch, ca
     # Unstubbed, these tests passed only on a machine that happens to have a
     # gitignored file, and could never pass on the one environment that gates a merge.
     monkeypatch.setattr(ch, "_release_manifest_gate", lambda: ([], []))
+    # And the released-only policy gate: these fixtures NEED an [Unreleased]
+    # section (the drop/duplicate warn machinery under test only exists for
+    # one), which that gate hard-fails on. Its own coverage lives in
+    # test_changelog_tracked_file_rejects_an_unreleased_section.
+    monkeypatch.setattr(ch, "_changelog_no_unreleased_section", lambda: [])
     monkeypatch.delenv("LOCALM_HYGIENE_STRICT", raising=False)
     _init_changelog_repo(tmp_path, _DRAFT_BASE)
 
@@ -1384,6 +1394,11 @@ def test_added_note_is_report_only_and_rides_along_with_a_warning(
     # Unstubbed, these tests passed only on a machine that happens to have a
     # gitignored file, and could never pass on the one environment that gates a merge.
     monkeypatch.setattr(ch, "_release_manifest_gate", lambda: ([], []))
+    # And the released-only policy gate: these fixtures NEED an [Unreleased]
+    # section (the drop/duplicate warn machinery under test only exists for
+    # one), which that gate hard-fails on. Its own coverage lives in
+    # test_changelog_tracked_file_rejects_an_unreleased_section.
+    monkeypatch.setattr(ch, "_changelog_no_unreleased_section", lambda: [])
     monkeypatch.delenv("LOCALM_HYGIENE_STRICT", raising=False)
     _init_changelog_repo(tmp_path, _DRAFT_BASE)
 
@@ -1429,6 +1444,11 @@ def test_added_note_does_not_inflate_the_strict_failure_count(
     # Unstubbed, these tests passed only on a machine that happens to have a
     # gitignored file, and could never pass on the one environment that gates a merge.
     monkeypatch.setattr(ch, "_release_manifest_gate", lambda: ([], []))
+    # And the released-only policy gate: these fixtures NEED an [Unreleased]
+    # section (the drop/duplicate warn machinery under test only exists for
+    # one), which that gate hard-fails on. Its own coverage lives in
+    # test_changelog_tracked_file_rejects_an_unreleased_section.
+    monkeypatch.setattr(ch, "_changelog_no_unreleased_section", lambda: [])
     monkeypatch.delenv("LOCALM_HYGIENE_STRICT", raising=False)
     _init_changelog_repo(tmp_path, _DRAFT_BASE)
     (tmp_path / "CHANGELOG.md").write_text(
@@ -1512,3 +1532,33 @@ def test_baseline_ref_is_the_merge_base_not_the_moving_tip(monkeypatch):
     ref = ch._changelog_baseline_ref()
     assert calls and calls[0] == ("merge-base", "HEAD", "origin/master"), calls
     assert ref == "cafebabecafebabecafebabecafebabecafebabe"
+
+
+def test_changelog_tracked_file_rejects_an_unreleased_section(tmp_path, monkeypatch):
+    """Maintainer policy (2026-08-18): the tracked CHANGELOG.md is
+    released-only - the in-app changelog button serves it, so nothing a user
+    cannot see or test in a shipped build may appear there. A
+    '## [Unreleased]' section is a hard failure that names the draft's new
+    home; the SUBSTRING in shipped release-note prose stays legal (the check
+    is structural on the H2 header, so it can never pressure an edit to the
+    permanent published record - diff-review item 19's over-reach shape)."""
+    ch = _load_check_hygiene()
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    cl = tmp_path / "CHANGELOG.md"
+
+    # Released-only file, including a legitimate prose mention -> clean.
+    cl.write_text(
+        "# Changelog\n\n## [0.1.5] - 2026-08-01\n\n### Fixed\n"
+        "- see the corrected `[Unreleased]` entry note\n", encoding="utf-8")
+    assert ch._changelog_no_unreleased_section() == []
+
+    # A draft section sneaking back in -> FAIL, pointing at the draft file.
+    cl.write_text(
+        "# Changelog\n\n## [Unreleased]\n\n### Added\n- new thing\n\n"
+        "## [0.1.5] - 2026-08-01\n\n### Fixed\n- a fix\n", encoding="utf-8")
+    problems = ch._changelog_no_unreleased_section()
+    assert problems and "released-only" in problems[0], problems
+
+    # No changelog at all: nothing to police here (other checks own that).
+    cl.unlink()
+    assert ch._changelog_no_unreleased_section() == []

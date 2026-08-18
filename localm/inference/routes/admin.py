@@ -255,7 +255,14 @@ def register(app: FastAPI, ctx) -> None:
         fixes in detail before they ship. Stripped HERE rather than in the GUI because
         this endpoint is the single serving point: a client-side filter would leave the
         raw section reachable over the API by anyone who asks. Published prereleases
-        (0.1.5rc1 and the like) are NOT stripped - they are on GitHub, so they shipped."""
+        (0.1.5rc1 and the like) are NOT stripped - they are on GitHub, so they shipped.
+
+        Since 2026-08-18 the tracked CHANGELOG.md is released-only at the SOURCE
+        (check_hygiene fails on a ``## [Unreleased]`` section; the draft lives in a
+        gitignored file and is curated in at release time), so on current builds this
+        strip finds nothing to remove. It stays anyway: older shipped builds carry
+        changelogs that still have the section, and a defense that costs one regex is
+        cheaper than trusting every future file to honor the policy."""
         import localm
         from localm import updater
         try:

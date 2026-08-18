@@ -395,6 +395,30 @@ def _changelog_append_only() -> list[str]:
             f"Removed: {shown}{more}"]
 
 
+def _changelog_no_unreleased_section() -> list[str]:
+    """The tracked CHANGELOG.md must contain RELEASED history only (maintainer
+    policy, 2026-08-18): the in-app "Show changelog" button serves this file,
+    so nothing a user cannot see or test in a shipped build belongs in it.
+    The in-progress draft lives OUTSIDE the repo (a gitignored file in the
+    maintainer's working tree) and is curated into a new version section at
+    release time. Structural check on the H2 HEADER only - the substring
+    "[Unreleased]" legitimately survives in shipped release-note PROSE (a
+    0.1.5rc2 entry references it) and in this file's own history, and a
+    substring check would pressure someone into editing the permanent record
+    to satisfy it (the exact over-reach diff-review item 19 documents)."""
+    try:
+        working = (REPO / _CHANGELOG).read_text(encoding="utf-8")
+    except OSError:
+        return []
+    if re.search(r"^## \[Unreleased\]", working, re.MULTILINE):
+        return [f"{_CHANGELOG}: contains a '## [Unreleased]' section. The tracked "
+                "changelog is released-only (the in-app changelog button serves "
+                "it); put in-progress entries in the gitignored draft "
+                "(dev-notes/CHANGELOG-unreleased.md in the main checkout) and "
+                "curate them in when the release is cut."]
+    return []
+
+
 # ---- check 4b: [Unreleased] draft corruption (warn-only) --------------------
 # The append-only gate above deliberately exempts the [Unreleased] draft: it is
 # freely rewritable until cut. That exemption has a blind spot: when parallel
@@ -1624,6 +1648,7 @@ def main(argv: list[str]) -> int:
     for f in tracked:
         problems.extend(_scan(f))
     problems.extend(_changelog_append_only())
+    problems.extend(_changelog_no_unreleased_section())
     problems.extend(_raw_accessor_violations(tracked))
     problems.extend(_big_test_write_violations(tracked))
     problems.extend(_sw_cache_derivation_violations())

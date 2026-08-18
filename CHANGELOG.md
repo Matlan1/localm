@@ -6,111 +6,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Being pre-1.0
 minor versions may include breaking changes.
 
 Each release adds its section on top. Published (versioned) sections are the
-permanent public record of what shipped and are never rewritten; the in-progress
-`[Unreleased]` section is maintained until it is cut into a release.
-
-## [Unreleased]
-
-### Added
-- **Music and Video now have the same library as Images.** Generated tracks and
-  clips were a plain list of filenames with play, move and delete. They are now
-  a grid of cards you can tick to select, with bulk move and bulk delete, and a
-  detail view holding the full generation metadata plus download, copy path,
-  rename, move and delete. "Reuse settings" refills the form from any track or
-  clip you already made, opening the Advanced section when it restores anything
-  hidden there. A clip's card shows a real frame from just past the start; a
-  track's card leads with its style tags and length, since audio has no frame to
-  show, and plays in place from the card in one click. Long libraries show the
-  newest 24 with a "show all" toggle.
-- **The server now watches itself for hangs and recovers on its own.** A
-  frozen server (nothing responding, no error, no crash) previously just sat
-  there until someone noticed the GUI had gone dead. A built-in watchdog now
-  detects a frozen server, turns the status window red with what is wrong,
-  and automatically restarts the server on the same port within about a
-  minute - no user action needed. Set `LOCALM_HANG_RECOVERY=surface` to keep
-  the warning but disable the automatic restart, or `=off` to disable the
-  watchdog entirely. When individual requests get stuck without the whole
-  server being dead, nothing is shown (a warning that can be wrong is worse
-  than none), but the debug log records exactly which requests were stuck,
-  where they were blocked, and what to include in a bug report.
-- **Registering models found in a ComfyUI folder now shows real progress.**
-  The guided "Import from ComfyUI..." wizard and the "Re-scan ComfyUI folder"
-  button used to sit there with no feedback (or just a static "Scanning..."
-  message) while everything they found got registered. Both now show a live
-  "registering model N of M" count, with the file name, as it works.
-- **`localm gui` can now open as its own app window instead of a browser
-  tab.** Setup now asks up front (default stays browser tab, no extra
-  install); a Settings toggle ("Default window mode", under Desktop app)
-  lets you change your mind later without re-running setup. By default the
-  window's close button hides it to the tray and the server keeps running,
-  same as closing a browser tab - another toggle ("Quit when the app window
-  is closed") makes it quit the whole app instead. On Linux this installs
-  entirely via pip - no system packages, no `sudo` needed.
-- **The file/folder picker used throughout the GUI can now create a new folder
-  and rename a file or folder.** A "New folder" button creates a folder in the
-  location you are browsing and opens it; each listed file and folder has a
-  rename control. Renaming never overwrites an existing file or folder with the
-  same name.
-
-### Changed
-- **The chat parameters drawer and the image, music and video generation forms
-  now keep their rarely-touched settings behind an "Advanced" section.** Chat
-  leads with the persona, the system prompt and temperature; the Studio forms
-  lead with the prompt and the settings that come with a real starting value.
-  Seed, sampling, resolution, steps, CFG, denoise, LoRA strengths and the GBNF
-  grammar fold away behind a single line that names what is inside, so you can
-  tell whether it is worth opening. It opens itself whenever something fills
-  those fields in - restoring an image's settings from history, or applying a
-  persona - and a collapsed section that still holds values says how many, so a
-  setting can never quietly change your output from behind a fold.
-- **Status indicators across the GUI (the chat connection line, the coder
-  session and tool-call states, model and plugin status tags, the Knowledge
-  and Studio badges, and the Settings ComfyUI indicator) now render
-  consistently as small colored pills**, matching the style already used for
-  job/run status elsewhere. Two small display bugs are fixed along the way: a
-  model that is merely loaded in memory no longer looks identical to (and no
-  longer highlights its row like) the one actually active, and a missing
-  Studio model file no longer shows a color that ignores your light/dark theme.
-- **Settings > System no longer shows "Updates" twice.** The app-update card,
-  the Runtime update card, and the update-behavior toggles (offer prereleases,
-  ignore network access) are now one "Updates" card with three clearly
-  labeled parts, instead of three separate panels.
-
-### Fixed
-- **A link straight to a media or tool page now opens that page.** Opening the
-  GUI at a Images, Music, Video, Knowledge, Coder or Jobs link (for example a
-  bookmark or a link you shared with yourself) quietly showed a different page
-  instead, and the address it was given was discarded, so reloading did not help
-  it either. Those links now land where they point. A link to a page that does
-  not exist still falls back to Models.
-- **The "reload chat model after generation" toggle now applies only to the page
-  you set it on.** It sat on the Images page but wrote a single shared setting,
-  so turning it off there silently turned off the VRAM handover for Music and
-  Video too, with nothing on those pages to say so or change it back. Each of
-  the three pages now has its own toggle writing its own setting. An existing
-  setting keeps its meaning: a generator you have never set individually still
-  follows the shared default.
-- **A generated file whose preview cannot be shown now says so.** A file the
-  browser refused to decode left a silent blank tile; it now reads "Preview
-  unavailable" and keeps its card, so you can still open, move or delete it.
-- **Fixed a startup deadlock that could freeze the entire server for good.**
-  Launching with a model to preload while the memory/knowledge plugins needed
-  the embedding model could deadlock the model loader against the embedder
-  (each waiting forever on a lock the other held). From then on every part of
-  the GUI that touched model or embedding status silently stopped answering,
-  the browser ran out of connections, and the whole app appeared dead - with
-  the server process still running at 0% CPU, indefinitely. The two code
-  paths now take those locks in one agreed order, so the deadlock cannot
-  form. This was the cause of the 2026-08-18 "clicked Launch ComfyUI and
-  everything stopped loading" hang: the click itself was just the first
-  casualty a user could see.
-- **The status window is bigger and its text actually readable.** The red
-  status line no longer gets cut off mid-sentence (it wraps to the window
-  width), and the log pane wraps long lines instead of auto-scrolling
-  sideways into unreadable fragments.
-- **The Images/Music/Video workflow panel now matches the rest of the GUI.**
-  The pick/delete buttons used one-off styling instead of the shared button
-  classes, and hovering or selecting a workflow row showed no feedback.
+permanent public record of what shipped and are never rewritten. This file
+holds RELEASED history only - it is what the in-app "Show changelog" button
+displays, so nothing appears here before it has actually shipped.
 
 ## [0.1.5rc3] - 2026-08-13
 
@@ -4474,7 +4372,6 @@ First tagged release. A self-contained, offline local-LLM platform.
 - The NVIDIA GPU path is validated by design and CI-adjacent testing; the primary
   development hardware is AMD.
 
-[Unreleased]: https://github.com/Matlan1/localm/compare/v0.1.4...HEAD
 [0.1.4]: https://github.com/Matlan1/localm/releases/tag/v0.1.4
 [0.1.3]: https://github.com/Matlan1/localm/releases/tag/v0.1.3
 [0.1.2]: https://github.com/Matlan1/localm/releases/tag/v0.1.2
