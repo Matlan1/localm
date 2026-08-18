@@ -142,9 +142,9 @@
           <div class="full"><label>System prompt <span class="sub">(blank = your Settings &rsaquo; Chat default)</span></label><textarea id="p-system" rows="3" placeholder="Blank = use your default from Settings"></textarea></div>
           <div><label>Temperature</label><input id="p-temperature" type="number" step="0.05" min="0" max="2" placeholder="default"></div>
           <div class="full check-row"><label title="Lets the model search the web and read pages mid-conversation (uses the server's network policy). Off = fully offline chat."><input type="checkbox" id="p-web"> <span class="lbl-ic" data-icon="web"></span> Web access - the model may search and read pages</label></div>
-          <div class="full check-row"><label title="Recall the durable facts localm has learned about you and add them to the prompt (server-side, query-aware). Add facts with /remember, view or edit with /memory. Growing memory is blocked in privacy mode."><input type="checkbox" id="p-memory" checked> <span class="lbl-ic" data-icon="memory"></span> Memory - remind the model what it knows about you</label></div>
+          <div class="full check-row"><label title="Recalls facts localm has learned about you and adds them to the prompt. Add facts with /remember, view/edit with /memory. Blocked in privacy mode."><input type="checkbox" id="p-memory" checked> <span class="lbl-ic" data-icon="memory"></span> Memory - remind the model what it knows about you</label></div>
           <div class="full check-row"><label title="Reads each finished reply aloud. Install the tts plugin for neural Kokoro voices; otherwise the browser's built-in offline voice is used. Every assistant message also has a speaker button."><input type="checkbox" id="p-speak"> <span class="lbl-ic" data-icon="speak"></span> Speak replies aloud</label></div>
-          <div class="full" id="voice-row" style="display:none"><label title="Which voice reads replies aloud. Remembered in THIS browser and overrides the server-side default in Settings &rsaquo; Text-to-speech. With the tts plugin installed these are neural Kokoro voices; otherwise your browser's local (offline) voices."><span class="lbl-ic" data-icon="voice"></span> Voice <span class="sub">(this browser)</span></label><select id="p-voice"></select></div>
+          <div class="full" id="voice-row" style="display:none"><label title="Which voice reads replies aloud, remembered in this browser. Neural Kokoro voices with the tts plugin installed, otherwise your browser's offline voices."><span class="lbl-ic" data-icon="voice"></span> Voice <span class="sub">(this browser)</span></label><select id="p-voice"></select></div>
           <div class="full"><label><span class="lbl-ic" data-icon="book"></span> Knowledge - ground replies in an indexed collection (manage on the Knowledge page)</label><select id="p-kb"><option value="">(none)</option></select></div>
           <!-- Sampling knobs whose blank state already means "use the tuned
                default", plus the grammar box. Folded away so Temperature and the
@@ -211,9 +211,9 @@
       <div id="coder-setup">
         <div class="card-head"><span class="ic cat-ic cat-green" data-icon="coder"></span>
           <div class="card-head-text"><h2>Coder session</h2></div></div>
-        <div class="sub">Run the localcoder agent against a project directory. The agent
-        can read, write, and run code; destructive actions ask for your approval below
-        unless you enable auto-approve.</div>
+        <div class="sub">Destructive actions ask for your approval below, unless you enable
+        auto-approve. Runs the localcoder agent against a project directory; it can read,
+        write, and run code.</div>
         <label for="setup-cwd">Project directory</label>
         <div class="row">
           <input type="text" id="setup-cwd" placeholder="path to your project" spellcheck="false">
@@ -243,7 +243,7 @@
         </div>
         <label for="setup-scope">Scope (optional glob - file tools are confined to matching paths)</label>
         <input type="text" id="setup-scope" placeholder="src/**/*.py" spellcheck="false">
-        <label for="setup-system" title="Extra guidance prepended to the agent's system prompt: conventions, style, constraints. Overrides this project's .localcoder/system.md for this session; leave blank to use that file if present.">Custom instructions (optional - conventions, style, constraints)</label>
+        <label for="setup-system" title="Overrides this project's .localcoder/system.md for this session; leave blank to use that file. Extra guidance prepended to the agent's system prompt: conventions, style, constraints.">Custom instructions (optional - conventions, style, constraints)</label>
         <textarea id="setup-system" placeholder="e.g. Always run pytest before finishing. Prefer guard clauses." spellcheck="false" rows="2"></textarea>
         <div class="checks">
           <label><input type="checkbox" id="setup-auto"> Auto-approve destructive tools</label>
@@ -375,9 +375,8 @@
     <section id="view-images" class="view">
       <div class="page">
         <h2>Image generation</h2>
-        <div class="sub">Runs your local ComfyUI FLUX pipeline (port 8188). The LLM is
-        unloaded automatically to hand VRAM to the image model, and reloads on the next
-        chat request.</div>
+        <div class="sub">Runs your local ComfyUI FLUX pipeline. The LLM unloads automatically
+        to free VRAM for the image model, and reloads on the next chat request.</div>
         <div class="card">
           <div class="card-head"><span class="ic cat-ic cat-violet" data-icon="image"></span>
             <div class="card-head-text"><h3>Generate</h3></div></div>
@@ -439,8 +438,8 @@
       <div class="page">
         <h2>Music generation</h2>
         <div class="sub">Runs the ACE-Step workflow on your local ComfyUI (same VRAM
-        handover as image generation). Track length is arbitrary - long tracks just
-        take proportionally longer.</div>
+        handover as image generation). Track length is arbitrary; longer tracks just
+        take longer.</div>
         <div class="card">
           <div class="card-head"><span class="ic cat-ic cat-violet" data-icon="music"></span>
             <div class="card-head-text"><h3>Generate</h3></div></div>
@@ -487,11 +486,9 @@
     <section id="view-video" class="view">
       <div class="page">
         <h2>Video generation</h2>
-        <div class="sub">Runs the Wan 2.2 workflow on your local ComfyUI (same VRAM
-        handover as image generation). Keep the native 1280&times;704 resolution -
-        the model was trained at 720p and quality collapses below it; iterate with
-        short durations and fewer steps instead (~5 s is the native length). Video
-        is the slowest generator: minutes to hours per clip.</div>
+        <div class="sub">Slowest generator here: minutes to hours per clip, so iterate
+        with short durations and fewer steps. Keep the native 1280&times;704 resolution
+        or quality collapses. Runs Wan 2.2 on your local ComfyUI.</div>
         <div class="card">
           <div class="card-head"><span class="ic cat-ic cat-violet" data-icon="video"></span>
             <div class="card-head-text"><h3>Generate</h3></div></div>

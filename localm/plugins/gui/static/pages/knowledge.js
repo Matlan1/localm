@@ -155,12 +155,11 @@ export async function refreshKnowledgePage() {
 
     const reembed = el("button", needsReembed ? "warn" : "secondary",
       needsReembed ? "re-embed needed" : "re-embed");
-    reembed.title = "Recompute this collection's vectors with the embedding "
-      + "model currently set in Settings, from the text already stored here - "
-      + "no original files needed, uploads included, nothing deleted. Use this "
-      + "after switching the embedding model, or any time this shows BM25 for a "
-      + "collection you expected to be hybrid. Clicking 'add docs' again does "
-      + "NOT do this: unchanged files are skipped, not re-embedded.";
+    // Distinct from "add docs": that skips unchanged files rather than re-embedding them,
+    // so it will not clear a BM25-only collection the way this button does.
+    reembed.title = "Recomputes vectors with the current embedding model, from text "
+      + "already stored here - no original files needed, nothing deleted. Use after "
+      + "switching models or when this shows BM25 unexpectedly.";
     reembed.onclick = () => kbReembedCollection(c.name);
     actions.appendChild(reembed);
 
