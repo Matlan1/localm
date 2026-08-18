@@ -87,10 +87,12 @@ export function renderHwStats(data) {
     add(`GPU ${Math.round(data.gpu.percent)}%`);
   el.textContent = "";
   if (spans.length) {
-    spans.forEach((s, i) => {
-      if (i) el.appendChild(document.createTextNode(" · "));
-      el.appendChild(s);
-    });
+    // No separator TEXT NODES between the spans: the row wraps now (it used to
+    // ellipsise and cut the VRAM figure off), and a " · " text node is exactly
+    // the thing that gets stranded at the end of a wrapped line. The separator
+    // is drawn in CSS as `span + span::before`, so it lives inside the metric
+    // it introduces and wraps with it.
+    spans.forEach((s) => el.appendChild(s));
     el.hidden = false;
   } else {
     el.hidden = true;
