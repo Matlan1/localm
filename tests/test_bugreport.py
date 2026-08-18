@@ -351,6 +351,28 @@ def test_scrub_secrets_redacts_a_quoted_credential_value(line, canary):
     assert "=<redacted>" in out
 
 
+def test_unterminated_quote_redaction_span_is_what_the_comment_claims():
+    """The three spans an unterminated quote can produce, pinned because the
+    comment beside the pattern got one of them wrong: it claimed end-of-line in
+    all cases, when a later quote on the same line ends the span earlier.
+
+    All three over-redact rather than under-redact, which is the property that
+    matters; this test exists so the DOCUMENTED boundary stays the real one."""
+    # no later quote: to end of line
+    out = bugreport._scrub_secrets("api_key=\"UNTERM1 and more text here")
+    assert "UNTERM1" not in out
+    assert out == "api_key=<redacted>"
+    # a later quote on the same line: the span ends THERE, not at end of line
+    out = bugreport._scrub_secrets(
+        "api_key=\"UNTERM2 then require_auth=\"true\" after")
+    assert "UNTERM2" not in out
+    assert out.endswith("after"), out
+    # never across a newline: the next line is untouched
+    out = bugreport._scrub_secrets("api_key=\"UNTERM3\nn_gpu_layers=35")
+    assert "UNTERM3" not in out
+    assert "n_gpu_layers=35" in out
+
+
 def test_scrub_secrets_never_marks_redacted_while_leaving_the_secret():
     """The specific shape the live run produced. Asserting the two together is
     the point: either alone passes on the broken output."""
