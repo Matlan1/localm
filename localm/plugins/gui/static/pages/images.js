@@ -109,7 +109,7 @@ export function renderImageGrid() {
 
     // hover quick actions (top-right) - inline SVG icons (no emoji glyphs)
     const acts = el("div", "thumb-acts");
-    const dl = el("button");
+    const dl = el("button", "download");
     dl.appendChild(iconEl("download"));
     dl.title = "Download";
     dl.onclick = (e) => {
@@ -173,7 +173,7 @@ export function renderImgBulkBar() {
     refreshImageHistory();
   };
 
-  const del = el("button", "danger", "delete");
+  const del = el("button", "btn-secondary btn-danger", "delete");
   del.onclick = () => {
     confirmDanger(`Delete ${n} image(s)?`, "This removes the files from disk.",
       "Delete", async () => {
@@ -328,7 +328,7 @@ export function showImageDetail(item) {
     };
     actions.appendChild(move);
 
-    const del = el("button", "danger", "delete");
+    const del = el("button", "btn-secondary btn-danger", "delete");
     del.onclick = () => {
       confirmDanger(`Delete "${item.name}"?`, "This removes the file from disk.",
         "Delete", async () => {

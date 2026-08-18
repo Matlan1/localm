@@ -360,7 +360,7 @@ export function confirmWebRequest(call) {
         $("modal").style.display = "none";
         resolve(false);
       };
-      const allow = el("button", "btn-secondary btn-primary", "Allow");
+      const allow = el("button", "btn-primary", "Allow");
       allow.onclick = () => {
         if (cb.checked) webAskSession = true;
         $("modal").style.display = "none";

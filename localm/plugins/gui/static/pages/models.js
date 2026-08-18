@@ -245,7 +245,7 @@ export async function refreshModelsPage() {
 
     const actions = el("td");
     actions.style.textAlign = "right";
-    const detail = el("button", "", "info");
+    const detail = el("button", "secondary", "info");
     detail.onclick = () => showModelDetail(m.name);
     actions.appendChild(detail);
 
@@ -311,7 +311,7 @@ export async function refreshModelsPage() {
         };
         actions.appendChild(use);
       }
-      const aliasBtn = el("button", "", "alias");
+      const aliasBtn = el("button", "secondary", "alias");
       aliasBtn.onclick = async () => {
         const name = prompt(`New alias for '${m.name}':`);
         if (!name) return;
@@ -327,7 +327,7 @@ export async function refreshModelsPage() {
         else toast(data.detail || "Alias failed", true);
       };
       actions.appendChild(aliasBtn);
-      const renameBtn = el("button", "", "rename");
+      const renameBtn = el("button", "secondary", "rename");
       renameBtn.title = "Rename this model (unlike alias, the old name stops working; "
         + "any OTHER name already pointing at the same file is unaffected)";
       renameBtn.onclick = async () => {
@@ -356,7 +356,7 @@ export async function refreshModelsPage() {
       };
       actions.appendChild(renameBtn);
       if (m.loaded) {
-        const unload = el("button", "", "unload");
+        const unload = el("button", "secondary", "unload");
         unload.title = "Release this model from GPU/CPU memory (it reloads "
           + "automatically on the next chat request)";
         unload.onclick = async () => {

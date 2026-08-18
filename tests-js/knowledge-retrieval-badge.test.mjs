@@ -85,7 +85,7 @@ test("BM25 row has no badge and a plain re-embed button when the embedding model
   const reembedBtn = [...table.querySelectorAll("button")]
     .find((b) => b.textContent.includes("re-embed"));
   assert.ok(reembedBtn);
-  assert.equal(reembedBtn.className, "", "not highlighted - re-embedding wouldn't help right now");
+  assert.equal(reembedBtn.className, "secondary", "not highlighted - re-embedding wouldn't help right now");
   assert.equal(reembedBtn.textContent, "re-embed");
 });
 
@@ -103,7 +103,7 @@ test("a hybrid row (has_vectors true) never gets the badge, even when the embedd
   assert.match(table.textContent, /hybrid/);
   const reembedBtn = [...table.querySelectorAll("button")]
     .find((b) => b.textContent.includes("re-embed"));
-  assert.equal(reembedBtn.className, "");
+  assert.equal(reembedBtn.className, "secondary");
 });
 
 test("the embedding-ready panel copy qualifies that existing collections may need re-embed", async () => {
