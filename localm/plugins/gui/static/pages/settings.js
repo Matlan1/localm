@@ -79,6 +79,20 @@ export function settingsSectionHead(heading, groupId) {
   return head;
 }
 
+/** A smaller .card-head for a sub-panel nested one level down inside a settings
+ *  section (a "Shared"/"Advanced"/"Experimental" box, or the managed-ComfyUI
+ *  panel): a category-hued icon + the sub-head's own .media-sub-head <h4>, same
+ *  icon+divider shell as settingsSectionHead above (docs/gui-design.md rule 4).
+ *  The .media-sub-head class keeps its existing (smaller) sizing. */
+function subCardHead(heading, iconName, cat) {
+  const head = el("div", "card-head");
+  head.appendChild(iconEl(iconName, "ic cat-ic " + cat));
+  const txt = el("div", "card-head-text");
+  txt.appendChild(el("h4", "media-sub-head", heading));
+  head.appendChild(txt);
+  return head;
+}
+
 // Which top-level group a core schema `group` string belongs to. Plugin (owner)
 // sections go to "plugins"; the Media section is its own top-level group (built
 // directly with dataset.group = "media", not looked up here). Anything unmapped
@@ -1396,7 +1410,7 @@ export async function buildMediaSection(form, fields) {
   const sharedCtrls = sharedFields.map(f => buildSettingControl(f)).filter(Boolean);
   if (sharedCtrls.length) {
     const box = el("div", "media-comfy-box");
-    box.appendChild(el("h4", "media-sub-head", "Shared"));
+    box.appendChild(subCardHead("Shared", "sliders", "cat-teal"));
     box.appendChild(el("div", "sub",
       "Applies to every media plugin (whichever ComfyUI is used)."));
     for (const ctrl of sharedCtrls) {
@@ -1424,7 +1438,7 @@ export async function buildMediaSection(form, fields) {
   const placementField = (fields || []).find(f => f.key === "comfy_gpu_placement");
   if (placementField) {
     const box = el("div", "media-comfy-box");
-    box.appendChild(el("h4", "media-sub-head", "Experimental"));
+    box.appendChild(subCardHead("Experimental", "warning", "cat-teal"));
     const ctrl = buildSettingControl(placementField);
     if (ctrl) {
       box.appendChild(ctrl.node);
@@ -1597,7 +1611,7 @@ export async function buildTtsSection(form) {
   const advanced = fields.filter(f => f.advanced);
   if (advanced.length) {
     const box = el("div", "media-comfy-box");
-    box.appendChild(el("h4", "media-sub-head", "Advanced"));
+    box.appendChild(subCardHead("Advanced", "sliders", "cat-violet"));
     box.appendChild(el("div", "sub",
       "How the browser runs the voice model. Changes here (and to the model "
       + "above) apply the next time the page is loaded."));
@@ -1715,8 +1729,7 @@ function startComfyJobIndicator(anchorEl, logEl) {
  *  until the user clicks Set up. */
 export async function renderManagedComfyPanel(host, toggleFields) {
   host.replaceChildren();
-  const head = el("div", "media-comfy-head");
-  head.appendChild(el("h4", "media-sub-head", "localm's own ComfyUI"));
+  const head = subCardHead("localm's own ComfyUI", "download", "cat-teal");
   const pill = el("span", "comfy-pill", "checking...");
   head.appendChild(pill);
   host.appendChild(head);
@@ -2130,7 +2143,12 @@ export function renderMediaSubsection(name) {
   const { sub, label, fields } = entry;
   sub.replaceChildren();
   const head = el("h4", "media-sub-head", label);
-  sub.appendChild(head);
+  const wrap = el("div", "card-head");
+  wrap.appendChild(iconEl(name, "ic cat-ic cat-teal"));
+  const txt = el("div", "card-head-text");
+  txt.appendChild(head);
+  wrap.appendChild(txt);
+  sub.appendChild(wrap);
   if (["image", "music", "video"].includes(name)) {
     // docs/gui-design.md rule 6: state renders as a .job-state pill, not an
     // inline-JS-styled span. checking -> base pill (neutral, matches the old

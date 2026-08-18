@@ -1180,7 +1180,6 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
   padding: 10px 12px; margin-top: 12px;
   background: var(--bg-elevated, rgba(127,127,127,0.04));
 }
-.media-comfy-head { display: flex; align-items: center; gap: 10px; }
 .media-comfy-row {
   display: flex; flex-wrap: wrap; gap: 4px 20px; margin-top: 8px;
 }
