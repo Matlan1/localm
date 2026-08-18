@@ -9,17 +9,25 @@ looks like a security decision.
 
 Two things are pinned independently, and both are needed:
 
-- The route walk below catches an unreviewed route landing under an exempt
-  prefix.
+- The route walk below watches the two DIRECTORIES the exemption used to
+  match by prefix (``/v1/surfaces/``, ``/v1/instances/``), hardcoded here
+  rather than read off the live tuple. This is deliberate: reading it off
+  the live (now-narrowed) tuple could never flag a new, unrelated route
+  under either directory, because such a route no longer matches the
+  narrowed tuple at all - which is correct production behavior, but it
+  would make the test blind to the exact "was this new route reviewed"
+  question it exists to ask. Any route appearing under either directory,
+  authenticated or not, exempt or not, needs a deliberate look before it
+  ships - this walk forces that look by failing until one is taken.
 - The tuple-contents assertion catches a regression back to directory-prefix
   matching directly, which the route walk alone cannot: the two real exempt
   routes satisfy a prefix match exactly as well as a full-path match, so a
   route walk against a reverted (prefixed) tuple still finds no offenders.
 
 ``_CROSS_ORIGIN_OK`` is local to ``create_app()``, not a module attribute, so
-it is recovered here from the live ``_origin_guard`` middleware's closure -
-the actual object controlling production behavior, not a re-implementation
-of it.
+the second check recovers it from the live ``_origin_guard`` middleware's
+closure - the actual object controlling production behavior, not a
+re-implementation of it.
 """
 
 from fastapi.routing import APIRoute
@@ -27,15 +35,19 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from localm.inference.http_server import create_app
 
-# Reviewed set of (method, path) pairs allowed to sit under a _CROSS_ORIGIN_OK
-# entry. Adding a route here is a deliberate security review, not a way to
+# The two directories _CROSS_ORIGIN_OK used to match by prefix before this
+# fix. Hardcoded (not read off the live tuple - see the module docstring for
+# why) so any route appearing under either one is forced through review here,
+# independent of whether the current _CROSS_ORIGIN_OK entry happens to match
+# it.
+_WATCHED_PREFIXES = ("/v1/surfaces/", "/v1/instances/")
+
+# Reviewed set of (method, path) pairs allowed to sit under a watched
+# prefix. Adding a route here is a deliberate security review, not a way to
 # silence this test - see the reasoning at each entry's definition site in
-# http_server.py and (for the last two) in _BESPOKE_GATED_ROUTES,
+# http_server.py and (for these two) in _BESPOKE_GATED_ROUTES,
 # tests/test_kernel_routes_scope_contract.py.
-_REVIEWED_CROSS_ORIGIN_OK_ROUTES = {
-    ("POST", "/v1/chat/completions"),
-    ("POST", "/v1/completions"),
-    ("POST", "/v1/embeddings"),
+_REVIEWED_WATCHED_ROUTES = {
     ("POST", "/v1/surfaces/gui"),
     ("POST", "/v1/instances/cooperate-unload"),
 }
@@ -63,7 +75,7 @@ def _live_cross_origin_ok(app) -> tuple:
         "this test needs updating to match it")
 
 
-def test_cross_origin_ok_routes_match_reviewed_allowlist():
+def test_every_route_under_a_watched_prefix_is_reviewed():
     app = create_app(None)
     api_routes = [r for r in app.routes if isinstance(r, APIRoute)]
     # Sanity floor, same reasoning as test_kernel_routes_scope_contract.py:
@@ -74,24 +86,22 @@ def test_cross_origin_ok_routes_match_reviewed_allowlist():
         "may have changed shape; re-verify this test's route walk still "
         "reaches every kernel route before trusting a pass here")
 
-    cross_origin_ok = _live_cross_origin_ok(app)
-
     offenders = []
     for route in api_routes:
-        if not route.path.startswith(cross_origin_ok):
+        if not route.path.startswith(_WATCHED_PREFIXES):
             continue
         for method in sorted(route.methods):
-            if (method, route.path) not in _REVIEWED_CROSS_ORIGIN_OK_ROUTES:
+            if (method, route.path) not in _REVIEWED_WATCHED_ROUTES:
                 offenders.append(f"{method} {route.path}")
 
     assert not offenders, (
-        "route(s) under a cross-origin-exempt prefix not on the reviewed "
-        "allowlist: " + ", ".join(sorted(offenders)) + " - such a route "
-        "silently inherits the cross-origin/CSRF refusal exemption and the "
-        "open-mode shell-token exemption from _CROSS_ORIGIN_OK; review it "
-        "and either give it its own credential check plus a listing in "
-        "_REVIEWED_CROSS_ORIGIN_OK_ROUTES above (with a one-line reason), "
-        "or leave it off _CROSS_ORIGIN_OK entirely")
+        "route(s) under a watched, formerly-prefix-exempted directory "
+        "(/v1/surfaces/ or /v1/instances/) not on the reviewed allowlist: "
+        + ", ".join(sorted(offenders)) + " - such a route was never "
+        "individually reviewed for the cross-origin/CSRF refusal and the "
+        "open-mode shell-token gate; confirm it does NOT need to be added "
+        "to _CROSS_ORIGIN_OK in http_server.py, then add it to "
+        "_REVIEWED_WATCHED_ROUTES above with a one-line reason")
 
 
 def test_cross_origin_ok_tuple_entries_are_full_paths_not_prefixes():
