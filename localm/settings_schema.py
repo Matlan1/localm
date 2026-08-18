@@ -447,19 +447,16 @@ CORE_FIELDS: list = [
                  group="General"),
     SettingField("desktop_window_mode", Widget.SELECT, "Default window mode",
                  "How `localm gui` opens when the standalone-window extra "
-                 "(localm[desktop]) is installed. auto: use the app window "
-                 "when available, otherwise the browser (default). browser: "
-                 "always use the browser tab even when the app window is "
-                 "available.",
+                 "(localm[desktop]) is installed. auto (default): the app "
+                 "window when available, else a browser tab. browser: always "
+                 "a browser tab.",
                  group="Desktop", options=["auto", "browser"]),
     SettingField("desktop_window_quit_on_close", Widget.TOGGLE,
                  "Quit when the app window is closed",
-                 "Only applies when using the standalone app window "
-                 "(localm[desktop]). Off (default): the close button hides "
-                 "the window and the server keeps running in the background "
-                 "- same as closing a browser tab - use Stop to actually "
-                 "quit. On: the close button quits the app and stops the "
-                 "server.",
+                 "Only for the standalone app window (localm[desktop]). Off "
+                 "(default): closing hides the window and the server keeps "
+                 "running; use Stop to quit. On: closing quits the app and "
+                 "stops the server.",
                  group="Desktop"),
     # ---- Privacy ----
     # REC-MEDIA-CMD sweep: these three decide WHETHER LOCALM WRITES THE USER'S
