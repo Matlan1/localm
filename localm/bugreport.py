@@ -337,7 +337,20 @@ _QUERY_SECRET_RE = re.compile(
     #    short generic names, per the reasoning above.
     r"|(?<=[A-Za-z0-9])[_-](?:api[_-]?key|token|secret|password|passwd|pwd"
     r"|access[_-]?token|signature|key|auth|sig)"
-    r")=)[^&\s#\"'\)\]\}]*"
+    r")=)"
+    # A value that CANNOT be a secret is left alone. This is the INVERSE of
+    # the value-shape rule forbidden above, not an exception to it: that one
+    # would try to RECOGNISE a secret by its shape and would always miss the
+    # next format, whereas this only declines to redact a short list of
+    # literals no credential is ever equal to. Without it the name-based match
+    # eats ``LOCALM_REQUIRE_AUTH=1``, ``require_auth=true``,
+    # ``digital_signature=True`` and ``has_token=false`` out of a report - and
+    # hiding whether auth was ON is exactly the diagnostic a reader needs when
+    # the bug IS about auth. The inner lookahead pins the literal to the WHOLE
+    # value, so ``api_key=truesecret123`` and ``api_key=10`` still redact.
+    r"(?!(?:true|false|none|null|nil|yes|no|on|off|enabled|disabled|[01])"
+    r"(?![^&\s#\"'\)\]\}]))"
+    r"[^&\s#\"'\)\]\}]*"
 )
 
 # The same credential can arrive as a pasted HTTP header line instead of a URL

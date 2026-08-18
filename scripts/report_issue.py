@@ -152,7 +152,13 @@ _QUERY_SECRET_RE = re.compile(
     #    admits the short generic names, per the reasoning above.
     r"|(?<=[A-Za-z0-9])[_-](?:api[_-]?key|token|secret|password|passwd|pwd"
     r"|access[_-]?token|signature|key|auth|sig)"
-    r")=)[^&\s#\"'\)\]\}]*"
+    r")=)"
+    # Leave a value that cannot be a secret alone (true/false/none/0/1/...),
+    # so a config or flag line survives in a report. The inner lookahead pins
+    # the literal to the whole value, so api_key=truesecret123 still redacts.
+    r"(?!(?:true|false|none|null|nil|yes|no|on|off|enabled|disabled|[01])"
+    r"(?![^&\s#\"'\)\]\}]))"
+    r"[^&\s#\"'\)\]\}]*"
 )
 _HEADER_SECRET_RE = re.compile(
     r"(?i)((?:x-)?(?:api[_-]key|api[_-]token|auth[_-]token)\s*:\s*)\S+"
