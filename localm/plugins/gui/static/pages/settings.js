@@ -1206,7 +1206,24 @@ export async function refreshSettingsPage() {
   const ordered = [...sections.values()];
 
   form.replaceChildren();
+  // The two update-behavior toggles (update_allow_prerelease,
+  // update_ignore_net_policy, both admin_only) render INTO the static
+  // "Updates" card (index.html's #update-toggles-block) rather than getting
+  // their own section below - that second panel headed "Updates" is exactly
+  // the duplication S1's card merge removes. Reset to hidden first so a caller
+  // without those fields (or a schema fetch that dropped them) leaves it
+  // empty rather than showing a stale render from an earlier refresh.
+  const updateToggleBlock = $("update-toggles-block");
+  if (updateToggleBlock) updateToggleBlock.hidden = true;
   for (const sec of ordered) {
+    if (sec.id === "core-Updates" && updateToggleBlock) {
+      const grid = $("settings-sec-core-Updates");
+      grid.replaceChildren(...sec.ctrls.map((c) => c.node));
+      const save = $("update-toggles-save");
+      if (save) save.onclick = () => saveSettingsSection(sec.id);
+      updateToggleBlock.hidden = false;
+      continue;
+    }
     // Every group has a real heading now (CORE_SECTION_HEADING is total, and an
     // empty string is no longer representable), so a section can never render as
     // a bare grey block again - design rule 4.

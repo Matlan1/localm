@@ -1202,6 +1202,15 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
   border: 1px solid var(--border); color: var(--text-dim);
 }
 .comfy-pill.ok { color: var(--green); border-color: var(--green); }
+/* The Settings "Updates" card: three sub-blocks (app update, runtime update,
+   the update-behavior toggles) stacked in one card, same bordered-box language
+   as .media-comfy-box so they read as distinct pieces without being separate
+   cards. */
+.update-subsection {
+  border: 1px solid var(--border); border-radius: 8px;
+  padding: 10px 12px; margin-top: 12px;
+}
+.update-sub-head { margin: 0 0 6px; font-size: 14px; }
 /* Settings page per-media-subsection badge (.job-state pill, docs/gui-design.md
    rule 6) - spacing only, sits inline after the subsection's <h4>. */
 .comfy-status-badge { margin-left: 12px; }

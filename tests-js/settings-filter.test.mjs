@@ -217,14 +217,26 @@ test("a control that is not offered is not findable, and becomes findable when i
     "once offered, the row is findable");
 });
 
-test("gate-hidden sections never match", async () => {
+test("gate-hidden sub-content never matches, but the card's always-shown content still does", async () => {
   const { doc, type, activeIds } = await setup();
 
-  // Updates is [hidden] unless the updater proxy is configured.
-  assert.ok(doc.getElementById("sec-updates").hidden, "Updates starts gated off");
+  // The app-update sub-block is [hidden] unless the updater proxy is
+  // configured; the "Updates" card ITSELF is never gated - the runtime-update
+  // block and the update-behavior toggles it also holds must stay findable
+  // regardless (see index.html's #sec-updates comment; S1 merged what used to
+  // be three separate panels into this one card).
+  assert.equal(doc.getElementById("sec-updates").hidden, false,
+    "the Updates card itself is never gated");
+  assert.ok(doc.getElementById("app-update-block").hidden,
+    "the app-update sub-block starts gated off");
+
   type("check for a newer localm build");
   assert.equal(activeIds().includes("sec-updates"), false,
-    "a gated-off card does not match");
+    "text scoped to the gated-off app-update sub-block does not match");
+
+  type("check for a newer llama.cpp runtime build");
+  assert.ok(activeIds().includes("sec-updates"),
+    "the always-shown runtime-update text still matches the same card");
 
   // Same for a .sec-hidden card (the non-owner keys card).
   doc.getElementById("keys-card").classList.add("sec-hidden");
