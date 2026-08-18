@@ -85,6 +85,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
   labeled parts, instead of three separate panels.
 
 ### Fixed
+- **Reading replies aloud now works with no internet connection.** The
+  neural voice needed a piece of its engine downloaded from a public CDN
+  every time it started, so on a machine that was offline, air-gapped, or
+  behind a filtering proxy or strict firewall the speech engine simply
+  failed to start and localm fell back to the robotic system voice. That
+  engine now ships inside localm, so the voice starts from your own
+  machine. Nothing else changes: the same voices, the same quality. The
+  voice model itself is still downloaded once on first use and then kept
+  in the browser, as before.
 - **A link straight to a media or tool page now opens that page.** Opening the
   GUI at a Images, Music, Video, Knowledge, Coder or Jobs link (for example a
   bookmark or a link you shared with yourself) quietly showed a different page

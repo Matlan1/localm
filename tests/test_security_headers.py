@@ -91,34 +91,68 @@ def _directive(csp: str, name: str) -> str:
     return ""
 
 
-def test_script_src_admits_the_onnx_runtime_origin_not_just_connect_src():
-    """The onnxruntime backend is a MODULE SCRIPT, so it needs script-src.
+def test_no_cdn_origin_is_granted_anywhere_in_the_policy():
+    """The onnxruntime runtime is VENDORED, so no CDN origin belongs in the CSP.
 
-    REGRESSION, live 2026-08-13: cdn.jsdelivr.net was listed in connect-src only.
-    The tts plugin's Kokoro bundle pulls the backend with a dynamic import(),
-    which is governed by script-src, so the browser refused it and Kokoro died
-    with "no available backend found" - neural TTS was completely dead. Measured
-    from a live page: fetch() of that exact URL returned 200 (connect-src) while
-    import() of the same URL was blocked (script-src).
+    HISTORY, and it is why this is asserted per directive rather than as a
+    substring of the whole header. The tts plugin's Kokoro bundle pulls the
+    onnxruntime backend with a dynamic import(), which is a MODULE SCRIPT and is
+    therefore governed by script-src, not connect-src. When that runtime came
+    off cdn.jsdelivr.net the origin had to sit in BOTH directives, and a spell
+    where it sat in connect-src alone killed neural TTS outright ("no available
+    backend found"): measured from a live page, fetch() of that exact URL
+    returned 200 while import() of the same URL was refused.
 
-    The pre-existing assertion above could not catch it: `"huggingface.co" in csp`
-    is true no matter which directive the host sits in, and says nothing about
-    jsdelivr - yet its comment claimed this very property ("so enforcing does not
-    break TTS"). Hence a directive-scoped check.
+    Vendoring the runtime removed the need for either grant, so this now asserts
+    the ABSENCE. That is the stronger property: an origin nothing uses is pure
+    attack surface, and re-adding one is the cheap-looking "fix" whenever a TTS
+    load error appears - which would hide a broken vendored path rather than
+    repair it.
+
+    Checked in EVERY directive, not just the two that carried it, because the
+    next reader reaching for a CDN grant has no reason to pick the same two.
+    """
+    with TestClient(create_app(_engine())) as c:
+        r = c.get("/health")
+    csp = r.headers.get("Content-Security-Policy", "")
+    assert csp, "no enforcing Content-Security-Policy at all"
+    script_src = _directive(csp, "script-src")
+    assert script_src, f"no script-src at all: {csp!r}"
+    assert "cdn.jsdelivr.net" not in csp, (
+        "a CDN origin is back in the CSP. The onnxruntime runtime ships under "
+        "localm/plugins/builtin/tts/static/vendor/onnxruntime/ and is served "
+        f"from 'self'; nothing needs a third-party script origin. csp={csp!r}"
+    )
+    # Only the model weights may come from off-box, and only over fetch/XHR,
+    # which is connect-src's job. script-src must name no remote origin at all.
+    for token in script_src.split():
+        assert not token.startswith("http"), (
+            "script-src must not admit any remote origin; the shell's own "
+            f"scripts are same-origin and nonce-gated. offending token={token!r}"
+        )
+    connect_src = _directive(csp, "connect-src")
+    assert "https://huggingface.co" in connect_src, connect_src
+
+
+def test_script_src_still_admits_wasm_compilation_and_blob_workers():
+    """Vendoring moved the runtime, it did not remove WebAssembly.
+
+    Guards against over-cleaning the directive that the CDN token was removed
+    from. Both of these were separately measured as REQUIRED and are unrelated
+    to where the runtime is hosted: 'wasm-unsafe-eval' because compiling any
+    WebAssembly needs an explicit grant (onnxruntime-web is WebAssembly on both
+    its wasm and webgpu paths), and blob: because a cross-origin-isolated page
+    gives onnxruntime SharedArrayBuffer, so it loads its THREADED build whose
+    worker arrives as a blob: module - and a dynamic import of that blob is
+    governed by script-src, not worker-src.
     """
     with TestClient(create_app(_engine())) as c:
         r = c.get("/health")
     csp = r.headers.get("Content-Security-Policy", "")
     script_src = _directive(csp, "script-src")
-    assert script_src, f"no script-src at all: {csp!r}"
-    assert "https://cdn.jsdelivr.net" in script_src, (
-        "the onnxruntime backend origin must be in script-src, not only "
-        f"connect-src - a dynamic import() is a module script. script-src={script_src!r}"
-    )
-    # And the fetch side must keep working too: the model weights come over
-    # fetch/XHR, which is connect-src's job.
-    connect_src = _directive(csp, "connect-src")
-    assert "https://huggingface.co" in connect_src, connect_src
+    assert "'wasm-unsafe-eval'" in script_src, script_src
+    assert "blob:" in script_src, script_src
+    assert "blob:" in _directive(csp, "worker-src"), csp
 
 
 def test_cross_origin_isolation_headers_are_present():

@@ -9,5 +9,6 @@
   "voice": "af_heart",
   "speed": 1.0,
   "library": "vendor/kokoro.min.js",
-  "wasm_paths": ""
+  "_wasm_paths_note": "wasm_paths is the onnxruntime-web runtime the ONNX backend loads, resolved by the BROWSER against /plugins/tts/. It points at the vendored copy so a stock install needs no network for the runtime and the GUI's Content-Security-Policy needs no CDN origin. The trailing slash matters: onnxruntime concatenates the filename onto this prefix. Blank falls back to the bundle's own CDN default, which the CSP now refuses, so blank means no neural voice at all.",
+  "wasm_paths": "vendor/onnxruntime/"
 }

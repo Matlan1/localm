@@ -1706,8 +1706,9 @@ TTS_FIELDS: list = [
              "plugin's static folder.",
              gui=False, admin_only=True),
     TtsField("wasm_paths", Widget.TEXT, "ONNX runtime WASM path",
-             "Path to the onnxruntime WASM files, relative to the tts plugin's "
-             "static folder. Blank uses the bundle's own default.",
+             "Folder holding the onnxruntime WASM runtime, relative to the tts "
+             "plugin's static folder; keep the trailing slash. Blank falls "
+             "back to the vendored copy that ships with the plugin.",
              gui=False, admin_only=True),
 ]
 

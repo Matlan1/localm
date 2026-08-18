@@ -78,8 +78,26 @@ export async function register(ctx) {
   async function load() {
     const mod = await import(libraryURL);
     const onnx = mod.env && mod.env.backends && mod.env.backends.onnx;
-    if (cfg.wasm_paths && onnx) {
-      onnx.wasm.wasmPaths = new URL(cfg.wasm_paths, import.meta.url).href;
+    // The onnxruntime runtime is VENDORED (see vendor/NOTICE.md), and this
+    // fallback is where the default has to live rather than only in
+    // tts.example.json. The template default reaches us through
+    // /api/tts/config, and every path that loses it lands here silently: the
+    // config fetch above swallows a failure into `cfg = {}`, settings.py
+    // returns {} when the template is unreadable, and an old install may still
+    // carry a saved `wasm_paths: ""` override from before this shipped. In each
+    // of those the bundle would fall back to its OWN default,
+    // cdn.jsdelivr.net - which the CSP no longer admits, so neural TTS would
+    // die with "no available backend found" for a reason nothing local caused.
+    // A user value still wins (never silently override an explicit choice).
+    // The trailing slash is not cosmetic: onnxruntime concatenates the filename
+    // straight onto this prefix, so "vendor/onnxruntime" (no slash) would
+    // request ".../vendor/onnxruntimeort-wasm-simd-threaded.jsep.wasm" and 404.
+    // The settings validator accepts the value with or without it, so normalise
+    // here rather than trusting the way it was typed.
+    if (onnx) {
+      const wasmDir = String(cfg.wasm_paths || "vendor/onnxruntime/");
+      onnx.wasm.wasmPaths =
+        new URL(wasmDir.endsWith("/") ? wasmDir : wasmDir + "/", import.meta.url).href;
     }
     if (!announced) {
       announced = true;
