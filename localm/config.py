@@ -1198,7 +1198,13 @@ def _merge_stored_config(cfg: dict, stored) -> None:
               "is left untouched so you can recover it by hand.", file=sys.stderr)
 
 
-def load_config() -> dict:
+def load_config_checked() -> tuple:
+    """``(config, read_ok)``. ``read_ok`` is False ONLY when config.json (or its
+    ``.bak``) was PRESENT and could not be read, so *config* is DEFAULT_CONFIG
+    with nothing merged in - the same shape a genuinely absent config.json
+    produces (see _read_json_checked). A caller that needs to tell "no config
+    yet" apart from "a config exists but is corrupt" (e.g. bug-report
+    diagnostics) uses this instead of load_config()."""
     ensure_dirs()
     # DEEP copy: a shallow .copy() shares the nested mutable defaults (e.g. the
     # "plugins" dict) with DEFAULT_CONFIG, so a caller mutating cfg["plugins"][x]
@@ -1206,9 +1212,13 @@ def load_config() -> dict:
     # module-level DEFAULT_CONFIG for the rest of the process.
     cfg = copy.deepcopy(DEFAULT_CONFIG)
     with _io_lock:
-        stored = _read_json(CONFIG_FILE, {})
+        stored, read_ok = _read_json_checked(CONFIG_FILE, {})
     _merge_stored_config(cfg, stored)
-    return cfg
+    return cfg, read_ok
+
+
+def load_config() -> dict:
+    return load_config_checked()[0]
 
 
 def keep_diagnostics_enabled() -> bool:

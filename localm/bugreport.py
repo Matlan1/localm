@@ -258,6 +258,7 @@ def collect_diagnostics(context: Optional[dict] = None) -> dict:
     diag.update(_runtime_state())          # session_mode, debug_mode
     diag["enabled_plugins"] = _enabled_plugins()
     diag["config_subset"] = _safe_config_subset()
+    diag["config_unreadable"] = _config_unreadable()
     diag["dependencies"] = _dependency_versions()
     return diag
 
@@ -448,6 +449,22 @@ def _safe_config_subset() -> dict:
             val = _scrub_query_and_header_secrets(_scrub_url_creds(_scrub_home(val)))
         out[key] = val
     return out
+
+
+def _config_unreadable() -> bool:
+    """True only when config.json (or its .bak) EXISTS and could not be parsed,
+    in which case _safe_config_subset() is showing built-in defaults rather than
+    the user's real settings - see config.load_config_checked. Deliberately
+    independent of _safe_config_subset (which stays on load_config(), the signal
+    this needs is discarded there): a corrupt config must not render identically
+    to no config at all. Never raises."""
+    try:
+        from localm.config import load_config_checked
+        return not load_config_checked()[1]
+    except Exception:
+        # Could not even determine read_ok (e.g. a broken install failing the
+        # import): say nothing rather than assert a corruption we never checked.
+        return False
 
 
 def _dependency_versions() -> dict:
@@ -842,7 +859,17 @@ def build_report(summary: str, reason: str = "",
 
     config_subset = diag.get("config_subset") or {}
     if config_subset:
-        parts += ["", "## Configuration (safe subset)", "\n".join(_kv_lines(config_subset))]
+        section = ["", "## Configuration (safe subset)"]
+        if diag.get("config_unreadable"):
+            # Say the file could not be READ rather than silently showing
+            # defaults. Without this line a corrupt config.json renders a
+            # section byte-identical to a user with no config at all, hiding
+            # the single most likely cause of "my settings do nothing"
+            # (AGENTS.md rule 5).
+            section.append("(config.json exists but could not be read; the "
+                            "values below are DEFAULTS, not the user's settings)")
+        section.append("\n".join(_kv_lines(config_subset)))
+        parts += section
     deps = diag.get("dependencies") or {}
     if deps:
         parts += ["", "## Dependencies", "\n".join(_kv_lines(deps))]
