@@ -283,18 +283,18 @@
             <div class="disc-filter-bar">
               <div class="disc-filters" id="disc-type-filter">
                 <span class="sub disc-filter-label">Types</span>
-                <label class="filter-chip disc-chip" data-type="llm"><input type="checkbox" class="disc-type" value="llm" checked><span>LLMs</span></label>
-                <label class="filter-chip disc-chip" data-type="embedding"><input type="checkbox" class="disc-type" value="embedding" checked><span>Embedding</span></label>
-                <label class="filter-chip disc-chip" data-type="diffusion-unet"><input type="checkbox" class="disc-type" value="diffusion-unet" checked><span>Diffusion</span></label>
-                <label class="filter-chip disc-chip" data-type="text-encoder"><input type="checkbox" class="disc-type" value="text-encoder" checked><span>Encoders</span></label>
-                <label class="filter-chip disc-chip" data-type="vae"><input type="checkbox" class="disc-type" value="vae" checked><span>VAEs</span></label>
-                <label class="filter-chip disc-chip" data-type="lora"><input type="checkbox" class="disc-type" value="lora" checked><span>LoRAs</span></label>
-                <label class="filter-chip disc-chip" data-type="unknown"><input type="checkbox" class="disc-type" value="unknown" checked><span>Other</span></label>
+                <label class="disc-chip" data-type="llm"><input type="checkbox" class="disc-type" value="llm" checked><span>LLMs</span></label>
+                <label class="disc-chip" data-type="embedding"><input type="checkbox" class="disc-type" value="embedding" checked><span>Embedding</span></label>
+                <label class="disc-chip" data-type="diffusion-unet"><input type="checkbox" class="disc-type" value="diffusion-unet" checked><span>Diffusion</span></label>
+                <label class="disc-chip" data-type="text-encoder"><input type="checkbox" class="disc-type" value="text-encoder" checked><span>Encoders</span></label>
+                <label class="disc-chip" data-type="vae"><input type="checkbox" class="disc-type" value="vae" checked><span>VAEs</span></label>
+                <label class="disc-chip" data-type="lora"><input type="checkbox" class="disc-type" value="lora" checked><span>LoRAs</span></label>
+                <label class="disc-chip" data-type="unknown"><input type="checkbox" class="disc-type" value="unknown" checked><span>Other</span></label>
               </div>
               <div class="disc-filters" id="disc-formats">
                 <span class="sub disc-filter-label">Format</span>
-                <label class="filter-chip disc-chip disc-chip-fmt" data-fmt="gguf"><input type="checkbox" id="disc-fmt-gguf" checked><span>GGUF</span></label>
-                <label class="filter-chip disc-chip disc-chip-fmt" data-fmt="hf"><input type="checkbox" id="disc-fmt-hf" checked><span>Safetensors</span></label>
+                <label class="disc-chip disc-chip-fmt" data-fmt="gguf"><input type="checkbox" id="disc-fmt-gguf" checked><span>GGUF</span></label>
+                <label class="disc-chip disc-chip-fmt" data-fmt="hf"><input type="checkbox" id="disc-fmt-hf" checked><span>Safetensors</span></label>
               </div>
             </div>
             <div class="sub disc-hf-hint" id="disc-hf-hint" style="display:none"></div>
@@ -343,18 +343,15 @@
         <div class="card">
           <div class="card-head"><span class="ic cat-ic cat-blue" data-icon="models"></span>
             <div class="card-head-text"><h3>Registered models</h3></div></div>
-          <div class="filter-bar" id="models-type-filter">
-            <div class="filter-chips">
-              <span class="sub filter-label">Types</span>
-              <label class="filter-chip reg-chip" data-type="llm"><input type="checkbox" class="reg-type" value="llm" checked><span>LLMs<i class="chip-count"></i></span></label>
-              <label class="filter-chip reg-chip" data-type="embedding"><input type="checkbox" class="reg-type" value="embedding" checked><span>Embedding<i class="chip-count"></i></span></label>
-              <label class="filter-chip reg-chip" data-type="diffusion-unet"><input type="checkbox" class="reg-type" value="diffusion-unet" checked><span>Diffusion<i class="chip-count"></i></span></label>
-              <label class="filter-chip reg-chip" data-type="text-encoder"><input type="checkbox" class="reg-type" value="text-encoder" checked><span>Encoders<i class="chip-count"></i></span></label>
-              <label class="filter-chip reg-chip" data-type="vae"><input type="checkbox" class="reg-type" value="vae" checked><span>VAEs<i class="chip-count"></i></span></label>
-              <label class="filter-chip reg-chip" data-type="lora"><input type="checkbox" class="reg-type" value="lora" checked><span>LoRAs<i class="chip-count"></i></span></label>
-              <label class="filter-chip reg-chip" data-type="unknown"><input type="checkbox" class="reg-type" value="unknown" checked><span>Other<i class="chip-count"></i></span></label>
-              <button class="filter-reset" id="models-type-reset" hidden>reset</button>
-            </div>
+          <div class="tab-nav" id="models-tab-nav">
+            <button class="tab-btn active" data-type="all">All</button>
+            <button class="tab-btn" data-type="llm">LLMs</button>
+            <button class="tab-btn" data-type="embedding">Embedding</button>
+            <button class="tab-btn" data-type="diffusion-unet">Diffusion</button>
+            <button class="tab-btn" data-type="text-encoder">Encoders</button>
+            <button class="tab-btn" data-type="vae">VAEs</button>
+            <button class="tab-btn" data-type="lora">LoRAs</button>
+            <button class="tab-btn" data-type="unknown">Other</button>
           </div>
           <div class="scan-row">
             <button class="btn-secondary" id="models-unload-all-btn" title="Release every currently-loaded model from GPU/CPU memory">Unload all</button>
