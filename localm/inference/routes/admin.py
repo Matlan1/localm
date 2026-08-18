@@ -255,7 +255,16 @@ def register(app: FastAPI, ctx) -> None:
         fixes in detail before they ship. Stripped HERE rather than in the GUI because
         this endpoint is the single serving point: a client-side filter would leave the
         raw section reachable over the API by anyone who asks. Published prereleases
-        (0.1.5rc1 and the like) are NOT stripped - they are on GitHub, so they shipped."""
+        (0.1.5rc1 and the like) are NOT stripped - they are on GitHub, so they shipped.
+
+        The strip is now DEFENCE IN DEPTH rather than the primary control: the tracked
+        CHANGELOG.md carries released sections only, and unreleased work lives in a
+        gitignored internal changelog, so in the normal case there is nothing here to
+        remove. It stays because the cost is one line scan and the failure it prevents
+        is disclosing unshipped security fixes. Note the consequence for testing: with
+        the strip in place, an [Unreleased] section wrongly re-added to the tracked file
+        is INVISIBLE from this endpoint's output, so the source file is asserted
+        directly in tests/test_changelog_endpoint.py rather than through this route."""
         import localm
         from localm import updater
         try:

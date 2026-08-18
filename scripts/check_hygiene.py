@@ -461,6 +461,21 @@ def _changelog_append_only() -> list[str]:
 #     already present at the baseline is master's defect, not this branch's, and
 #     nagging every session about it on every run is how a warning gets trained
 #     into background noise.
+# INERT BY DESIGN SINCE THE CHANGELOG SPLIT, and that is stated here rather than left
+# for a reader to discover: the tracked CHANGELOG.md no longer HAS an [Unreleased]
+# section (unreleased work moved to a gitignored internal changelog), so
+# _changelog_unreleased_lines() finds nothing and every check below returns empty and
+# stays silent. It is kept, not deleted, for two reasons: it still fires correctly if a
+# draft section is ever re-added to the tracked file, and its DUPLICATE arm still reads
+# a real section when one exists.
+#
+# It CANNOT be repointed at the internal changelog, and the reason is worth knowing: it
+# works by diffing the working copy against a GIT BASELINE, and an untracked file has no
+# baseline to diff against. The failure it guarded (a sibling branch's bullet lost in a
+# rebase) also cannot occur there, since a gitignored file never merges. The internal
+# file's own hazard is different - every worktree holds a private copy that silently
+# diverges - and the defence for that is append-only writes to the main checkout's copy,
+# a discipline, not a check this script can make.
 _CHANGELOG_UNRELEASED_HEADER = re.compile(r"^##\s+\[unreleased\]", re.I)
 
 

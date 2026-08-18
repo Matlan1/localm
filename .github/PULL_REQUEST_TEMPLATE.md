@@ -6,10 +6,10 @@
 
 - [ ] `python scripts/check_hygiene.py` passes (no em/en dashes, no personal
       disclosure, no machine-absolute paths in code) - see AGENTS.md
-- [ ] Its `[Unreleased]` WARNINGS, if any, are understood before merging (AGENTS.md):
-      a DROPPED line must be one you meant to remove or reword, not a sibling PR's
-      bullet lost around a rebase; a DUPLICATED bullet is usually one restored that
-      was never actually lost, so delete the extra copy, not every copy
+- [ ] `CHANGELOG.md` carries RELEASED changes only. localm serves it in-app behind
+      the Changelog button, so nothing unreleased and nothing internal goes in it,
+      and a change a user cannot see or try does not belong there at all. Note an
+      unreleased user-visible change in the internal changelog instead
 - [ ] `pytest -m "not integration"` passes
 - [ ] `ruff check .` reviewed (no new lint regressions)
 - [ ] Defaults are project-relative or user-config; no absolute or

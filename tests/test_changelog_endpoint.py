@@ -136,9 +136,13 @@ def test_changelog_endpoint_serves_the_real_shipped_file(monkeypatch):
     """End-to-end with the REAL repo CHANGELOG.md (no monkeypatch): it is found and
     contains a version section - proving repo_root() resolution actually works.
 
-    Also the only test that runs against the ACTUAL file users are served, so it is
-    where the strip is proven on real content rather than on a fixture built to suit
-    it. Asserted on the heading, which is stable, rather than on today's bullets."""
+    The only test that runs against the ACTUAL file users are served. It no longer
+    proves the STRIP, and saying so matters: the tracked changelog now carries no
+    `[Unreleased]` section at all (that draft lives in a gitignored internal file),
+    so the strip has nothing to remove here and this assertion passes whether or not
+    the strip works. The strip is proven by the fixture tests above, which build a
+    file that actually has the section. What this test now guards is the SERVED
+    result, and the source-file invariant behind it has its own test below."""
     _open_mode(monkeypatch)
     data = _get(create_app(_engine()), "/api/changelog").json()
     assert data["available"] is True
@@ -153,6 +157,34 @@ def test_changelog_endpoint_serves_the_real_shipped_file(monkeypatch):
     assert "## [Unreleased]" not in md, (
         "the real shipped changelog must reach users without its in-progress section")
     assert "\n[Unreleased]:" not in md, "the dangling link definition goes too"
+
+
+def test_public_changelog_source_has_no_unreleased_section():
+    """The tracked CHANGELOG.md is RELEASED-ONLY, at the source, not merely at the
+    point of serving.
+
+    localm shows this file in-app behind the Changelog button, so it carries only
+    what is in a shipped release: nothing unreleased, nothing internal, nothing a
+    user cannot see or try. The in-progress draft lives in a gitignored internal
+    changelog instead.
+
+    Asserted on the FILE rather than on the endpoint's output on purpose. The strip
+    in admin.py stays as defence in depth, and precisely because it stays, an
+    `[Unreleased]` section re-added to the tracked file would be invisible from the
+    served result: the strip would quietly remove it and every endpoint assertion
+    would still pass. This is the only check that can see that mistake."""
+    from localm import updater
+    src = (updater.repo_root() / "CHANGELOG.md").read_text(encoding="utf-8")
+    offending = [ln for ln in src.splitlines() if ln.startswith("## [Unreleased]")]
+    assert not offending, (
+        "the public changelog has an [Unreleased] section again; unreleased work "
+        "belongs in the gitignored internal changelog, not in the file users are "
+        f"served: {offending!r}")
+    assert not [ln for ln in src.splitlines() if ln.startswith("[Unreleased]:")], \
+        "the [Unreleased] link-reference definition points at a section that is gone"
+    # Not vacuous: the file must still actually contain releases.
+    assert any(ln.startswith("## [0.1.0]") for ln in src.splitlines()), \
+        "the released history is missing, so this test is checking an empty file"
 
 
 def test_strip_leaves_unreleased_MENTIONS_inside_released_sections_alone(tmp_path):

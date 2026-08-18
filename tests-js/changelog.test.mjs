@@ -8,8 +8,11 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadAppWithPages } from "./harness.mjs";
 
+// Two RELEASED sections, which is the only shape this endpoint can return: the
+// tracked changelog is released-only and the route strips any [Unreleased] section
+// before serving. A fixture containing one would depict a response that cannot occur.
 const CHANGELOG_MD =
-  "# Changelog\n\n## [Unreleased]\n\n### Added\n- brand new feature\n\n" +
+  "# Changelog\n\n## [0.2.0] - 2026-08-01\n\n### Added\n- brand new feature\n\n" +
   "## [0.1.0] - 2026-07-04\n\nFirst tagged release.\n";
 
 function makeFetch(routes) {
@@ -44,7 +47,7 @@ test("Changelog: 'Show changelog' fetches /api/changelog and renders version his
   const modal = doc.getElementById("modal");
   assert.notEqual(modal.style.display, "none", "the changelog modal opened");
   // Full history, newest first: both the newest and an older release section show.
-  assert.match(modal.textContent, /\[Unreleased\]/);
+  assert.match(modal.textContent, /\[0\.2\.0\]/);
   assert.match(modal.textContent, /\[0\.1\.0\]/);
   assert.match(modal.textContent, /First tagged release\./);
 });
