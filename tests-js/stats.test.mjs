@@ -6,6 +6,8 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { loadApp } from "./harness.mjs";
 
 const GIB = 1024 ** 3;
@@ -101,4 +103,58 @@ test("pollHwStats fetches /api/stats and renders the result", async () => {
   await settle();
   assert.ok(calls.some((u) => u.endsWith("/api/stats")), "polls GET /api/stats");
   assert.match(window.document.getElementById("hw-stats").textContent, /CPU 12%/);
+});
+
+// --------------------------------------------------------------------------- //
+//  The readout WRAPS, it never truncates                                       //
+//                                                                              //
+//  It used to be `white-space: nowrap` + `overflow: hidden` + `text-overflow:  //
+//  ellipsis`, so at the sidebar's width the line was cut - and because VRAM is //
+//  rendered last of CPU/RAM/VRAM/GPU, the figure that got cut was the one the  //
+//  readout exists for ("VRAM 3.6/1..."). jsdom does no layout, so the wrap     //
+//  itself is unobservable here; what IS checkable is that the truncating       //
+//  declarations are gone from the REAL stylesheet and the wrapping ones are    //
+//  present, plus the DOM shape the wrap depends on.                            //
+// --------------------------------------------------------------------------- //
+
+// COMMENTS ARE STRIPPED FIRST, and that is not tidiness. The rule carries a
+// comment naming the very declarations that must be absent (it explains what
+// was removed and why), so a raw match reports "text-overflow: ellipsis is
+// still here" against prose while the declaration is long gone. Caught by this
+// test failing on a correct stylesheet - the check has to read declarations,
+// not the words near them.
+const hwStatsCss = () => {
+  const css = readFileSync(
+    fileURLToPath(new URL("../localm/plugins/gui/static/style.css", import.meta.url)), "utf8");
+  const m = css.match(/\n\.hw-stats \{([\s\S]*?)\n\}/);
+  assert.ok(m, ".hw-stats rule found in style.css");
+  return m[1].replace(/\/\*[\s\S]*?\*\//g, "");
+};
+
+test("hw-stats: the rule does not truncate", () => {
+  const rule = hwStatsCss();
+  assert.doesNotMatch(rule, /text-overflow:\s*ellipsis/,
+    "ellipsis would silently cut the VRAM figure off again");
+  assert.doesNotMatch(rule, /white-space:\s*nowrap/,
+    "nowrap on the container is what forced the truncation");
+  assert.doesNotMatch(rule, /overflow:\s*hidden/, "hidden overflow clips the wrapped second line");
+});
+
+test("hw-stats: the rule wraps instead", () => {
+  assert.match(hwStatsCss(), /flex-wrap:\s*wrap/, "metrics must be allowed onto a second line");
+});
+
+test("hw-stats: each metric is one unbreakable span, with no stray separator text", () => {
+  const { window } = loadApp({ fetchImpl: goodFetch() });
+  const el = window.document.getElementById("hw-stats");
+  window.renderHwStats(STATS);
+  const spans = [...el.querySelectorAll("span")];
+  assert.equal(spans.length, 4, "one span per metric (CPU/RAM/VRAM/GPU)");
+  // Every child is an element: a " · " TEXT node between spans is precisely what
+  // gets stranded at the end of a wrapped line, so the separator moved to CSS.
+  assert.equal([...el.childNodes].every((n) => n.nodeType === 1), true,
+    "no separator text nodes between the metric spans");
+  // The whole VRAM figure travels together - a wrap must not split "2.0/16.0 GB".
+  const vram = spans.find((s) => /VRAM/.test(s.textContent));
+  assert.equal(vram.textContent, "VRAM 2.0/16.0 GB", "the VRAM span carries the complete figure");
 });
