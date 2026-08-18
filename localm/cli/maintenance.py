@@ -200,18 +200,26 @@ def setup_embeddings(model, yes=False):
     mem_note = ""
     try:
         from ..inference.embedder import embed_texts
-        from ..memory.backfill import backfill_all, vectorless_total
+        from ..memory.backfill import backfill_all, vectorless_scan
         from ..memory.store import _memory_root as _mem_root
 
         _root = _mem_root(None)
-        pending = vectorless_total(_root)
-        if pending:
-            console.print(f"  Embedding {pending} stored memory item(s) ...")
+        pending, unreadable_ns = vectorless_scan(_root)
+        if pending or unreadable_ns:
+            if pending:
+                console.print(f"  Embedding {pending} stored memory item(s) ...")
             res = backfill_all(_root, embed_texts)
-            if res["remaining"]:
-                mem_note = (f"\nMemory: embedded {res['embedded']} item(s); "
-                            f"{res['remaining']} could not be embedded and stay "
-                            "lexical - re-run to retry.")
+            if res["remaining"] or res["unreadable"]:
+                bits = []
+                if res["embedded"]:
+                    bits.append(f"embedded {res['embedded']} item(s)")
+                if res["remaining"]:
+                    bits.append(f"{res['remaining']} could not be embedded")
+                if res["unreadable"]:
+                    bits.append(
+                        f"{res['unreadable']} namespace(s) could not be read")
+                mem_note = ("\nMemory: " + "; ".join(bits) +
+                            " - stay lexical, re-run to retry.")
             elif res["embedded"]:
                 mem_note = (f"\nMemory: {res['embedded']} stored item(s) embedded, "
                             "so recall is semantic for those too.")

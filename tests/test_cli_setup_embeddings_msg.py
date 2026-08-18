@@ -172,3 +172,31 @@ class TestSetupEmbeddingsPreSwitchConfirm:
         result = cli_runner.invoke(setup_embeddings, ["--model", "new-model"])
         assert result.exit_code == 0, result.output
         assert "may invalidate" not in result.output
+
+
+# --------------------------------------------------------------------------- #
+#  An unreadable memory namespace must be NAMED in the banner, not silently   #
+#  absorbed as "nothing to embed". Reproduces the CLI-layer cost of the       #
+#  backfill.py defect: pending == 0 for a root whose only namespace could not #
+#  be opened, which used to skip the whole memory block with no note at all.  #
+# --------------------------------------------------------------------------- #
+
+class TestSetupEmbeddingsUnreadableMemoryNamespace:
+    def test_unreadable_namespace_is_named_in_the_banner(
+            self, cli_runner, monkeypatch, tmp_path):
+        from localm.cli.maintenance import setup_embeddings
+        _stub_install(monkeypatch, tmp_path)
+
+        ns_dir = tmp_path / ".localm" / "memory" / "chat"
+        ns_dir.mkdir(parents=True, exist_ok=True)
+        (ns_dir / ("0" * 16 + ".jsonl")).write_bytes(
+            b'{"id":"a"}\n\xff\xfe not utf-8\n')
+
+        result = cli_runner.invoke(setup_embeddings, [])
+        assert result.exit_code == 0, result.output
+        low = result.output.lower()
+        assert "could not be read" in low, (
+            "an unreadable namespace must be named in the banner, not silently "
+            f"treated as nothing to embed: {result.output!r}")
+        assert "so recall is semantic for those too" not in low, (
+            "must never claim success while a namespace went unread")
