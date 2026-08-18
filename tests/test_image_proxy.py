@@ -12,7 +12,7 @@ one route whose whole job is to say no in five different ways before it says yes
 
 import pytest
 from fastapi.testclient import TestClient
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from localm.plugins.gui.routes import imgproxy
 
@@ -67,6 +67,25 @@ def test_proxies_the_bytes_when_enabled(monkeypatch):
     # Attacker-choosable bytes served from our own origin stay inert.
     assert "default-src 'none'" in r.headers.get("content-security-policy", "")
     assert r.headers.get("x-content-type-options") == "nosniff"
+
+
+def test_the_response_is_never_cached(monkeypatch):
+    """Turning the feature OFF must take effect immediately.
+
+    MEASURED: with `private, max-age=300` the browser kept serving an
+    already-fetched image for five minutes after the owner switched the setting
+    off, so the control they had just used appeared to do nothing - and
+    model-influenced bytes sat in the on-disk HTTP cache of an offline-first
+    product. The client keeps its own in-page blob cache, so a streaming
+    re-render still does not refetch; the HTTP cache was buying almost nothing.
+    """
+    c = _client(monkeypatch, enabled=True, fetch=_ok_fetch)
+    r = c.get("/api/image-proxy", params={"url": "https://example.com/a.png"})
+    assert r.status_code == 200
+    cache = r.headers.get("cache-control", "")
+    assert "no-store" in cache, f"cache-control={cache!r}"
+    assert "max-age" not in cache, (
+        f"a max-age here delays the off-switch by exactly that long: {cache!r}")
 
 
 def test_ssrf_refusal_from_netpolicy_is_surfaced_not_swallowed(monkeypatch):

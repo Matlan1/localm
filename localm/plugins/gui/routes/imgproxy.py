@@ -102,7 +102,15 @@ def register(app: FastAPI, ctx) -> None:
                 # even if something downstream mis-reads it, and costs nothing for
                 # an image.
                 "Content-Security-Policy": "default-src 'none'; sandbox",
-                "Cache-Control": "private, max-age=300",
+                # no-store, and this was MEASURED rather than chosen on taste.
+                # An earlier `private, max-age=300` meant turning the feature OFF
+                # did not take effect for five minutes: the browser kept serving
+                # the cached image, so the switch the user had just used appeared
+                # to do nothing. It also wrote model-influenced bytes into the
+                # on-disk HTTP cache of an offline-first product. The client keeps
+                # its own in-page blob cache, so a streaming re-render still does
+                # not refetch - the HTTP cache was buying almost nothing.
+                "Cache-Control": "no-store",
                 # An image is never a download prompt and never a page.
                 "X-Content-Type-Options": "nosniff",
             },

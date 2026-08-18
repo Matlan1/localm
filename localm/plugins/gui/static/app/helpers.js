@@ -262,6 +262,29 @@ export function scrubMarkers(text) {
  *  it is not a sanitize-then-modify hazard. data:, blob: and relative/same-origin
  *  sources are left exactly as they are: they already load, and routing them
  *  through the proxy would be a pointless round trip. */
+/** remote href -> blob: URL once fetched, or the in-flight Promise for it.
+ *
+ *  Keyed on the URL, NOT on the element, and that is load-bearing rather than an
+ *  optimisation: renderMarkdown reassigns innerHTML on every streamed chunk, so
+ *  the <img> is a BRAND NEW element each time and any per-element "already done"
+ *  flag is destroyed with its predecessor. Measured before this existed: three
+ *  renders of one reply produced three fetches, so a streaming reply would have
+ *  re-fetched every image on every token. The cache also removes the flicker of
+ *  an image blanking and reloading mid-stream. */
+const _imgProxyCache = new Map();
+const _IMG_PROXY_CACHE_MAX = 64;
+
+function _rememberProxiedImage(href, objUrl) {
+  if (_imgProxyCache.size >= _IMG_PROXY_CACHE_MAX) {
+    const oldest = _imgProxyCache.keys().next().value;
+    const stale = _imgProxyCache.get(oldest);
+    _imgProxyCache.delete(oldest);
+    // Only a settled entry holds a revocable URL; an in-flight Promise does not.
+    if (typeof stale === "string") URL.revokeObjectURL(stale);
+  }
+  _imgProxyCache.set(href, objUrl);
+}
+
 function proxyRemoteImages(root) {
   root.querySelectorAll("img[src]").forEach((img) => {
     const raw = img.getAttribute("src") || "";
@@ -269,7 +292,44 @@ function proxyRemoteImages(root) {
     let u;
     try { u = new URL(raw, window.location.href); } catch (e) { return; }
     if (u.origin === window.location.origin) return; // our own bytes, no detour
-    img.setAttribute("src", "/api/image-proxy?url=" + encodeURIComponent(u.href));
+    img.dataset.lmProxySrc = u.href;                 // what the model asked for
+    // Drop the remote src so no broken load stays pending. The browser has not
+    // reached that host regardless - `img-src 'self' data: blob:` refused it the
+    // moment innerHTML created the element, which is what actually guarantees the
+    // privacy property here. If a future change ever adds a remote origin to
+    // img-src, that guarantee moves to this line's timing and becomes a race.
+    img.removeAttribute("src");
+
+    const cached = _imgProxyCache.get(u.href);
+    if (typeof cached === "string") { img.src = cached; return; }
+    if (cached) { cached.then((o) => { if (o) img.src = o; }); return; }  // in flight
+
+    // MUST be fetch(), not a bare src=. In open mode every GET under /api/ needs
+    // the per-process shell token as a BEARER header, and an <img> element cannot
+    // send a header - so pointing src straight at the proxy 403s on the default
+    // keyless install and the feature silently never works. Measured end to end:
+    // 403 without the token, 200 with it, on the same URL.
+    const pending = fetch("/api/image-proxy?url=" + encodeURIComponent(u.href),
+                          { headers: authHeaders() })
+      .then((r) => (r.ok ? r.blob() : Promise.reject(new Error("HTTP " + r.status))))
+      .then((blob) => {
+        const objUrl = URL.createObjectURL(blob);
+        _rememberProxiedImage(u.href, objUrl);
+        return objUrl;
+      })
+      .catch(() => {
+        // Off (403 - the DEFAULT state), refused by the network policy, or the
+        // host is unreachable. Forget it so a later render may retry, and leave
+        // the image blank exactly as a blocked remote image looks today rather
+        // than inventing an error state in the middle of a reply.
+        _imgProxyCache.delete(u.href);
+        return null;
+      });
+    _imgProxyCache.set(u.href, pending);
+    pending.then((o) => {
+      if (o) img.src = o;
+      else img.dataset.lmProxyFailed = "1";
+    });
   });
 }
 
