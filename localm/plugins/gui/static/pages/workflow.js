@@ -7,7 +7,7 @@
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { $, authHeaders, confirmDanger, el, toast } from "../app/helpers.js";
-import { emptyState, iconEl } from "../app/icons.js";
+import { emptyState } from "../app/icons.js";
 import { loginWithKey } from "../app/models-sidebar.js";
 import { MEDIA_PLUGIN_ORDER } from "./settings.js";
 
@@ -171,9 +171,13 @@ async function comfyModelPicker(media) {
 export function workflowRow(media, name, label, active, deletable) {
   const row = el("div", "workflow-row" + (active ? " active" : ""));
   const pick = el("button", "btn-secondary workflow-pick");
-  pick.appendChild(iconEl(active ? "dot" : "ring", "btn-ic"));
+  // No radio dot/ring: the row's own accent bar (.workflow-row.active) already
+  // marks the selection, and a second glyph saying the same thing just competed
+  // with it. The non-visual signal is NOT dropped with the glyph - aria-current
+  // carries it for assistive tech, which the decorative icon never did.
   pick.appendChild(document.createTextNode(label));
   pick.type = "button";
+  if (active) pick.setAttribute("aria-current", "true");
   pick.title = active ? "In use" : "Use this workflow";
   pick.onclick = () => selectWorkflow(media, name);
   row.appendChild(pick);

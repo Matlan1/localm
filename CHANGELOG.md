@@ -98,6 +98,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   the Runtime update card, and the update-behavior toggles (offer prereleases,
   ignore network access) are now one "Updates" card with three clearly
   labeled parts, instead of three separate panels.
+- **Two places that said the same thing twice now say it once.** The sidebar
+  showed the active model's name in a badge directly under the dropdown that
+  was already showing it, and the Image, Music and Video workflow lists marked
+  the workflow in use with a radio dot as well as the highlighted bar down the
+  side of the row. The duplicate badge and the dot are gone. The badge still
+  appears for everything the dropdown cannot tell you, which is the part worth
+  keeping: while a model is loading or unloading, and for any problem, such as
+  a failed load or the server becoming unreachable.
 
 ### Fixed
 - **A model pull can no longer be reported as failed after it actually
