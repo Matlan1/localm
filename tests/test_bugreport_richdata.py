@@ -178,6 +178,54 @@ def test_build_report_end_to_end_no_canary_survives_with_credentialed_config_url
     assert "QACANARYREVIEWTOK5a9c33e1" not in text
 
 
+def test_corrupt_config_flagged_unreadable_not_silently_defaulted(tmp_path, monkeypatch):
+    """A corrupt config.json must not render identically to a genuinely absent
+    one - see bugreport._config_unreadable / config.load_config_checked.
+
+    Uses REAL files on disk rather than monkeypatching load_config, unlike the
+    tests above: a lambda can never be "unreadable", which is exactly the
+    fixture shape that let a corrupt config go undetected in the first place.
+    """
+    import localm.config as cfg
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(cfg, "HOME_DIR", home)
+    monkeypatch.setattr(cfg, "MODELS_DIR", home / "models")
+    monkeypatch.setattr(cfg, "CONFIG_FILE", home / "config.json")
+
+    # arm A: a real, valid config on disk.
+    cfg.CONFIG_FILE.write_text('{"n_ctx": 31337}', encoding="utf-8")
+    report_present = bugreport.build_report("x")
+    # Prove the injection took before trusting anything downstream: if
+    # CONFIG_FILE were mis-pointed, every arm below would silently render the
+    # same built-in defaults and the rest of this test would prove nothing.
+    assert "31337" in report_present
+
+    # arm B: overwrite the SAME path with corrupt JSON.
+    cfg.CONFIG_FILE.write_text("{ not json ", encoding="utf-8")
+    assert cfg.CONFIG_FILE.is_file() and cfg.CONFIG_FILE.stat().st_size > 0
+    report_corrupt = bugreport.build_report("x")
+
+    # arm C: no config.json at all.
+    cfg.CONFIG_FILE.unlink()
+    report_absent = bugreport.build_report("x")
+
+    # The discriminator: only the corrupt arm may say the file could not be read.
+    marker = "config.json exists but could not be read"
+    assert marker in report_corrupt
+    assert marker not in report_absent
+
+    # The actual finding: the two Configuration sections must not be
+    # byte-identical (they were, before this fix - both showed bare defaults
+    # with nothing distinguishing "corrupt" from "never configured").
+    def _config_section(text):
+        start = text.index("## Configuration (safe subset)")
+        end = text.find("\n\n## ", start)
+        return text[start:] if end == -1 else text[start:end]
+
+    assert _config_section(report_corrupt) != _config_section(report_absent)
+
+
 # ----------------------- client / browser sanitizer ----------------------- #
 
 def test_sanitize_client_context_caps_and_filters():
