@@ -17,18 +17,6 @@ updates:
       - dependency-name: "rocm"
       - dependency-name: "rocm-sdk-core"
       - dependency-name: "rocm-sdk-libraries-gfx103x-all"
-      # transformers is capped at ~=5.13.1 in pyproject.toml's [gpu] extra: 5.14+
-      # hard-imports transformers/distributed/fsdp.py on the ordinary
-      # `from transformers import AutoTokenizer` path, and the pinned ROCm/Windows
-      # torch wheel has no torch._C._distributed_c10d, so every HF model load dies
-      # at "loading processor..." with a message that hides the real cause. See
-      # tests/test_gpu_extra_pins.py, which guards this. A minor/major bump would
-      # cross that boundary; patch bumps within 5.13.x stay enabled since they
-      # cannot.
-      - dependency-name: "transformers"
-        update-types:
-          - "version-update:semver-minor"
-          - "version-update:semver-major"
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
