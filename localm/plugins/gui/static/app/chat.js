@@ -7,7 +7,7 @@
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { $, authHeaders, autoGrow, confirmDanger, el, fetchImageURL, INSTANCE_SCOPED_KEYS, readStoredJSON, reconcileInstanceId, renderMarkdown, scrubMarkers, stripThink, toast } from "./helpers.js";
-import { iconEl } from "./icons.js";
+import { emptyState, iconEl } from "./icons.js";
 import { modelCache, modelSelect } from "./models-sidebar.js";
 import { openMemoryModal, runCompletion, speak, setWebAskSession } from "./settings-perf.js";
 import { showView } from "./tabs.js";
@@ -769,6 +769,9 @@ export function renderConvList() {
 
   if (term && !visible.length) {
     list.appendChild(el("div", "privacy-hint", "no matching chats"));
+  } else if (!term && !chat.conversations.length) {
+    list.appendChild(emptyState("chat", "No conversations yet",
+      "Start one with the + above."));
   }
 }
 

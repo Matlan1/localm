@@ -7,7 +7,7 @@
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { $, authHeaders, confirmDanger, el, toast } from "../app/helpers.js";
-import { iconEl } from "../app/icons.js";
+import { emptyState, iconEl } from "../app/icons.js";
 import { loginWithKey } from "../app/models-sidebar.js";
 import { MEDIA_PLUGIN_ORDER } from "./settings.js";
 
@@ -43,7 +43,7 @@ export async function refreshWorkflowPanel(media) {
     if (!r.ok) throw new Error(r.statusText);
     data = await r.json();
   } catch (e) {
-    box.replaceChildren(el("div", "sub", "Could not load workflows: " + e.message));
+    box.replaceChildren(emptyState("warning", "Could not load workflows", e.message));
     return;
   }
   box.replaceChildren();
@@ -114,7 +114,7 @@ async function comfyModelPicker(media) {
       { headers: authHeaders() });
     data = await r.json();
   } catch (e) {
-    wrap.appendChild(el("div", "sub", "Could not check ComfyUI models: " + e.message));
+    wrap.appendChild(emptyState("warning", "Could not check ComfyUI models", e.message));
     return wrap;
   }
   if (!data.reachable) {

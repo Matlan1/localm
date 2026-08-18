@@ -848,7 +848,8 @@ export async function kbInfoModal(name) {
       body.appendChild(row);
     }
     if (!data.docs.length) {
-      body.appendChild(el("div", "sub", "(empty - use add docs)"));
+      body.appendChild(emptyState("file", "No documents yet",
+        "Use add docs above to index a file or folder."));
     }
   });
 }
@@ -880,7 +881,8 @@ export function kbSearchModal(name) {
         if (!r.ok) throw new Error(data.detail || r.statusText);
         results.replaceChildren();
         if (!data.hits.length) {
-          results.appendChild(el("div", "sub", "(no matches)"));
+          results.appendChild(emptyState("search", "No matches",
+            "Try a different query, or check that the collection has documents."));
           return;
         }
         for (const h of data.hits) {

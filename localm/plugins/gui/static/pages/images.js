@@ -57,14 +57,14 @@ export async function refreshImageHistory() {
     if (!r.ok) {
       // Show a visible message instead of a blank grid (mirrors music/video),
       // so a transient non-200 does not look like a broken/half-loaded page.
-      $("img-history").replaceChildren(
-        el("div", "sub", `Could not load images (HTTP ${r.status}).`));
+      $("img-history").replaceChildren(emptyState("warning", "Could not load images",
+        `The server returned HTTP ${r.status}. Try refreshing the page.`));
       return;
     }
     imgState.items = (await r.json()).images;
   } catch (e) {
-    $("img-history").replaceChildren(
-      el("div", "sub", `Could not load images: ${(e && e.message) || e}`));
+    $("img-history").replaceChildren(emptyState("warning", "Could not load images",
+      `${(e && e.message) || e}`));
     return;
   }
   // Drop selections for images that no longer exist

@@ -115,7 +115,7 @@ export async function renderCatalogPlugins() {
     if (!r.ok) throw new Error(r.statusText);
     data = await r.json();
   } catch (e) {
-    box.appendChild(el("div", "sub", "Could not load plugins: " + e.message));
+    box.appendChild(emptyState("warning", "Could not load plugins", e.message));
     return;
   }
   if (myToken !== _catalogRenderToken) return;   // superseded while fetching
@@ -377,7 +377,7 @@ export async function refreshPluginsPage() {
       box.appendChild(pluginErrorLine(name, err));
     }
   } catch (e) {
-    box.appendChild(el("div", "sub", "Could not load plugins: " + e.message));
+    box.appendChild(emptyState("warning", "Could not load plugins", e.message));
   }
 }
 
