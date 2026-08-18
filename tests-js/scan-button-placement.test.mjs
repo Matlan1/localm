@@ -100,13 +100,49 @@ test("scan-placement: the button carries an icon and copy that differentiates it
     "the re-scan row's copy references the already-configured folder (its distinguishing behavior)");
 });
 
+// A real (non-dry-run) scan is job-based now (see gui_scan_models /
+// scan_comfy_models's progress_cb): POST /api/models/scan returns {job_id}
+// immediately and the result streams over GET /api/jobs/{id}/events, with the
+// final progress event (phase "done") carrying the same added/skipped/method
+// fields the old synchronous response body used to. Single-shot SSE playback,
+// same shape as models-import-comfy.test.mjs's sseResponse.
+function sseResponse(events) {
+  const frames = events.map((ev) => `data: ${JSON.stringify(ev)}\n\n`);
+  let idx = 0;
+  const enc = new TextEncoder();
+  return {
+    ok: true, status: 200,
+    body: {
+      getReader() {
+        return {
+          async read() {
+            if (idx < frames.length) {
+              const chunk = enc.encode(frames[idx]);
+              idx++;
+              return { done: false, value: chunk };
+            }
+            return { done: true, value: undefined };
+          },
+          async cancel() {},
+        };
+      },
+    },
+  };
+}
+
 test("scan-placement: clicking the (now always-visible) button still POSTs the scan and toasts the result", async () => {
   const calls = [];
   const fetchImpl = async (url, opts = {}) => {
     const u = String(url);
+    if (/\/api\/jobs\/[^/]+\/events$/.test(u)) {
+      return sseResponse([
+        { type: "progress", phase: "done", done: 3, total: 3, added: 2, skipped: 1, method: "hybrid" },
+        { type: "end", status: "done", returncode: 0 },
+      ]);
+    }
     if (u.startsWith("/api/models/scan")) {
       calls.push({ url: u, method: opts.method });
-      return { ok: true, status: 200, json: async () => ({ added: 2, skipped: 1, method: "hybrid" }), text: async () => "" };
+      return { ok: true, status: 200, json: async () => ({ job_id: "scan-placement-job" }), text: async () => "" };
     }
     return okFetch(u);
   };

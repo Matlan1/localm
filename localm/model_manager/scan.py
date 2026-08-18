@@ -225,11 +225,20 @@ def _discover_comfy_files(models_path: Path, comfy_url: Optional[str] = None):
     return found_files, method
 
 
-def scan_comfy_models(comfy_url: Optional[str] = None, workdir: Optional[str] = None) -> ScanResult:
+def scan_comfy_models(comfy_url: Optional[str] = None, workdir: Optional[str] = None,
+                       *, progress_cb=None) -> ScanResult:
     """Scan ComfyUI folders and/or /object_info and register newly discovered
     files. *workdir* overrides the configured comfy_workdir for a one-off scan
     of an arbitrary folder (e.g. the guided Import-from-ComfyUI flow) WITHOUT
-    reading or mutating the persistent comfy_workdir config value."""
+    reading or mutating the persistent comfy_workdir config value.
+
+    *progress_cb*, when given, is called as ``progress_cb(done, total, name)``
+    once per discovered file as it is registered (or found already registered)
+    - the one point in this function with an honest denominator (the directory
+    walk above it has none). The GUI route wires this to Job.progress() so the
+    guided Import-from-ComfyUI flow can show a real "registering model N of M"
+    count instead of a silent wait; a caller that passes nothing (every
+    existing caller) sees no behavior change."""
     models_path = _resolve_scan_models_path(workdir)
     if models_path is None:
         return ScanResult(added=0, skipped=0, method="none (comfy_workdir not configured)")
@@ -243,8 +252,11 @@ def scan_comfy_models(comfy_url: Optional[str] = None, workdir: Optional[str] = 
 
     added = 0
     skipped = 0
+    total = len(found_files)
 
-    for path, mtype in found_files.items():
+    for i, (path, mtype) in enumerate(found_files.items(), start=1):
+        if progress_cb is not None:
+            progress_cb(i, total, path.name)
         resolved_path = path.resolve()
         if resolved_path in existing_paths:
             skipped += 1

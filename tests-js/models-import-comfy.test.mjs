@@ -4,6 +4,13 @@
 // nothing registered) -> confirm (real registration) -> toast + refresh.
 // Separate from the existing "Scan ComfyUI Models" button/tests (scan-reason,
 // models-add-disk): this flow always sends an explicit workdir + dry_run.
+//
+// A real (dry_run:false) scan is job-based now (see gui_scan_models /
+// scan_comfy_models's progress_cb): POST /api/models/scan returns {job_id}
+// immediately and the registration count streams over GET
+// /api/jobs/{id}/events, mirroring the model-pull flow's streamJob() usage.
+// jobEvents below plays back that SSE stream the same way
+// streamjob-reconnect.test.mjs does for the pull flow.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -29,7 +36,59 @@ const FS = {
   },
 };
 
-function makeFetch({ managedStatus, scanImpl } = {}) {
+// A single-shot SSE playback of *events*, shaped exactly like
+// streamjob-reconnect.test.mjs's mock: a fetch Response whose body.getReader()
+// hands back one "data: <json>\n\n" frame per call, then a clean EOF.
+//
+// delayMs>0 resolves each frame on a REAL timer instead of an already-resolved
+// microtask. Plain `await`-chained microtasks all drain within a single event
+// loop turn (Node runs the microtask queue to exhaustion before any timer
+// fires), so a test that fires the click and reads the DOM after just one
+// `setTimeout(...,0)` observes the FULLY SETTLED end state, not a mid-stream
+// one, no matter how many progress events preceded it - a real per-frame delay
+// plus polling (waitFor, below) is what actually lets a test catch an
+// in-flight "registering model N of M" moment.
+function sseResponse(events, { delayMs = 0 } = {}) {
+  const frames = events.map((ev) => `data: ${JSON.stringify(ev)}\n\n`);
+  let idx = 0;
+  const enc = new TextEncoder();
+  return {
+    ok: true, status: 200,
+    body: {
+      getReader() {
+        return {
+          read() {
+            const emit = () => {
+              if (idx < frames.length) {
+                const chunk = enc.encode(frames[idx]);
+                idx++;
+                return { done: false, value: chunk };
+              }
+              return { done: true, value: undefined };
+            };
+            if (!delayMs) return Promise.resolve(emit());
+            return new Promise((resolve) => setTimeout(() => resolve(emit()), delayMs));
+          },
+          async cancel() {},
+        };
+      },
+    },
+  };
+}
+
+// Poll *cond* until it returns true or *timeout* elapses - same shape as
+// streamjob-reconnect.test.mjs's deadline loops, for asserting on a
+// real-timer-paced SSE playback (see sseResponse's delayMs) without a race.
+async function waitFor(cond, { timeout = 2000, interval = 5 } = {}) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    if (cond()) return true;
+    await new Promise((r) => setTimeout(r, interval));
+  }
+  return false;
+}
+
+function makeFetch({ managedStatus, scanImpl, jobEvents, jobEventsDelayMs } = {}) {
   return async (url, opts = {}) => {
     const u = String(url);
     if (u.startsWith("/api/comfy/managed-status")) {
@@ -37,6 +96,9 @@ function makeFetch({ managedStatus, scanImpl } = {}) {
         return { ok: false, status: 403, json: async () => ({}) };
       }
       return { ok: true, status: 200, json: async () => managedStatus };
+    }
+    if (/\/api\/jobs\/[^/]+\/events$/.test(u)) {
+      return sseResponse(jobEvents || [], { delayMs: jobEventsDelayMs });
     }
     if (u.startsWith("/api/models/scan")) {
       const body = opts.body ? JSON.parse(opts.body) : {};
@@ -253,13 +315,21 @@ test("import-comfy: Import POSTs dry_run:false for the previewed folder, toasts,
   const { window } = loadAppWithPages({
     fetchImpl: async (url, opts = {}) => {
       const u = String(url);
+      if (/\/api\/jobs\/[^/]+\/events$/.test(u)) {
+        return sseResponse([
+          { type: "progress", phase: "registering", done: 1, total: 2, name: "a.safetensors" },
+          { type: "progress", phase: "registering", done: 2, total: 2, name: "b.safetensors" },
+          { type: "progress", phase: "done", done: 2, total: 2, added: 2, skipped: 0, method: "folder-walk" },
+          { type: "end", status: "done", returncode: 0 },
+        ]);
+      }
       if (u.startsWith("/api/models/scan")) {
         const b = opts.body ? JSON.parse(opts.body) : {};
         calls.push(b);
         if (b.dry_run) {
           return { ok: true, json: async () => ({ dry_run: true, method: "folder-walk", counts: { lora: 2 }, already_registered: 0, total_new: 2 }) };
         }
-        return { ok: true, json: async () => ({ added: 2, skipped: 0, method: "folder-walk" }) };
+        return { ok: true, json: async () => ({ job_id: "scan-job-1" }) };
       }
       if (u === "/api/models" || u.startsWith("/api/models?")) {
         modelsFetchCount++;
@@ -284,20 +354,78 @@ test("import-comfy: Import POSTs dry_run:false for the previewed folder, toasts,
 
   assert.equal(calls.length, 2);
   assert.deepEqual(calls[1], { workdir: "D:/my-comfy", dry_run: false });
+  // The final progress event's added/skipped/method feeds scanResultMessage()
+  // exactly as the old synchronous response body used to.
   assert.match(window.document.getElementById("toast").textContent, /added 2 models/i);
   assert.equal(window.document.getElementById("modal").style.display, "none", "the modal closes on a successful import");
   assert.ok(modelsFetchCount > fetchesBeforeImport, "the models list is refreshed after import");
 });
 
-test("import-comfy: a failed Import surfaces the server error and re-enables the button", async () => {
+test("import-comfy: Import shows live 'registering model N of M' progress as the job runs", async () => {
+  // The concrete gap this whole unit closes: Import used to disable the
+  // button and show LITERALLY NOTHING until the whole batch finished.
+  const { window } = loadAppWithPages({
+    fetchImpl: makeFetch({
+      scanImpl: async (b) => {
+        if (b.dry_run) {
+          return { ok: true, json: async () => ({ dry_run: true, method: "folder-walk", counts: { lora: 3 }, already_registered: 0, total_new: 3 }) };
+        }
+        return { ok: true, json: async () => ({ job_id: "scan-job-2" }) };
+      },
+      // A real per-frame delay (not an already-resolved microtask) so the
+      // test below can genuinely observe an IN-FLIGHT state via polling,
+      // rather than a fully-drained end state that happens to still read
+      // "registering..." because nothing later overwrote it (see
+      // sseResponse's doc comment).
+      jobEvents: [
+        { type: "progress", phase: "registering", done: 1, total: 3, name: "alpha.safetensors" },
+        { type: "progress", phase: "registering", done: 2, total: 3, name: "beta.safetensors" },
+        { type: "progress", phase: "registering", done: 3, total: 3, name: "gamma.safetensors" },
+        { type: "progress", phase: "done", done: 3, total: 3, added: 3, skipped: 0, method: "folder-walk" },
+        { type: "end", status: "done", returncode: 0 },
+      ],
+      jobEventsDelayMs: 30,
+    }),
+  });
+  openModalFor(window);
+  await flush();
+  const body = window.document.getElementById("modal-body");
+  body.querySelector("input[type=text]").value = "D:/my-comfy";
+  const previewBtn = [...body.querySelectorAll("button")].find((b) => b.textContent === "Preview");
+  previewBtn.click();
+  await flush();
+
+  const importBtn = [...body.querySelectorAll("button")].find((b) => b.textContent === "Import");
+  importBtn.click();
+  const progressText = () => body.querySelector(".import-comfy-progress").textContent;
+  // Catch the FIRST tick specifically (not just "some registering text
+  // eventually") - proves the count genuinely advances per event rather than
+  // jumping straight to the end.
+  const sawFirst = await waitFor(() => /registering model 1 of 3/i.test(progressText()));
+  assert.ok(sawFirst, `never observed "1 of 3" while the job was in flight (last seen: ${progressText()})`);
+
+  const toastShowsDone = await waitFor(
+    () => /added 3 models/i.test(window.document.getElementById("toast").textContent));
+  assert.ok(toastShowsDone, "the final toast still reads the same as before this unit (Added 3 models)");
+});
+
+test("import-comfy: a failed Import surfaces the job's own error and re-enables the button", async () => {
   const { window } = loadAppWithPages({
     fetchImpl: makeFetch({
       scanImpl: async (b) => {
         if (b.dry_run) {
           return { ok: true, json: async () => ({ dry_run: true, method: "folder-walk", counts: { lora: 1 }, already_registered: 0, total_new: 1 }) };
         }
-        return { ok: false, status: 500, json: async () => ({ detail: "Scan failed: boom" }) };
+        // A real scan is job-based now: the POST always starts the job (200 +
+        // job_id); a failure surfaces on the job's OWN stream, not as a
+        // synchronous 500 from this POST.
+        return { ok: true, json: async () => ({ job_id: "scan-job-3" }) };
       },
+      jobEvents: [
+        { type: "line", text: "Scanning ComfyUI model folders..." },
+        { type: "line", text: "Scan failed: boom" },
+        { type: "end", status: "failed", returncode: 1 },
+      ],
     }),
   });
   openModalFor(window);
@@ -314,4 +442,40 @@ test("import-comfy: a failed Import surfaces the server error and re-enables the
   assert.match(window.document.getElementById("toast").textContent, /scan failed: boom/i);
   assert.equal(importBtn.disabled, false, "a failed import re-enables the button so the user can retry");
   assert.equal(window.document.getElementById("modal").style.display, "flex", "the modal stays open on failure");
+});
+
+test("import-comfy: a disconnected stream leaves the modal open with a 'connection lost' message, not a false failure", async () => {
+  const { window } = loadAppWithPages({
+    fetchImpl: makeFetch({
+      scanImpl: async (b) => {
+        if (b.dry_run) {
+          return { ok: true, json: async () => ({ dry_run: true, method: "folder-walk", counts: { lora: 1 }, already_registered: 0, total_new: 1 }) };
+        }
+        return { ok: true, json: async () => ({ job_id: "scan-job-4" }) };
+      },
+    }),
+  });
+  openModalFor(window);
+  await flush();
+  const body = window.document.getElementById("modal-body");
+  body.querySelector("input[type=text]").value = "D:/my-comfy";
+  const previewBtn = [...body.querySelectorAll("button")].find((b) => b.textContent === "Preview");
+  previewBtn.click();
+  await flush();
+  // Override just the events route to a 404 for this one test.
+  const origFetch = window.fetch;
+  window.fetch = async (url, opts) => {
+    if (/\/api\/jobs\/[^/]+\/events$/.test(String(url))) {
+      return { ok: false, status: 404, statusText: "Not Found" };
+    }
+    return origFetch(url, opts);
+  };
+  const importBtn = [...body.querySelectorAll("button")].find((b) => b.textContent === "Import");
+  importBtn.click();
+  await flush();
+
+  assert.match(window.document.getElementById("toast").textContent, /lost connection/i);
+  assert.equal(importBtn.disabled, false, "a lost connection re-enables the button");
+  assert.equal(window.document.getElementById("modal").style.display, "flex", "the modal stays open - the import may still be running");
+  assert.match(body.querySelector(".import-comfy-progress").textContent, /connection lost/i);
 });

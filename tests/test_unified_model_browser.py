@@ -468,6 +468,62 @@ def test_preview_excludes_already_registered_files(tmp_path, temp_registry):
     assert preview.already_registered == 5
 
 
+class TestScanProgressCallback:
+    """scan_comfy_models's progress_cb: the unit the GUI's job-based real scan
+    (models.py's gui_scan_models) wires to Job.progress() for a real
+    "registering model N of M" count. Unit-level, no HTTP/job machinery."""
+
+    def test_progress_cb_called_once_per_file_with_a_fixed_total(self, tmp_path, temp_registry):
+        comfy_dir = tmp_path / "comfy"
+        layout = _make_comfy_tree(comfy_dir)   # 5 files, one per SUBFOLDER_MAPPING convention
+
+        calls = []
+        with patch("localm.model_manager.scan.comfy_object_info", return_value=None):
+            res = scan_comfy_models(comfy_url="http://localhost:8188", workdir=str(comfy_dir),
+                                    progress_cb=lambda done, total, name: calls.append((done, total, name)))
+
+        assert res.added == 5
+        assert len(calls) == 5
+        # done climbs 1..5 against a FIXED total (never a growing/shrinking one).
+        assert [c[0] for c in calls] == [1, 2, 3, 4, 5]
+        assert all(c[1] == 5 for c in calls)
+        assert {c[2] for c in calls} == set(layout.values())
+
+    def test_progress_cb_still_fires_for_an_already_registered_file(self, tmp_path, temp_registry):
+        """A file that turns out to be a skip (already registered) is still a
+        real item of work in the loop - the callback must count it too, or a
+        rescan with mostly-skips would show a bar that never reaches its total."""
+        comfy_dir = tmp_path / "comfy"
+        _make_comfy_tree(comfy_dir)
+        with patch("localm.model_manager.scan.comfy_object_info", return_value=None):
+            scan_comfy_models(comfy_url="http://localhost:8188", workdir=str(comfy_dir))   # registers all 5
+
+            calls = []
+            res = scan_comfy_models(comfy_url="http://localhost:8188", workdir=str(comfy_dir),
+                                    progress_cb=lambda done, total, name: calls.append((done, total, name)))
+
+        assert res.added == 0 and res.skipped == 5
+        assert len(calls) == 5, "every already-registered file still gets a progress tick"
+        assert [c[0] for c in calls] == [1, 2, 3, 4, 5]
+
+    def test_progress_cb_default_none_changes_nothing(self, tmp_path, temp_registry):
+        """Every existing caller (the CLI has none; only the GUI route calls
+        this) omits progress_cb - confirms that path is untouched."""
+        comfy_dir = tmp_path / "comfy"
+        _make_comfy_tree(comfy_dir)
+        with patch("localm.model_manager.scan.comfy_object_info", return_value=None):
+            res = scan_comfy_models(comfy_url="http://localhost:8188", workdir=str(comfy_dir))
+        assert res.added == 5 and res.skipped == 0
+
+    def test_preview_comfy_models_takes_no_progress_cb(self, tmp_path, temp_registry):
+        """Deliberate: preview's directory walk has no honest total to report
+        progress against (see the docstring on scan_comfy_models), so
+        preview_comfy_models's signature was left unchanged rather than
+        growing an unused parameter."""
+        import inspect
+        assert "progress_cb" not in inspect.signature(preview_comfy_models).parameters
+
+
 def test_preview_missing_models_folder_reports_reason(tmp_path, temp_registry):
     """No models/ folder under the chosen workdir -> the same honest 'none (...)'
     reason scan_comfy_models gives, not a silent empty result."""

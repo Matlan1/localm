@@ -23,6 +23,7 @@ from (a request body or the config file) was never the thing that made the scan
 safe; host filesystem reach is. The tests below now encode that.
 """
 
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -32,6 +33,22 @@ from fastapi.testclient import TestClient
 
 from localm import scopes as S
 from localm.plugins.gui.web import attach_gui
+
+
+def _wait_job(app, job_id, timeout=10.0):
+    """Poll a real (non-dry-run) scan's background job until it leaves
+    'running' - mirrors test_start_fn_outcome_honesty.py's _wait_for_terminal.
+    A real scan is now job-based (see gui_scan_models), so every test that used
+    to read added/skipped/method straight off the POST response now starts the
+    job, waits here, then reads the same fields off its final progress event."""
+    job = app.state.jobs.get(job_id)
+    assert job is not None, f"job {job_id} was never registered"
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if job.status != "running":
+            return job
+        time.sleep(0.01)
+    raise AssertionError(f"job {job_id} never finished: status={job.status}")
 
 
 @pytest.fixture
@@ -99,15 +116,23 @@ class TestBodylessFormAlsoRequiresHostFsAccess:
 
     def test_bodyless_post_succeeds_for_a_host_fs_access_key(self, scan_app):
         """The gate is fs_access, not the body: a host-fs key still gets the
-        ordinary configured-workdir scan, unchanged."""
+        ordinary configured-workdir scan, unchanged. A REAL scan (dry_run
+        absent/false) is job-based now, so the immediate response is a job id;
+        wait for it and read the final progress event for the same "method"
+        that used to come back synchronously."""
         with TestClient(scan_app) as c:
             r = c.post("/api/models/scan", headers=_hdr(_host_writer_key()))
             assert r.status_code == 200, r.text
             body = r.json()
-            # No comfy_workdir configured in this throwaway home - a legitimate
-            # "none (...)" result, not a failure, and NOT the dry-run shape.
             assert "dry_run" not in body
-            assert body["method"].startswith("none (comfy_workdir not configured)")
+            assert "job_id" in body
+            job = _wait_job(scan_app, body["job_id"])
+            assert job.status == "done", job._history
+            # No comfy_workdir configured in this throwaway home - a legitimate
+            # "none (...)" result, not a failure.
+            assert job._last_progress["method"].startswith("none (comfy_workdir not configured)")
+            assert job._last_progress["added"] == 0
+            assert job._last_progress["skipped"] == 0
 
     def test_bodyless_post_succeeds_in_open_mode(self, scan_app):
         """No key configured at all -> loopback owner -> host access implied, so
@@ -169,8 +194,94 @@ class TestDryRunNeverRegisters:
             assert r.status_code == 200, r.text
             # A second, real (non-dry-run) scan of the SAME tree must still find
             # the file unregistered - proving the preview above added nothing.
+            # dry_run=False is job-based now; wait for it and read the count off
+            # its final progress event.
             with patch("requests.get", side_effect=Exception("offline")):
                 r2 = c.post("/api/models/scan", headers=_hdr(_host_writer_key()),
                            json={"workdir": str(comfy_tree), "dry_run": False})
             assert r2.status_code == 200, r2.text
-            assert r2.json()["added"] == 1, "the dry run must not have registered it already"
+            job = _wait_job(scan_app, r2.json()["job_id"])
+            assert job.status == "done", job._history
+            assert job._last_progress["added"] == 1, "the dry run must not have registered it already"
+
+
+@pytest.fixture
+def comfy_tree_multi(tmp_path):
+    """Three files across three SUBFOLDER_MAPPING conventions - big enough to
+    prove a real "N of M" progression, not just a single 1-of-1 tick."""
+    d = tmp_path / "comfy"
+    for sub, fname in (("unet", "flux.safetensors"),
+                       ("clip", "clip_l.safetensors"),
+                       ("loras", "style.safetensors")):
+        sub_dir = d / "models" / sub
+        sub_dir.mkdir(parents=True)
+        (sub_dir / fname).write_bytes(b"DATA")
+    return d
+
+
+class TestRealScanReportsProgress:
+    """The concrete gap this file's route change closes: a real (non-dry-run)
+    scan used to run synchronously with zero feedback until the whole batch
+    finished. It is job-based now and must report a real "registering model N
+    of M" count as it goes, not just a start/end pair."""
+
+    def test_progress_events_carry_an_increasing_done_of_a_fixed_total(
+            self, scan_app, comfy_tree_multi):
+        with TestClient(scan_app) as c:
+            with patch("requests.get", side_effect=Exception("offline")):
+                r = c.post("/api/models/scan", headers=_hdr(_host_writer_key()),
+                          json={"workdir": str(comfy_tree_multi), "dry_run": False})
+            assert r.status_code == 200, r.text
+            job = _wait_job(scan_app, r.json()["job_id"])
+            assert job.status == "done", job._history
+
+            registering = [e for e in job._history
+                          if e.get("type") == "progress" and e.get("phase") == "registering"]
+            assert len(registering) == 3, registering
+            # done climbs 1, 2, 3 against a FIXED total of 3, and every event
+            # names the file it is registering - the actual "N of M: name"
+            # data the GUI renders instead of a silent wait.
+            assert [e["done"] for e in registering] == [1, 2, 3]
+            assert all(e["total"] == 3 for e in registering)
+            assert all(e.get("name") for e in registering)
+            assert {e["name"] for e in registering} == {
+                "flux.safetensors", "clip_l.safetensors", "style.safetensors"}
+
+    def test_final_progress_event_carries_added_skipped_method(
+            self, scan_app, comfy_tree_multi):
+        """The route's docstring promise: the final progress event (phase
+        "done") carries the same added/skipped/method fields the old
+        synchronous response body used to return directly, so the GUI can
+        build its existing scanResultMessage() toast unchanged."""
+        with TestClient(scan_app) as c:
+            with patch("requests.get", side_effect=Exception("offline")):
+                r = c.post("/api/models/scan", headers=_hdr(_host_writer_key()),
+                          json={"workdir": str(comfy_tree_multi), "dry_run": False})
+            job = _wait_job(scan_app, r.json()["job_id"])
+            assert job.status == "done", job._history
+            final = job._last_progress
+            assert final["phase"] == "done"
+            assert final["added"] == 3
+            assert final["skipped"] == 0
+            assert final["method"] in ("folder-walk",
+                                       "hybrid (folder-walk + /object_info)")
+
+    def test_a_genuine_scan_failure_still_marks_the_job_failed(self, scan_app, comfy_tree_multi):
+        """Root-cause path: an exception during registration must not report a
+        false "done" - the job fails, matching the old route's HTTPException(500).
+
+        The scan runs in a JobManager background thread now (start_fn), so the
+        patch must stay active for the whole wait, not just the POST - the POST
+        only spawns the thread and returns immediately; unpatching right after
+        it races the thread and (measured) lets the unpatched real function win."""
+        with TestClient(scan_app) as c:
+            with patch("requests.get", side_effect=Exception("offline")), \
+                 patch("localm.model_manager.scan._existing_registered_paths",
+                       side_effect=RuntimeError("boom")):
+                r = c.post("/api/models/scan", headers=_hdr(_host_writer_key()),
+                          json={"workdir": str(comfy_tree_multi), "dry_run": False})
+                assert r.status_code == 200, r.text   # the job itself always starts
+                job = _wait_job(scan_app, r.json()["job_id"])
+            assert job.status == "failed", job._history
+            lines = [e["text"] for e in job._history if e.get("type") == "line"]
+            assert any("boom" in t for t in lines), lines
