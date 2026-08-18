@@ -1008,12 +1008,15 @@ export async function refreshPluginCommands() {
     // endpoint is configured (otherwise the report is saved-to-file + emailed).
     const bugUp = $("bug-upload");
     if (bugUp) bugUp.hidden = !data.bugreport_upload;
-    // Reveal the Updates + Issues settings cards only when their proxy surfaces are
-    // configured. On startup, a single throttled, quiet update check surfaces a
-    // banner - it NEVER applies anything (apply is always an explicit click).
-    const upSec = $("sec-updates");
-    if (upSec) {
-      upSec.hidden = !data.update_available;
+    // Reveal the app-update sub-block (inside the merged "Updates" card) and the
+    // Issues card only when their proxy surfaces are configured. The Updates
+    // card itself is never hidden here - the runtime-update block and the
+    // update-behavior toggles it also holds stay visible regardless. On
+    // startup, a single throttled, quiet update check surfaces a banner - it
+    // NEVER applies anything (apply is always an explicit click).
+    const upBlock = $("app-update-block");
+    if (upBlock) {
+      upBlock.hidden = !data.update_available;
       if (data.update_available) maybeAutoUpdateCheck();
     }
     const isSec = $("sec-issues");

@@ -807,40 +807,74 @@
               </div>
             </section>
 
-            <!-- Updates + Issues: shown only when the proxy is configured for them
-                 (capabilities.update_available / .issues_available). localm never
-                 self-updates; applying is always this explicit button. -->
-            <section class="card settings-section" id="sec-updates" data-group="system" data-sec-label="Updates" hidden>
+            <!-- Updates: one card for both ways localm can be updated (a new app
+                 build, a new llama.cpp runtime) plus the two toggles that control
+                 how the check behaves. Used to be three panels (two of them both
+                 headed "Updates") - see dev-notes/settings-ia-2026-08-13.
+
+                 THE TWO SUB-BLOCKS BELOW HAVE DIFFERENT VISIBILITY RULES, and
+                 they stay independent on purpose:
+                   #app-update-block  proxy-gated - hidden until capabilities
+                                      .update_available (settings-perf.js)
+                   the runtime block  ALWAYS shown - this is local disk state,
+                                      not a proxy capability; the check itself
+                                      reports "nothing installed yet" when
+                                      setup-llama has never run
+                 The CARD ITSELF is therefore never [hidden]: the runtime block
+                 and the toggles below it must stay visible even on a build with
+                 no update proxy configured. Only the app-update sub-block gates. -->
+            <section class="card settings-section" id="sec-updates" data-group="system" data-sec-label="Updates">
               <div class="card-head"><span class="ic cat-ic cat-slate" data-icon="download"></span>
                 <div class="card-head-text"><h3>Updates</h3></div></div>
-              <div class="sub">Check for a newer localm build. You always start it - localm
-              never updates itself. Most updates apply with just a restart.</div>
-              <div class="actions">
-                <button class="btn-secondary" id="update-check">Check for updates</button>
-                <button class="btn-primary" id="update-apply" hidden>Update now</button>
-              </div>
-              <div id="update-status" class="sub" hidden></div>
-            </section>
 
-            <!-- Runtime update: the NATIVE llama.cpp binaries `localm setup-llama`
-                 provisions, separate from the Python source tree above. Always
-                 shown (this is local disk state, not a proxy capability) - the
-                 check itself reports "nothing installed yet" when setup has never
-                 run. Apply streams a job (a download + native load-test), same
-                 shape as the managed-ComfyUI update panel. -->
-            <section class="card settings-section" id="sec-runtime-update" data-group="system" data-sec-label="Runtime update">
-              <div class="card-head"><span class="ic cat-ic cat-slate" data-icon="download"></span>
-                <div class="card-head-text"><h3>Runtime update</h3></div></div>
-              <div class="sub">Check for a newer llama.cpp runtime build for your installed
-              backend. You always start it - it never re-provisions on its own. A build that
-              fails to load on this machine is never kept: setup-llama walks back to an older
-              one that does.</div>
-              <div class="actions">
-                <button class="btn-secondary" id="runtime-update-check">Check for runtime update</button>
-                <button class="btn-primary" id="runtime-update-apply" hidden>Update runtime</button>
+              <div class="update-subsection" id="app-update-block" hidden>
+                <h4 class="update-sub-head">App update</h4>
+                <div class="sub">Check for a newer localm build. You always start it - localm
+                never updates itself. Most updates apply with just a restart.</div>
+                <div class="actions">
+                  <button class="btn-secondary" id="update-check">Check for updates</button>
+                  <button class="btn-primary" id="update-apply" hidden>Update now</button>
+                </div>
+                <div id="update-status" class="sub" hidden></div>
               </div>
-              <div id="runtime-update-status" class="sub" hidden></div>
-              <pre id="runtime-update-log" class="comfy-managed-log" style="display:none"></pre>
+
+              <div class="update-subsection">
+                <h4 class="update-sub-head">Runtime update</h4>
+                <div class="sub">Check for a newer llama.cpp runtime build for your installed
+                backend. You always start it - it never re-provisions on its own. A build that
+                fails to load on this machine is never kept: setup-llama walks back to an older
+                one that does.</div>
+                <div class="actions">
+                  <button class="btn-secondary" id="runtime-update-check">Check for runtime update</button>
+                  <button class="btn-primary" id="runtime-update-apply" hidden>Update runtime</button>
+                </div>
+                <div id="runtime-update-status" class="sub" hidden></div>
+                <pre id="runtime-update-log" class="comfy-managed-log" style="display:none"></pre>
+              </div>
+
+              <!-- update_allow_prerelease / update_ignore_net_policy: schema-driven
+                   admin-only toggles, injected here by refreshSettingsPage's
+                   "Updates" special case in settings.js instead of rendering as
+                   their own separate section - that second "Updates" panel was
+                   exactly the duplication this card merges away. Stays [hidden]
+                   (nothing to render) for a caller without those admin-only
+                   fields, or before the schema fetch resolves.
+
+                   #update-toggles-save carries .settings-section-save (not just
+                   .btn-primary): saveActiveSettingsSection()'s Ctrl+S handler
+                   picks a section's save button via `.settings-section-save ||
+                   .actions .btn-primary` - with only .btn-primary, that fallback
+                   would match #update-apply first (also .btn-primary, earlier in
+                   this same card) and Ctrl+S would silently APPLY an app update
+                   instead of saving these toggles. The more specific class must
+                   win. -->
+              <div class="update-subsection" id="update-toggles-block" hidden>
+                <h4 class="update-sub-head">Update behavior</h4>
+                <div id="settings-sec-core-Updates" class="settings-fields"></div>
+                <div class="actions">
+                  <button class="btn-primary settings-section-save" id="update-toggles-save">Save Updates</button>
+                </div>
+              </div>
             </section>
 
             <section class="card settings-section" id="sec-issues" data-group="system" data-sec-label="Issues" hidden>
