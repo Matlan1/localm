@@ -324,3 +324,21 @@ def test_powershell_reporter_scrubs_title_and_credentials():
     # Scrub covers URL user:pass@ credentials and sk-/localm-sk API keys.
     assert r"(://)[^/@\s]+@" in text
     assert "localm[_-]sk" in text
+def test_powershell_reporter_scrubs_credential_named_assignments():
+    """Same static-guard reasoning as the test above, applied to the query and
+    header scrub. This one is worth pinning precisely: the .ps1 comment claimed
+    to mirror _scrub_secrets while the function carried NO query or header scrub
+    at all, so what rotted was the CLAIM, and nothing in either suite noticed.
+
+    The last two assertions are the load-bearing ones. A port that only handled
+    the old ?/&-anchored form would satisfy a laxer test while leaving the
+    fallback reporter weaker than the in-app one, which is the shape that
+    leaks."""
+    ps1 = _MOD_PATH.parent / "report_issue.ps1"
+    text = ps1.read_text(encoding="utf-8")
+    # The header-line port.
+    assert r"(?:x-)?(?:api[_-]key|api[_-]token|auth[_-]token)" in text
+    # All three branches of the query port, not just the historic one.
+    assert r"(?<=[?&])" in text
+    assert r"(?<![A-Za-z0-9])" in text
+    assert r"[A-Za-z0-9]+[_-](?:key|auth|sig)" in text
