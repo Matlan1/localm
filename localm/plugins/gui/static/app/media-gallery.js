@@ -109,8 +109,10 @@ export function createGallery(cfg) {
   }
 
   async function download(name) {
-    // Not revoked on a timer: the anchor click is synchronous but the browser
-    // reads the URL after, so it is released on the next render instead.
+    // Revoked on a TIMER, unlike every other URL here. A download is not tied
+    // to an element whose load event we could hang the release on, and the
+    // browser reads the URL asynchronously AFTER the synchronous click(), so
+    // revoking immediately cancels the download. 30s outlasts the read.
     const url = await fetchImageURL(`/api/${cfg.slug}/file/${encodeURIComponent(name)}`);
     const a = document.createElement("a");
     a.href = url;
