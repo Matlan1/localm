@@ -240,6 +240,39 @@ export function scrubMarkers(text) {
     .replace(/<\|?\s*channel\s*\|?>|<\s*channel\s*\|>|<\|?\s*message\s*\|?>|<\|start\|>(assistant|user|system)?|<\|return\|>|<\|turn>(user|model|assistant|system)?\n?|<turn\|>|<\|tool>|<tool\|>|<\|think\|>|<think\|>|<unused\d+>?/g, "");
 }
 
+/** Point every REMOTE <img> in a rendered reply at localm's own image proxy, so
+ *  the browser never contacts the remote host.
+ *
+ *  The shell's CSP is `img-src 'self' data: blob:`, so a model-linked remote
+ *  image simply does not load - the one place localm rendered less than the
+ *  comparable UIs do. They close it by letting the browser fetch the image
+ *  directly, which hands the remote host the user's IP, User-Agent and referrer.
+ *  This closes it without that: /api/image-proxy fetches server-side through the
+ *  same netpolicy path as every other outbound request.
+ *
+ *  DELIBERATELY UNCONDITIONAL - the server decides, not this function. The
+ *  feature is off by default and the route 403s until the owner turns it on, so
+ *  a default install renders exactly as before (a broken image, same as today).
+ *  Reading a config flag here instead would mean baking it into the page at load
+ *  and going stale the moment the user toggles the setting, and would put a
+ *  security decision in the browser where it cannot be enforced.
+ *
+ *  Runs AFTER sanitisation, and only ever REPLACES a src attribute with a
+ *  same-origin URL built through encodeURIComponent - it inserts no markup, so
+ *  it is not a sanitize-then-modify hazard. data:, blob: and relative/same-origin
+ *  sources are left exactly as they are: they already load, and routing them
+ *  through the proxy would be a pointless round trip. */
+function proxyRemoteImages(root) {
+  root.querySelectorAll("img[src]").forEach((img) => {
+    const raw = img.getAttribute("src") || "";
+    if (!/^https?:\/\//i.test(raw)) return;          // data:/blob:/relative: already fine
+    let u;
+    try { u = new URL(raw, window.location.href); } catch (e) { return; }
+    if (u.origin === window.location.origin) return; // our own bytes, no detour
+    img.setAttribute("src", "/api/image-proxy?url=" + encodeURIComponent(u.href));
+  });
+}
+
 /** True if the main reply body rendered to something the user can actually see.
  *  A reply can be a non-empty STRING yet render to nothing: a tiny model that
  *  emits only an unterminated / empty ```code fence produces an empty <pre><code>
@@ -288,6 +321,10 @@ export function renderMarkdown(target, text, opts = {}) {
     target.appendChild(main);
   }
   main.innerHTML = DOMPurify.sanitize(marked.parse(rest || ""));
+  // On `target`, not `main`, so the think block's sink is covered by the same
+  // call. Idempotent across a streaming re-render: an already-proxied src is
+  // same-origin, so the second pass leaves it alone.
+  proxyRemoteImages(target);
   // Never leave a blank reply bubble. On a SETTLED render (opts.final - a reload
   // or post-stream renderChat, never a mid-stream shell) a body that rendered to
   // nothing visible gets a plain note instead of an empty box (real case: a 1B

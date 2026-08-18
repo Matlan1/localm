@@ -589,6 +589,16 @@ DEFAULT_CONFIG: dict = {
     "net_deny": [],             # domains always refused (wins over allow)
     "net_allow_private": False, # True = permit loopback/private targets (SSRF guard off)
     "net_search_url": None,     # SearXNG base URL; None = DuckDuckGo (no key)
+    # Display a remote image a model links in a reply, by fetching it SERVER-side
+    # and streaming it back, so the browser never contacts the remote origin.
+    # OFF by default and that is deliberate: a rendered remote image is the
+    # standard model-driven exfiltration channel (the URL itself carries the
+    # payload), and turning this on does not close that channel, it only makes
+    # the request come from this machine's server rather than from the browser.
+    # What it does buy, when a user wants images to work: the remote host never
+    # sees the browser's IP, User-Agent or referrer, and the fetch is subject to
+    # the same SSRF guard and domain lists as every other outbound request.
+    "gui_proxy_remote_images": False,
     # Reach localm by NAME, not just IP, on a network bind (see localm/netname.py
     # and docs/naming.md). mDNS/Bonjour advertises "<mdns_name>.local" so a phone
     # opens https://localm.local:PORT with no IP; the name is folded into the TLS
