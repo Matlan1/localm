@@ -1627,20 +1627,66 @@ const scanBtn = $("models-scan-btn");
 if (scanBtn) {
   scanBtn.onclick = async () => {
     scanBtn.disabled = true;
-    toast("Scanning ComfyUI model folders...");
+    const prog = $("scan-progress");
+    const bar = $("scan-bar");
+    const pct = $("scan-pct");
+    // Live (indeterminate) bar from the start, same shape as the pull flow's
+    // #pull-progress - registering ComfyUI's own found_files.items() has no
+    // total until the directory walk finishes, so the FIRST real feedback is
+    // this busy bar, then it flips to a real "N of M" once registration starts.
+    if (prog) {
+      prog.style.display = "block";
+      bar.classList.remove("failed");
+      bar.classList.add("indeterminate");
+      bar.style.width = "35%";
+    }
+    if (pct) pct.textContent = "Scanning ComfyUI model folders…";
+    let lastLine = null;
+    let finalResult = null;
     try {
       const r = await fetch("/api/models/scan", {
         method: "POST",
         headers: authHeaders(),
       });
       const data = await r.json().catch(() => ({}));
-      if (r.ok) {
-        toast(scanResultMessage(data));
-        refreshModelsPage();
-      } else {
+      if (!r.ok) {
+        if (bar) { bar.classList.remove("indeterminate"); bar.classList.add("failed"); }
+        if (pct) pct.textContent = "failed - see toast";
         toast(data.detail || "Scan failed", true);
+        return;
+      }
+      const end = await streamJob(data.job_id, (line) => { lastLine = line; }, (ev) => {
+        if (ev.phase === "done") {
+          finalResult = { added: ev.added || 0, skipped: ev.skipped || 0, method: ev.method || "" };
+          return;
+        }
+        if (ev.total && bar && pct) {
+          bar.classList.remove("indeterminate");
+          bar.style.width = (ev.done / ev.total * 100) + "%";
+          pct.textContent = `Registering model ${ev.done} of ${ev.total}`
+            + (ev.name ? `: ${ev.name}` : "");
+        }
+      });
+      if (end.status === "done") {
+        if (bar) { bar.classList.remove("indeterminate"); bar.style.width = "100%"; }
+        if (pct) pct.textContent = "done";
+        toast(finalResult ? scanResultMessage(finalResult) : "Scan complete.");
+        refreshModelsPage();
+      } else if (end.status === "disconnected") {
+        // Same distinction streamJob's doc makes for the pull flow: a lost
+        // SSE connection is not a job failure, so the bar is left as-is
+        // rather than painted red for a fact we do not have.
+        if (pct) pct.textContent = "connection lost - it may still be running";
+        toast("Lost connection to the scan - it may still be running in the "
+              + "background. Check the Models list in a moment.", true);
+      } else {
+        if (bar) { bar.classList.remove("indeterminate"); bar.classList.add("failed"); }
+        if (pct) pct.textContent = "failed - see toast";
+        toast(lastLine || "Scan failed", true);
       }
     } catch (e) {
+      if (bar) { bar.classList.remove("indeterminate"); bar.classList.add("failed"); }
+      if (pct) pct.textContent = "failed - see toast";
       toast("Scan failed: " + e.message, true);
     } finally {
       scanBtn.disabled = false;
@@ -1733,6 +1779,12 @@ export function openImportComfyModal(initialPath = "") {
     const previewBox = el("div", "sub import-comfy-preview");
     wrap.appendChild(previewBox);
 
+    // Live "registering model N of M" text while Import's background job runs
+    // (see importBtn.onclick below) - hidden the rest of the time.
+    const progressBox = el("div", "sub import-comfy-progress");
+    progressBox.style.display = "none";
+    wrap.appendChild(progressBox);
+
     const actions = el("div", "actions");
     const previewBtn = el("button", "btn-secondary", "Preview");
     previewBtn.type = "button";
@@ -1801,6 +1853,10 @@ export function openImportComfyModal(initialPath = "") {
     importBtn.onclick = async () => {
       if (!previewedWorkdir) return;
       importBtn.disabled = true;
+      progressBox.style.display = "block";
+      progressBox.textContent = "Starting import…";
+      let lastLine = null;
+      let finalResult = null;
       try {
         const r = await fetch("/api/models/scan", {
           method: "POST", headers: authHeaders(),
@@ -1810,14 +1866,42 @@ export function openImportComfyModal(initialPath = "") {
         if (!r.ok) {
           toast(data.detail || "Import failed", true);
           importBtn.disabled = false;
+          progressBox.style.display = "none";
           return;
         }
-        toast(scanResultMessage(data));
-        $("modal").style.display = "none";
-        refreshModelsPage();
+        const end = await streamJob(data.job_id, (line) => { lastLine = line; }, (ev) => {
+          // The final progress event (phase "done") carries the same
+          // added/skipped/method fields the old synchronous response body
+          // used to - scanResultMessage() renders it identically either way.
+          if (ev.phase === "done") {
+            finalResult = { added: ev.added || 0, skipped: ev.skipped || 0, method: ev.method || "" };
+            return;
+          }
+          if (ev.total) {
+            progressBox.textContent = `Registering model ${ev.done} of ${ev.total}`
+              + (ev.name ? `: ${ev.name}` : "");
+          }
+        });
+        if (end.status === "done") {
+          toast(finalResult ? scanResultMessage(finalResult) : "Import finished");
+          $("modal").style.display = "none";
+          refreshModelsPage();
+        } else if (end.status === "disconnected") {
+          // Same "lost the stream, not necessarily the job" distinction the
+          // pull flow makes (streamJob never reports this as a failure).
+          progressBox.textContent = "Connection lost - it may still be running";
+          toast("Lost connection to the import - it may still be running in "
+                + "the background. Check the Models list in a moment.", true);
+          importBtn.disabled = false;
+        } else {
+          progressBox.style.display = "none";
+          toast(lastLine || "Import failed", true);
+          importBtn.disabled = false;
+        }
       } catch (e) {
         toast("Import failed: " + e.message, true);
         importBtn.disabled = false;
+        progressBox.style.display = "none";
       }
     };
   });

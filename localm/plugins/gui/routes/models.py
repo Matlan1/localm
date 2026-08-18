@@ -312,9 +312,19 @@ def register(app: FastAPI, ctx) -> None:
         Import-from-ComfyUI flow (never written back to config); with no
         `workdir` (the old button's bodyless POST, or an explicit `{}`) it
         scans whatever `comfy_workdir` is configured. `dry_run` previews
-        per-type counts and registers nothing.
+        per-type counts and registers nothing, and stays synchronous (its
+        directory walk has no honest total to report progress against - see
+        scan_comfy_models's progress_cb docstring).
 
-        BOTH forms require `require_fs_host` - called BEFORE the try/except
+        A REAL scan (`dry_run` false or absent) runs as a background job
+        instead, exactly like a model pull: this returns `{"job_id": ...}`
+        immediately and the registration loop reports "registering model N of
+        M" via Job.progress() as it goes, instead of the caller blocking on
+        the whole batch with zero feedback. GET /api/jobs/{id}/events streams
+        it; the final progress event before "end" carries added/skipped/method
+        (the same fields the old synchronous response returned directly).
+
+        BOTH forms require `require_fs_host` - called BEFORE either branch
         below, so its 403 propagates as-is rather than getting reported as a
         generic 500. Either one walks a host directory and writes the resulting
         absolute paths into registry.json, a capability equivalent to the host
@@ -341,9 +351,9 @@ def register(app: FastAPI, ctx) -> None:
         require_fs_host(request)
         workdir = req.workdir if req else None
         dry_run = bool(req and req.dry_run)
-        loop = asyncio.get_running_loop()
-        try:
-            if dry_run:
+        if dry_run:
+            loop = asyncio.get_running_loop()
+            try:
                 res = await loop.run_in_executor(
                     get_plugin_executor(), partial(preview_comfy_models, workdir=workdir))
                 return {
@@ -353,15 +363,30 @@ def register(app: FastAPI, ctx) -> None:
                     "already_registered": res.already_registered,
                     "total_new": sum(res.counts.values()),
                 }
-            res = await loop.run_in_executor(
-                get_plugin_executor(), partial(scan_comfy_models, workdir=workdir))
-            return {
-                "added": res.added,
-                "skipped": res.skipped,
-                "method": res.method,
-            }
-        except Exception as e:
-            raise HTTPException(500, f"Scan failed: {e}")
+            except Exception as e:
+                raise HTTPException(500, f"Scan failed: {e}")
+
+        def _run_scan(job):
+            job.push({"type": "line", "text": "Scanning ComfyUI model folders..."})
+
+            def _cb(done, total, name):
+                job.progress(phase="registering", done=done, total=total,
+                            unit="models", name=name)
+
+            try:
+                res = scan_comfy_models(workdir=workdir, progress_cb=_cb)
+            except Exception as e:
+                job.push({"type": "line", "text": f"Scan failed: {e}"})
+                return False
+            job.push({"type": "line", "text":
+                     f"Added {res.added} models, skipped {res.skipped} existing."})
+            total = res.added + res.skipped
+            job.progress(phase="done", done=total, total=total, unit="models",
+                        added=res.added, skipped=res.skipped, method=res.method)
+            return True
+
+        job = jobs.start_fn("model-scan", _run_scan, owner=principal_id(request))
+        return {"job_id": job.id}
 
     @app.get("/api/models/roles", dependencies=[Depends(require_scope(scopes.MODELS_READ))])
     async def gui_model_roles(request: Request):

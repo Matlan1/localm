@@ -12,6 +12,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Registering models found in a ComfyUI folder now shows real progress.**
+  The guided "Import from ComfyUI..." wizard and the "Re-scan ComfyUI folder"
+  button used to sit there with no feedback (or just a static "Scanning..."
+  message) while everything they found got registered. Both now show a live
+  "registering model N of M" count, with the file name, as it works.
 - **`localm gui` can now open as its own app window instead of a browser
   tab.** Setup now asks up front (default stays browser tab, no extra
   install); a Settings toggle ("Default window mode", under Desktop app)
