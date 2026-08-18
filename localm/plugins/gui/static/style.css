@@ -397,10 +397,6 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
   font-size: 13px; color: var(--text);
 }
 .perf-backend-hint .btn-secondary { flex-shrink: 0; padding: 5px 12px; font-size: 12.5px; }
-.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-dim); }
-.dot.ok { background: var(--green); }
-.dot.busy { background: var(--yellow); }
-.dot.err { background: var(--red); }
 
 /* ---------------- main ---------------- */
 
@@ -820,9 +816,7 @@ pre:hover .canvas-btn { opacity: 1; }
   white-space: nowrap;
   flex: 1;
 }
-.tool-card .head .state { font-size: 12px; }
-.tool-card .head .state.ok { color: var(--green); }
-.tool-card .head .state.fail { color: var(--red); }
+.tool-card .head .state { flex-shrink: 0; }
 .tool-card .body {
   display: none;
   border-top: 1px solid var(--border);
@@ -1197,6 +1191,9 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
   border: 1px solid var(--border); color: var(--text-dim);
 }
 .comfy-pill.ok { color: var(--green); border-color: var(--green); }
+/* Settings page per-media-subsection badge (.job-state pill, docs/gui-design.md
+   rule 6) - spacing only, sits inline after the subsection's <h4>. */
+.comfy-status-badge { margin-left: 12px; }
 .comfy-managed-log {
   margin-top: 8px; max-height: 220px; overflow: auto;
 }
@@ -1246,7 +1243,14 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
 .comfy-model-label { flex: 0 0 auto; min-width: 110px; color: var(--text-dim); }
 .comfy-model-select { flex: 1; min-width: 0; }
 .comfy-model-missing { color: var(--danger, #d66); }
-.comfy-model-missing-value { flex: 1; min-width: 0; color: var(--danger, #d66); }
+/* docs/gui-design.md rule 6: state renders as a .job-state pill (job-state
+   st-error supplies the color, no longer the undefined --danger token which
+   always fell back to a hardcoded hex regardless of theme). A pill that grows
+   to fill the row (flex: 1, matching the sibling .comfy-model-select it
+   replaces) renders as a wide color bar instead of a badge, so it does not
+   grow here - min-width: 0 is kept only so a very long filename can still
+   shrink instead of overflowing the row. */
+.comfy-model-missing-value { min-width: 0; }
 
 /* Camera button: only useful on a device with a camera + touch (a phone). The
    attach button already offers camera+gallery on mobile via the OS picker, so
@@ -1422,24 +1426,15 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
 }
 .data-table .mono { font-family: var(--mono); font-size: 12px; color: var(--text-dim); }
 .data-table .name { font-weight: 600; }
-.data-table .active-tag {
-  color: var(--green); font-size: 11px; border: 1px solid var(--green);
-  border-radius: 5px; padding: 1px 6px; margin-left: 8px;
-}
+.data-table .active-tag, .data-table .loaded-tag { margin-left: 8px; }
 /* Knowledge page: a collection stuck on BM25 while the embedding model is
    ready is actionable (reindex fixes it), so it gets a visible inline flag
-   instead of only a tooltip - same shape as .active-tag, warning color. */
-.retrieval-badge {
-  color: var(--yellow); font-size: 11px; border: 1px solid var(--yellow);
-  border-radius: 5px; padding: 1px 6px; margin-left: 8px;
-}
-/* Chunk-level or metadata damage (a corrupt/malformed file on disk), distinct
-   from .retrieval-badge's "not embedded yet" - this means data may be lost
-   or unreadable, not just un-optimized, so it gets the stronger red. */
-.corrupt-badge {
-  color: var(--red); font-size: 11px; border: 1px solid var(--red);
-  border-radius: 5px; padding: 1px 6px; margin-left: 8px;
-}
+   instead of only a tooltip - same shape as .active-tag, warning color.
+   Chunk-level or metadata damage (.corrupt-badge) is distinct from
+   .retrieval-badge's "not embedded yet" - it means data may be lost or
+   unreadable, not just un-optimized, so it gets the stronger red. Both reuse
+   the .job-state pill (docs/gui-design.md rule 6); this rule is spacing-only. */
+.retrieval-badge, .corrupt-badge { margin-left: 8px; }
 .data-table button {
   background: none; border: 1px solid var(--border); color: var(--text-dim);
   border-radius: 6px; padding: 3px 10px; font-size: 12px; cursor: pointer;

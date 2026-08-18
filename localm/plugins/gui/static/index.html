@@ -99,7 +99,7 @@
     <div id="model-box">
       <label for="model-select">Model</label>
       <select id="model-select"></select>
-      <div id="model-status"><span class="dot" id="status-dot"></span><span id="status-text">connecting…</span></div>
+      <div id="model-status"><span class="job-state" id="status-text">connecting…</span></div>
       <div id="model-split-line" class="sub" hidden></div>
       <button type="button" id="activity-pill" class="job-state st-running"
               style="display:none; cursor:pointer;" title="Click for details"></button>
@@ -186,7 +186,7 @@
         <select id="session-select" title="Switch session"></select>
         <button class="btn-secondary" id="session-new">+ new</button>
         <span class="cwd" id="coder-cwd"></span>
-        <span id="coder-state"></span>
+        <span id="coder-state" class="job-state"></span>
         <span class="spacer"></span>
         <button class="btn-secondary" id="coder-undo" title="Revert the last file write">undo</button>
         <button class="btn-secondary" id="coder-files" title="Files changed this session, with diffs">files</button>

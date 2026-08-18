@@ -107,7 +107,7 @@ export async function refreshKnowledgePage() {
     tr.appendChild(el("td", "mono", String(c.n_chunks)));
     const retrievalTd = el("td", "mono", c.has_vectors ? "hybrid" : "BM25");
     if (needsReembed) {
-      const badge = el("span", "retrieval-badge", "re-embed needed");
+      const badge = el("span", "retrieval-badge job-state st-skipped", "re-embed needed");
       badge.title = staleVectors
         ? "This collection's stored vectors were built under a different "
           + "embedding model than the one currently active, so a query here "
@@ -126,7 +126,7 @@ export async function refreshKnowledgePage() {
     // cannot count (NEW-RAG-INDEX-WARN-SPAM residual B). Separate from
     // needsReembed: a corrupt index needs Repair, not re-embed.
     if (c.corrupt) {
-      const badge = el("span", "corrupt-badge",
+      const badge = el("span", "corrupt-badge job-state st-error",
         c.chunks_bad_lines > 0
           ? `${c.chunks_bad_lines} malformed line(s)`
           : "index damaged");

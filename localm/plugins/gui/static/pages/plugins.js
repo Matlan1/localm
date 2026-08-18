@@ -37,7 +37,14 @@ export function _catalogRow(p) {
     : p.active ? "active"
     : p.installed ? "installed (off)"
     : "available";
-  tr.appendChild(el("td", "mono", status));
+  // docs/gui-design.md rule 6: state renders as a .job-state pill, not plain
+  // .mono text. protected -> on (accent, "special/can't be disabled"),
+  // active -> st-ok (green), installed-but-off -> st-pending (neutral/idle),
+  // available (never installed) -> base pill (neutral, no variant).
+  const statusCls = p.protected ? "on" : p.active ? "st-ok" : p.installed ? "st-pending" : "";
+  const statusTd = el("td");
+  statusTd.appendChild(el("span", ("job-state " + statusCls).trim(), status));
+  tr.appendChild(statusTd);
   const descTd = el("td", "", p.description);
   // Warn when a plugin needs other plugins that are not installed (B15).
   const missing = Array.isArray(p.missing_requires) ? p.missing_requires : [];

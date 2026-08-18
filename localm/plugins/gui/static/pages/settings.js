@@ -2132,11 +2132,10 @@ export function renderMediaSubsection(name) {
   const head = el("h4", "media-sub-head", label);
   sub.appendChild(head);
   if (["image", "music", "video"].includes(name)) {
-    const badge = el("span", "sub comfy-status-badge", "ComfyUI: checking...");
-    badge.style.marginLeft = "12px";
-    badge.style.padding = "2px 6px";
-    badge.style.borderRadius = "4px";
-    badge.style.backgroundColor = "var(--bg-input)";
+    // docs/gui-design.md rule 6: state renders as a .job-state pill, not an
+    // inline-JS-styled span. checking -> base pill (neutral, matches the old
+    // no-color-set look); Running/Stopped/Unknown are set in checkComfy() below.
+    const badge = el("span", "comfy-status-badge job-state", "ComfyUI: checking...");
     head.appendChild(badge);
     
     // NEW-STOPCOMFY: Stop/Restart controls. Stop shows whenever ComfyUI is up
@@ -2164,16 +2163,12 @@ export function renderMediaSubsection(name) {
         .then(r => r.json())
         .then(d => {
           badge.textContent = d.alive ? "ComfyUI: Running" : "ComfyUI: Stopped";
-          // Real theme tokens (matches the app's actual light/dark palette),
-          // not the fabricated --success-color/--error-color fallbacks this
-          // used before - those were never defined anywhere, so the badge
-          // always rendered the same hardcoded hex regardless of theme.
-          badge.style.color = d.alive ? "var(--green)" : "var(--red)";
+          badge.className = "comfy-status-badge job-state " + (d.alive ? "st-ok" : "st-error");
           stopBtn.style.display = d.alive ? "" : "none";
           restartBtn.style.display = d.launched_by_localm ? "" : "none";
         }).catch(() => {
           badge.textContent = "ComfyUI: Unknown";
-          badge.style.color = "";   // drop a stale Running/Stopped color from a prior check
+          badge.className = "comfy-status-badge job-state st-unknown";
           stopBtn.style.display = "none";
           restartBtn.style.display = "none";
         });

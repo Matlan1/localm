@@ -26,6 +26,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   rename control. Renaming never overwrites an existing file or folder with the
   same name.
 
+### Changed
+- **Status indicators across the GUI (the chat connection line, the coder
+  session and tool-call states, model and plugin status tags, the Knowledge
+  and Studio badges, and the Settings ComfyUI indicator) now render
+  consistently as small colored pills**, matching the style already used for
+  job/run status elsewhere. Two small display bugs are fixed along the way: a
+  model that is merely loaded in memory no longer looks identical to (and no
+  longer highlights its row like) the one actually active, and a missing
+  Studio model file no longer shows a color that ignores your light/dark theme.
+
 ## [0.1.5rc3] - 2026-08-13
 
 ### Added
