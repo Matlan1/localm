@@ -355,9 +355,16 @@ _QUERY_SECRET_RE = re.compile(
     # so ``api_key=1)SECRET`` stays redacted - measured identical to the
     # no-suppressor behaviour on every credential shape, which is the bar this
     # has to clear: a false-positive fix must not open a true-negative.
-    r"(?!(?:true|false|none|null|nil|yes|no|on|off|enabled|disabled|[01])"
+    r"(?![\"']?(?:true|false|none|null|nil|yes|no|on|off|enabled|disabled|[01])"
     r"[`\"'\)\]\}]{0,4}(?:[\s&#]|$))"
-    r"[^&\s#\"'\)\]\}]*"
+    # The value may be QUOTED, which is how a .env writes it far more often
+    # than not. Stopping at the opening quote used to leave the secret sitting
+    # in the report right next to a <redacted> marker claiming it had gone -
+    # a privacy step reporting a success it did not achieve, which is the one
+    # thing rule 5 forbids outright. An unterminated quote still redacts to end
+    # of line: over-redacting the rest of a line that opened with a credential
+    # is the safe direction.
+    r"(?:\"[^\"\r\n]*\"?|'[^'\r\n]*'?|[^&\s#\"'\)\]\}]*)"
 )
 
 # The same credential can arrive as a pasted HTTP header line instead of a URL

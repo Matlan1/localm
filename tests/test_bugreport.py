@@ -271,6 +271,8 @@ _NON_SECRET_ASSIGNMENTS = (
     "(require_auth=1)",
     "`LOCALM_REQUIRE_AUTH=1`",
     "set `require_auth=true` to fail closed",
+    'require_auth="true"',
+    "require_auth='true'",
 )
 
 
@@ -317,6 +319,46 @@ def test_the_non_secret_suppressor_does_not_fire_when_more_value_follows(line):
     out = bugreport._scrub_secrets(line)
     assert "=<redacted>" in out, (
         f"the suppressor swallowed a credential assignment: {out!r}")
+
+
+# FOUND BY A LIVE RUN, not by the suite: filing a real report through the CLI
+# with a pasted .env produced
+#
+#     API_KEY=<redacted>"ENVQUOTEDSECRET1"
+#
+# The value stopped at the opening quote, so the secret shipped in full sitting
+# next to a marker claiming it had been removed. A quoted value is the COMMON
+# .env form, and every fixture in this file had used the bare form.
+#
+# Worse than a plain miss: a privacy step reporting a success it did not achieve
+# is the one thing AGENTS.md rule 5 forbids outright.
+@pytest.mark.parametrize("line,canary", [
+    ('API_KEY="ENVQUOTED1"', "ENVQUOTED1"),
+    ("SECRET_KEY='ENVQUOTED2'", "ENVQUOTED2"),
+    ('api_key="with spaces inside"', "with spaces inside"),
+    ('OPENAI_API_KEY="sk-ENVQUOTED3"', "ENVQUOTED3"),
+    ('?api_key="ENVQUOTED4"&x=1', "ENVQUOTED4"),
+    # An unterminated quote redacts to end of line. Over-redacting the rest of a
+    # line that opened with a credential is the safe direction.
+    ('api_key="ENVQUOTED5', "ENVQUOTED5"),
+    ("api_key='ENVQUOTED6", "ENVQUOTED6"),
+])
+def test_scrub_secrets_redacts_a_quoted_credential_value(line, canary):
+    out = bugreport._scrub_secrets(line)
+    # DATA first: a regression must say the canary survived.
+    assert canary not in out, (
+        f"a quoted credential shipped verbatim: {out!r}")
+    assert "=<redacted>" in out
+
+
+def test_scrub_secrets_never_marks_redacted_while_leaving_the_secret():
+    """The specific shape the live run produced. Asserting the two together is
+    the point: either alone passes on the broken output."""
+    out = bugreport._scrub_secrets('my .env has API_KEY="ENVQUOTED7"')
+    assert "ENVQUOTED7" not in out
+    assert '<redacted>"' not in out, (
+        f"a redaction marker was emitted immediately before a surviving quoted "
+        f"value: {out!r}")
 
 
 def test_scrub_secrets_never_eats_a_non_secret_value_out_of_the_real_docs():
