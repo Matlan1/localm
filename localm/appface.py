@@ -448,8 +448,8 @@ class _StatusWindow(AppFace):
         try:
             root.title(self.name)
             root.configure(bg=_BG)
-            root.geometry("470x380")
-            root.minsize(430, 320)
+            root.geometry("640x480")
+            root.minsize(520, 380)
             if sys.platform == "win32":
                 ip = icon_path()
                 if ip:
@@ -466,9 +466,17 @@ class _StatusWindow(AppFace):
                      font=("Segoe UI", 18, "bold")).pack(side="left")
 
             self._status_lbl = tk.Label(root, text="Starting LocaLM...", bg=_BG,
-                                        fg=_TEXT_DIM, anchor="w",
+                                        fg=_TEXT_DIM, anchor="w", justify="left",
                                         font=("Segoe UI", 11))
             self._status_lbl.pack(fill="x", padx=16)
+            # Wrap the status text to the live label width instead of
+            # truncating: a hang-alarm message is exactly the text that must
+            # stay fully readable (wraplength follows resizes; updating it
+            # does not change the packed width, so no re-Configure loop).
+            self._status_lbl.bind(
+                "<Configure>",
+                lambda e: self._status_lbl.configure(
+                    wraplength=max(200, e.width - 8)))
             self._addr_lbl = tk.Label(root, text="", bg=_BG, fg=_ACCENT, anchor="w",
                                       font=("Consolas", 10))
             self._addr_lbl.pack(fill="x", padx=16, pady=(2, 8))
@@ -485,8 +493,13 @@ class _StatusWindow(AppFace):
 
             wrap = tk.Frame(root, bg=_BORDER)
             wrap.pack(fill="both", expand=True, padx=16, pady=(2, 6))
+            # wrap="word": long log lines break onto new lines and the whole
+            # entry stays visible at any window size. With wrap="none" the
+            # autoscroll's see("end") also scrolled HORIZONTALLY to each
+            # line's tail, so the pane showed drifting mid-sentence fragments
+            # that read as centered noise (maintainer report, 2026-08-18).
             self._log = tk.Text(wrap, bg="#0b0d11", fg=_TEXT_DIM, bd=0,
-                                font=("Consolas", 9), wrap="none", height=9,
+                                font=("Consolas", 9), wrap="word", height=9,
                                 state="disabled")
             self._log.pack(fill="both", expand=True, padx=1, pady=1)
 

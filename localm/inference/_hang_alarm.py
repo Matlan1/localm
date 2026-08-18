@@ -150,6 +150,16 @@ class RequestProgress:
             oldest = min(self._inflight.values()) if self._inflight else now
             return count, now - oldest, now - self._last_progress
 
+    def observe(self) -> Tuple[Tuple[float, ...], float]:
+        """(per-request in-flight ages, seconds since the last response
+        progress) - the alarm's view. Per-request ages, not just the oldest,
+        so the surfaced message can count the requests that are actually
+        stuck rather than everything currently in flight."""
+        now = time.monotonic()
+        with self._lock:
+            ages = tuple(now - t for t in self._inflight.values())
+            return ages, now - self._last_progress
+
 
 class RequestProgressMiddleware:
     """Pure ASGI (deliberately NOT BaseHTTPMiddleware - see the
@@ -158,12 +168,16 @@ class RequestProgressMiddleware:
     body chunk as progress, so detector S can tell "slow but moving" from
     "nothing is answering at all".
 
-    /health is excluded on purpose: it is a liveness instrument (this
-    module's own self-probe, external monitors), and an instrument must not
-    mask the condition it exists to reveal - in the live incident /health
-    answered in 25ms the whole time the server was unusable, and had those
-    responses counted as progress the starvation detector would never have
-    fired."""
+    /health and /whoami are excluded on purpose: they are liveness/identity
+    instruments (this module's own self-probe, external monitors, and the
+    cross-instance discovery/pairing polls), and an instrument must not mask
+    the condition it exists to reveal - in the live incident /health
+    answered in 25ms the whole time the server was unusable, and a paired
+    second instance's /whoami polls would keep "progress" ticking through a
+    real hang the same way. Everything a user actually experiences (pages,
+    stats, activity, chat) stays tracked."""
+
+    _EXCLUDED_PATHS = frozenset({"/health", "/whoami"})
 
     def __init__(self, app, tracker: Optional["RequestProgress"] = None) -> None:
         self.app = app
@@ -172,7 +186,8 @@ class RequestProgressMiddleware:
         self.tracker: RequestProgress = tracker if tracker is not None else _TRACKER
 
     async def __call__(self, scope, receive, send):
-        if scope.get("type") != "http" or scope.get("path") == "/health":
+        if (scope.get("type") != "http"
+                or scope.get("path") in self._EXCLUDED_PATHS):
             await self.app(scope, receive, send)
             return
         token = self.tracker.start()
@@ -429,25 +444,43 @@ class HangAlarm:
             self._maybe_restart(
                 "%d consecutive self-probe failures" % self._probe_fails)
 
+    def _starve_text(self, stuck: int, oldest_age: float,
+                     progress_age: float) -> str:
+        """State the evidence, never a verdict the evidence does not carry
+        (maintainer correction, 2026-08-18: a red "server is likely hung"
+        over a server that was otherwise serving fine reads as a false
+        alarm and burns trust). "May be hung" appears only while NOTHING is
+        completing; once other traffic moves again the message downgrades
+        itself to the plain stuck-request fact it can still prove."""
+        mins = max(1.0, oldest_age / 60.0)
+        if progress_age > self.starvation_after:
+            return ("%d request(s) stuck for over %.0f minute(s) and nothing "
+                    "is completing - the server may be hung; use Restart if "
+                    "this persists" % (stuck, mins))
+        return ("%d request(s) stuck for over %.0f minute(s) (other requests "
+                "are completing) - use Restart if the app misbehaves"
+                % (stuck, mins))
+
     def _check_starvation(self) -> None:
         if self._inflight is None or self.starvation_after <= 0:
             return
-        count, oldest_age, progress_age = self._inflight()
+        ages, progress_age = self._inflight()
+        stuck = [a for a in ages if a > self.starvation_after]
         if "starve" in self._active:
             # HOLD while the stuck requests are still stuck: unrelated healthy
             # traffic completing must not clear a real wedge (measured in the
             # live incident: /health answered fine next to permanently wedged
-            # status polls). Clears only when the old in-flight work drains.
-            if count == 0 or oldest_age <= self.starvation_after:
+            # status polls). Clears only when the old in-flight work drains;
+            # meanwhile the text re-renders to whatever is currently true.
+            if not stuck:
                 self._set_active("starve", None)
+            else:
+                self._set_active("starve", self._starve_text(
+                    len(stuck), max(stuck), progress_age))
             return
-        if (count > 0 and oldest_age > self.starvation_after
-                and progress_age > self.starvation_after):
-            self._set_active(
-                "starve",
-                "%d request(s) stuck for over %.0f minutes and nothing is "
-                "completing - the server is likely hung; use Restart if this "
-                "persists" % (count, oldest_age / 60.0))
+        if stuck and progress_age > self.starvation_after:
+            self._set_active("starve", self._starve_text(
+                len(stuck), max(stuck), progress_age))
 
     # -- main loop ---------------------------------------------------------
 

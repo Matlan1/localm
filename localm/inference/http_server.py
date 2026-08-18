@@ -3525,7 +3525,7 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
                         heartbeat_gap=lambda: (
                             None if _hb_monotonic is None
                             else time.monotonic() - _hb_monotonic),
-                        inflight=_ha.tracker().snapshot,
+                        inflight=_ha.tracker().observe,
                         probe_target=_alarm_probe_target,
                         surface=lambda text: _hang_surface_hooks["surface"](text),
                         recovered=lambda: _hang_surface_hooks["recovered"](),

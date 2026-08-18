@@ -252,7 +252,7 @@ def test_starvation_surfaces_holds_through_healthy_traffic_and_clears():
     stuck even though other traffic is completing (progress_age small), must
     clear once they drain - and must NEVER auto-restart (the one detector
     whose condition legitimate long work can also produce)."""
-    state = {"snap": (0, 0.0, 0.0)}
+    state = {"snap": ((), 0.0)}
     spy = _Spy()
     alarm = _make_alarm(
         spy,
@@ -260,18 +260,33 @@ def test_starvation_surfaces_holds_through_healthy_traffic_and_clears():
         starvation_after=0.3,
     ).start()
     try:
-        # Wedged: one request stuck beyond the window, nothing progressing.
-        state["snap"] = (3, 1.0, 1.0)
+        # Wedged: two requests stuck beyond the window plus one young one,
+        # nothing progressing. The count must be the STUCK count (2), not
+        # everything in flight, and total starvation earns the "may be
+        # hung" phrasing.
+        state["snap"] = ((1.0, 0.9, 0.05), 1.0)
         assert spy.wait_for("surface", 5), spy.events
-        assert "stuck" in spy.texts("surface")[0]
+        first = spy.texts("surface")[0]
+        assert "2 request(s) stuck" in first, first
+        assert "may be hung" in first, first
         # Healthy traffic resumes alongside the still-stuck requests (the
-        # incident's own /health behavior): progress_age is tiny, oldest is
-        # still ancient. The surface must HOLD (no recovered event).
-        state["snap"] = (3, 2.0, 0.01)
-        time.sleep(0.3)
+        # incident's own /health behavior): progress_age tiny, stuck ones
+        # still ancient. The surface must HOLD (no recovered event) but the
+        # text must downgrade to the provable fact - no hang verdict while
+        # other requests are completing (maintainer correction 2026-08-18).
+        state["snap"] = ((2.0, 1.9), 0.01)
+        deadline = time.monotonic() + 5
+        while (time.monotonic() < deadline
+               and not any("other requests are completing" in t
+                           for t in spy.texts("surface"))):
+            time.sleep(0.02)
+        assert any("other requests are completing" in t
+                   for t in spy.texts("surface")), spy.events
+        assert not any("may be hung" in t
+                       for t in spy.texts("surface")[1:]), spy.events
         assert "recovered" not in spy.kinds(), spy.events
         # The stuck requests drain: now it clears.
-        state["snap"] = (1, 0.05, 0.01)
+        state["snap"] = ((0.05,), 0.01)
         assert spy.wait_for("recovered", 5), spy.events
         assert "restart" not in spy.kinds(), spy.events
     finally:
@@ -370,11 +385,13 @@ def test_middleware_tracks_inflight_and_progress():
     assert "http.response.body" in sent
 
 
-def test_middleware_excludes_health_from_tracking():
-    """/health is a liveness instrument (the alarm's own probe, external
-    monitors); counting it as progress would mask the exact starvation it
-    exists to reveal - in the live incident /health answered in 25ms the
-    whole time the server was unusable."""
+@pytest.mark.parametrize("path", ["/health", "/whoami"])
+def test_middleware_excludes_instrument_endpoints_from_tracking(path):
+    """/health and /whoami are liveness/identity instruments (the alarm's own
+    probe, external monitors, cross-instance discovery polls); counting them
+    as progress would mask the exact starvation they exist to reveal - in
+    the live incident /health answered in 25ms the whole time the server
+    was unusable."""
     tracker = ha.RequestProgress()
 
     async def app(scope, receive, send):
@@ -393,7 +410,7 @@ def test_middleware_excludes_health_from_tracking():
         async def send(message):
             seen_inflight.append(tracker.snapshot()[0])
 
-        await mw({"type": "http", "path": "/health"}, receive, send)
+        await mw({"type": "http", "path": path}, receive, send)
         return before, seen_inflight
 
     before, seen_inflight = asyncio.run(_drive())
