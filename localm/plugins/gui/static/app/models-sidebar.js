@@ -30,6 +30,24 @@ export function setStatus(state, text) {
   _statusBusy = state === "busy";
   $("status-text").className = "job-state " + (STATUS_STATE_CLASS[state] || "");
   $("status-text").textContent = text;
+  // The pill is HIDDEN for "ok" only, because that is the one state whose text
+  // the dropdown directly above already shows: "ok" carries the active model's
+  // name, or "no model" - and the select renders exactly that, including its
+  // explicit disabled "No model loaded" placeholder when nothing is active. Two
+  // controls saying the same thing is noise, so "ok" renders as the select
+  // alone.
+  //
+  // "busy" and "err" STAY VISIBLE and must never be folded into this (rule 5:
+  // we do not hide problems). Neither is derivable from the select: "busy" is a
+  // transient "loading X…"/"unloading X…" the select cannot express, and "err"
+  // is the ONLY surface for "server unreachable", "load failed", "unload
+  // failed", "models unavailable (HTTP n)" and "page out of date". Hiding the
+  // whole element would delete the load-failure report, not just a duplicate.
+  //
+  // The text/class are written FIRST and unconditionally, so a hidden pill
+  // still holds the last state for anything that reads it.
+  const box = $("model-status");
+  if (box) box.hidden = state === "ok";
 }
 
 // Live hardware monitor in the status bar (CPU/RAM/VRAM/GPU). Renders whatever

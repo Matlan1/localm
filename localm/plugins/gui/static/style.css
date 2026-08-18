@@ -327,6 +327,11 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
   align-items: center;
   gap: 6px;
 }
+/* Required, not defensive: the `display: flex` above BEATS the user-agent
+   `[hidden] { display: none }`, so setStatus()'s `hidden = state === "ok"`
+   would be a silent no-op without this rule and the pill would never actually
+   disappear. */
+#model-status[hidden] { display: none; }
 #status-text {
   white-space: nowrap;
   overflow: hidden;

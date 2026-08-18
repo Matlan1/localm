@@ -57,7 +57,20 @@ test("workflow panel renders default + uploaded, and select round-trips", async 
   assert.ok(picks.some((p) => /Built-in default/.test(p.textContent)), "default row present");
   const activePick = picks.find((p) => /a\.json/.test(p.textContent));
   assert.ok(activePick, "a.json row present");
-  assert.ok(activePick.querySelector('[data-icon-name="dot"]'), "a.json marked active with a filled dot");
+  // Selection is marked by the row's accent bar (.workflow-row.active) plus
+  // aria-current, NOT by a radio dot/ring glyph - those were removed because
+  // they duplicated the accent bar.
+  assert.ok(activePick.closest(".workflow-row").classList.contains("active"),
+            "a.json's row carries .active (the accent-bar selection marker)");
+  assert.equal(activePick.getAttribute("aria-current"), "true",
+               "a.json is announced as the current workflow");
+  const defaultPick = picks.find((p) => /Built-in default/.test(p.textContent));
+  assert.ok(!defaultPick.closest(".workflow-row").classList.contains("active"),
+            "the unselected row is not marked active");
+  assert.equal(defaultPick.getAttribute("aria-current"), null,
+               "only the selected row carries aria-current");
+  assert.equal(box.querySelectorAll('[data-icon-name="dot"], [data-icon-name="ring"]').length, 0,
+               "no radio dot/ring glyphs remain in the workflow list");
 
   // Switch to the built-in default (sends name: null).
   [...box.querySelectorAll(".workflow-pick")]
