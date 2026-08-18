@@ -28,8 +28,8 @@ AuditLog produces, which is what a real second server run would create).
 @integration + @real_gguf (same precedent as test_gguf_smoke_integration.py) so
 the default `pytest -m "not integration"` full-suite run is unaffected; run this
 explicitly with `pytest -m real_gguf tests/test_memory_longitudinal_harness.py -v`
-(GPU is a shared resource - wrap with D:/projects/.claude/gpu_lease.py when
-sharing a machine). Skips cleanly (never fails) when the native runtime or
+(the GPU is a shared resource, so serialise this against any other GPU
+workload on the same machine before running it). Skips cleanly (never fails) when the native runtime or
 network is unavailable.
 """
 
