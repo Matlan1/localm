@@ -40,14 +40,6 @@ permanent public record of what shipped and are never rewritten; the in-progress
   location you are browsing and opens it; each listed file and folder has a
   rename control. Renaming never overwrites an existing file or folder with the
   same name.
-- **Answers built on your indexed documents and remembered facts are now
-  checked against the evidence they were given.** localm gains a regression
-  check that indexes an invented fact, asks about it, then flips that fact and
-  asks again: a correct answer has to change with it. It covers both the RAG
-  retrieval path and the memory recall the assistant receives each turn, and it
-  runs against a real model, so a future change to how retrieved text is
-  presented cannot quietly leave answers relying on what the model already knew
-  instead of on what you gave it.
 
 ### Changed
 - **The chat parameters drawer and the image, music and video generation forms
