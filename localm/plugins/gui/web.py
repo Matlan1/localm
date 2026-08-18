@@ -638,12 +638,16 @@ def _name_is_safe(safe: str) -> bool:
     this sentence: a list written into a docstring goes stale the moment someone
     adds one.
 
-    This is a bare character/reserved-name check with NO filesystem call - the
-    right shape for share.py's write path, which folds *safe* into an
-    already-unique, UUID-prefixed name rather than resolving it directly. A
-    caller that resolves *safe* against a real directory (confinement,
-    directory-escape, OS-level alias substitution) needs the FULL check -
-    see _confined_upload_path, which uses pathsafe.confined_name for that.
+    This is a bare character check plus a '.'/'..' rejection, with NO filesystem
+    call - the right shape for share.py's write path, which folds *safe* into an
+    already-unique, UUID-prefixed name rather than resolving it directly. Windows
+    reserved DEVICE names (con, nul, com1 ...) are deliberately NOT rejected here,
+    matching pathsafe.confined_name's documented contract; the upload write path
+    stays non-clobbering via _unique_upload_target's exists() check, so only a
+    bare extensionless device name behaves unusually on Windows. A caller that
+    resolves *safe* against a real directory (confinement, directory-escape,
+    OS-level alias substitution) needs the FULL check - see _confined_upload_path,
+    which uses pathsafe.confined_name for that.
     """
     return bool(safe) and safe not in (".", "..") and not (set(safe) & _BAD_NAME_CHARS)
 
@@ -688,7 +692,9 @@ def _confined_upload_path(name: str) -> Path:
 def _unique_upload_target(base: Path, safe_name: str) -> Path:
     """A non-clobbering path for *safe_name* in *base*: 'note.txt' -> 'note (1).txt'
     if it already exists (mirrors the log-export dedup), so an upload never
-    silently overwrites an existing file."""
+    silently overwrites an existing file. This exists() check is also what saves
+    a bare Windows device name (nul, con ...) from silently discarding its data -
+    see _name_is_safe's docstring."""
     target = base / safe_name
     if not target.exists():
         return target

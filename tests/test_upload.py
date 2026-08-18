@@ -7,6 +7,7 @@ on the host. File names are basename-confined so they cannot traverse out of the
 uploads dir.
 """
 
+import os
 from pathlib import Path
 
 import pytest
@@ -197,6 +198,36 @@ def test_confined_upload_path_rejects_illegal_chars(scoped_app):
         with pytest.raises(HTTPException) as ei:
             web._confined_upload_path(bad)
         assert ei.value.status_code == 400
+
+
+def test_name_is_safe_docstring_documents_device_names():
+    # Load-bearing: the fix IS a docstring, so pin its wording directly. Modeled on
+    # tests/test_pathsafe_confined_name.py::test_docstring_does_not_claim_device_name_rejection.
+    doc = " ".join((web._name_is_safe.__doc__ or "").lower().split())
+    assert "character/reserved-name check" not in doc
+    assert "device names" in doc
+    assert "not rejected" in doc
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows device-name behaviour")
+def test_upload_bare_device_name_does_not_lose_data(scoped_app):
+    # A bare, extensionless Windows device name ("NUL") is not rejected by
+    # _name_is_safe (deliberately - see its docstring), but _unique_upload_target's
+    # exists() check redirects it to "NUL (1)" instead of writing through to the
+    # actual device, which would silently discard the data.
+    key = _writer_key()
+    body = b"12345678901234567890"  # 20 bytes; content must survive a real write
+    with TestClient(scoped_app) as c:
+        r = c.post("/api/upload", headers=_hdr(key), files={"file": ("NUL", body)})
+    up = scoped_app.state._home / "uploads"
+    entries = list(up.iterdir()) if up.exists() else []
+    # Assert on the data before the status code: a regression here is data loss,
+    # not a wrong number, and a status-code-first assertion could be "fixed" by
+    # adjusting the number instead of by restoring the missing write.
+    assert len(entries) == 1, f"expected exactly one saved file, got {entries}"
+    assert entries[0].read_bytes() == body
+    assert r.status_code == 200, r.text
+    assert r.json()["uploaded"][0]["name"] == "NUL (1)"
 
 
 class TestConfinedUploadPathAliasSubstitution:
