@@ -55,10 +55,12 @@ export async function register(ctx) {
 
   // ---- lazy model load (with WebGPU -> WASM fallback) -------------------- //
   let kokoro = null;
+  let Splitter = null;       // vendored TextSplitterStream; see speak()
   let loadPromise = null;
   let announced = false;
   let activeDevice = null;   // the backend that actually built the model (see build())
-  let repairWarned = false;  // warn once per page, not once per sentence
+  let repairWarned = false;    // warn once per page, not once per sentence
+  let splitterWarned = false;  // ditto (see speak())
 
   // R08: is this Kokoro model already in the transformers.js browser cache?
   // Used to avoid a misleading "first run downloads" toast on a hard reload, and
@@ -77,9 +79,28 @@ export async function register(ctx) {
 
   async function load() {
     const mod = await import(libraryURL);
+    Splitter = mod.TextSplitterStream || null;
     const onnx = mod.env && mod.env.backends && mod.env.backends.onnx;
-    if (cfg.wasm_paths && onnx) {
-      onnx.wasm.wasmPaths = new URL(cfg.wasm_paths, import.meta.url).href;
+    // The onnxruntime runtime is VENDORED (see vendor/NOTICE.md), and this
+    // fallback is where the default has to live rather than only in
+    // tts.example.json. The template default reaches us through
+    // /api/tts/config, and every path that loses it lands here silently: the
+    // config fetch above swallows a failure into `cfg = {}`, settings.py
+    // returns {} when the template is unreadable, and an old install may still
+    // carry a saved `wasm_paths: ""` override from before this shipped. In each
+    // of those the bundle would fall back to its OWN default,
+    // cdn.jsdelivr.net - which the CSP no longer admits, so neural TTS would
+    // die with "no available backend found" for a reason nothing local caused.
+    // A user value still wins (never silently override an explicit choice).
+    // The trailing slash is not cosmetic: onnxruntime concatenates the filename
+    // straight onto this prefix, so "vendor/onnxruntime" (no slash) would
+    // request ".../vendor/onnxruntimeort-wasm-simd-threaded.jsep.wasm" and 404.
+    // The settings validator accepts the value with or without it, so normalise
+    // here rather than trusting the way it was typed.
+    if (onnx) {
+      const wasmDir = String(cfg.wasm_paths || "vendor/onnxruntime/");
+      onnx.wasm.wasmPaths =
+        new URL(wasmDir.endsWith("/") ? wasmDir : wasmDir + "/", import.meta.url).href;
     }
     if (!announced) {
       announced = true;
@@ -206,7 +227,34 @@ export async function register(ctx) {
     try {
       // stream() splits into sentences and yields audio per sentence, so the
       // first words start playing without waiting for the whole reply.
-      for await (const chunk of k.stream(text, { voice: currentVoice, speed })) {
+      //
+      // FEED IT A SPLITTER WE CLOSE OURSELVES. Handing stream() a plain STRING
+      // looks equivalent and is not: kokoro-js then builds a TextSplitterStream
+      // internally, pushes the text and NEVER closes it - and that splitter only
+      // emits its trailing sentence from flush(), which only close() triggers.
+      // So the LAST sentence of every reply was never synthesised and the loop
+      // then awaited more input forever, leaving speaking() stuck true. Measured
+      // against the vendored bundle: "One. Two. Three." yields exactly "One." and
+      // "Two." and then hangs, and a ONE-sentence reply yields nothing at all,
+      // which is silence with no error anywhere. Closing up front costs no
+      // streaming - the sentences are already segmented, so audio still starts on
+      // the first one.
+      let source = text;
+      if (Splitter) {
+        source = new Splitter();
+        source.push(text);
+        source.close();
+      } else if (!splitterWarned) {
+        splitterWarned = true;
+        // RULE 5: the degraded path still works for all but the final sentence,
+        // so it is worth taking rather than failing the utterance - but it must
+        // not be silent, because the symptom (a reply that stops one sentence
+        // short) looks like a model problem rather than a missing export.
+        console.warn(
+          "[tts] the vendored bundle exports no TextSplitterStream, so the last " +
+          "sentence of each reply cannot be flushed and will not be spoken.");
+      }
+      for await (const chunk of k.stream(source, { voice: currentVoice, speed })) {
         if (myToken !== token) return;
         // Repair the WebGPU leading transient BEFORE encoding: toBlob() writes a
         // float32 wav, so an out-of-range sample is carried through verbatim and

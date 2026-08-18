@@ -407,6 +407,13 @@ class PluginHost:
         # them (idempotent) so served plugin scripts always load as modules.
         mimetypes.add_type("text/javascript", ".js")
         mimetypes.add_type("text/javascript", ".mjs")
+        # .wasm for the same reason, and it is now load-bearing: the tts plugin
+        # serves the vendored onnxruntime runtime from here, and
+        # WebAssembly.instantiateStreaming REFUSES anything that is not
+        # application/wasm. Python's own table maps it correctly, but the Windows
+        # registry is consulted first and can override, so pin it rather than
+        # leave neural TTS depending on a machine's file associations.
+        mimetypes.add_type("application/wasm", ".wasm")
         prefix = "/" + (url_prefix or f"/plugins/{self._spec.name}").strip("/")
         if prefix in self._static_prefixes:
             return prefix                    # already serving this prefix (idempotent)

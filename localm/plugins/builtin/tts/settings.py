@@ -99,9 +99,12 @@ def asset_root() -> Path:
     the data directory (``PluginHost.mount_static`` roots at the installed
     plugin's path), not this in-tree source: the two are kept hash-identical by
     the builtin refresh, but a user who drops their own onnxruntime WASM folder
-    into the installed copy would otherwise be told it does not exist. Falls
-    back to the shipped source when the plugin is not installed (so the setting
-    can still be validated before the plugin is added).
+    into the installed copy would otherwise be told it does not exist. (The
+    plugin now VENDORS that runtime under ``static/vendor/onnxruntime/`` and
+    defaults ``wasm_paths`` to it, so this is the override case rather than the
+    only case.) Falls back to the shipped source when the plugin is not
+    installed (so the setting can still be validated before the plugin is
+    added).
     """
     try:
         from localm.config import home_dir

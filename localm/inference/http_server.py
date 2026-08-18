@@ -4242,21 +4242,18 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
     # it would mean rewriting every one. The remaining directives are unchanged
     # from the report-only policy and were each confirmed against a live GUI.
     #
-    # script-src MUST list cdn.jsdelivr.net, and connect-src alone is NOT enough.
-    # The tts plugin's Kokoro bundle pulls the onnxruntime-web backend with a
-    # dynamic import() (ort-wasm-simd-threaded.jsep.mjs). A dynamic import is a
-    # MODULE SCRIPT, so it is governed by script-src; connect-src only covers
-    # fetch/XHR. Measured 2026-08-13 from a live page: fetch() of that exact URL
-    # returned 200 while import() of it was refused, and Kokoro died with "no
-    # available backend found" - i.e. neural TTS was completely dead. It was
-    # invisible until this policy started ENFORCING, because Report-Only blocks
-    # nothing, and a live-GUI check cannot catch it: the backend is fetched
-    # lazily on the FIRST SPEAK, by a plugin that must be installed first.
-    # FOLLOW-UP (not done here, it is a maintainer call): vendoring onnxruntime
-    # locally would drop this origin entirely and make TTS work offline, which is
-    # what rule 4 wants - but ort-wasm-simd-threaded.jsep.wasm is 21.6 MB, so
-    # whether that belongs in the repo, in the installer, or as a first-run
-    # download is a product decision. See dev-notes/TTS-ROOT-CAUSE-2026-08-13.md.
+    # NO CDN ORIGIN IS LISTED, AND NOTHING NEEDS ONE. The tts plugin's Kokoro
+    # bundle pulls the onnxruntime-web backend with a dynamic import()
+    # (ort-wasm-simd-threaded.jsep.mjs), and a dynamic import is a MODULE SCRIPT,
+    # so it is governed by script-src rather than connect-src. That runtime used
+    # to come from cdn.jsdelivr.net, which forced the origin into BOTH directives
+    # and meant neural TTS never worked offline or behind a filtering proxy.
+    # It is now vendored and served from 'self'
+    # (localm/plugins/builtin/tts/static/vendor/onnxruntime/, pointed at by the
+    # plugin's own wasm_paths default), so the grant was removed on both sides.
+    # Do not add a CDN origin back to make a TTS load error go away: that error
+    # means the vendored runtime did not resolve, and widening the policy hides
+    # the real fault instead of fixing it.
     #
     # The 'wasm-unsafe-eval' token is REQUIRED and is a SECOND, INDEPENDENT block.
     # Allowing the origin above only gets the backend DOWNLOADED; instantiating it
@@ -4283,7 +4280,7 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
     # that is already executing, so this does not give an INJECTED script a new
     # way in - the nonce still gates what may execute in the first place.
     _CSP_PREFIX = ("default-src 'self'; "
-                   "script-src 'self' blob: https://cdn.jsdelivr.net 'wasm-unsafe-eval' 'nonce-")
+                   "script-src 'self' blob: 'wasm-unsafe-eval' 'nonce-")
     _CSP_SUFFIX = (
         "'; "
         "style-src 'self' 'unsafe-inline'; "
@@ -4301,8 +4298,11 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
         # assigning a blocked src fires an error EVENT on the element rather
         # than throwing, so a try/catch around it cannot see it and the player
         # just sits there dead. That is how this survived unnoticed.
-        "connect-src 'self' blob: https://huggingface.co https://*.hf.co "
-        "https://cdn.jsdelivr.net; "
+        # huggingface.co / *.hf.co are the MODEL weights (chat models are
+        # server-side, but the tts plugin fetches Kokoro's ~86 MB ONNX in the
+        # browser and caches it there). The onnxruntime RUNTIME is vendored and
+        # same-origin, so no CDN origin belongs here either.
+        "connect-src 'self' blob: https://huggingface.co https://*.hf.co; "
         "media-src 'self' blob:; "
         "worker-src 'self' blob:; "
         "frame-src 'self'; "
