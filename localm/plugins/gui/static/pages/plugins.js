@@ -37,9 +37,14 @@ function pluginErrorLine(name, err) {
 
 export function _catalogRow(p) {
   const tr = el("tr");
-  const nameTd = el("td", "name-cell");
-  nameTd.appendChild(iconEl("plugins", "ic ic-plugin"));
-  nameTd.appendChild(el("span", "name", p.label || p.name));
+  const nameTd = el("td", "name-cell shrink-cell");
+  // The icon/name/badge flex line lives on this inner span, never on the td: a
+  // display:flex td stops being a table-cell, so its border-bottom draws under
+  // its own content and breaks the row separator partway across (style.css).
+  const nameLine = el("span", "cell-line");
+  nameTd.appendChild(nameLine);
+  nameLine.appendChild(iconEl("plugins", "ic ic-plugin"));
+  nameLine.appendChild(el("span", "name", p.label || p.name));
   tr.appendChild(nameTd);
   const status = p.protected ? "protected"
     : p.active ? "active"
@@ -50,10 +55,10 @@ export function _catalogRow(p) {
   // active -> st-ok (green), installed-but-off -> st-pending (neutral/idle),
   // available (never installed) -> base pill (neutral, no variant).
   const statusCls = p.protected ? "on" : p.active ? "st-ok" : p.installed ? "st-pending" : "";
-  const statusTd = el("td");
+  const statusTd = el("td", "shrink-cell");
   statusTd.appendChild(el("span", ("job-state " + statusCls).trim(), status));
   tr.appendChild(statusTd);
-  const descTd = el("td", "", p.description);
+  const descTd = el("td", "grow-cell", p.description);
   // Warn when a plugin needs other plugins that are not installed (B15).
   const missing = Array.isArray(p.missing_requires) ? p.missing_requires : [];
   if (missing.length) {
@@ -67,8 +72,7 @@ export function _catalogRow(p) {
       `needs Python packages: ${missingDeps.join(", ")}`));
   }
   tr.appendChild(descTd);
-  const actions = el("td");
-  actions.style.textAlign = "right";
+  const actions = el("td", "actions-cell");
   if (!p.protected) {
     if (!p.installed) {
       actions.appendChild(_catalogBtn("install", p.name, "primary", "Install"));
@@ -343,16 +347,17 @@ export async function refreshPluginsPage() {
       const tbody = el("tbody");
       for (const p of data.plugins) {
         const tr = el("tr");
-        const nameTd = el("td", "name-cell");
-        nameTd.appendChild(iconEl("plugins", "ic ic-plugin"));
-        nameTd.appendChild(el("span", "name", p.name));
+        const nameTd = el("td", "name-cell shrink-cell");
+        const nameLine = el("span", "cell-line");
+        nameTd.appendChild(nameLine);
+        nameLine.appendChild(iconEl("plugins", "ic ic-plugin"));
+        nameLine.appendChild(el("span", "name", p.name));
         tr.appendChild(nameTd);
-        tr.appendChild(el("td", "mono", p.version));
-        tr.appendChild(el("td", "", p.description));
+        tr.appendChild(el("td", "mono shrink-cell", p.version));
+        tr.appendChild(el("td", "grow-cell", p.description));
         tr.appendChild(el("td", "mono",
           (p.tool_exports || []).length ? p.tool_exports.join(", ") : ""));
-        const actions = el("td");
-        actions.style.textAlign = "right";
+        const actions = el("td", "actions-cell");
         const rm = el("button", "danger", "remove");
         rm.onclick = () => {
           confirmDanger(`Remove plugin '${p.name}'?`,

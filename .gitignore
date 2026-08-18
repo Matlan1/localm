@@ -154,4 +154,11 @@ tests/test_make_release.py
 # Full internal changelog. CHANGELOG.md is served to users by the in-app
 # changelog button, so it carries RELEASED, user-facing entries only; anything
 # unreleased or internal is recorded here instead and promoted at release time.
+# BOTH casings are listed on purpose: gitignore matching is case-SENSITIVE unless
+# core.ignorecase is on, which it is by default on Windows and NOT on Linux/macOS.
+# The file on disk is CHANGELOG-FULL.md, so the lower-case pattern alone matched it
+# only on Windows - on any case-sensitive checkout it showed up untracked and one
+# `git add -A` from being published on a public repo. Verified with a throwaway repo
+# at core.ignorecase=false: the upper-case name was reported `?? CHANGELOG-FULL.md`.
 CHANGELOG-full.md
+CHANGELOG-FULL.md

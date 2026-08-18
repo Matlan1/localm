@@ -128,6 +128,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   status line no longer gets cut off mid-sentence (it wraps to the window
   width), and the log pane wraps long lines instead of auto-scrolling
   sideways into unreadable fragments.
+- **Rows in the Models, Plugins, Knowledge and Jobs tables no longer break into
+  pieces.** Each row's separator line stopped partway across and continued at a
+  different height, and the buttons at the end of a row stacked one per line, so a
+  single model or plugin sprawled over several lines of staggered rules. Every
+  record is one row again, with one line under it and its controls side by side.
+  On the Models page the type dropdown has moved into the Role column, where it
+  now doubles as that column's coloured type tag instead of sitting twice in the
+  same row, and a long source path is shortened with the full value on hover. In a
+  window too narrow for the whole table, the table scrolls on its own rather than
+  pushing the page sideways.
 - **The Images/Music/Video workflow panel now matches the rest of the GUI.**
   The pick/delete buttons used one-off styling instead of the shared button
   classes, and hovering or selecting a workflow row showed no feedback.

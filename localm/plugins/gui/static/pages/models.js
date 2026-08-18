@@ -216,8 +216,14 @@ export async function refreshModelsPage() {
   for (const m of models) {
     const tr = el("tr");
     const nameTd = el("td", "name-cell");
-    nameTd.appendChild(iconEl("models", "ic ic-model"));
-    nameTd.appendChild(el("span", "name", m.name));
+    // The icon/name/badge flex line lives on this inner span, never on the td: a
+    // display:flex td stops being a table-cell, so its border-bottom draws under its
+    // own content rather than at the row's foot, which left the separator visibly
+    // broken partway across every row (measured 82px out on a tall one).
+    const nameLine = el("span", "cell-line");
+    nameTd.appendChild(nameLine);
+    nameLine.appendChild(iconEl("models", "ic ic-model"));
+    nameLine.appendChild(el("span", "name", m.name));
     // F8-PERSIST-ARCH-AND-EXPERT-COUNT: the same real, from-the-file-header
     // architecture/MoE badges the HuggingFace search page shows (discRepoRow
     // below), now available for an already-registered model too - hard
@@ -227,14 +233,14 @@ export async function refreshModelsPage() {
     // not be read, has these as null/undefined and correctly shows NEITHER
     // badge - never a false "not MoE" claim about a model nobody has checked.
     if (m.architecture) {
-      nameTd.appendChild(el("span", "arch-badge", m.architecture));
+      nameLine.appendChild(el("span", "arch-badge", m.architecture));
     }
     if (m.expert_count > 0) {
-      nameTd.appendChild(el("span", "moe-badge moe-confirmed", MOE_LABEL.confirmed));
+      nameLine.appendChild(el("span", "moe-badge moe-confirmed", MOE_LABEL.confirmed));
     }
     const visBadge = visionBadge(m.vision);
-    if (visBadge) nameTd.appendChild(visBadge);
-    if (m.active) nameTd.appendChild(el("span", "active-tag job-state st-ok", "active"));
+    if (visBadge) nameLine.appendChild(visBadge);
+    if (m.active) nameLine.appendChild(el("span", "active-tag job-state st-ok", "active"));
     // Independent of "active": a model can sit resident in VRAM without being
     // the one currently serving requests - surfaced so a background-loaded
     // model is never invisible/indistinguishable from one that was never
@@ -243,33 +249,24 @@ export async function refreshModelsPage() {
     // CSS of its own - and incorrectly triggered the tr:has(.active-tag) row
     // highlight for a merely-resident model); job-state's "on" variant gives it
     // its own distinct look instead.
-    else if (m.loaded) nameTd.appendChild(el("span", "loaded-tag job-state on", "loaded"));
+    else if (m.loaded) nameLine.appendChild(el("span", "loaded-tag job-state on", "loaded"));
     tr.appendChild(nameTd);
     
-    // Role column (using job-state badge layout). An 'unknown'-type model (its
-    // type could not be determined) is highlighted so it stands out as needing a
-    // type set via the control below.
-    const roleTd = el("td", "mono");
+    // Role column. The set-type control IS this column - one pill that both shows
+    // the type and changes it, wearing the same .type-<name> colour the read-only
+    // badge used to, so the column still scans by colour. It was previously a badge
+    // here plus a separate <select> over in the actions cell: the same fact twice,
+    // and the select was the widest thing in the row.
+    const roleTd = el("td", "mono shrink-cell");
     const roleType = m.model_type || "llm";
-    roleTd.appendChild(el("span", "type-badge type-" + roleType, roleType));
-    tr.appendChild(roleTd);
-    
-    tr.appendChild(el("td", "mono", m.source || ""));
-    tr.appendChild(el("td", "mono", fmtSize(m.size_bytes)));
-    tr.appendChild(el("td", "mono", fmtModelDate(m.mtime)));
 
-    const actions = el("td");
-    actions.style.textAlign = "right";
-    const detail = el("button", "secondary", "info");
-    detail.onclick = () => showModelDetail(m.name);
-    actions.appendChild(detail);
-
-    // One-click set-type control on every row (outside the LLM-only gate below):
-    // an 'unknown'/media model otherwise has no controls, and this is how a
-    // mis-detected model is reclassified without the CLI. Changing it POSTs the
-    // chosen type, then re-renders (so an unknown->llm switch reveals use/alias).
-    const typeSel = el("select", "model-type-select");
+    // On every row (outside the LLM-only gate below): an 'unknown'/media model
+    // otherwise has no controls, and this is how a mis-detected model is
+    // reclassified without the CLI. Changing it POSTs the chosen type, then
+    // re-renders (so an unknown->llm switch reveals use/alias).
+    const typeSel = el("select", "model-type-select type-badge type-" + roleType);
     typeSel.title = "Change this model's type";
+    typeSel.setAttribute("aria-label", `Model type for ${m.name}`);
     for (const t of MODEL_TYPE_OPTIONS) {
       const opt = el("option", "", t);
       opt.value = t;
@@ -290,7 +287,21 @@ export async function refreshModelsPage() {
         refreshPerfEstimate();
       } finally { typeSel.disabled = false; }
     };
-    actions.appendChild(typeSel);
+    roleTd.appendChild(typeSel);
+    tr.appendChild(roleTd);
+
+    // The source is reference text, not the row's identity, so it clips to an
+    // ellipsis with the full value on hover rather than wrapping the row.
+    const sourceTd = el("td", "mono clip-cell", m.source || "");
+    if (m.source) sourceTd.title = m.source;
+    tr.appendChild(sourceTd);
+    tr.appendChild(el("td", "mono shrink-cell", fmtSize(m.size_bytes)));
+    tr.appendChild(el("td", "mono shrink-cell", fmtModelDate(m.mtime)));
+
+    const actions = el("td", "actions-cell");
+    const detail = el("button", "secondary", "info");
+    detail.onclick = () => showModelDetail(m.name);
+    actions.appendChild(detail);
 
     // Only LLMs support use/alias/remove in Phase 1
     const isLlm = !m.model_type || m.model_type === "llm";
