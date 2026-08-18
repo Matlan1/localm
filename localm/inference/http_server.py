@@ -2168,21 +2168,68 @@ def set_hang_surface(surface, recovered) -> None:
     _hang_surface_hooks["recovered"] = recovered
 
 
+# The running event loop, captured at lifespan startup for _hang_dump's
+# async-task section (a plain thread cannot resolve it on its own).
+_hang_dump_loop = None
+
+
 def _hang_dump(reason: str) -> None:
     """Forensic stack snapshot on a NEW hang incident, into the same
     per-run trace file the stall watchdog uses - under the same privacy gate
     (_diagnostics_allowed), because it writes stack frames to disk. The alarm
     calls this once per distinct incident; detection/surfacing themselves are
-    NOT gated on this (they write nothing sensitive anywhere)."""
+    NOT gated on this (they write nothing sensitive anywhere).
+
+    Two sections: every THREAD (faulthandler - where the 2026-08-18
+    incident's wedged executor jobs were visible), then every asyncio TASK
+    with its await stack - because a purely-async wedge (a coroutine parked
+    on an await that never completes) does not exist on any thread and is
+    invisible to faulthandler. The task section is gathered ON the loop
+    (call_soon_threadsafe) with a short wait: in the starvation class the
+    loop is healthy by definition so it returns instantly, and in the
+    frozen-loop class it times out and is skipped - the thread section
+    already shows the freeze itself."""
     if not _diagnostics_allowed():
         return
     import faulthandler
+    import traceback
     from localm.debuglog import hang_trace_path
     with open(hang_trace_path(), "a", encoding="utf-8",
               errors="backslashreplace") as fh:
         fh.write(f"\n===== LOCALM HANG ALARM: {reason} (pid {os.getpid()}, "
                  f"{time.strftime('%Y-%m-%d %H:%M:%S')}) =====\n")
         faulthandler.dump_traceback(file=fh, all_threads=True)
+        loop = _hang_dump_loop
+        if loop is None or loop.is_closed():
+            return
+        lines: list = []
+        done = threading.Event()
+
+        def _capture_tasks() -> None:
+            try:
+                for task in asyncio.all_tasks(loop):
+                    lines.append(f"\n--- task {task.get_name()}: {task!r}\n")
+                    frames = task.get_stack(limit=25)
+                    for frame in frames:
+                        lines.extend(traceback.format_stack(frame, limit=1))
+                    if not frames:
+                        lines.append("    (no Python frames: done/cancelled)\n")
+            except Exception:
+                lines.append("    (task capture failed)\n")
+            finally:
+                done.set()
+
+        try:
+            loop.call_soon_threadsafe(_capture_tasks)
+        except RuntimeError:
+            return   # loop shutting down
+        if done.wait(2.0):
+            fh.write("\n----- asyncio tasks (await stacks) -----\n")
+            fh.writelines(lines)
+        else:
+            fh.write("\n----- asyncio tasks: NOT CAPTURED (loop did not "
+                     "respond in 2s - consistent with a frozen loop; see "
+                     "the thread section above) -----\n")
 
 
 def _hang_restart_action(app) -> None:
@@ -3521,6 +3568,8 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
 
                 _mode_now = _ha.recovery_mode()
                 if _mode_now != "off":
+                    global _hang_dump_loop
+                    _hang_dump_loop = asyncio.get_running_loop()
                     hang_alarm = _ha.HangAlarm(
                         heartbeat_gap=lambda: (
                             None if _hb_monotonic is None
