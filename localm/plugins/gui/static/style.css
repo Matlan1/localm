@@ -257,7 +257,7 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
   display: flex;
   align-items: center;
   padding: 7px 10px;
-  border-radius: 7px;
+  border-radius: 8px;
   cursor: pointer;
   color: var(--text-dim);
   font-size: 13px;
@@ -284,7 +284,7 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
   width: calc(100% - 20px);
   margin: 0 10px 8px;
   background: var(--bg-input); border: 1px solid var(--border);
-  border-radius: 7px; color: var(--text); font-size: 12.5px;
+  border-radius: 8px; color: var(--text); font-size: 12.5px;
   padding: 5px 9px;
 }
 #conv-search:focus { outline: none; border-color: var(--accent); }
@@ -435,7 +435,7 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 /* button styling shared with #conversations h3 via .section-head-btn */
 .coder-session-item {
   display: flex; align-items: center; gap: 6px;
-  padding: 9px 10px; border-radius: 7px; cursor: pointer;
+  padding: 9px 10px; border-radius: 8px; cursor: pointer;
   color: var(--text-dim); font-size: 13px;
   white-space: nowrap; overflow: hidden;
 }
@@ -473,7 +473,7 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 .msg-row.user .msg-body {
   background: var(--accent-soft);
   border: 1px solid var(--border);
-  border-radius: 14px 14px 4px 14px;
+  border-radius: 12px 12px 4px 12px;
   padding: 9px 14px;
   max-width: 80%;
 }
@@ -528,7 +528,7 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
   background: none;
   border: 1px solid var(--border);
   color: var(--text-dim);
-  border-radius: 5px;
+  border-radius: 8px;
   font-size: 11px;
   padding: 2px 8px;
   cursor: pointer;
@@ -692,7 +692,7 @@ pre:hover .canvas-btn { opacity: 1; }
   margin: 10px auto 0;
   background: var(--bg-raised);
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: 12px;
   padding: 14px;
   gap: 14px;
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
@@ -708,7 +708,7 @@ pre:hover .canvas-btn { opacity: 1; }
   width: 100%;
   background: var(--bg-input);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: 8px;
   color: var(--text);
   padding: 6px 8px;
   font-size: 13px;
@@ -724,7 +724,7 @@ pre:hover .canvas-btn { opacity: 1; }
   margin: 60px auto;
   background: var(--bg-raised);
   border: 1px solid var(--border);
-  border-radius: 14px;
+  border-radius: 12px;
   padding: 28px;
 }
 #coder-setup h2 { margin: 0 0 6px; font-size: 20px; }
@@ -796,7 +796,7 @@ pre:hover .canvas-btn { opacity: 1; }
 .tool-card .inner {
   background: var(--bg-raised);
   border: 1px solid var(--border);
-  border-radius: 9px;
+  border-radius: 12px;
   overflow: hidden;
 }
 .tool-card .head {
@@ -843,7 +843,7 @@ pre:hover .canvas-btn { opacity: 1; }
 .confirm-card .inner {
   background: var(--bg-raised);
   border: 1px solid var(--yellow);
-  border-radius: 10px;
+  border-radius: 12px;
   padding: 14px;
 }
 .confirm-card .title { font-weight: 600; margin-bottom: 8px; }
@@ -906,7 +906,7 @@ pre:hover .canvas-btn { opacity: 1; }
   padding: 7px 10px;
   background: var(--bg-raised);
   border: 1px solid var(--border);
-  border-radius: 7px;
+  border-radius: 8px;
   color: var(--text);
   font-size: 13px;
 }
@@ -1191,7 +1191,7 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
 .media-comfy-box {
   border: 1px solid var(--border); border-radius: 8px;
   padding: 10px 12px; margin-top: 12px;
-  background: var(--bg-elevated, rgba(127,127,127,0.04));
+  background: var(--bg-input);
 }
 .media-comfy-head { display: flex; align-items: center; gap: 10px; }
 .media-comfy-row {
@@ -1229,7 +1229,7 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
 .workflow-list { display: flex; flex-direction: column; gap: 4px; margin: 6px 0; }
 .workflow-row {
   display: flex; align-items: center; gap: 8px;
-  padding: 4px 6px; border-radius: 6px;
+  padding: 4px 6px; border-radius: 8px;
 }
 .workflow-row:hover, .workflow-row.active { background: var(--bg-input); }
 .workflow-row.active { box-shadow: inset 2px 0 0 var(--accent); }
@@ -1374,7 +1374,7 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
   font-size: 11px;
   padding: 2px 4px;
   margin: 0 2px;
-  border-radius: 6px;
+  border-radius: 8px;
   border: 1px solid var(--border);
   background: var(--surface, transparent);
   color: var(--text);
@@ -1474,7 +1474,7 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
 .img-grid .thumb {
   position: relative;
   border: 1px solid var(--border);
-  border-radius: 9px;
+  border-radius: 12px;
   overflow: hidden;
   cursor: pointer;
   background: var(--code-bg);
@@ -1503,7 +1503,7 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
 .thumb:hover .thumb-acts { opacity: 1; }
 .thumb-acts button {
   background: rgba(0, 0, 0, 0.55); color: #fff;
-  border: none; border-radius: 6px;
+  border: none; border-radius: 8px;
   width: 26px; height: 26px; cursor: pointer; font-size: 13px;
   display: inline-flex; align-items: center; justify-content: center;
 }
@@ -1622,14 +1622,14 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
 /* msg meta action buttons */
 .msg-meta button.action {
   background: none; border: 1px solid var(--border); color: var(--text-dim);
-  border-radius: 5px; font-size: 11px; padding: 2px 8px; cursor: pointer;
+  border-radius: 8px; font-size: 11px; padding: 2px 8px; cursor: pointer;
 }
 .msg-meta button.action:hover { color: var(--accent); border-color: var(--accent); }
 
 /* F11: "used N memories" chip on an assistant turn (chat.js buildMemoryChip). */
 .msg-meta button.mem-chip {
   background: none; border: 1px solid var(--border); color: var(--text-dim);
-  border-radius: 5px; font-size: 11px; padding: 2px 8px; cursor: pointer;
+  border-radius: 8px; font-size: 11px; padding: 2px 8px; cursor: pointer;
 }
 .msg-meta button.mem-chip:hover { color: var(--accent); border-color: var(--accent); }
 
@@ -1818,13 +1818,13 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
 .embedding-warmup-row { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
 .embedding-warmup-status { color: var(--text-muted, #888); }
 /* Plugin catalog: "requires X (missing)" warning under a plugin's description. */
-.plugin-missing-req { color: var(--danger, #d9534f); }
+.plugin-missing-req { color: var(--red); }
 
 /* coder session bar */
 
 #session-select {
   background: var(--bg-input); color: var(--text);
-  border: 1px solid var(--border); border-radius: 7px;
+  border: 1px solid var(--border); border-radius: 8px;
   padding: 5px 8px; font-size: 12.5px; max-width: 240px;
 }
 #coder-feeds { flex: 1; min-height: 0; display: flex; flex-direction: column; }
@@ -1898,12 +1898,12 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
 .key-row { display: flex; align-items: center; gap: 8px; }
 .key-row .name { font-weight: 600; }
 .key-scope-tags { flex: 1; font-size: 12px; opacity: 0.8; }
-.key-scope-danger { color: var(--danger, #d9534f); font-weight: 600; }
+.key-scope-danger { color: var(--red); font-weight: 600; }
 .key-presets { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 6px 0; }
 .key-presets-label { margin-right: 2px; }
 .key-preset-btn { padding: 2px 10px; font-size: 12px; }
 .key-preset-del { margin-left: 6px; font-weight: 700; opacity: 0.55; cursor: pointer; }
-.key-preset-del:hover { opacity: 1; color: var(--danger, #d9534f); }
+.key-preset-del:hover { opacity: 1; color: var(--red); }
 .key-preset-save { font-size: 12px; opacity: 0.85; }
 .key-scope-disabled { opacity: 0.45; }
 .key-expiry-row { display: flex; align-items: center; gap: 8px; font-size: 13px; margin: 6px 0; }
@@ -1981,7 +1981,7 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
 .disc-filter-bar {
   display: flex; flex-direction: column; gap: 8px;
   margin: 10px 0 4px; padding: 10px 12px;
-  background: var(--bg-input); border: 1px solid var(--border); border-radius: 10px;
+  background: var(--bg-input); border: 1px solid var(--border); border-radius: 8px;
 }
 .disc-formats, .disc-filters, .filter-chips { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
 .disc-filter-label, .filter-label {
