@@ -12,7 +12,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
-- - **Diagnostics moved into the app: Settings > System > Diagnostics.** Until now
+- **Diagnostics moved into the app: Settings > System > Diagnostics.** Until now
   the only way to run localm's active self-checks was `localm doctor` in a
   terminal, so anyone using the app alone could not run them at all. The card
   runs the five checks that actually try something rather than reading a version
