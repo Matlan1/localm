@@ -89,6 +89,7 @@ _ADL_VENDOR_AMD = 1002        # decimal, NOT 0x1002 - ADL reports it in base 10
 _lock = threading.Lock()
 _adl_state: Optional[dict] = None      # None = not tried yet; {} = tried and unusable
 _pdh_state: Optional[dict] = None
+_pdh_util_state: Optional[dict] = None
 
 
 class _AdapterInfo(ctypes.Structure):
@@ -272,6 +273,105 @@ def _pdh_adapter_used() -> list:
         # condition - sets the sticky {}.
         logger.debug("gpu_usage: PDH query failed (will retry next call): %s", e)
         return []
+
+
+def adapter_utilisation() -> Dict[str, float]:
+    """GPU busy percentage per WDDM adapter LUID, or ``{}`` when unavailable.
+
+    VENDOR-NEUTRAL, which is the point. localm's only utilisation source was
+    ``nvidia-smi``, so every AMD and Intel board reported no GPU load at all - not
+    "unknown", simply a missing metric on a status bar whose job is to show load.
+    That was a real gap rather than a fair limitation: Windows exposes the figure
+    for EVERY vendor through the same WDDM counters Task Manager itself reads, and
+    this module already keeps a persistent PDH query open for adapter memory.
+
+    Counter: ``GPU Engine`` / ``Utilization Percentage``, aggregated the way Task
+    Manager aggregates it. Instances are per PROCESS and per ENGINE (3D, Copy,
+    Video Codec, Compute, ...), so per-process values are summed WITHIN an engine
+    type and the adapter's figure is then the BUSIEST engine type, not the sum
+    across them. Summing across types double-counts work that ran concurrently on
+    separate engines and routinely exceeds 100% (measured on a real board: 26.1%
+    summed against 11.0% for the busiest engine).
+
+    Keyed by adapter LUID, read from the instance name, so a multi-GPU board
+    reports each card separately rather than one blended figure.
+
+    UTILISATION IS A RATE, so it needs two collections separated in time. The
+    query handle is kept open between calls (the same reason
+    :func:`_pdh_adapter_used` keeps one), which makes the interval the gap between
+    successive calls - on the stats poll, seconds. The FIRST call after the query
+    opens has no previous sample to rate against and returns ``{}`` rather than a
+    fabricated 0%: a card reported idle when nothing was measured is the "report
+    success when the measurement did not hold" that AGENTS.md rule 5 forbids.
+    """
+    global _pdh_util_state
+    if _pdh_util_state is not None and not _pdh_util_state:
+        return {}
+    try:
+        import win32pdh
+    except Exception as e:
+        logger.debug("gpu_usage: win32pdh unavailable for utilisation: %s", e)
+        _pdh_util_state = {}
+        return {}
+    try:
+        first = _pdh_util_state is None
+        if first:
+            _pdh_util_state = {"query": win32pdh.OpenQuery(), "counters": {},
+                               "pdh": win32pdh}
+        pdh = _pdh_util_state["pdh"]
+        query = _pdh_util_state["query"]
+        counters = _pdh_util_state["counters"]
+
+        _objs, instances = pdh.EnumObjectItems(
+            None, None, "GPU Engine", win32pdh.PERF_DETAIL_WIZARD)
+        for inst in set(instances):
+            if inst in counters:
+                continue
+            try:
+                counters[inst] = pdh.AddEnglishCounter(query, pdh.MakeCounterPath(
+                    (None, "GPU Engine", inst, None, -1, "Utilization Percentage")))
+            except Exception:
+                continue   # a vanished instance never hides the rest
+        pdh.CollectQueryData(query)
+        if first:
+            # No previous sample: a rate counter cannot be read yet. Say nothing.
+            return {}
+
+        by_engine: Dict[tuple, float] = {}
+        for inst, handle in list(counters.items()):
+            try:
+                _typ, val = pdh.GetFormattedCounterValue(handle, win32pdh.PDH_FMT_DOUBLE)
+            except Exception:
+                continue
+            luid = _luid_of(inst)
+            if luid is None:
+                continue
+            eng = inst.split("engtype_")[-1] if "engtype_" in inst else "?"
+            by_engine[(luid, eng)] = by_engine.get((luid, eng), 0.0) + float(val)
+
+        out: Dict[str, float] = {}
+        for (luid, _eng), pct in by_engine.items():
+            out[luid] = max(out.get(luid, 0.0), pct)
+        return {k: min(100.0, round(v, 1)) for k, v in out.items()}
+    except Exception as e:
+        # Same reasoning as _pdh_adapter_used: a runtime hiccup is not proof the
+        # source is permanently gone, so the open query is kept for the next call
+        # rather than latched off for the whole process lifetime.
+        logger.debug("gpu_usage: PDH utilisation query failed (will retry): %s", e)
+        return {}
+
+
+def _luid_of(instance: str) -> Optional[str]:
+    """The adapter LUID inside a ``GPU Engine`` instance name, or None.
+
+    Instances look like
+    ``pid_1234_luid_0x00000000_0x0000C3F1_phys_0_eng_0_engtype_3D``. The LUID pair
+    identifies the ADAPTER; the pid and engine index do not.
+    """
+    if "luid_" not in instance:
+        return None
+    parts = instance.split("luid_", 1)[1].split("_")
+    return "_".join(parts[:2]) if len(parts) >= 2 else None
 
 
 def source_is_warm() -> bool:

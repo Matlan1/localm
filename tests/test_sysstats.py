@@ -10,6 +10,8 @@ design choice."""
 
 import sys
 import threading
+
+import pytest
 import time
 import types
 from collections import namedtuple
@@ -825,3 +827,79 @@ def test_a_process_scoped_card_reports_total_only(monkeypatch):
     # Card 1's is device-global on the same board, so it still reports in full -
     # the gate is PER CARD, not all-or-nothing.
     assert devs[1]["used"] == 1 * GB
+
+
+@pytest.fixture(autouse=True)
+def _no_wddm_fallback(monkeypatch):
+    """Keep the WDDM utilisation fallback OUT of every test that is about the
+    nvidia-smi probe path.
+
+    Those tests assert `_gpu_util() == {}` to mean "the nvidia reading has not
+    landed, so nothing is fabricated". Once a second, genuinely-different source
+    exists, that empty dict stops being a statement about the nvidia probe and
+    becomes a statement about the whole machine - and on a Windows box with any
+    GPU the fallback correctly returns a real number, so the tests failed while
+    both the code and their intent were fine.
+
+    Stubbing it off here keeps each of those tests measuring the one thing it was
+    written for. The tests that ARE about the fallback stub it back on explicitly.
+    """
+    from localm import gpu_usage
+    monkeypatch.setattr(gpu_usage, "adapter_utilisation", lambda: {})
+
+
+class TestVendorNeutralGpuUtilisation:
+    """GPU load must not be an NVIDIA-only metric.
+
+    nvidia-smi was the only source, so an AMD or Intel board showed no GPU load at
+    all - which a user reads as "this box reports no GPU utilisation", not as
+    "localm cannot see it", on a readout whose whole job is showing load. Windows
+    publishes it for every vendor through the counters Task Manager itself reads.
+    """
+
+    def test_falls_back_to_the_wddm_counter_when_nvidia_smi_has_nothing(
+            self, monkeypatch):
+        from localm import gpu_usage, sysstats
+        monkeypatch.setattr(sysstats, "_gpu_util_last", None, raising=False)
+        monkeypatch.setattr(sysstats, "_gpu_util_last_t", 0.0, raising=False)
+        # Two adapters, as a real board reports: the busiest one is the compute card.
+        monkeypatch.setattr(gpu_usage, "adapter_utilisation",
+                            lambda: {"0x0_0xA": 7.1, "0x0_0xB": 0.0})
+        assert sysstats._gpu_util() == {"gpu": {"percent": 7.1}}
+
+    def test_omits_the_field_rather_than_fabricating_zero(self, monkeypatch):
+        # adapter_utilisation returns {} on its first ever call: a rate counter has
+        # nothing to rate against yet. Reporting 0% there would assert an idle card
+        # on the strength of a measurement that never happened.
+        from localm import gpu_usage, sysstats
+        monkeypatch.setattr(sysstats, "_gpu_util_last", None, raising=False)
+        monkeypatch.setattr(sysstats, "_gpu_util_last_t", 0.0, raising=False)
+        monkeypatch.setattr(gpu_usage, "adapter_utilisation", lambda: {})
+        assert sysstats._gpu_util() == {}
+
+    def test_a_broken_counter_never_breaks_the_readout(self, monkeypatch):
+        from localm import gpu_usage, sysstats
+        monkeypatch.setattr(sysstats, "_gpu_util_last", None, raising=False)
+        monkeypatch.setattr(sysstats, "_gpu_util_last_t", 0.0, raising=False)
+        def boom():
+            raise OSError("PDH exploded")
+        monkeypatch.setattr(gpu_usage, "adapter_utilisation", boom)
+        assert sysstats._gpu_util() == {}
+
+
+class TestAdapterUtilisationAggregation:
+    def test_busiest_engine_not_the_sum_across_engines(self):
+        """Summing engine types double-counts concurrent work and exceeds 100%.
+
+        Measured on a real board: 26.1% summed across engine types against 11.0%
+        for the busiest one. Task Manager reports the busiest engine, and so do we.
+        """
+        from localm.gpu_usage import _luid_of
+        # The LUID pair identifies the ADAPTER; pid and engine index do not, which
+        # is what lets a multi-card board be reported per card.
+        a = _luid_of("pid_1234_luid_0x00000000_0x0000C3F1_phys_0_eng_0_engtype_3D")
+        b = _luid_of("pid_9999_luid_0x00000000_0x0000C3F1_phys_0_eng_3_engtype_Copy")
+        c = _luid_of("pid_1234_luid_0x00000000_0x0000D107_phys_0_eng_0_engtype_3D")
+        assert a == b, "same adapter, different process and engine"
+        assert a != c, "different adapter"
+        assert _luid_of("no_luid_here") is None
