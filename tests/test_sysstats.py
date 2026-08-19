@@ -663,3 +663,75 @@ def test_gpu_util_never_raises_and_unlatches_when_thread_creation_fails(monkeypa
     assert sysstats._gpu_util_inflight is False, (
         "a failed thread spawn left _gpu_util_inflight stuck True - no later "
         "call could ever retry")
+
+
+class TestPerDeviceVram:
+    """The per-card VRAM breakdown.
+
+    The aggregate is not merely coarser on a multi-GPU board, it is MISLEADING:
+    ``vram_capacity`` either sums a configured split (a full card and an empty one
+    average into a comfortable-looking number) or, with no split configured, falls
+    back to the single main GPU and does not represent the other cards at all.
+    Neither answers "how full is card 1", which is the question the readout exists
+    for once there is more than one card.
+    """
+
+    _GIB = 1024 ** 3
+
+    def _fake(self, free0, free1):
+        return [
+            {"index": 0, "name": "RTX 4090", "total": 24 * self._GIB, "free": free0},
+            {"index": 1, "name": "RTX 3090", "total": 24 * self._GIB, "free": free1},
+        ]
+
+    def _compute(self, monkeypatch, devices, *, trusted=True):
+        from localm import discover, sysstats
+        monkeypatch.setattr(discover, "last_known_gpus", lambda *a, **k: devices)
+        monkeypatch.setattr(
+            discover, "vram_capacity",
+            lambda *a, **k: ({"total": 48 * self._GIB, "free": 26 * self._GIB}, None))
+        monkeypatch.setattr(sysstats, "_vram_reading_trusted", lambda *a, **k: trusted)
+        return sysstats._compute_vram()["vram"]
+
+    def test_each_card_reports_its_own_used_total(self, monkeypatch):
+        v = self._compute(monkeypatch, self._fake(4 * self._GIB, 22 * self._GIB))
+        assert [d["index"] for d in v["devices"]] == [0, 1]
+        # The whole point: the aggregate reads 22/48 (46%, comfortable) while card
+        # 0 is at 20/24 (83%, nearly full). Both must be visible, not just the mean.
+        assert v["used"] == 22 * self._GIB
+        assert v["devices"][0]["used"] == 20 * self._GIB
+        assert v["devices"][1]["used"] == 2 * self._GIB
+        assert v["devices"][0]["percent"] > 80 > v["devices"][1]["percent"]
+
+    def test_an_untrusted_reading_reports_total_only_per_card(self, monkeypatch):
+        # Same contract the aggregate already honours: a stale or process-scoped
+        # `free` OVERSTATES what is available, and a confidently wrong per-card
+        # figure is worse than an absent one, because per-card numbers are shown
+        # precisely so someone can act on them.
+        v = self._compute(monkeypatch, self._fake(4 * self._GIB, 22 * self._GIB),
+                          trusted=False)
+        for d in v["devices"]:
+            assert d["total"] == 24 * self._GIB
+            assert "used" not in d and "percent" not in d
+
+    def test_a_single_card_sends_no_breakdown(self, monkeypatch):
+        # `devices` is only worth sending when it says something the aggregate does
+        # not, so a one-card board keeps the payload it always had.
+        one = [{"index": 0, "name": "RTX 4090", "total": 24 * self._GIB,
+                "free": 4 * self._GIB}]
+        assert "devices" not in self._compute(monkeypatch, one)
+
+    def test_a_failing_probe_never_costs_the_aggregate(self, monkeypatch):
+        # Rule 5: the enrichment failing is visible as a MISSING BREAKDOWN, never
+        # as a missing readout, and never as a silenced aggregate.
+        def boom(*a, **k):
+            raise RuntimeError("driver wedged")
+        from localm import discover, sysstats
+        monkeypatch.setattr(discover, "last_known_gpus", boom)
+        monkeypatch.setattr(
+            discover, "vram_capacity",
+            lambda *a, **k: ({"total": 48 * self._GIB, "free": 26 * self._GIB}, None))
+        monkeypatch.setattr(sysstats, "_vram_reading_trusted", lambda *a, **k: True)
+        v = sysstats._compute_vram()["vram"]
+        assert v["total"] == 48 * self._GIB and v["used"] == 22 * self._GIB
+        assert "devices" not in v
