@@ -27,14 +27,19 @@ doctor_mod = importlib.import_module("localm.cli.doctor")
 def _probe(monkeypatch, result):
     """Control the ABI probe subprocess. None models 'the probe never ran'.
 
-    Patched on localm.cli.errors, NOT on the doctor module: _check_native_abi
-    does `from .errors import _run_probe_subprocess` INSIDE the function, so the
-    name is resolved from that module on every call and never exists as a doctor
-    attribute at all (patching doctor_mod raises AttributeError, which is how
-    this was caught)."""
-    import localm.cli.errors as errors_mod
-    monkeypatch.setattr(errors_mod, "_run_probe_subprocess",
-                        lambda code, prefix: result)
+    Patched on localm.diagnostics, NOT on the doctor module: the probe itself
+    now lives there (doctor's _check_native_abi is a renderer over
+    diagnostics.check_native_abi), and check_native_abi resolves
+    run_probe_subprocess from its own module globals on every call, so the name
+    never exists as a doctor attribute at all - patching doctor_mod raises
+    AttributeError, which is how the equivalent was caught before the move.
+
+    The assertions below still drive doctor's RENDERED OUTPUT rather than the
+    core's return value, deliberately: the wrong reason this file exists to stop
+    is one a user reads, so the test stays at the layer that prints it."""
+    import localm.diagnostics as diagnostics_mod
+    monkeypatch.setattr(diagnostics_mod, "run_probe_subprocess",
+                        lambda code, prefix, **kw: result)
 
 
 def test_a_probe_that_never_ran_does_not_claim_the_runtime_is_unloadable(

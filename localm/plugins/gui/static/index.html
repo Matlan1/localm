@@ -1036,6 +1036,33 @@
               </div>
             </section>
 
+            <!-- Diagnostics: the ACTIVE self-checks from `localm doctor` - the ones
+                 that go and try something (load the runtime, spawn a worker, build a
+                 throwaway venv) rather than read a version string. Everything else
+                 doctor prints already has a home in this GUI (Hardware, the Plugins
+                 page, the ComfyUI panel, the bug report), so this card deliberately
+                 does NOT repeat it.
+
+                 THE VERDICT IS SCOPED IN ITS OWN WORDING, on purpose. It aggregates
+                 five checks and the card says so; "your system is healthy" would be
+                 a claim nothing here measured. The rows are rendered from the
+                 endpoint's own `covers` list rather than typed here, so the UI can
+                 never fall out of step with what the server actually ran. -->
+            <section class="card settings-section" id="sec-diagnostics" data-group="system" data-sec-label="Diagnostics">
+              <div class="card-head"><span class="ic cat-ic cat-slate" data-icon="check"></span>
+                <div class="card-head-text"><h3>Diagnostics</h3></div></div>
+              <div class="sub">Run localm's active self-checks - the same ones
+              <code>localm doctor</code> performs in a terminal. They try the things that
+              silently break an install: loading the runtime, spawning the worker process
+              every model load needs, and creating a nested venv. Nothing is installed or
+              changed, and a run takes about half a minute.</div>
+              <div class="actions">
+                <button class="btn-secondary" id="doctor-run">Run diagnostics</button>
+              </div>
+              <div id="doctor-status" class="sub" hidden></div>
+              <div id="doctor-checks" class="doctor-checks"></div>
+            </section>
+
             <section class="card settings-section" id="sec-issues" data-group="system" data-sec-label="Issues" hidden>
               <div class="card-head"><span class="ic cat-ic cat-slate" data-icon="book"></span>
                 <div class="card-head-text"><h3>Issues</h3></div></div>

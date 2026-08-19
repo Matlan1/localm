@@ -14,7 +14,7 @@ import { refreshImageHistory } from "./images.js";
 import { refreshKnowledgePage } from "./knowledge.js";
 import { refreshModelsPage, refreshUploadsList, runtimeUpdateCheck } from "./models.js";
 import { refreshPluginsPage, renderCatalogPlugins } from "./plugins.js";
-import { refreshSettingsPage } from "./settings.js";
+import { refreshDiagnosticsCard, refreshSettingsPage } from "./settings.js";
 import { refreshMusicHistory } from "./music.js";
 import { refreshVideoHistory } from "./video.js";
 import { refreshWorkflowPanel } from "./workflow.js";
@@ -40,6 +40,11 @@ window.onViewShown = (name) => {
   if (name === "settings") {
     refreshSettingsPage();
     refreshUploadsList();
+    // Paints the last diagnostics report, and REATTACHES to a run still in
+    // flight - one started in another tab, or in this one before a reload
+    // (ADR-0008: a background operation the server knows about must not be
+    // undiscoverable just because you did not start it here).
+    refreshDiagnosticsCard();
     // The model could have been switched from the model dropdown or the Models
     // page while Settings was not on screen - re-fetch the VRAM estimate so it
     // always reflects the currently active model on (re-)entering the tab.

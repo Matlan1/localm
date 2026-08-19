@@ -1335,6 +1335,14 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
   padding: 10px 12px; margin-top: 12px;
 }
 .update-sub-head { margin: 0 0 6px; font-size: 14px; }
+/* Settings "Diagnostics" card: one row per active self-check, each a name plus a
+   .job-state pill (docs/gui-design.md rule 6) with the check's own sentence
+   underneath. Reuses .job-head / .job-name so a status row reads the same here
+   as on the Jobs page. */
+.doctor-checks { margin-top: 12px; display: flex; flex-direction: column; gap: 10px; }
+.doctor-check { border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; }
+.doctor-check .sub { margin-top: 4px; }
+.doctor-check-hint { margin-top: 2px; font-size: 12px; color: var(--text-dim); }
 /* Settings page per-media-subsection badge (.job-state pill, docs/gui-design.md
    rule 6) - spacing only, sits inline after the subsection's <h4>. */
 .comfy-status-badge { margin-left: 12px; }
@@ -1476,6 +1484,12 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
   color: var(--red); border-color: var(--red);
   background: color-mix(in srgb, var(--red) 15%, transparent);
 }
+/* st-warn joins the yellow group rather than reusing st-skipped: a diagnostics
+   check that WARNED and one that did not run need different pills, and the
+   plain (unmodified) .job-state above is the neutral one a not-run check gets.
+   Rendering "not installed, and that is fine" in yellow would put a warning on
+   every ordinary box, which is how a warning stops meaning anything. */
+.job-state.st-warn,
 .job-state.st-skipped {
   color: var(--yellow); border-color: var(--yellow);
   background: color-mix(in srgb, var(--yellow) 15%, transparent);

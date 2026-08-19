@@ -2534,3 +2534,163 @@ export async function saveMediaPlugin(name) {
   }
 }
 
+
+/* ================================================================ */
+/*  Settings > Diagnostics                                           */
+/* ================================================================ */
+/* The ACTIVE self-checks from `localm doctor`, run in the app. The five probes
+   live server-side in localm/diagnostics.py and are shared with the CLI, so the
+   two surfaces cannot drift; this only renders them.
+
+   THE WORDING IS THE DESIGN DECISION HERE. A terminal shows a transcript and the
+   reader draws their own conclusion; a card has to state one. So the verdict line
+   always says WHAT was checked ("5 active checks"), never "your system is fine" -
+   these five probes are a real but narrow slice, and a card that overclaims is
+   worse than no card, because the next person trusts it. */
+
+// Rendered pill per check status. `skipped` is deliberately the NEUTRAL pill
+// (no st- modifier): an absent optional backend is the common case and is not a
+// fault, so painting it yellow would put a warning on every ordinary box.
+const _DOCTOR_PILL = { ok: "st-ok", warn: "st-warn", fail: "st-error",
+                       error: "st-error", skipped: "" };
+const _DOCTOR_WORD = { ok: "ok", warn: "warning", fail: "failed",
+                       error: "error", skipped: "not run" };
+
+// Set while a run is being polled, so entering Settings twice does not start a
+// second poll loop against the same job.
+let _doctorPolling = false;
+
+/** One check as a row: name + status pill, its sentence, and any extra lines
+ *  the check produced (an ABI mismatch lists the fields that differ). */
+function renderDoctorCheck(check) {
+  const box = el("div", "doctor-check");
+  const head = el("div", "job-head");
+  head.appendChild(el("span", "job-name", check.label));
+  const pill = el("span", "job-state " + (_DOCTOR_PILL[check.status] || ""),
+                  _DOCTOR_WORD[check.status] || check.status);
+  head.appendChild(pill);
+  box.appendChild(head);
+  if (check.summary) box.appendChild(el("div", "sub", check.summary));
+  // `summary` is already the finding that carries the check's verdict (the
+  // server picks it, so both surfaces agree on which line leads). Show the
+  // OTHERS underneath - for a library that was found and then failed its BLAS
+  // kernel check, the "found it" line is the context that makes the failure
+  // readable - plus every finding's hints, which is where an ABI mismatch lists
+  // the fields that actually differ.
+  const findings = check.findings || [];
+  const lead = findings.find((f) => f.status === check.status);
+  for (const f of findings) {
+    if (f !== lead) box.appendChild(el("div", "doctor-check-hint", f.text));
+    for (const h of (f.hints || [])) box.appendChild(el("div", "doctor-check-hint", h));
+  }
+  return box;
+}
+
+/** Paint the card from one GET /api/doctor body. */
+export function renderDoctorReport(body) {
+  const status = $("doctor-status"), list = $("doctor-checks"), btn = $("doctor-run");
+  if (!list) return;
+  list.textContent = "";
+  const report = body.report;
+  const covers = body.covers || [];
+
+  if (btn) btn.disabled = !!body.running;
+  if (status) {
+    status.hidden = false;
+    if (body.running) {
+      const p = body.progress || {};
+      // "3 of 5" counts what has FINISHED and names what is running now, which
+      // is what the server sends - never a percentage invented here.
+      status.textContent = p.phase
+        ? `Running: ${p.phase} (${p.done || 0} of ${p.total || covers.length} done)`
+        : "Running the checks...";
+    } else if (!report) {
+      status.textContent = "Not run yet. These checks take about half a minute.";
+    } else if (report.verdict === "error") {
+      // The run did not happen. This must never render as a clean result.
+      status.textContent = "The checks could not be run: " + (report.error || "no reason reported");
+    } else {
+      const checks = report.checks || [];
+      const bad = checks.filter((c) => c.status === "fail" || c.status === "warn");
+      const ran = checks.filter((c) => c.status !== "skipped").length;
+      status.textContent = bad.length
+        ? `${bad.length} of ${ran} active checks need attention.`
+        : `All ${ran} active checks passed. This covers the active probes only, `
+          + "not everything about your system.";
+    }
+  }
+
+  // Before the first run, still show the rows - so the card names what it is
+  // about to check rather than presenting an unexplained button.
+  //
+  // MID-RUN, each row says where IT is, from the server's `done` count. Saying
+  // "waiting" on all five while the line above reads "4 of 5 done" contradicts
+  // itself, and the fix is not to guess a verdict for the four that finished:
+  // the browser genuinely does not have their results until the run ends (they
+  // arrive as one report). So a finished row says it was checked and that the
+  // result is coming, which is exactly what is true.
+  const done = (body.progress || {}).done || 0;
+  const placeholder = (i) => {
+    if (!body.running) return "not run yet";
+    if (i < done) return "checked - result when the run finishes";
+    return i === done ? "checking now..." : "waiting...";
+  };
+  const rows = (report && report.checks && report.checks.length)
+    ? report.checks
+    : covers.map((c, i) => ({ key: c.key, label: c.label, status: "skipped",
+                              summary: placeholder(i), findings: [] }));
+  for (const c of rows) list.appendChild(renderDoctorCheck(c));
+}
+
+/** Fetch and paint. Also resumes polling when a run started elsewhere (another
+ *  tab, or this one before a reload) is still in flight - ADR-0008. */
+export async function refreshDiagnosticsCard() {
+  if (!$("doctor-checks")) return;
+  try {
+    const r = await fetch("/api/doctor", { headers: authHeaders() });
+    if (!r.ok) return;
+    const body = await r.json();
+    renderDoctorReport(body);
+    if (body.running) pollDiagnostics();
+  } catch (e) { /* a card that cannot reach the server just stays as it was */ }
+}
+
+/** Poll until the run finishes, then paint the result. */
+export async function pollDiagnostics() {
+  if (_doctorPolling) return;
+  _doctorPolling = true;
+  try {
+    for (;;) {
+      await new Promise((res) => setTimeout(res, 1000));
+      const r = await fetch("/api/doctor", { headers: authHeaders() });
+      if (!r.ok) return;
+      const body = await r.json();
+      renderDoctorReport(body);
+      if (!body.running) return;
+    }
+  } catch (e) {
+    // Say so rather than leaving the card frozen mid-run: a stalled poll and a
+    // still-running check look identical from the outside.
+    const status = $("doctor-status");
+    if (status) { status.hidden = false; status.textContent = "Lost contact with the server while the checks were running."; }
+    const btn = $("doctor-run");
+    if (btn) btn.disabled = false;
+  } finally { _doctorPolling = false; }
+}
+
+export async function runDiagnostics() {
+  const btn = $("doctor-run"), status = $("doctor-status");
+  if (btn) btn.disabled = true;
+  if (status) { status.hidden = false; status.textContent = "Starting the checks..."; }
+  try {
+    const r = await fetch("/api/doctor/run", { method: "POST", headers: authHeaders() });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.detail || r.statusText);
+  } catch (e) {
+    if (status) status.textContent = "Could not start the checks: " + e.message;
+    if (btn) btn.disabled = false;
+    return;
+  }
+  pollDiagnostics();
+}
+if ($("doctor-run")) $("doctor-run").onclick = runDiagnostics;

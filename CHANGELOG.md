@@ -12,6 +12,19 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- - **Diagnostics moved into the app: Settings > System > Diagnostics.** Until now
+  the only way to run localm's active self-checks was `localm doctor` in a
+  terminal, so anyone using the app alone could not run them at all. The card
+  runs the five checks that actually try something rather than reading a version
+  number - the llama.cpp library is present and not truncated or missing its GPU
+  kernel data, the runtime's struct layout matches this build, the worker process
+  every model load depends on can really be spawned, a nested venv can really be
+  created, and the transformers backend's classes really load - and shows a
+  verdict per check with the same wording the terminal gives. A run takes about
+  half a minute, names the check it is on while it works, and can be picked up
+  from another tab or after a reload. Nothing is installed or changed, and the
+  summary says it covers these checks rather than claiming your whole system is
+  healthy.
 - **What localm remembers about you can now be managed from the terminal.**
   `localm memory` lists the facts it has learned, shows one in full, saves a fact
   you type yourself, deletes one, reviews the corrections that background
