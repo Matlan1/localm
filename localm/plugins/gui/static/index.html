@@ -748,6 +748,24 @@
               </label>
             </section>
 
+            <section class="card settings-section" id="owner-key-card" data-group="security" data-sec-label="Owner key">
+              <div class="card-head"><span class="ic cat-ic cat-amber" data-icon="key"></span>
+                <div class="card-head-text"><h3>Owner key</h3></div></div>
+              <div class="sub">The one key that grants full access to this server - the
+                named keys below are limited slices of it. Roll it if it may have leaked,
+                or set one you already use. This browser stays signed in; every other
+                device keeps working only once you give it the new key.</div>
+              <div class="actions">
+                <button class="btn-secondary" id="owner-key-roll">Generate new key</button>
+              </div>
+              <input type="text" id="owner-key-value" placeholder="or paste a key to use instead"
+                     spellcheck="false" autocomplete="off">
+              <div class="actions">
+                <button class="btn-secondary" id="owner-key-set">Set this key</button>
+              </div>
+              <div id="owner-key-secret" class="key-secret" style="display:none"></div>
+            </section>
+
             <section class="card settings-section" id="keys-card" data-group="security" data-sec-label="Keys &amp; devices">
               <div class="card-head"><span class="ic cat-ic cat-amber" data-icon="key"></span>
                 <div class="card-head-text"><h3>Keys &amp; devices</h3></div></div>

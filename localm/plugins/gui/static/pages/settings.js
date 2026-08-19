@@ -853,6 +853,97 @@ export async function refreshKeysPanel() {
   };
 }
 
+// Settings -> Owner key: roll or set the ONE key that grants full access. The GUI
+// form of `localm key generate` and `localm key set <key>`.
+//
+// Hidden from a non-owner the same way the keys card is, but the gate that MATTERS is
+// the server's: POST /api/auth/key/rotate requires the owner scope, because setting a
+// key the caller CHOSE is a promotion to owner. Hiding this card is a courtesy so a
+// keys:admin device is not shown a control it cannot use; it is never the control.
+export async function refreshOwnerKeyPanel() {
+  const card = $("owner-key-card"), box = $("owner-key-secret");
+  if (!card || !box) return;
+
+  // A settings SECTION, so show/hide via the class the section nav reads, exactly as
+  // refreshKeysPanel does - an inline display style fights the section show/hide.
+  const setHidden = (hidden) => {
+    card.classList.toggle("sec-hidden", hidden);
+    if (typeof buildSettingsNav === "function") buildSettingsNav();
+  };
+  // Same probe the keys card uses. /v1/keys reports is_owner, and a non-ok answer
+  // means this caller is not even a key minter.
+  try {
+    const r = await fetch("/v1/keys", { headers: authHeaders() });
+    if (!r.ok) { setHidden(true); return; }
+    const data = await r.json();
+    if (!data.is_owner) { setHidden(true); return; }
+  } catch (e) { setHidden(true); return; }
+  setHidden(false);
+
+  const rotate = async (body, verb) => {
+    let r;
+    try {
+      r = await fetch("/api/auth/key/rotate", {
+        method: "POST",
+        headers: { ...authHeaders(), "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    } catch (e) { toast(`${verb} failed`, true); return; }
+    if (!r.ok) {
+      const e = await r.json().catch(() => ({}));
+      toast(e.detail || `${verb} failed`, true);
+      return;
+    }
+    const out = await r.json();
+    box.replaceChildren();
+    // READ `rotated`; never infer success from the 200. The server answers 200 with
+    // rotated:false when the key reached disk but is NOT the credential it accepts
+    // (LOCALM_API_KEY outranks the stored key). A green "key updated" there is exactly
+    // the lie the route's shape exists to prevent: someone rotating a leaked key would
+    // be told the leaked one was dead while it still authenticates.
+    if (out.rotated) {
+      toast("Owner key updated");
+      box.appendChild(el("div", "sub",
+        "New owner key - copy it now, it is shown only once:"));
+    } else {
+      toast("Key saved but NOT in effect", true);
+      for (const w of out.warnings || []) box.appendChild(el("div", "key-warn", w));
+      box.appendChild(el("div", "sub",
+        "The key that was written (not currently in effect):"));
+    }
+    const secret = document.createElement("input");
+    secret.type = "text"; secret.readOnly = true; secret.value = out.key;
+    secret.className = "key-secret-value";
+    box.appendChild(secret);
+    const copy = el("button", "btn-secondary", "Copy");
+    copy.onclick = () => {
+      secret.select();
+      if (navigator.clipboard) navigator.clipboard.writeText(out.key);
+      toast("Copied");
+    };
+    box.appendChild(copy);
+    box.style.display = "";
+    $("owner-key-value").value = "";
+  };
+
+  // Confirm both paths: this cuts off every other device holding the old key, which is
+  // not obvious from a button labelled "Generate".
+  const WARN = "Every other device holding the current key loses access until you give "
+    + "it the new one. This browser stays signed in.";
+  $("owner-key-roll").onclick = () => {
+    confirmDanger("Generate a new owner key?", WARN, "Generate",
+                  () => rotate({}, "Generate"));
+  };
+  $("owner-key-set").onclick = () => {
+    const chosen = ($("owner-key-value").value || "").trim();
+    // Guard here as well as server-side: an empty value GENERATES a random key on the
+    // server, which is not what a user pressing "Set this key" asked for.
+    if (!chosen) { toast("Paste a key, or use Generate new key", true); return; }
+    confirmDanger("Set this as the owner key?", WARN, "Set key",
+                  () => rotate({ key: chosen }, "Set"));
+  };
+}
+
 // Friendly section label per plugin owner (falls back to the capitalized scope).
 export const PLUGIN_SECTION_LABEL = {
   image: "Image", web: "Web access", voice: "Voice", coder: "Coder",
@@ -1285,6 +1376,7 @@ export async function refreshSettingsPage() {
   refreshPairingQR();
   refreshCompanion();
   refreshKeysPanel();
+  refreshOwnerKeyPanel();
 }
 
 /** Mark which folder list the current RAG indexing MODE actually uses (Allowed in

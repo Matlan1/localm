@@ -2183,6 +2183,9 @@ div:has(> .data-table) { overflow-x: auto; }
 .pairing-qr svg path, .key-qr-img svg path { fill: #000; }
 .pairing-qr svg rect, .key-qr-img svg rect { fill: #fff; }
 .key-secret { margin-top: 10px; }
+/* A rotation that reached disk without becoming the LIVE credential. Yellow, not
+   red: nothing broke, but the caller must not read it as a completed rotation. */
+.key-warn { color: var(--yellow); margin: 4px 0; }
 .key-secret-value {
   font-family: var(--mono); font-size: 12px; margin: 4px 0; width: 100%;
 }
