@@ -108,8 +108,12 @@ def registry_models_by_type(registry: Optional[dict] = None) -> dict:
 
 
 def _pair_roles_to_slots(slots: list, roles: list) -> dict:
-    """``{id(slot): role}`` pairing each slot with a declared role of the SAME
+    """``{slot index: role}`` pairing each slot with a declared role of the SAME
     model_type, positionally within that type.
+
+    Keyed by INDEX rather than ``id(slot)``: identity would silently give the
+    second occurrence the first one's role if a list ever held the same dict
+    twice, and an index cannot alias.
 
     Positional is all that is available: ComfyUI's graph carries no role names,
     so a plugin declaring two text-encoder roles ('CLIP-L', 'T5/CLIP-G') against
@@ -127,14 +131,14 @@ def _pair_roles_to_slots(slots: list, roles: list) -> dict:
         by_type.setdefault(role.get("model_type"), []).append(role)
     paired: dict = {}
     used: dict = {}
-    for slot in slots:
+    for index, slot in enumerate(slots):
         if not isinstance(slot, dict):
             continue
         mtype = model_type_for_node(slot.get("class_type"))
         candidates = by_type.get(mtype) or []
         i = used.get(mtype, 0)
         if i < len(candidates):
-            paired[id(slot)] = candidates[i]
+            paired[index] = candidates[i]
             used[mtype] = i + 1
     return paired
 
@@ -155,7 +159,7 @@ def annotate_slots(slots: Optional[list], roles: list) -> Optional[list]:
         return None
     paired = _pair_roles_to_slots(slots, roles)
     out = []
-    for slot in slots:
+    for index, slot in enumerate(slots):
         if not isinstance(slot, dict):
             # A backend broke workflow_model_slots' documented shape. Pass the
             # entry through rather than 500-ing the whole picker, but SAY so -
@@ -167,7 +171,7 @@ def annotate_slots(slots: Optional[list], roles: list) -> Optional[list]:
                 "left unannotated", type(slot).__name__)
             out.append(slot)
             continue
-        role = paired.get(id(slot))
+        role = paired.get(index)
         annotated = dict(slot)
         annotated["model_type"] = model_type_for_node(slot.get("class_type"))
         annotated["role_id"] = role.get("role_id") if role else None
@@ -206,8 +210,8 @@ def describe_roles(roles: list, slots: Optional[list],
     reg = load_registry() if registry is None else registry
     paired = _pair_roles_to_slots(slots, roles) if slots is not None else {}
     slot_by_role = {}
-    for slot in (slots or []):
-        role = paired.get(id(slot))
+    for index, slot in enumerate(slots or []):
+        role = paired.get(index)
         if role is not None and isinstance(slot, dict):
             slot_by_role[role.get("role_id")] = slot
 
