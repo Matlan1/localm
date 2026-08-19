@@ -138,6 +138,23 @@ def _comfy_model_slots(s: dict) -> Optional[list]:
     return _comfy.workflow_model_slots(workflow, s["api_url"])
 
 
+def _comfy_model_roles(s: dict, roles: list) -> dict:
+    """This plugin's model-picker payload: the live ComfyUI slots joined to the
+    localm registry's ``model_type`` slice and to the roles the plugin declared
+    through ``host.register_model_role``.
+
+    The backend owns this seam (rather than the route) because resolving which
+    models exist IS backend work: a future non-ComfyUI backend for this media
+    type implements this one function and the route, the GUI and the role
+    contract are unchanged.
+
+    One ComfyUI round trip and one registry read per call - both blocking, so the
+    caller runs it off the event loop exactly as it already does for
+    ``_comfy_model_slots``."""
+    from localm.plugins import media_roles
+    return media_roles.resolve_model_roles(_comfy_model_slots(s), roles)
+
+
 def _comfy_generate(s: dict, prompt: str, out_path: Path, *,
                     self_url: str, write_sidecar: bool, on_progress=None,
                     input_image: Optional[Path] = None,

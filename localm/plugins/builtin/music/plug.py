@@ -302,10 +302,21 @@ async def music_history(request: Request):
 
 
 @_router.get("/api/music/comfy-models")
-async def music_comfy_models():
+async def music_comfy_models(request: Request):
     """Model-file slots the active music workflow exposes (for the Workflow
     panel's model-picker dropdowns), resolved against the live ComfyUI. Honest
     about unreachability (rule 5) - never a silently-empty picker.
+
+    Each slot also carries the localm ``model_type`` its loader node holds, the
+    declared role it fills (``role_id``/``role_label`` from
+    ``host.register_model_role``), and ``installed`` - decided by the SAME rule
+    preflight uses to call a model missing, so the picker cannot call a slot fine
+    that generation then refuses. ``roles`` reports every declared role including
+    ones this workflow has no slot for, and ``registry_models`` lists this box's
+    own registered component models by type. Both are answered from the registry,
+    so they are returned even when ComfyUI is unreachable - "we could not ask
+    ComfyUI" is a different answer from "you have nothing" (rule 5), and the
+    panel is no longer a dead end when ComfyUI is down.
 
     Resolution is a blocking urlopen of ComfyUI's multi-MB /object_info (10s
     timeout), so it runs OFF the event loop: inline it stalled every concurrent
@@ -318,15 +329,21 @@ async def music_comfy_models():
     from localm.inference._threadpool_timeout import (
         ThreadCallTimeout, run_in_threadpool_bounded,
     )
+    from localm.plugins.media_roles import plugin_model_roles
     s = _backend.settings(load_config())
+    # Read in the request, not in the worker: this walks the plugin manager's
+    # in-memory descriptors (no I/O), and handing app state to a thread is not
+    # something to do for a lookup that costs nothing here.
+    roles = plugin_model_roles(request.app, "music")
     try:
-        slots = await run_in_threadpool_bounded(_backend._comfy_model_slots, s, timeout=20.0)
+        resolved = await run_in_threadpool_bounded(
+            _backend._comfy_model_roles, s, roles, timeout=20.0)
     except ThreadCallTimeout as e:
         raise HTTPException(504, f"Reading ComfyUI's model list timed out: {e}")
-    if slots is None:
-        return {"reachable": False, "api_url": s["api_url"], "slots": [],
-                "message": "ComfyUI is not running - launch it to see available models."}
-    return {"reachable": True, "api_url": s["api_url"], "slots": slots}
+    out = {"api_url": s["api_url"], **resolved}
+    if not resolved["reachable"]:
+        out["message"] = "ComfyUI is not running - launch it to see available models."
+    return out
 
 
 @_router.post("/api/music/comfy-launch")

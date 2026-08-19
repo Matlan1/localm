@@ -76,6 +76,24 @@ def is_llm(entry: dict) -> bool:
     return isinstance(entry, dict) and entry.get("model_type", "llm") == "llm"
 
 
+def models_of_type(model_type: str, registry: Optional[dict] = None) -> dict:
+    """Every registry entry whose ``model_type`` is *model_type*, as
+    ``{name: entry}``.
+
+    The registry's own type slice, as DATA - ``list_models`` renders exactly this
+    for the CLI, and the media plugins read it to answer "which UNet / text
+    encoder / VAE / LoRA does this box already have registered" for a plugin's
+    declared model roles. A legacy entry with no ``model_type`` key counts as
+    'llm', the same default every other reader in this module applies, so the two
+    can never disagree about one entry.
+
+    *registry* lets a caller that already loaded the registry pass it in rather
+    than paying a second read; omitted, it is loaded here."""
+    reg = _mm.load_registry() if registry is None else registry
+    return {k: v for k, v in reg.items()
+            if isinstance(v, dict) and v.get("model_type", "llm") == model_type}
+
+
 def _entry_path(entry, field: str = "path") -> Optional[str]:
     """The stored file path of a registry *entry*, or None when the entry is
     malformed (not a dict; the named *field* missing / null / not a non-empty
@@ -874,8 +892,7 @@ def vision_input_guidance(mmproj_failed: bool = False,
 def list_models(type_filter: Optional[str] = None) -> None:
     reg = _mm.load_registry()
     if type_filter:
-        reg = {k: v for k, v in reg.items()
-               if isinstance(v, dict) and v.get("model_type", "llm") == type_filter}
+        reg = models_of_type(type_filter, reg)
     if not reg:
         console.print("[dim]No models yet. Use [bold]localm pull <name>[/bold] to download one.[/dim]")
         console.print("[dim]Run [bold]localm models[/bold] to see what's available.[/dim]")
