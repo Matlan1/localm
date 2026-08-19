@@ -815,6 +815,8 @@ def attach_gui(
     _routes_comfy.register(app, ctx)
     from .routes import runtime as _routes_runtime
     _routes_runtime.register(app, ctx)
+    from .routes import doctor as _routes_doctor
+    _routes_doctor.register(app, ctx)
 
     # R47: "/api/bug-report" POST lives on the core server (http_server.py) so it
     # works in headless `localm serve`; the GUI button targets that one canonical

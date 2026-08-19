@@ -72,6 +72,11 @@ _SEVERITY = {SKIPPED: 0, OK: 1, WARN: 2, FAIL: 3, ERROR: 4}
 # the ABI/GPU probes: one parseable line, so anything else the child or its own
 # grandchildren print cannot be mistaken for the result.
 JSON_PREFIX = "LOCALM_DIAGNOSTICS:"
+# One line per check as the child starts it, so a surface watching a two-minute
+# run can say which check is in flight instead of showing a spinner. A separate
+# prefix from the result, not a field on it: the result arrives once, at the end,
+# and conflating the two would mean a partial result had to be parseable.
+PROGRESS_PREFIX = "LOCALM_DIAGNOSTICS_PROGRESS:"
 
 
 @dataclass(frozen=True)
@@ -228,6 +233,8 @@ def run_probe_subprocess(code: str, prefix: str, *, timeout: float = 120
 # rejects 0/1-byte stubs and tiny placeholders.
 TINY_LIB_BYTES = 64 * 1024
 
+_LIB_LABEL = "llama.cpp library"
+
 
 def _blas_findings(binary_dir) -> list:
     """Report a ROCm/HIP install whose BLAS kernel data is missing.
@@ -265,7 +272,7 @@ def check_llama_lib(find_binary_dir: Optional[Callable] = None) -> CheckResult:
     if find_binary_dir is None:
         from localm.config import find_binary_dir as _fbd
         find_binary_dir = _fbd
-    label = "llama.cpp library"
+    label = _LIB_LABEL
     binary_dir = find_binary_dir()
     if not binary_dir:
         return _result("llama_lib", label, [Finding(
@@ -372,6 +379,9 @@ def check_native_abi() -> CheckResult:
 #  3. The isolated worker process                                      #
 # ------------------------------------------------------------------ #
 
+_SPAWN_LABEL = "Worker process spawn"
+
+
 def _worker_spawn_probe(conn) -> None:
     """Target of the spawn self-check below - runs ONLY in the spawned child.
     Module-level (not a closure): the "spawn" start method re-imports the
@@ -397,7 +407,7 @@ def check_worker_spawn() -> CheckResult:
     break. That gap is exactly why #617 (every GGUF load failing with
     "[WinError 2] The system cannot find the file specified") passed a doctor
     run showing everything green. This check would have caught it."""
-    label = "Worker process spawn"
+    label = _SPAWN_LABEL
     try:
         from localm._mp_spawn import ensure_spawn_uses_venv_python
         ensure_spawn_uses_venv_python()
@@ -442,6 +452,9 @@ def check_worker_spawn() -> CheckResult:
 #  4. Nested venv creation                                             #
 # ------------------------------------------------------------------ #
 
+_VENV_LABEL = "Nested venv creation"
+
+
 def check_venv_creation() -> CheckResult:
     """Verify localm can actually create a nested venv via ``-m venv`` using
     ``real_base_python()`` - the SAME mechanism the managed-ComfyUI installer
@@ -467,7 +480,7 @@ def check_venv_creation() -> CheckResult:
 
     from localm._mp_spawn import real_base_python
 
-    label = "Nested venv creation"
+    label = _VENV_LABEL
     venv_python = real_base_python() or sys.executable
     ok = False
     detail = ""
@@ -634,8 +647,16 @@ def check_hf_backend(torch_mod: Any = None, transformers_mod: Any = None, *,
 # In the order a report reads best: the library first (everything native depends
 # on it), then what it can be asked, then the two process-level probes, then the
 # optional backend. The CLI prints them in this order too, so a finding that says
-# "the runtime above checks out" still refers to something above it.
-CHECK_KEYS = ("llama_lib", "native_abi", "worker_spawn", "venv", "hf_backend")
+# "the runtime above checks out" still refers to something above it, and a
+# surface that reorders these rows breaks that phrase.
+CHECK_LABELS = {
+    "llama_lib":    _LIB_LABEL,
+    "native_abi":   _ABI_LABEL,
+    "worker_spawn": _SPAWN_LABEL,
+    "venv":         _VENV_LABEL,
+    "hf_backend":   _HF_LABEL,
+}
+CHECK_KEYS = tuple(CHECK_LABELS)
 
 
 def skipped_native_abi() -> CheckResult:
@@ -651,7 +672,7 @@ def skipped_native_abi() -> CheckResult:
         findings=())
 
 
-def run_checks() -> list:
+def run_checks(on_check_start: Optional[Callable] = None) -> list:
     """Run all five active checks in THIS process and return their results.
 
     ``check_native_abi`` is skipped, not run, when the library is not healthy:
@@ -659,15 +680,45 @@ def run_checks() -> list:
     and costs a 120s subprocess timeout. That is the same ordering ``doctor``
     has always used.
 
+    *on_check_start*, when given, is called as
+    ``(key, label, done, total)`` immediately BEFORE each check, where ``done``
+    is how many have actually finished. Reported before rather than after so a
+    watching surface can name the check that is currently taking the time, and
+    so ``done`` is never a number nothing has earned yet (ADR-0008 R1: an
+    operation with no established denominator is at an unknown percentage, not
+    at 0%). A callback that raises must not cost the caller its report, so it is
+    guarded - but the failure is logged rather than swallowed.
+
     See the module docstring before calling this from a long-lived process: it
     imports torch and transformers.
     """
-    results = []
+    results: list = []
+    total = len(CHECK_KEYS)
+
+    def _starting(index: int) -> None:
+        if on_check_start is None:
+            return
+        key = CHECK_KEYS[index]
+        try:
+            on_check_start(key, CHECK_LABELS[key], len(results), total)
+        except Exception as e:  # noqa: BLE001 - progress must never lose a report
+            try:
+                from localm.debuglog import logger as _dbg
+                _dbg.debug("diagnostics: progress callback failed for %s: %r",
+                           key, e)
+            except Exception:
+                pass
+
+    _starting(0)
     lib = check_llama_lib()
     results.append(lib)
+    _starting(1)
     results.append(check_native_abi() if lib.healthy else skipped_native_abi())
+    _starting(2)
     results.append(check_worker_spawn())
+    _starting(3)
     results.append(check_venv_creation())
+    _starting(4)
     results.append(check_hf_backend())
     return results
 
@@ -686,12 +737,24 @@ def build_report(checks) -> DiagnosticsReport:
     return DiagnosticsReport(checks=checks, verdict=verdict(checks))
 
 
-def run_report() -> DiagnosticsReport:
+def run_report(on_check_start: Optional[Callable] = None) -> DiagnosticsReport:
     """Run every check in THIS process and aggregate."""
-    return build_report(run_checks())
+    return build_report(run_checks(on_check_start))
 
 
-def run_report_isolated(*, timeout: float = 360.0) -> DiagnosticsReport:
+# The child command. ``-c`` rather than ``-m localm.diagnostics`` on purpose:
+# multiprocessing's "spawn" re-imports the parent's __main__ in the child, and
+# with ``-m`` that means re-running this module under runpy for every spawn the
+# worker-spawn check performs. A ``-c`` main has no spec and no __file__, so
+# multiprocessing skips that entirely and the spawn probe measures the spawn
+# rather than an import of itself. ``__main__`` below still works for a human
+# debugging the child by hand.
+_CHILD_CODE = "import localm.diagnostics as d; d.main_json()"
+
+
+def run_report_isolated(*, timeout: float = 360.0,
+                        on_progress: Optional[Callable] = None
+                        ) -> DiagnosticsReport:
     """Run the checks in a FRESH child interpreter and parse its one JSON line.
 
     This is what a server surface must use. Three reasons, and the first alone
@@ -706,37 +769,91 @@ def run_report_isolated(*, timeout: float = 360.0) -> DiagnosticsReport:
       * a terminal ``localm doctor`` is itself a fresh process, so this is the
         only way the two surfaces can be expected to agree.
 
+    *on_progress* is called as ``(key, label, done, total)`` each time the child
+    starts a check, so a caller can report which one is in flight rather than
+    show two minutes of nothing.
+
     A child that times out, crashes or prints nothing parseable yields an ERROR
     verdict naming what happened - never an empty report, which would render as
     a clean bill of health.
+
+    Read line by line rather than with ``subprocess.run`` because progress that
+    only arrives at the end is not progress. That costs the built-in timeout, so
+    a watchdog timer kills the child at the deadline and the read loop ends when
+    its stdout closes. NOTE what the kill does NOT reach: the child's own
+    grandchildren (the ABI probe, the venv probe). Each of those carries its own
+    shorter timeout (120s, 60s, 30s), so they self-terminate rather than leak
+    indefinitely - stated rather than glossed, because "the parent was killed"
+    and "everything it started is gone" are not the same claim on any platform.
     """
-    code = "import localm.diagnostics as d; d.main_json()"
+    import threading
+
     try:
-        r = subprocess.run([sys.executable, "-c", code],
-                           capture_output=True, text=True, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        return DiagnosticsReport(
-            checks=(), verdict=ERROR,
-            error=f"the diagnostics run did not finish within {int(timeout)}s")
+        proc = subprocess.Popen(
+            [sys.executable, "-c", _CHILD_CODE],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     except Exception as e:
         return DiagnosticsReport(
             checks=(), verdict=ERROR,
             error=f"the diagnostics run could not be started: {e}")
-    line = next((ln for ln in (r.stdout or "").splitlines()
-                 if ln.startswith(JSON_PREFIX)), "")
-    if not line:
+
+    timed_out = threading.Event()
+
+    def _expire() -> None:
+        timed_out.set()
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+    watchdog = threading.Timer(timeout, _expire)
+    watchdog.daemon = True
+    watchdog.start()
+
+    result_line = ""
+    try:
+        for raw in proc.stdout:
+            line = raw.rstrip("\r\n")
+            if line.startswith(JSON_PREFIX):
+                result_line = line
+            elif line.startswith(PROGRESS_PREFIX) and on_progress is not None:
+                try:
+                    ev = json.loads(line[len(PROGRESS_PREFIX):])
+                    on_progress(ev.get("key", ""), ev.get("label", ""),
+                                int(ev.get("done", 0)), int(ev.get("total", 0)))
+                except Exception:
+                    # A malformed or unhandleable progress line costs a progress
+                    # update, never the report. Deliberately not escalated: the
+                    # result line is what this function exists to return.
+                    pass
+    finally:
+        watchdog.cancel()
+        try:
+            stderr_text = proc.stderr.read() or ""
+        except Exception:
+            stderr_text = ""
+        try:
+            proc.wait(timeout=10)
+        except Exception:
+            pass
+
+    if timed_out.is_set():
+        return DiagnosticsReport(
+            checks=(), verdict=ERROR,
+            error=f"the diagnostics run did not finish within {int(timeout)}s")
+    if not result_line:
         # Surface what the child actually said. A run that produced no result is
         # already the worst case for a diagnostic; dropping its stderr would
         # make it undiagnosable as well.
-        tail = ((r.stderr or "").strip().splitlines()
-                or (r.stdout or "").strip().splitlines())
+        tail = stderr_text.strip().splitlines()
         why = tail[-1] if tail else "it printed no result"
         return DiagnosticsReport(
             checks=(), verdict=ERROR,
             error=f"the diagnostics run reported nothing usable (exit "
-                  f"{r.returncode}): {why}")
+                  f"{proc.returncode}): {why}")
     try:
-        return DiagnosticsReport.from_dict(json.loads(line[len(JSON_PREFIX):]))
+        return DiagnosticsReport.from_dict(
+            json.loads(result_line[len(JSON_PREFIX):]))
     except Exception as e:
         return DiagnosticsReport(
             checks=(), verdict=ERROR,
@@ -744,12 +861,17 @@ def run_report_isolated(*, timeout: float = 360.0) -> DiagnosticsReport:
 
 
 def main_json() -> None:
-    """Entry point for the isolated run: one JSON line on stdout, nothing else.
+    """Entry point for the isolated run: progress lines then one result line.
 
     Any exception becomes an ERROR report rather than a traceback and a silent
     parent, so the caller always gets a verdict it can render."""
+    def _emit(key, label, done, total):
+        sys.stdout.write(PROGRESS_PREFIX + json.dumps(
+            {"key": key, "label": label, "done": done, "total": total}) + "\n")
+        sys.stdout.flush()
+
     try:
-        report = run_report()
+        report = run_report(_emit)
     except Exception as e:  # noqa: BLE001 - the parent must get a verdict, not a crash
         report = DiagnosticsReport(
             checks=(), verdict=ERROR,
