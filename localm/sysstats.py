@@ -217,16 +217,66 @@ def _compute_vram() -> dict:
     (see :func:`_vram_reading_trusted`); a stale or process-blind reading shows
     ``total`` alone rather than a wrong used/free, so the status bar never
     presents a number localm cannot stand behind as current fact."""
-    from localm.discover import vram_capacity
+    from localm.discover import last_known_gpus, vram_capacity
     info, status = vram_capacity(return_status=True)
     total = info.get("total")
     if not total:
         return {}
     vram: dict = {"total": int(total)}
-    if _vram_reading_trusted(info, status):
+    trusted = _vram_reading_trusted(info, status)
+    if trusted:
         used = max(0, int(total) - int(info["free"]))
         vram["used"] = used
         vram["percent"] = round(used / int(total) * 100, 1)
+
+    # PER-DEVICE breakdown, because the aggregate above is WRONG TO READ AS
+    # "this card" on a multi-GPU board, in both of its two shapes:
+    #   * with a gpu_split_indices configured, it SUMS the split devices, so a
+    #     full card and an empty one average out to a comfortable-looking number;
+    #   * with no split configured it falls back to vram_info(), the single MAIN
+    #     GPU, and the other cards are simply not represented at all.
+    # Neither lets a user answer "how full is card 1", which is the question the
+    # status bar exists for once there is more than one card.
+    #
+    # COST: ZERO extra probes. This reads the reading vram_capacity() just took
+    # (see last_known_gpus), rather than re-probing. It still sits inside
+    # _compute_vram, which is single-flighted onto a background thread and
+    # throttled to _VRAM_REFRESH_INTERVAL_S, so nothing here touches the ~2.5s
+    # poll path either way.
+    #
+    # The SAME trust gate applies per device: a process-scoped or stale reading
+    # overstates free, so those devices report total only. A per-card figure that
+    # is confidently wrong is worse than an absent one, since the whole point of
+    # showing it per card is to be able to act on it.
+    try:
+        # last_known_gpus(), NOT list_gpus(): vram_capacity() above has just
+        # driven a probe, and list_gpus has no TTL cache, so calling it here would
+        # spawn a SECOND torch subprocess for data the first one already produced.
+        # Measured: that doubled _compute_vram's wall time and broke this module's
+        # own probe-timing tests.
+        devices = []
+        for g in last_known_gpus():
+            t = g.get("total")
+            if not t:
+                continue
+            d = {"index": g.get("index"), "total": int(t)}
+            if g.get("name"):
+                d["name"] = g["name"]
+            if trusted and g.get("free") is not None:
+                u = max(0, int(t) - int(g["free"]))
+                d["used"] = u
+                d["percent"] = round(u / int(t) * 100, 1)
+            devices.append(d)
+        # Only worth sending when it says something the aggregate does not.
+        if len(devices) > 1:
+            vram["devices"] = devices
+    except Exception as e:
+        # Never let the per-device extra cost the aggregate: the single number is
+        # the load-bearing one and was already computed above (rule 5 - this is a
+        # best-effort enrichment, and its failure is visible as a missing
+        # breakdown rather than a missing readout, not a silenced problem).
+        from localm.debuglog import logger
+        logger.debug("_vram: per-device breakdown unavailable: %s", e)
     return {"vram": vram}
 
 

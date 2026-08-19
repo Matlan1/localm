@@ -63,18 +63,25 @@ export function renderHwStats(data) {
   // `used` only for a fresh, device-global reading - see sysstats._vram); a
   // total-only reading gets no colour, since there is nothing to be "full" of.
   const spans = [];
-  const add = (text, cls) => {
+  // `metric` pins the span to a GRID COLUMN in CSS (load left, memory right).
+  // Without it the layout would depend on where the row happens to wrap, and a
+  // missing metric would slide the rest sideways - see the .hw-stats rule.
+  const add = (metric, text, cls) => {
     const s = document.createElement("span");
     s.textContent = text;
+    s.dataset.metric = metric;
     if (cls) s.className = cls;
     spans.push(s);
   };
-  // ORDER: CPU, RAM, GPU, VRAM - two pairs, each "load, then memory". At the
-  // sidebar's width the row wraps after two metrics, so this reads as a 2x2:
-  // the system on the first line, the graphics card on the second. The previous
-  // order (CPU, RAM, VRAM, GPU) split the card's pair across the wrap.
+  // ORDER: CPU, RAM, GPU, VRAM - two pairs, each "load, then memory", laid out
+  // as a real 2x2 GRID (system on row 1, graphics card on row 2) rather than a
+  // row that happens to wrap after two. Each span is pinned to its column by
+  // `data-metric`, so an ABSENT metric leaves its cell empty instead of pulling
+  // the next one into the wrong column - which matters here because absence is
+  // routine, not exceptional: no psutil means no CPU/RAM, and an AMD card
+  // reports no GPU%.
   if (data && data.cpu && typeof data.cpu.percent === "number")
-    add(`CPU ${Math.round(data.cpu.percent)}%`);
+    add("cpu", `CPU ${Math.round(data.cpu.percent)}%`);
   // RAM as used/total GB, matching the VRAM figure it now sits above - a bare
   // percentage next to "3.6/16.0 GB" was the odd one out, and the absolute
   // number is what tells you whether another model will fit. sysstats sends
@@ -82,19 +89,48 @@ export function renderHwStats(data) {
   // the fallback for an older server or a proxy returning a partial payload.
   if (data && data.ram) {
     const r = data.ram;
-    if (r.used != null && r.total) add(`RAM ${gib(r.used)}/${gib(r.total)} GB`);
-    else if (typeof r.percent === "number") add(`RAM ${Math.round(r.percent)}%`);
+    if (r.used != null && r.total) add("ram", `RAM ${gib(r.used)}/${gib(r.total)} GB`);
+    else if (typeof r.percent === "number") add("ram", `RAM ${Math.round(r.percent)}%`);
   }
-  if (data && data.gpu && typeof data.gpu.percent === "number")
-    add(`GPU ${Math.round(data.gpu.percent)}%`);
+  // The aggregate GPU% is emitted ONLY on a single-card board. /api/stats sends
+  // one system-wide figure (nvidia-smi, NVIDIA only) with no card attribution, so
+  // on a multi-card board it can neither be placed beside a specific card nor
+  // given a row of its own without implying it belongs to one. The per-card rows
+  // below replace it with something that IS attributable; this is a swap for
+  // better information, not a hidden metric.
+  const multi = !!(data && data.vram && Array.isArray(data.vram.devices)
+                   && data.vram.devices.length > 1);
+  if (!multi && data && data.gpu && typeof data.gpu.percent === "number")
+    add("gpu", `GPU ${Math.round(data.gpu.percent)}%`);
+  const band = (used, total) => {
+    const frac = total ? used / total : 0;
+    return frac >= 0.9 ? "vram-full" : frac >= 0.7 ? "vram-busy" : "vram-ok";
+  };
   if (data && data.vram && data.vram.total) {
     const v = data.vram;
-    if (v.used != null) {
-      const frac = v.total ? v.used / v.total : 0;
-      const band = frac >= 0.9 ? "vram-full" : frac >= 0.7 ? "vram-busy" : "vram-ok";
-      add(`VRAM ${gib(v.used)}/${gib(v.total)} GB`, `vram-usage ${band}`);
+    // MULTI-GPU: one row PER CARD, never the combined figure alone. The
+    // aggregate is actively misleading per-card - 22/48 GB reads as comfortable
+    // while card 0 sits at 20/24. The backend sends `devices` only when there
+    // is more than one, so the single-card path below is untouched.
+    if (multi) {
+      v.devices.forEach((d, i) => {
+        const label = d.index == null ? `GPU${i}` : `GPU${d.index}`;
+        // Column 1 carries the card's IDENTITY, not a utilisation percent:
+        // /api/stats reports gpu.percent as ONE system-wide figure (nvidia-smi,
+        // NVIDIA only), so printing it beside a specific card would attribute
+        // whole-board load to that card. The label is true; a borrowed percent
+        // would not be.
+        add("gpu", label);
+        if (d.used != null) {
+          add("vram", `${gib(d.used)}/${gib(d.total)} GB`, `vram-usage ${band(d.used, d.total)}`);
+        } else {
+          add("vram", `${gib(d.total)} GB`);
+        }
+      });
+    } else if (v.used != null) {
+      add("vram", `VRAM ${gib(v.used)}/${gib(v.total)} GB`, `vram-usage ${band(v.used, v.total)}`);
     } else {
-      add(`VRAM ${gib(v.total)} GB`);
+      add("vram", `VRAM ${gib(v.total)} GB`);
     }
   }
   el.textContent = "";

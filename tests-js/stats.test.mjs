@@ -161,6 +161,12 @@ const hwStatsCss = () => {
   return m[1].replace(/\/\*[\s\S]*?\*\//g, "");
 };
 
+// The column pinning lives in its own rules, OUTSIDE `.hw-stats { ... }`, so the
+// rule-scoped reader above cannot see it. Same comment-stripping, same reason.
+const styleCss = () => readFileSync(
+  fileURLToPath(new URL("../localm/plugins/gui/static/style.css", import.meta.url)), "utf8")
+  .replace(/\/\*[\s\S]*?\*\//g, "");
+
 test("hw-stats: the rule does not truncate", () => {
   const rule = hwStatsCss();
   assert.doesNotMatch(rule, /text-overflow:\s*ellipsis/,
@@ -170,8 +176,35 @@ test("hw-stats: the rule does not truncate", () => {
   assert.doesNotMatch(rule, /overflow:\s*hidden/, "hidden overflow clips the wrapped second line");
 });
 
-test("hw-stats: the rule wraps instead", () => {
-  assert.match(hwStatsCss(), /flex-wrap:\s*wrap/, "metrics must be allowed onto a second line");
+test("hw-stats: the rule lays the metrics out as a grid instead", () => {
+  const css = hwStatsCss();
+  assert.match(css, /display:\s*grid/, "metrics must be allowed onto a second line");
+  assert.match(css, /grid-template-columns:\s*auto auto/,
+    "two columns: load on the left, memory on the right");
+});
+
+// The 2x2 must NOT depend on where the row happens to wrap. It is pinned, so an
+// absent metric leaves an empty cell rather than pulling the next one across -
+// and absence is routine here (no psutil means no CPU/RAM, an AMD card reports
+// no GPU%), which is exactly the case a wrap-based layout got wrong.
+test("hw-stats: load and memory are pinned to their own columns", () => {
+  const css = styleCss();
+  assert.match(css, /\[data-metric="cpu"\][\s\S]{0,80}\[data-metric="gpu"\]\s*{\s*grid-column:\s*1/,
+    "CPU and GPU share column 1");
+  assert.match(css, /\[data-metric="ram"\][\s\S]{0,80}\[data-metric="vram"\]\s*{\s*grid-column:\s*2/,
+    "RAM and VRAM share column 2");
+});
+
+// Column-major reading is the whole point of the layout, so it is asserted on the
+// RENDERED spans rather than only in CSS: a future change to the emit order in
+// renderHwStats would otherwise pass the CSS checks above while scrambling the grid.
+test("hw-stats: each metric carries the column tag the grid needs", () => {
+  const { window } = loadApp({ fetchImpl: goodFetch() });
+  window.renderHwStats(STATS);
+  const el = window.document.getElementById("hw-stats");
+  const tags = [...el.querySelectorAll("span")].map((s) => s.dataset.metric);
+  assert.deepEqual(tags, ["cpu", "ram", "gpu", "vram"],
+    "row 1 is the system (CPU, RAM), row 2 is the card (GPU, VRAM)");
 });
 
 test("hw-stats: each metric is one unbreakable span, with no stray separator text", () => {
@@ -187,4 +220,60 @@ test("hw-stats: each metric is one unbreakable span, with no stray separator tex
   // The whole VRAM figure travels together - a wrap must not split "2.0/16.0 GB".
   const vram = spans.find((s) => /VRAM/.test(s.textContent));
   assert.equal(vram.textContent, "VRAM 2.0/16.0 GB", "the VRAM span carries the complete figure");
+});
+
+// MULTI-GPU. The aggregate is not merely less detailed on a 2-card board, it is
+// actively misleading: 22/48 GB reads as comfortable while card 0 sits at 20/24.
+// These pin the per-card rows so that cannot silently regress back to one figure.
+const MULTI = {
+  cpu: { percent: 12.4 },
+  ram: { used: 4 * GIB, total: 8 * GIB, percent: 50.0 },
+  gpu: { percent: 30.0 },
+  vram: {
+    used: 22 * GIB, total: 48 * GIB, percent: 45.8,
+    devices: [
+      { index: 0, name: "RTX 4090", total: 24 * GIB, used: 20 * GIB, percent: 83.3 },
+      { index: 1, name: "RTX 3090", total: 24 * GIB, used: 2 * GIB, percent: 8.3 },
+    ],
+  },
+};
+
+test("hw-stats: a multi-GPU board gets one row per card, not the combined figure", () => {
+  const { window } = loadApp({ fetchImpl: goodFetch() });
+  window.renderHwStats(MULTI);
+  const el = window.document.getElementById("hw-stats");
+  const spans = [...el.querySelectorAll("span")];
+  const text = spans.map((s) => s.textContent);
+
+  assert.deepEqual(spans.map((s) => s.dataset.metric),
+    ["cpu", "ram", "gpu", "vram", "gpu", "vram"],
+    "CPU|RAM, then one GPU|VRAM pair per card");
+  assert.deepEqual(text.slice(2), ["GPU0", "20.0/24.0 GB", "GPU1", "2.0/24.0 GB"],
+    "each card names itself and reports ITS OWN used/total");
+
+  // The combined 22/48 must not appear anywhere: it is the number that hides the
+  // full card, which is the entire reason the breakdown exists.
+  assert.ok(!text.some((t) => t.includes("22.0/48.0")),
+    "the combined figure must not be shown alongside the per-card rows");
+
+  // The near-full card must carry the warm band while the empty one does not -
+  // a per-card figure with a board-wide colour would defeat the point.
+  assert.match(spans[3].className, /vram-busy|vram-full/, "card 0 at 83% reads as busy");
+  assert.match(spans[5].className, /vram-ok/, "card 1 at 8% reads as fine");
+});
+
+test("hw-stats: the unattributable aggregate GPU% is dropped on a multi-GPU board", () => {
+  const { window } = loadApp({ fetchImpl: goodFetch() });
+  window.renderHwStats(MULTI);
+  const el = window.document.getElementById("hw-stats");
+  const text = [...el.querySelectorAll("span")].map((s) => s.textContent);
+  // /api/stats sends ONE system-wide percent with no card attribution, so beside a
+  // named card it would be a borrowed number. Dropped rather than mis-attributed.
+  assert.ok(!text.some((t) => /^GPU \d+%$/.test(t)),
+    "a board-wide GPU% must not sit beside a specific card");
+  // ...but it is still shown when there IS only one card to attribute it to.
+  window.renderHwStats(STATS);
+  const single = [...el.querySelectorAll("span")].map((s) => s.textContent);
+  assert.ok(single.some((t) => /^GPU \d+%$/.test(t)),
+    "single-card boards keep the aggregate GPU%");
 });

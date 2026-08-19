@@ -743,6 +743,25 @@ _gpu_probe_result: Optional[dict] = None
 _gpu_probe_epoch = 0
 
 
+def last_known_gpus() -> list:
+    """The most recent SUCCESSFUL :func:`list_gpus` reading, WITHOUT probing.
+
+    ``list_gpus`` deliberately has no TTL cache - every call re-probes so a live
+    ``free`` is never stale - which makes it the wrong thing to call for a second,
+    incidental use right after something else has already probed. On this box a
+    probe spawns a torch-importing subprocess and costs seconds.
+
+    This is for exactly that case: a caller that has JUST driven a probe (e.g. via
+    :func:`vram_capacity`) and wants the per-device detail behind the number it
+    already has. Returns ``[]`` when no probe has ever succeeded - never a
+    fabricated or partial reading, and never a fresh probe.
+
+    NOT a substitute for ``list_gpus`` when the reading must be current: the value
+    here is as fresh as whatever last probed, and nothing about it says when.
+    """
+    return list(_gpu_last_good or [])
+
+
 def _reset_gpu_probe_cache() -> None:
     """Test hook: drop the last-known-good GPU reading + in-flight flag, and
     INVALIDATE any probe still in flight so it cannot bleed into the next test.

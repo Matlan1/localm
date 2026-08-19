@@ -343,17 +343,43 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
   color: var(--text-dim);
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.2px;
-  /* WRAPS, never truncates. This was `white-space: nowrap` + `overflow: hidden`
-     + `text-overflow: ellipsis`, which ellipsised the line at the sidebar's
-     width - and since VRAM is rendered LAST of CPU/RAM/VRAM/GPU, the figure
-     that got cut was the one this readout exists for ("VRAM 3.6/1..."). A
-     metric the user cannot read is not a compact readout, it is a missing one.
-     Wrapping to a second line costs a few pixels of a sidebar that has room. */
-  display: flex;
-  flex-wrap: wrap;
-  column-gap: 9px;
+  /* A REAL 2x2 GRID, never a truncated line:
+
+         CPU 53%     RAM 20.3/31.9 GB
+         GPU 12%    VRAM  5.6/16.0 GB
+
+     LOAD in column 1, MEMORY in column 2, system on row 1 and the card on
+     row 2, so the two percentages and the two used/total figures each read
+     down a column.
+
+     This was `white-space: nowrap` + `overflow: hidden` + `text-overflow:
+     ellipsis`, which ellipsised at the sidebar's width and cut the VRAM figure
+     - the one value this readout exists for ("VRAM 3.6/1..."). The first fix
+     made it `flex-wrap`, which stopped the truncation but left the layout at
+     the mercy of WHERE the row happened to wrap: the 2x2 held only while the
+     metrics were about equal width and all four were present.
+
+     Grid instead of wrapping, because ABSENCE IS ROUTINE HERE rather than
+     exceptional - no psutil means no CPU/RAM, and an AMD card reports no GPU%.
+     Under `flex-wrap` a missing GPU pulls VRAM up into the GPU slot; with each
+     span pinned to its column below, the cell just stays empty and everything
+     else keeps its place.
+
+     `justify-content: start` + `auto` tracks keep the pair tight against the
+     left rather than stretching across the sidebar. */
+  display: grid;
+  grid-template-columns: auto auto;
+  justify-content: start;
+  column-gap: 10px;
   row-gap: 2px;
 }
+/* Pin each metric to its column. Auto-placement alone would not do it: it fills
+   row-major from whatever spans exist, so one absent metric shifts every later
+   one into the wrong column. */
+.hw-stats > [data-metric="cpu"],
+.hw-stats > [data-metric="gpu"]  { grid-column: 1; }
+.hw-stats > [data-metric="ram"],
+.hw-stats > [data-metric="vram"] { grid-column: 2; }
 /* Each metric is an unbreakable unit, so a wrap can never split "3.6/16.0 GB"
    across two lines.
 
