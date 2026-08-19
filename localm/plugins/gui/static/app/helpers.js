@@ -274,6 +274,23 @@ export function scrubMarkers(text) {
 const _imgProxyCache = new Map();
 const _IMG_PROXY_CACHE_MAX = 64;
 
+/** Drop every cached proxied image and release its object URL.
+ *
+ *  MUST be called when the remote-image setting may have changed. Without it the
+ *  OFF switch does not take effect for anything already on screen: the route
+ *  starts refusing, but a cached blob keeps rendering for the REST OF THE PAGE
+ *  SESSION, including in a conversation the user has not opened yet. That is the
+ *  same staleness the response's `no-store` was added to fix, and strictly worse
+ *  - a session outlasts the five minutes that was judged unacceptable there.
+ *  Closing the HTTP cache while leaving this one open fixed half the defect. */
+export function clearImageProxyCache() {
+  for (const v of _imgProxyCache.values()) {
+    if (typeof v === "string") URL.revokeObjectURL(v);
+  }
+  _imgProxyCache.clear();
+}
+window.clearImageProxyCache = clearImageProxyCache;
+
 function _rememberProxiedImage(href, objUrl) {
   if (_imgProxyCache.size >= _IMG_PROXY_CACHE_MAX) {
     const oldest = _imgProxyCache.keys().next().value;
@@ -286,6 +303,19 @@ function _rememberProxiedImage(href, objUrl) {
 }
 
 function proxyRemoteImages(root) {
+  // srcset FIRST, and it is not optional tidying. DOMPurify's default allowlist
+  // passes `srcset`, `picture` and `source` (verified against the vendored
+  // build), and when an <img> carries both, the browser picks a srcset candidate
+  // and IGNORES src - so proxying src alone leaves the element still pointing at
+  // the remote host, and with the feature ON the image would not render at all.
+  // There is no cheap way to proxy each candidate (they are per-descriptor
+  // alternatives), so the remote ones are dropped and the proxied src becomes the
+  // single source. A <source> inside <picture> is emptied for the same reason,
+  // which makes the browser fall through to the <img> this function does proxy.
+  root.querySelectorAll("img[srcset], source[srcset]").forEach((node) => {
+    const set = node.getAttribute("srcset") || "";
+    if (/(^|[\s,])https?:\/\//i.test(set)) node.removeAttribute("srcset");
+  });
   root.querySelectorAll("img[src]").forEach((img) => {
     const raw = img.getAttribute("src") || "";
     if (!/^https?:\/\//i.test(raw)) return;          // data:/blob:/relative: already fine

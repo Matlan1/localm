@@ -7,7 +7,7 @@
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { pickDirectory, pickFile } from "../app/picker.js";
-import { $, authHeaders, confirmDanger, el, openModal, promptText, streamJob, toast } from "../app/helpers.js";
+import { $, authHeaders, clearImageProxyCache, confirmDanger, el, openModal, promptText, streamJob, toast } from "../app/helpers.js";
 import { emptyState } from "../app/icons.js";
 import { applyServerTtsConfig, browserVoiceOverride, caps, capsReady, clearBrowserVoiceOverride } from "../app/settings-perf.js";
 
@@ -1142,6 +1142,13 @@ export async function saveSettingsSection(secId) {
   }
   if (r.ok) {
     toast("Saved - engine values apply on the next model load");
+    // A save may have turned "Show remote images in replies" OFF. The route
+    // starts refusing immediately, but an already-fetched image is held in a
+    // page-lifetime blob cache, so without this the switch appears to do nothing
+    // for every image already on screen. Cleared unconditionally: it costs one
+    // refetch of visible images when the setting did not change, and reading
+    // which key moved would put a security decision behind a diff.
+    clearImageProxyCache();
     refreshSettingsPage();   // re-render to reflect server-normalized values
   } else {
     toast(data.detail || "Save failed", true);
