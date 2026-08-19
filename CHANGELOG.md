@@ -12,6 +12,18 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Managing what the coder remembers no longer needs a terminal, and two more
+  session settings arrived.** The **lessons** panel under Coder now has a
+  **stored** and a **dropped** tab, so you can see both what the agent recalls
+  from past sessions on a project and what it has let go of. Any lesson can be
+  forgotten, any dropped one brought back, and **consolidate** asks the model to
+  merge related lessons into one - opt-in, manual, and every original kept so a
+  bad merge is reversible. There is also an erase-everything button; that one
+  takes the recoverable copies with it and cannot be undone, so it asks first.
+  Alongside it the session form gains **seed**, which pins sampling so the same
+  seed and prompt reproduce the same output, and **still confirm shell
+  commands**, which lets file writes run unattended under auto-approve while
+  shell commands still stop for you.
 - **A plugin can now contribute a working settings section.** `add_settings()`
   was already documented as part of the plugin API, but calling it did
   nothing - the fields simply never appeared anywhere. Any plugin, built-in or

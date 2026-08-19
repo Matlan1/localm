@@ -73,8 +73,17 @@ class CreateSessionRequest(BaseModel):
     model: str | None = None          # switch active engine when given
     scope: str | None = None          # glob restricting file-access tools
     dry_run: bool = False             # destructive tools report but don't run
+    # The CLI's --interactive-confirm: auto-approve file writes but STILL prompt
+    # before shell execution. Only meaningful with auto_approve, which is what it
+    # carves an exception out of; on its own it changes nothing, because every
+    # destructive tool already prompts.
+    interactive_confirm: bool = False
     temperature: float | None = None
     max_tokens: int | None = None
+    # Pins the sampler's RNG so the same seed, model, prompt and settings
+    # reproduce the same output (the CLI's --seed). A plain generation kwarg
+    # alongside the two above, forwarded the same way.
+    seed: int | None = None
     resume: bool = False              # restore this cwd's saved conversation (CODER-2)
     custom_instructions: str | None = None   # extra system-prompt guidance (rec#584)
     # Exit-code oracle: a command the HARNESS runs before a turn that changed
@@ -105,6 +114,17 @@ class MessageRequest(BaseModel):
 
 class EstimateRequest(BaseModel):
     text: str
+
+
+class EpisodeTargetRequest(BaseModel):
+    """Which project's lessons an episode WRITE operation applies to.
+
+    A body rather than a query parameter, unlike the two read routes: these are
+    state-changing, so they must be unsafe methods, and an unsafe method is what
+    the CSRF check applies to. A destructive operation reachable by a URL alone
+    is one someone can be walked into.
+    """
+    cwd: str
 
 
 class SetModelRequest(BaseModel):
@@ -281,6 +301,8 @@ async def create_session(req: CreateSessionRequest, request: Request):
         gen_kwargs["temperature"] = req.temperature
     if req.max_tokens is not None:
         gen_kwargs["max_tokens"] = req.max_tokens
+    if req.seed is not None:
+        gen_kwargs["seed"] = req.seed
 
     # Omitted -> the Agent's own default stays the single source of truth,
     # matching how temperature/max_tokens above are handled rather than
@@ -304,6 +326,7 @@ async def create_session(req: CreateSessionRequest, request: Request):
         mode=session_mode,
         scope=req.scope,
         dry_run=req.dry_run,
+        interactive_confirm=req.interactive_confirm,
         patch_mode=req.patch_mode,
         restricted=restricted,
         custom_instructions=req.custom_instructions,
@@ -765,6 +788,68 @@ async def coder_resumable(request: Request, cwd: str = ""):
     return {"resumable": True, "cwd": str(p.resolve()), **info}
 
 
+# ------------------------------------------------------------------ #
+#  Episodic memory (the CLI's --episodes family)                      #
+# ------------------------------------------------------------------ #
+
+def _is_owner(request: Request) -> bool:
+    """Owner-only is the gate for EVERY episode operation, read or write.
+
+    Lessons are the owner's own record of their own projects, and a restricted
+    (scoped-key) session is excluded from episodic memory entirely - it neither
+    recalls a lesson nor writes one - so nothing here can belong to a shared key.
+    """
+    is_owner, _ = _principal_from_request(request)
+    return is_owner
+
+
+def _episode_root(cwd: str) -> Path:
+    """Validate a caller-supplied project path and return the key to file under.
+
+    ONE helper rather than a copy per route: five near-identical guards is five
+    chances for one to drift, and the one that drifts is the one that stops
+    refusing UNC.
+
+    Deliberately NO is_dir() check, and that is a correctness decision rather
+    than a relaxation. Lessons live under the localm data dir keyed by the
+    RESOLVED project path (measured: delete the project and its lessons are still
+    there), so a directory that has been moved or removed still has an entry -
+    and that is precisely when someone wants to reach it. Refusing on is_dir()
+    would hide it.
+
+    That leaves resolve() as the ONLY filesystem touch on a client-supplied
+    string, and resolve() is required: the CLI derives the very same key by
+    resolving the same way, so the two surfaces would otherwise disagree about
+    which project they are looking at. UNC and device syntax is refused
+    LEXICALLY, before that call - a GET carries no CSRF check, and a UNC string
+    reaching the filesystem is an SMB dial.
+    """
+    if not cwd.strip():
+        raise HTTPException(400, "cwd is required")
+    try:
+        p = Path(cwd).expanduser()
+    except (OSError, ValueError, RuntimeError):
+        raise HTTPException(400, "Invalid cwd")
+    if _is_unc_or_device_path(str(p)):
+        raise HTTPException(
+            400, "'cwd' must be a local directory path, not a UNC or device path.")
+    return p.resolve()
+
+
+async def _episode_op(fn):
+    """Run a store operation off the event loop, turning a failure into a 5xx
+    that NAMES it rather than a clean-looking empty result. Every episode route
+    goes through this so no operation can quietly half-happen."""
+    loop = asyncio.get_running_loop()
+    try:
+        return await loop.run_in_executor(get_plugin_executor(), fn)
+    except HTTPException:
+        raise
+    except Exception as e:                                     # noqa: BLE001
+        raise HTTPException(
+            500, f"Episode store operation failed: {type(e).__name__}: {e}")
+
+
 @_router.get("/api/coder/episodes")
 async def coder_episodes(request: Request, cwd: str = ""):
     """The episodic-memory lessons stored for *cwd*: the CLI's ``--episodes``.
@@ -782,34 +867,9 @@ async def coder_episodes(request: Request, cwd: str = ""):
     Lessons live under the localm data dir, never inside the project, so the
     ``cwd`` here is only the KEY they are filed under; nothing in the project
     tree is read, and a directory that no longer exists still has its lessons."""
-    is_owner, _ = _principal_from_request(request)
-    if not is_owner:
+    if not _is_owner(request):
         return {"episodes": [], "cwd": None}
-    if not cwd.strip():
-        raise HTTPException(400, "cwd is required")
-    try:
-        p = Path(cwd).expanduser()
-    except (OSError, ValueError, RuntimeError):
-        raise HTTPException(400, "Invalid cwd")
-    # Same unconditional UNC/device refusal, on the EXPANDED string, as
-    # create_session and coder_resumable - see those for the full reasoning. A
-    # GET carries no CSRF check, and the store keys on this path.
-    if _is_unc_or_device_path(str(p)):
-        raise HTTPException(
-            400, "'cwd' must be a local directory path, not a UNC or device path.")
-    # Deliberately NO is_dir() check, and this is a correctness decision rather
-    # than a relaxation. Lessons live under the localm data dir keyed by the
-    # RESOLVED project path (measured: delete the project and its lessons are
-    # still there), so a directory that has been moved or removed still has an
-    # entry - and that is precisely when someone wants to read it. Refusing on
-    # is_dir() would hide it. An unknown directory simply has no lessons filed,
-    # which is the same shape coder_resumable answers with rather than a 400.
-    #
-    # It also leaves resolve() as the ONLY filesystem touch on a client-supplied
-    # string here, and resolve() is required: it is how the CLI's --episodes
-    # derives the very same key, so the two surfaces would otherwise disagree
-    # about which project they are looking at.
-    root = p.resolve()
+    root = _episode_root(cwd)
 
     def _read():
         from localm.plugins.coder.episodes import EpisodeStore
@@ -832,6 +892,194 @@ async def coder_episodes(request: Request, cwd: str = ""):
             500, f"Could not read the episode store for {root}: "
                  f"{type(e).__name__}: {e}")
     return {"episodes": episodes, "cwd": str(root)}
+
+
+@_router.get("/api/coder/episodes/archive")
+async def coder_episodes_archive(request: Request, cwd: str = ""):
+    """Lessons this project has DROPPED and can get back: ``--episodes-archive``.
+
+    An unreadable archive is NOT an empty one, and that difference is the whole
+    point of this endpoint: the lesson you are looking for may be sitting in
+    there, recoverable, while a 200 with an empty list would tell you it is gone.
+    The CLI refuses that collapse by exiting non-zero; here it is a 503, because
+    the condition is transient (another process holding the file) and a retry is
+    the right next move.
+    """
+    if not _is_owner(request):
+        return {"archived": [], "cwd": None}
+    root = _episode_root(cwd)
+
+    def _read():
+        from localm.plugins.coder.episodes import EpisodeStore
+        store = EpisodeStore(root)
+        rows = store.forgotten()
+        if not rows and not store.last_forgotten_ok:
+            raise HTTPException(
+                503, "The episode archive exists but could not be read, so this "
+                     "list would be INCOMPLETE. It may be locked by another "
+                     "process - try again.")
+        return rows
+
+    rows = await _episode_op(_read)
+    return {"archived": rows, "cwd": str(root)}
+
+
+@_router.post("/api/coder/episodes/{episode_id}/forget")
+async def coder_episode_forget(episode_id: str, request: Request,
+                               req: EpisodeTargetRequest):
+    """Drop ONE lesson from recall: ``--forget-episode``.
+
+    Reversible by design - the record is archived first - which is why this is a
+    plain POST rather than something the UI has to frighten anyone about. If the
+    archiving half failed, the lesson is still gone from recall, so that is
+    reported as a caveat on a real outcome rather than swallowed.
+    """
+    if not _is_owner(request):
+        raise HTTPException(404, "No such episode")
+    root = _episode_root(req.cwd)
+
+    def _forget():
+        from localm.plugins.coder.episodes import EpisodeStore
+        store = EpisodeStore(root)
+        if not store.forget(episode_id):
+            raise HTTPException(404, f"No episode with id {episode_id}")
+        return store.last_archive_ok
+
+    archived = await _episode_op(_forget)
+    return {
+        "forgotten": episode_id,
+        "recoverable": archived,
+        # Said plainly rather than left to be inferred from a boolean: without
+        # the archive copy this particular forget is NOT undoable, and a user who
+        # believed otherwise would find that out at the worst possible moment.
+        "warning": None if archived else
+        "The lesson was dropped from recall, but the archive could not be "
+        "written - so this one cannot be restored.",
+    }
+
+
+@_router.post("/api/coder/episodes/{episode_id}/restore")
+async def coder_episode_restore(episode_id: str, request: Request,
+                                req: EpisodeTargetRequest):
+    """Put an archived lesson back into recall: ``--restore-episode``.
+
+    Carries the CLI's two caveats, because both describe a restore that
+    SUCCEEDED and is still not what the user pictured: the archive may not have
+    been updated (so the lesson is live AND still listed as forgotten), and a
+    store at its cap may have evicted it again immediately.
+    """
+    if not _is_owner(request):
+        raise HTTPException(404, "No such episode")
+    root = _episode_root(req.cwd)
+
+    def _restore():
+        from localm.plugins.coder.episodes import EpisodeStore
+        store = EpisodeStore(root)
+        ep = store.restore(episode_id)
+        if ep is None:
+            if not store.last_forgotten_ok:
+                # The archive EXISTS but could not be read, so "no such id" is a
+                # claim we cannot make - the episode may well be in there.
+                raise HTTPException(
+                    503, "The episode archive could not be read, so this id "
+                         "could not be looked up. Nothing was changed - try "
+                         "again.")
+            raise HTTPException(404, f"No archived episode with id {episode_id}")
+        return {
+            "restored": ep.id,
+            "lesson": ep.lesson or ep.summary,
+            "archive_updated": store.last_restore_archive_ok,
+            "evicted_again": any(e.id == ep.id for e in store.last_evicted),
+        }
+
+    out = await _episode_op(_restore)
+    notes = []
+    if not out["archive_updated"]:
+        notes.append("The lesson is live again, but the archive could not be "
+                     "updated, so it is also still listed as forgotten.")
+    if out["evicted_again"]:
+        notes.append("The store is at its episode cap and this lesson ranked "
+                     "lowest, so it was dropped again immediately. Forget one "
+                     "you no longer need first.")
+    out["notes"] = notes
+    return out
+
+
+@_router.delete("/api/coder/episodes")
+async def coder_episodes_clear(request: Request, req: EpisodeTargetRequest):
+    """Erase ALL episodic memory for a project, archive included:
+    ``--forget-episodes``.
+
+    NOT reversible, and the archive goes too on purpose: "cleared episodic
+    memory" while the lesson text still sat in a sidecar would be a privacy claim
+    that is not true. The counts are read BEFORE the erase so the response can
+    say what was actually destroyed - afterwards there is nothing left to count.
+    """
+    if not _is_owner(request):
+        raise HTTPException(403, "Owner only")
+    root = _episode_root(req.cwd)
+
+    def _clear():
+        from localm.plugins.coder.episodes import EpisodeStore
+        store = EpisodeStore(root)
+        live = len(store.all())
+        archived = len(store.forgotten())
+        store.clear()
+        # Read back rather than trusting the unlink. This is the one episode
+        # operation with no undo, so "erased" has to be a MEASURED claim: a
+        # partial erase that reported success would leave lesson text on disk
+        # under a privacy promise that was not kept (rule 5).
+        after = EpisodeStore(root)
+        remaining = len(after.all()) + len(after.forgotten())
+        if remaining:
+            raise HTTPException(
+                500, f"Erase did not fully complete: {remaining} record(s) "
+                     "remain, so this is NOT reported as cleared.")
+        return {"erased": live, "erased_archived": archived}
+
+    return await _episode_op(_clear)
+
+
+@_router.post("/api/coder/episodes/consolidate")
+async def coder_episodes_consolidate(request: Request, req: EpisodeTargetRequest):
+    """Ask the model to merge related lessons into one: ``--consolidate-episodes``.
+
+    OPT-IN and manual only, never automatic - a local model rewriting stored
+    memory is exactly where one bad merge poisons every future run. Every input
+    is archived, so a merge it gets wrong is reversible with restore.
+
+    Reports what it DID (groups, merged, replaced, archived, skipped) rather than
+    mutating silently, and a group whose merge came back unusable is counted as
+    skipped and left alone.
+    """
+    if not _is_owner(request):
+        raise HTTPException(403, "Owner only")
+    root = _episode_root(req.cwd)
+    self_url = getattr(request.app.state, "self_url", None)
+    active_model = getattr(request.app.state, "active_model", None)
+    if not self_url or active_model is None:
+        raise HTTPException(503, "Consolidation needs the localm GUI server "
+                                 "(run `localm gui`).")
+
+    def _consolidate():
+        from localm.plugins.coder.backends.http import HTTPBackend
+        from localm.plugins.coder.episodes import EpisodeStore, consolidate
+        from localm.textnorm import strip_think
+        backend = HTTPBackend(
+            self_url,
+            model=active_model(),
+            api_key=os.environ.get("LOCALM_API_KEY") or "localm",
+            localm_server=True,
+        )
+
+        def _complete(prompt: str) -> str:
+            return strip_think(
+                backend.chat([{"role": "user", "content": prompt}],
+                             max_tokens=1024) or "")
+
+        return consolidate(EpisodeStore(root), complete=_complete)
+
+    return await _episode_op(_consolidate)
 
 
 def register(host) -> None:

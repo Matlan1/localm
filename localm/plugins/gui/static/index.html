@@ -241,6 +241,10 @@
             <label for="setup-temperature">Temperature</label>
             <input type="number" id="setup-temperature" placeholder="default" min="0" max="2" step="0.05">
           </div>
+          <div>
+            <label for="setup-seed" title="The same seed with the same model, prompt and settings reproduces the same output. Leave blank for a fresh random seed each run.">Seed (reproducible runs)</label>
+            <input type="number" id="setup-seed" placeholder="random" step="1">
+          </div>
         </div>
         <label for="setup-scope">Scope (optional glob - file tools are confined to matching paths)</label>
         <input type="text" id="setup-scope" placeholder="src/**/*.py" spellcheck="false">
@@ -259,6 +263,7 @@
         <div class="checks">
           <label><input type="checkbox" id="setup-auto"> Auto-approve destructive tools</label>
           <label title="Destructive tools report what they would do without touching anything"><input type="checkbox" id="setup-dry"> Dry run (nothing is written or executed)</label>
+          <label title="Only bites with auto-approve, which is what it carves an exception out of: file writes go through, shell commands still stop for you."><input type="checkbox" id="setup-interactive-confirm"> Still confirm shell commands (with auto-approve)</label>
           <label title="File writes are captured as a unified diff instead of being applied. Download it from the session toolbar when you are done."><input type="checkbox" id="setup-patch"> Patch mode (collect a diff, write nothing)</label>
           <label title="Run no exit-code check at all, even when this project has an obvious one."><input type="checkbox" id="setup-no-verify"> Skip verification</label>
           <label title="Ask the model server for the OpenAI-compatible native tools API. localm's own server does not implement it and will say so; it uses grammar-constrained tool calls instead."><input type="checkbox" id="setup-native-tools"> Native tools API (if the server supports it)</label>

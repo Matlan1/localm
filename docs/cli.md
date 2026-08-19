@@ -523,9 +523,10 @@ localm coder --restore-episode ID          # bring an archived lesson back into 
 localm coder --consolidate-episodes        # ask the model to merge related lessons (opt-in, manual only)
 ```
 
-The GUI shows the same list under **lessons** in the coder setup panel, ids included, so
-you can read them without a terminal; forgetting, restoring and consolidating stay CLI
-flags. The GUI also carries web forms of `--estimate` (the **estimate** button under the
+The GUI offers all of this under **lessons** in the coder setup panel: a stored and a
+dropped tab, per-lesson forget and restore, an erase-everything button behind a
+confirmation, and consolidate - ids included, so what you read there stays actionable
+from a terminal. The GUI also carries web forms of `--estimate` (the **estimate** button under the
 composer), `--patch-mode` (a setup toggle plus a **patch** download), `--native-tools` (a
 setup toggle, which reports back when the server cannot honour it) and
 `--output-format json` (the **export** dialog's result-JSON option).
