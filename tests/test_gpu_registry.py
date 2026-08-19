@@ -689,3 +689,27 @@ class TestLifespanRegistersGpuCoordination:
         with TestClient(app):
             assert gpu_registry.list_entries(gpu_registry.registry_dir()) == []
             assert hs._gpu_coord is None
+
+    def test_startup_reaps_a_dead_peers_leftover_entry(self, tmp_path, monkeypatch):
+        """A prior instance that crashed (SIGKILL, no shutdown cleanup) leaves
+        its entry on disk forever unless something sweeps it. Confirms the
+        NEXT instance to start does that sweep (gpu_registry.reap_stale wired
+        into the same startup path instances.advertise() uses), not merely
+        that a dead entry is filtered out of list_gpu_peers - the entry must
+        actually be gone from disk afterward."""
+        d = gpu_registry.registry_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        dead = d / "dead-peer.json"
+        dead.write_text(json.dumps({
+            "instance_id": "dead-peer", "pid": 999999, "port": 1, "host": "h",
+            "scheme": "http", "model": None, "vram_estimate_bytes": None,
+            "gpu_index": 0, "updated_at": "now", "coordination_token": "t",
+        }), encoding="utf-8")
+        monkeypatch.setattr(gpu_registry, "pid_alive", lambda pid: pid != 999999)
+
+        app = self._advertised_app()
+        with TestClient(app):
+            entries = {e["instance_id"]
+                      for e in gpu_registry.list_entries(gpu_registry.registry_dir())}
+            assert entries == {"iid-gpu-lifespan"}
+        assert not dead.exists()

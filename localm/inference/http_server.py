@@ -3628,6 +3628,12 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
                     "token": secrets.token_urlsafe(32),
                 }
                 app.state.gpu_coordination_token = _gpu_coord["token"]
+                # Sweep entries left behind by an instance that crashed or was
+                # killed without reaching its own shutdown cleanup below -
+                # same reap-before-register pattern as instances.advertise().
+                from localm import gpu_registry
+                gpu_registry.reap_stale(gpu_registry.registry_dir(),
+                                        self_id=_instance_id)
                 _gpu_registry_sync()
                 gpu_task = asyncio.create_task(_gpu_registry_heartbeat_loop())
             except Exception as e:
@@ -3669,9 +3675,10 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
                 except asyncio.CancelledError:
                     pass
             if _gpu_coord is not None:
-                # Best-effort: a crash just leaves the entry to be aged out by
-                # a peer's own pid+identity liveness check (same philosophy as
-                # instances.py's own registry cleanup).
+                # Best-effort: a crash just leaves the entry on disk. No live
+                # peer ever trusts it (list_gpu_peers' pid+identity check), and
+                # the next instance to start reaps it via gpu_registry.reap_stale
+                # above (same philosophy as instances.py's own registry cleanup).
                 try:
                     from localm import gpu_registry
                     gpu_registry.remove_entry(
