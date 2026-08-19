@@ -11,6 +11,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-08-19
+
 ### Added
 - **Images a model links in a reply can now be displayed, without the site that
   hosts them learning anything about you.** Until now a linked image showed as
@@ -4603,7 +4605,8 @@ First tagged release. A self-contained, offline local-LLM platform.
 - The NVIDIA GPU path is validated by design and CI-adjacent testing; the primary
   development hardware is AMD.
 
-[Unreleased]: https://github.com/Matlan1/localm/compare/v0.1.4...HEAD
+[Unreleased]: https://github.com/Matlan1/localm/compare/v0.1.5...HEAD
+[0.1.5]: https://github.com/Matlan1/localm/releases/tag/v0.1.5
 [0.1.4]: https://github.com/Matlan1/localm/releases/tag/v0.1.4
 [0.1.3]: https://github.com/Matlan1/localm/releases/tag/v0.1.3
 [0.1.2]: https://github.com/Matlan1/localm/releases/tag/v0.1.2
