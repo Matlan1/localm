@@ -255,7 +255,7 @@ def register(app: FastAPI, ctx) -> None:
         fixes in detail before they ship. Stripped HERE rather than in the GUI because
         this endpoint is the single serving point: a client-side filter would leave the
         raw section reachable over the API by anyone who asks. Published prereleases
-        (0.1.5rc1 and the like) are NOT stripped - they are on GitHub, so they shipped."""
+        (0.1.5rc2 and the like) are NOT stripped - they are on GitHub, so they shipped."""
         import localm
         from localm import updater
         try:

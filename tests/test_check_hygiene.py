@@ -235,6 +235,55 @@ def test_changelog_removed_lines_deleting_an_entry_fails():
     assert removed == ["- the GUI"], removed
 
 
+# A version can have a git TAG and still never have been published: the release ritual
+# pushes the tag before the GitHub release is promoted out of draft. The gate uses "a tag
+# exists" as its proxy for "it shipped", so that case needs an explicit carve-out, and the
+# carve-out needs a guard-rail - it must not unfreeze anything real.
+_DRAFT_AND_SHIPPED_CHANGELOG = (
+    "# Changelog\n\n"
+    "## [Unreleased]\n\n"
+    "- work in progress\n\n"
+    "## [0.1.5rc1] - 2026-08-07\n\n"
+    "### Added\n"
+    "- a thing that was never published\n\n"
+    "## [0.1.0] - 2026-07-04\n\n"
+    "### Added\n"
+    "- a thing that really shipped\n"
+)
+
+
+def test_a_never_published_version_section_is_not_frozen():
+    """0.1.5rc1 was tagged but its GitHub release stayed a DRAFT, so nobody could have
+    downloaded it and there is no public history to protect. Removing its section is a
+    correction, not a history rewrite."""
+    ch = _load_check_hygiene()
+    new = _DRAFT_AND_SHIPPED_CHANGELOG.replace(
+        "## [0.1.5rc1] - 2026-08-07\n\n### Added\n"
+        "- a thing that was never published\n\n", "")
+    assert ch._changelog_removed_lines(_DRAFT_AND_SHIPPED_CHANGELOG, new) == []
+
+
+def test_the_never_published_carve_out_does_not_unfreeze_a_real_release():
+    """THE GUARD-RAIL, and the reason the carve-out is safe to have at all. A carve-out
+    on a history-protection gate is only as good as the proof that it is narrow: deleting
+    from a genuinely published section must still be flagged, in the same file where the
+    draft section is being removed."""
+    ch = _load_check_hygiene()
+    new = _DRAFT_AND_SHIPPED_CHANGELOG.replace("- a thing that really shipped\n", "")
+    removed = ch._changelog_removed_lines(_DRAFT_AND_SHIPPED_CHANGELOG, new)
+    assert removed == ["- a thing that really shipped"], removed
+
+
+def test_the_never_published_list_holds_only_provably_unpublished_versions():
+    """Keeps the list from quietly growing. Every entry has to be a release that was
+    never promoted out of draft; adding a shipped version here would silently unfreeze
+    the public record this gate exists to protect."""
+    ch = _load_check_hygiene()
+    assert ch._NEVER_PUBLISHED_VERSIONS == frozenset({"0.1.5rc1"})
+    for shipped in ("0.1.0", "0.1.4", "0.1.5rc2", "0.1.5rc3"):
+        assert shipped not in ch._NEVER_PUBLISHED_VERSIONS
+
+
 def test_changelog_rewriting_unreleased_is_allowed():
     """The in-progress [Unreleased] draft is freely rewritable until it is cut into a
     version: rewording or dropping an [Unreleased] line is NOT a history rewrite."""

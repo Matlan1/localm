@@ -243,6 +243,22 @@ def _pending_release_version() -> str | None:
     return version
 
 
+# Versions that have a git tag but were NEVER PUBLISHED, so there is no shipped history
+# to protect: nobody can have downloaded them. This is the case _pending_release_version
+# cannot cover - it uses "a tag exists" as its proxy for "it shipped", and that proxy is
+# wrong when a tag was pushed for a release that stayed a draft.
+#
+# MEASURED 2026-08-18: `gh release list` reports 0.1.5rc1 as **Draft** while 0.1.5rc2 and
+# 0.1.5rc3 are Pre-release. A draft is visible only to maintainers, so no user ever
+# received rc1, and its changelog section described a mechanism that was replaced before
+# the release existed (the corrected version shipped in 0.1.5rc2 and is still there).
+#
+# KEEP THIS EMPTY unless a release is PROVABLY unpublished, and record the evidence here.
+# Adding a genuinely shipped version would unfreeze real public history, which is the one
+# thing this gate exists to prevent.
+_NEVER_PUBLISHED_VERSIONS = frozenset({"0.1.5rc1"})
+
+
 def _changelog_protected_lines(text: str, pending_version: str | None = None) -> list[str]:
     """Lines of the PUBLISHED (versioned) changelog sections whose loss would rewrite
     history: the ``## [x.y.z]`` header line itself, plus every non-blank, non-link-
@@ -274,9 +290,12 @@ def _changelog_protected_lines(text: str, pending_version: str | None = None) ->
         # still protected content (handled by the generic append below).
         if stripped.startswith("## "):
             m = _CHANGELOG_VERSION_HEADER.match(stripped)
-            # The pending (cut but unreleased) version's section is still a draft.
-            published = bool(m) and not (
-                pending_version is not None and m.group(1).strip() == pending_version
+            ver = m.group(1).strip() if m else ""
+            # The pending (cut but unreleased) version's section is still a draft, and so
+            # is a version that was tagged but never actually published - see
+            # _NEVER_PUBLISHED_VERSIONS. Neither can have been downloaded by anyone.
+            published = bool(m) and ver not in _NEVER_PUBLISHED_VERSIONS and not (
+                pending_version is not None and ver == pending_version
             )
             if published:
                 out.append(line)   # the header itself is part of the published record
