@@ -529,6 +529,23 @@ def test_custom_url_warning_printed(monkeypatch, tmp_path):
     assert "Warning: Custom URL download is unverified" in result.output
 
 
+def test_sycl_backend_note_is_platform_conditional(monkeypatch):
+    """The pinned b10375 Windows SYCL zip (llama-b10375-bin-win-sycl-x64.zip)
+    bundles the whole oneAPI DPC++ runtime alongside ggml-sycl.dll (sycl8.dll,
+    mkl_core.2.dll, mkl_sycl_blas.5.dll, ur_adapter_level_zero.dll,
+    ur_adapter_opencl.dll, tbb12.dll, libiomp5md.dll, dnnl.dll, sycl-ls.exe,
+    ...) - confirmed by downloading and inspecting the archive against its
+    pinned sha256. The matching Linux tarball ships only libggml-sycl.so with
+    none of that, so a system oneAPI install is still required there. A prior
+    version of this note claimed the Linux-only fact ('needs the oneAPI
+    runtime present') unconditionally on every platform, which was never true
+    on Windows."""
+    monkeypatch.setattr(sl.sys, "platform", "win32")
+    assert sl._sycl_backend_note() == "Intel oneAPI build + self-contained oneAPI runtime"
+    monkeypatch.setattr(sl.sys, "platform", "linux")
+    assert sl._sycl_backend_note() == "Intel oneAPI build (needs the oneAPI runtime present)"
+
+
 def test_help_text_does_not_claim_nvidia_amd_default_to_vulkan_on_linux():
     """Pins the live `--backend` --help string against the b8878c2b / 22cabce0
     policy flip: NVIDIA now gets cuda on Linux too (not vulkan), and AMD gets
