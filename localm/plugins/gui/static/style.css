@@ -1353,6 +1353,15 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
 .comfy-model-label { flex: 0 0 auto; min-width: 110px; color: var(--text-dim); }
 .comfy-model-select { flex: 1; min-width: 0; }
 .comfy-model-missing { color: var(--red); }
+/* The two picker rows that carry no <select>: the per-role "what you have
+   registered" summary shown while ComfyUI is unreachable, and the "this is
+   registered here but ComfyUI is not offering it" note. Both would otherwise
+   take `.page .sub`'s 18px bottom margin, which inside a flex row pushes the
+   value off the label's baseline (measured in the browser: the fallback list
+   rendered visibly staggered) and between rows opens a gap that reads as a
+   section break. */
+.comfy-model-known { flex: 1; min-width: 0; color: var(--text-dim); margin: 0; }
+.comfy-model-registry-hint { margin: 2px 0 6px; font-size: 12px; }
 /* docs/gui-design.md rule 6: state renders as a .job-state pill (job-state
    st-error supplies the color, no longer the undefined --danger token which
    always fell back to a hardcoded hex regardless of theme). A pill that grows

@@ -239,7 +239,7 @@ function appendRegistryFallback(wrap, data) {
     const row = el("div", "comfy-model-row");
     row.appendChild(el("label", "comfy-model-label", role.label));
     const known = role.registry_models || [];
-    row.appendChild(el("span", "sub", known.length
+    row.appendChild(el("span", "comfy-model-known", known.length
       ? `${known.length} registered: ${known.map((m) => m.name).join(", ")}`
       : "none registered in localm"));
     wrap.appendChild(row);
