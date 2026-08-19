@@ -682,6 +682,7 @@ def _print_activity(scheme: str, port, instance_token=None) -> None:
         return
     now = (payload or {}).get("now")
     console.print("[bold]activity[/bold]")
+    cancellable = False
     for op in ops:
         label = op.get("label") or op.get("kind") or "operation"
         pct = op.get("pct")
@@ -698,7 +699,17 @@ def _print_activity(scheme: str, port, instance_token=None) -> None:
         status = op.get("status") or "?"
         colour = {"running": "cyan", "done": "green",
                   "failed": "red", "cancelled": "yellow"}.get(status, "white")
-        console.print(f"  [{colour}]{status:<9}[/{colour}] {label}{pct_s}{age_s}")
+        # The id and the cancellable flag were both already in this payload and
+        # both were dropped on the floor here, which left the terminal able to
+        # WATCH a two-hour re-embed and unable to name it, let alone stop it.
+        # Job ids are 12 hex chars, short enough to print whole and type.
+        op_id = op.get("id")
+        id_s = f"  [dim]{op_id}[/dim]" if op_id else ""
+        if op.get("cancellable") and op_id:
+            cancellable = True
+        console.print(f"  [{colour}]{status:<9}[/{colour}] {label}{pct_s}{age_s}{id_s}")
+    if cancellable:
+        console.print("[dim]Cancel one with[/dim] localm cancel <id>")
 
 
 @main.command("status")
@@ -732,6 +743,94 @@ def status_cmd(project):
     console.print("[dim]Stop it with[/dim] localm stop")
 
 
+
+
+def _match_operation(ops, wanted: str):
+    """The one operation whose id is *wanted* or starts with it.
+
+    Returns ``(op, error)``; exactly one is None. Prefix matching mirrors
+    ``localm stop``, which takes an instance-id prefix for the same reason -
+    an id is a copy-paste target, and refusing a unique prefix buys nothing.
+    An AMBIGUOUS prefix is an error, never a silent pick of the first match.
+    """
+    exact = [o for o in ops if str(o.get("id") or "") == wanted]
+    if exact:
+        return exact[0], None
+    hits = [o for o in ops if str(o.get("id") or "").startswith(wanted)]
+    if not hits:
+        return None, "none"
+    if len(hits) > 1:
+        return None, "ambiguous"
+    return hits[0], None
+
+
+@main.command("cancel")
+@click.argument("operation_id")
+def cancel_cmd(operation_id):
+    """Cancel one operation a running localm server is doing.
+
+    Pass an id from `localm status` (a unique prefix is enough). This is the
+    same cancel the GUI's activity list offers: a model pull's subprocess is
+    ended, and an in-process job (a RAG re-embed, a media generation) is asked
+    to stop at its next checkpoint.
+
+    Scheduled jobs are a different thing under a different id space - use
+    `localm job` for those.
+    """
+    from ._core import (no_server_message, report_server_failure,
+                        running_server, server_call)
+
+    server = running_server()
+    if server is None:
+        no_server_message("cancelling an operation")
+        sys.exit(1)
+    url, headers = server
+
+    # Resolve the id against what the server says it is doing, BEFORE posting.
+    # Two reasons, and neither is convenience: it is what lets a prefix work,
+    # and it is what lets this command tell "already finished" apart from
+    # "cancelling" - POSTing blind to a finished job returns the same
+    # {"status": "cancelling"} as a real cancellation, so reporting that back
+    # would claim to have stopped something that had already stopped.
+    state, payload = server_call(url, headers, "GET", "/api/activity", timeout=10)
+    if state != "ok":
+        report_server_failure(state, payload, "ask the server what it is doing")
+        sys.exit(1)
+    ops = (payload or {}).get("operations") or []
+    op, err = _match_operation(ops, operation_id)
+    if err == "ambiguous":
+        console.print(f"[red]{operation_id!r} matches more than one operation "
+                      "- be more specific:[/red]")
+        for o in ops:
+            if str(o.get("id") or "").startswith(operation_id):
+                console.print(f"  {o.get('id')}  {o.get('label') or o.get('kind')}")
+        sys.exit(1)
+    if err == "none":
+        console.print(f"[red]No operation matches[/red] {operation_id!r}")
+        console.print("[dim]See[/dim] localm status [dim]for what this server is "
+                      "doing. Finished operations are forgotten after a while.[/dim]")
+        sys.exit(1)
+    if not op.get("cancellable"):
+        console.print(f"[dim]{op.get('id')} is not running (status: "
+                      f"{op.get('status') or '?'}) - nothing to cancel.[/dim]")
+        return
+
+    # not_found="missing": a 404 HERE means the job is gone (finished and
+    # evicted between the read above and this POST), not that the server has
+    # no cancel route.
+    state, payload = server_call(url, headers, "POST",
+                                 f"/api/jobs/{op['id']}/cancel", timeout=30,
+                                 not_found="missing")
+    if state != "ok":
+        report_server_failure(state, payload, "cancel that operation")
+        sys.exit(1)
+    label = op.get("label") or op.get("kind") or "operation"
+    # "cancelling", not "cancelled": the server sets a cooperative flag and
+    # terminates any subprocess, and an in-process job stops at its next
+    # checkpoint. Claiming it is already stopped would be a state this command
+    # never observed.
+    console.print(f"[green]Cancelling[/green] {label} [dim]({op['id']})[/dim]")
+    console.print("[dim]Confirm with[/dim] localm status")
 
 
 @main.command("config")

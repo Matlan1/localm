@@ -230,6 +230,135 @@ class _GracefulGroup(click.Group):
 
 
 
+def running_server(*, allow_url_override: bool = True):
+    """The localm server serving this directory: ``(url, headers)``, or None.
+
+    ``url`` is a bare origin (no trailing slash), ``headers`` already carries
+    the right credential: the owner key (``LOCALM_API_KEY`` env, else the
+    persisted ``auth.key``) when one is configured, otherwise the discovered
+    instance's own attach token - the 0600 per-instance registry field that
+    the open-mode management gate accepts in place of a key (#953). A caller
+    that skips this and builds its own headers gets a 403 on the default,
+    keyless install, which is how localm runs out of the box.
+
+    Returns None rather than exiting so a caller can decide: some verbs need a
+    server and must say so, while ``comfy status`` still has an honest partial
+    answer to give without one.
+
+    *allow_url_override*: honour ``LOCALM_URL`` for a different instance, the
+    same escape hatch ``localm unload`` offers. An overridden URL has no
+    registry entry, so there is no attach token to fall back on and a keyless
+    server there needs ``LOCALM_API_KEY``.
+    """
+    import os
+
+    from .. import instances
+    from ..auth import resolve_bearer_headers
+    from ..config import home_dir
+
+    if allow_url_override:
+        override = os.environ.get("LOCALM_URL", "").rstrip("/")
+        if override:
+            return override, resolve_bearer_headers(None)
+    entry = instances.find_attachable(home_dir(), instances.resolve_root_dir())
+    if entry is None:
+        return None
+    scheme = entry.get("scheme", "http")
+    url = f"{scheme}://{entry.get('host', '127.0.0.1')}:{entry.get('port')}"
+    return url, resolve_bearer_headers(entry.get("token"))
+
+
+def server_call(url, headers, method: str, path: str, *, timeout: float = 30.0,
+                params=None, json_body=None, not_found: str = "unsupported") -> tuple:
+    """Call *path* on a discovered localm server. Returns ``(state, payload)``.
+
+    *state* is one of:
+      ``"ok"``           - payload is the parsed body
+      ``"unauthorized"`` - the server wants a credential this client lacks
+      ``"unsupported"``  - 404: this server has no such route (an older localm)
+      ``"missing"``      - 404 on a route whose 404 means "no such object"
+      ``"http"``         - some other HTTP status; payload is ``(code, detail)``
+      ``"unreachable"``  - could not connect; payload is a short reason
+
+    The same five-outcome split ``localm.selfclient.read_activity`` keeps, for
+    the same reason: folding any of them into the others reports an answer on
+    the evidence of never having got one. ``unsupported`` matters most here -
+    an older server with no ``/v1/comfy/status`` must not read as "ComfyUI is
+    not running".
+
+    *not_found* names what a 404 MEANS on this particular path, because the
+    status code alone cannot tell you. On ``/v1/comfy/status`` a 404 is an
+    older server with no such route; on ``/api/jobs/<id>/cancel`` the route
+    exists and 404s for an id that is not there (or not yours). Same code, two
+    unrelated answers, and a caller that printed "this server predates the
+    feature" for a mistyped job id would be reporting the wrong one. Pass
+    ``not_found="missing"`` where the object, not the route, is what is absent.
+    """
+    import requests
+
+    from .. import tls
+    try:
+        r = requests.request(method, f"{url}{path}", headers=headers,
+                             params=params, json=json_body, timeout=timeout,
+                             verify=tls.requests_verify(url))
+    except requests.RequestException as e:
+        return "unreachable", type(e).__name__
+    if r.status_code in (401, 403):
+        return "unauthorized", r.status_code
+    if r.status_code == 404:
+        return not_found, r.status_code
+    if not r.ok:
+        detail = ""
+        try:
+            detail = (r.json() or {}).get("detail", "")
+        except ValueError:
+            detail = (r.text or "")[:200]
+        return "http", (r.status_code, detail)
+    try:
+        return "ok", r.json()
+    except ValueError:
+        # A 200 whose body is not JSON means something other than localm
+        # answered on that port, not an empty/negative result.
+        return "http", (r.status_code, "the reply was not JSON")
+
+
+def report_server_failure(state, payload, what: str) -> None:
+    """Print why *what* could not be done, naming WHICH failure happened.
+
+    Never prints a negative RESULT - every branch here is "could not ask", and
+    a caller that turned any of them into "it is not running" or "nothing to
+    do" would be stating an answer it never obtained.
+    """
+    if state == "unreachable":
+        console.print(f"[red]Could not reach the localm server[/red] to {what} "
+                      f"({payload}).")
+    elif state == "unauthorized":
+        console.print(f"[red]The localm server refused this request[/red] "
+                      f"({what}). Set LOCALM_API_KEY to the server's key, or "
+                      "run from the install whose auth.key it uses.")
+    elif state == "unsupported":
+        console.print(f"[yellow]![/yellow]  This server has no route to {what} "
+                      "(it predates this feature).")
+    elif state == "missing":
+        console.print(f"[red]Could not {what}[/red]: the server has no such "
+                      "item (it may have already finished and been forgotten).")
+    else:
+        code, detail = payload if isinstance(payload, tuple) else (payload, "")
+        console.print(f"[red]Could not {what} (HTTP {code})[/red]"
+                      + (f": {detail}" if detail else ""))
+
+
+def no_server_message(what: str) -> None:
+    """Say that *what* needs a running localm server, and how to get one."""
+    from .. import instances
+    console.print(f"[red]No running localm server found for this directory[/red] "
+                  f"- {what} needs one.")
+    console.print(f"[dim]Directory:[/dim] {instances.resolve_root_dir()}")
+    console.print("[dim]Start one with[/dim] localm gui  [dim]or[/dim]  "
+                  "localm serve <model>[dim], or set LOCALM_URL to target a "
+                  "different instance.[/dim]")
+
+
 def _read_version_for_cli() -> str:
     """Version string for ``localm --version``: the live VERSION file (so it tracks
     a code-only self-update), falling back to a static string if unreadable."""
