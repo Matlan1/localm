@@ -125,6 +125,52 @@ def _maybe_apply_func_shim_and_retry(message: str, api_url: str, retry):
 
 
 
+def _generate_or_abort(api_url: str, run):
+    """Run a media generation, and on Ctrl-C actually STOP the render.
+
+    Without this, Ctrl-C ends the localm process while ComfyUI carries on
+    rendering the prompt it was handed and keeps its VRAM held - the terminal
+    throws away the only handle it had on that work, and the card stays full
+    until something else frees it. The user reads the interrupt as "stopped";
+    the machine disagrees.
+
+    ``interrupt_comfy`` (abort the running prompt + clear the queue) and
+    ``free_comfy_vram`` are plain HTTP calls to ComfyUI, so they work from any
+    process. That is what makes this fixable HERE at all, unlike ``stop_comfy``,
+    which also needs the subprocess handle that only the launching process
+    holds - see localm/cli/comfy.py's module docstring.
+
+    Best-effort by nature (ComfyUI may already be gone), but never SILENTLY:
+    the abort's own result is reported, so an interrupt that did not land says
+    so instead of leaving the user believing the render stopped. The
+    KeyboardInterrupt is re-raised afterwards so Click still exits the way it
+    always did.
+    """
+    from ..media.comfy_client import free_comfy_vram, interrupt_comfy
+    try:
+        return run()
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Interrupted - telling ComfyUI to stop...[/yellow]")
+        aborted = False
+        try:
+            aborted = interrupt_comfy(api_url)
+            free_comfy_vram(api_url)
+        except Exception as e:
+            console.print(f"[yellow]![/yellow]  Could not reach ComfyUI to stop it "
+                          f"({e}). It may still be rendering and holding VRAM.")
+            raise
+        if aborted:
+            console.print("[dim]Render aborted, queue cleared, VRAM freed.[/dim]")
+        else:
+            # interrupt_comfy swallows its own transport errors and returns
+            # False. That is "I could not tell it to stop", which must not be
+            # printed as if the render had ended.
+            console.print("[yellow]![/yellow]  ComfyUI did not accept the abort "
+                          "(it may already have stopped, or be unreachable). "
+                          "Check with [dim]localm comfy status[/dim]")
+        raise
+
+
 @main.command("image")
 @click.argument("prompt")
 @click.option("--negative", default=None,
@@ -179,19 +225,21 @@ def image_cmd(prompt, negative, guidance, cfg, seed, input_image, denoise,
     console.print("[dim]Generating image via ComfyUI (this can take a minute)...[/dim]")
     _is_privacy = effective_mode("server") == SessionMode.PRIVACY
     _write_sidecar = not _is_privacy
-    ok, message = generate_image(
-        prompt, out_path,
-        api_url=api_url,
-        write_sidecar=_write_sidecar,
-        delete_outputs=_is_privacy,
-        **kwargs,
-    )
+
+    def _gen_image():
+        return generate_image(
+            prompt, out_path,
+            api_url=api_url,
+            write_sidecar=_write_sidecar,
+            delete_outputs=_is_privacy,
+            **kwargs,
+        )
+
+    ok, message = _generate_or_abort(api_url, _gen_image)
     if not ok:
         ok, message = _maybe_apply_func_shim_and_retry(
             message, api_url,
-            lambda: generate_image(prompt, out_path, api_url=api_url,
-                                   write_sidecar=_write_sidecar,
-                                   delete_outputs=_is_privacy, **kwargs))
+            lambda: _generate_or_abort(api_url, _gen_image))
     console.print(f"[{'green' if ok else 'red'}]{message}[/{'green' if ok else 'red'}]")
     if not ok:
         sys.exit(1)
@@ -256,9 +304,10 @@ def music_cmd(tags, lyrics, duration, out, seed, steps, cfg):
             **kwargs,
         )
 
-    ok, message = _gen_music()
+    ok, message = _generate_or_abort(api_url, _gen_music)
     if not ok:
-        ok, message = _maybe_apply_func_shim_and_retry(message, api_url, _gen_music)
+        ok, message = _maybe_apply_func_shim_and_retry(
+            message, api_url, lambda: _generate_or_abort(api_url, _gen_music))
     console.print(f"[{'green' if ok else 'red'}]{message}[/{'green' if ok else 'red'}]")
     if not ok:
         sys.exit(1)
@@ -336,9 +385,10 @@ def video_cmd(prompt, negative, duration, fps, width, height, input_image,
             **kwargs,
         )
 
-    ok, message = _gen_video()
+    ok, message = _generate_or_abort(api_url, _gen_video)
     if not ok:
-        ok, message = _maybe_apply_func_shim_and_retry(message, api_url, _gen_video)
+        ok, message = _maybe_apply_func_shim_and_retry(
+            message, api_url, lambda: _generate_or_abort(api_url, _gen_video))
     console.print(f"[{'green' if ok else 'red'}]{message}[/{'green' if ok else 'red'}]")
     if not ok:
         sys.exit(1)

@@ -9,7 +9,9 @@ from ..model_manager import (
     get_model_info, list_models, MODEL_TYPES, pull_model, relocate_model,
     remove_model, set_model_type, show_shortcuts, sync_models_dir,
 )
-from ._core import console, main, _complete_model_name
+from ._core import (console, main, _complete_model_name,
+                    no_server_message, report_server_failure,
+                    running_server, server_call)
 from ..selfclient import read_activity
 
 
@@ -777,9 +779,6 @@ def cancel_cmd(operation_id):
     Scheduled jobs are a different thing under a different id space - use
     `localm job` for those.
     """
-    from ._core import (no_server_message, report_server_failure,
-                        running_server, server_call)
-
     server = running_server()
     if server is None:
         no_server_message("cancelling an operation")
