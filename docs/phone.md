@@ -24,10 +24,11 @@ address*.
 1. **Bind to your network.** By default `localm gui` listens only on this machine
    (`127.0.0.1`). To let your phone reach it, bind to all interfaces - and set an
    API key first, because the GUI also exposes the coder agent:
-   - set an API key: `localm key generate`, or set `LOCALM_API_KEY` to something
-     only you know - Linux/macOS: `export LOCALM_API_KEY=...`; Windows
-     PowerShell: `$env:LOCALM_API_KEY="..."` (or use the desktop launcher's
-     Generate button), then
+   - set an API key: *Settings > Security > Owner key > Generate new key*, or
+     `localm key generate`, or set `LOCALM_API_KEY` to something only you
+     know - Linux/macOS: `export LOCALM_API_KEY=...`; Windows PowerShell:
+     `$env:LOCALM_API_KEY="..."` (or use the desktop launcher's Generate
+     button), then
    - `localm gui -H 0.0.0.0`, **or** set *Settings > Server > Bind address* to
      `0.0.0.0` and click *Restart server* - no terminal needed. (Without a
      strong key the server refuses the network bind and stays on `127.0.0.1`;
