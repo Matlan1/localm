@@ -346,6 +346,26 @@ DEFAULT_CONFIG: dict = {
     "desktop_window_mode": "auto",
     "import_max_depth": 3,    # `localm add <dir>` recurses up to this many levels
     "port": 8642,             # default inference server port (auto-bumps if busy; an explicit --port does not)
+    # Bind address for a fresh server start when -H/--host is not given on the
+    # command line: "" = loopback only (127.0.0.1), "0.0.0.0" = every interface,
+    # or one specific interface IP. GUI-settable (Settings > Server) so a
+    # browser-only user can enable the phone/Companion feature without a
+    # terminal; applies on restart. An explicit -H always wins for that process
+    # (and survives an in-place restart, which re-execs the same argv). Binding
+    # past loopback still requires a strong API key: without one the server
+    # IGNORES this key and stays on loopback (see plugins/gui/cli.py) - the
+    # --insecure override deliberately has NO config form, so an unauthenticated
+    # network bind can only ever be caused by an operator typing it in a
+    # terminal, never by a config write.
+    "bind_host": "",
+    # Built-in TLS on network binds (NET-1). tls_enabled False is the persistent
+    # form of --no-tls (plain HTTP past loopback - the API key then crosses the
+    # network in cleartext); tls_cert/tls_key are the persistent form of the
+    # --tls-cert/--tls-key override pair (blank = localm's own local-CA cert).
+    # CLI flags win over all three; loopback binds never use TLS either way.
+    "tls_enabled": True,
+    "tls_cert": "",
+    "tls_key": "",
     "cors_origins": None,     # None = localhost only; list of origins; or "*"
     # Require a configured API key on protected endpoints: true refuses requests
     # until a key is set (see localm/auth.py); env override LOCALM_REQUIRE_AUTH.

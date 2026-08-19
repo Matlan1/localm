@@ -8,10 +8,13 @@ address*.
 
 ## The short version
 
-- **Same Wi-Fi:** run `localm gui -H 0.0.0.0` (set an API key first); open the
-  `https://localm.local:<port>/` it prints on your phone (or the `https://<your-ip>:<port>/`
-  it prints next to it); trust the certificate once (one tap on the key screen);
-  enter your key; choose *Install app*.
+- **Same Wi-Fi:** run `localm gui -H 0.0.0.0` (set an API key first) - or, from
+  a GUI that is already open, set *Settings > Server > Bind address* to
+  `0.0.0.0` and click *Restart server*. Open the `https://localm.local:<port>/`
+  it prints on your phone (or the `https://<your-ip>:<port>/` it prints next to
+  it; the Settings *Companion app* card shows the same addresses); trust the
+  certificate once (one tap on the key screen); enter your key; choose
+  *Install app*.
 - **Anywhere else:** put the machine and the phone on a
   [Tailscale](https://tailscale.com) network and open the machine's Tailscale
   address - localm serves HTTPS there too, by name.
@@ -21,10 +24,15 @@ address*.
 1. **Bind to your network.** By default `localm gui` listens only on this machine
    (`127.0.0.1`). To let your phone reach it, bind to all interfaces - and set an
    API key first, because the GUI also exposes the coder agent:
-   - set `LOCALM_API_KEY` to something only you know - Linux/macOS:
-     `export LOCALM_API_KEY=...`; Windows PowerShell: `$env:LOCALM_API_KEY="..."`
-     (or use the desktop launcher's Generate button), then
-   - `localm gui -H 0.0.0.0`
+   - set an API key: *Settings > Security > Owner key > Generate new key*, or
+     `localm key generate`, or set `LOCALM_API_KEY` to something only you
+     know - Linux/macOS: `export LOCALM_API_KEY=...`; Windows PowerShell:
+     `$env:LOCALM_API_KEY="..."` (or use the desktop launcher's Generate
+     button), then
+   - `localm gui -H 0.0.0.0`, **or** set *Settings > Server > Bind address* to
+     `0.0.0.0` and click *Restart server* - no terminal needed. (Without a
+     strong key the server refuses the network bind and stays on `127.0.0.1`;
+     the *Companion app* card tells you why.)
 
    localm now serves **HTTPS automatically** on a network bind, so the key and
    your prompts are encrypted in transit. No reverse proxy, no extra tools.

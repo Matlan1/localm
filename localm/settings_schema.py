@@ -387,6 +387,48 @@ CORE_FIELDS: list = [
                  "Port the API/GUI server binds to (default 8642); auto-bumps to "
                  "the next free port if busy.",
                  group="Server", applies=Applies.RESTART, min=1, max=65535, step=1),
+    # admin_only: this decides WHICH NETWORK can reach the server at all - the
+    # widest reach-widening key in the Server group, same trust boundary class
+    # as cors_origins (browser origins) and net_allow_private (outbound reach).
+    # A non-owner config:write key must not be able to expose the server to the
+    # LAN. Note what this key CANNOT do: bind past loopback without a strong API
+    # key. The startup guard (plugins/gui/cli.py) ignores a config-driven
+    # network bind when no strong key is set and stays on loopback, loudly -
+    # only the CLI's --insecure flag, which deliberately has NO config form,
+    # can override that, so an unauthenticated network bind always requires a
+    # terminal. Applies.RESTART: an in-place restart re-execs the same argv,
+    # and the fresh process re-reads this key (cli._resolve_bind_host) when no
+    # explicit -H was typed - that read is what makes the Settings > Restart
+    # server flow work for a browser-only user.
+    SettingField("bind_host", Widget.TEXT, "Bind address",
+                 "Network interface the server binds to. Blank = this computer "
+                 "only (127.0.0.1); 0.0.0.0 = every interface, so phones on "
+                 "your network can reach it (set an API key first, or the "
+                 "server stays on loopback); or one specific interface IP. "
+                 "Save, then click Restart server below.",
+                 group="Server", applies=Applies.RESTART, admin_only=True),
+    # admin_only, all three: turning TLS off sends the API key over the network
+    # in cleartext, and the cert/key pair decides what the server presents to
+    # every client - transport-trust decisions are the owner's, never a
+    # delegated config:write key's. CLI flags (--no-tls / --tls-cert/--tls-key)
+    # win over all three for that process; see cli._resolve_tls.
+    SettingField("tls_enabled", Widget.TOGGLE, "Encrypt network traffic (TLS)",
+                 "Serve HTTPS on a network bind with localm's built-in "
+                 "certificate (or the custom pair below). Off = plain HTTP: "
+                 "the API key crosses the network readable by anyone on it - "
+                 "only for a trusted, isolated network. Loopback binds always "
+                 "use plain HTTP either way.",
+                 group="Server", applies=Applies.RESTART, admin_only=True),
+    SettingField("tls_cert", Widget.PATH, "Custom TLS certificate (PEM)",
+                 "Use this certificate instead of localm's built-in one. "
+                 "Requires the private key below; blank = built-in. If the "
+                 "pair cannot be loaded at startup, localm falls back to its "
+                 "built-in certificate (with a warning) rather than serving "
+                 "unencrypted or failing to start.",
+                 group="Server", applies=Applies.RESTART, admin_only=True),
+    SettingField("tls_key", Widget.PATH, "Custom TLS private key (PEM)",
+                 "Private key for the certificate above.",
+                 group="Server", applies=Applies.RESTART, admin_only=True),
     # admin_only: this names WHICH BROWSER ORIGINS may call the authenticated
     # API - it widens a trust boundary exactly like net_allow_private (network
     # reach) and the rag_* keys (filesystem reach) do. "*" additionally opts the
@@ -1285,6 +1327,40 @@ def _validate_one(key: str, val, field: "SettingField", default):
         return val
 
     # TEXT / FOLDER / PATH / SECRET
+    if key == "bind_host":
+        # Store "" (loopback default) or a value the server can actually bind:
+        # 'localhost' or an IP literal. Rejecting everything else AT WRITE TIME
+        # is what keeps the Settings > Restart server flow safe: an unbindable
+        # value would only surface as a startup failure, and the user who set
+        # it from the GUI may have no terminal to recover from one. The read
+        # site (cli._resolve_bind_host) re-checks with the same predicate as
+        # defense in depth against a hand-edited config.json.
+        from localm.bindhost import is_valid_bind_host
+        s = "" if val is None else str(val).strip()
+        if not s:
+            return ""
+        if not is_valid_bind_host(s):
+            raise ValueError(
+                f"bind_host: {val!r} is not a bindable address - use an IPv4 "
+                f"literal (0.0.0.0 for every interface, or one interface's IP "
+                f"like 192.168.1.20) or localhost; blank = this computer only. "
+                f"Hostnames, host:port values and IPv6 literals are not "
+                f"accepted (the port has its own setting; IPv6 binds are not "
+                f"supported yet).")
+        return s
+    if key in ("tls_cert", "tls_key"):
+        # A non-empty value must point at an existing file NOW, so a typo is a
+        # clear save-time error instead of a silent fallback at the next
+        # restart (the startup read falls back to the built-in cert when the
+        # pair is unusable - see cli._resolve_tls - which keeps the server
+        # alive but is not what the user asked for; catch it here first).
+        from pathlib import Path
+        s = "" if val is None else str(val).strip()
+        if not s:
+            return ""
+        if not Path(s).is_file():
+            raise ValueError(f"{key}: file not found: {s}")
+        return s
     if key == "mdns_name":
         # Store the sanitized DNS label, not the raw input, so config.json always
         # holds a valid mDNS name (ASCII letters/digits/hyphens) whatever was typed.

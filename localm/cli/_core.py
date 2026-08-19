@@ -53,6 +53,128 @@ def _exposed_bind_warning(host: str) -> Optional[str]:
 
 
 
+def _resolve_bind_host(cli_host: Optional[str]):
+    """Resolve the effective bind host for a fresh server start. Returns
+    ``(host, from_config)``.
+
+    Precedence: an explicit ``-H/--host`` always wins for that process - and
+    survives an in-place restart, which re-execs the same argv (see
+    http_server._restart_argv). With no explicit flag, the GUI-settable
+    ``bind_host`` config key applies (Applies.RESTART: this read, running in
+    the fresh process, is what makes a Settings-driven bind take effect across
+    the Restart server button). Otherwise loopback.
+
+    ``from_config`` tells the caller the value came from config, i.e. was
+    possibly set from the GUI by a user with NO terminal - a failed
+    precondition past that point (no strong API key, TLS unavailable) must
+    degrade LOUDLY to a loopback bind rather than exit, or the server dies
+    with no terminal-free way back. Explicit CLI binds keep their fail-hard
+    behavior (the operator typing -H is watching a terminal).
+
+    A config value that is not even well-FORMED (possible only via a
+    hand-edited config.json - PATCH /v1/config and `localm config` both
+    validate at write time) is treated as unset, with a warning. Syntax is all
+    this helper can judge; whether the address is bindable RIGHT NOW (a
+    specific interface IP can go stale when DHCP reassigns the machine) is a
+    runtime question answered by _bind_preflight_error at the call site in
+    plugins/gui/cli.py - handing a stale address to uvicorn would kill the
+    server at startup, the exact no-way-back failure above."""
+    if cli_host is not None:
+        return str(cli_host), False
+    from localm.config import load_config
+    cfg_host = str(load_config().get("bind_host") or "").strip()
+    if not cfg_host:
+        return "127.0.0.1", False
+    from localm.bindhost import is_valid_bind_host
+    if not is_valid_bind_host(cfg_host):
+        from localm.debuglog import logger
+        msg = (f"config 'bind_host' is not a bindable address: {cfg_host!r} - "
+               f"ignoring it and binding 127.0.0.1 (use an IP literal like "
+               f"0.0.0.0, or localhost)")
+        logger.warning(msg)
+        console.print(f"[yellow]{msg}[/yellow]")
+        return "127.0.0.1", False
+    return cfg_host, True
+
+
+def _bind_preflight_error(host: str) -> Optional[str]:
+    """Why *host* cannot be bound on this machine RIGHT NOW, or None when it
+    can. Probes with a real throwaway bind to an ephemeral port.
+
+    Exists because syntax validation cannot see the commonest real failure of
+    the ``bind_host`` config key's own recommended use: a SPECIFIC interface
+    IP that is no longer assigned, because DHCP gave the machine a different
+    address some time after the value was saved. Handing such a host to the
+    server kills the process at the socket bind (uvicorn exits on a failed
+    bind, and portmux's uvicorn fallback re-tries the same host) - for a
+    config-driven bind that is a locked-out user with no terminal, so the
+    caller falls back to loopback instead. Loopback and the wildcards bind
+    trivially; the probe costs one socket.
+
+    Known residual, stated rather than glossed: the address can still
+    disappear in the window between this probe and the real bind. The probe
+    closes the common stale-at-boot case; it is not a TOCTOU-free guarantee,
+    and the explicit-CLI path (-H) deliberately keeps today's fail-hard
+    behavior in front of the operator who typed it."""
+    import socket
+    try:
+        infos = socket.getaddrinfo(host, 0, type=socket.SOCK_STREAM,
+                                   flags=socket.AI_PASSIVE)
+        family, stype, proto, _name, addr = infos[0]
+        with socket.socket(family, stype, proto) as s:
+            s.bind(addr)
+        return None
+    except OSError as e:
+        return str(e)
+
+
+def _config_tls_pair(cfg: dict):
+    """The usable custom TLS pair from config, or ``None``.
+
+    ``(tls_cert, tls_key)`` when both keys are set, both files exist, and the
+    pair actually loads as a certificate chain (``SSLContext.load_cert_chain``,
+    which also proves the key matches the cert). Anything less returns None
+    with a WARNING naming what is wrong, so the caller falls back to the
+    built-in certificate: a config-sourced pair is applied at a startup nobody
+    may be watching (possibly set from the GUI, applied by the Restart
+    button), so a broken pair must not become a dead server (uvicorn raises on
+    an unloadable pair) - and must not become cleartext either. Falling back
+    to the built-in cert keeps the bind encrypted and the server reachable;
+    the warning keeps the substitution honest (clients pinning the custom cert
+    will refuse the built-in one, which is the loud, safe direction).
+
+    The CLI pair (--tls-cert/--tls-key) deliberately does NOT come through
+    here: click checks existence at parse time and a broken pair then fails
+    uvicorn's own startup in front of the operator who typed it."""
+    import ssl
+    from pathlib import Path
+    from localm.debuglog import logger
+    cert = str(cfg.get("tls_cert") or "").strip()
+    key = str(cfg.get("tls_key") or "").strip()
+    if not cert and not key:
+        return None
+    problem = None
+    if not (cert and key):
+        problem = ("both tls_cert and tls_key must be set (only "
+                   + ("tls_cert" if cert else "tls_key") + " is)")
+    elif not Path(cert).is_file():
+        problem = f"tls_cert file not found: {cert}"
+    elif not Path(key).is_file():
+        problem = f"tls_key file not found: {key}"
+    else:
+        try:
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ctx.load_cert_chain(cert, key)
+            return cert, key
+        except Exception as e:
+            problem = f"the pair does not load as a certificate chain: {e}"
+    msg = (f"configured TLS certificate pair is unusable ({problem}) - "
+           f"using localm's built-in certificate instead")
+    logger.warning(msg)
+    console.print(f"[yellow]{msg}[/yellow]")
+    return None
+
+
 def _resolve_tls(host, *, no_tls, tls_cert, tls_key):
     """Decide TLS for a bind and return ``(ssl_certfile, ssl_keyfile)`` - or
     ``(None, None)`` for plain HTTP.
@@ -64,6 +186,15 @@ def _resolve_tls(host, *, no_tls, tls_cert, tls_key):
     pair on any bind. Raises on a half-specified override; the cert-generation
     path may raise on a broken crypto stack and the caller refuses to fall back
     to cleartext.
+
+    The GUI-settable config keys are the persistent, flag-less forms and CLI
+    flags win over all of them: ``tls_enabled`` False acts as --no-tls (only
+    when --no-tls was not itself passed - there is no positive --tls flag, so
+    an absent flag cannot veto the config), and a usable ``tls_cert``/
+    ``tls_key`` pair acts as the override pair (an UNUSABLE config pair falls
+    back to the built-in cert with a warning instead of dying or serving
+    cleartext - see _config_tls_pair; an explicit CLI pair keeps its fail-hard
+    behavior and never reads config at all).
     """
     if tls_cert or tls_key:
         if not (tls_cert and tls_key):
@@ -71,8 +202,15 @@ def _resolve_tls(host, *, no_tls, tls_cert, tls_key):
                 "--tls-cert and --tls-key must be provided together.")
         return str(tls_cert), str(tls_key)
     from localm.bindhost import is_loopback_host
+    from localm.config import load_config
+    cfg = load_config()
+    if not no_tls and cfg.get("tls_enabled", True) is False:
+        no_tls = True
     if no_tls or is_loopback_host(host):
         return None, None
+    pair = _config_tls_pair(cfg)
+    if pair is not None:
+        return pair
     from localm import netname, tls
     from localm.config import home_dir
     # Cover the reachable NAMES too (localm.local, <hostname>.local, the Tailscale

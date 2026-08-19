@@ -88,6 +88,19 @@ permanent public record of what shipped and are never rewritten; the in-progress
   cannot load on your machine is still never kept, and a machine whose runtime
   is missing or broken can now be repaired from the same screen instead of
   being locked out of the one action that would fix it.
+- **Binding the server to your network no longer needs a terminal.** Settings >
+  Server gains a **Bind address** field (plus TLS controls: turn encryption
+  off for a trusted network, or point at your own certificate pair), so the
+  phone/Companion feature can be enabled entirely from the GUI: set an API
+  key, set the bind address to `0.0.0.0`, click Restart server. The safety
+  rules are unchanged and enforced at startup: without a strong API key the
+  server refuses the configured network bind and stays on this computer only -
+  the Companion card then says exactly why - and the unauthenticated
+  `--insecure` override deliberately has no settings form, so it still
+  requires a terminal. An explicit `-H` on the command line always wins over
+  the setting, and a custom certificate pair that fails to load falls back to
+  localm's built-in certificate (with a warning) instead of serving
+  unencrypted or failing to start.
 - **Managing what the coder remembers no longer needs a terminal, and two more
   session settings arrived.** The **lessons** panel under Coder now has a
   **stored** and a **dropped** tab, so you can see both what the agent recalls

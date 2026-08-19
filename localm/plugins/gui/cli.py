@@ -254,8 +254,9 @@ def _attach_conflicts(ctx, existing: dict, model: str) -> list:
 
 @click.command("gui")
 @click.argument("model", default="", required=False, shell_complete=_complete_model)
-@click.option("-H", "--host", default="127.0.0.1", show_default=True,
-              help="Bind address. Keep 127.0.0.1 unless you know what you're doing.")
+@click.option("-H", "--host", default=None,
+              help="Bind address [default: config 'bind_host' (127.0.0.1)]. "
+                   "Keep 127.0.0.1 unless you know what you're doing.")
 @click.option("-p", "--port", default=None, type=click.IntRange(1, 65535),
               help="Port [default: config 'port' (8642), auto-bumps if busy; an "
                    "explicit --port must be free or startup errors].")
@@ -527,19 +528,87 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
                     "(files missing, not a model, or type 'unknown').[/yellow] "
                     "Opening the GUI - fix, add, or set a model's type on the Models page.")
 
+    # Effective bind host: an explicit -H wins for this process (and survives
+    # an in-place restart, which re-execs the same argv); otherwise the
+    # GUI-settable 'bind_host' config key (Applies.RESTART - this read, running
+    # in the fresh process, is what makes Settings > Restart server apply it);
+    # otherwise loopback. host_from_config marks a bind possibly driven from
+    # the GUI by a user with NO terminal: every failed precondition below must
+    # then degrade LOUDLY to loopback instead of exiting, or the server dies
+    # with no terminal-free way back (the GUI is how that user would fix it).
+    from localm.cli import _resolve_bind_host
+    host, host_from_config = _resolve_bind_host(host)
+    bind_fallback = None
+
     # Refuse to bind past loopback without auth unless explicitly forced: the GUI
     # exposes not just the chat API but the coder agent, which can run shell
     # commands and edit files on this machine. Checked before any setup work.
     bind_warning = _gui_bind_warning(host)
-    if bind_warning and not insecure:
+    if bind_warning and not insecure and host_from_config:
+        # A config-driven network bind without a strong key is refused exactly
+        # like the exit(2) below - the network is never served unauthenticated,
+        # and --insecure deliberately has NO config form, so this override can
+        # only ever be typed in a terminal - but the refusal here is a loopback
+        # bind, not an exit: the server stays reachable on this machine so the
+        # Settings page that caused the bind can also fix it. Surfaced on the
+        # console, in the log, and via /api/companion (bind_fallback).
+        from localm.auth import any_key_configured
+        _why = ("no API key is set" if not any_key_configured()
+                else "the API key is too short to be safe")
+        bind_fallback = (
+            f"The configured bind address ({host}) was not applied: {_why}. "
+            f"The server is on 127.0.0.1 (this computer only). Set a strong "
+            f"API key (Settings > Security > Owner key, or run: localm key "
+            f"generate), then restart the server.")
+        console.print(f"[bold yellow]{bind_warning}[/bold yellow]")
+        console.print(
+            "[bold yellow]  Ignoring the configured bind address and binding "
+            "127.0.0.1 (this computer only). Set a strong API key, then "
+            "restart.[/bold yellow]")
+        from localm.debuglog import logger as _blog
+        _blog.warning("config bind_host=%s not applied: %s", host, _why)
+        host = "127.0.0.1"
+    elif bind_warning and not insecure:
         console.print(f"[bold red]{bind_warning}[/bold red]")
         console.print(
             "[bold red]Refusing to start: binding past loopback without auth. "
             "Set $env:LOCALM_API_KEY first, or pass --insecure to override.[/bold red]")
         sys.exit(2)
-    if bind_warning:
+    elif bind_warning:
         console.print(f"[bold yellow]{bind_warning}[/bold yellow]")
         console.print("[bold yellow]  Proceeding anyway (--insecure set).[/bold yellow]")
+
+    # A config-sourced address must also be BINDABLE right now, not merely
+    # well-formed: the field's own recommended use (one specific interface IP)
+    # goes stale when DHCP reassigns the machine, and handing a stale address
+    # to the server kills the process at the socket bind - the locked-out-user
+    # failure the auth fallback above exists to prevent, through a different
+    # door. Probed with a real throwaway bind (syntax checks cannot see it);
+    # same loud loopback fallback. Runs even under --insecure (that flag
+    # waives AUTH, not bindability - a dead process helps nobody). An explicit
+    # -H keeps failing hard in front of the operator who typed it.
+    if host_from_config and bind_fallback is None:
+        from localm.bindhost import is_loopback_host as _is_lb
+        if not _is_lb(host):
+            from localm.cli import _bind_preflight_error
+            _bind_err = _bind_preflight_error(host)
+            if _bind_err is not None:
+                bind_fallback = (
+                    f"The configured bind address ({host}) was not applied: "
+                    f"this machine has no usable interface with that address "
+                    f"right now ({_bind_err}). The server is on 127.0.0.1 "
+                    f"(this computer only). Fix Settings > Server > Bind "
+                    f"address (0.0.0.0 = every interface), then restart the "
+                    f"server.")
+                console.print(
+                    f"[bold yellow]The configured bind address {host} cannot "
+                    f"be bound on this machine right now ({_bind_err}) - "
+                    f"ignoring it and binding 127.0.0.1 (this computer "
+                    f"only).[/bold yellow]")
+                from localm.debuglog import logger as _plog
+                _plog.warning("config bind_host=%s not applied: %s",
+                              host, _bind_err)
+                host = "127.0.0.1"
 
     model_path = None
     display_name = ""
@@ -554,6 +623,47 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
         model_path, display_hint = info
         display_name = model if model in registry else display_hint
 
+    # Built-in TLS (NET-1): a network bind serves HTTPS out of the box so the
+    # API key and all traffic are encrypted. Resolved before attach_gui so the
+    # coder/media/RAG self-call URL carries the right scheme - and BEFORE
+    # pick_port below, so a config-driven bind that has to fall back to
+    # loopback here picks its port for the host it will actually bind.
+    from localm.cli import _resolve_tls, _setup_tls_or_exit
+    if host_from_config:
+        # A config-driven bind must not die over TLS (no terminal to see the
+        # exit - see host_from_config above). An unusable CUSTOM cert pair
+        # already degrades to the built-in cert inside _resolve_tls; this
+        # catches the built-in path itself failing (a broken crypto stack),
+        # where the only option that is neither cleartext nor a dead server is
+        # staying on loopback. A half-specified CLI --tls-cert/--tls-key is
+        # still the operator's usage error and propagates as one.
+        try:
+            ssl_certfile, ssl_keyfile = _resolve_tls(
+                host, no_tls=no_tls, tls_cert=tls_cert, tls_key=tls_key)
+        except click.UsageError:
+            raise
+        except Exception as e:
+            bind_fallback = (
+                f"The configured bind address ({host}) was not applied: "
+                f"built-in TLS could not be set up ({e}). The server is on "
+                f"127.0.0.1 (this computer only). Fix TLS (or turn 'Encrypt "
+                f"network traffic' off for a trusted network), then restart "
+                f"the server.")
+            console.print(
+                f"[bold yellow]Could not set up built-in TLS: {e} - ignoring "
+                f"the configured bind address and binding 127.0.0.1 (this "
+                f"computer only) rather than serving the network in "
+                f"cleartext.[/bold yellow]")
+            from localm.debuglog import logger as _tlog
+            _tlog.warning("config bind_host=%s not applied: TLS setup failed: %s",
+                          host, e)
+            host = "127.0.0.1"
+            ssl_certfile = ssl_keyfile = None
+    else:
+        ssl_certfile, ssl_keyfile = _setup_tls_or_exit(
+            host, no_tls=no_tls, tls_cert=tls_cert, tls_key=tls_key)
+    scheme = "https" if ssl_certfile else "http"
+
     try:
         chosen_port, was_busy = pick_port(port, host="127.0.0.1" if host == "0.0.0.0" else host)
     except PortInUseError as exc:
@@ -564,14 +674,6 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
         sys.exit(1)
     if was_busy:
         console.print(f"[yellow]Default port busy - using {chosen_port}.[/yellow]")
-
-    # Built-in TLS (NET-1): a network bind serves HTTPS out of the box so the
-    # API key and all traffic are encrypted. Resolved before attach_gui so the
-    # coder/media/RAG self-call URL carries the right scheme.
-    from localm.cli import _setup_tls_or_exit
-    ssl_certfile, ssl_keyfile = _setup_tls_or_exit(
-        host, no_tls=no_tls, tls_cert=tls_cert, tls_key=tls_key)
-    scheme = "https" if ssl_certfile else "http"
 
     from localm.inference.engine import Engine
     from localm.inference import http_server as hs
@@ -716,8 +818,8 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     if host in ("127.0.0.1", "localhost", "::1"):
         console.print(
             "  [dim]use from your phone: bind to your network with "
-            "[/dim][cyan]localm gui -H 0.0.0.0[/cyan][dim] (set LOCALM_API_KEY "
-            "first); then see docs/phone.md[/dim]")
+            "[/dim][cyan]localm gui -H 0.0.0.0[/cyan][dim] or Settings > Server "
+            "> Bind address (set an API key first); see docs/phone.md[/dim]")
         if show_qr:
             console.print(
                 "  [yellow][PoC][/yellow] [dim]--qr needs a network bind to be "
@@ -823,7 +925,13 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
 
     # Record the bind host so the SPA-shell route knows whether every client is
     # loopback (a 127.0.0.1 bind) and can safely seed the API key into the page.
+    # This is the EFFECTIVE host (after any config-bind fallback above), so every
+    # trust decision gating on app.state.bind_host matches what is actually
+    # bound. bind_fallback carries WHY a configured network bind was not applied
+    # (or None) - /api/companion surfaces it so a browser-only user is told what
+    # to fix instead of silently staying unreachable (we do not hide problems).
     app.state.bind_host = host
+    app.state.bind_fallback = bind_fallback
 
     # Advertise this server in the instance registry (H6 phase 3/4) as a "full"
     # surface (API + GUI) so a future launch in the same dir can discover and

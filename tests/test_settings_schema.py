@@ -266,6 +266,17 @@ GUARD_OWNER_KEYS = {
     "coder_untrusted_provenance",   # indirect-prompt-injection hardening
 }
 
+# The GUI-settable server bind (F1). bind_host decides WHICH NETWORK can reach
+# the server at all - the widest reach-widening key in the schema after the
+# EXEC set - and the TLS trio decides whether/with what certificate that
+# traffic is encrypted (tls_enabled off = the API key crosses the network in
+# cleartext). All owner-only so a delegated config:write key can never expose
+# the server or strip its transport encryption. Note the startup guard is a
+# second, independent layer: even the OWNER writing bind_host cannot cause an
+# unauthenticated network bind (no strong key -> the server stays on loopback;
+# --insecure has no config form). See tests/test_bind_host_config.py.
+NETWORK_BIND_OWNER_KEYS = {"bind_host", "tls_enabled", "tls_cert", "tls_key"}
+
 
 def test_admin_only_keys_lists_the_owner_only_settings():
     # The rag_* folder keys widen a filesystem-read boundary; net_allow_private
@@ -340,7 +351,11 @@ def test_admin_only_keys_lists_the_owner_only_settings():
         # (S9: the classification gap that made a mapped drive letter
         # indistinguishable from an ordinary local one). Own line, per the
         # additive-resolution note above.
-        | {"allow_network_drives"})
+        | {"allow_network_drives"}
+        # The GUI-settable server bind + TLS trio (F1) - see the constant's own
+        # comment above for the boundary each widens. Added additively, per the
+        # additive-resolution note above.
+        | NETWORK_BIND_OWNER_KEYS)
 
 
 def test_outbound_endpoint_keys_are_owner_only():

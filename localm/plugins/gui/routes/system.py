@@ -92,6 +92,12 @@ def register(app: FastAPI, ctx) -> None:
             "network_bind": not _web._is_loopback_host(bind_host),
             "lan": addrs.get("lan") or "",
             "tailscale": addrs.get("tailscale") or "",
+            # Why a CONFIGURED network bind was not applied at startup (no
+            # strong API key / TLS unavailable), or "". The card shows it so a
+            # browser-only user learns what to fix - without it, setting
+            # Bind address and restarting would look like it silently did
+            # nothing (we do not hide problems).
+            "bind_fallback": getattr(app.state, "bind_fallback", None) or "",
         }
 
     @app.get("/api/capabilities", dependencies=[Depends(_require_auth)])

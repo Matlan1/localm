@@ -13,7 +13,9 @@ from ._core import (
 
 @main.command()
 @click.argument("model", shell_complete=_complete_model_name)
-@click.option("-H", "--host",        default="127.0.0.1", help="Bind address (0.0.0.0 for LAN).")
+@click.option("-H", "--host",        default=None,
+              help="Bind address (0.0.0.0 for LAN) [default: config "
+                   "'bind_host' (127.0.0.1)].")
 @click.option("-p", "--port",        default=None,        type=click.IntRange(1, 65535),
               help="Port [default: config 'port' (8642), auto-bumps if busy; an "
                    "explicit --port must be free or startup errors].")
