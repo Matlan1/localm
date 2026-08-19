@@ -625,13 +625,16 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
                 "that it is idle.")
         lines = []
         for e in rows:
-            where = f"{e.get('scheme', 'http')}://127.0.0.1:{e.get('port')}"
+            from localm.bindhost import self_connect_host, url_host
+            _h = url_host(self_connect_host(e.get("host")))
+            where = f"{e.get('scheme', 'http')}://{_h}:{e.get('port')}"
             if not e.get("alive"):
                 lines.append(f"{where}: registered but not responding; "
                              f"its activity is unknown.")
                 continue
             state, payload = read_activity(
-                e.get("scheme", "http"), e.get("port"), e.get("token"))
+                e.get("scheme", "http"), e.get("port"), e.get("token"),
+                e.get("host"))
             if state == "unreachable":
                 lines.append(f"{where}: could not be reached ({payload}); "
                              f"its activity is unknown.")

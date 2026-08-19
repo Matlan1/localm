@@ -12,6 +12,7 @@ from ..model_manager import (
 from ._core import (console, main, _complete_model_name,
                     no_server_message, report_server_failure,
                     running_server, server_call)
+from ..bindhost import url_host
 from ..selfclient import read_activity
 
 
@@ -648,9 +649,10 @@ def _fmt_age(seconds) -> str:
     return f"{s // 3600}h{(s % 3600) // 60:02d}m"
 
 
-def _print_activity(scheme: str, port, instance_token=None) -> None:
+def _print_activity(scheme: str, port, instance_token=None,
+                    bind_host=None) -> None:
     """Render what the server is doing, or why that could not be determined."""
-    state, payload = read_activity(scheme, port, instance_token)
+    state, payload = read_activity(scheme, port, instance_token, bind_host)
     console.print()
     if state == "unreachable":
         console.print("[yellow]![/yellow]  Could not ask this server what it is "
@@ -731,7 +733,8 @@ def status_cmd(project):
     scheme = entry.get("scheme", "http")
     console.print(f"  [bold]directory[/bold]  {root}")
     console.print(f"  [bold]address  [/bold]  "
-                  f"{scheme}://{entry.get('host', '127.0.0.1')}:{entry.get('port')}")
+                  f"{scheme}://{url_host(entry.get('host') or '127.0.0.1')}"
+                  f":{entry.get('port')}")
     console.print(f"  [bold]surface  [/bold]  {entry.get('mode')}")
     console.print(f"  [bold]pid      [/bold]  {entry.get('pid')}")
     console.print(f"  [bold]version  [/bold]  {entry.get('version')}")
@@ -740,7 +743,8 @@ def status_cmd(project):
     # fixed at process start; none of it can tell you a model pull is halfway
     # through. Printed last so the identity block still renders when the server
     # cannot be reached.
-    _print_activity(scheme, entry.get("port"), entry.get("token"))
+    _print_activity(scheme, entry.get("port"), entry.get("token"),
+                    entry.get("host"))
     console.print()
     console.print("[dim]Stop it with[/dim] localm stop")
 

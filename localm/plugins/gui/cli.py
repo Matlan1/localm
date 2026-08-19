@@ -10,6 +10,8 @@ from pathlib import Path
 
 import click
 
+from localm.netlisten import is_wildcard_host
+
 
 def _complete_model(ctx, param, incomplete):
     try:
@@ -29,6 +31,22 @@ def _report_preload_failure(console, exc: Exception) -> None:
     console.print(f"[yellow]Background model load failed: {exc}[/yellow]")
     from localm.debuglog import logger
     logger.exception("background model preload failed")
+
+
+def _mdns_addresses(host: str):
+    """Which addresses mDNS should advertise for a bind on *host*, or None to let
+    ``netname.start_advertiser`` pick this machine's LAN IPv4 as before.
+
+    A WILDCARD bind answers on every interface, so the LAN IPv4 that
+    ``start_advertiser`` finds for itself is reachable and is the right advert -
+    including for ``::``, which localm binds dual-stack (see ``netlisten``), so an
+    IPv4 client resolving ``<name>.local`` genuinely connects.
+
+    A SPECIFIC literal answers on exactly one address, and advertising any other
+    one publishes a name that does not resolve to a listening socket. So that bind
+    advertises ITSELF. This is also what makes ``<name>.local`` usable on a
+    specific IPv6 bind, where the LAN IPv4 would be pure fiction."""
+    return None if is_wildcard_host(host) else [host]
 
 
 def _should_auto_open_browser(no_browser: bool) -> bool:
@@ -472,6 +490,7 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
                     webbrowser.open(open_url)
             return
 
+    from localm.bindhost import is_loopback_host, self_connect_host, url_host
     from localm.config import PortInUseError, load_registry, pick_port
     from localm.model_manager import (get_model_info, get_model_mmproj,
                                       is_auto_chat_eligible, sync_models_dir)
@@ -588,27 +607,33 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     # waives AUTH, not bindability - a dead process helps nobody). An explicit
     # -H keeps failing hard in front of the operator who typed it.
     if host_from_config and bind_fallback is None:
-        from localm.bindhost import is_loopback_host as _is_lb
-        if not _is_lb(host):
-            from localm.cli import _bind_preflight_error
-            _bind_err = _bind_preflight_error(host)
-            if _bind_err is not None:
-                bind_fallback = (
-                    f"The configured bind address ({host}) was not applied: "
-                    f"this machine has no usable interface with that address "
-                    f"right now ({_bind_err}). The server is on 127.0.0.1 "
-                    f"(this computer only). Fix Settings > Server > Bind "
-                    f"address (0.0.0.0 = every interface), then restart the "
-                    f"server.")
-                console.print(
-                    f"[bold yellow]The configured bind address {host} cannot "
-                    f"be bound on this machine right now ({_bind_err}) - "
-                    f"ignoring it and binding 127.0.0.1 (this computer "
-                    f"only).[/bold yellow]")
-                from localm.debuglog import logger as _plog
-                _plog.warning("config bind_host=%s not applied: %s",
-                              host, _bind_err)
-                host = "127.0.0.1"
+        # EVERY config-driven bind is probed, loopback included. This used to
+        # skip loopback on the reasoning that "loopback binds trivially" - true
+        # of 127.0.0.1 and ::1, and false of ``::ffff:127.0.0.1``, which
+        # is_loopback_host correctly calls loopback (it IS one) and which
+        # Windows refuses to bind (WinError 10049, measured). Skipping the probe
+        # for the whole loopback class therefore left exactly the
+        # dead-server-with-no-terminal hole this probe exists to close, reachable
+        # from a value the validator accepts. The probe costs one socket.
+        from localm.cli import _bind_preflight_error
+        _bind_err = _bind_preflight_error(host)
+        if _bind_err is not None:
+            bind_fallback = (
+                f"The configured bind address ({host}) was not applied: "
+                f"this machine has no usable interface with that address "
+                f"right now ({_bind_err}). The server is on 127.0.0.1 "
+                f"(this computer only). Fix Settings > Server > Bind "
+                f"address (0.0.0.0 = every interface), then restart the "
+                f"server.")
+            console.print(
+                f"[bold yellow]The configured bind address {host} cannot "
+                f"be bound on this machine right now ({_bind_err}) - "
+                f"ignoring it and binding 127.0.0.1 (this computer "
+                f"only).[/bold yellow]")
+            from localm.debuglog import logger as _plog
+            _plog.warning("config bind_host=%s not applied: %s",
+                          host, _bind_err)
+            host = "127.0.0.1"
 
     model_path = None
     display_name = ""
@@ -665,7 +690,10 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     scheme = "https" if ssl_certfile else "http"
 
     try:
-        chosen_port, was_busy = pick_port(port, host="127.0.0.1" if host == "0.0.0.0" else host)
+        # A wildcard is not itself connectable, so probe the loopback it covers
+        # (self_connect_host maps 0.0.0.0 -> 127.0.0.1 and :: -> ::1). Passing
+        # the raw wildcard used to work only for the IPv4 one by accident.
+        chosen_port, was_busy = pick_port(port, host=self_connect_host(host))
     except PortInUseError as exc:
         # An explicit --port is honored or refused, never silently relocated onto
         # another (often the shared default) port. Only the default auto-bumps.
@@ -674,6 +702,15 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
         sys.exit(1)
     if was_busy:
         console.print(f"[yellow]Default port busy - using {chosen_port}.[/yellow]")
+
+    # The authority (host:port) this process uses to reach ITSELF, and to show the
+    # user the address that works on this machine. Derived from the effective bind
+    # rather than hardcoded to 127.0.0.1: a server bound only on ::1 (or on one
+    # specific interface) has nothing listening on the IPv4 loopback, so every
+    # self-call the GUI makes - the coder agent, RAG self-embedding, the chat/media
+    # VRAM handover - would dial an address that is not there. url_host brackets an
+    # IPv6 literal so the result is a legal URL authority and not https://::1:8642/.
+    _self_authority = f"{url_host(self_connect_host(host))}:{chosen_port}"
 
     from localm.inference.engine import Engine
     from localm.inference import http_server as hs
@@ -740,7 +777,7 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     if not api_mode:
         manager = attach_gui(
             app,
-            self_url=f"{scheme}://127.0.0.1:{chosen_port}/v1",
+            self_url=f"{scheme}://{_self_authority}/v1",
             switch_model=switch_model,
             # Read the authoritative pointer directly rather than shadowing it
             # in a local dict updated only on load (via on_active): that copy
@@ -754,7 +791,7 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
             active_model=lambda: hs._active_model_name or "",
         )
 
-    base_url = f"{scheme}://127.0.0.1:{chosen_port}/"
+    base_url = f"{scheme}://{_self_authority}/"
     # Deep-link the browser to the Models page (and a pending download) when
     # the GUI was opened with --pull or with nothing registered yet.
     open_url = base_url
@@ -807,15 +844,17 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     # not when the name is taken). Closed in the finally below.
     from localm import netname
     mdns_advertiser = None
-    if host not in ("127.0.0.1", "localhost", "::1") and not isolated:
-        mdns_advertiser = netname.start_advertiser(chosen_port, tls=bool(ssl_certfile))
+    if not is_loopback_host(host) and not isolated:
+        mdns_advertiser = netname.start_advertiser(
+            chosen_port, tls=bool(ssl_certfile),
+            addresses=_mdns_addresses(host))
     _adv_name = netname.mdns_fqdn() if mdns_advertiser is not None else None
 
     # Phone / LAN access. The GUI is an installable PWA, so a phone just opens
     # this URL and adds it to the home screen. Bound to loopback, it is only
     # reachable on this machine; bound to the network, print the address a phone
     # on the same Wi-Fi can open. See docs/phone.md (Tailscale for off-LAN use).
-    if host in ("127.0.0.1", "localhost", "::1"):
+    if is_loopback_host(host):
         console.print(
             "  [dim]use from your phone: bind to your network with "
             "[/dim][cyan]localm gui -H 0.0.0.0[/cyan][dim] or Settings > Server "
@@ -828,11 +867,11 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
         # A network bind: print the reachable NAMES (localm.local when advertised,
         # the Tailscale MagicDNS name) and IPs so a phone needs no address typed by
         # hand.
-        targets = netname.network_targets(mdns_name=_adv_name)
+        targets = netname.network_targets(mdns_name=_adv_name, bind_host=host)
         primary_url = None
         qr_url = None
         for _label, _target in targets:
-            url = f"{scheme}://{_target}:{chosen_port}/"
+            url = f"{scheme}://{url_host(_target)}:{chosen_port}/"
             suffix = "  [dim](open it, then Install as app)[/dim]" if primary_url is None else ""
             console.print(f"  [dim]{_label}:[/dim] [cyan]{url}[/cyan]{suffix}")
             if primary_url is None:
@@ -849,8 +888,8 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
             console.print("  [dim]no reachable network address detected - "
                           "this machine only[/dim]")
         if scheme == "https":
-            _ca_host = netname.ca_trust_host(_adv_name) or (
-                "127.0.0.1" if host in ("0.0.0.0", "::") else host)
+            _ca_host = url_host(netname.ca_trust_host(_adv_name)
+                                or self_connect_host(host))
             console.print(
                 "  [dim]first visit shows a one-time certificate warning; tap "
                 "[/dim][cyan]Install certificate[/cyan][dim] on the key screen "

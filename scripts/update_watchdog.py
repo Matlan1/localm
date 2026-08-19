@@ -204,7 +204,12 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
 
     install_root = args.install_root.resolve()
-    url = f"{args.scheme}://{args.host}:{args.port}/whoami"
+    # An IPv6 host needs brackets inside a URL authority, or the parser cannot
+    # tell the address's colons from the port separator.
+    _host = args.host
+    if ":" in _host and not _host.startswith("["):
+        _host = f"[{_host}]"
+    url = f"{args.scheme}://{_host}:{args.port}/whoami"
     _log(args.log_file, f"watching {url} for version {args.expect_version!r} "
                         f"(timeout {args.timeout}s, poll every {args.poll_interval}s)")
 

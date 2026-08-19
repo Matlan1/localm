@@ -229,9 +229,13 @@ def san_targets(
     for h in extra_hostnames or ():
         h = (h or "").strip()
         # A bare IP passed as a hostname (e.g. -H 0.0.0.0 / a specific bind IP)
-        # belongs in the IP SAN list, not the DNS one. 0.0.0.0 means "all
-        # interfaces" and is never itself a connectable address, so drop it.
-        if not h or h == "0.0.0.0":
+        # belongs in the IP SAN list, not the DNS one. Both wildcards mean "all
+        # interfaces" and neither is ever itself a connectable address, so they
+        # are dropped rather than certified: nothing can present a certificate
+        # for an address no client can dial. ``::1`` is NOT a wildcard and is
+        # already in the default IP SAN set above, so an IPv6 loopback bind is
+        # covered without a special case here.
+        if not h or h in ("0.0.0.0", "::"):
             continue
         norm = _norm_ip(h)
         if norm:

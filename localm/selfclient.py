@@ -20,8 +20,11 @@ from typing import Optional
 
 import requests
 
+from localm.bindhost import self_connect_host, url_host
 
-def read_activity(scheme: str, port, instance_token: Optional[str] = None) -> tuple:
+
+def read_activity(scheme: str, port, instance_token: Optional[str] = None,
+                  bind_host: Optional[str] = None) -> tuple:
     """Ask a running localm server what it is doing. Returns ``(state, payload)``.
 
     *state* is one of:
@@ -51,11 +54,17 @@ def read_activity(scheme: str, port, instance_token: Optional[str] = None) -> tu
     process" principal the middleware means to admit. Used ONLY when no API key
     is configured, matching the server's own condition for requiring it at all -
     a protected-mode server keeps using the real key, unaffected.
+
+    *bind_host* is the address that server BOUND (the instance registry
+    records it). Omitted, this dials the IPv4 loopback exactly as before -
+    correct for every bind that answers there. Passed, an IPv6-bound server
+    is dialled on an address it is actually listening on, instead of being
+    reported "unreachable" while it is running perfectly.
     """
     from localm import tls as _tls
     from localm.auth import resolve_bearer_headers
 
-    url = f"{scheme}://127.0.0.1:{port}/api/activity"
+    url = f"{scheme}://{url_host(self_connect_host(bind_host))}:{port}/api/activity"
     headers = resolve_bearer_headers(instance_token)
     try:
         r = requests.get(url, headers=headers, timeout=5,
@@ -100,7 +109,9 @@ def resolve_self_url(app) -> Optional[str]:
     scheme = getattr(app.state, "instance_scheme", None)
     port = getattr(app.state, "instance_port", None)
     if scheme and port:
-        return f"{scheme}://127.0.0.1:{port}/v1"
+        from localm.bindhost import self_connect_host, url_host
+        host = url_host(self_connect_host(getattr(app.state, "bind_host", None)))
+        return f"{scheme}://{host}:{port}/v1"
     return None
 
 

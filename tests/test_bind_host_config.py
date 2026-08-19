@@ -61,6 +61,8 @@ def _set(cfg_mod, **updates):
 class TestIsValidBindHost:
     @pytest.mark.parametrize("good", [
         "127.0.0.1", "0.0.0.0", "192.168.1.20", "10.0.0.7", "localhost",
+        # IPv6, accepted since the end-to-end IPv6 bind support landed.
+        "::", "::1", "2001:db8::5", "fe80::1",
     ])
     def test_accepts_bindable_literals(self, good):
         assert is_valid_bind_host(good) is True
@@ -68,12 +70,12 @@ class TestIsValidBindHost:
     @pytest.mark.parametrize("bad", [
         "", None, 0, "myhouse", "example.com", "0.0.0.0:8642",
         "http://0.0.0.0", "127.0.0.1 ", "0.0.0.0/0",
-        # IPv6 is well-formed but the server DIES on it today (the port probe
-        # is AF_INET; socket.gaierror at startup, reproduced live on all
-        # three). Accepting it here would let a Settings write brick a
-        # terminal-less user - see is_valid_bind_host's docstring. Widen only
-        # together with real end-to-end IPv6 support.
-        "::", "::1", "fe80::1",
+        # A ZONE ID stays rejected: the index names an interface as numbered
+        # on ONE machine, and the scoped form does not survive the
+        # getaddrinfo(AI_PASSIVE) the server binds through (measured: WinError
+        # 10049, while the same address unscoped binds fine). Plain IPv6
+        # literals are now ACCEPTED - see TestAcceptsIPv6 below.
+        "fe80::1%eth0", "[::1]", "[::]",
     ])
     def test_rejects_everything_else(self, bad):
         assert is_valid_bind_host(bad) is False
@@ -96,10 +98,24 @@ class TestValidateUpdate:
         assert ss.validate_update({"bind_host": val})["bind_host"] == stored
 
     @pytest.mark.parametrize("bad", ["myhouse", "0.0.0.0:8642", "http://x", "a b",
-                                     "::", "::1", "fe80::1"])
+                                     "fe80::1%eth0", "[::1]"])
     def test_bind_host_rejects_unbindable(self, bad):
         with pytest.raises(ValueError, match="bind_host"):
             ss.validate_update({"bind_host": bad})
+
+    @pytest.mark.parametrize("val, stored", [
+        ("::", "::"), ("::1", "::1"), (" 2001:db8::5 ", "2001:db8::5"),
+        ("fe80::1", "fe80::1"),
+    ])
+    def test_bind_host_accepts_ipv6_literals(self, val, stored):
+        """Write-time acceptance of IPv6, the LAST half of the IPv6 unit.
+
+        This is the half that could brick a terminal-less user if it landed
+        without the serving half, so it is pinned here rather than left to the
+        predicate's own test: a regression that broke the port probe or the
+        listening socket while leaving this validator open would put the
+        Settings field back to accepting a value the server dies on."""
+        assert ss.validate_update({"bind_host": val})["bind_host"] == stored
 
     def test_tls_paths_must_exist(self, tmp_path):
         real = tmp_path / "c.pem"

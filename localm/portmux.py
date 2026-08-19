@@ -55,6 +55,8 @@ import re
 import sys
 from typing import Optional
 
+from localm.netlisten import create_listen_socket
+
 # Child of the "localm" logger so records flow through its handlers (the debug
 # file handler + the fd-2-stable console handler from debuglog #220).
 _log = logging.getLogger("localm.portmux")
@@ -137,7 +139,8 @@ def run_server(
                 # recur, which is no worse than before this layer existed).
                 import traceback
                 traceback.print_exc()
-                uvicorn.run(app, host=host, port=port, log_level=log_level)
+                _run_uvicorn_on_socket(uvicorn, app, host, port,
+                                       log_level=log_level)
             return
 
         try:
@@ -151,10 +154,42 @@ def run_server(
             # is not caught, which is no worse than before this module existed.
             import traceback
             traceback.print_exc()
-            uvicorn.run(app, host=host, port=port, log_level=log_level,
-                        ssl_certfile=ssl_certfile, ssl_keyfile=ssl_keyfile)
+            _run_uvicorn_on_socket(uvicorn, app, host, port,
+                                   log_level=log_level,
+                                   ssl_certfile=ssl_certfile,
+                                   ssl_keyfile=ssl_keyfile)
     finally:
         bugreport.disarm_crash_guard(instance_id=instance_id)
+
+
+def _run_uvicorn_on_socket(uvicorn, app, host, port, *, log_level,
+                           ssl_certfile=None, ssl_keyfile=None) -> None:
+    """The last-resort direct uvicorn bind, on a socket built the same way the
+    normal path builds it.
+
+    ``uvicorn.run(host=..., port=...)`` would reach asyncio's create_server and
+    silently re-apply IPV6_V6ONLY, so this fallback - which exists so a failure
+    in the peek layer never leaves the user without a server - would quietly
+    serve IPv6 only on a ``::`` bind, contradicting the URLs already printed.
+    ``Server.run(sockets=[...])`` takes the prepared socket instead, so the
+    reachable set is the same on the degraded path as on the normal one.
+
+    If even the socket cannot be built, fall back to uvicorn's own binding
+    rather than leaving the user with nothing: an IPv6-only server is worse than
+    a dual-stack one and far better than no server, and the reason is logged."""
+    config_kwargs = dict(app=app, log_level=log_level)
+    if ssl_certfile:
+        config_kwargs.update(ssl_certfile=ssl_certfile, ssl_keyfile=ssl_keyfile)
+    try:
+        sock = create_listen_socket(host, port)
+    except OSError as e:
+        _log.warning("portmux: could not build the listening socket for %s:%s "
+                     "(%s); falling back to uvicorn's own bind, which serves "
+                     "IPv6 only for a :: host", host, port, e)
+        uvicorn.run(host=host, port=port, **config_kwargs)
+        return
+    server = uvicorn.Server(uvicorn.Config(host=host, port=port, **config_kwargs))
+    server.run(sockets=[sock])
 
 
 def _track_conn_task(inflight: "set[asyncio.Task]", coro) -> None:
@@ -211,7 +246,16 @@ async def _serve_async(app, host, port, ssl_certfile, ssl_keyfile, log_level) ->
     def _on_conn(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         _track_conn_task(inflight, _handle_conn(reader, writer, internal_port, port))
 
-    demux = await asyncio.start_server(_on_conn, host=host, port=port)
+    # Family-aware, dual-stack-where-it-matters listening socket. NOT
+    # `start_server(host=..., port=...)`: asyncio forces IPV6_V6ONLY on every
+    # AF_INET6 socket it builds, which would turn `-H ::` into an IPv6-only
+    # server. See netlisten.create_listen_socket for the measurement.
+    _lsock = create_listen_socket(host, port)
+    try:
+        demux = await asyncio.start_server(_on_conn, sock=_lsock)
+    except BaseException:
+        _lsock.close()
+        raise
 
     # SRV-6: Ensure Windows event loop wakes up to process Ctrl+C
     wakeup_task = None
@@ -268,7 +312,16 @@ async def _serve_async_plain(app, host, port, log_level) -> None:
         _track_conn_task(
             inflight, _handle_conn_plain(reader, writer, internal_port, port, state))
 
-    demux = await asyncio.start_server(_on_conn, host=host, port=port)
+    # Family-aware, dual-stack-where-it-matters listening socket. NOT
+    # `start_server(host=..., port=...)`: asyncio forces IPV6_V6ONLY on every
+    # AF_INET6 socket it builds, which would turn `-H ::` into an IPv6-only
+    # server. See netlisten.create_listen_socket for the measurement.
+    _lsock = create_listen_socket(host, port)
+    try:
+        demux = await asyncio.start_server(_on_conn, sock=_lsock)
+    except BaseException:
+        _lsock.close()
+        raise
 
     # SRV-6: Ensure Windows event loop wakes up to process Ctrl+C
     wakeup_task = None
