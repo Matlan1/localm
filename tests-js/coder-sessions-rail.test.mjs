@@ -43,9 +43,12 @@ test("R17: clicking a rail item activates that session", () => {
     "the newly-activated session is highlighted");
 });
 
-test("R17: the rail shows an empty state when no sessions are open", () => {
+test("R17: the rail shows an empty state when there are no sessions at all", () => {
   const { window } = loadApp();
   runScript(window, "coder.sessions.clear(); renderCoderSessionList();");
   const list = window.document.getElementById("coder-session-list");
-  assert.match(list.textContent, /No open sessions/);
+  // Wording widened deliberately when the rail stopped being only about OPEN
+  // sessions: it now also lists past ones, so "No open sessions" would assert
+  // the absence of one kind while the empty state actually covers both.
+  assert.match(list.textContent, /No sessions yet/);
 });

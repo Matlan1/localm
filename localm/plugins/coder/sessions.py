@@ -190,6 +190,18 @@ class CoderSession:
             from localm.plugins.coder.agent.constants import _SHELL_EXEC_TOOLS
             always_confirm |= set(_SHELL_EXEC_TOOLS)
 
+        # Record WHERE this session ran, so the rail can offer it again later.
+        # record_project refuses outright for privacy mode - that refusal lives in
+        # the module rather than here on purpose, so every future caller inherits it
+        # instead of each one having to remember. It never raises: a convenience
+        # list must not be able to stop a session starting.
+        try:
+            from localm.plugins.coder.projects import record_project
+            record_project(cwd, mode)
+        except Exception as _e:   # pragma: no cover - defensive, see above
+            from localm.debuglog import logger
+            logger.debug("coder projects: not recorded (%s)", _e)
+
         self.agent = Agent(
             backend,
             cwd=cwd,
@@ -543,22 +555,35 @@ class CoderSession:
         except Exception:
             pass
 
-    def resume_from_checkpoint(self) -> bool:
-        """Load this cwd's saved conversation back into the agent and replay a
-        readable recap into the feed (CODER-2). The model gets the FULL restored
-        history; the feed rows are a visual summary. True when something was
-        restored. Tool-call markup is stripped from the recap, and tool-result
-        envelopes / steering notes are skipped."""
+    def resume_from_checkpoint(self, checkpoint_id: Optional[str] = None) -> bool:
+        """Load a saved conversation back into the agent and replay a readable
+        recap into the feed (CODER-2). The model gets the FULL restored history;
+        the feed rows are a visual summary. True when something was restored.
+        Tool-call markup is stripped from the recap, and tool-result envelopes /
+        steering notes are skipped.
+
+        *checkpoint_id* is None to restore this cwd's MOST RECENT conversation,
+        which is what this always did and stays the default. Pass an id from
+        ``list_checkpoints()`` to continue one PARTICULAR past session - the
+        agent has accepted that argument since sessions stopped overwriting each
+        other, and this is the caller that lets a listing act on it.
+
+        An id that no longer resolves returns False rather than silently falling
+        back to the newest: those are different conversations, and continuing
+        the wrong one looks like a restore while quietly abandoning the session
+        the user picked."""
         try:
-            data = self.agent.load_checkpoint()
+            data = self.agent.load_checkpoint(checkpoint_id)
         except Exception:
             data = None
         if not data:
             return False
         self.agent.resume_checkpoint(data)
         when = data.get("interrupted_at") or "earlier"
+        which = ("your last session here" if checkpoint_id is None
+                 else f"“{data.get('title') or 'a past session'}”")
         self._push({"type": "info",
-                    "text": f"Resumed your last session here (saved {when}, "
+                    "text": f"Resumed {which} (saved {when}, "
                             f"{data.get('turns', 0)} turns). Continue where you "
                             "left off."})
         # Live-attribute access (not a top-level import) so a test patching

@@ -7,7 +7,7 @@
 "use strict";
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
-import { populateSetupModels } from "../app/coder.js";
+import { populateSetupModels, refreshDormant } from "../app/coder.js";
 import { $, authHeaders } from "../app/helpers.js";
 import { refreshPerfEstimate, refreshPluginCommands } from "../app/settings-perf.js";
 import { refreshImageHistory } from "./images.js";
@@ -30,7 +30,13 @@ window.onViewShown = (name) => {
   // toggled elsewhere (CLI, another tab) updates the slash hints without a
   // full reload (refreshPluginCommands lives in app.js, shared global scope).
   if (name === "chat" || name === "coder") refreshPluginCommands();
-  if (name === "coder") { populateSetupModels(); presetCoderMode(); }
+  // refreshDormant on ARRIVAL, not only when the directory field changes.
+  // Without this the rail reads "No sessions yet" for someone who has past
+  // work in several projects, until they happen to type a path - which is a
+  // false statement about their own history, and the exact case the rail
+  // exists to serve. Found in a browser; every jsdom test called
+  // refreshDormant() itself and so could not see the missing trigger.
+  if (name === "coder") { populateSetupModels(); presetCoderMode(); refreshDormant(); }
   if (name === "models") refreshModelsPage();
   if (name === "images") { refreshImageHistory(); refreshWorkflowPanel("image"); warmComfyStatus(); }
   if (name === "music") { refreshMusicHistory(); refreshWorkflowPanel("music"); warmComfyStatus(); }

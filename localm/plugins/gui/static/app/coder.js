@@ -71,26 +71,140 @@ export function renderSessionSelect() {
 
 // R17: the coder's right-side open-sessions rail (mirrors the chat conversation
 // list). The #session-select dropdown stays as the mobile fallback.
+/** Put the session rail on the configured side.
+ *
+ * Drives a `data-rail` attribute rather than toggling a class per side: one
+ * attribute with one value cannot end up in the both-classes state that two
+ * independent toggles can reach, and CSS reads it directly.
+ *
+ * An unknown or absent value is left alone deliberately - the CSS default is the
+ * right-hand rail, so an older server, a partial config payload or a typo lays the
+ * page out correctly instead of producing a rail on neither side.
+ */
+export function applyCoderRailSide(side) {
+  const view = $("view-coder");
+  if (!view) return;
+  if (side === "left") view.dataset.rail = "left";
+  else delete view.dataset.rail;
+}
+
+// Past sessions, grouped by project, as the server last reported them. Kept
+// separate from coder.sessions (which is LIVE, in-memory, authoritative) so a
+// failed or slow dormant fetch can never blank the list of sessions the user
+// currently has open.
+export const dormant = { projects: [], note: "", loaded: false };
+
+function _when(iso) {
+  if (!iso) return "";
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return "";
+  const mins = Math.floor((Date.now() - t) / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return mins + "m ago";
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return hrs + "h ago";
+  return Math.floor(hrs / 24) + "d ago";
+}
+
+function _dormantRow(projectPath, sess, available) {
+  const item = el("div", "coder-session-item dormant");
+  item.appendChild(el("span", "title", sess.title || "(untitled session)"));
+  const meta = [_when(sess.interrupted_at), (sess.turns || 0) + " turns"]
+    .filter(Boolean).join(" · ");
+  item.appendChild(el("span", "coder-session-meta", meta));
+  if (available) {
+    item.title = "Continue this session";
+    item.onclick = () => startCoderSession(
+      { resume: true, cwd: projectPath, checkpointId: sess.id });
+  } else {
+    // The conversation is still here, the FOLDER is not. Offering a click that
+    // then fails at the server is worse than saying so up front.
+    item.classList.add("unavailable");
+    item.title = "The project folder is missing, so this session cannot be continued";
+  }
+  return item;
+}
+
 export function renderCoderSessionList() {
   const list = $("coder-session-list");
   if (!list) return;
   list.replaceChildren();
-  if (!coder.sessions.size) {
-    list.appendChild(el("div", "coder-session-empty", "No open sessions"));
+
+  // 1. LIVE. Always from memory, always first: these are running right now.
+  if (coder.sessions.size) {
+    list.appendChild(el("div", "coder-rail-head", "Open"));
+    for (const [id, s] of coder.sessions) {
+      const item = el("div", "coder-session-item" + (id === coder.activeId ? " active" : ""));
+      item.appendChild(el("span", "title", sessionLabel(s.info)));
+      if (s.busy) {
+        const badge = el("span", "badge");
+        badge.appendChild(iconEl("clock", "ic"));
+        badge.title = "Busy";
+        item.appendChild(badge);
+      }
+      item.onclick = () => activateSession(id);
+      list.appendChild(item);
+    }
+  }
+
+  // 2. PAST, for the project the form is pointing at.
+  const current = dormant.projects.find((p) => p.current);
+  if (current && current.sessions.length) {
+    list.appendChild(el("div", "coder-rail-head", "Past sessions here"));
+    for (const sess of current.sessions) {
+      list.appendChild(_dormantRow(current.path, sess, current.available));
+    }
+  }
+
+  // 3. OTHER PROJECTS, collapsed. This is the half that did not exist: a past
+  // session is reachable without first typing its project path into the form.
+  const others = dormant.projects.filter((p) => !p.current && p.sessions.length);
+  if (others.length) {
+    list.appendChild(el("div", "coder-rail-head", "Other projects"));
+    for (const proj of others) {
+      const group = el("details", "coder-rail-project");
+      const sum = el("summary");
+      sum.appendChild(el("span", "title", proj.name));
+      sum.appendChild(el("span", "coder-session-meta",
+        proj.sessions.length + (proj.available ? "" : " · folder missing")));
+      group.appendChild(sum);
+      for (const sess of proj.sessions) {
+        group.appendChild(_dormantRow(proj.path, sess, proj.available));
+      }
+      list.appendChild(group);
+    }
+  }
+
+  if (!list.childNodes.length) {
+    list.appendChild(el("div", "coder-session-empty", "No sessions yet"));
+  }
+
+  // The note is PERMANENT, not an empty state, and its text comes from the
+  // server rather than a string here - one wording, which cannot drift from
+  // what the endpoint actually guarantees.
+  const note = $("coder-rail-note");
+  if (note) note.textContent = dormant.loaded ? (dormant.note || "") : "";
+}
+
+// Past sessions across every remembered project. Never throws and never clears
+// what is already shown: a listing that blanks on a transient error looks
+// exactly like "you have no past work".
+export async function refreshDormant() {
+  const cwdEl = $("setup-cwd");
+  const cwd = cwdEl ? cwdEl.value.trim() : "";
+  try {
+    const r = await fetch("/api/coder/dormant?cwd=" + encodeURIComponent(cwd),
+                          { headers: authHeaders() });
+    if (!r.ok) return;
+    const d = await r.json();
+    if (!d || !Array.isArray(d.projects)) return;
+    dormant.projects = d.projects;
+    dormant.note = d.privacy_note || "";
+    dormant.loaded = true;
+  } catch {
     return;
   }
-  for (const [id, s] of coder.sessions) {
-    const item = el("div", "coder-session-item" + (id === coder.activeId ? " active" : ""));
-    item.appendChild(el("span", "title", sessionLabel(s.info)));
-    if (s.busy) {
-      const badge = el("span", "badge");
-      badge.appendChild(iconEl("clock", "ic"));
-      badge.title = "Busy";
-      item.appendChild(badge);
-    }
-    item.onclick = () => activateSession(id);
-    list.appendChild(item);
-  }
+  renderCoderSessionList();
 }
 
 export function showCoderUI(hasSession) {
@@ -112,6 +226,7 @@ export function showCoderUI(hasSession) {
     $("coder-usage").textContent = "";
     renderSessionSelect();
     refreshResumable();   // reveal "Continue last session" if the cwd has one (CODER-2)
+    refreshDormant();     // and list past sessions across every remembered project
   }
   $("setup-cancel").style.display =
     !hasSession && coder.sessions.size > 0 ? "" : "none";
@@ -555,6 +670,10 @@ export function populateSetupModels() {
 
 export async function startCoderSession(opts = {}) {
   const resume = !!opts.resume;
+  // A rail row names its OWN project, which is usually not the one in the form -
+  // that is the whole point of listing other projects. Taking the form's value
+  // there would start a session in the wrong folder while looking correct.
+  if (opts.cwd) $("setup-cwd").value = opts.cwd;
   const cwd = $("setup-cwd").value.trim();
   if (!cwd) { toast("Enter a project directory", true); return; }
   $("setup-start").disabled = true;
@@ -576,6 +695,10 @@ export async function startCoderSession(opts = {}) {
       native_tools: $("setup-native-tools").checked,
       mode: $("setup-mode").value,
       resume,
+      // WHICH past conversation, when the rail offered a specific one. Absent
+      // for the plain "continue last session" button, which still means "the
+      // most recent here".
+      resume_checkpoint_id: opts.checkpointId || null,
     };
     // Blank = the server's own default (sessions.py), matching temperature two
     // lines below - a hardcoded "|| 40" here duplicated that default instead
@@ -808,6 +931,26 @@ $("session-new").onclick = () => {
 // R17: the open-sessions rail's "+" mirrors the bar's "+ new".
 if ($("coder-new-session")) $("coder-new-session").onclick = () => $("session-new").click();
 renderCoderSessionList();   // R17: show the empty-state rail on first load
+
+const _railFlip = $("coder-rail-flip");
+if (_railFlip) _railFlip.onclick = async () => {
+  const view = $("view-coder");
+  const next = view && view.dataset.rail === "left" ? "right" : "left";
+  applyCoderRailSide(next);            // instant, so the click never feels lost
+  try {
+    const r = await fetch("/v1/config", {
+      method: "PATCH", headers: authHeaders(),
+      body: JSON.stringify({ coder_rail_side: next }),
+    });
+    if (!r.ok) throw new Error("save failed");
+  } catch {
+    // Put it back rather than leaving the screen disagreeing with what was
+    // saved - a side that silently reverts on the next load is worse than one
+    // that refuses now and says why.
+    applyCoderRailSide(next === "left" ? "right" : "left");
+    toast("Could not save which side the session list sits on", true);
+  }
+};
 // Arrow wrapper: a bare `.onclick = startCoderSession` would pass the click
 // Event as opts, making opts.resume truthy and always resuming (CODER-2).
 $("setup-start").onclick = () => startCoderSession();
@@ -815,7 +958,7 @@ $("setup-start").onclick = () => startCoderSession();
 export let _resumeProbeTimer = null;
 $("setup-cwd").addEventListener("input", () => {
   clearTimeout(_resumeProbeTimer);
-  _resumeProbeTimer = setTimeout(refreshResumable, 350);
+  _resumeProbeTimer = setTimeout(() => { refreshResumable(); refreshDormant(); }, 350);
 });
 $("setup-cancel").onclick = () => {
   // Return to the session we left (or any remaining one) without starting
@@ -838,6 +981,7 @@ $("setup-browse").onclick = async () => {
     // persist the absolute project path to localStorage in privacy mode.
     lsSetScoped("localm.coderCwd", dir);
     refreshResumable();   // setting .value does not fire 'input' (CODER-2)
+    refreshDormant();
   }
 };
 $("coder-send").onclick = sendCoderTask;

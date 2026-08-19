@@ -11,6 +11,7 @@ import { emptyState, iconEl } from "./icons.js";
 import { modelCache, modelSelect } from "./models-sidebar.js";
 import { openMemoryModal, runCompletion, speak, setWebAskSession } from "./settings-perf.js";
 import { showView } from "./tabs.js";
+import { applyCoderRailSide } from "./coder.js";
 
 /* ================================================================ */
 /*  Chat                                                             */
@@ -235,6 +236,12 @@ export async function refreshCtxLimit() {
       // The Settings "Default system prompt": a chat with a blank System prompt
       // field inherits this (the per-chat drawer overrides it).
       chat.systemDefault = (cfg.chat_system_prompt || "").trim();
+      // The coder session rail's side. Applied here because this is the one boot
+      // round trip that already has the config in hand - a second fetch just for a
+      // panel side would be a request per page load for a value that never changes
+      // between them. Unknown/absent falls through to the CSS default (right), so
+      // an older server or a partial payload lays out correctly rather than blank.
+      applyCoderRailSide(cfg.coder_rail_side);
 
       // AUD-INSTANCEID: confirm this browser origin is actually talking to the
       // SAME backend data directory whose cache it holds, BEFORE any of that

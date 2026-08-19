@@ -85,6 +85,10 @@ class CreateSessionRequest(BaseModel):
     # alongside the two above, forwarded the same way.
     seed: int | None = None
     resume: bool = False              # restore this cwd's saved conversation (CODER-2)
+    # WHICH past conversation to restore, when several are saved for this cwd.
+    # None + resume -> the most recent, unchanged. An id (from
+    # /api/coder/dormant) continues that particular session instead.
+    resume_checkpoint_id: str | None = None
     custom_instructions: str | None = None   # extra system-prompt guidance (rec#584)
     # Exit-code oracle: a command the HARNESS runs before a turn that changed
     # files may finish. None + auto_verify -> the project's detected check.
@@ -343,7 +347,8 @@ async def create_session(req: CreateSessionRequest, request: Request):
     resumed = False
     if req.resume and not restricted:
         resumed = await loop.run_in_executor(
-            get_plugin_executor(), session.resume_from_checkpoint)
+            get_plugin_executor(), session.resume_from_checkpoint,
+            req.resume_checkpoint_id)
     return {**session.info(), "resumed": resumed, "notes": notes}
 
 
@@ -786,6 +791,95 @@ async def coder_resumable(request: Request, cwd: str = ""):
     if not info:
         return {"resumable": False}
     return {"resumable": True, "cwd": str(p.resolve()), **info}
+
+
+# A permanent statement, not an empty-state message. The list below is
+# INCOMPLETE by construction for anyone who uses privacy mode, and a surface
+# that only admits that when it happens to be empty reads as an excuse for a
+# short list rather than as a property of the feature (AGENTS.md rule 5).
+_PRIVACY_NOTE = "Privacy-mode sessions are never recorded and never appear here."
+
+
+def _dormant_for(path_str: str) -> list:
+    """Past conversations saved for one project, newest first.
+
+    Checkpoints are keyed on a digest of the project path and live under the
+    data dir, NOT inside the project - so this still answers for a project
+    directory that has been moved or deleted, which is exactly when a user most
+    wants their conversation back.
+
+    Privacy-mode sessions cannot appear: that mode writes no checkpoint at all
+    (see Agent.save_checkpoint), so the omission is structural here rather than
+    a filter this route could get wrong.
+    """
+    from localm.plugins.coder.agent.checkpoint import list_checkpoints
+    try:
+        return list_checkpoints(Path(path_str))
+    except Exception:
+        # One unreadable project must not blank the whole listing; the rest of
+        # the response is still true and useful.
+        return []
+
+
+@_router.get("/api/coder/dormant")
+async def coder_dormant(request: Request, cwd: str = ""):
+    """Past coder conversations, grouped by project, resumable by id.
+
+    Owner-only for the same reason /api/coder/resumable is: a session title is
+    the user's own words about their own work, so a scoped or shared key is
+    never shown one.
+
+    *cwd* is optional and only decides which group is marked ``current`` - the
+    listing spans every remembered project either way, which is the point: a
+    past session is reachable without first typing its project path back into
+    the form.
+    """
+    is_owner, _ = _principal_from_request(request)
+    if not is_owner:
+        return {"projects": [], "privacy_note": _PRIVACY_NOTE}
+
+    current = ""
+    if cwd.strip():
+        try:
+            p = Path(cwd).expanduser()
+        except (OSError, ValueError, RuntimeError):
+            raise HTTPException(400, "Invalid cwd")
+        # Same guard, in the same order, as the resumable probe above: refuse
+        # UNC/device syntax on the EXPANDED string before any filesystem call.
+        if _is_unc_or_device_path(str(p)):
+            raise HTTPException(
+                400, "'cwd' must be a local directory path, not a UNC or device path.")
+        try:
+            current = str(p.resolve())
+        except (OSError, ValueError, RuntimeError):
+            raise HTTPException(400, "Invalid cwd")
+
+    def _collect() -> list:
+        from localm.plugins.coder.projects import list_projects
+        rows, seen = [], set()
+        if current:
+            rows.append({"path": current, "name": Path(current).name or current,
+                         "available": Path(current).is_dir(), "current": True,
+                         "sessions": _dormant_for(current)})
+            seen.add(os.path.normcase(current))
+        for entry in list_projects():
+            path = str(entry.get("path") or "")
+            if not path or os.path.normcase(path) in seen:
+                continue
+            seen.add(os.path.normcase(path))
+            rows.append({"path": path,
+                         "name": entry.get("name") or path,
+                         "available": bool(entry.get("available")),
+                         "current": False,
+                         "sessions": _dormant_for(path)})
+        return rows
+
+    # Off the event loop: this globs and parses a JSON file per checkpoint per
+    # project, which is unbounded filesystem work and would otherwise stall
+    # every other request while it runs.
+    loop = asyncio.get_running_loop()
+    projects = await loop.run_in_executor(get_plugin_executor(), _collect)
+    return {"projects": projects, "privacy_note": _PRIVACY_NOTE}
 
 
 # ------------------------------------------------------------------ #
