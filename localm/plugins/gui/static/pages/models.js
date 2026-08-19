@@ -1027,10 +1027,17 @@ export async function discoverFiles(repo, filesBox, btn, gpus, detectedType) {
         $("pull-spec").value = `${repo}:${f.file}`;
         $("pull-name").value = f.file.replace(/\.gguf$/i, "");
         // A vision-projector companion file is never the searched-for type
-        // (there is no mmproj tab/checkbox) - only hint a REGULAR file's own
-        // pull, not one drawn from data.mmprojs (same object reference, "show
-        // mmproj files" merge above). The hint resolves at click time from the
-        // repo's detected type and the current Type checkboxes.
+        // (the search Type checkboxes above have no mmproj entry) - only hint a
+        // REGULAR file's own pull, not one drawn from data.mmprojs (same object
+        // reference, "show mmproj files" merge above). The hint resolves at
+        // click time from the repo's detected type and the current Type
+        // checkboxes.
+        //
+        // This says CHECKBOX deliberately. It used to read "no mmproj
+        // tab/checkbox", which stopped being unambiguous once the
+        // Registered-models Other tab began collecting every type with no tab
+        // of its own - mmproj included. That strip is a different control from
+        // these search filters, and only the filters decide this hint.
         const isMmproj = Array.isArray(data.mmprojs) && data.mmprojs.includes(f);
         const typeHint = isMmproj ? null : resolveTypeHint(detectedType);
         pendingPullTypeHint = typeHint

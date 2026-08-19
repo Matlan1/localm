@@ -95,6 +95,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
   the folders you listed, not your home directory, working directory or
   configured allowed folders. Leave it unset and a key behaves exactly as
   before. The owner key is never affected by this.
+- **The Models page gained an "Other" tab, a way to keep it out of your main
+  list, and a group-by-type view.** A vision projector, or a model localm could
+  not classify, used to appear only in the "All" list mixed in with the models
+  you actually chat with, because no tab covered it. Those now have their own
+  **Other** tab, and the All list leaves them out by default while telling you
+  how many it is holding back and where they are; a **show other types here**
+  tick puts them back in. A **group by type** tick breaks the list into one
+  section per kind (LLMs, Embedding, VAEs, ...), sorted inside each section by
+  whichever column you are sorting on. Both are remembered in this browser only.
 
 ### Changed
 - **The chat parameters drawer and the image, music and video generation forms
