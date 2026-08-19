@@ -30,7 +30,7 @@
 "use strict";
 
 import { lsSetScoped } from "./chat.js";
-import { $, authHeaders, confirmDanger, el, fetchImageURL, openModal, toast } from "./helpers.js";
+import { $, authHeaders, confirmDanger, el, fetchImageURL, openModal, promptText, toast } from "./helpers.js";
 import { emptyState, iconEl } from "./icons.js";
 import { pickDirectory } from "./picker.js";
 
@@ -311,14 +311,24 @@ export function createGallery(cfg) {
 
       const rename = el("button", "btn-secondary", "rename…");
       rename.onclick = async () => {
-        const newName = prompt("New name:", item.name);
-        if (!newName || newName.trim() === item.name) return;
+        // promptText() reuses the same shared #modal this item-detail view is
+        // already showing, so it replaces this modal's content while it is up
+        // (unlike the native prompt() it replaces, which floats above the page
+        // untouched). Re-open the same item's detail view on any path that
+        // isn't the success-and-closeModal() one below, so cancelling or a
+        // failed rename lands back where the user was instead of on a bare
+        // closed modal.
+        const newName = await promptText("New name:", item.name);
+        if (!newName || newName.trim() === item.name) { showDetail(item); return; }
         try {
           const name = await apiRename(item.name, newName.trim());
           toast("Renamed to " + name);
           closeModal();
           refresh();
-        } catch (e) { toast(e.message || "Rename failed", true); }
+        } catch (e) {
+          toast(e.message || "Rename failed", true);
+          showDetail(item);
+        }
       };
       actions.appendChild(rename);
 

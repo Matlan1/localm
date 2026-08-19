@@ -846,6 +846,58 @@ export function confirmDanger(title, message, confirmLabel, onConfirm) {
   });
 }
 
+/** In-page text-input equivalent of confirmDanger, for the free-text half of
+ *  the same NET-1 class: window.prompt() is suppressed in the same mobile/PWA
+ *  browsers confirmDanger's own comment names, so a raw prompt() call goes
+ *  silent with no error and no toast (indistinguishable from the user
+ *  cancelling). Resolves to the entered text (untrimmed, exactly like
+ *  prompt()'s own return value - callers already trim/validate the same way
+ *  they did with prompt()), or null if cancelled. Cancelling and submitting an
+ *  emptied field resolve differently on purpose: some callers (e.g. the
+ *  conversation folder prompt) treat an empty submit as "clear the value" but
+ *  a cancel as "leave it alone". */
+export function promptText(title, defaultValue) {
+  return new Promise((resolve) => {
+    let settled = false;
+    let watch = null;
+    let input;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      if (watch) clearInterval(watch);
+      $("modal").style.display = "none";
+      resolve(value);
+    };
+    openModal(title, (body) => {
+      input = el("input");
+      input.type = "text";
+      input.value = defaultValue || "";
+      body.appendChild(input);
+      const row = el("div", "actions");
+      const cancel = el("button", "btn-secondary", "Cancel");
+      cancel.onclick = () => finish(null);
+      const ok = el("button", "btn-secondary", "OK");
+      ok.onclick = () => finish(input.value);
+      row.appendChild(cancel);
+      row.appendChild(ok);
+      body.appendChild(row);
+      input.onkeydown = (e) => {
+        if (e.key === "Enter") { e.preventDefault(); finish(input.value); }
+        else if (e.key === "Escape") { e.preventDefault(); finish(null); }
+      };
+    });
+    input.focus();
+    input.select();
+    // Dismissing via the shared modal chrome (x / backdrop) sets display:none;
+    // poll for it and treat as cancel - those handlers are not ours (same
+    // pattern _offerModelDownload's missing-model modal uses below, for the
+    // same reason).
+    watch = setInterval(() => {
+      if ($("modal").style.display === "none") finish(null);
+    }, 200);
+  });
+}
+
 /** Offer to download ONE curated missing model (repo/file/size shown in full,
  *  a real Download button - never a silent auto-pull). Resolves true whether
  *  the user downloads or skips (either way the caller proceeds to its real

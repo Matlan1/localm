@@ -6,7 +6,7 @@
 "use strict";
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
-import { $, authHeaders, autoGrow, confirmDanger, el, fetchImageURL, INSTANCE_SCOPED_KEYS, readStoredJSON, reconcileInstanceId, renderMarkdown, scrubMarkers, stripThink, toast } from "./helpers.js";
+import { $, authHeaders, autoGrow, confirmDanger, el, fetchImageURL, INSTANCE_SCOPED_KEYS, promptText, readStoredJSON, reconcileInstanceId, renderMarkdown, scrubMarkers, stripThink, toast } from "./helpers.js";
 import { emptyState, iconEl } from "./icons.js";
 import { modelCache, modelSelect } from "./models-sidebar.js";
 import { openMemoryModal, runCompletion, speak, setWebAskSession } from "./settings-perf.js";
@@ -672,9 +672,9 @@ export function buildConvItem(conv, snippet) {
   fold.appendChild(iconEl("folder", "ic"));
   fold.title = conv.folder ? `Folder: ${conv.folder} (click to change)`
                            : "Move to a folder";
-  fold.onclick = (e) => {
+  fold.onclick = async (e) => {
     e.stopPropagation();
-    const name = prompt("Folder name (empty removes it from the folder):",
+    const name = await promptText("Folder name (empty removes it from the folder):",
                         conv.folder || "");
     if (name === null) return;
     if (name.trim()) conv.folder = name.trim();

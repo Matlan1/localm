@@ -5,7 +5,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { loadAppWithPages } from "./harness.mjs";
+import { loadAppWithPages, runScript } from "./harness.mjs";
 
 function makeFetch(models, calls, renameResponse) {
   return async (url, opts = {}) => {
@@ -28,7 +28,7 @@ const MODELS = [
 async function clickRename(window, typed) {
   await window.refreshModelsPage();
   await new Promise((r) => setTimeout(r, 0));
-  window.prompt = () => typed;
+  runScript(window, `promptText = async () => ${JSON.stringify(typed)};`);
   const btn = [...window.document.querySelectorAll("#models-table tbody tr button")]
     .find((b) => b.textContent === "rename");
   assert.ok(btn, "the row exposes a rename control");

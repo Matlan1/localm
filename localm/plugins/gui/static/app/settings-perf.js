@@ -8,7 +8,7 @@
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { iconEl } from "./icons.js";
 import { COMPACT_KEEP, addMessageRow, chat, chatParams, compactConversation, currentConv, lsSetScoped, maybeCompactConversation, msgImages, msgText, newConversation, noteLabel, renderAttachChips, renderChat, renderConvList, saveConversations, stripUserImages } from "./chat.js";
-import { $, GIB, authHeaders, autoGrow, confirmDanger, el, formatToolCalls, nearBottom, openModal, readSSE, renderMarkdown, revealFilledAdvanced, stripThink, toast } from "./helpers.js";
+import { $, GIB, authHeaders, autoGrow, confirmDanger, el, formatToolCalls, nearBottom, openModal, promptText, readSSE, renderMarkdown, revealFilledAdvanced, stripThink, toast } from "./helpers.js";
 import { modelCache, modelSelect } from "./models-sidebar.js";
 import { execChatCommand, handleSlashSubmit } from "./slash.js";
 import { CORE_VIEWS, VIEWS, _applyActiveClasses, closeNav, showView } from "./tabs.js";
@@ -1477,7 +1477,7 @@ $("p-persona").onchange = () => {
 };
 
 $("persona-save").onclick = async () => {
-  const name = prompt("Persona name:", $("p-persona").value || "");
+  const name = await promptText("Persona name:", $("p-persona").value || "");
   if (!name || !name.trim()) return;
   const params = {};
   for (const [key, id] of Object.entries(PERSONA_PARAM_IDS)) {

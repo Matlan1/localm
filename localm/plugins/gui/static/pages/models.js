@@ -7,7 +7,7 @@
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { pickDirectory } from "../app/picker.js";
-import { $, GIB, authHeaders, confirmDanger, downloadRate, el, fmtBytes, fmtDuration, openModal, renderMarkdown, streamJob, toast } from "../app/helpers.js";
+import { $, GIB, authHeaders, confirmDanger, downloadRate, el, fmtBytes, fmtDuration, openModal, promptText, renderMarkdown, streamJob, toast } from "../app/helpers.js";
 import { onServerUnreachable } from "../app/init.js";
 import { emptyState, iconEl } from "../app/icons.js";
 import { modelCache, refreshModels, showKeyGate, switchModel, toastLoadResult } from "../app/models-sidebar.js";
@@ -339,7 +339,7 @@ export async function refreshModelsPage() {
       }
       const aliasBtn = el("button", "secondary", "alias");
       aliasBtn.onclick = async () => {
-        const name = prompt(`New alias for '${m.name}':`);
+        const name = await promptText(`New alias for '${m.name}':`);
         if (!name) return;
         const r = await fetch("/api/models/alias", {
           method: "POST", headers: authHeaders(),
@@ -357,7 +357,7 @@ export async function refreshModelsPage() {
       renameBtn.title = "Rename this model (unlike alias, the old name stops working; "
         + "any OTHER name already pointing at the same file is unaffected)";
       renameBtn.onclick = async () => {
-        const name = prompt(`Rename '${m.name}' to:`, m.name);
+        const name = await promptText(`Rename '${m.name}' to:`, m.name);
         if (!name || name.trim() === m.name) return;
         const r = await fetch("/api/models/rename", {
           method: "POST", headers: authHeaders(),
