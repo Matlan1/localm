@@ -587,12 +587,32 @@ class MemoryStore:
                 self._save()
             return removed
 
-    def clear(self) -> None:
+    def clear(self, *, include_forgotten: bool = False) -> None:
+        """Erase this namespace's live records.
+
+        MEASURED, because it is not what the name suggests: the forgotten sidecar
+        is a SEPARATE file and a plain clear() does not touch it, so after one,
+        every record that prune eviction or an accepted correction ever archived is
+        still readable on disk. Cleared three facts, evicted two beforehand, and
+        both evicted texts survived the clear.
+
+        ``include_forgotten`` takes the archive too, which is what any user-facing
+        "erase what you remember about me" must pass: leaving the text in a sidecar
+        while reporting the memory cleared is a privacy claim that is not true. The
+        coder's episode store already draws exactly this line and says so in its own
+        clear(); this brings the two into agreement.
+
+        The default stays False so this is not a behaviour change for anything that
+        existed before - and at the time of writing nothing else called clear() at
+        all, so the only caller is the CLI, which passes True.
+        """
         with _namespace_lock(self._ns_hash):
             self._records = []
             self._vectors = {}
             self._dim = None
             self._save()
+            if include_forgotten:
+                self._forgotten_file().unlink(missing_ok=True)
 
     def invalidate_vectors(self, ids) -> None:
         """Drop the cached vectors of *ids* so the next save/replace re-embeds

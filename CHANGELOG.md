@@ -12,6 +12,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **What localm remembers about you can now be managed from the terminal.**
+  `localm memory` lists the facts it has learned, shows one in full, saves a fact
+  you type yourself, deletes one, reviews the corrections that background
+  consolidation proposes, and erases everything. Until now all of that was only
+  reachable in the app, which was awkward the other way round too: a scheduled
+  memory job could quietly produce correction proposals that a terminal user had
+  no way to read or resolve. Erasing now takes the recoverable copies with it, so
+  "erased" means the text is off disk rather than moved to a file you cannot see.
 - **Managing what the coder remembers no longer needs a terminal, and two more
   session settings arrived.** The **lessons** panel under Coder now has a
   **stored** and a **dropped** tab, so you can see both what the agent recalls
