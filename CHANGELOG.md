@@ -167,6 +167,18 @@ permanent public record of what shipped and are never rewritten; the in-progress
   now lets you refuse them across the folder picker, folder creation,
   renaming, log export, and document indexing, if you would rather keep
   localm confined to local disks.
+- **Rolling back a bad update no longer needs a terminal.** Settings > Updates
+  gains a **Roll back** button that restores the build you were running before
+  the last update and restarts, so the restored build actually loads. It covers
+  the case nothing else did: an update that installed cleanly, runs, and turns
+  out worse (a build too broken to start is what `rollback.bat` / `rollback.sh`
+  are for, and an update that never comes back is already rolled back for you).
+  The button appears only when there is a backup to restore and names the build
+  it would put back before you press it. It asks for the owner key rather than
+  any key that may change settings, because restoring an older build can bring
+  back something the newer one fixed. Like `localm update --rollback`, it
+  restores that build's files; it does not undo package installs an update made
+  along the way.
 
 ### Changed
 - **The chat parameters drawer and the image, music and video generation forms

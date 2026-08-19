@@ -633,7 +633,7 @@ def apply(asset_id, *, signature=None, installed=None, download_opener=None,
     from localm.bugreport import LocalmError
     target = Path(installed) if installed else repo_root()
     updir = _updates_dir()
-    backup_dir = updir / "backup"   # the STABLE location rollback_last() reads
+    backup_dir = _backup_dir(create=True)   # the STABLE location rollback_last() reads
 
     with _apply_lock():
         run_dir = _new_run_dir()

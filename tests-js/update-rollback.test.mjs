@@ -84,7 +84,8 @@ test("Roll back: the button confirms, POSTs, and reports the restart", async () 
 
   ok.click();
   await flush();
-  assert.equal(calls.filter((m) => m === "POST").length, 1);
+  assert.equal(calls.filter((m) => m === "POST").length, 1,
+    "confirming must actually POST the rollback, exactly once");
   const text = doc.getElementById("update-rollback-status").textContent;
   assert.match(text, /Rolled back to 0\.1\.4/);
   assert.match(text, /Restarting/);
