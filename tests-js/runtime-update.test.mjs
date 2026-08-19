@@ -91,6 +91,25 @@ test("Runtime: up to date hides the button", async () => {
   assert.equal(doc.getElementById("runtime-update-apply").hidden, true);
 });
 
+test("Runtime: a pin is reported on BOTH the up-to-date and the newer reading", async () => {
+  // The pin suffix is the one branch of this status line no other test covers,
+  // and it is shared by both readings - a user who pinned a build away from a
+  // broken release must be able to see that is why they are being offered what
+  // they are being offered.
+  for (const [payload, want] of [
+    [{ ...INSTALLED_VULKAN, pinned: "b10300" }, /Pinned to b10300\./],
+    [{ ...INSTALLED_VULKAN, current: "b10361", newer: false, pinned: "b10361" }, /Pinned to b10361\./],
+  ]) {
+    const { window } = loadAppWithPages({ fetchImpl: makeFetch([
+      ["/api/runtime/check", payload],
+    ]) });
+    const doc = window.document;
+    doc.getElementById("runtime-update-check").click();
+    await flush();
+    assert.match(doc.getElementById("runtime-update-status").textContent, want);
+  }
+});
+
 test("Runtime: nothing installed INVITES an install rather than sending the user to a terminal", async () => {
   // This is the behaviour the whole unit exists for. It used to read "run setup
   // first" and hide the button, because the route refused to provision anything
