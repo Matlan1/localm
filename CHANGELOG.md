@@ -110,6 +110,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   the Runtime update card, and the update-behavior toggles (offer prereleases,
   ignore network access) are now one "Updates" card with three clearly
   labeled parts, instead of three separate panels.
+- **Two places that said the same thing twice now say it once.** The sidebar
+  showed the active model's name in a badge directly under the dropdown that
+  was already showing it, and the Image, Music and Video workflow lists marked
+  the workflow in use with a radio dot as well as the highlighted bar down the
+  side of the row. The duplicate badge and the dot are gone. The badge still
+  appears for everything the dropdown cannot tell you, which is the part worth
+  keeping: while a model is loading or unloading, and for any problem, such as
+  a failed load or the server becoming unreachable.
 
 ### Fixed
 - **A model pull can no longer be reported as failed after it actually
@@ -120,6 +128,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
   back as failed (and, from the GUI, file a bug report) even though the model
   was fully downloaded and ready to use. That confirmation can no longer turn
   a completed, verified download into a false failure.
+- **Chat no longer refuses to send after a model is unloaded, when the model
+  was going to reload by itself anyway.** Both the "unload model" button and
+  the optional unload-after-idle setting say the model comes back on your next
+  message, and the server really does do that. The chat box did not know it:
+  it saw no model in memory, said "No model loaded - load a model on the
+  sidebar before chatting", and refused to send the very message that would
+  have brought the model back. The sidebar showed "No model loaded" too, so
+  the only way out was picking the model again by hand. It now keeps showing
+  the model that will answer your next message, and sending one reloads it, as
+  both of those features already promised. A message still cannot be sent when
+  there is genuinely nothing to load.
 - **Reading replies aloud now works with no internet connection.** The
   neural voice needed a piece of its engine downloaded from a public CDN
   every time it started, so on a machine that was offline, air-gapped, or

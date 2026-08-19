@@ -327,6 +327,11 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
   align-items: center;
   gap: 6px;
 }
+/* Required, not defensive: the `display: flex` above BEATS the user-agent
+   `[hidden] { display: none }`, so setStatus()'s `hidden = state === "ok"`
+   would be a silent no-op without this rule and the pill would never actually
+   disappear. */
+#model-status[hidden] { display: none; }
 #status-text {
   white-space: nowrap;
   overflow: hidden;
@@ -338,10 +343,28 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
   color: var(--text-dim);
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.2px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  /* WRAPS, never truncates. This was `white-space: nowrap` + `overflow: hidden`
+     + `text-overflow: ellipsis`, which ellipsised the line at the sidebar's
+     width - and since VRAM is rendered LAST of CPU/RAM/VRAM/GPU, the figure
+     that got cut was the one this readout exists for ("VRAM 3.6/1..."). A
+     metric the user cannot read is not a compact readout, it is a missing one.
+     Wrapping to a second line costs a few pixels of a sidebar that has room. */
+  display: flex;
+  flex-wrap: wrap;
+  column-gap: 9px;
+  row-gap: 2px;
 }
+/* Each metric is an unbreakable unit, so a wrap can never split "3.6/16.0 GB"
+   across two lines.
+
+   SEPARATION IS THE GAP, NOT A "·" GLYPH, and that is a consequence of wrapping
+   rather than a taste call: an inline separator has to attach to one side, and
+   once the row can wrap, BOTH sides are wrong somewhere. As a text node after a
+   metric it strands at the end of a wrapped line; moved into the next metric's
+   ::before (tried, and visibly wrong in the browser) it leads the wrapped line
+   with an orphan "· VRAM ...". A gap cannot be orphaned because it collapses at
+   a line break. */
+.hw-stats > span { white-space: nowrap; }
 .hw-stats[hidden] { display: none; }
 #sidebar-unload-btn { width: 100%; margin-top: 6px; padding: 5px 8px; font-size: 12px; }
 /* Subtle VRAM-fullness tint, shown ONLY when a trustworthy used/total is known
