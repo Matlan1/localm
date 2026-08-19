@@ -170,6 +170,9 @@ def _offline_hfapi(monkeypatch):
     import huggingface_hub
 
     class _NoNetApi:
+        def __init__(self, *a, **kw):
+            pass
+
         def model_info(self, *a, **k):
             raise RuntimeError("offline in test")
 

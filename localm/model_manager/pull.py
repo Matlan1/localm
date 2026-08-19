@@ -28,6 +28,12 @@ from .registry import _detect_local_model_type, _sanitize_name
 from .registry import alias_model
 from .registry import find_aliases_by_path
 
+# HF_ENDPOINT / HF_HUB_ENDPOINT are ambient env vars localm never exposes as a
+# setting anywhere (no settings_schema.py key, no CLI flag, no docs). Pinned
+# explicitly at every huggingface_hub call site below so a stray env var in
+# the user's shell can never silently redirect a model pull elsewhere.
+_HF_ENDPOINT = "https://huggingface.co"
+
 
 
 
@@ -494,7 +500,7 @@ def _hf_file_sha256(repo_id: str, filename: str) -> Optional[str]:
     """
     try:
         from huggingface_hub import HfApi
-        info = HfApi().get_paths_info(repo_id, [filename])
+        info = HfApi(endpoint=_HF_ENDPOINT).get_paths_info(repo_id, [filename])
         if info:
             lfs = getattr(info[0], "lfs", None)
             digest = getattr(lfs, "sha256", None) if lfs else None
@@ -529,7 +535,7 @@ def _hf_repo_files(repo_id: str) -> Optional[List[str]]:
     false "no vision projector found" note."""
     try:
         from huggingface_hub import HfApi
-        return HfApi().list_repo_files(repo_id)
+        return HfApi(endpoint=_HF_ENDPOINT).list_repo_files(repo_id)
     except Exception as e:
         logger.debug("could not list files for %s to look for an mmproj "
                      "sibling: %s", repo_id, e)
@@ -629,7 +635,7 @@ def _maybe_fetch_repo_mmproj(repo_id: str, filename: str, base_dir: Path) -> Opt
         try:
             from huggingface_hub import hf_hub_download
             local = hf_hub_download(repo_id=repo_id, filename=candidate,
-                                     local_dir=str(base_dir))
+                                     local_dir=str(base_dir), endpoint=_HF_ENDPOINT)
             if Path(local) != dest:
                 shutil.move(local, dest)
         except Exception as e:
@@ -750,7 +756,8 @@ def _fetch_explicit_mmproj(mmproj_spec: str, base_dir: Path) -> Optional[Path]:
         console.print(f"Pulling mmproj: {mmproj_spec}")
         try:
             from huggingface_hub import hf_hub_download
-            local = hf_hub_download(repo_id=m_repo, filename=safe, local_dir=str(base_dir))
+            local = hf_hub_download(repo_id=m_repo, filename=safe, local_dir=str(base_dir),
+                                     endpoint=_HF_ENDPOINT)
             if Path(local) != dest:
                 shutil.move(local, dest)
         except Exception as e:
@@ -945,7 +952,7 @@ def _pull_gguf_file(
         import requests as _req
         total_size = 0
         for part in missing:
-            cdn_url = hf_hub_url(repo_id, part)
+            cdn_url = hf_hub_url(repo_id, part, endpoint=_HF_ENDPOINT)
             head    = _req.head(cdn_url, allow_redirects=True, timeout=10)
             total_size += int(head.headers.get("content-length", 0))
     except Exception:
@@ -971,6 +978,7 @@ def _pull_gguf_file(
                     repo_id=repo_id,
                     filename=part,
                     local_dir=str(base_dir),
+                    endpoint=_HF_ENDPOINT,
                 )
                 final = base_dir / part
                 if Path(local) != final:
@@ -1210,7 +1218,7 @@ def _pull_hf_snapshot(
     total_size = 0
     try:
         from huggingface_hub import HfApi
-        info = HfApi().model_info(repo_id, files_metadata=True)
+        info = HfApi(endpoint=_HF_ENDPOINT).model_info(repo_id, files_metadata=True)
         repo_siblings = info.siblings
         total_size = sum(getattr(s, "size", None) or 0 for s in repo_siblings)
     except Exception as e:
@@ -1324,6 +1332,7 @@ def _pull_hf_snapshot(
             snapshot_download(
                 repo_id=repo_id,
                 local_dir=str(dest),
+                endpoint=_HF_ENDPOINT,
             )
             _prog.ok()
     except Exception as e:

@@ -81,6 +81,11 @@ KNOWN_EMBEDDING_MODELS = {
 }
 DEFAULT_EMBEDDING_MODEL = "bge-small-en-v1.5"
 
+# Same rationale as pull.py's _HF_ENDPOINT: HF_ENDPOINT/HF_HUB_ENDPOINT are
+# ambient env vars localm never exposes as a setting, so the endpoint is
+# pinned explicitly rather than left to whatever the shell happens to set.
+_HF_ENDPOINT = "https://huggingface.co"
+
 # llama.cpp LLAMA_POOLING_TYPE_* values. UNSPECIFIED (-1) is llama.cpp's own
 # default and means "the model's declared pooling decides" (see llamacpp/_abi.py,
 # which treats that -1 as an ABI keystone).
@@ -623,7 +628,7 @@ def _download_known(name: str, repo: str, filename: str, dest: Path,
         from huggingface_hub import hf_hub_download
         dest.parent.mkdir(parents=True, exist_ok=True)
         logger.info("downloading embedding model %s/%s (one-time)...", repo, filename)
-        got = hf_hub_download(repo, filename, local_dir=str(dest.parent))
+        got = hf_hub_download(repo, filename, local_dir=str(dest.parent), endpoint=_HF_ENDPOINT)
         # hf may nest under the repo dir; normalise to dest.
         got_p = Path(got)
         if got_p.resolve() != dest.resolve() and got_p.is_file():

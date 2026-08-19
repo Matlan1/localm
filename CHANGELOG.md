@@ -259,6 +259,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
   no filesystem access no matter what was requested, even when the owner
   asked for it. The owner key can now actually grant it; the same request
   from any other key is refused instead of being quietly downgraded to none.
+- **Model downloads from HuggingFace now always go to the real HuggingFace,
+  even if something else on your machine points elsewhere.** The library
+  localm uses to pull models honors an environment variable, `HF_ENDPOINT`,
+  that redirects every download to a different host - something another
+  program on your machine could set without your knowledge, and localm never
+  exposed a setting of its own that could override it. Every model,
+  projector and embedding download now pins the real HuggingFace address
+  explicitly, so a stray `HF_ENDPOINT` can no longer change where your
+  models come from.
 
 ## [0.1.5rc3] - 2026-08-13
 
