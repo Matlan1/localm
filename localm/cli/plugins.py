@@ -461,3 +461,258 @@ def plugin_status():
         console.print(f"  [dim]+[/dim]  [bold]{p['name']}[/bold]{desc}")
     if not any_available:
         console.print("  [dim](none)[/dim]")
+
+
+# ------------------------------------------------------------------ #
+#  Plugin-scoped settings (`localm plugin config`)                     #
+#                                                                      #
+#  The terminal counterpart to the GUI's three plugin settings routes. #
+#  See settings_schema.plugin_config_kind for WHY this has two paths:  #
+#  the media and tts blocks are static schemas this process can read   #
+#  offline, while a host.add_settings() block only exists inside a     #
+#  process that has LOADED that plugin - which the CLI deliberately    #
+#  never is (set_enabled_state and friends exist to keep it that way,  #
+#  and _load would fire the on_first_use hook for what is only a read).#
+#  So the generic case asks a RUNNING localm, and when there is none   #
+#  it says exactly that rather than reporting an empty field list.     #
+# ------------------------------------------------------------------ #
+
+def _plugin_install_state(name):
+    """(installed, active) for *name*, without loading a single plugin."""
+    from localm import cli as _cli
+    for p in _cli._engine_manager().api_state().get("plugins", []):
+        if p.get("name") == name:
+            return bool(p.get("installed")), bool(p.get("active"))
+    return False, False
+
+
+def _attached_server():
+    """``(url, headers, None)`` for a running localm serving this directory, or
+    ``(None, None, reason)``. LOCALM_URL targets a different instance, in which
+    case there is no registry entry to read an attach token from and only an
+    owner key (LOCALM_API_KEY / the persisted one) authenticates - the same
+    trade `localm unload` documents."""
+    import os
+
+    from .. import instances
+    from ..auth import resolve_bearer_headers
+    from ..config import home_dir
+
+    override = os.environ.get("LOCALM_URL", "").rstrip("/")
+    if override:
+        return override, resolve_bearer_headers(None), None
+    entry = instances.find_attachable(home_dir(), instances.resolve_root_dir())
+    if entry is None:
+        return None, None, "no running localm server was found for this directory"
+    scheme = entry.get("scheme", "http")
+    url = f"{scheme}://{entry.get('host', '127.0.0.1')}:{entry.get('port')}"
+    return url, resolve_bearer_headers(entry.get("token")), None
+
+
+def _server_error(resp) -> str:
+    """The server's own reason for refusing, or a bare status when it gave none."""
+    try:
+        detail = resp.json().get("detail")
+    except Exception:
+        detail = None
+    return str(detail) if detail else f"HTTP {resp.status_code}"
+
+
+def _fmt_field_value(f) -> str:
+    """One field's resolved value for the listing."""
+    if "value" not in f:
+        # A SECRET field's value never round-trips out of the server in
+        # plaintext (plugin_settings_schema_json omits it deliberately), so
+        # report whether it is configured, never what it is.
+        return "[dim](set)[/dim]" if f.get("is_override") else "[dim](not set)[/dim]"
+    val = f.get("value")
+    if isinstance(val, bool):
+        return "true" if val else "false"
+    if val is None or val == "":
+        return "[dim](none)[/dim]"
+    if isinstance(val, list):
+        return ", ".join(str(x) for x in val) if val else "[dim](none)[/dim]"
+    return str(val)
+
+
+def _print_fields(name, fields, *, note=None):
+    if note:
+        console.print(note)
+    if not fields:
+        console.print(f"[dim]{name} declares no settings.[/dim]")
+        return
+    width = max(len(f["key"]) for f in fields)
+    for f in fields:
+        origin = "" if f.get("is_override") else "  [dim](default)[/dim]"
+        console.print(f"  [bold]{f['key']:<{width}}[/bold]  "
+                      f"{_fmt_field_value(f)}{origin}")
+    console.print(f"[dim]Set one with:  localm plugin config {name} "
+                  f"<key> <value>   (a blank value clears it)[/dim]")
+
+
+def _runtime_fields(name):
+    """One plugin's add_settings() fields from a RUNNING server, or exit with a
+    message that says which of the several "nothing to show" states this is."""
+    import requests
+
+    from .. import tls
+    installed, active = _plugin_install_state(name)
+    if not installed:
+        console.print(f"[red]No such plugin:[/red] {name}")
+        console.print("[dim]See[/dim] localm plugin status [dim]for the "
+                      "installed ones.[/dim]")
+        sys.exit(1)
+    if not active:
+        console.print(f"[yellow]{name} is installed but not enabled[/yellow], so it "
+                      f"has declared no settings.")
+        console.print(f"[dim]Enable it with:[/dim]  localm plugin enable {name}")
+        sys.exit(1)
+    url, headers, why = _attached_server()
+    if url is None:
+        # AGENTS.md rule 5: this is "could not ask", NOT "there is nothing
+        # there". A plugin declares its settings while it LOADS, so only a
+        # running localm knows this one's field list - reporting an empty
+        # section here would be a different, and false, answer.
+        console.print(f"[yellow]{name}'s settings are declared when the plugin "
+                      f"loads[/yellow], so a running localm is needed to list "
+                      f"them, and {why}.")
+        console.print("[dim]Start one with[/dim] localm gui  [dim]or[/dim]  "
+                      "localm serve <model>[dim], or set LOCALM_URL.[/dim]")
+        sys.exit(1)
+    try:
+        resp = requests.get(f"{url}/v1/plugins/settings", headers=headers,
+                            timeout=15, verify=tls.requests_verify(url))
+    except requests.RequestException as e:
+        console.print(f"[red]Could not reach the localm server at {url}:[/red] {e}")
+        sys.exit(1)
+    if resp.status_code != 200:
+        console.print(f"[red]The server refused the request:[/red] "
+                      f"{_server_error(resp)}")
+        sys.exit(1)
+    for section in resp.json().get("plugins", []):
+        if section.get("plugin") == name:
+            return url, headers, section.get("fields") or []
+    # The server DID answer, and this plugin is not in its list: a real empty.
+    return url, headers, []
+
+
+@plugin.command("config")
+@click.argument("name")
+@click.argument("key", required=False)
+@click.argument("value", required=False)
+def plugin_config(name, key, value):
+    """Show or set one plugin's own settings.
+
+    These are the per-plugin blocks the GUI edits under Settings, which
+    `localm config` cannot reach: it writes top-level keys, while these live
+    under a plugin of their own.
+
+    \b
+    Examples:
+      localm plugin config image                      # list, with resolved values
+      localm plugin config image workdir              # show one
+      localm plugin config image workdir /srv/comfy   # set it for image only
+      localm plugin config image workdir ""           # clear, back to the shared default
+      localm plugin config video float_type fp16
+      localm plugin config music use_config_from image
+      localm plugin config tts voice af_heart
+
+    image, music, video and tts are readable and settable offline. Any other
+    plugin declares its settings as it loads, so listing or setting those needs
+    a running localm (this command finds it the way `localm status` does).
+    """
+    from ..config import load_config
+    from ..settings_schema import (apply_local_plugin_config,
+                                   local_plugin_config_fields,
+                                   plugin_config_kind)
+
+    if plugin_config_kind(name) == "runtime":
+        _runtime_plugin_config(name, key, value)
+        return
+
+    installed, active = _plugin_install_state(name)
+    note = None
+    if not active:
+        # Not a refusal: the settings routes deliberately accept a write for an
+        # inactive plugin so it can be configured BEFORE being enabled (see
+        # _tts_payload's `active` note). Say so instead of failing.
+        state = "installed but not enabled" if installed else "not installed"
+        note = (f"[dim]{name} is {state}; these settings are stored either way "
+                f"and apply once it runs.[/dim]")
+
+    if key is None:
+        _print_fields(name, local_plugin_config_fields(name, load_config()),
+                      note=note)
+        return
+
+    if value is None:
+        fields = {f["key"]: f for f in local_plugin_config_fields(name, load_config())}
+        f = fields.get(key)
+        if f is None:
+            from ..settings_schema import local_plugin_config_keys
+            console.print(f"[red]Unknown setting for {name}:[/red] {key}")
+            console.print("[dim]Settable keys: "
+                          f"{', '.join(local_plugin_config_keys(name))}[/dim]")
+            sys.exit(1)
+        console.print(_fmt_field_value(f))
+        return
+
+    try:
+        _, stored = apply_local_plugin_config(name, key, value)
+    except ValueError as e:
+        raise click.ClickException(str(e))
+    _report_set(name, key, stored)
+
+
+def _report_set(name, key, stored):
+    if stored is None:
+        console.print(f"[green]OK[/green] {name}.{key} cleared "
+                      f"[dim](back to the default)[/dim]")
+    else:
+        console.print(f"[green]OK[/green] {name}.{key} = {stored}")
+
+
+def _runtime_plugin_config(name, key, value):
+    """`plugin config` for a host.add_settings() block, over a running server."""
+    import requests
+
+    from .. import tls
+    url, headers, fields = _runtime_fields(name)
+
+    if key is None:
+        _print_fields(name, fields)
+        return
+    known = [f["key"] for f in fields]
+    if key not in known:
+        console.print(f"[red]Unknown setting for {name}:[/red] {key}")
+        if known:
+            console.print(f"[dim]Settable keys: {', '.join(known)}[/dim]")
+        sys.exit(1)
+    if value is None:
+        console.print(_fmt_field_value(
+            next(f for f in fields if f["key"] == key)))
+        return
+
+    try:
+        resp = requests.post(f"{url}/v1/plugins/{name}/settings", json={key: value},
+                             headers=headers, timeout=30,
+                             verify=tls.requests_verify(url))
+    except requests.RequestException as e:
+        console.print(f"[red]Could not reach the localm server at {url}:[/red] {e}")
+        sys.exit(1)
+    if resp.status_code != 200:
+        console.print(f"[red]The server refused the change:[/red] "
+                      f"{_server_error(resp)}")
+        sys.exit(1)
+    saved = {f["key"]: f for f in resp.json().get("fields", [])}.get(key, {})
+    if not saved.get("is_override"):
+        _report_set(name, key, None)
+    elif "value" not in saved:
+        # A SECRET field's value is deliberately never echoed back
+        # (plugin_settings_schema_json omits it), so confirm the write without
+        # inventing a value - and, the reason this branch exists, without
+        # reading that absence as "cleared", which is what a plain
+        # saved.get("value") did: it reported a successful SET as a CLEAR.
+        console.print(f"[green]OK[/green] {name}.{key} set [dim](not shown)[/dim]")
+    else:
+        _report_set(name, key, saved.get("value"))

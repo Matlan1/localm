@@ -2039,3 +2039,236 @@ def validate_plugin_settings_update(fields, updates: dict) -> dict:
             raise ValueError(f"unknown setting: {key!r}")
         merge[key] = _coerce_plugin_field_value(f, val)
     return merge
+
+
+# --------------------------------------------------------------------------- #
+#  CLI-facing view of ONE plugin's own settings block                          #
+#  (`localm plugin config <name> [<key> [<value>]]`)                           #
+#                                                                              #
+#  The GUI reaches these blocks through three routes (POST /v1/media/config/   #
+#  <name>, POST /v1/tts/config, POST /v1/plugins/<name>/settings). A CLI needs #
+#  the same reach, and the awkward part is that those three do NOT share a     #
+#  source for their field list:                                                #
+#                                                                              #
+#    image/music/video  MEDIA_PLUGIN_FIELDS   a module constant, always known  #
+#    tts                TTS_FIELDS            a module constant, always known  #
+#    anything else      host.add_settings()   supplied at register() time, so  #
+#                                             it exists ONLY inside a process  #
+#                                             that has LOADED that plugin      #
+#                                                                              #
+#  A CLI process has not loaded any plugin, and deliberately never does: the   #
+#  app-free set_enabled_state / set_installed_state / set_installed_from_dir   #
+#  exist precisely so CLI plugin management never runs a plugin's register()   #
+#  (see their docstrings in plugins/engine.py, and every command in            #
+#  cli/plugins.py uses them). Loading one just to read its field list would    #
+#  not be a free probe either: PluginManager._load calls _maybe_fire_first_use,#
+#  which invokes the on_first_use lifecycle hook and writes config for it - so #
+#  a READ would have a side effect. A no-app load also fails outright for any  #
+#  plugin that mounts routes (app is None), so it would work for some plugins  #
+#  and silently not others.                                                    #
+#                                                                              #
+#  So the CLI answers the static two itself, offline, exactly the way          #
+#  `localm config` already answers the core schema - and for a runtime-        #
+#  declared block it asks a RUNNING localm over the existing routes.           #
+#  plugin_config_kind() is the discriminator, and its "runtime" answer is a    #
+#  real answer the caller must report as such: "this plugin has to be running  #
+#  for its settings to be listed" is a different state from "this plugin has   #
+#  no settings", and collapsing the two would report an unasked question as an #
+#  empty result (AGENTS.md rule 5).                                            #
+# --------------------------------------------------------------------------- #
+
+#: The two per-plugin media keys that are NOT MediaFields. Both live in the same
+#: config["plugins"][<media>] block and both are per-plugin (no global comfy_*
+#: fallback), so neither is reachable through `localm config`. Each already has
+#: its own rule owned elsewhere, so they are DESCRIBED here for the field
+#: listing and DISPATCHED to those owners on write rather than folded into
+#: validate_media_block.
+#:
+#: Deliberately NOT added to MEDIA_PLUGIN_FIELDS: that list is what the GUI's
+#: media settings section renders, and `workflow` already has a richer GUI
+#: affordance of its own (the workflow manager), so adding it there would
+#: duplicate an existing control rather than add a missing one.
+MEDIA_EXTRA_KEYS = ("workflow", "use_config_from")
+
+
+def plugin_config_kind(name: str) -> str:
+    """Which source can describe plugin *name*'s settable settings block.
+
+    ``"media"`` / ``"tts"`` - a static schema in this module, readable offline.
+    ``"runtime"`` - a host.add_settings() block, known only to a process that
+    has actually loaded the plugin, so the caller must ask a running server.
+    Note "runtime" is also the answer for a name that is not a plugin at all;
+    telling those two apart needs the installed-plugin list, which the caller
+    has and this function does not.
+    """
+    if name in MEDIA_PLUGINS:
+        return "media"
+    if name == TTS_PLUGIN:
+        return "tts"
+    return "runtime"
+
+
+def _media_extra_fields(name: str, block: dict) -> list:
+    """Descriptors for MEDIA_EXTRA_KEYS, in media_schema_json's shape."""
+    from localm import media_workflows
+    others = [p for p in MEDIA_PLUGINS if p != name]
+    try:
+        choices = [w["name"] for w in media_workflows.list_workflows(name, active=None)]
+    except Exception:
+        # A listing that could not be MADE is not an empty listing, so omit the
+        # options key entirely rather than render "no workflows available". The
+        # key stays settable; select_workflow does the real existence check.
+        choices = None
+    selected = block.get("workflow")
+    share = block.get("use_config_from")
+    fields = [
+        {"key": "workflow", "widget": Widget.SELECT,
+         "label": "ComfyUI workflow",
+         "help": "Uploaded workflow this plugin generates with. Blank falls back "
+                 "to the shipped example template.",
+         "value": selected if isinstance(selected, str) and selected else None,
+         "is_override": bool(isinstance(selected, str) and selected),
+         "global": None},
+        {"key": "use_config_from", "widget": Widget.SELECT,
+         "label": "Use config from",
+         "help": "Reuse another media plugin's backend settings live instead of "
+                 "this plugin's own. Blank uses its own.",
+         "value": share if isinstance(share, str) and share else None,
+         "is_override": bool(isinstance(share, str) and share),
+         "global": None, "options": others},
+    ]
+    if choices is not None:
+        fields[0]["options"] = choices
+    return fields
+
+
+def local_plugin_config_fields(name: str, cfg: dict) -> list:
+    """Every field ``localm plugin config <name>`` can address, with its
+    RESOLVED value, for a plugin whose schema is static.
+
+    Owner view throughout: a CLI caller on this machine IS the owner, which is
+    the default media_schema_json / tts_schema_json already document for
+    callers that are not request-scoped. Raises ValueError for a
+    runtime-declared plugin, which this function structurally cannot describe.
+    """
+    kind = plugin_config_kind(name)
+    plugins = cfg.get("plugins") if isinstance(cfg.get("plugins"), dict) else {}
+    block = plugins.get(name) if isinstance(plugins.get(name), dict) else {}
+    if kind == "media":
+        return media_schema_json(name, block, cfg) + _media_extra_fields(name, block)
+    if kind == "tts":
+        return tts_schema_json(block)
+    raise ValueError(f"{name!r} has no static settings schema")
+
+
+def local_plugin_config_keys(name: str) -> list:
+    """The settable key names for a static-schema plugin, in display order."""
+    kind = plugin_config_kind(name)
+    if kind == "media":
+        return [f.key for f in media_fields_for(name)] + list(MEDIA_EXTRA_KEYS)
+    if kind == "tts":
+        return [f.key for f in TTS_FIELDS]
+    raise ValueError(f"{name!r} has no static settings schema")
+
+
+def _validate_use_config_from(name: str, value, cfg: dict):
+    """Coerce + check a media plugin's share-config pointer. Blank clears it."""
+    from localm.plugins import media_config
+    if value is None:
+        return None
+    src = str(value).strip()
+    if not src:
+        return None
+    others = ", ".join(p for p in MEDIA_PLUGINS if p != name)
+    if src not in MEDIA_PLUGINS or src == name:
+        raise ValueError(f"use_config_from: {value!r} is not one of: {others}")
+    # Cycle prevention is the whole reason this key needs a validator rather
+    # than being free text: image<-video while video<-image makes resolve_config
+    # fall back with a warning on EVERY read instead of failing here, once.
+    if media_config.would_cycle(name, src, cfg):
+        raise ValueError(
+            f"use_config_from: {src!r} already takes its config from {name!r} "
+            f"(directly or through another plugin), which would be a cycle")
+    return src
+
+
+def _deep_merge_block(dst: dict, src: dict) -> None:
+    """Merge a validated media block into the stored one, nested keys included -
+    the same shape POST /v1/media/config/<name> uses, so a CLI write leaves this
+    plugin's other fields (and the other plugins) exactly as the GUI would."""
+    for k, v in src.items():
+        if isinstance(v, dict) and isinstance(dst.get(k), dict):
+            _deep_merge_block(dst[k], v)
+        else:
+            dst[k] = v
+
+
+def _own_block_mutator(name: str, apply):
+    """update_config callback that hands *apply* this plugin's own block,
+    creating config["plugins"][name] when it does not exist yet."""
+    def _mutate(cfg: dict) -> None:
+        plugins = cfg.get("plugins")
+        if not isinstance(plugins, dict):
+            plugins = cfg["plugins"] = {}
+        block = plugins.get(name)
+        if not isinstance(block, dict):
+            block = plugins[name] = {}
+        apply(block)
+    return _mutate
+
+
+def apply_local_plugin_config(name: str, key: str, value) -> tuple:
+    """Validate and PERSIST one field of a static-schema plugin's block.
+
+    Returns ``(key, stored_value)``, where a stored None means the override was
+    CLEARED - back to the shared global comfy_* default for a media field, or to
+    the shipped template default for a tts one. Raises ValueError with a usable
+    message on an unknown key or a bad value; the caller reports it and exits
+    non-zero.
+
+    Each key is dispatched to whichever writer already owns its rule, so there
+    stays exactly one definition of each: validate_media_block /
+    validate_tts_block for the schema fields (the same validators the HTTP
+    routes call), and media_workflows.select_workflow for `workflow` (which owns
+    both the does-this-file-exist check and the pop-on-clear that the GUI's own
+    selection route relies on).
+    """
+    from localm.config import load_config, update_config
+    kind = plugin_config_kind(name)
+    if kind == "runtime":
+        raise ValueError(f"{name!r} has no static settings schema")
+    known = local_plugin_config_keys(name)
+    if key not in known:
+        raise ValueError(f"unknown setting for {name!r}: {key!r}. "
+                         f"Settable keys: {', '.join(known)}")
+
+    if kind == "media" and key == "workflow":
+        from localm import media_workflows
+        chosen = media_workflows.select_workflow(
+            name, str(value).strip() if value is not None else None)
+        return key, chosen
+
+    if kind == "media" and key == "use_config_from":
+        src = _validate_use_config_from(name, value, load_config())
+
+        def _share(block: dict) -> None:
+            if src is None:
+                block.pop("use_config_from", None)
+            else:
+                block["use_config_from"] = src
+
+        update_config(_own_block_mutator(name, _share))
+        return key, src
+
+    if kind == "media":
+        merge = validate_media_block(name, {key: value})
+        field = {f.key: f for f in media_fields_for(name)}[key]
+        stored = _block_get(merge, field.block_path)
+        update_config(_own_block_mutator(
+            name, lambda block: _deep_merge_block(block, merge)))
+        return key, stored
+
+    merge = validate_tts_block({key: value})
+    update_config(_own_block_mutator(
+        TTS_PLUGIN, lambda block: block.update(merge)))
+    return key, merge[key]
