@@ -441,6 +441,51 @@ class TestDeclaredRolesCoverTheShippedWorkflow:
         assert media_roles.plugin_model_roles(FastAPI(), "image") == []
 
 
+class TestDocumentedRoleContract:
+    """docs/plugins.md's "Model roles" section states these. A documented claim
+    with no runnable check is exactly the kind that quietly stops being true (it
+    sits next to the code, so readers trust it and nobody re-derives it)."""
+
+    def test_an_unknown_model_type_raises_at_registration(self):
+        """Documented as raising at register() time - the alternative is a role
+        that silently never matches anything and reads as an empty picker."""
+        from localm.plugins.contract import ModelRoleDescriptor
+        from localm.plugins.engine import PluginHost, PluginSpec
+        host = PluginHost(FastAPI(), object(), PluginSpec(name="demo"))
+        with pytest.raises(ValueError, match="Invalid model_type"):
+            host.register_model_role(
+                ModelRoleDescriptor("demo-x", "X", "not-a-real-type"))
+
+    def test_plugin_name_is_stamped_by_the_host_not_the_plugin(self):
+        """Documented as "filled in by the host; do not set it" - the roles
+        surface filters by it, so a plugin able to forge it could label its
+        slots as another plugin's."""
+        from localm.plugins.contract import ModelRoleDescriptor
+        from localm.plugins.engine import PluginHost, PluginSpec
+        host = PluginHost(FastAPI(), object(), PluginSpec(name="demo"))
+        host.register_model_role(
+            ModelRoleDescriptor("demo-vae", "VAE", "vae", plugin_name="someone-else"))
+        assert host.model_roles[0].plugin_name == "demo"
+
+    def test_a_disabled_plugin_stops_reporting_its_roles(self, tmp_path, monkeypatch):
+        """Documented as "a disabled or uninstalled plugin's roles stop being
+        reported". Nothing clears host.model_roles on unmount - what makes the
+        claim true is that the engine only walks LOADED hosts, so this pins the
+        behaviour rather than the mechanism."""
+        app = _media_app(tmp_path, monkeypatch, "image")
+        manager = app.state.plugin_manager
+        assert media_roles.plugin_model_roles(app, "image")
+        manager._unload("image")
+        assert media_roles.plugin_model_roles(app, "image") == []
+
+    def test_every_declared_role_uses_a_real_registry_type(self, tmp_path, monkeypatch):
+        from localm.model_manager.registry import MODEL_TYPES
+        for plugin in ("image", "music", "video"):
+            app = _media_app(tmp_path, monkeypatch, plugin)
+            for r in media_roles.plugin_model_roles(app, plugin):
+                assert r["model_type"] in MODEL_TYPES
+
+
 # --------------------------------------------------------------------------- #
 #  the three routes
 # --------------------------------------------------------------------------- #
