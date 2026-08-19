@@ -3086,6 +3086,32 @@ def _do_shutdown(*, instance_id: Optional[str] = None) -> None:
     the crash-marker clear to THIS instance only - see bugreport.py's
     per-instance-scoping note; omitting it falls back to the legacy shared
     marker name rather than silently skipping the clear."""
+    # Stop the child processes of any in-flight background job FIRST. A start_cli
+    # job runs `python -m localm <cmd>` as a real child (a model pull, a runtime
+    # provision, a ComfyUI setup): os._exit below bypasses atexit, the job worker
+    # thread is a daemon so its finally may never run, and the Popen carries no
+    # creationflags - so without this the child is simply ABANDONED. It keeps
+    # running with its stdout pipe dead, keeps writing into the shared data dir
+    # after this server is gone, and no record of it survives anywhere. ADR-0008
+    # inferred that from the code shape and deferred it as option E; it is
+    # measured now, and the child does outlive the exit.
+    #
+    # FIRST in the sequence, before the engine and embedder teardown below,
+    # because a media child can itself hold VRAM and any child can keep writing
+    # to the data dir - both of which the teardown below is trying to finish.
+    #
+    # The registry is deliberately left saying "running" rather than cancelled:
+    # the next start reconciles those rows to "interrupted", which is the honest
+    # word for a server that stopped while work was in flight (ADR-0008 R3).
+    try:
+        from localm.plugins.gui.jobs import terminate_children_for_exit
+        _killed = terminate_children_for_exit()
+        if _killed:
+            from localm.debuglog import logger as _dbg
+            _dbg.info("terminated %d in-flight job child process(es) on shutdown", _killed)
+    except Exception:
+        _dbg_swallow("terminating job child processes during shutdown failed "
+                     "(non-fatal); a child may be left running")
     # Unload all engines in the multi-model dictionary
     for engine in list(_engines.values()):
         try:
@@ -3212,6 +3238,33 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
     into them - see that wait's own comment further down for the full
     rationale. Best-effort: an unmeasurable/wedged probe must not block a
     restart the user asked for - vram_capacity() is itself deadline-bounded."""
+    # Stop the child processes of any in-flight background job FIRST. A start_cli
+    # job runs `python -m localm <cmd>` as a real child (a model pull, a runtime
+    # provision, a ComfyUI setup): os.execv below bypasses atexit, the job worker
+    # thread is a daemon so its finally may never run, and the Popen carries no
+    # creationflags - so without this the child is simply ABANDONED. It keeps
+    # running with its stdout pipe dead, keeps writing into the shared data dir
+    # after this server is gone, and no record of it survives anywhere. ADR-0008
+    # inferred that from the code shape and deferred it as option E; it is
+    # measured now, and the child does outlive the exit.
+    #
+    # FIRST in the sequence, before the engine and embedder teardown below,
+    # because a media child can itself hold VRAM and any child can keep writing
+    # to the data dir - both of which the teardown below is trying to finish.
+    #
+    # The registry is deliberately left saying "running" rather than cancelled:
+    # the next start reconciles those rows to "interrupted", which is the honest
+    # word for a server that stopped while work was in flight (ADR-0008 R3).
+    try:
+        from localm.plugins.gui.jobs import terminate_children_for_exit
+        _killed = terminate_children_for_exit()
+        if _killed:
+            from localm.debuglog import logger as _dbg
+            _dbg.info("terminated %d in-flight job child process(es) on restart", _killed)
+    except Exception:
+        _dbg_swallow("terminating job child processes during restart failed "
+                     "(non-fatal); a child may be left running")
+
     free_before = None
     try:
         from localm.discover import vram_capacity

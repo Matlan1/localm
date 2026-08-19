@@ -15,19 +15,32 @@ import asyncio
 import collections
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
 import time
 import uuid
+import weakref
 from dataclasses import dataclass, field
-from typing import Optional
+from pathlib import Path
+from typing import Callable, Optional
 
 from localm.model_manager import PROGRESS_SENTINEL
 
 # Bound on both the replay backlog and each subscriber's queue, mirroring the
 # old single-queue's maxsize so a very long-lived job cannot grow unbounded.
 _HISTORY_MAX = 10_000
+
+# Every status a job can hold. "interrupted" is the one that needs explaining:
+# it means THIS SERVER STOPPED while the operation was in flight, so its outcome
+# is unknown - not that the work failed, and not that anyone cancelled it. Those
+# are three different claims and ADR-0008 R3 forbids them sharing a word ("I lost
+# the connection" and "the work failed" are different claims; see #1065's
+# disconnected-vs-failed split for the same rule applied to the SSE channel).
+# Reporting a restart-orphaned pull as "failed" would assert something nobody
+# measured: the download may well have completed on disk.
+_JOB_STATUSES = ("running", "done", "failed", "cancelled", "interrupted")
 
 
 def _safe_put(q: asyncio.Queue, event: dict) -> None:
@@ -52,7 +65,7 @@ class Job:
     id: str
     kind: str                      # "pull" | "imagine" | ...
     argv: list
-    status: str = "running"        # running | done | failed | cancelled
+    status: str = "running"        # one of _JOB_STATUSES - see that tuple
     returncode: Optional[int] = None
     result: Optional[str] = None   # kind-specific payload (e.g. output image path)
     created_at: float = field(default_factory=time.time)
@@ -104,6 +117,99 @@ class Job:
     # returncode above - no lock needed, unlike _history/_subscribers which
     # are also read cross-thread by SSE subscribers.
     _outcome: Optional[str] = None
+    # Called (best-effort, never allowed to raise into the job) whenever this
+    # job's DURABLE state changes: a cancel, and the one-time finished stamp.
+    # Set by JobManager when it registers the job, so the manager can persist
+    # without Job needing to know what a store is - the same shape as _proc,
+    # which Job holds without knowing anything about subprocess management.
+    # Progress deliberately does NOT notify: a per-second tick would rewrite
+    # the whole store file, which is exactly the objection ADR-0008 raised
+    # against reusing the scheduled-jobs store for this.
+    _notify: Optional[Callable[[], None]] = None
+    # For a job REBUILT from a persisted row (see from_record): the pid its child
+    # process had in the previous run, or None. Never used to signal anything -
+    # that pid may have been recycled by an unrelated process - only to report
+    # that an orphan may still be running. Absent on a live job, which has _proc.
+    restored_child_pid: Optional[int] = None
+
+    # ---- durable record -------------------------------------------------- #
+    # A row carries only what a LISTING and an ownership check need. Notably NOT
+    # argv, which summary() already withholds from clients because it carries the
+    # resolved model spec and any host path the caller passed; there is no reason
+    # for a durable file to hold what the API refuses to hand out. Progress is
+    # not persisted either (see _notify above), so a recovered row reports an
+    # UNKNOWN percentage rather than a stale one.
+
+    def to_record(self) -> dict:
+        """This job as a persistable row. Reads plain fields only, never the
+        _sub_lock-guarded history/subscribers, so it is safe to call under the
+        manager's own lock without adding a lock edge."""
+        pid = self.restored_child_pid
+        proc = self._proc
+        if proc is not None:
+            try:
+                pid = int(proc.pid)
+            except Exception:
+                pass
+        return {
+            "id": self.id,
+            "kind": self.kind,
+            "label": self.label,
+            "status": self.status,
+            "created_at": self.created_at,
+            "finished_at": self.finished_at,
+            "returncode": self.returncode,
+            "result": self.result,
+            "owner": self.owner,
+            "child_pid": pid,
+        }
+
+    @classmethod
+    def from_record(cls, data: dict) -> "Job":
+        """Rebuild a job from a persisted row, or raise ValueError on a row this
+        build cannot make sense of (the caller skips it and counts it, matching
+        the scheduled-jobs store's per-entry posture).
+
+        The result is a RECORD, not a live job: argv is empty and _proc is None,
+        the same shape a start_fn job already has. created_at is required and
+        must be a real number, because snapshot() sorts on it - a None there
+        would raise inside the listing route rather than at load time, which is
+        the wrong place to find out."""
+        jid = data.get("id")
+        if not isinstance(jid, str) or not jid.strip():
+            raise ValueError("row has no id")
+        status = data.get("status")
+        if status not in _JOB_STATUSES:
+            raise ValueError(f"unknown status {status!r}")
+        created = data.get("created_at")
+        if not isinstance(created, (int, float)):
+            raise ValueError(f"created_at must be a number, got {created!r}")
+        finished = data.get("finished_at")
+        if finished is not None and not isinstance(finished, (int, float)):
+            raise ValueError(f"finished_at must be a number or null, got {finished!r}")
+        rc = data.get("returncode")
+        if rc is not None and not isinstance(rc, int):
+            rc = None
+        pid = data.get("child_pid")
+        if not isinstance(pid, int) or pid <= 0:
+            pid = None
+        label = data.get("label")
+        result = data.get("result")
+        owner = data.get("owner")
+        job = cls(
+            id=jid,
+            kind=str(data.get("kind") or "unknown"),
+            argv=[],
+            status=status,
+            returncode=rc,
+            result=result if isinstance(result, str) else None,
+            created_at=float(created),
+            finished_at=(float(finished) if finished is not None else None),
+            label=label if isinstance(label, str) else None,
+            owner=owner if isinstance(owner, str) else None,
+        )
+        job.restored_child_pid = pid
+        return job
 
     @property
     def cancel_requested(self) -> bool:
@@ -211,6 +317,7 @@ class Job:
         proc = self._proc
         if proc is not None and proc.poll() is None:
             proc.terminate()
+        self._fire_notify()
 
     def mark_finished(self) -> None:
         """Stamp finished_at once, when the worker thread leaves. Idempotent so
@@ -218,6 +325,27 @@ class Job:
         the timestamp forward and give the job a second lease on the TTL."""
         if self.finished_at is None:
             self.finished_at = time.time()
+            # Inside the idempotence guard on purpose: the notify exists to
+            # persist the terminal state ONCE, and a second call has nothing new
+            # to record.
+            self._fire_notify()
+
+    def _fire_notify(self) -> None:
+        """Tell the owning manager this job's durable state moved. Best-effort by
+        contract: persistence is a convenience layered on top of a job, and a
+        store problem must never propagate into the job's own control flow
+        (rule 5 keeps it visible - the manager's own handler logs it)."""
+        cb = self._notify
+        if cb is None:
+            return
+        try:
+            cb()
+        except Exception:
+            try:
+                from localm.debuglog import logger
+                logger.debug("job %s state notify failed", self.id, exc_info=True)
+            except Exception:
+                pass
 
     def mark_outcome(self, status: str) -> None:
         """Record that THIS job's own real work has verifiably finished with
@@ -350,14 +478,742 @@ class _HostAnnouncer:
             self._say(msg)
 
 
+# --------------------------------------------------------------------------- #
+#  Durable record of in-flight operations                                     #
+# --------------------------------------------------------------------------- #
+# ADR-0008 chose the in-memory registry and DEFERRED durability as its option E,
+# naming the consequence in its own limits section: "a server restart still loses
+# the record while a pull may continue". This closes that.
+#
+# WHY NOT REUSE THE SCHEDULED-JOBS STORE (localm/plugins/builtin/jobs/store.py):
+# ADR-0008 rejected it on four grounds that all still hold - its Job is a
+# recurring TASK DEFINITION with no concept of an in-flight instance, it rewrites
+# the whole file under one process-wide lock on every mutation, it has no startup
+# reconciliation, and the plugin is OPTIONAL and not preinstalled while this
+# registry is kernel and always present. That last one is also why the quarantine
+# helpers below are a local implementation rather than an import: kernel code must
+# not depend on a plugin that may not be installed. The POSTURE is deliberately
+# copied though (atomic temp+replace, owner-restricted, corrupt-file quarantine,
+# per-row skip on a bad entry), because that posture was earned - see issue #859
+# and audit F4 in that file's own comments.
+#
+# ONE FILE PER WRITER, named <pid>-<run>.json under <data dir>/activity/. The pid
+# half is what a later run reads to decide whether the writer is GONE; the run
+# half is a nonce minted per store instance, and it is not decoration - MEASURED
+# 2026-08-19, with a pid-only name and two managers alive in one process (which
+# gui/web.py's fallback can legitimately create), 37 of 40 terminal writes were
+# LOST: both managers wrote the same path through config.atomic_write_private's
+# FIXED "<name>.tmp" temp, so one writer's os.replace moved the temp out from
+# under the other and failed with WinError 2, leaving the file claiming "running"
+# for a job that had finished. A per-manager lock cannot fix that, which is
+# exactly what the sibling store's own _STORE_LOCK comment says about several
+# instances pointing at one file. So: a path unique per (process, store) removes
+# the collision, and _STORE_LOCK below serialises whatever remains in-process.
+# Two further consequences, both wanted:
+#   * Several localm servers can share one data dir (ADR-0002), and none of them
+#     can clobber another's record, because no writer ever touches another
+#     writer's file.
+#   * The sibling store RAISES on an unreadable file specifically so that a
+#     failed read cannot be followed by a write that erases intact data (its
+#     audit F4). That hazard is structurally absent here rather than ignored: the
+#     only file this process ever WRITES is its own, so a file it could not READ
+#     is never a file it is about to overwrite.
+# The pid, not the instance_id, is what liveness is checked against, because a
+# restart re-execs and re-advertises with a FRESH instance_id (see
+# http_server._do_restart) - an id-keyed file could never be recognised again by
+# the server that wrote it. Pid REUSE is handled by the run nonce plus the
+# in-process registry rather than by trusting the pid: see _ActivityStore.reap.
+#
+# PRIVACY. This is written in every session mode, including the privacy default,
+# and that is a considered position rather than an oversight. Privacy mode is
+# about automatic traces of SESSION CONTENT (audit trails, transcripts,
+# checkpoints, generation sidecars - see localm/audit.py). An in-flight operation
+# record is operational runtime state, the same class as the instance registry
+# (localm/instances.py, which writes pid/port/root_dir/token) and the GPU
+# coordination registry (localm/gpu_registry.py, which writes the loaded MODEL
+# NAME) - neither consults effective_mode, both write 0600 into the data dir. The
+# row deliberately holds no session content, no prompts and no argv, and the TTL
+# sweep drops it an hour after the operation finishes.
+_ACTIVITY_VERSION = 1
+
+# Serialises every activity-store operation IN THIS PROCESS. Not an instance lock
+# and not the manager's lock, for the reason measured above: two JobManagers can
+# coexist in one process, each with its own lock, and reconciliation additionally
+# reads and DELETES files a sibling manager may be reaping at the same moment.
+# Home-scale data, so one coarse lock is fine - the same call the sibling
+# scheduled-jobs store makes. Lock order in this module is always
+# JobManager._lock OUTER, _STORE_LOCK INNER (persisting happens under the
+# manager's lock); nothing here ever reaches back for the manager's lock, so that
+# order cannot invert.
+_STORE_LOCK = threading.RLock()
+
+# How many corrupt-copies to keep across the whole activity dir. Per-pid file
+# names mean each pid would otherwise start its own unbounded series, so unlike
+# the sibling store this prunes across the DIRECTORY, not per file name.
+_QUARANTINE_KEEP = 3
+
+# `owner` holds the sha256 of the creating key - the same digest the keystore
+# stores (http_server.principal_id returns key_hash). A quarantine copy is made
+# from a file that FAILED to parse, so it cannot be re-serialised through json:
+# the redaction has to work on raw text. Matches the digest SHAPE (64 hex) so a
+# mangled value is left alone rather than replaced blind. Same regex as the
+# scheduled-jobs store's, for the same field, for the same reason (issue #859).
+_OWNER_DIGEST_RE = re.compile(r'("owner"\s*:\s*)"[0-9a-fA-F]{64}"')
+
+# What the digest is replaced WITH, and this is the load-bearing detail:
+# job_owner_ok (inference/http_server.py) treats owner=None as "unowned, so
+# unrestricted". Dropping or nulling the field would therefore turn every
+# recovered row into one ANY caller may stream and cancel - trading a digest that
+# is already owner-only on disk for an open ACL. A non-null, non-hex sentinel can
+# never equal a principal_id() (always 64 hex), so a recovered row resolves to
+# NOBODY and fails CLOSED: unreachable to a scoped key, still reachable to an
+# admin/owner key.
+_REDACTED_OWNER = "redacted-on-quarantine"
+
+
+def activity_dir() -> Path:
+    """The in-flight operation record dir (``<data dir>/activity``), resolved at
+    CALL time so a test that repoints LOCALM_HOME is honoured (home_dir() is
+    itself lazy). Deliberately NOT ``<data dir>/run``: the instance reaper globs
+    ``*.json`` there and would try to parse these as instance entries."""
+    from localm.config import home_dir
+    return (home_dir() / "activity").resolve()
+
+
+def _redact_owner_digests(raw: str) -> str:
+    """Strip owner key digests out of a corrupt record file before it is copied
+    aside, keeping everything else the copy exists to preserve.
+
+    Reports at warning when a digest-shaped value survives: a partially corrupt
+    file can hold one in a position this cannot match, and a redaction that
+    silently half-happened must not look like one that fully did (rule 5)."""
+    if not raw:
+        return raw
+    out, n = _OWNER_DIGEST_RE.subn(rf'\1"{_REDACTED_OWNER}"', raw)
+    if re.search(r"\b[0-9a-fA-F]{64}\b", out):
+        try:
+            from localm.debuglog import logger
+            logger.warning(
+                "activity store: quarantine copy still holds a digest-shaped "
+                "value after redacting %d owner field(s); the file is corrupt, "
+                "so it may carry one in a form this cannot match", n)
+        except Exception:
+            pass
+    return out
+
+
+class _ActivityStore:
+    """Reads and writes this process's in-flight operation record.
+
+    Every method is BEST-EFFORT for the caller's purposes: ``write`` returns
+    False rather than raising, and ``reap`` returns whatever it could read. A
+    persistence problem must never break the operation being recorded, and must
+    never be silent either - each failure logs (rule 5)."""
+
+    def __init__(self, root: Optional[Path] = None, *,
+                 pid: Optional[int] = None, run: Optional[str] = None) -> None:
+        self._root_override = Path(root).resolve() if root is not None else None
+        self._pid = int(pid) if pid is not None else os.getpid()
+        self._run = str(run) if run else uuid.uuid4().hex[:12]
+
+    @property
+    def root(self) -> Path:
+        return self._root_override if self._root_override is not None else activity_dir()
+
+    @property
+    def path(self) -> Path:
+        return self.root / f"{self._pid}-{self._run}.json"
+
+    @property
+    def pid(self) -> int:
+        return self._pid
+
+    # ---- write ----------------------------------------------------------- #
+    def write(self, rows: list) -> bool:
+        """Persist *rows* atomically, owner-restricted. Returns success."""
+        with _STORE_LOCK:
+            return self._write(rows)
+
+    def _write(self, rows: list) -> bool:
+        try:
+            d = self.root
+            d.mkdir(parents=True, exist_ok=True)
+            try:
+                os.chmod(d, 0o700)
+            except OSError:
+                pass          # POSIX-only nicety; the FILE ACL is what matters
+            payload = {"version": _ACTIVITY_VERSION, "pid": self._pid,
+                       "operations": rows}
+            # The shared temp+restrict+replace primitive, not a sixth private
+            # variant of the same dance: rows carry the owner key digest, so the
+            # file must be owner-only from the moment the bytes first exist, on
+            # Windows as well as POSIX. Its FIXED "<name>.tmp" temp name is safe
+            # here only because two things hold together - the destination path is
+            # unique per (process, store), and _STORE_LOCK serialises every writer
+            # in this process. Break either and the measured 37-of-40 lost-write
+            # race in the module note above comes straight back.
+            from localm.config import atomic_write_private
+            atomic_write_private(
+                self.path, json.dumps(payload, indent=2, ensure_ascii=False))
+            return True
+        except Exception as e:
+            try:
+                from localm.debuglog import logger
+                logger.warning(
+                    "activity store: could not persist the in-flight operation "
+                    "record to %s (%s); a restart will not be able to report "
+                    "what was running", self.path, e)
+            except Exception:
+                pass
+            return False
+
+    def clear(self) -> None:
+        """Remove this process's record file, for when there is nothing left to
+        record - so a data dir does not accumulate empty files."""
+        with _STORE_LOCK:
+            self._clear()
+
+    def _clear(self) -> None:
+        try:
+            self.path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            try:
+                from localm.debuglog import logger
+                logger.debug("activity store: could not remove %s (%s)",
+                             self.path, e)
+            except Exception:
+                pass
+
+    # ---- read + reconcile ------------------------------------------------- #
+    def reap(self, *, skip=None) -> list:
+        """Adopt every record file left by a writer that is GONE, and return their
+        rows. An adopted file is deleted, so its rows end up in exactly one live
+        process's record.
+
+        *skip* is the set of paths owned by managers alive IN THIS PROCESS
+        (including the caller's own). It exists because pid liveness cannot answer
+        the same-process question: this process is obviously alive, so a file
+        bearing our pid is either our own live record or a leftover from a
+        DIFFERENT process that held this pid before us, and only the in-process
+        registry can tell those apart.
+
+        A live foreign writer's file is left completely alone - not read, not
+        adopted, not deleted - so two servers sharing a data dir never take each
+        other's operations."""
+        with _STORE_LOCK:
+            return self._reap(skip=skip)
+
+    def _reap(self, *, skip=None) -> list:
+        skipped = {Path(s) for s in (skip or ())}
+        try:
+            files = sorted(self.root.glob("*.json"))
+        except OSError as e:
+            try:
+                from localm.debuglog import logger
+                logger.debug("activity store: could not list %s (%s)",
+                             self.root, e)
+            except Exception:
+                pass
+            return []
+        out: list = []
+        for f in files:
+            if f in skipped:
+                continue
+            pid = self._pid_of(f)
+            if pid is not None and pid != self._pid:
+                from localm.instances import pid_alive
+                if pid_alive(pid):
+                    continue      # another live server owns it
+            rows = self._read(f)
+            if rows is None:
+                continue          # unreadable/corrupt: already reported by _read
+            out.extend(rows)
+            try:
+                f.unlink()
+            except OSError as e:
+                # The rows are now held by this process, so leaving the file
+                # behind risks a THIRD process adopting them again and reporting
+                # them twice. Report it rather than pretending the handover was
+                # clean (rule 5).
+                try:
+                    from localm.debuglog import logger
+                    logger.warning(
+                        "activity store: adopted the operation records in %s but "
+                        "could not remove it (%s); they may be reported twice",
+                        f.name, e)
+                except Exception:
+                    pass
+        return out
+
+    @staticmethod
+    def _pid_of(path: Path) -> Optional[int]:
+        """The writer pid a record filename encodes, or None when the name does
+        not follow the scheme (a hand-dropped file: read it, do not guess).
+
+        Only the pid half is parsed. The run nonce after it is never compared to
+        anything: a file bearing OUR pid but a different nonce is a leftover from
+        a process that held this pid before us, and _live_store_paths - not the
+        nonce - is what identifies our own live files."""
+        try:
+            return int(path.stem.split("-", 1)[0])
+        except (TypeError, ValueError, IndexError):
+            return None
+
+    def _read(self, path: Path) -> Optional[list]:
+        """The rows in *path*, or None when it could not be read at all."""
+        raw = None
+        try:
+            raw = path.read_text(encoding="utf-8")
+            data = json.loads(raw)
+        except OSError as e:
+            # Not collapsed to an empty list, and not raised either: this process
+            # never writes another writer's file, so there is nothing here to
+            # erase (see the module note above). Reported, then left in place for
+            # a later run, or for the user to look at.
+            try:
+                from localm.debuglog import logger
+                logger.warning("activity store: %s is unreadable (%s); the "
+                               "operations it records cannot be recovered",
+                               path.name, e)
+            except Exception:
+                pass
+            return None
+        except json.JSONDecodeError as e:
+            self._quarantine(path, raw, e)
+            return None
+        ops = data.get("operations") if isinstance(data, dict) else None
+        if not isinstance(ops, list):
+            self._quarantine(path, raw, "no operations list")
+            return None
+        return [r for r in ops if isinstance(r, dict)]
+
+    def _quarantine(self, path: Path, raw, err) -> None:
+        """Copy a corrupt record file aside before anything removes it, and warn
+        (rule 5: a data-loss risk must be visible, never silent). Redacted and
+        pruned - see _redact_owner_digests and _prune_quarantine for why each is
+        needed and why neither replaces the other."""
+        try:
+            from localm.debuglog import logger
+        except Exception:
+            logger = None
+        try:
+            backup = path.with_name(f"{path.name}.corrupt-{int(time.time())}")
+            if raw is not None:
+                backup.write_text(_redact_owner_digests(raw), encoding="utf-8")
+                # The copy still describes the user's operations and may carry a
+                # residual digest, so restrict it the way the live file is: the
+                # ACL and the redaction address different halves and neither makes
+                # the other unnecessary. Check-and-retry like atomic_write_private.
+                from localm.config import restrict_file_perms
+                if not restrict_file_perms(backup):
+                    restrict_file_perms(backup)
+            if logger is not None:
+                logger.warning(
+                    "activity store: %s is corrupt (%s); backed up to %s. The "
+                    "operations it recorded cannot be reported, but the file is "
+                    "preserved rather than lost", path.name, err, backup.name)
+            self._prune_quarantine()
+        except OSError as e:
+            if logger is not None:
+                # No refusal actually happens: the caller carries on with no rows
+                # from this file either way, so say what really occurs rather than
+                # claiming a refusal that never fires.
+                logger.warning("activity store: corrupt record file %s could not "
+                               "be backed up (%s); its content may be lost",
+                               path.name, e)
+
+    def _prune_quarantine(self) -> None:
+        """Keep only the newest _QUARANTINE_KEEP corrupt-copies in the dir.
+
+        Bounded across the whole DIRECTORY rather than per file name, because
+        per-pid names would otherwise give every pid its own unbounded series.
+        Sorted by the timestamp SUFFIX, not lexically: the pid prefix sorts first,
+        so a lexical order would prune by pid instead of by age.
+
+        Best-effort by design: failing to delete an old backup must never break
+        the recovery path that just successfully wrote a new one."""
+        try:
+            from localm.debuglog import logger
+        except Exception:
+            logger = None
+        try:
+            backups = list(self.root.glob("*.json.corrupt-*"))
+        except OSError as e:
+            if logger is not None:
+                logger.debug(
+                    "activity store: could not list quarantine copies (%s)", e)
+            return
+
+        def _stamp(pth: Path) -> int:
+            try:
+                return int(pth.name.rsplit("-", 1)[1])
+            except (IndexError, ValueError):
+                return 0
+
+        backups.sort(key=lambda b: (_stamp(b), b.name))
+        for old in (backups[:-_QUARANTINE_KEEP] if _QUARANTINE_KEEP else backups):
+            try:
+                old.unlink()
+            except OSError as e:
+                if logger is not None:
+                    logger.debug("activity store: could not prune %s (%s)",
+                                 old.name, e)
+
+
+# --------------------------------------------------------------------------- #
+#  Child-process termination on process exit                                  #
+# --------------------------------------------------------------------------- #
+# Every live JobManager in this process. os._exit / os.execv (http_server's
+# _do_shutdown / _do_restart) bypass atexit and never touch a start_cli CHILD, so
+# something at module scope has to be reachable from those functions - they take
+# no app and hold no manager. Exactly the shape of embedder.release_for_exit(),
+# which those same two functions already call for the same reason.
+#
+# A WeakSet, so a manager built by a test (or by an app that is torn down) does
+# not keep itself alive here.
+_MANAGERS: "weakref.WeakSet" = weakref.WeakSet()
+
+def _live_store_paths() -> set:
+    """The record-file paths owned by managers that are ALIVE in this process.
+
+    Reconciliation needs this because pid liveness cannot answer the same-process
+    question - see _ActivityStore.reap. Reading the private _store attribute of a
+    sibling manager is deliberate: the set is meaningless to anyone outside this
+    module, so exposing it as API would invite a caller to act on it."""
+    out = set()
+    for manager in list(_MANAGERS):
+        try:
+            out.add(manager._store.path)
+        except Exception:
+            continue
+    return out
+
+
+# How long a child gets to exit after a graceful signal before it is killed.
+# Short on purpose: this runs on the way out of the process, and a stop the user
+# asked for must not stall behind a child that is ignoring its signal.
+_CHILD_GRACE_S = 3.0
+
+
+def _terminate_process_tree(proc, *, grace: float = _CHILD_GRACE_S) -> None:
+    """Terminate *proc* and, where the platform allows it, its descendants.
+
+    A start_cli child is ``python -m localm <cmd>``, and several of those commands
+    spawn their OWN children (comfy setup runs git and pip - see
+    media/managed_comfy_provision.py, which notes it sits one process-hop inside
+    this one). Killing only the direct child strands those.
+
+    The tree half is BEST-EFFORT and says so rather than overclaiming:
+
+    * Windows uses ``taskkill /F /T``, which walks the child tree. There is no
+      graceful tree-wide signal on Windows, and Popen.terminate() is itself
+      TerminateProcess, so nothing is lost by going straight to it here.
+    * POSIX walks the tree with psutil, which is an OPTIONAL dependency (pyproject
+      declares it under gpu/monitor/dev, not core). Without it only the direct
+      child is reached, and that limit is LOGGED rather than glossed.
+
+    Deliberately no start_new_session/creationflags change to the Popen itself:
+    that would alter signal delivery for every existing job (a host Ctrl+C would
+    stop reaching a pull), which is a separate decision from this one."""
+    try:
+        from localm.debuglog import logger
+    except Exception:
+        logger = None
+    try:
+        pid = int(proc.pid)
+    except Exception:
+        return
+    if sys.platform == "win32":
+        try:
+            done = subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
+                                  capture_output=True, timeout=10)
+            if done.returncode == 0:
+                return
+            if logger is not None:
+                # taskkill reports its ordinary failures by exit code, not by
+                # raising: "not found" when the child exited between our poll and
+                # this call, or access-denied. Returning unconditionally would
+                # claim a tree kill that never ran and skip the fallback below.
+                logger.debug("taskkill exited %s for job child %s; falling back "
+                             "to the process handle", done.returncode, pid)
+        except (OSError, subprocess.SubprocessError) as e:
+            if logger is not None:
+                logger.debug("taskkill unavailable for job child %s (%s); "
+                             "falling back to the process handle", pid, e)
+        _kill_handle(proc)
+        return
+
+    kids = []
+    try:
+        import psutil
+        kids = psutil.Process(pid).children(recursive=True)
+    except ImportError:
+        if logger is not None:
+            logger.debug("psutil is not installed, so only the direct child of "
+                         "job pid %s is signalled; any grandchildren it spawned "
+                         "are left running", pid)
+    except Exception as e:
+        if logger is not None:
+            logger.debug("could not walk the child tree of job pid %s (%s); "
+                         "signalling the direct child only", pid, e)
+    for kid in kids:
+        try:
+            kid.terminate()
+        except Exception:
+            pass
+    try:
+        proc.terminate()
+    except Exception:
+        pass
+    try:
+        proc.wait(timeout=grace)
+    except Exception:
+        _kill_handle(proc)
+    for kid in kids:
+        try:
+            if kid.is_running():
+                kid.kill()
+        except Exception:
+            pass
+
+
+def _kill_handle(proc) -> None:
+    """Force-kill via the Popen handle - bound to the object we launched, so it can
+    never hit a recycled pid."""
+    try:
+        proc.kill()
+    except Exception:
+        pass
+    try:
+        proc.wait(timeout=2)
+    except Exception:
+        pass
+
+
+def terminate_children_for_exit(*, grace: float = _CHILD_GRACE_S) -> int:
+    """Terminate every in-flight job child process in this process, and return how
+    many were signalled.
+
+    Called from http_server._do_shutdown and _do_restart. Both end in a call that
+    bypasses atexit (os._exit / os.execv), the job worker threads are daemons so
+    their ``finally`` may never run, and the Popen carries no creationflags - so
+    without this a stop or restart simply ABANDONS the child: it keeps
+    downloading, keeps writing into the shared data dir, and its stdout pipe dies
+    with us, which turns a resumable download into a half-written file nobody is
+    tracking. ADR-0008 inferred that from the code shape and left it unmeasured;
+    it is measured now, and the child does outlive the exit."""
+    total = 0
+    for manager in list(_MANAGERS):
+        try:
+            total += manager.terminate_children_for_exit(grace=grace)
+        except Exception:
+            try:
+                from localm.debuglog import logger
+                logger.debug("terminating job children failed for one manager",
+                             exc_info=True)
+            except Exception:
+                pass
+    return total
+
+
 class JobManager:
-    """Registry of background jobs. Finished jobs stay queryable for an hour."""
+    """Registry of background jobs. Finished jobs stay queryable for an hour.
+
+    DURABLE since 2026-08-19 (ADR-0008's option E). The registry is still the
+    in-memory dict below - that is what SSE subscribers, progress and cancellation
+    all attach to - with a small record of each operation's LIFECYCLE mirrored to
+    ``<data dir>/activity/<pid>.json`` so a restart can still say what was running.
+    Progress is not mirrored, deliberately: see _ActivityStore's module comment.
+
+    On construction it RECONCILES: records left by a writer process that is gone
+    are adopted, and any of them still marked ``running`` become ``interrupted``,
+    because nobody measured whether that work succeeded (see _JOB_STATUSES)."""
 
     _TTL_S = 3600
 
-    def __init__(self) -> None:
+    def __init__(self, *, store: Optional["_ActivityStore"] = None,
+                 reconcile: bool = True) -> None:
         self._jobs: dict[str, Job] = {}
-        self._lock = threading.Lock()
+        # An RLock, not a Lock: persisting happens while holding it (so the file
+        # can never be written out of order relative to the dict it mirrors), and
+        # the persist path is reached both directly and through Job._notify.
+        # Lock order in this module is _lock OUTER, Job._sub_lock INNER - the order
+        # snapshot() -> summary() already establishes. Nothing here takes _sub_lock
+        # while holding _lock except that path, and to_record deliberately reads
+        # plain fields only so persisting adds no new lock edge.
+        self._lock = threading.RLock()
+        self._store = store if store is not None else _ActivityStore()
+        _MANAGERS.add(self)
+        if reconcile:
+            self._reconcile_from_disk()
+
+    # ---- durability ------------------------------------------------------- #
+    def _register(self, job: Job) -> None:
+        """Track *job*, sweep expired records, and persist - the shared tail of
+        start_cli and start_fn."""
+        job._notify = self._persist
+        with self._lock:
+            # _gc() runs here and nowhere else, so this one write also carries any
+            # eviction it just made; there is no separate persist for the sweep.
+            self._gc()
+            self._jobs[job.id] = job
+            self._persist_locked()
+
+    def _persist(self) -> None:
+        with self._lock:
+            self._persist_locked()
+
+    def _persist_locked(self) -> None:
+        """Mirror the registry to disk. Caller holds _lock.
+
+        Best-effort by contract: _ActivityStore.write reports its own failures and
+        returns False rather than raising, so a full disk cannot fail a model pull.
+        An EMPTY registry removes the file instead of writing an empty one, so a
+        data dir does not accumulate one file per process that ever started."""
+        rows = [j.to_record() for j in self._jobs.values()]
+        if rows:
+            self._store.write(rows)
+        else:
+            self._store.clear()
+
+    def _reconcile_from_disk(self) -> None:
+        """Adopt the operation records of writer processes that are gone.
+
+        A row still marked ``running`` is reported as ``interrupted``: this server
+        stopped while it was in flight, so its outcome is genuinely unknown. It is
+        NOT reported as ``failed`` - ADR-0008 R3 - because a pull that was 99% done
+        may well have finished, and claiming otherwise would be a fabrication in
+        the one direction a user cannot check.
+
+        ``finished_at`` is stamped at DETECTION rather than derived from the file's
+        mtime, and that is load-bearing rather than lazy: _gc() sweeps on
+        finished_at, so a timestamp from before the crash would put the row past
+        the TTL cutoff the instant it was recovered - evicting it before the user
+        who just restarted the server could ever see it. That is the exact defect
+        _gc()'s own docstring records for created_at."""
+        try:
+            rows = self._store.reap(skip=_live_store_paths())
+        except Exception:
+            try:
+                from localm.debuglog import logger
+                logger.warning("activity store: reconciliation failed; this "
+                               "server cannot report what a previous run was "
+                               "doing", exc_info=True)
+            except Exception:
+                pass
+            return
+        if not rows:
+            return
+        now = time.time()
+        recovered = []
+        interrupted = 0
+        skipped = 0
+        orphan_pids = []
+        for row in rows:
+            try:
+                job = Job.from_record(row)
+            except (ValueError, TypeError):
+                skipped += 1      # skip a corrupt row rather than fail the load
+                continue
+            if job.status == "running":
+                job.status = "interrupted"
+                job.finished_at = now
+                interrupted += 1
+                if job.restored_child_pid is not None:
+                    try:
+                        from localm.instances import pid_alive
+                        if pid_alive(job.restored_child_pid):
+                            orphan_pids.append(job.restored_child_pid)
+                    except Exception:
+                        pass
+            elif job.finished_at is None:
+                # A terminal row with no stamp cannot be swept, so it would sit in
+                # the listing forever. Give it the same detection stamp.
+                job.finished_at = now
+            self._seed_recovered_history(job)
+            recovered.append(job)
+        with self._lock:
+            for job in recovered:
+                job._notify = self._persist
+                self._jobs[job.id] = job
+            self._gc()
+            self._persist_locked()
+        try:
+            from localm.debuglog import logger
+            logger.info(
+                "recovered %d operation record(s) from a previous run "
+                "(%d interrupted)", len(recovered), interrupted)
+            if skipped:
+                logger.warning("activity store: skipped %d unreadable operation "
+                               "record(s)", skipped)
+            if orphan_pids:
+                # Adoption of an orphan (re-attaching to its output, or killing
+                # it) is explicitly out of scope per ADR-0008, and killing it
+                # would be the destructive choice for a download that may be
+                # nearly done. Reported so it is not invisible.
+                logger.warning(
+                    "a previous run left child process(es) %s still running; they "
+                    "are no longer tracked and their output goes nowhere",
+                    ", ".join(str(p) for p in orphan_pids))
+        except Exception:
+            pass
+
+    @staticmethod
+    def _seed_recovered_history(job: Job) -> None:
+        """Give a recovered job a terminal event stream.
+
+        Without this, a client that reattaches to a recovered id over
+        ``GET /api/jobs/{id}/events`` gets an empty history and then keepalives
+        forever, because the worker thread that would have pushed the ``end``
+        frame died with the previous process. The stream has to be able to say
+        "this is over" for the same reason the status has to."""
+        if job.status == "interrupted":
+            job.push({"type": "line",
+                      "text": "The server stopped while this operation was in "
+                              "flight, so its outcome is unknown. Its output was "
+                              "not kept."})
+        else:
+            job.push({"type": "line",
+                      "text": "Recovered after a server restart. The live output "
+                              "of this operation was not kept."})
+        job.push({"type": "end", "status": job.status,
+                  "returncode": job.returncode, "result": job.result})
+
+    # ---- exit ------------------------------------------------------------- #
+    def terminate_children_for_exit(self, *, grace: float = _CHILD_GRACE_S) -> int:
+        """Terminate the child process of every still-running start_cli job, and
+        return how many were signalled. See the module-level function of the same
+        name for why this exists at all.
+
+        Enumerates under the lock and kills OUTSIDE it: a tree kill runs a
+        subprocess with its own timeout, and holding a lock other threads need
+        across that would stall them for the duration.
+
+        Deliberately does NOT go through Job.cancel(): cancel means "the user asked
+        to stop this", and a shutdown is not that. The registry is left saying
+        ``running``, which is what makes the next start reconcile these rows to
+        ``interrupted`` - the honest word for what actually happened to them."""
+        with self._lock:
+            live = [(j.id, j._proc) for j in self._jobs.values()
+                    if j.status == "running" and j._proc is not None]
+        count = 0
+        for job_id, proc in live:
+            try:
+                if proc.poll() is not None:
+                    continue          # already exited on its own
+            except Exception:
+                continue
+            try:
+                from localm.debuglog import logger
+                logger.debug("terminating job %s child pid %s on exit",
+                             job_id, getattr(proc, "pid", "?"))
+            except Exception:
+                pass
+            _terminate_process_tree(proc, grace=grace)
+            count += 1
+        return count
 
     def start_cli(self, kind: str, cli_args: list, *,
                   result_path: str | None = None,
@@ -383,9 +1239,7 @@ class JobManager:
             owner=owner,
             label=host_label,
         )
-        with self._lock:
-            self._gc()
-            self._jobs[job.id] = job
+        self._register(job)
 
         def _run():
             announcer = _HostAnnouncer(host_label) if host_label else None
@@ -417,6 +1271,11 @@ class JobManager:
                     bufsize=1,
                     env=env,
                 )
+                # Re-persist now that the child EXISTS: the create-time write
+                # happened before this Popen, so it recorded no pid. That pid is
+                # the only thing that lets a later run report "a previous run left
+                # this child running" instead of staying silent about an orphan.
+                self._persist()
                 for line in job._proc.stdout:
                     line = line.rstrip()
                     if not line:
@@ -504,9 +1363,7 @@ class JobManager:
         """
         job = Job(id=uuid.uuid4().hex[:12], kind=kind, argv=[], result=result_path,
                   owner=owner, label=label)
-        with self._lock:
-            self._gc()
-            self._jobs[job.id] = job
+        self._register(job)
 
         def _run():
             try:
