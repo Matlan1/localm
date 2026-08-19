@@ -61,7 +61,8 @@ def _patch_instances(monkeypatch, rows):
 def _patch_read(monkeypatch, state, payload):
     import localm.selfclient as sc
     monkeypatch.setattr(sc, "read_activity",
-                        lambda scheme, port, instance_token=None: (state, payload))
+                        lambda scheme, port, instance_token=None, bind_host=None:
+                        (state, payload))
 
 
 _LIVE = [{"scheme": "http", "port": 1234, "alive": True}]
@@ -148,16 +149,22 @@ def test_the_rows_token_reaches_read_activity(tools, monkeypatch):
     read_activity, not just exist in the row - a real, working credential is
     useless if the call site never reads it."""
     _patch_instances(monkeypatch, [
-        {"scheme": "http", "port": 1234, "alive": True, "token": "row-token"}])
+        {"scheme": "http", "port": 1234, "alive": True, "token": "row-token",
+         "host": "::1"}])
     captured = {}
 
-    def _fake_read_activity(scheme, port, instance_token=None):
+    def _fake_read_activity(scheme, port, instance_token=None, bind_host=None):
         captured["instance_token"] = instance_token
+        captured["bind_host"] = bind_host
         return "ok", {"now": time.time(), "operations": []}
     import localm.selfclient as sc
     monkeypatch.setattr(sc, "read_activity", _fake_read_activity)
     _call(tools)
     assert captured["instance_token"] == "row-token"
+    # The row's BIND HOST must reach it too: an IPv6-bound instance is not
+    # listening on the IPv4 loopback, so a call that dropped this would report
+    # a healthy server as unreachable.
+    assert captured["bind_host"] == "::1"
 
 
 def test_running_operations_are_listed(tools, monkeypatch):
