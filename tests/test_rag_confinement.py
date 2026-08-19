@@ -460,6 +460,40 @@ class TestNetworkDriveGuard:
             confine_index_path(f, None)
         assert ei.value.reason == "network_drive_denied"
 
+    @pytest.mark.skipif(os.name != "nt", reason="GetDriveTypeW is Windows-only")
+    def test_key_scoped_policy_still_respects_the_global_toggle(
+            self, home_env, tmp_path, monkeypatch):
+        """indexing_policy(key_roots=...) replaces the whitelist SET for a
+        per-key-scoped caller, but allow_network_drives is a WHOLE-MACHINE
+        preference, not a per-key one - a scoped key must not be able to
+        reach a network drive the owner disallowed just because its early
+        return never read config. Regression for a real gap the per-key
+        rag_roots feature's merge introduced: that branch used to build its
+        policy dict without ever loading cfg at all."""
+        import ctypes
+        import localm.config as cfg
+        monkeypatch.setattr(ctypes.windll.kernel32, "GetDriveTypeW",
+                            lambda root: 4)
+        monkeypatch.setattr(cfg, "load_config",
+                            lambda: {"allow_network_drives": False})
+        shared = tmp_path / "shared"
+        f = shared / "a.txt"
+        shared.mkdir(parents=True)
+        f.write_text("x", encoding="utf-8")
+        pol = indexing_policy(key_roots=[str(shared)])
+        assert pol["key_scoped"] is True
+        assert pol["allow_network_drives"] is False
+        with pytest.raises(ConfinementError) as ei:
+            confine_index_path(f, pol)
+        assert ei.value.reason == "network_drive_denied"
+
+    def test_key_scoped_policy_defaults_to_allowed(self, home_env, tmp_path):
+        """Control: with no config override, a key-scoped policy still
+        defaults to allowed, matching the global policy's own default."""
+        shared = tmp_path / "shared"
+        shared.mkdir()
+        assert indexing_policy(key_roots=[str(shared)])["allow_network_drives"] is True
+
 
 # --------------------------------------------------------------------------- #
 #  Per-key rag_roots (S4): indexing_policy(key_roots=...) and                 #

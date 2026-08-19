@@ -411,15 +411,11 @@ def indexing_policy(cfg: Optional[dict] = None,
     applies underneath this exactly as it does for the global policy; only the
     whitelist SET changes.
     """
-    if key_roots:
-        resolved: list[Path] = []
-        for r in key_roots:
-            try:
-                resolved.append(Path(r).expanduser().resolve())
-            except (OSError, ValueError):
-                continue
-        return {"mode": "whitelist", "allowed": resolved, "denied": [],
-                "key_scoped": True}
+    # Loaded ONCE, before the key_roots branch too: allow_network_drives is a
+    # WHOLE-MACHINE preference (see the comment on the return below), not
+    # part of the per-key folder scoping key_roots exists for, so a key-scoped
+    # caller must still see the owner's real setting rather than silently
+    # defaulting to "allowed" because this branch never looked.
     if cfg is None:
         try:
             from localm.config import load_config
@@ -433,6 +429,16 @@ def indexing_policy(cfg: Optional[dict] = None,
             _dbg.debug("rag indexing_policy: could not load config, using an empty "
                        "fail-closed policy: %s", e)
             cfg = {}
+    if key_roots:
+        resolved: list[Path] = []
+        for r in key_roots:
+            try:
+                resolved.append(Path(r).expanduser().resolve())
+            except (OSError, ValueError):
+                continue
+        return {"mode": "whitelist", "allowed": resolved, "denied": [],
+                "key_scoped": True,
+                "allow_network_drives": bool(cfg.get("allow_network_drives", True))}
     mode = cfg.get("rag_indexing_mode", "whitelist")
     if mode not in _INDEX_MODES:
         mode = "whitelist"
