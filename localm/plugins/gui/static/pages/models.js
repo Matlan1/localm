@@ -248,16 +248,17 @@ export function sortModels(models, sortKey, sortDir) {
 // Guards refreshModelsPage() against overlapping calls (a rapid double-click
 // on a sortable header, a set-type change or use/alias/rename/remove action
 // firing while a prior refresh's fetch is still in flight, ...):
-// box.replaceChildren() only clears whatever is already in the DOM at the
-// moment IT runs, so two calls racing past their own awaited fetch each clear
-// once and then each append their own table - both survive, rendering the
-// model list duplicated (reproduced live: a rapid double-click on the Name
-// header left two <table class="data-table"> in #models-table). Every call
-// captures this counter BEFORE it awaits anything, then re-checks it
-// immediately before every write into the shared `box` (the clear itself, and
-// every render path - error, empty, AND success): a call superseded by a
-// newer one discards its own render instead of writing stale/duplicate
-// content over (or alongside) the newer call's.
+// two calls racing past their own awaited fetch would each render their own
+// table (reproduced live: a rapid double-click on the Name header left two
+// <table class="data-table"> in #models-table). Every call captures this counter
+// BEFORE it awaits anything, then re-checks it immediately before its single
+// write into the shared `box`: a call superseded by a newer one discards its own
+// render instead of writing stale content over the newer call's.
+//
+// Each render path now writes with ONE replaceChildren() rather than clearing up
+// front and appending afterwards. That is what stops the scroll jump (see
+// refreshModelsPage), and it also makes the duplicate impossible by construction
+// rather than only by the counter: a replace cannot leave two tables behind.
 let _modelsRenderGen = 0;
 
 export async function refreshModelsPage() {
@@ -266,7 +267,16 @@ export async function refreshModelsPage() {
 
   const box = $("models-table");
   if (myGen !== _modelsRenderGen) return;
-  box.replaceChildren();
+  // NOT cleared here. This used to be `box.replaceChildren()`, which emptied the
+  // table and THEN awaited the fetch below - so the scroll container sat empty
+  // across a whole network round-trip. An empty container has nothing to scroll,
+  // so the browser clamps scrollTop to 0, and the rebuilt rows arrive too late to
+  // put it back: the page visibly jumped to the top on every sort, tab change and
+  // row action. MEASURED before the fix: scrollHeight 1232 -> 945 (== clientHeight)
+  // -> 1429 with scrollTop 287 -> 0, and zero scroll calls from our own code.
+  // Every write below therefore REPLACES the old content in one call instead of
+  // appending to an emptied box, so what is on screen is swapped atomically and
+  // no layout ever sees it empty.
 
   // Fetched unfiltered and narrowed to the active tab below. The tabs carry a
   // per-type count, and a count of a type you are NOT looking at cannot come
@@ -291,14 +301,14 @@ export async function refreshModelsPage() {
       // a body with no `models` array; the empty-list fallback would hide the real
       // failure behind "No models yet". Surface the status instead.
       if (myGen !== _modelsRenderGen) return;
-      box.appendChild(el("div", "sub", `Could not load models (HTTP ${r.status})`));
+      box.replaceChildren(el("div", "sub", `Could not load models (HTTP ${r.status})`));
       return;
     }
     const data = await r.json();
     models = (data && Array.isArray(data.models)) ? data.models : [];
   } catch (e) {
     if (myGen !== _modelsRenderGen) return;
-    box.appendChild(el("div", "sub", "Error loading models: " + e.message));
+    box.replaceChildren(el("div", "sub", "Error loading models: " + e.message));
     return;
   }
 
@@ -339,7 +349,7 @@ export async function refreshModelsPage() {
   if (!models.length) {
     // "No models yet - pull your first one" is FALSE when the registry is not
     // empty and All is merely hiding all of it, so say the true thing instead.
-    box.appendChild(hiddenOther
+    box.replaceChildren(hiddenOther
       ? otherHiddenNote(hiddenOther)
       : emptyState("models", "No models yet",
                    "Pull a model above, or search HuggingFace to add your first one."));
@@ -657,8 +667,8 @@ export async function refreshModelsPage() {
   }
   table.appendChild(tbody);
   if (myGen !== _modelsRenderGen) return;
-  if (hiddenOther) box.appendChild(otherHiddenNote(hiddenOther));
-  box.appendChild(table);
+  // ONE call, so the old table is still on screen until the new one is ready.
+  box.replaceChildren(...(hiddenOther ? [otherHiddenNote(hiddenOther), table] : [table]));
 }
 
 export async function showModelDetail(name) {
