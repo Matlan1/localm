@@ -8,7 +8,7 @@
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { iconEl } from "./icons.js";
 import { COMPACT_KEEP, addMessageRow, chat, chatParams, compactConversation, currentConv, lsSetScoped, maybeCompactConversation, msgImages, msgText, newConversation, noteLabel, renderAttachChips, renderChat, renderConvList, saveConversations, stripUserImages } from "./chat.js";
-import { $, GIB, authHeaders, autoGrow, confirmDanger, el, formatToolCalls, nearBottom, openModal, promptText, readSSE, renderMarkdown, revealFilledAdvanced, stripThink, toast } from "./helpers.js";
+import { $, GIB, authHeaders, autoGrow, confirmDanger, el, formatToolCalls, nearBottom, openModal, promptText, readSSE, renderMarkdown, revealFilledAdvanced, streamJob, stripThink, toast } from "./helpers.js";
 import { modelCache, modelSelect } from "./models-sidebar.js";
 import { execChatCommand, handleSlashSubmit } from "./slash.js";
 import { CORE_VIEWS, VIEWS, _applyActiveClasses, closeNav, showView } from "./tabs.js";
@@ -753,7 +753,7 @@ export async function runWebCall(conv, call, extraNote = "") {
 /* ---- voice: mic (Whisper STT) + read-aloud (browser TTS) ---- */
 
 export const voice = { rec: null, chunks: [], available: true, reason: "",
-                modelCached: true, model: "" };
+                modelCached: true, model: "", canDownload: false };
 
 /** Grey out the mic up front when the server lacks the [voice] extra,
  *  instead of letting the user record and only then failing. */
@@ -768,6 +768,7 @@ export async function refreshVoiceStatus() {
       voice.available = false;
       voice.reason = "Speech-to-text is not installed. Enable the 'voice' "
                    + "plugin on the Plugins page (needs the [voice] extra).";
+      voice.canDownload = false;
       const mic = $("chat-mic");
       if (mic) { mic.classList.add("unavailable"); mic.title = voice.reason; }
       return;
@@ -777,6 +778,7 @@ export async function refreshVoiceStatus() {
     voice.reason = data.reason || "";
     voice.modelCached = data.model_cached !== false;
     voice.model = data.model || "";
+    voice.canDownload = !!data.can_download;
     const btn = $("chat-mic");
     btn.classList.toggle("unavailable", !data.available);
     // Reset the tooltip on the success path too - not just set it in the
@@ -785,7 +787,9 @@ export async function refreshVoiceStatus() {
     // it needs the extra forever, since nothing ever wrote over the stale text.
     btn.title = data.available
       ? "Hold a thought, speak it - click to record, click again to transcribe"
-      : data.reason;
+      : (data.reason || "") + (voice.canDownload
+          ? " Click the mic to download it now (one-time; changes no settings)."
+          : "");
   } catch (e) { /* server unreachable - status refreshes on next load */ }
 }
 
@@ -798,6 +802,41 @@ export function blobToB64(blob) {
   });
 }
 
+/** One-time "continue anyway" for a Whisper download blocked by net_mode=ask:
+ *  the server re-checks the caller's config:write scope and refuses under
+ *  net_mode=off; nothing is persisted - net_mode stays as configured for
+ *  everything else. On success the mic un-greys via refreshVoiceStatus. */
+export async function downloadVoiceModel() {
+  if (!confirm(
+      (voice.reason ? voice.reason + "\n\n" : "") +
+      `Download the Whisper "${voice.model}" speech model once now? ` +
+      "This changes no settings; transcription runs fully offline afterwards."))
+    return;
+  const btn = $("chat-mic");
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fetch("/api/voice/model/download",
+                          { method: "POST", headers: authHeaders() });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || r.statusText);
+    if (data.job_id) {
+      toast("Downloading the speech model…");
+      let lastLine = "";
+      const end = await streamJob(data.job_id, (line) => { lastLine = line; });
+      if (end.status !== "done" || /^error:/i.test(lastLine)) {
+        throw new Error(lastLine.replace(/^error:\s*/i, "")
+                        || "download did not complete");
+      }
+    }
+    toast("Speech model ready - click the mic to record");
+  } catch (e) {
+    toast("Speech model download failed: " + e.message, true);
+  } finally {
+    if (btn) btn.disabled = false;
+    await refreshVoiceStatus();
+  }
+}
+
 export async function toggleMic() {
   const btn = $("chat-mic");
   if (voice.rec) {           // second click stops and transcribes
@@ -805,12 +844,19 @@ export async function toggleMic() {
     return;
   }
   if (!voice.available) {
+    // The one place the mic is grey but a click still has a useful answer: a
+    // model download blocked by net_mode=ask, for a caller the server says may
+    // authorize it (config:write / open mode). Offer the one-time download -
+    // the "continue anyway" of the network-policy override; nothing persisted.
+    if (voice.canDownload) { downloadVoiceModel(); return; }
     toast(voice.reason || "Speech-to-text not installed", true);
     return;
   }
   if (!voice.modelCached) {
     // Transcription is fully local, but the FIRST use fetches the Whisper
-    // model from HuggingFace - make that one network access explicit.
+    // model from HuggingFace - make that one network access explicit. (Only
+    // reachable under net_mode=allow: any other mode already reports
+    // available=false + can_download above.)
     if (!confirm(
         `First use downloads the Whisper "${voice.model}" speech model ` +
         "from HuggingFace (one-time). Transcription itself runs fully " +

@@ -2874,7 +2874,12 @@ class TestDiscoverEndpoints:
 @pytest.fixture
 def voice_app(tmp_path, monkeypatch):
     """A bare app with the builtin voice plugin loaded (open mode). voice became
-    a plugin in Phase 3, so its routes are mounted by enabling it - not attach_gui."""
+    a plugin in Phase 3, so its routes are mounted by enabling it - not attach_gui.
+
+    install() fires voice's on_install hook, which prefetches the Whisper model
+    on a background thread: stub the prefetch (no network in a unit test) and
+    JOIN that thread before returning, so it can never outlive the monkeypatch
+    scope and run the real download against the real config."""
     monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     import localm.config as _cfg
@@ -2882,9 +2887,16 @@ def voice_app(tmp_path, monkeypatch):
     monkeypatch.setattr(_cfg, "MODELS_DIR", tmp_path / "models")
     monkeypatch.setattr(_cfg, "CONFIG_FILE", tmp_path / "config.json")
     monkeypatch.setattr(_cfg, "REGISTRY_FILE", tmp_path / "registry.json")
+    import localm.voice as _voice
+    monkeypatch.setattr(_voice, "prefetch_stt_model",
+                        lambda allow_download=None: (False, "stubbed in tests"))
     from localm.plugins.engine import PluginManager
     app = FastAPI()
     PluginManager(app, external_root=tmp_path / "noplugins").install("voice")
+    import threading
+    for t in threading.enumerate():
+        if t.name == _voice.PREFETCH_THREAD_NAME:
+            t.join(timeout=10)
     return app
 
 
