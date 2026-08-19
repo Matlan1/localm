@@ -531,7 +531,7 @@ def test_find_attachable_case_insensitive_on_windows(tmp_path):
 def test_default_probe_uses_recorded_scheme(monkeypatch):
     calls = []
     monkeypatch.setattr(instances, "_try_whoami",
-                        lambda s, p, i, t: (calls.append(s), s == "https")[1])
+                        lambda s, p, i, t, h=None: (calls.append(s), s == "https")[1])
     assert instances.default_probe({"port": 1, "instance_id": "i", "scheme": "https"}) is True
     assert calls == ["https"], "a recorded scheme must be probed first/only"
 
@@ -539,9 +539,22 @@ def test_default_probe_uses_recorded_scheme(monkeypatch):
 def test_default_probe_missing_scheme_tries_both(monkeypatch):
     calls = []
     monkeypatch.setattr(instances, "_try_whoami",
-                        lambda s, p, i, t: (calls.append(s), False)[1])
+                        lambda s, p, i, t, h=None: (calls.append(s), False)[1])
     assert instances.default_probe({"port": 1, "instance_id": "i"}) is False
     assert calls == ["http", "https"]
+
+
+def test_default_probe_forwards_the_recorded_bind_host(monkeypatch):
+    """The entry's bind host must reach _try_whoami, or an IPv6-bound server is
+    probed on an IPv4 loopback it is not listening on and reported DEAD while
+    it is serving. Measured before the fix: a live ``-H ::1`` server showed
+    alive=False and `localm status` said nothing was serving."""
+    seen = []
+    monkeypatch.setattr(instances, "_try_whoami",
+                        lambda s, p, i, t, h=None: (seen.append(h), True)[1])
+    assert instances.default_probe(
+        {"port": 1, "instance_id": "i", "scheme": "http", "host": "::1"}) is True
+    assert seen == ["::1"]
 
 
 def test_attach_target_for_running_instance(tmp_path):

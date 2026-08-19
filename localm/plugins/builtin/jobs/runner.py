@@ -786,6 +786,19 @@ def _coder_backend(job: Job):
 
     self_url = os.environ.get("LOCALM_SELF_URL")
     if not self_url:
+        # The instance registry knows the address AND the port the server is
+        # really on; the configured port is only a guess and the IPv4 loopback
+        # is wrong outright for an IPv6-bound server. Fall back to the guess
+        # only when there is no registry entry to read.
+        try:
+            from localm import instances
+            from localm.config import home_dir
+            entry = instances.attach_target(home_dir(),
+                                            instances.resolve_root_dir())
+            self_url = entry.get("base_url") if entry else None
+        except Exception:
+            self_url = None
+    if not self_url:
         from localm.config import load_config
         port = load_config().get("port", 8642)
         self_url = f"http://127.0.0.1:{port}/v1"

@@ -133,7 +133,12 @@ def _mount_remote_gui(entry: dict) -> bool:
     token = entry.get("token")
     if not port or not token:
         return False
-    url = f"{scheme}://127.0.0.1:{port}/v1/surfaces/gui"
+    # Dial the loopback THAT instance bound: an IPv6-bound server does not
+    # answer on the IPv4 loopback, and this call is what turns a headless
+    # server into a GUI one.
+    from localm.bindhost import self_connect_host, url_host
+    url = (f"{scheme}://{url_host(self_connect_host(entry.get('host')))}"
+           f":{port}/v1/surfaces/gui")
     try:
         from localm.tls import requests_verify
         verify = requests_verify(url)
@@ -225,7 +230,9 @@ def _probe_active_model(existing: dict):
     try:
         from localm.inference.http_engine import remote_model_status
         scheme = existing.get("scheme") or "http"
-        base = f"{scheme}://127.0.0.1:{existing.get('port')}/v1"
+        from localm.bindhost import self_connect_host, url_host
+        _h = url_host(self_connect_host(existing.get("host")))
+        base = f"{scheme}://{_h}:{existing.get('port')}/v1"
         return remote_model_status(base, existing.get("token"))[1]
     except Exception:
         return None
@@ -350,7 +357,7 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
       localm gui --no-model
       localm gui --pull bartowski/Qwen2.5-7B-Instruct-GGUF:Qwen2.5-7B-Instruct-Q4_K_M.gguf
     """
-    from localm.console import console
+    from localm.console import console, show_url
 
     # A click into this console window must not freeze the server
     # (Windows QuickEdit suspends output, and output blocks inference).
@@ -459,7 +466,7 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
                     console.print(
                         "  [yellow]Could not mount the GUI on it (an older "
                         "instance?); opening its address anyway.[/yellow]")
-            console.print(f"  [dim]Opening[/dim] [cyan]{url}[/cyan]")
+            console.print(f"  [dim]Opening[/dim] [cyan]{show_url(url)}[/cyan]")
             if not no_browser:
                 # Force a FRESH navigation with a unique cache-buster so the browser
                 # actually reloads (instead of silently focusing an already-open tab
@@ -710,7 +717,11 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     # self-call the GUI makes - the coder agent, RAG self-embedding, the chat/media
     # VRAM handover - would dial an address that is not there. url_host brackets an
     # IPv6 literal so the result is a legal URL authority and not https://::1:8642/.
-    _self_authority = f"{url_host(self_connect_host(host))}:{chosen_port}"
+    # The BARE address for socket-level self-connects (create_connection takes
+    # an address, never a bracketed URL authority), and the bracketed form for
+    # anything that goes into a URL.
+    _self_host = self_connect_host(host)
+    _self_authority = f"{url_host(_self_host)}:{chosen_port}"
 
     from localm.inference.engine import Engine
     from localm.inference import http_server as hs
@@ -830,7 +841,7 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
         _wtitle = f"LocaLM  -  {display_name or model}  -  :{chosen_port}"
     set_console_title(_wtitle)
     _srv_name = "localm API server" if api_mode else "localm GUI"
-    console.print(f"[bold green]{_srv_name}[/bold green] → {base_url}")
+    console.print(f"[bold green]{_srv_name}[/bold green] → {show_url(base_url)}")
     if model_less:
         console.print("  model: [yellow]none yet - add one on the Models page[/yellow]")
     else:
@@ -873,7 +884,7 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
         for _label, _target in targets:
             url = f"{scheme}://{url_host(_target)}:{chosen_port}/"
             suffix = "  [dim](open it, then Install as app)[/dim]" if primary_url is None else ""
-            console.print(f"  [dim]{_label}:[/dim] [cyan]{url}[/cyan]{suffix}")
+            console.print(f"  [dim]{_label}:[/dim] [cyan]{show_url(url)}[/cyan]{suffix}")
             if primary_url is None:
                 primary_url = url
             # Prefer an IP for the scannable QR (resolves on any phone, even one
@@ -893,8 +904,9 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
             console.print(
                 "  [dim]first visit shows a one-time certificate warning; tap "
                 "[/dim][cyan]Install certificate[/cyan][dim] on the key screen "
-                "(or open [/dim][cyan]" + f"{scheme}://{_ca_host}:{chosen_port}"
-                "/localm-ca.crt[/cyan][dim]) to trust it once - then no warning "
+                "(or open [/dim][cyan]"
+                + show_url(f"{scheme}://{_ca_host}:{chosen_port}/localm-ca.crt")
+                + "[/cyan][dim]) to trust it once - then no warning "
                 "and the app installs.[/dim]")
             console.print(
                 "  [dim]Firefox has its own certificate store: import the CA in "
@@ -921,7 +933,8 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     # browser does not open. It carries the one-time grant, which is fine: this is the
     # host's own console. soft_wrap so the long URL is emitted as ONE line (a wrapped
     # URL with an injected newline is not copy-pasteable).
-    console.print(f"  [dim]Open the GUI:[/dim] [cyan]{open_url}[/cyan]", soft_wrap=True)
+    console.print(f"  [dim]Open the GUI:[/dim] [cyan]{show_url(open_url)}[/cyan]",
+                  soft_wrap=True)
 
     def _open_when_ready(url: str, port: int, timeout: float = 20.0) -> None:
         """Open the browser tab only once the server actually ACCEPTS a
@@ -938,7 +951,7 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
         deadline = _time.monotonic() + timeout
         while _time.monotonic() < deadline:
             try:
-                with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+                with socket.create_connection((_self_host, port), timeout=0.5):
                     break
             except OSError:
                 _time.sleep(0.25)
@@ -1001,7 +1014,7 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
             import time as _t
             for _ in range(160):   # up to ~40s, then flip anyway
                 try:
-                    with socket.create_connection(("127.0.0.1", chosen_port), 0.5):
+                    with socket.create_connection((_self_host, chosen_port), 0.5):
                         break
                 except OSError:
                     _t.sleep(0.25)
@@ -1075,7 +1088,7 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
         _deadline = _time3.monotonic() + 20.0
         while _time3.monotonic() < _deadline:
             try:
-                with _socket.create_connection(("127.0.0.1", chosen_port), 0.5):
+                with _socket.create_connection((_self_host, chosen_port), 0.5):
                     break
             except OSError:
                 _time3.sleep(0.25)

@@ -669,7 +669,7 @@ class HTTPBackend(BaseLLMBackend):
 #  Convenience constructors
 # ------------------------------------------------------------------ #
 
-def make_localm_backend(model: str, port: int = 8642, *,
+def make_localm_backend(model: str, port: int = 8642, *, host: str = "",
                         api_key: str = "", **kw) -> HTTPBackend:
     """Backend for a local ``localm serve``. The bearer key resolves to *api_key*
     if given, else the owner key this install has configured (env var, else
@@ -681,8 +681,13 @@ def make_localm_backend(model: str, port: int = 8642, *,
     keyed via ``localm key generate`` (persisted to file, no env var set)
     still 401'd every ``localcoder --no-server`` attach."""
     from localm.auth import get_api_key
+    from localm.bindhost import self_connect_host, url_host
     key = api_key or get_api_key() or "localm"
-    return HTTPBackend(f"http://127.0.0.1:{port}/v1", model, api_key=key,
+    # *host* is the address the target server BOUND. Blank keeps the IPv4
+    # loopback every pre-IPv6 caller expects; an IPv6-bound server needs its
+    # own loopback, since it is not listening on 127.0.0.1 at all.
+    _h = url_host(self_connect_host(host)) if host else "127.0.0.1"
+    return HTTPBackend(f"http://{_h}:{port}/v1", model, api_key=key,
                        localm_server=True, **kw)
 
 

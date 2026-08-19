@@ -4,8 +4,10 @@ from pathlib import Path
 
 import click
 
+from ..console import show_url
 from ._core import console, main
 from .errors import run_or_die
+from ..bindhost import self_connect_host, url_host
 
 
 # ------------------------------------------------------------------ #
@@ -505,7 +507,7 @@ def _attached_server():
     if entry is None:
         return None, None, "no running localm server was found for this directory"
     scheme = entry.get("scheme", "http")
-    url = f"{scheme}://{entry.get('host', '127.0.0.1')}:{entry.get('port')}"
+    url = f"{scheme}://{url_host(self_connect_host(entry.get('host')))}:{entry.get('port')}"
     return url, resolve_bearer_headers(entry.get("token")), None
 
 
@@ -597,7 +599,8 @@ def _runtime_fields(name):
         resp = requests.get(f"{url}/v1/plugins/settings", headers=headers,
                             timeout=15, verify=tls.requests_verify(url))
     except requests.RequestException as e:
-        console.print(f"[red]Could not reach the localm server at {url}:[/red] {e}")
+        console.print(f"[red]Could not reach the localm server at "
+                      f"{show_url(url)}:[/red] {e}")
         sys.exit(1)
     if resp.status_code != 200:
         console.print(f"[red]The server refused the request:[/red] "
@@ -612,7 +615,7 @@ def _runtime_fields(name):
     if not remote:
         _explain_from_local_state()
     else:
-        console.print(f"[dim]The localm at {url} reports no settings for "
+        console.print(f"[dim]The localm at {show_url(url)} reports no settings for "
                       f"{name}.[/dim]")
         sys.exit(1)
     return url, headers, []
@@ -720,7 +723,8 @@ def _runtime_plugin_config(name, key, value):
                              headers=headers, timeout=30,
                              verify=tls.requests_verify(url))
     except requests.RequestException as e:
-        console.print(f"[red]Could not reach the localm server at {url}:[/red] {e}")
+        console.print(f"[red]Could not reach the localm server at "
+                      f"{show_url(url)}:[/red] {e}")
         sys.exit(1)
     if resp.status_code != 200:
         console.print(f"[red]The server refused the change:[/red] "

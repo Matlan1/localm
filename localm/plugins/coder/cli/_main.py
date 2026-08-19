@@ -922,7 +922,9 @@ def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
                         backend = HTTPBackend(_tgt["base_url"], model, api_key=attach_key,
                                               native_tools=native_tools,
                                               localm_server=True)
-                        console.print(f"[dim]connected to newly started server at {_tgt['base_url']}[/dim]")
+                        from localm.console import show_url
+                        console.print(f"[dim]connected to newly started server at "
+                                      f"{show_url(_tgt['base_url'])}[/dim]")
                     elif proc.poll() is not None:
                         tail = _child_log_tail()
                         if tail:

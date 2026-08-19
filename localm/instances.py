@@ -395,13 +395,22 @@ def _canon(p: str) -> str:
 
 
 def _try_whoami(scheme: str, port: int, instance_id: Optional[str],
-                timeout: float) -> bool:
-    """One handshake: GET <scheme>://127.0.0.1:<port>/whoami and confirm it is
+                timeout: float, bind_host: Optional[str] = None) -> bool:
+    """One handshake: GET <scheme>://<loopback>:<port>/whoami and confirm it is
     THIS localm instance (app==localm AND the advertised instance_id matches the
     registry file - the impostor guard). Always probes loopback: discovery is
-    same-machine, even for a network-bound instance."""
+    same-machine, even for a network-bound instance.
+
+    WHICH loopback comes from the entry's recorded *bind_host*. "Loopback" is
+    two addresses, not one: a server bound on ``::1`` has nothing listening on
+    127.0.0.1, so hardcoding the IPv4 one reported a healthy IPv6-bound server
+    as DEAD - measured, with the process listening and answering requests while
+    ``localm status`` said no server was serving this directory. Omitted, it
+    still dials 127.0.0.1, which is what every pre-IPv6 entry wants."""
     import requests
-    url = f"{scheme}://127.0.0.1:{port}/whoami"
+    from localm.bindhost import self_connect_host, url_host
+    host = url_host(self_connect_host(bind_host))
+    url = f"{scheme}://{host}:{port}/whoami"
     try:
         from localm.tls import requests_verify
         verify = requests_verify(url)
@@ -437,7 +446,8 @@ def default_probe(entry: dict, *, timeout: float = 0.7) -> bool:
     iid = entry.get("instance_id")
     scheme = entry.get("scheme")
     order = [scheme] if scheme in ("http", "https") else ["http", "https"]
-    return any(_try_whoami(s, int(port), iid, timeout) for s in order)
+    return any(_try_whoami(s, int(port), iid, timeout, entry.get("host"))
+               for s in order)
 
 
 def find_attachable(home: Path, root_dir: str,
@@ -475,9 +485,15 @@ def find_attachable(home: Path, root_dir: str,
 
 
 def attach_url(entry: dict) -> str:
-    """The browser URL for an attachable instance (loopback - same machine)."""
+    """The browser URL for an attachable instance (loopback - same machine).
+
+    The loopback address is derived from the entry's recorded bind host, so an
+    IPv6-bound instance gets ``http://[::1]:PORT/`` rather than an IPv4 loopback
+    it is not listening on, correctly bracketed for a URL authority."""
+    from localm.bindhost import self_connect_host, url_host
     scheme = entry.get("scheme") or "http"
-    return f"{scheme}://127.0.0.1:{entry.get('port')}/"
+    host = url_host(self_connect_host(entry.get("host")))
+    return f"{scheme}://{host}:{entry.get('port')}/"
 
 
 def attach_target(home: Path, root_dir: str,
@@ -491,9 +507,11 @@ def attach_target(home: Path, root_dir: str,
     entry = find_attachable(home, root_dir, probe=probe)
     if not entry:
         return None
+    from localm.bindhost import self_connect_host, url_host
     scheme = entry.get("scheme") or "http"
+    _h = url_host(self_connect_host(entry.get("host")))
     return {
-        "base_url": f"{scheme}://127.0.0.1:{entry.get('port')}/v1",
+        "base_url": f"{scheme}://{_h}:{entry.get('port')}/v1",
         "token": entry.get("token"),
         "port": entry.get("port"),
         "scheme": scheme,
