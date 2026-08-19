@@ -390,3 +390,26 @@ def test_the_servers_own_refusal_is_reported_verbatim(env, monkeypatch):
     res = _run("widget", "greeting", "x" * 999)
     assert res.exit_code != 0
     assert "greeting: too long" in res.output
+
+
+def test_the_cycle_check_reads_the_config_the_write_is_based_on(env, monkeypatch):
+    """A cycle check taken from a load_config() read BEFORE the write is
+    check-then-act: update_config holds a cross-process lock across the whole
+    read-modify-write, so a concurrent writer can add the other half of the
+    cycle in the window between the look and the write.
+
+    Distinguishing the two needs the pre-read to DISAGREE with what the write is
+    based on, which is what patching load_config does here: it returns a
+    cycle-free view while the real stored config already has music -> image. A
+    check against the stale view allows the write; a check inside the mutator
+    refuses it.
+    """
+    import localm.config as cfg_mod
+    from localm import settings_schema as ss
+
+    assert _run("music", "use_config_from", "image").exit_code == 0
+    monkeypatch.setattr(cfg_mod, "load_config", lambda *a, **k: {"plugins": {}})
+    with pytest.raises(ValueError, match="cycle"):
+        ss.apply_local_plugin_config("image", "use_config_from", "music")
+    # ... and the refusal aborted the write rather than leaving it half done.
+    assert "use_config_from" not in _blocks(env).get("image", {})

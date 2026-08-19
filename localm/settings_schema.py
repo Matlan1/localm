@@ -2203,17 +2203,21 @@ def _deep_merge_block(dst: dict, src: dict) -> None:
             dst[k] = v
 
 
+def _own_plugin_block(cfg: dict, name: str) -> dict:
+    """This plugin's own block inside *cfg*, created if it is not there yet."""
+    plugins = cfg.get("plugins")
+    if not isinstance(plugins, dict):
+        plugins = cfg["plugins"] = {}
+    block = plugins.get(name)
+    if not isinstance(block, dict):
+        block = plugins[name] = {}
+    return block
+
+
 def _own_block_mutator(name: str, apply):
-    """update_config callback that hands *apply* this plugin's own block,
-    creating config["plugins"][name] when it does not exist yet."""
+    """update_config callback that hands *apply* this plugin's own block."""
     def _mutate(cfg: dict) -> None:
-        plugins = cfg.get("plugins")
-        if not isinstance(plugins, dict):
-            plugins = cfg["plugins"] = {}
-        block = plugins.get(name)
-        if not isinstance(block, dict):
-            block = plugins[name] = {}
-        apply(block)
+        apply(_own_plugin_block(cfg, name))
     return _mutate
 
 
@@ -2233,7 +2237,7 @@ def apply_local_plugin_config(name: str, key: str, value) -> tuple:
     both the does-this-file-exist check and the pop-on-clear that the GUI's own
     selection route relies on).
     """
-    from localm.config import load_config, update_config
+    from localm.config import update_config
     kind = plugin_config_kind(name)
     if kind == "runtime":
         raise ValueError(f"{name!r} has no static settings schema")
@@ -2249,16 +2253,26 @@ def apply_local_plugin_config(name: str, key: str, value) -> tuple:
         return key, chosen
 
     if kind == "media" and key == "use_config_from":
-        src = _validate_use_config_from(name, value, load_config())
+        # The cycle check runs INSIDE the mutator, not against a load_config()
+        # read taken before it. update_config holds a cross-process lock across
+        # the whole read-modify-write and hands the mutator the config it is
+        # about to persist, so checking there is atomic: a concurrent writer
+        # cannot slip the other half of a cycle into the window between the
+        # look and the write. Raising here also aborts the write, since
+        # update_config only reaches its atomic write once the mutator returns.
+        seen = {}
 
-        def _share(block: dict) -> None:
+        def _share(cfg: dict) -> None:
+            block = _own_plugin_block(cfg, name)
+            src = _validate_use_config_from(name, value, cfg)
+            seen["src"] = src
             if src is None:
                 block.pop("use_config_from", None)
             else:
                 block["use_config_from"] = src
 
-        update_config(_own_block_mutator(name, _share))
-        return key, src
+        update_config(_share)
+        return key, seen.get("src")
 
     if kind == "media":
         merge = validate_media_block(name, {key: value})
