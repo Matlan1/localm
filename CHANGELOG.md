@@ -20,6 +20,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   memory job could quietly produce correction proposals that a terminal user had
   no way to read or resolve. Erasing now takes the recoverable copies with it, so
   "erased" means the text is off disk rather than moved to a file you cannot see.
+- **Rolling the owner key no longer needs a terminal.** Settings > Security gains
+  an **Owner key** card: **Generate new key** mints a fresh one, or paste a key you
+  already use and press **Set this key**. The new key is shown once with a copy
+  button, and either action asks first, since both cut off every other device
+  holding the old key. This browser stays signed in, so you can rotate a key that
+  may have leaked without locking yourself out, and remotely rather than only from
+  the machine localm runs on. Scoped device keys are untouched. If
+  `LOCALM_API_KEY` is set in the server's environment it still overrides the
+  stored key, and localm now says so instead of reporting a rotation that has not
+  taken effect.
 - **Managing what the coder remembers no longer needs a terminal, and two more
   session settings arrived.** The **lessons** panel under Coder now has a
   **stored** and a **dropped** tab, so you can see both what the agent recalls
