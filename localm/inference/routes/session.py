@@ -51,8 +51,12 @@ def register(app: FastAPI, ctx) -> None:
         # the durable secret never sits in a cookie jar). The scope/identity/
         # fs-access snapshot is taken now so the session stays valid across a roll.
         from localm import scopes as S, sessions
-        from localm.auth import _hash_key, _is_owner_key, fs_access_for
+        from localm.auth import _hash_key, _is_owner_key, fs_access_for, rag_roots_for
         fs = "host" if S.ADMIN in held else fs_access_for(presented, "none")
+        # Same "owner is never confined by a per-credential field" shape as fs
+        # above: an ADMIN session snapshots [] (unrestricted), never a stored
+        # per-key list, exactly like effective_rag_roots resolves it live.
+        rag_roots = [] if S.ADMIN in held else rag_roots_for(presented, [])
         # Record WHETHER THE OWNER KEY minted this session, while that is still
         # provable. key_hash freezes the key's VALUE, and an owner-key roll
         # deliberately leaves sessions alive, so afterwards the frozen hash matches
@@ -62,7 +66,7 @@ def register(app: FastAPI, ctx) -> None:
         # against the live owner key: a POSITIVE proof that reads no keystore, so a
         # corrupt auth.json cannot flip it, and holding ADMIN cannot earn it.
         sid = sessions.create(scopes=held, key_hash=_hash_key(presented),
-                              fs_access=fs,
+                              fs_access=fs, rag_roots=rag_roots,
                               owner_key_minted=_is_owner_key(presented))
         secure = request.url.scheme == "https"
         response.set_cookie(_hs.SESSION_COOKIE, sid, httponly=True,

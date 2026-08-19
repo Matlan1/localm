@@ -81,7 +81,7 @@ def test_admin_owner_session_exempt_from_key_liveness(monkeypatch):
     from localm.inference.http_server import _principal_from_token
     prin = _principal_from_token(sid, "cookie")
     assert prin is not None
-    held, key_hash, fs = prin
+    held, key_hash, fs, rag_roots = prin
     assert scopes.ADMIN in held
 
 

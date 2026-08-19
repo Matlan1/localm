@@ -153,6 +153,7 @@ def _expired(rec: dict, now: float) -> bool:
 
 
 def create(*, scopes, key_hash: Optional[str], fs_access: str = "none",
+           rag_roots: Optional[list] = None,
            label: str = "", ttl: float = _ABS_TTL_S,
            idle_ttl: float = _IDLE_TTL_S,
            owner_key_minted: bool = False) -> str:
@@ -163,8 +164,11 @@ def create(*, scopes, key_hash: Optional[str], fs_access: str = "none",
     session stays valid across a later owner-key roll. *key_hash* is the sha256 of
     the key that minted it (so principal_id() over a cookie matches the same key
     presented as a bearer, for job ownership). *fs_access* is the host-filesystem
-    reach for this session. Raises if the store cannot be persisted (a security
-    step that fails must not look like success).
+    reach for this session. *rag_roots* is this session's per-key RAG-indexing
+    folder allowlist snapshot, same shape and same reason as *fs_access* - taken
+    now so it survives a later owner-key roll rather than being re-derived from a
+    key hash that may no longer resolve. Raises if the store cannot be persisted
+    (a security step that fails must not look like success).
 
     *owner_key_minted* records WHAT KIND of credential minted this session: True
     only when the presented credential WAS the owner key itself (auth._is_owner_key,
@@ -193,6 +197,7 @@ def create(*, scopes, key_hash: Optional[str], fs_access: str = "none",
         "scopes": sorted(scopes) if scopes else [],
         "key_hash": key_hash,
         "fs_access": fs_access or "none",
+        "rag_roots": list(rag_roots) if rag_roots else [],
         "owner_key_minted": bool(owner_key_minted),
         "label": (label or "")[:120],
         "issued": now,
@@ -240,6 +245,7 @@ def lookup(sid: Optional[str]) -> Optional[dict]:
             return {"scopes": list(r.get("scopes", [])),
                     "key_hash": r.get("key_hash"),
                     "fs_access": r.get("fs_access", "none"),
+                    "rag_roots": list(r.get("rag_roots", []) or []),
                     # `is True`, not bool(): create() only ever writes a real
                     # bool, so anything else in the file is a record written
                     # before this field existed, or a hand-edited/corrupted store.

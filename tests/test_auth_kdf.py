@@ -263,7 +263,7 @@ def test_kdf_runs_once_on_the_real_request_path(auth, monkeypatch):
 
     seen = set()
     for _ in range(10):
-        held, key_hash, fs = _principal_from_token(key, "header")
+        held, key_hash, fs, rag_roots = _principal_from_token(key, "header")
         assert S.ADMIN in held and fs == "host"
         seen.add(key_hash)
 
@@ -393,7 +393,7 @@ def test_env_var_owner_key_works_end_to_end_and_is_derived(auth, monkeypatch):
 
     assert auth.get_api_key() == key
     assert auth.verify(key) == {S.ADMIN}
-    held, key_hash, fs = _principal_from_token(key, "header")
+    held, key_hash, fs, rag_roots = _principal_from_token(key, "header")
     assert S.ADMIN in held and fs == "host"
     assert key_hash != _sha256(key)
     assert _kdf_records(auth)[0]["alg"] == "scrypt"
@@ -409,7 +409,7 @@ def test_hand_written_auth_key_works_end_to_end_and_is_derived(auth):
 
     assert auth.get_api_key() == key
     assert auth.verify(key) == {S.ADMIN}
-    held, key_hash, fs = _principal_from_token(key, "header")
+    held, key_hash, fs, rag_roots = _principal_from_token(key, "header")
     assert S.ADMIN in held and fs == "host"
     assert key_hash != _sha256(key)
     assert _kdf_records(auth)[0]["alg"] == "scrypt"

@@ -80,6 +80,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   second's share) instead of only the automatic, free-VRAM-proportional split.
   Leave every weight blank to keep the automatic sizing. This was previously
   only settable by hand-editing `config.json`.
+- **A scoped key can now be handed access to specific document folders only,
+  instead of your whole default RAG reach.** `localm key create` gains a
+  repeatable `--rag-root` option: set it and that key can index and query only
+  the folders you listed, not your home directory, working directory or
+  configured allowed folders. Leave it unset and a key behaves exactly as
+  before. The owner key is never affected by this.
 
 ### Changed
 - **The chat parameters drawer and the image, music and video generation forms

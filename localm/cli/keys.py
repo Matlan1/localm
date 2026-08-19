@@ -230,10 +230,13 @@ def key_list():
     table.add_column("Name")
     table.add_column("Scopes")
     table.add_column("FS access")
+    table.add_column("RAG roots")
     for k in keys:
+        rag_roots = k.get("rag_roots", [])
         table.add_row(str(k.get("id", "")), str(k.get("name", "")),
                       ", ".join(k.get("scopes", [])),
-                      str(k.get("fs_access", "none")))
+                      str(k.get("fs_access", "none")),
+                      ", ".join(rag_roots) if rag_roots else "(unrestricted)")
     console.print(table)
 
 
@@ -250,7 +253,13 @@ def key_list():
                    "whole server disk). Defaults to none so a shared key cannot "
                    "browse your disk. (A confined 'shared'/designated-roots tier "
                    "is reserved but not yet enforced.)")
-def key_create(name, scopes, fs_access):
+@click.option("--rag-root", "rag_roots", multiple=True,
+              help="A folder this key may index/query via RAG (repeatable). "
+                   "Setting this CONFINES the key's RAG reach to exactly these "
+                   "folders instead of your home dir + working dir + configured "
+                   "allowed roots. Omit to leave the key unrestricted (falls back "
+                   "to the global RAG indexing policy, same as today).")
+def key_create(name, scopes, fs_access, rag_roots):
     """Mint a named key limited to SCOPES; print the secret once.
 
     Privileged scopes (admin, keys:admin, plugins:admin, config:write) are
@@ -260,17 +269,24 @@ def key_create(name, scopes, fs_access):
     --fs-access grants host filesystem reach (default none). The owner key always
     has full host access; this is how you let (or deny) a shared device key browse
     the server disk.
+
+    --rag-root grants a per-key RAG-indexing folder allowlist (repeatable, default
+    unrestricted). The owner key is never confined by this; use it to hand a
+    shared key access to specific document folders only.
     """
     from localm import auth
     try:
         rec = auth.create_key(name, list(scopes), allow_privileged=False,
-                              fs_access=fs_access)
+                              fs_access=fs_access,
+                              rag_roots=list(rag_roots) or None)
     except (ValueError, PermissionError) as e:
         console.print(f"[red]{e}[/red]")
         sys.exit(1)
+    rag_note = (f"; rag-roots {', '.join(rec['rag_roots'])}"
+                if rec.get("rag_roots") else "")
     console.print(f"[green]New key '{rec['name']}' "
-                  f"({', '.join(rec['scopes'])}; fs-access {rec['fs_access']}) "
-                  f"- shown once:[/green]")
+                  f"({', '.join(rec['scopes'])}; fs-access {rec['fs_access']}"
+                  f"{rag_note}) - shown once:[/green]")
     console.print(f"  [bold]{rec['key']}[/bold]")
     console.print(f"[dim]id {rec['id']}; revoke with: "
                   f"localm key rm {rec['id']}[/dim]")

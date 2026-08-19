@@ -388,7 +388,8 @@ class ConfinementError(ValueError):
 _INDEX_MODES = ("whitelist", "blacklist")
 
 
-def indexing_policy(cfg: Optional[dict] = None) -> dict:
+def indexing_policy(cfg: Optional[dict] = None,
+                    key_roots: Optional[list] = None) -> dict:
     """The current RAG indexing confinement policy, read from config.
 
     ``mode`` is ``whitelist`` (index only your home folder, the working directory,
@@ -397,7 +398,28 @@ def indexing_policy(cfg: Optional[dict] = None) -> dict:
     and credential folders are still refused - a hard floor that
     ``confine_index_path`` enforces separately and no mode can turn off. Returns
     resolved ``Path`` lists so callers compare like-for-like.
+
+    *key_roots* is an optional PER-KEY folder allowlist (``auth.rag_roots_for`` /
+    ``http_server.effective_rag_roots`` - empty/None for the owner or a key that
+    never had one set). When non-empty it OVERRIDES the config-driven policy
+    entirely: the returned policy is forced to ``whitelist`` with ``allowed`` set
+    to exactly the resolved *key_roots* and a ``key_scoped`` flag set, so
+    ``confine_index_path`` does NOT also imply the home directory, the working
+    directory, or the global ``rag_allowed_roots`` on top of it - "each key gets
+    its own explicit folder allowlist", not an addition to everyone else's reach.
+    The hard floor (credential folders, secret files, UNC/device paths) still
+    applies underneath this exactly as it does for the global policy; only the
+    whitelist SET changes.
     """
+    if key_roots:
+        resolved: list[Path] = []
+        for r in key_roots:
+            try:
+                resolved.append(Path(r).expanduser().resolve())
+            except (OSError, ValueError):
+                continue
+        return {"mode": "whitelist", "allowed": resolved, "denied": [],
+                "key_scoped": True}
     if cfg is None:
         try:
             from localm.config import load_config
@@ -470,7 +492,13 @@ def confine_index_path(p, policy: Optional[dict] = None) -> Path:
         LOCALM_HOME exactly like any other folder outside the defaults, not as a
         special case;
       - ``blacklist``: *p* is allowed unless it is within a ``rag_denied_roots``
-        entry, then ``reason='denied'``.
+        entry, then ``reason='denied'``;
+      - a KEY-SCOPED policy (``indexing_policy(key_roots=...)``, marked
+        ``policy["key_scoped"]``) replaces the whitelist SET entirely: *p* must
+        be within one of the key's own explicit roots, and the home
+        directory/working directory/global ``rag_allowed_roots`` are NOT also
+        allowed on top of it - a per-key allowlist exists to confine a
+        credential to less than the owner's own reach.
 
     ``policy=None`` means hard-floor only: the local CLI operator, who can already
     read their own files, is otherwise unconfined.
@@ -562,12 +590,28 @@ def confine_index_path(p, policy: Optional[dict] = None) -> Path:
 
     # whitelist: your home folder + the working dir are always allowed, plus the
     # roots you added. Anything else is a fixable miss (the owner can widen).
-    roots: list[Path] = []
-    for r in [Path.home(), Path.cwd(), *policy.get("allowed", [])]:
-        try:
-            roots.append(Path(r).resolve())   # coerce str entries, then resolve
-        except (OSError, ValueError):
-            continue
+    #
+    # UNLESS this is a KEY-SCOPED policy (indexing_policy(key_roots=...)) - a
+    # per-key allowlist exists specifically to confine a credential to LESS than
+    # the owner's own reach, so home/cwd/the global rag_allowed_roots are
+    # deliberately NOT implied on top of it; only the key's own explicit roots
+    # count. The hard floor above (credential dirs, secret files, UNC/device
+    # paths) still applies either way - that guard runs before this branch and
+    # cannot be widened by any policy.
+    if policy.get("key_scoped"):
+        roots: list[Path] = []
+        for r in policy.get("allowed", []):
+            try:
+                roots.append(Path(r).resolve())
+            except (OSError, ValueError):
+                continue
+    else:
+        roots = []
+        for r in [Path.home(), Path.cwd(), *policy.get("allowed", [])]:
+            try:
+                roots.append(Path(r).resolve())   # coerce str entries, then resolve
+            except (OSError, ValueError):
+                continue
     if any(_path_within(rp, r) for r in roots):
         return rp
     raise ConfinementError(

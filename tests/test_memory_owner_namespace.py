@@ -46,6 +46,6 @@ def test_job_ownership_principal_unchanged_for_admin(monkeypatch):
     monkeypatch.setattr(hs, "_request_token", lambda r: ("tok", "header"))
     monkeypatch.setattr("localm.auth.any_key_configured", lambda: True)
     monkeypatch.setattr(hs, "_principal_from_token",
-                        lambda t, s: ({scopes.ADMIN}, "owner-key-hash", None))
+                        lambda t, s: ({scopes.ADMIN}, "owner-key-hash", None, []))
     # principal_id still returns the real hash (job stays bound to the key).
     assert hs.principal_id(object()) == "owner-key-hash"

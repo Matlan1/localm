@@ -670,9 +670,16 @@ async def rag_add(name: str, req: RagAddRequest, request: Request):
     # a hard denial (credential / data dir / an explicit deny-list entry) is always
     # refused (400). Only the owner may widen the allow-list, so a non-owner shared
     # key gets a plain 403 for a miss.
+    #
+    # A caller whose KEY carries its own rag_roots allowlist (auth.create_key's
+    # per-key field) is confined to exactly those folders instead of the global
+    # policy - effective_rag_roots resolves to [] (no per-key restriction) for the
+    # owner/ADMIN and for any key that never had one set, so this is a no-op change
+    # for every existing key.
     from localm.rag.store import (confine_index_path, indexing_policy,
                                   ConfinementError)
-    policy = indexing_policy()
+    from localm.inference.http_server import effective_rag_roots
+    policy = indexing_policy(key_roots=effective_rag_roots(request))
     addable: list[str] = []
     blocked: list[str] = []
     confined: list[Path] = []

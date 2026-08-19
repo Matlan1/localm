@@ -2672,15 +2672,19 @@ def _session_exempt_from_key_recheck(rec, token=None) -> bool:
 
 
 def _principal_from_token(token, source):
-    """Resolve a presented credential to ``(scopes, key_hash, fs_access)`` or None.
+    """Resolve a presented credential to ``(scopes, key_hash, fs_access,
+    rag_roots)`` or None.
 
     A ``header`` token is a raw API key -> ``auth.verify()``. A ``cookie`` token is
     now an OPAQUE SESSION ID -> the server-side session store (``localm.sessions``),
-    which returns the scope / owning-key / fs-access SNAPSHOT taken at login. So a
-    cookie session stays valid across an owner-key roll (the reported bug), and the
-    durable key never has to live in the cookie. ``key_hash`` is the sha256 of the
-    key that minted the session, so ``principal_id`` over a cookie matches the same
-    key presented as a bearer (job ownership parity)."""
+    which returns the scope / owning-key / fs-access / rag-roots SNAPSHOT taken at
+    login. So a cookie session stays valid across an owner-key roll (the reported
+    bug), and the durable key never has to live in the cookie. ``key_hash`` is the
+    sha256 of the key that minted the session, so ``principal_id`` over a cookie
+    matches the same key presented as a bearer (job ownership parity). ``rag_roots``
+    is that credential's per-key RAG-indexing folder allowlist (see
+    ``auth.rag_roots_for`` / ``effective_rag_roots``); empty means no per-key
+    restriction, exactly like ``fs_access``'s "none" is not the ADMIN answer."""
     if not token:
         return None
     if source == "cookie":
@@ -2688,13 +2692,14 @@ def _principal_from_token(token, source):
         if rec is None:
             return None
         return (set(rec.get("scopes", [])), rec.get("key_hash"),
-                rec.get("fs_access", "none"))
-    from localm.auth import _hash_key, fs_access_for, verify
+                rec.get("fs_access", "none"), list(rec.get("rag_roots", []) or []))
+    from localm.auth import _hash_key, fs_access_for, rag_roots_for, verify
     held = verify(token)
     if held is None:
         return None
     fs = "host" if scopes.ADMIN in held else fs_access_for(token, "none")
-    return held, _hash_key(token), fs
+    rag_roots = [] if scopes.ADMIN in held else rag_roots_for(token, [])
+    return held, _hash_key(token), fs, rag_roots
 
 
 def caller_minted_by_owner_key(request: Request) -> bool:
@@ -2851,7 +2856,7 @@ def principal_id(request: Request) -> Optional[str]:
     # else auth is enforced.
     prin = _principal_from_token(token, source)
     if prin is not None:
-        held, key_hash, _ = prin
+        held, key_hash, _fs, _rag_roots = prin
         return key_hash
     return None
 
@@ -2930,10 +2935,36 @@ def effective_fs_access(request: Request) -> str:
     prin = _principal_from_token(token, source)
     if prin is None:
         return "none"                       # keys configured, none/invalid presented
-    held, _key_hash, fs = prin
+    held, _key_hash, fs, _rag_roots = prin
     if scopes.ADMIN in held:
         return "host"                       # owner key / owner session
     return fs                               # bearer key or session fs-access snapshot
+
+
+def effective_rag_roots(request: Request) -> list:
+    """The caller's effective per-key RAG-indexing folder allowlist: a list of
+    folder-path strings, or ``[]`` meaning NO per-key restriction (the caller
+    falls back to the global ``rag_allowed_roots`` policy that already applies to
+    everyone - see ``rag.store.indexing_policy``/``confine_index_path``).
+
+    Exactly the same shape as ``effective_fs_access``: open mode (loopback owner)
+    and the owner/ADMIN key always resolve to ``[]`` (unrestricted - a per-key
+    allowlist exists to confine a LESSER credential, never the owner's own); any
+    other valid key uses its stored rag_roots list (default ``[]`` for a legacy
+    key or one that never had one set); no valid key -> ``[]`` (the caller is
+    then refused elsewhere in the request pipeline, same as a missing fs_access
+    check - this function only ever narrows an already-authorized caller)."""
+    from localm.auth import any_key_configured
+    if not any_key_configured():
+        return []                           # open/dev mode = loopback owner
+    token, source = _request_token(request)
+    prin = _principal_from_token(token, source)
+    if prin is None:
+        return []
+    held, _key_hash, _fs, rag_roots = prin
+    if scopes.ADMIN in held:
+        return []                           # owner key / owner session
+    return rag_roots                        # bearer key or session snapshot
 
 
 def require_fs_host(request: Request) -> None:
