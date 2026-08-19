@@ -98,8 +98,10 @@ Pair with an AI agent on code tasks. Point it at a project directory and give it
 
 - **Verification command** is the exit-code oracle: the harness runs it before a turn that changed files may finish and reads its exit code, so the agent cannot declare a success the check disagrees with. Leave it blank to use the project's detected check, set **verification fix attempts** to bound the retries, or tick **skip verification** to run none. This is the same oracle `localcoder --until` uses for a one-shot task.
 - **Patch mode** captures every file write as a unified diff instead of applying it; nothing is written to disk and the **patch** button downloads the result.
+- **Seed** pins the sampler's RNG, so the same seed with the same model, prompt and settings reproduces the same output. Leave it blank for a fresh random seed each run.
+- **Still confirm shell commands** only bites alongside auto-approve, which is what it carves an exception out of: file writes go through unattended while shell commands still stop for you. Same as `localcoder --interactive-confirm`.
 - **Native tools API** asks the model server for the OpenAI-compatible `tools` protocol. localm's own server does not implement it and says so when you tick this; it uses grammar-constrained tool calls instead, which give the same guarantee.
-- **Lessons** lists the episodic-memory lessons stored for the directory in the form, with the ids `localcoder --forget-episode` / `--restore-episode` take.
+- **Lessons** manages the episodic-memory lessons stored for the directory in the form. It has two tabs: **stored** (what the coder currently recalls) and **dropped** (what it has let go of, which can be brought back). Each lesson can be forgotten, each dropped one restored, and the whole set can be **erased** - that last one takes the recoverable copies too and cannot be undone, so it asks first. **Consolidate** asks the model to merge related lessons into one; it is opt-in and manual, every original is archived so a bad merge is reversible, and it tells you how many groups it left alone. Ids are shown because they are what `localcoder --forget-episode` and `--restore-episode` take.
 
 **In-session commands:** Type `/` to open the coder command menu: `/undo`, `/files`, `/compact`, `/export`, `/log`, `/stop`, `/end`, `/help`.
 

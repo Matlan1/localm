@@ -7,7 +7,7 @@
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { addMessageRow, lsSetScoped } from "./chat.js";
-import { $, authHeaders, autoGrow, el, nearBottom, openModal, readSSE, renderMarkdown, toast } from "./helpers.js";
+import { $, authHeaders, autoGrow, confirmDanger, el, nearBottom, openModal, readSSE, renderMarkdown, toast } from "./helpers.js";
 import { emptyState, iconEl } from "./icons.js";
 import { modelCache, refreshModels } from "./models-sidebar.js";
 import { pickDirectory } from "./picker.js";
@@ -566,6 +566,10 @@ export async function startCoderSession(opts = {}) {
       // Writes become a unified diff instead of landing on disk (the CLI's
       // --patch-mode); download it from the "patch" button in the session bar.
       patch_mode: $("setup-patch").checked,
+      // Only meaningful WITH auto-approve, which is exactly what it carves an
+      // exception out of - sent unconditionally anyway so the session reports
+      // back what it was actually given rather than what we guessed it meant.
+      interactive_confirm: $("setup-interactive-confirm").checked,
       // The CLI's --native-tools. The server reports back whether it could
       // actually be honoured - see info.notes below - rather than us guessing
       // here, so this stays a plain request.
@@ -582,6 +586,10 @@ export async function startCoderSession(opts = {}) {
     if (model) body.model = model;
     const temp = $("setup-temperature").value.trim();
     if (temp !== "") body.temperature = Number(temp);
+    // Blank = no seed at all (a fresh random one per run), which is NOT the same
+    // as seed 0 - a real and reproducible value. Omit rather than coerce.
+    const seed = $("setup-seed").value.trim();
+    if (seed !== "") body.seed = Number(seed);
     const scope = $("setup-scope").value.trim();
     if (scope) body.scope = scope;
     const system = $("setup-system").value.trim();
@@ -1080,34 +1088,147 @@ export async function downloadCoderPatch() {
  *  web form of `localcoder --episodes`. Read-only: forgetting and restoring a
  *  lesson stay CLI flags with their own destructive semantics. The id is shown
  *  because it is what `--forget-episode` / `--restore-episode` address. */
-export async function openEpisodesModal() {
+/** POST/DELETE helper for the episode write routes. Every one of them is
+ *  owner-only and state-changing, so they are unsafe methods carrying the cwd in
+ *  the body rather than a URL a user could be walked into following. */
+async function episodeOp(method, path, cwd) {
+  const r = await fetch(path, {
+    method,
+    headers: authHeaders(),
+    body: JSON.stringify({ cwd }),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.detail || r.statusText);
+  return data;
+}
+
+/** Manage the episodic-memory lessons stored for the project in the setup form:
+ *  the web form of `localcoder --episodes` and its write siblings
+ *  (`--episodes-archive`, `--forget-episode`, `--restore-episode`,
+ *  `--forget-episodes`, `--consolidate-episodes`).
+ *
+ *  Ids are shown because they are what the CLI flags address, so what you read
+ *  here stays actionable from a terminal. */
+export async function openEpisodesModal(view = "live") {
   const cwd = ($("setup-cwd")?.value || "").trim();
   if (!cwd) { toast("Enter a project directory first", true); return; }
+  const url = view === "archive"
+    ? "/api/coder/episodes/archive?cwd=" : "/api/coder/episodes?cwd=";
   try {
-    const r = await fetch("/api/coder/episodes?cwd=" + encodeURIComponent(cwd),
-                          { headers: authHeaders() });
+    const r = await fetch(url + encodeURIComponent(cwd), { headers: authHeaders() });
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);
-    openModal("Stored lessons", (body) => {
-      const rows = data.episodes || [];
+    const rows = (view === "archive" ? data.archived : data.episodes) || [];
+    openModal(view === "archive" ? "Dropped lessons" : "Stored lessons", (body) => {
+      const tabs = el("div", "actions");
+      const liveBtn = el("button", "btn-secondary", "stored");
+      liveBtn.onclick = () => openEpisodesModal("live");
+      const arcBtn = el("button", "btn-secondary", "dropped");
+      arcBtn.onclick = () => openEpisodesModal("archive");
+      (view === "archive" ? arcBtn : liveBtn).classList.add("active");
+      tabs.appendChild(liveBtn);
+      tabs.appendChild(arcBtn);
+      body.appendChild(tabs);
+
       if (!rows.length) {
-        body.appendChild(emptyState(
-          "No lessons stored for this project yet. The coder writes one when a "
-          + "session that changed files finishes, outside privacy mode."));
-        return;
+        body.appendChild(emptyState(view === "archive"
+          ? "Nothing has been dropped for this project. Lessons land here when "
+            + "they are merged, evicted at the cap, or forgotten - so they can be "
+            + "brought back."
+          : "No lessons stored for this project yet. The coder writes one when a "
+            + "session that changed files finishes, outside privacy mode."));
+      } else {
+        body.appendChild(el("p", "sub",
+          `${rows.length} lesson(s) for ${data.cwd}. The id is what `
+          + "localcoder --forget-episode / --restore-episode take."));
+        for (const ep of rows) {
+          const card = el("div", "card");
+          card.appendChild(el("div", "row",
+            `${ep.lesson || ep.summary || ep.task || "(no lesson text)"}`));
+          const meta = view === "archive"
+            ? `${ep.id} · dropped: ${ep.reason || "?"}`
+            : `${ep.id} · ${ep.outcome} · ${ep.turns} turn(s)`
+              + (ep.merged ? ` · merged ${ep.merged}` : "");
+          card.appendChild(el("div", "sub", meta));
+          const act = el("div", "actions");
+          if (view === "archive") {
+            const b = el("button", "btn-secondary", "restore");
+            b.onclick = async () => {
+              try {
+                const out = await episodeOp(
+                  "POST", `/api/coder/episodes/${encodeURIComponent(ep.id)}/restore`, cwd);
+                // The caveats are surfaced, not swallowed: both describe a
+                // restore that SUCCEEDED and is still not what you pictured.
+                for (const n of out.notes || []) toast(n, true);
+                if (!(out.notes || []).length) toast("Lesson restored");
+                openEpisodesModal("archive");
+              } catch (e) { toast("Restore failed: " + e.message, true); }
+            };
+            act.appendChild(b);
+          } else {
+            const b = el("button", "btn-secondary", "forget");
+            b.title = "Drops it from recall. Archived, so it can be restored.";
+            b.onclick = async () => {
+              try {
+                const out = await episodeOp(
+                  "POST", `/api/coder/episodes/${encodeURIComponent(ep.id)}/forget`, cwd);
+                if (out.warning) toast(out.warning, true);
+                else toast("Forgotten - restore it from the dropped tab");
+                openEpisodesModal("live");
+              } catch (e) { toast("Forget failed: " + e.message, true); }
+            };
+            act.appendChild(b);
+          }
+          card.appendChild(act);
+          body.appendChild(card);
+        }
       }
-      body.appendChild(el("p", "sub",
-        `${rows.length} lesson(s) for ${data.cwd}. Forget or restore one with `
-        + "localcoder --forget-episode / --restore-episode <id>."));
-      for (const ep of rows) {
-        const card = el("div", "card");
-        card.appendChild(el("div", "row",
-          `${ep.lesson || ep.summary || ep.task || "(no lesson text)"}`));
-        card.appendChild(el("div", "sub",
-          `${ep.id} · ${ep.outcome} · ${ep.turns} turn(s)`
-          + (ep.merged ? ` · merged ${ep.merged}` : "")));
-        body.appendChild(card);
-      }
+
+      const foot = el("div", "actions");
+      const cons = el("button", "btn-secondary", "consolidate");
+      cons.title = "Ask the model to merge related lessons into one. Opt-in and "
+        + "manual; every original is archived, so a bad merge is reversible.";
+      cons.onclick = async () => {
+        cons.disabled = true;
+        try {
+          const rep = await episodeOp("POST", "/api/coder/episodes/consolidate", cwd);
+          if (!rep.groups) toast("Nothing to consolidate: no related lessons found");
+          else {
+            toast(`Consolidated ${rep.groups} group(s): ${rep.replaced} merged `
+              + `into ${rep.merged}, ${rep.archived} archived`);
+            // A group the model returned nothing usable for is COUNTED, not
+            // hidden - it was left untouched rather than dropped.
+            if (rep.skipped) {
+              toast(`${rep.skipped} group(s) left untouched (no usable merge)`, true);
+            }
+          }
+          if (rep.warning) toast(rep.warning, true);
+          openEpisodesModal("live");
+        } catch (e) {
+          toast("Consolidate failed: " + e.message, true);
+        } finally { cons.disabled = false; }
+      };
+      foot.appendChild(cons);
+
+      const wipe = el("button", "btn-secondary btn-danger", "erase all");
+      wipe.title = "Erases every lesson for this project, dropped ones included. "
+        + "Not reversible.";
+      wipe.onclick = () => confirmDanger(
+        "Erase all lessons?",
+        "This erases every lesson this project remembers, including the dropped "
+        + "ones you could otherwise restore. The archive goes too, so nothing is "
+        + "recoverable afterwards. This cannot be undone.",
+        "Erase everything",
+        async () => {
+          try {
+            const out = await episodeOp("DELETE", "/api/coder/episodes", cwd);
+            toast(`Erased ${out.erased} lesson(s) and ${out.erased_archived} `
+              + "dropped one(s)");
+            openEpisodesModal("live");
+          } catch (e) { toast("Erase failed: " + e.message, true); }
+        });
+      foot.appendChild(wipe);
+      body.appendChild(foot);
     });
   } catch (e) {
     toast("Could not read lessons: " + e.message, true);

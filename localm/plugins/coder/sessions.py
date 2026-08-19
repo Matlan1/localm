@@ -97,6 +97,7 @@ class CoderSession:
         mode: str = "privacy",
         scope: Optional[str] = None,
         dry_run: bool = False,
+        interactive_confirm: bool = False,
         patch_mode: bool = False,
         disabled_tools: Optional[frozenset] = None,
         restricted: bool = False,
@@ -129,6 +130,11 @@ class CoderSession:
         self.auto_approve = auto_approve
         self.mode = mode
         self.dry_run = dry_run
+        # Auto-approve file writes but still prompt before shell execution (the
+        # CLI's --interactive-confirm). It only bites WITH auto_approve, which is
+        # exactly what it carves an exception out of: without it every
+        # destructive tool already prompts, so there is nothing to except.
+        self.interactive_confirm = interactive_confirm
         # Writes are captured as a unified diff and never reach disk. The CLI's
         # --patch-mode names an output FILE; a browser has no such thing, so the
         # web form is "accumulate, then download" - see current_patch().
@@ -175,10 +181,20 @@ class CoderSession:
                 self._detect_verify(cwd) if auto_verify else None)
         self.verify_cmd = verify_cmd
 
+        # The shell-execution family keeps its confirmation even under
+        # auto_approve. A RESTRICTED session never has those tools at all, so
+        # the set is left empty there rather than naming tools that do not
+        # exist for it.
+        always_confirm: set = set()
+        if interactive_confirm and not restricted:
+            from localm.plugins.coder.agent.constants import _SHELL_EXEC_TOOLS
+            always_confirm |= set(_SHELL_EXEC_TOOLS)
+
         self.agent = Agent(
             backend,
             cwd=cwd,
             auto_approve=auto_approve,
+            always_confirm=always_confirm,
             max_turns=max_turns,
             mode=parse_mode(mode),
             scope=scope,
@@ -585,6 +601,7 @@ class CoderSession:
             "mode": self.mode,
             "auto_approve": self.auto_approve,
             "dry_run": self.dry_run,
+            "interactive_confirm": self.interactive_confirm,
             "patch_mode": self.patch_mode,
             # EFFECTIVE, not requested. `native_tools_requested` alongside it so
             # a UI can say "you asked and did not get it" rather than silently
