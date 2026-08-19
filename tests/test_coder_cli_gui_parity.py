@@ -469,27 +469,41 @@ def test_episodes_is_owner_only_and_validates_cwd(tmp_path, monkeypatch):
         assert client.get("/api/coder/episodes", headers=sh,
                           params={"cwd": str(proj)}).json()["episodes"] == []
         assert client.get("/api/coder/episodes", headers=owner).status_code == 400
-        assert client.get("/api/coder/episodes", headers=owner,
-                          params={"cwd": str(tmp_path / "nope")}).status_code == 400
+        # A directory that does not exist is NOT an error: lessons live under the
+        # localm data dir keyed by the resolved project path, so a project you
+        # moved or deleted still has an entry - and that is exactly when you want
+        # to read it. Same shape /api/coder/resumable answers with.
+        gone = client.get("/api/coder/episodes", headers=owner,
+                          params={"cwd": str(tmp_path / "nope")})
+        assert gone.status_code == 200
+        assert gone.json()["episodes"] == []
 
 
 @pytest.mark.parametrize("bad", [_UNC, _UNC_FWD, _DEVICE])
 def test_episodes_refuses_unc_and_device_cwd(tmp_path, monkeypatch, bad):
     """Same unconditional lexical refusal every other cwd-taking coder route
-    carries: a UNC string reaching is_dir() is the SMB dial (and the
-    net-NTLMv2 leak), which happens before any status code is chosen."""
-    seen: list = []
-    real_is_dir = Path.is_dir
+    carries: a UNC string reaching the filesystem is the SMB dial (and the
+    net-NTLMv2 leak), which happens before any status code is chosen.
 
-    def spy(self, *a, **kw):
-        s = str(self)
-        seen.append(s)
-        if s[:2] in ("\\\\", "//", "\\/", "/\\"):
-            raise AssertionError(
-                "Path.is_dir() reached the filesystem with %r" % s)
-        return real_is_dir(self, *a, **kw)
+    The spy covers ``resolve`` AND ``is_dir``, not merely whichever one this
+    route calls today. A spy pointed at a single method goes structurally DEAD
+    the moment the code reaches for the other one - and a dead fault injector is
+    indistinguishable from a guard that correctly found nothing to refuse, since
+    both produce a clean green. This test was written against ``is_dir`` and the
+    route stopped calling it in the same change."""
+    real = {"resolve": Path.resolve, "is_dir": Path.is_dir}
 
-    monkeypatch.setattr(Path, "is_dir", spy)
+    def make_spy(name):
+        def spy(self, *a, **kw):
+            s = str(self)
+            if s[:2] in ("\\\\", "//", "\\/", "/\\"):
+                raise AssertionError(
+                    "Path.%s() reached the filesystem with %r" % (name, s))
+            return real[name](self, *a, **kw)
+        return spy
+
+    for name in real:
+        monkeypatch.setattr(Path, name, make_spy(name))
     app, proj, owner = _owner(tmp_path, monkeypatch)
     with TestClient(app) as client:
         r = client.get("/api/coder/episodes", headers=owner, params={"cwd": bad})

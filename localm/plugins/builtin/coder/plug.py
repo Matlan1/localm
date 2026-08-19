@@ -781,7 +781,7 @@ async def coder_episodes(request: Request, cwd: str = ""):
 
     Lessons live under the localm data dir, never inside the project, so the
     ``cwd`` here is only the KEY they are filed under; nothing in the project
-    tree is read."""
+    tree is read, and a directory that no longer exists still has its lessons."""
     is_owner, _ = _principal_from_request(request)
     if not is_owner:
         return {"episodes": [], "cwd": None}
@@ -797,8 +797,18 @@ async def coder_episodes(request: Request, cwd: str = ""):
     if _is_unc_or_device_path(str(p)):
         raise HTTPException(
             400, "'cwd' must be a local directory path, not a UNC or device path.")
-    if not p.is_dir():
-        raise HTTPException(400, f"Not a directory: {cwd}")
+    # Deliberately NO is_dir() check, and this is a correctness decision rather
+    # than a relaxation. Lessons live under the localm data dir keyed by the
+    # RESOLVED project path (measured: delete the project and its lessons are
+    # still there), so a directory that has been moved or removed still has an
+    # entry - and that is precisely when someone wants to read it. Refusing on
+    # is_dir() would hide it. An unknown directory simply has no lessons filed,
+    # which is the same shape coder_resumable answers with rather than a 400.
+    #
+    # It also leaves resolve() as the ONLY filesystem touch on a client-supplied
+    # string here, and resolve() is required: it is how the CLI's --episodes
+    # derives the very same key, so the two surfaces would otherwise disagree
+    # about which project they are looking at.
     root = p.resolve()
 
     def _read():
