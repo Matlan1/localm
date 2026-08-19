@@ -217,7 +217,8 @@ def _compute_vram() -> dict:
     (see :func:`_vram_reading_trusted`); a stale or process-blind reading shows
     ``total`` alone rather than a wrong used/free, so the status bar never
     presents a number localm cannot stand behind as current fact."""
-    from localm.discover import last_known_gpus, vram_capacity
+    from localm.discover import (FREE_SCOPE_DEVICE as _FREE_SCOPE_DEVICE,
+                                 last_known_gpus, vram_capacity)
     info, status = vram_capacity(return_status=True)
     total = info.get("total")
     if not total:
@@ -271,9 +272,18 @@ def _compute_vram() -> dict:
         raw = last_known_gpus()
         if not raw:
             try:
+                from localm.discover import _apply_device_global_free
                 from localm.inference.backends.llamacpp._loader import (
                     native_device_inventory)
-                raw = native_device_inventory() or []
+                raw = list(native_device_inventory() or [])
+                # The registry hands back a RAW driver `free` with NO free_scope
+                # tag, and on Windows + AMD that number counts only THIS process's
+                # allocations. Measured on a real board while writing this: the raw
+                # reading said 0.2 GB in use where the desktop alone held 1.6 GB.
+                # _apply_device_global_free both corrects it and tags the scope, so
+                # the per-card gate below has something true to read - without this
+                # the fallback would report a comfortable card that is not.
+                _apply_device_global_free(raw)
             except Exception:
                 raw = []
         devices = []
@@ -284,7 +294,20 @@ def _compute_vram() -> dict:
             d = {"index": g.get("index"), "total": int(t)}
             if g.get("name"):
                 d["name"] = g["name"]
-            if trusted and g.get("free") is not None:
+            # BOTH halves, because they answer different questions and dropping
+            # either one shows a number that cannot be stood behind:
+            #   `trusted`  - is the reading FRESH (a probe actually completed, not
+            #                a served last-known-good frozen from an earlier state).
+            #                It is a property of the probe, so it is board-wide.
+            #   free_scope - does THIS CARD's free count every process, or only the
+            #                calling one. It is per device, and the aggregate flag
+            #                cannot stand in for it: a device list from the native
+            #                registry never went through vram_capacity at all.
+            # Measured on a real board: a process-scoped reading said 0.2 GB in use
+            # where 1.6 GB was, so scope alone decides whether a per-card figure is
+            # honest, and freshness alone decides whether it is current.
+            if (g.get("free") is not None and trusted
+                    and g.get("free_scope") == _FREE_SCOPE_DEVICE):
                 u = max(0, int(t) - int(g["free"]))
                 d["used"] = u
                 d["percent"] = round(u / int(t) * 100, 1)
