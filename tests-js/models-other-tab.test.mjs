@@ -137,11 +137,18 @@ test("merge-toggle: the checkbox writes the flag and re-renders", async () => {
   const window = await load();
   const box = window.document.getElementById("models-show-other");
   assert.equal(box.checked, false, "off unless the browser already stored otherwise");
+  assert.ok(noteText(window), "before: All is leaving rows out and saying so");
+
   box.checked = true;
   box.dispatchEvent(new window.Event("change"));
   await tick();
+
   assert.equal(window.localStorage.getItem("localm.showOtherModelsInAll"), "true");
   assert.ok(rowNames(window).includes("llava-mmproj"), "and the list refreshed itself");
+  // The note going away is what only a real re-render THROUGH the new filter can
+  // produce. "the row is present" alone is satisfied by never filtering at all,
+  // so on its own it could not fail if the merge-out were reverted.
+  assert.equal(noteText(window), null, "after: nothing is left out, so the note is gone");
 });
 
 test("merge-toggle: a value stored by a previous visit is reflected on load", async () => {
