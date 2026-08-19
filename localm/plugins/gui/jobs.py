@@ -674,15 +674,18 @@ class _ActivityStore:
             self._clear()
 
     def _clear(self) -> None:
+        # Broad, like write(): the contract this class documents is that no
+        # caller's control flow ever changes because of a store problem, and the
+        # path itself is resolved lazily (home_dir()) so even computing it can
+        # fail. A narrower except here would let that reach a job.
         try:
             self.path.unlink()
         except FileNotFoundError:
             pass
-        except OSError as e:
+        except Exception as e:
             try:
                 from localm.debuglog import logger
-                logger.debug("activity store: could not remove %s (%s)",
-                             self.path, e)
+                logger.debug("activity store: could not remove the record file (%s)", e)
             except Exception:
                 pass
 
