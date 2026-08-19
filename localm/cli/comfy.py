@@ -1,19 +1,73 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""`localm comfy` - manage localm's OWN (optional) ComfyUI instance.
+"""`localm comfy` - manage localm's OWN (optional) ComfyUI instance, and the
+lifecycle of whichever ComfyUI localm is targeting.
 
-`status` reports whether a managed instance exists and which ComfyUI localm
-targets. `remove` deletes the managed instance under the localm data dir
-(reversible, self-contained). `setup` provisions one: it REPLICATES the user's
-existing ComfyUI when they have one (stage S2, the COPY path - clone at the same
-commit, a fresh localm venv, the same packages, shared models), or installs a
-FRESH, hardware-matched ComfyUI when they do not (stage S3 - a pinned ComfyUI,
-the PyTorch build for their GPU, and the custom nodes localm's workflows need).
-The user's own ComfyUI is never touched.
+`status` reports whether a managed instance exists, which ComfyUI localm
+targets, and (by default) whether that ComfyUI is actually running. `remove`
+deletes the managed instance under the localm data dir (reversible,
+self-contained). `setup` provisions one: it REPLICATES the user's existing
+ComfyUI when they have one (stage S2, the COPY path - clone at the same commit,
+a fresh localm venv, the same packages, shared models), or installs a FRESH,
+hardware-matched ComfyUI when they do not (stage S3 - a pinned ComfyUI, the
+PyTorch build for their GPU, and the custom nodes localm's workflows need). The
+user's own ComfyUI is never touched.
+
+`start` / `stop` / `restart` drive the PROCESS, and they go through the running
+localm server rather than acting in-process. That is not indirection for its own
+sake: the handle on a ComfyUI localm launched lives in `comfy_client`'s
+process-local `_spawned_procs`, so a fresh CLI process calling `stop_comfy()`
+directly finds no handle, leaves a server-launched ComfyUI running with its VRAM
+held, and reports "localm did not launch this ComfyUI" - a false statement about
+the very thing the user asked about. Only the process that spawned it can end
+it, so the CLI asks that process. This is the same discover-instance-and-POST
+shape `localm stop` and `localm unload` already use.
 """
 
 import click
 
-from ._core import console, main
+from ._core import (console, main, no_server_message, report_server_failure,
+                    running_server, server_call)
+
+# Each client timeout must exceed the SERVER-side budget for the same call, or
+# the CLI gives up while the server is still working and reports a failure that
+# did not happen. The server bounds status at _COMFY_STATUS_TIMEOUT_S (15s) and
+# stop at _COMFY_STOP_TIMEOUT_S (90s) in localm/inference/routes/config.py.
+_STATUS_TIMEOUT = 20.0
+_STOP_TIMEOUT = 100.0
+# Transport slack added on top of a launch budget that is computed, never
+# guessed - see _launch_timeout below.
+_LAUNCH_SLACK = 30.0
+
+# The image plugin serves its generation routes under /api/imagine, music and
+# video under their own names; comfy-launch lives under the generation prefix in
+# all three (see the GUI's own GENERATE_PREFIX in static/pages/workflow.js).
+_LAUNCH_PREFIX = {"image": "imagine", "music": "music", "video": "video"}
+
+
+def _launch_timeout(cfg) -> float:
+    """How long to wait on a launch, derived from the SAME configured budget
+    ensure_comfy will actually honour.
+
+    comfy_launch_timeout exists because a ZLUDA/ROCm cold start compiles GPU
+    kernels and can take minutes. An independent client-side guess would drift
+    below a user's own setting and abort a launch that was still legitimately
+    progressing, so read the one number rather than inventing a second."""
+    from ..media.comfy_client import comfy_launch_wait_seconds
+    return comfy_launch_wait_seconds(cfg) + _LAUNCH_SLACK * 2
+
+
+def _restart_timeout(cfg) -> float:
+    """The restart route's own budget plus slack: it stops (bounded at the
+    server's 90s stop budget) and THEN launches, so a client that only allowed
+    for the launch half would abandon a restart mid-flight."""
+    return _STOP_TIMEOUT + _launch_timeout(cfg)
+
+
+def _live_status(server) -> tuple:
+    """(state, payload) for GET /v1/comfy/status on the discovered *server*."""
+    url, headers = server
+    return server_call(url, headers, "GET", "/v1/comfy/status",
+                       timeout=_STATUS_TIMEOUT)
 
 
 @main.group("comfy")
@@ -28,10 +82,80 @@ def comfy_group() -> None:
     """
 
 
+def _print_process_status(api_url: str, ping: bool) -> None:
+    """The RUNNING half of `comfy status`: is that ComfyUI up, and can localm
+    control it.
+
+    Asks the running localm server, because `launched_by_localm` is only
+    knowable inside the process that did the launching (see this module's
+    docstring). With no server to ask, fall back to a direct liveness probe -
+    which answers "is it up" perfectly well, and answers the control question
+    not at all. Those two are printed as different things: "no" would be a
+    claim, and the honest word is "unknown".
+    """
+    console.print()
+    console.print("[bold]ComfyUI process[/bold]")
+    if not ping:
+        console.print("  Running           : [dim]not checked (--no-ping)[/dim]")
+        return
+
+    server = running_server()
+    if server is not None:
+        state, payload = _live_status(server)
+        if state == "ok":
+            alive = bool((payload or {}).get("alive"))
+            ours = bool((payload or {}).get("launched_by_localm"))
+            console.print("  Running           : "
+                          + ("[green]yes[/green]" if alive else "[yellow]no[/yellow]"))
+            if not alive:
+                console.print("  [dim]Start it with[/dim] localm comfy start")
+                return
+            console.print(f"  Launched by localm: {'yes' if ours else 'no'}")
+            if ours:
+                console.print("  [dim]localm can[/dim] localm comfy stop  [dim]or[/dim]  "
+                              "localm comfy restart")
+            else:
+                console.print("  [dim]You started this one, so[/dim] localm comfy stop "
+                              "[dim]aborts its render and frees its VRAM but leaves "
+                              "the process running.[/dim]")
+            return
+        # Could not ask the server. Say so, then still answer what a direct
+        # probe CAN answer rather than printing nothing at all.
+        report_server_failure(state, payload, "ask the localm server about ComfyUI")
+
+    _print_direct_probe(api_url, had_server=server is not None)
+
+
+def _print_direct_probe(api_url: str, *, had_server: bool) -> None:
+    """Liveness straight from ComfyUI, with the control question left open.
+
+    A direct probe is a real answer to "is it running" - it is the same
+    /system_stats call the server's own route makes. It is NOT an answer to
+    "did localm launch it": the only process that knows is the one holding the
+    subprocess handle, so reporting `no` here would be inventing a negative out
+    of not having asked.
+    """
+    from ..media.comfy_client import _comfy_alive
+
+    alive = _comfy_alive(api_url, timeout=2.0)
+    console.print("  Running           : "
+                  + ("[green]yes[/green]" if alive else "[yellow]no[/yellow]"))
+    reason = ("the localm server could not be asked"
+              if had_server else "no localm server is running for this directory")
+    console.print(f"  Launched by localm: [dim]unknown - {reason}, and only the "
+                  "process that launched ComfyUI knows[/dim]")
+    if not had_server:
+        console.print("  [dim]Start one with[/dim] localm gui  [dim]to stop or restart "
+                      "ComfyUI from here.[/dim]")
+
+
 @comfy_group.command("status")
-def comfy_status() -> None:
-    """Show whether a managed ComfyUI is installed, where, and which ComfyUI
-    localm currently targets."""
+@click.option("--ping/--no-ping", "ping", default=True, show_default=True,
+              help="Also check whether the targeted ComfyUI is actually running. "
+                   "--no-ping keeps this command offline and instant.")
+def comfy_status(ping: bool) -> None:
+    """Show whether a managed ComfyUI is installed, where, which ComfyUI localm
+    currently targets, and whether that ComfyUI is running."""
     from ..config import load_config
     from ..media.managed_comfy import (
         MANAGED_COMFY_API_URL, is_managed_comfy_installed, managed_comfy_paths,
@@ -55,6 +179,153 @@ def comfy_status() -> None:
     target = resolve_comfy_target(cfg)
     which = "localm's managed ComfyUI" if target.managed else "your own ComfyUI"
     console.print(f"  Target now        : {which} ({target.api_url})")
+
+    _print_process_status(target.api_url, ping)
+
+
+@comfy_group.command("start")
+@click.option("--media", "media", default=None,
+              type=click.Choice(sorted(_LAUNCH_PREFIX)),
+              help="Launch with this media plugin's own ComfyUI settings "
+                   "(workdir / launch command). Omit to try image, then music, "
+                   "then video, and fall back to the global comfy_launch_cmd.")
+def comfy_start(media) -> None:
+    """Start ComfyUI without running a generation.
+
+    Uses the same launch path a real generation would (comfy_launch_cmd /
+    comfy_workdir, or the managed instance's own), so what starts here is
+    exactly what a later `localm image` would have started. A cold ROCm/ZLUDA
+    start compiles GPU kernels and can take minutes; this waits for the
+    configured comfy_launch_timeout.
+
+    Already running? This says so and changes nothing - it never interrupts a
+    render in progress.
+    """
+    from ..config import load_config
+
+    server = running_server()
+    if server is None:
+        no_server_message("starting ComfyUI")
+        raise SystemExit(1)
+    url, headers = server
+
+    # Ask first, and stop here when it is already up. The fallback below
+    # (/v1/comfy/restart) would otherwise abort whatever ComfyUI is currently
+    # rendering, which is the opposite of what "start" promises.
+    state, payload = _live_status(server)
+    if state == "ok" and (payload or {}).get("alive"):
+        console.print("[green]ComfyUI is already running.[/green]")
+        console.print("[dim]Restart it with[/dim] localm comfy restart")
+        return
+    if state not in ("ok", "unsupported"):
+        report_server_failure(state, payload, "ask the localm server about ComfyUI")
+        raise SystemExit(1)
+    # POSITIVELY established down, as opposed to merely not established up. The
+    # per-plugin launch routes are safe either way (ensure_available only brings
+    # ComfyUI up), but the kernel fallback below goes through /v1/comfy/restart,
+    # whose stop half ABORTS an in-flight render. That one is only allowed on a
+    # confirmed-down ComfyUI. An "unsupported" status read is a server too old
+    # to have the route; it is not evidence that nothing is rendering.
+    confirmed_down = state == "ok" and not (payload or {}).get("alive")
+
+    cfg = load_config()
+    timeout = _launch_timeout(cfg)
+    console.print("[dim]Starting ComfyUI (a cold start can take minutes)...[/dim]")
+
+    order = [media] if media else ["image", "music", "video"]
+    for kind in order:
+        st, pl = server_call(url, headers, "POST",
+                             f"/api/{_LAUNCH_PREFIX[kind]}/comfy-launch",
+                             timeout=timeout)
+        if st != "unsupported":
+            _report_action(st, pl, "start ComfyUI")
+            return
+        # 404: that media plugin is not installed on this server. Try the next.
+
+    if media:
+        console.print(f"[red]The {media} plugin is not installed on this server[/red], "
+                      "so it has no launch route.")
+        console.print("[dim]Install it with[/dim] localm plugin install "
+                      f"{media}[dim], or omit --media.[/dim]")
+        raise SystemExit(1)
+
+    # No media plugin is installed, so no per-plugin launch route exists. The
+    # kernel restart route launches from the GLOBAL comfy_launch_cmd, and with
+    # ComfyUI confirmed down above its stop half has nothing to abort.
+    if not confirmed_down:
+        console.print("[yellow]![/yellow]  No media plugin is installed, and this "
+                      "server cannot say whether ComfyUI is already running.")
+        console.print("[dim]The only remaining way to start it from here also "
+                      "aborts any render in progress, so it is not used blind. "
+                      "Install a media plugin, or start ComfyUI yourself.[/dim]")
+        raise SystemExit(1)
+    console.print("[dim]No media plugin is installed - launching from the global "
+                  "comfy_launch_cmd instead of a plugin's own.[/dim]")
+    st, pl = server_call(url, headers, "POST", "/v1/comfy/restart",
+                         timeout=_restart_timeout(cfg))
+    _report_action(st, pl, "start ComfyUI")
+
+
+@comfy_group.command("stop")
+def comfy_stop() -> None:
+    """Stop ComfyUI: abort the in-flight render, clear the queue, free its VRAM.
+
+    When localm launched it, its process is also ended. When YOU launched it,
+    localm only aborts and frees - it never kills a process it did not start,
+    and says so rather than implying it stopped something it did not.
+    """
+    server = running_server()
+    if server is None:
+        no_server_message("stopping ComfyUI")
+        raise SystemExit(1)
+    url, headers = server
+    console.print("[dim]Stopping ComfyUI...[/dim]")
+    st, pl = server_call(url, headers, "POST", "/v1/comfy/stop",
+                         timeout=_STOP_TIMEOUT)
+    _report_action(st, pl, "stop ComfyUI")
+
+
+@comfy_group.command("restart")
+def comfy_restart() -> None:
+    """Restart the ComfyUI localm launched: stop it, then launch a fresh one.
+
+    Only meaningful for a ComfyUI localm started (see `localm comfy status`);
+    for one you started yourself, the stop half aborts its render but its
+    process is left alone, so the relaunch finds it already up.
+    """
+    from ..config import load_config
+
+    server = running_server()
+    if server is None:
+        no_server_message("restarting ComfyUI")
+        raise SystemExit(1)
+    url, headers = server
+    console.print("[dim]Restarting ComfyUI (a cold start can take minutes)...[/dim]")
+    st, pl = server_call(url, headers, "POST", "/v1/comfy/restart",
+                         timeout=_restart_timeout(load_config()))
+    _report_action(st, pl, "restart ComfyUI")
+
+
+def _report_action(state, payload, what: str) -> None:
+    """Print the outcome of a comfy lifecycle POST, and exit 1 on failure.
+
+    The routes answer 200 with ``{"ok": false, "message": ...}`` for a refusal
+    they handled cleanly, so a 2xx is NOT by itself success - reading only the
+    status code here would report a failed stop as done, which is the exact
+    shape of a discarded return value.
+    """
+    from rich.markup import escape
+
+    if state != "ok":
+        report_server_failure(state, payload, what)
+        raise SystemExit(1)
+    ok = bool((payload or {}).get("ok"))
+    message = (payload or {}).get("message") or (
+        f"Asked the server to {what}." if ok else f"Could not {what}.")
+    colour = "green" if ok else "red"
+    console.print(f"[{colour}]{escape(str(message))}[/{colour}]")
+    if not ok:
+        raise SystemExit(1)
 
 
 @comfy_group.command("remove")

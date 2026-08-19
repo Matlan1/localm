@@ -194,7 +194,7 @@ never modified. Full guide: [docs/managed-comfyui.md](../docs/managed-comfyui.md
 ```bash
 localm comfy setup                 # provision it (copies your ComfyUI, or a fresh hardware-matched install)
                                     # media routes to it right away (comfy_target defaults to "own")
-localm comfy status                # is one installed, and which ComfyUI is targeted now
+localm comfy status                # is one installed, which ComfyUI is targeted, and is it running
 localm comfy update                # advance to the shipped pinned version, re-apply localm's patches
 localm comfy remove [--models]     # delete it (keeps the managed models unless --models)
 ```
@@ -202,6 +202,29 @@ localm comfy remove [--models]     # delete it (keeps the managed models unless 
 `localm comfy setup` takes `--copy-custom-nodes` / `--no-custom-nodes` (copy path
 only; you are asked when custom nodes are present). `localm comfy update` takes
 `--reinstall-requirements` and, for testing, `--commit <sha>`.
+
+### Starting and stopping ComfyUI
+
+These drive whichever ComfyUI localm targets - the managed one or your own.
+
+```bash
+localm comfy status                # ...including whether it is running, and whether localm launched it
+localm comfy status --no-ping      # skip the liveness check (offline and instant)
+localm comfy start                 # start it without running a generation
+localm comfy start --media music   # start it with the music plugin's own ComfyUI settings
+localm comfy stop                  # abort the render, clear the queue, free its VRAM
+localm comfy restart               # stop it, then launch a fresh one
+```
+
+These need a running localm server (`localm gui` or `localm serve`), because the
+handle on a ComfyUI localm launched belongs to the process that launched it -
+only that process can end it. `localm comfy stop` never kills a ComfyUI you
+started yourself: it aborts the render and frees the VRAM, and says so rather
+than implying the process is gone. A cold start compiles GPU kernels and can take
+minutes, so `start` and `restart` wait for the configured `comfy_launch_timeout`.
+
+Pressing Ctrl-C during `localm image` / `localm music` / `localm video` now tells
+ComfyUI to abort that render and free its VRAM, instead of leaving it running.
 
 Whether localm targets the managed instance is decided by one setting,
 `comfy_target` (`own` by default, or `user` to force your own ComfyUI) - localm
@@ -584,14 +607,18 @@ localm make-launcher --force             # rebuild it (use after a Python upgrad
 
 localm doctor                            # check Python, llama.dll, GPU driver, VRAM, packages
 localm info                              # data directory, config file, registry, registry file
-localm status                            # show the localm server serving this directory, if any
+localm memory list                       # what localm has remembered about you (see docs/memory.md)
+localm status                            # show the localm server serving this directory, and what it is doing
 localm ps                                # list running localm servers (per-directory instances)
+localm cancel <id>                       # cancel one operation that server is running (id from `status`)
 localm stop                              # stop the server serving this directory
 localm stop <id>                         # stop one instance by id (or an id prefix, as shown by `ps`)
 localm stop --all                        # stop every running localm instance
 ```
 
 `localm run`/`localm gui`/`localm serve` start a background server that keeps running after the command exits; `localm stop` is how you end it - it asks the server to shut down cleanly (model unloaded, same as the GUI's Settings page), and force-ends the process if it does not confirm within `--timeout` seconds (default 10).
+
+`localm status` lists what that server is working on right now - a model pull, a RAG re-embed, a media generation - with each operation's id. `localm cancel <id>` stops one of them (a unique id prefix is enough); a pull's download is ended, and an in-process job stops at its next checkpoint. Scheduled jobs are a separate thing under their own ids - use `localm job` for those.
 
 `localm setup-embeddings` fetches a small on-device embedding model (default `bge-small-en-v1.5`) so semantic memory and RAG retrieval work without a lexical-only fallback; pass `--model` to choose a known key, a registered model, or a GGUF path.
 
