@@ -676,15 +676,19 @@
               <div id="perf-gpu-split-row" hidden>
                 <label>Split across GPUs</label>
                 <div id="perf-gpu-split-list"></div>
-                <!-- The gpu_split_ratios clause is LOad-BEARING, not filler: that key
-                     is Widget.HIDDEN and config-file-only, so this sentence is the
-                     only place in the GUI a user can learn it exists (finding M3;
-                     whether to give it a real control is a product call). Pinned by
-                     tests-js/perf.test.mjs. -->
                 <div class="sub">Spread a model too large for one card over several
                 (check 2 or more, which overrides Main GPU). Each card's share follows
-                its free VRAM at load time; set gpu_split_ratios in config.json to pin
-                fixed shares. Saves immediately; applies on the next model load.</div>
+                its free VRAM at load time, unless pinned below. Saves immediately;
+                applies on the next model load.</div>
+                <!-- gpu_split_ratios: rendered by setupGpuSplitCheckboxes's
+                     renderGpuSplitRatioRow (settings-perf.js), not the generic
+                     settings form - same reasoning as gpu_split_indices above.
+                     Empty and hidden until 2+ boxes are checked. -->
+                <div id="perf-gpu-ratio-list" class="perf-gpu-ratio-list"></div>
+                <div id="perf-gpu-ratio-hint" class="sub" hidden>Optional relative
+                weight per checked device (e.g. 3 and 1 gives the first card three
+                times the second's share). Leave every weight blank to keep the
+                automatic free-VRAM sizing above.</div>
               </div>
               <!-- ONE note for BOTH rows: setIndexSpaceHint used to append it per
                    row, so a multi-GPU Vulkan box read the same sentence twice about

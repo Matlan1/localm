@@ -5,7 +5,9 @@
 // PATCHes the two engine keys. Also covers the "Split across GPUs" checkbox
 // row (refreshGpuSplitCheckboxes / onGpuSplitChange / setupGpuSplitCheckboxes
 // in app/settings-perf.js), which sits right below the Main GPU selector and
-// shares its GET /api/gpus data source and single-GPU-hides-row gate.
+// shares its GET /api/gpus data source and single-GPU-hides-row gate, plus
+// the ratio-weight inputs beside it (renderGpuSplitRatioRow) that expose
+// gpu_split_ratios.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -21,14 +23,15 @@ async function waitFor(fn, timeout = 800) {
 
 // Records calls; serves config + estimate + the bootstrap endpoints.
 function makeFetch(calls, { fits = true, gpus = [], gpuSplitIndices = null,
-                            free = 11 * GIB } = {}) {
+                            gpuSplitRatios = null, free = 11 * GIB } = {}) {
   return async (url, opts = {}) => {
     const u = String(url);
     const method = (opts.method || "GET").toUpperCase();
     calls.push({ u, method, body: opts.body });
     if (u.includes("/api/gpus"))
       return { ok: true, status: 200,
-        json: async () => ({ gpus, main_gpu_index: null, gpu_split_indices: gpuSplitIndices }) };
+        json: async () => ({ gpus, main_gpu_index: null, gpu_split_indices: gpuSplitIndices,
+                              gpu_split_ratios: gpuSplitRatios }) };
     if (u.includes("/api/vram-estimate"))
       return { ok: true, status: 200, json: async () => ({
         model: "m", model_bytes: 4 * GIB, weights: 4 * GIB, kv_cache: 0.6 * GIB,
@@ -286,36 +289,41 @@ test("estimate shows 'free VRAM unknown' and no fit verdict when free is withhel
     "no warn styling when fit is genuinely unknown");
 });
 
-test("two detected GPUs with a configured split: the checkbox row shows, both boxes pre-checked", async () => {
+test("two detected GPUs with a configured split: the checkbox row shows, both boxes pre-checked, ratios pre-filled", async () => {
   const calls = [];
   const gpus = [
     { index: 0, name: "GPU A", total: 24 * GIB, free: 20 * GIB },
     { index: 1, name: "GPU B", total: 12 * GIB, free: 10 * GIB },
   ];
-  const { window } = loadApp({ fetchImpl: makeFetch(calls, { gpus, gpuSplitIndices: [0, 1] }) });
+  const { window } = loadApp({ fetchImpl: makeFetch(calls,
+    { gpus, gpuSplitIndices: [0, 1], gpuSplitRatios: [3, 1] }) });
   const row = window.document.getElementById("perf-gpu-split-row");
   const list = window.document.getElementById("perf-gpu-split-list");
+  const ratioList = window.document.getElementById("perf-gpu-ratio-list");
   assert.ok(await waitFor(() => row.hidden === false), "split row becomes visible for 2+ GPUs");
   const boxes = [...list.querySelectorAll("input[type=checkbox]")];
   assert.equal(boxes.length, 2, "one checkbox per detected GPU");
   assert.ok(boxes.every((cb) => cb.checked), "both checkboxes pre-checked from gpu_split_indices");
+  const ratioInputs = [...ratioList.querySelectorAll("input[type=number]")];
+  assert.equal(ratioInputs.length, 2, "one ratio input per checked GPU");
+  assert.deepEqual(ratioInputs.map((i) => i.value), ["3", "1"],
+    "ratio inputs pre-fill from gpu_split_ratios, position-paired with gpu_split_indices");
 });
 
-test("the split row explains the automatic free-VRAM share sizing", () => {
+test("the split row explains the automatic free-VRAM share sizing, and no longer tells users to hand-edit config.json", () => {
   // Since the auto-split feature, each checked card's share follows its free
   // VRAM at load time (equal split only as the unmeasurable fallback or via a
-  // pinned gpu_split_ratios). A user staring at unequal cards must be able to
-  // tell the small/busy one will not be handed an oversized equal share - the
-  // row's own copy is the only place that can say so (gpu_split_ratios is a
-  // HIDDEN, config-file-only field whose schema description never renders in
-  // the GUI). Loads the REAL index.html via the harness, so this pins the
-  // shipped copy, not a fixture.
+  // pinned weight). A user staring at unequal cards must be able to tell the
+  // small/busy one will not be handed an oversized equal share. gpu_split_ratios
+  // now has a real widget (the ratio-weight inputs beside each checkbox), so
+  // the row must no longer send anyone to config.json for it. Loads the REAL
+  // index.html via the harness, so this pins the shipped copy, not a fixture.
   const { window } = loadApp({ fetchImpl: makeFetch([], {}) });
   const row = window.document.getElementById("perf-gpu-split-row");
   assert.match(row.textContent, /free VRAM/,
     "the split row must mention that shares follow free VRAM");
-  assert.match(row.textContent, /gpu_split_ratios/,
-    "the split row must name the config key that pins fixed shares instead");
+  assert.doesNotMatch(row.textContent, /config\.json/,
+    "the row must not send users to hand-edit config.json now that a widget exists");
 });
 
 test("a single detected GPU keeps the split checkbox row hidden", async () => {
@@ -374,4 +382,100 @@ test("2 checked boxes PATCH gpu_split_indices with both selected indices", async
   const body = JSON.parse(patch.body);
   assert.deepEqual(body.gpu_split_indices, [0, 1],
     "PATCH carries both checked GPU indices once 2 are checked");
+});
+
+test("a weight typed for every checked GPU PATCHes gpu_split_ratios, position-paired with gpu_split_indices", async () => {
+  const calls = [];
+  const gpus = [
+    { index: 0, name: "GPU A", total: 24 * GIB, free: 20 * GIB },
+    { index: 1, name: "GPU B", total: 12 * GIB, free: 10 * GIB },
+  ];
+  const { window } = loadApp({ fetchImpl: makeFetch(calls, { gpus, gpuSplitIndices: [0, 1] }) });
+  const ratioList = window.document.getElementById("perf-gpu-ratio-list");
+  assert.ok(await waitFor(() => ratioList.querySelectorAll("input[type=number]").length === 2),
+    "ratio inputs populated for the pre-checked pair");
+  const inp0 = ratioList.querySelector('input[data-gpu-index="0"]');
+  const inp1 = ratioList.querySelector('input[data-gpu-index="1"]');
+  inp0.value = "3";
+  inp0.dispatchEvent(new window.Event("change", { bubbles: true }));
+  inp1.value = "1";
+  inp1.dispatchEvent(new window.Event("change", { bubbles: true }));
+  assert.ok(await waitFor(() => {
+    const last = calls.filter((c) => c.u.endsWith("/v1/config") && c.method === "PATCH").at(-1);
+    return last && JSON.parse(last.body).gpu_split_ratios != null;
+  }), "typing both weights issues a PATCH carrying gpu_split_ratios");
+  const patch = calls.filter((c) => c.u.endsWith("/v1/config") && c.method === "PATCH").at(-1);
+  const body = JSON.parse(patch.body);
+  assert.deepEqual(body.gpu_split_indices, [0, 1]);
+  assert.deepEqual(body.gpu_split_ratios, [3, 1],
+    "ratios PATCH in the same order as the indices they weight");
+});
+
+test("leaving every weight blank saves gpu_split_ratios as null (automatic sizing)", async () => {
+  const calls = [];
+  const gpus = [
+    { index: 0, name: "GPU A", total: 24 * GIB, free: 20 * GIB },
+    { index: 1, name: "GPU B", total: 12 * GIB, free: 10 * GIB },
+  ];
+  const { window } = loadApp({ fetchImpl: makeFetch(calls,
+    { gpus, gpuSplitIndices: [0, 1], gpuSplitRatios: [3, 1] }) });
+  const ratioList = window.document.getElementById("perf-gpu-ratio-list");
+  assert.ok(await waitFor(() => ratioList.querySelectorAll("input[type=number]").length === 2));
+  for (const inp of ratioList.querySelectorAll("input[type=number]")) {
+    inp.value = "";
+    inp.dispatchEvent(new window.Event("change", { bubbles: true }));
+  }
+  assert.ok(await waitFor(() => calls.some(
+    (c) => c.u.endsWith("/v1/config") && c.method === "PATCH")), "blanking a weight issues a PATCH");
+  const patch = calls.filter((c) => c.u.endsWith("/v1/config") && c.method === "PATCH").at(-1);
+  const body = JSON.parse(patch.body);
+  assert.equal(body.gpu_split_ratios, null,
+    "every weight blank clears gpu_split_ratios rather than guessing one");
+});
+
+test("a partially filled ratio row is not saved, and the checked GPUs still save normally", async () => {
+  const calls = [];
+  const gpus = [
+    { index: 0, name: "GPU A", total: 24 * GIB, free: 20 * GIB },
+    { index: 1, name: "GPU B", total: 12 * GIB, free: 10 * GIB },
+  ];
+  const { window } = loadApp({ fetchImpl: makeFetch(calls, { gpus, gpuSplitIndices: [0, 1] }) });
+  const ratioList = window.document.getElementById("perf-gpu-ratio-list");
+  assert.ok(await waitFor(() => ratioList.querySelectorAll("input[type=number]").length === 2));
+  const inp0 = ratioList.querySelector('input[data-gpu-index="0"]');
+  inp0.value = "3";                              // only ONE of the two weighted
+  inp0.dispatchEvent(new window.Event("change", { bubbles: true }));
+  assert.ok(await waitFor(() => calls.some(
+    (c) => c.u.endsWith("/v1/config") && c.method === "PATCH")), "the partial edit still issues a PATCH");
+  const patch = calls.filter((c) => c.u.endsWith("/v1/config") && c.method === "PATCH").at(-1);
+  const body = JSON.parse(patch.body);
+  assert.deepEqual(body.gpu_split_indices, [0, 1],
+    "the checked-device selection saves even though the ratio row is incomplete");
+  assert.ok(!("gpu_split_ratios" in body),
+    "gpu_split_ratios is left out entirely rather than sending a half-guessed pairing");
+  const toastEl = window.document.getElementById("toast");
+  // The PATCH call is recorded (synchronously, inside the fetch mock) before
+  // _saveGpuSplit's own `await fetch(...)` resolves and reaches its toast()
+  // call, so the toast text needs its own wait rather than being ready the
+  // instant the PATCH shows up in `calls`.
+  assert.ok(await waitFor(() => /weight/i.test(toastEl.textContent)),
+    "the user is told a weight is missing rather than the save silently doing something unexpected");
+});
+
+test("unchecking a GPU down to 1 clears the ratio-weight row too", async () => {
+  const calls = [];
+  const gpus = [
+    { index: 0, name: "GPU A", total: 24 * GIB, free: 20 * GIB },
+    { index: 1, name: "GPU B", total: 12 * GIB, free: 10 * GIB },
+  ];
+  const { window } = loadApp({ fetchImpl: makeFetch(calls,
+    { gpus, gpuSplitIndices: [0, 1], gpuSplitRatios: [3, 1] }) });
+  const list = window.document.getElementById("perf-gpu-split-list");
+  const ratioList = window.document.getElementById("perf-gpu-ratio-list");
+  assert.ok(await waitFor(() => ratioList.querySelectorAll("input[type=number]").length === 2));
+  const boxes = [...list.querySelectorAll("input[type=checkbox]")];
+  boxes[0].checked = false;
+  boxes[0].dispatchEvent(new window.Event("change", { bubbles: true }));
+  assert.ok(await waitFor(() => ratioList.querySelectorAll("input[type=number]").length === 0),
+    "fewer than 2 checked GPUs leaves no ratio inputs to fill in");
 });
