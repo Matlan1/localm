@@ -607,6 +607,7 @@ localm make-launcher --force             # rebuild it (use after a Python upgrad
 
 localm doctor                            # check Python, llama.dll, GPU driver, VRAM, packages
 localm info                              # data directory, config file, registry, registry file
+localm memory list                       # what localm has remembered about you (see docs/memory.md)
 localm status                            # show the localm server serving this directory, and what it is doing
 localm ps                                # list running localm servers (per-directory instances)
 localm cancel <id>                       # cancel one operation that server is running (id from `status`)
