@@ -514,6 +514,22 @@ CORE_FIELDS: list = [
     # toggle as well - moving a panel is direct manipulation, and making someone
     # open Settings to do it is the kind of friction that gets a feature disliked.
     # Both surfaces write THIS key, so they cannot disagree.
+    # OFF is a legitimate position, not an edge case: a list of the project paths
+    # you have opened is a real record, and some people will not want one kept.
+    # Off means it is NOT WRITTEN, never "written but hidden" - see
+    # plugins/coder/projects.py, whose privacy-mode refusal is NOT covered by this
+    # setting and is not configurable at all.
+    SettingField("coder_remember_projects", Widget.TOGGLE,
+                 "Remember projects you have coded in",
+                 "Keeps a list of project folders so past sessions are easy to "
+                 "reach. Privacy-mode sessions are never listed.",
+                 group="Coder"),
+    # Capped because an unbounded list is both a scrolling wall and a slowly
+    # growing disclosure surface.
+    SettingField("coder_projects_remembered", Widget.NUMBER,
+                 "Projects to remember",
+                 "How many recent project folders to keep in that list.",
+                 group="Coder", min=0, step=5),
     SettingField("coder_rail_side", Widget.SELECT, "Coder session list side",
                  "Which side the coder's session list sits on. right "
                  "(default) or left.",

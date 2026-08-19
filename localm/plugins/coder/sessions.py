@@ -190,6 +190,18 @@ class CoderSession:
             from localm.plugins.coder.agent.constants import _SHELL_EXEC_TOOLS
             always_confirm |= set(_SHELL_EXEC_TOOLS)
 
+        # Record WHERE this session ran, so the rail can offer it again later.
+        # record_project refuses outright for privacy mode - that refusal lives in
+        # the module rather than here on purpose, so every future caller inherits it
+        # instead of each one having to remember. It never raises: a convenience
+        # list must not be able to stop a session starting.
+        try:
+            from localm.plugins.coder.projects import record_project
+            record_project(cwd, mode)
+        except Exception as _e:   # pragma: no cover - defensive, see above
+            from localm.debuglog import logger
+            logger.debug("coder projects: not recorded (%s)", _e)
+
         self.agent = Agent(
             backend,
             cwd=cwd,
