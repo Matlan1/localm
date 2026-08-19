@@ -275,7 +275,8 @@ def server_call(url, headers, method: str, path: str, *, timeout: float = 30.0,
     *state* is one of:
       ``"ok"``           - payload is the parsed body
       ``"unauthorized"`` - the server wants a credential this client lacks
-      ``"unsupported"``  - 404: this server has no such route (an older localm)
+      ``"unsupported"``  - this server has no such route (an older localm, or
+                           a plugin whose routes are not mounted)
       ``"missing"``      - 404 on a route whose 404 means "no such object"
       ``"http"``         - some other HTTP status; payload is ``(code, detail)``
       ``"unreachable"``  - could not connect; payload is a short reason
@@ -293,6 +294,7 @@ def server_call(url, headers, method: str, path: str, *, timeout: float = 30.0,
     unrelated answers, and a caller that printed "this server predates the
     feature" for a mistyped job id would be reporting the wrong one. Pass
     ``not_found="missing"`` where the object, not the route, is what is absent.
+    405 is never *not_found* - see the comment at that branch.
     """
     import requests
 
@@ -307,6 +309,21 @@ def server_call(url, headers, method: str, path: str, *, timeout: float = 30.0,
         return "unauthorized", r.status_code
     if r.status_code == 404:
         return not_found, r.status_code
+    if r.status_code == 405:
+        # MEASURED against a real running server, because the obvious
+        # assumption is wrong: a POST to a path this server does not serve
+        # comes back 405, NOT 404. Only GET produces a 404 there. So reading
+        # 404 alone as "no such route" made `comfy start` report "Could not
+        # start ComfyUI (HTTP 405)" on a server with no media plugin
+        # installed, instead of falling through to the route that could
+        # actually start it.
+        #
+        # Always "unsupported", never *not_found*: 405 is a statement about
+        # the path and method, and can never mean "the object you named is
+        # missing" - a mounted route with a genuinely absent object answers
+        # 404 with its own detail (measured: POST /api/jobs/<unknown>/cancel
+        # gives 404 "No such job: ...").
+        return "unsupported", r.status_code
     if not r.ok:
         detail = ""
         try:

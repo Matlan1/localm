@@ -18,7 +18,9 @@ change can go wrong:
     they handled cleanly, so a 2xx is not by itself success.
   - A 404 means "this server has no such route" on `/v1/comfy/status` and "no
     such job" on `/api/jobs/<id>/cancel`. One status code, two unrelated
-    answers.
+    answers. And a POST to a path the server does not serve is 405, not 404 -
+    measured, after the first version of this file assumed otherwise and the
+    bug reached a live run.
   - Cancelling an operation that already finished must not report "cancelling",
     which is what a blind POST would produce (the route returns the same body
     either way).
@@ -70,7 +72,16 @@ class _Server:
         self.calls.append((method, path))
         answer = self.routes.get((method, path), self.routes.get(path))
         if answer is None:
-            return _Resp(404, {"detail": f"no route {method} {path}"})
+            # MEASURED against a real localm server, not assumed - and the
+            # first version of this double got it wrong, which is precisely
+            # how the 405 bug reached a live run. A POST to a path the server
+            # does not serve comes back 405 Method Not Allowed; only GET
+            # gives 404 there. A fixture that answered 404 for both made the
+            # "no media plugin installed" case untestable while looking
+            # covered: the code fell through correctly against the fake and
+            # reported "Could not start ComfyUI (HTTP 405)" against reality.
+            return (_Resp(404, {"detail": "Not Found"}) if method == "GET"
+                    else _Resp(405, {"detail": "Method Not Allowed"}))
         if isinstance(answer, Exception):
             raise answer
         return answer
@@ -120,6 +131,24 @@ def test_the_two_404_meanings_do_not_print_the_same_sentence(capsys):
     assert absent_route != absent_object
     assert "predates" in absent_route
     assert "no such item" in absent_object
+
+
+def test_an_unserved_post_path_reports_405_as_no_such_route(monkeypatch):
+    """MEASURED on a real server: a POST to a path it does not serve answers
+    405, not 404. Treating only 404 as "no such route" is what made `comfy
+    start` fail on a server with no media plugin instead of falling back."""
+    monkeypatch.setattr(requests, "request", lambda *a, **k: _Resp(405, {}))
+    state, _ = server_call("http://x", {}, "POST", "/api/imagine/comfy-launch")
+    assert state == "unsupported"
+
+
+def test_405_is_never_read_as_a_missing_object(monkeypatch):
+    """not_found only ever reinterprets a 404. A 405 is a statement about the
+    path and method and can never mean "the job you named is gone"."""
+    monkeypatch.setattr(requests, "request", lambda *a, **k: _Resp(405, {}))
+    state, _ = server_call("http://x", {}, "POST", "/api/jobs/abc/cancel",
+                           not_found="missing")
+    assert state == "unsupported"
 
 
 @pytest.mark.parametrize("code,expected", [(401, "unauthorized"),

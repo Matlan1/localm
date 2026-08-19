@@ -234,8 +234,18 @@ def test_a_missing_server_clock_suppresses_the_age_rather_than_faking_one(
     _print_activity("http", 1234)
     out = _out(capsys)
     assert "P" in out
-    assert "h" not in out.replace("http", ""), (
-        f"invented an age with no reference clock: {out!r}")
+    # Assert against the OPERATION's own line, not the whole output. The
+    # original form was `"h" not in out.replace("http", "")` over everything
+    # printed - which reads as strict and is really a one-letter substring
+    # match, so any unrelated line containing an "h" fails it while the
+    # property under test still holds. It broke the day `_print_activity`
+    # gained a "Cancel one with localm cancel <id>" footer, on the "h" in
+    # "with". The property is unchanged and the second assertion makes it
+    # sharper: the age this fixture WOULD have produced is named outright.
+    op_line = next(ln for ln in out.splitlines() if "running" in ln)
+    assert "h" not in op_line, (
+        f"invented an age with no reference clock: {op_line!r}")
+    assert "2h00m" not in out, f"invented an age with no reference clock: {out!r}"
 
 
 # --------------------------------------------------------------- formatting
