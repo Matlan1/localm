@@ -240,6 +240,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   deliberately left readable, so a report still shows you and the maintainer
   things like `require_auth=true` and `n_gpu_layers=35` that are needed to
   work out what went wrong.
+- **A key minted through the API can now actually be granted access to your
+  files on disk.** A `POST /v1/keys` request could ask for `fs_access` (host
+  filesystem reach), and it was silently dropped - every key came back with
+  no filesystem access no matter what was requested, even when the owner
+  asked for it. The owner key can now actually grant it; the same request
+  from any other key is refused instead of being quietly downgraded to none.
 
 ## [0.1.5rc3] - 2026-08-13
 
