@@ -12,6 +12,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request, Response
 
 import localm.inference.http_server as _hs
 from localm import scopes
+from localm.bindhost import is_loopback_host as _is_loopback
 
 
 def register(app: FastAPI, ctx) -> None:
@@ -180,6 +181,142 @@ def register(app: FastAPI, ctx) -> None:
             return {"cleared": False, "warnings": warnings}
         _dbg.info("owner API key cleared via /api/auth/key/clear; session invalidated")
         return {"cleared": True, "warnings": []}
+
+    @app.post("/api/auth/key/rotate",
+              dependencies=[Depends(require_scope(scopes.ADMIN))],
+              include_in_schema=False)
+    async def rotate_owner_key(request: Request, response: Response):
+        """Roll or set the owner key (``auth.key``) - the GUI form of
+        ``localm key generate`` and ``localm key set <key>``.
+
+        The body is optional: no body (or ``{}``) mints a fresh random key,
+        ``{"key": "<value>"}`` persists that exact one. An empty or whitespace
+        ``key`` GENERATES rather than clearing, so this route can never drop the
+        server to open mode by accident - ``/api/auth/key/clear`` is the only way
+        out of protected mode, and it is a separate, deliberate action.
+
+        The active key is returned so the caller can show it once. That discloses
+        nothing new to THIS caller: an ADMIN principal can already read the owner
+        key from ``GET /api/pairing/qr``.
+
+        OWNER-GATED AND REMOTE-CAPABLE, deliberately. This is the posture decision
+        the route exists to record, so it is written here rather than left implicit:
+
+        * ``scopes.ADMIN``, NOT the ``config:write`` its sibling clear route takes,
+          and NOT ``keys:admin``. Clearing REMOVES a credential; setting INSTALLS
+          one the caller chose. A merely config:write or keys:admin holder POSTing
+          ``{"key": "<a value I know>"}`` would promote itself to owner in a single
+          call, so the lower bar next door is not a precedent to copy here.
+        * NOT loopback-only. The only pre-existing rolling path is a side effect of
+          the first-key lockout guard in ``routes/keys.py``, gated on
+          ``is_loopback_host`` and therefore absent on a network bind - i.e. absent
+          from exactly the deployment where an admin needs to rotate a leaked
+          credential (it is False for ``0.0.0.0``). Reaching this route already
+          requires the owner credential, so it grants no authority the caller does
+          not already hold, and rotation is the DEFENSIVE act of the party holding
+          it. Backstop if a stolen owner cookie is used to roll the key:
+          ``localm key recover``, run locally on the server machine, which is
+          precisely what that command is for.
+
+        CSRF needs no check here: ``_enforce_request`` already requires a valid
+        ``X-CSRF-Token`` for any cookie-sourced unsafe method.
+
+        Browser sessions are NOT revoked, matching ``localm key generate`` and
+        ``localm key set`` exactly. That is ``regenerate_key``'s documented design
+        (sessions are decoupled from the key value so a roll does not sign the GUI
+        out), and it is the whole premise of rotating from a browser. The command
+        that DOES revoke is ``localm key recover``, the local compromise path.
+        """
+        from localm import auth
+        payload = {}
+        try:
+            parsed = await request.json()
+            if isinstance(parsed, dict):
+                payload = parsed
+        except Exception:
+            payload = {}
+        requested = payload.get("key")
+        if requested is not None and not isinstance(requested, str):
+            raise HTTPException(
+                400, "'key' must be a string, or omitted to generate one.")
+        # Capture BEFORE writing: True only on an otherwise-keyless install, which
+        # is the open -> protected transition the lockout guard below exists for.
+        was_open = not auth.any_key_configured()
+        chose_own = bool(requested and requested.strip())
+        if chose_own:
+            try:
+                auth.set_api_key(requested)
+            except ValueError as e:
+                # set_api_key refuses a key that is too short or uses characters an
+                # HTTP Authorization header cannot carry. That is caller input, so
+                # it is a 400; letting the ValueError escape would surface as a 500
+                # and read as a server fault the user should report as a bug. The
+                # previous key is untouched on this path.
+                raise HTTPException(400, str(e)) from e
+            key = requested.strip()
+        else:
+            key = auth.regenerate_key()
+
+        # RULE 5, and the reason this returns a shape rather than a bare 200.
+        # READ THE KEY BACK rather than assuming the write decided the outcome.
+        # Two different things can make a "successful" rotation a no-op on the
+        # credential the server actually accepts, and they need different words:
+        #
+        #  1. LOCALM_API_KEY outranks the file (auth.get_api_key), so under that
+        #     env var the new key is genuinely on disk and the server still accepts
+        #     the OLD environment one. Telling someone rotating a leaked credential
+        #     that they are safe here is the exact rule-5 lie. The CLI says the same
+        #     thing through _note_env_override.
+        #  2. Anything else that leaves the read-back disagreeing with what was just
+        #     written is an unexplained failure, and is reported as one rather than
+        #     blamed on an env var that is not set.
+        import os as _os
+        warnings: list[str] = []
+        env_override = bool((_os.environ.get(auth.ENV_VAR) or "").strip())
+        active = auth.get_api_key() == key
+        if not active and env_override:
+            warnings.append(
+                f"{auth.ENV_VAR} is set in the server's environment and overrides "
+                "the stored key, so the server still accepts the environment's key "
+                "and NOT this new one. Unset it and restart to use this key.")
+        elif not active:
+            warnings.append(
+                "the new key was written but could not be read back as the active "
+                "key, so the previous credential may still be the live one")
+
+        # Lockout guard, mirroring the first-key path in routes/keys.py. In open
+        # mode the loopback GUI is trusted via the per-process shell token, which
+        # the server STOPS honouring the instant a key exists - so setting the very
+        # first key from the local GUI would orphan the browser that just did it.
+        # On the open -> protected transition from a loopback bind, hand THIS
+        # browser an opaque owner session (the id in the cookie, never the key).
+        # Loopback + open-mode only, exactly as next door: a network bind already
+        # required a key up front, so this never fires there and grants no
+        # authority the local user did not already hold via the shell token.
+        if was_open and _is_loopback(getattr(app.state, "bind_host", "127.0.0.1")):
+            from localm import sessions
+            # owner_key_minted is PROVEN, not assumed: _is_owner_key re-compares
+            # against the live value, so a write that somehow did not take reports
+            # False instead of stamping a privilege nothing established.
+            sid = sessions.create(scopes={scopes.ADMIN},
+                                  key_hash=auth._hash_key(key), fs_access="host",
+                                  owner_key_minted=auth._is_owner_key(key))
+            secure = request.url.scheme == "https"
+            response.set_cookie(_hs.SESSION_COOKIE, sid, httponly=True,
+                                secure=secure, samesite="strict", path="/",
+                                max_age=_hs.SESSION_MAX_AGE)
+
+        from localm.debuglog import logger as _dbg
+        # Never the key itself, and no filesystem path: this log is attached to bug
+        # reports. Only that a rotation happened and whether it took effect.
+        _dbg.info("owner API key %s via /api/auth/key/rotate (active=%s)",
+                  "set" if chose_own else "rolled", active)
+        # "rotated" is true only when the key is BOTH persisted and live, the same
+        # both-halves-completed contract /api/auth/key/clear uses for "cleared" - a
+        # caller reading only the status code must not conclude the credential
+        # changed. The warnings are path-free and carry no OS exception text.
+        return {"rotated": not warnings, "active": active, "key": key,
+                "warnings": warnings}
 
     @app.get("/api/session", include_in_schema=False)
     async def session_state(request: Request):
