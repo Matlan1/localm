@@ -38,6 +38,13 @@ const REGISTRY = [
   { name: "llava-mmproj", model_type: "mmproj", size_bytes: 10 },  // no tab of its own
   { name: "scratchpad", model_type: "unknown", size_bytes: 10 },   // no tab of its own
   { name: "kokoro", model_type: "tts-voice", size_bytes: 10 },     // not even in MODEL_TYPES
+  // NO TYPE RECORDED AT ALL - a third state, distinct from a recorded type and
+  // from the recorded type "unknown". This is exactly what the route sends for
+  // it: the "llm" default it keeps so the chat picker's ?type=llm still finds
+  // the model, plus the flag saying that default is a guess. A fixture that
+  // merely OMITTED model_type would not be a payload this client can receive,
+  // and so could not exercise the path at all.
+  { name: "ancient", model_type: "llm", model_type_recorded: false, size_bytes: 10 },
 ];
 
 function rowNames(window) {
@@ -84,8 +91,9 @@ test("other-tab: collects EVERY type with no tab of its own, not just 'unknown'"
   const window = await load();
   clickTab(window, "other");
   await tick();
-  assert.deepEqual(rowNames(window), ["kokoro", "llava-mmproj", "scratchpad"],
-    "mmproj and an entirely unknown-to-the-strip type land here beside 'unknown'");
+  assert.deepEqual(rowNames(window), ["ancient", "kokoro", "llava-mmproj", "scratchpad"],
+    "mmproj, a type the strip cannot name, and one with no type recorded at all, "
+    + "all beside the recorded 'unknown'");
 });
 
 test("other-tab: a type the strip does not name needs no second edit to land here", async () => {
@@ -110,6 +118,84 @@ test("other-tab: a type WITH a tab is never swept into Other", async () => {
   }
 });
 
+/* --------------- the third population: no type recorded YET --------------- */
+
+test("untagged: a model with no recorded type is on Other, not on LLMs", async () => {
+  // The route still calls it "llm" so the chat picker can find it, and that
+  // default is deliberately kept. A tab is a CLASSIFICATION though, and nobody
+  // classified this - so LLMs must not claim it and Other must.
+  const window = await load();
+  clickTab(window, "llm");
+  await tick();
+  assert.ok(!rowNames(window).includes("ancient"),
+    "the LLMs tab holds only models actually recorded as llm");
+  clickTab(window, "other");
+  await tick();
+  assert.ok(rowNames(window).includes("ancient"), "and Other is where it lives");
+});
+
+test("untagged: it is distinct from the RECORDED type 'unknown'", async () => {
+  // Both end up on Other, and that is correct, but they are different facts:
+  // "unknown" is a choice somebody made, no-type-at-all is an absence. The
+  // grouping is where the difference has to stay visible.
+  const window = await load({ seedLocalStorage: { "localm.modelsGroupByType": "true" } });
+  clickTab(window, "other");
+  await tick();
+  const heads = groupHeads(window);
+  const notSet = heads.find((h) => h.label === "(not set)");
+  const unknown = heads.find((h) => h.label === "unknown");
+  assert.ok(notSet && unknown, "two separate sections, never merged into one");
+  assert.equal(notSet.count, "1");
+  assert.equal(unknown.count, "1");
+});
+
+test("untagged: the Role control says 'not set' instead of asserting llm", async () => {
+  // The row sits on Other precisely because nobody classified it. A Role reading
+  // "llm" would have the page contradict its own tab.
+  const window = await load();
+  clickTab(window, "other");
+  await tick();
+  const row = [...window.document.querySelectorAll("#models-table tbody tr")]
+    .find((tr) => tr.querySelector(".name")?.textContent === "ancient");
+  const sel = row.querySelector("select");
+  const selected = sel.options[sel.selectedIndex];
+  assert.equal(selected.textContent, "not set");
+  assert.equal(selected.value, "", "a placeholder, not a value");
+  assert.equal(selected.disabled, true,
+    "it must not be postable - the set-type route would reject it");
+  assert.ok(sel.className.includes("type-unset"),
+    "and it must not borrow the 'unknown' hue, which is a different claim");
+});
+
+test("untagged: a recorded type still preselects its own option", async () => {
+  // Fires-control for the test above: the placeholder must appear ONLY for the
+  // untagged row, or "not set" would just be the new universal label.
+  const window = await load();
+  const row = [...window.document.querySelectorAll("#models-table tbody tr")]
+    .find((tr) => tr.querySelector(".name")?.textContent === "bge-small");
+  const sel = row.querySelector("select");
+  assert.equal(sel.value, "embedding");
+  assert.ok(![...sel.options].some((o) => o.textContent === "not set"),
+    "no placeholder on a row whose type IS recorded");
+});
+
+test("untagged: an absent flag means recorded, so an older payload is unchanged", async () => {
+  // The compatibility direction. Every model predating this field, and every
+  // response from a server predating it, carries no flag at all - and must keep
+  // behaving exactly as before rather than all becoming 'not set'.
+  const { window } = loadAppWithPages({
+    fetchImpl: makeFetch([
+      { name: "plain-llm", model_type: "llm", size_bytes: 10 },
+      { name: "no-type-key-at-all", size_bytes: 10 },
+    ]),
+  });
+  await window.refreshModelsPage();
+  await tick();
+  assert.deepEqual(rowNames(window), ["no-type-key-at-all", "plain-llm"],
+    "both stay on All exactly as they did before the flag existed");
+  assert.equal(noteText(window), null, "and nothing is being held back");
+});
+
 /* --------------------------- the merge-in toggle -------------------------- */
 
 test("merge-toggle: All leaves the no-tab types out by default", async () => {
@@ -118,7 +204,7 @@ test("merge-toggle: All leaves the no-tab types out by default", async () => {
     ["aardvark", "bge-small", "legacy-untyped", "qwen-7b"],
     "the four models whose type has a tab, and nothing else");
   assert.equal(countOn(window, "all"), "4", "and All's own count agrees with its list");
-  assert.equal(countOn(window, "other"), "3");
+  assert.equal(countOn(window, "other"), "4");
 });
 
 test("merge-toggle: ticking it merges them back into All, on demand", async () => {
@@ -127,9 +213,10 @@ test("merge-toggle: ticking it merges them back into All, on demand", async () =
   await window.refreshModelsPage();
   await tick();
   assert.deepEqual(rowNames(window),
-    ["aardvark", "bge-small", "kokoro", "legacy-untyped", "llava-mmproj", "qwen-7b", "scratchpad"],
+    ["aardvark", "ancient", "bge-small", "kokoro", "legacy-untyped", "llava-mmproj",
+     "qwen-7b", "scratchpad"],
     "every registered model");
-  assert.equal(countOn(window, "all"), "7", "All now counts the whole registry");
+  assert.equal(countOn(window, "all"), "8", "All now counts the whole registry");
   assert.equal(noteText(window), null, "and nothing is being left out, so nothing is said");
 });
 
@@ -163,7 +250,7 @@ test("hidden-note: All says how many it is leaving out and where they are", asyn
   const window = await load();
   const note = noteText(window);
   assert.ok(note, "a note is shown at all");
-  assert.match(note, /^3 models of a type with no tab of its own are not listed here/);
+  assert.match(note, /^4 models of a type with no tab of its own are not listed here/);
   assert.match(note, /Other tab/, "and it names where they went");
 });
 
@@ -231,6 +318,9 @@ test("group-by-type: one heading per present type, in the tab strip's own order"
     // MODEL_TYPE_OPTIONS names: known kinds keep their canonical order and
     // anything the registry grew afterwards sorts in behind them.
     { label: "tts-voice", count: "1" },
+    // Always last, and explicitly so rather than by where "(" happens to sort:
+    // every recorded type first, then the residual nobody has classified.
+    { label: "(not set)", count: "1" },
   ], "tabbed types first in strip order, then the remaining known ones, then the rest");
 });
 
@@ -270,7 +360,7 @@ test("group-by-type: applies to Other too, the other view that holds many types"
   clickTab(window, "other");
   await tick();
   assert.deepEqual(groupHeads(window).map((g) => g.label),
-    ["mmproj", "unknown", "tts-voice"], "same ordering rule as All");
+    ["mmproj", "unknown", "tts-voice", "(not set)"], "same ordering rule as All");
 });
 
 test("group-by-type: does nothing on a single-type tab", async () => {

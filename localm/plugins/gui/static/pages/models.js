@@ -56,10 +56,29 @@ export const GROUP_BY_TYPE_KEY = "localm.modelsGroupByType";
 const MODEL_TYPE_OPTIONS =
   ["llm", "embedding", "mmproj", "diffusion-unet", "text-encoder", "vae", "lora", "unknown"];
 
-// The route's own default: an entry with no recorded model_type reads as "llm".
-// Every filter, count and grouping decision goes through this one helper so they
-// cannot disagree about what an untyped registry entry is.
+// A registry entry with NO model_type at all is a third thing, distinct from
+// both a recorded type and from the recorded type "unknown": nobody has
+// classified it YET. The route still reports `model_type: "llm"` for it, because
+// that default is load-bearing elsewhere (the chat picker asks this same route
+// for ?type=llm, and a legacy entry must stay selectable for chat) - so it sends
+// `model_type_recorded: false` alongside to say the type is a guess rather than
+// a fact. Absent flag means recorded, which is what every normal model and every
+// older server sends.
+//
+// It reads as a type here rather than as a separate flag on purpose: ONE helper
+// then carries the distinction into the Other filter, the All merge-out, the tab
+// counts and the group headings, instead of four call sites each remembering to
+// check a second field. The sentinel is deliberately not identifier-shaped, so
+// it can never collide with a MODEL_TYPES member and is never used as a
+// selector (typeLabel's own regex rejects it and returns it as the heading).
+export const UNTAGGED_TYPE = "(not set)";
+
+// The route's own default: an entry with a recorded model_type reads as that,
+// and anything the route could not read reads as "llm". Every filter, count and
+// grouping decision goes through this one helper so they cannot disagree about
+// what an untyped registry entry is.
 export function modelTypeOf(m) {
+  if (m && m.model_type_recorded === false) return UNTAGGED_TYPE;
   return (m && m.model_type) || "llm";
 }
 
@@ -107,7 +126,12 @@ function _groupOrder(present) {
   const nav = $("models-tab-nav");
   if (nav) for (const b of nav.querySelectorAll(".tab-btn")) push(b.dataset.type);
   for (const t of MODEL_TYPE_OPTIONS) push(t);
-  for (const t of [...present].sort()) push(t);
+  for (const t of [...present].sort()) {
+    if (t !== UNTAGGED_TYPE) push(t);
+  }
+  // Last, explicitly rather than by where "(" happens to sort: every recorded
+  // type first, then the residual bucket of models nobody has classified.
+  push(UNTAGGED_TYPE);
   return order;
 }
 
@@ -426,19 +450,36 @@ export async function refreshModelsPage() {
     // here plus a separate <select> over in the actions cell: the same fact twice,
     // and the select was the widest thing in the row.
     const roleTd = el("td", "mono shrink-cell");
-    const roleType = m.model_type || "llm";
+    // An entry with nothing recorded must not wear an "llm" badge here: the row
+    // is on the Other tab precisely because nobody has classified it, and a page
+    // that files a model under Other while labelling it llm contradicts itself.
+    const untagged = modelTypeOf(m) === UNTAGGED_TYPE;
+    const roleType = untagged ? "unset" : (m.model_type || "llm");
 
     // On every row (outside the LLM-only gate below): an 'unknown'/media model
     // otherwise has no controls, and this is how a mis-detected model is
     // reclassified without the CLI. Changing it POSTs the chosen type, then
     // re-renders (so an unknown->llm switch reveals use/alias).
     const typeSel = el("select", "model-type-select type-badge type-" + roleType);
-    typeSel.title = "Change this model's type";
+    typeSel.title = untagged
+      ? "No type is recorded for this model - pick one"
+      : "Change this model's type";
     typeSel.setAttribute("aria-label", `Model type for ${m.name}`);
+    if (untagged) {
+      // A placeholder, not a value: "not set" is not a MODEL_TYPES member and
+      // the set-type route would reject it, so it is disabled and cannot be
+      // chosen or posted. It exists so the control shows the truth until
+      // somebody picks a real type, at which point it stops being rendered.
+      const none = el("option", "", "not set");
+      none.value = "";
+      none.disabled = true;
+      none.selected = true;
+      typeSel.appendChild(none);
+    }
     for (const t of MODEL_TYPE_OPTIONS) {
       const opt = el("option", "", t);
       opt.value = t;
-      if ((m.model_type || "llm") === t) opt.selected = true;
+      if (!untagged && (m.model_type || "llm") === t) opt.selected = true;
       typeSel.appendChild(opt);
     }
     typeSel.onchange = async () => {
@@ -626,7 +667,12 @@ export async function showModelDetail(name) {
   const data = await r.json().catch(() => ({}));
   if (!r.ok) { toast(data.detail || "Lookup failed", true); return; }
   openModal("Model - " + name, (body) => {
-    const modelType = data.model_type || "llm";
+    // Same three-state read as the list: `model_type` alone would render the
+    // route's "llm" DEFAULT as though somebody had chosen it, and this modal
+    // opens from a row that may be sitting on the Other tab for exactly the
+    // opposite reason.
+    const modelUntagged = data.model_type_recorded === false;
+    const modelType = modelUntagged ? "unset" : (data.model_type || "llm");
     const rows = [
       ["Path", data.path],
       ["Type", null],
@@ -640,7 +686,8 @@ export async function showModelDetail(name) {
       const row = el("div", "log-entry");
       row.appendChild(el("span", "t", k));
       if (k === "Type") {
-        row.appendChild(el("span", "type-badge type-" + modelType, modelType));
+        row.appendChild(el("span", "type-badge type-" + modelType,
+                            modelUntagged ? "not set" : modelType));
         // Beside the type, not as a row of its own: a "Capabilities" row would
         // have to render SOMETHING when there is no confirmed capability, and
         // the only honest something for an unknown is nothing at all. An

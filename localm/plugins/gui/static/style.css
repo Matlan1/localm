@@ -1486,6 +1486,15 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
   background: color-mix(in srgb, var(--cat-cyan) 15%, transparent); }
 .type-badge.type-unknown { color: var(--yellow); border-color: var(--yellow);
   background: color-mix(in srgb, var(--yellow) 15%, transparent); }
+/* NOT a MODEL_TYPES entry: a registry entry that carries no type at all, which
+   is a different fact from the recorded type 'unknown' ("we looked, it is none
+   of these") and must not borrow its colour. Deliberately quiet and unfilled -
+   it is an absence, not a classification, and dressing it as a category would
+   be the same claim the flag exists to avoid making. */
+.type-badge.type-unset {
+  color: var(--text-dim); border-color: var(--border);
+  background: transparent; font-style: italic;
+}
 /* The per-row model type <select>, which sits in the Role column and IS that
    column's type pill - one control that both shows the type and changes it, rather
    than a read-only badge plus a separate select elsewhere in the row. It takes its
