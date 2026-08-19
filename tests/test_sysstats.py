@@ -680,8 +680,10 @@ class TestPerDeviceVram:
 
     def _fake(self, free0, free1):
         return [
-            {"index": 0, "name": "RTX 4090", "total": 24 * self._GIB, "free": free0},
-            {"index": 1, "name": "RTX 3090", "total": 24 * self._GIB, "free": free1},
+            {"index": 0, "name": "RTX 4090", "total": 24 * self._GIB, "free": free0,
+             "free_scope": "device"},
+            {"index": 1, "name": "RTX 3090", "total": 24 * self._GIB, "free": free1,
+             "free_scope": "device"},
         ]
 
     def _compute(self, monkeypatch, devices, *, trusted=True):
@@ -718,7 +720,7 @@ class TestPerDeviceVram:
         # `devices` is only worth sending when it says something the aggregate does
         # not, so a one-card board keeps the payload it always had.
         one = [{"index": 0, "name": "RTX 4090", "total": 24 * self._GIB,
-                "free": 4 * self._GIB}]
+                "free": 4 * self._GIB, "free_scope": "device"}]
         assert "devices" not in self._compute(monkeypatch, one)
 
     def test_a_failing_probe_never_costs_the_aggregate(self, monkeypatch):
@@ -735,3 +737,91 @@ class TestPerDeviceVram:
         v = sysstats._compute_vram()["vram"]
         assert v["total"] == 48 * self._GIB and v["used"] == 22 * self._GIB
         assert "devices" not in v
+
+
+class TestPerDeviceVramAnyBackend:
+    """The per-card breakdown must not be NVIDIA/ROCm-only.
+
+    ``list_gpus`` enumerates via torch.cuda or nvidia-smi and never the Vulkan
+    loader, so on a vulkan build (how Intel Arc and many AMD boards run) it is
+    structurally blind to the very devices the readout is about. Falling back to
+    the ggml runtime's own registry is what makes the stats work on any backend
+    rather than only the maintainer's.
+    """
+
+    _GIB = 1024 ** 3
+
+    def test_falls_back_to_the_native_registry_when_torch_and_smi_see_nothing(
+            self, monkeypatch):
+        from localm import discover, sysstats
+        from localm.inference.backends.llamacpp import _loader
+        # The vulkan-build shape: the torch/nvidia-smi source is EMPTY, not wrong.
+        monkeypatch.setattr(discover, "last_known_gpus", lambda *a, **k: [])
+        monkeypatch.setattr(
+            discover, "vram_capacity",
+            lambda *a, **k: ({"total": 32 * self._GIB, "free": 8 * self._GIB}, None))
+        monkeypatch.setattr(sysstats, "_vram_reading_trusted", lambda *a, **k: True)
+        monkeypatch.setattr(_loader, "native_device_inventory", lambda: [
+            {"index": 0, "name": "Vulkan0", "total": 16 * self._GIB, "free": 2 * self._GIB},
+            {"index": 1, "name": "Vulkan1", "total": 16 * self._GIB, "free": 6 * self._GIB},
+        ])
+        # The registry tags no scope, so the correction pass is what makes these
+        # readable at all - stand in for it rather than touching real hardware.
+        def _tag(gpus):
+            for g in gpus:
+                g["free_scope"] = "device"
+        monkeypatch.setattr(discover, "_apply_device_global_free", _tag)
+        v = sysstats._compute_vram()["vram"]
+        assert [d["index"] for d in v["devices"]] == [0, 1]
+        assert v["devices"][0]["used"] == 14 * self._GIB
+        assert v["devices"][1]["used"] == 10 * self._GIB
+
+    def test_the_torch_source_still_wins_when_it_has_devices(self, monkeypatch):
+        # The fallback must not displace a working reading: last_known_gpus costs
+        # nothing (vram_capacity just probed) while the native registry needs the
+        # lib resident, so it stays the fallback.
+        from localm import discover, sysstats
+        from localm.inference.backends.llamacpp import _loader
+        monkeypatch.setattr(discover, "last_known_gpus", lambda *a, **k: [
+            {"index": 0, "name": "RTX 4090", "total": 24 * self._GIB,
+             "free": 4 * self._GIB, "free_scope": "device"},
+            {"index": 1, "name": "RTX 3090", "total": 24 * self._GIB,
+             "free": 22 * self._GIB, "free_scope": "device"},
+        ])
+        monkeypatch.setattr(
+            discover, "vram_capacity",
+            lambda *a, **k: ({"total": 48 * self._GIB, "free": 26 * self._GIB}, None))
+        monkeypatch.setattr(sysstats, "_vram_reading_trusted", lambda *a, **k: True)
+        def boom():
+            raise AssertionError("native inventory must not be consulted here")
+        monkeypatch.setattr(_loader, "native_device_inventory", boom)
+        v = sysstats._compute_vram()["vram"]
+        assert [d["name"] for d in v["devices"]] == ["RTX 4090", "RTX 3090"]
+
+
+def test_a_process_scoped_card_reports_total_only(monkeypatch):
+    """The bug this gate exists for, measured on a real board.
+
+    On Windows + AMD the raw driver `free` counts only the CALLING process, so a
+    probe holding no VRAM reported 0.2 GB in use where the desktop alone held 1.6.
+    A per-card number is shown so someone can decide whether a model fits; one that
+    silently overstates free by more than a gigabyte is worse than no number.
+    """
+    GB = 1024 ** 3
+    from localm import discover, sysstats
+    monkeypatch.setattr(discover, "last_known_gpus", lambda *a, **k: [
+        {"index": 0, "name": "RX 6900 XT", "total": 16 * GB, "free": 15 * GB,
+         "free_scope": "process"},
+        {"index": 1, "name": "RX 6900 XT", "total": 16 * GB, "free": 15 * GB,
+         "free_scope": "device"},
+    ])
+    monkeypatch.setattr(discover, "vram_capacity",
+                        lambda *a, **k: ({"total": 32 * GB, "free": 30 * GB}, None))
+    monkeypatch.setattr(sysstats, "_vram_reading_trusted", lambda *a, **k: True)
+    devs = sysstats._compute_vram()["vram"]["devices"]
+    # Card 0's reading is known blind: total only, no fabricated used/percent.
+    assert "used" not in devs[0] and "percent" not in devs[0]
+    assert devs[0]["total"] == 16 * GB
+    # Card 1's is device-global on the same board, so it still reports in full -
+    # the gate is PER CARD, not all-or-nothing.
+    assert devs[1]["used"] == 1 * GB
