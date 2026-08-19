@@ -1,0 +1,243 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""CHK-MEM-XPROC: memory namespaces must serialise writers ACROSS PROCESSES.
+
+``storekit.NamespaceLockRegistry`` serialises writers inside ONE process, which
+its own docstring says. It cannot serialise `localm memory add|forget|edit|
+accept|restore` - its own OS process, its own registry - against a running
+server's consolidation pass: both ``_load()`` the same state, mutate their copy
+and ``_save()``, so one update is gone. rag hit this and built
+``collection_lock.py``; memory had the same exposure and no guard until the
+`localm memory` CLI made a second writer routine.
+
+MEASURED 2026-08-19 before the fix, two real interpreters, reproduced first try:
+`localm memory add` printed "Remembered <id>: <fact>" and exited 0 while the
+fact was ABSENT afterwards. A FALSE SUCCESS, not merely a lost update, which is
+what makes this a rule-5 defect rather than a tuning question.
+
+The load-bearing tests here spawn REAL subprocesses, because a per-process lock
+passes every same-process simulation of this bug by construction - that is
+exactly how the gap survived. The headline test carries its own FIRES-CONTROL in
+the same run: the identical harness with the cross-process lock neutralised IN
+THE CHILD (test-side, never a product switch) must show the loss the locked
+version prevents. A test that cannot be made to fail proves nothing.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+import pytest
+
+from localm.memory import MemoryRecord, MemoryStore
+from localm.memory.store import _namespace_lockfile
+from localm.rag.collection_lock import CollectionLockedError
+
+
+# heavy_slot (only ONE subprocess-heavy test at a time, box-wide) comes from
+# tests/conftest.py - shared with tests/test_rag_collection_lock.py, which is
+# the point: these spawn real interpreters, and two files each serialising
+# only themselves starve each other. See its docstring.
+
+
+# The read-decide-write shape run_consolidation's apply block has: load the
+# current state, spend time, then save. The delay is what makes the window real;
+# in production it is the embedder resolution (BUG #648: up to a VRAM swap).
+_WORKER = """
+import contextlib, sys, time
+root, text, delay, neuter = sys.argv[1], sys.argv[2], float(sys.argv[3]), sys.argv[4]
+import localm.memory.store as st
+from localm.memory import MemoryRecord, MemoryStore
+
+if neuter == "1":
+    # Test-side only: strip the CROSS-process half, keep the in-process half, so
+    # the child is exactly the pre-fix code. Never a product flag - a shipped
+    # "skip the lock" switch would be the unserialised write path this forbids.
+    @contextlib.contextmanager
+    def _plain(ns_hash, store_file, op, timeout=None):
+        with st._namespace_lock(ns_hash):
+            yield
+    st._namespace_write_lock = _plain
+
+s = MemoryStore("owner", "chat", root=root)
+with s.lock():
+    s._load()
+    time.sleep(delay)
+    s._records.append(MemoryRecord(text=text, kind="semantic", source="user",
+                                   importance=0.8))
+    s._save()
+"""
+
+# Long enough to swamp interpreter-startup skew, short enough not to hold two
+# real interpreters on the box longer than the race needs.
+_RACE_DELAY = 1.5
+
+
+def _race_two_writers(root: Path, *, neuter: bool) -> set:
+    """Two separate OS processes each add a different fact to the SAME namespace.
+
+    Returns the set of fact texts that survived."""
+    env = dict(os.environ)
+    # Import the SAME localm this test runs (the worktree), not whatever is
+    # installed elsewhere - the worktree-venv wrong-source trap.
+    env["PYTHONPATH"] = os.pathsep.join(p for p in sys.path if p)
+    env["LOCALM_MODE"] = "log"
+    procs = [
+        subprocess.Popen(
+            [sys.executable, "-c", _WORKER, str(root), text, str(_RACE_DELAY),
+             "1" if neuter else "0"],
+            env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        for text in ("fact from the server", "fact from the CLI")
+    ]
+    for i, p in enumerate(procs):
+        _out, err = p.communicate(timeout=180)
+        assert p.returncode == 0, (
+            f"writer {i} exited {p.returncode}: "
+            f"{err.decode('utf-8', 'replace')[-2000:]}")
+    return {r.text for r in MemoryStore("owner", "chat", root=root).all()}
+
+
+def test_two_processes_writing_one_namespace_lose_nothing(heavy_slot, tmp_path):
+    """The headline case: `localm memory add` in its own process racing the
+    server's consolidation on the SAME namespace. Both facts must survive."""
+    survived = _race_two_writers(tmp_path, neuter=False)
+    assert survived == {"fact from the server", "fact from the CLI"}, (
+        f"a concurrent memory write from a SEPARATE OS process was lost: "
+        f"{survived}")
+
+
+def test_the_two_process_harness_does_catch_a_lost_update(heavy_slot, tmp_path):
+    """FIRES-CONTROL for the test above.
+
+    Same two processes, same timing, cross-process lock neutralised in the
+    children: one write MUST be lost. If this ever passes with both facts
+    present, the test above is not evidence of anything - the harness would have
+    passed on the pre-fix code too."""
+    survived = _race_two_writers(tmp_path, neuter=True)
+    assert survived != {"fact from the server", "fact from the CLI"}, (
+        "with the cross-process lock removed, two overlapping memory writes "
+        "still kept both facts - this harness cannot observe the race it is "
+        "supposed to be proving, so the locked test above proves nothing")
+
+
+# --------------------------------------------------------------------------- #
+#  Refusal, and what a refusal must NOT do                                     #
+# --------------------------------------------------------------------------- #
+
+def _hold_from_another_process(root: Path, seconds: float):
+    """Start a real second process holding the namespace, and wait until it
+    actually has the lock (the lock FILE existing is the proof, not a sleep)."""
+    src = ("import sys, time\n"
+           "from localm.memory import MemoryStore\n"
+           "s = MemoryStore('owner', 'chat', root=sys.argv[1])\n"
+           "with s.lock():\n"
+           "    print('HELD', flush=True)\n"
+           f"    time.sleep({seconds})\n")
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(p for p in sys.path if p)
+    env["LOCALM_MODE"] = "log"
+    p = subprocess.Popen([sys.executable, "-c", src, str(root)], env=env,
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    assert p.stdout.readline().strip() == b"HELD", "holder never took the lock"
+    return p
+
+
+def test_a_refused_write_changes_nothing_and_names_the_holder(heavy_slot,
+                                                              tmp_path,
+                                                              monkeypatch):
+    """Fails CLOSED. There is no path that proceeds to write without the lock,
+    because an unserialised write is the lost update this exists to prevent."""
+    monkeypatch.setenv("LOCALM_RAG_LOCK_WAIT", "1")
+    store = MemoryStore("owner", "chat", root=tmp_path)
+    store.add(MemoryRecord(text="already here", source="user", importance=0.8))
+    holder = _hold_from_another_process(tmp_path, 25)
+    try:
+        with pytest.raises(CollectionLockedError) as caught:
+            MemoryStore("owner", "chat", root=tmp_path).add(
+                MemoryRecord(text="must not land", source="user",
+                             importance=0.8))
+        assert "Memory namespace" in str(caught.value)
+        assert "nothing was changed" in str(caught.value)
+        # The property, asserted BEFORE any message check would have run: the
+        # store on disk is untouched. A refusal that still wrote would be worse
+        # than no lock at all.
+        assert [r.text for r in MemoryStore("owner", "chat", root=tmp_path).all()] \
+            == ["already here"]
+    finally:
+        holder.kill()
+        holder.communicate(timeout=60)
+
+
+def test_reads_stay_available_while_another_process_holds_the_lock(heavy_slot,
+                                                                   tmp_path,
+                                                                   monkeypatch):
+    """Reads deliberately do NOT take the cross-process lock.
+
+    _save() writes through storekit.atomic_write (tmp + os.replace), so a reader
+    sees the old file or the new one, never a mix - the read side was already
+    safe. Putting every _load() behind the file lock would park the chat recall
+    inlet behind whatever a background consolidation is doing, which is the
+    defect REG-520 exists to prevent. This pins that reads stayed cheap."""
+    monkeypatch.setenv("LOCALM_RAG_LOCK_WAIT", "1")
+    store = MemoryStore("owner", "chat", root=tmp_path)
+    store.add(MemoryRecord(text="readable", source="user", importance=0.8))
+    holder = _hold_from_another_process(tmp_path, 25)
+    try:
+        started = time.time()
+        fresh = MemoryStore("owner", "chat", root=tmp_path)
+        assert [r.text for r in fresh.all()] == ["readable"]
+        assert fresh.forgotten() == []
+        assert fresh.corrections() == []       # degrades, never raises
+        assert time.time() - started < 15, (
+            "a read waited on the cross-process write lock")
+    finally:
+        holder.kill()
+        holder.communicate(timeout=60)
+
+
+# --------------------------------------------------------------------------- #
+#  Reentrancy: the nesting that already exists in the tree                     #
+# --------------------------------------------------------------------------- #
+
+def test_batching_under_store_lock_does_not_deadlock(tmp_path):
+    """plug._migrate_legacy and memory_put both hold store.lock() across several
+    save=False mutations. collection_write_lock turns a NESTED acquisition into an
+    error on purpose, so the outermost acquisition has to be the only one that
+    takes the file lock."""
+    store = MemoryStore("owner", "chat", root=tmp_path)
+    with store.lock():
+        store._load()
+        for i in range(3):
+            store.add(MemoryRecord(text=f"batched {i}", source="user",
+                                   importance=0.8), save=False)
+        store._save()
+    assert len(MemoryStore("owner", "chat", root=tmp_path).all()) == 3
+
+
+def test_prune_calling_replace_does_not_deadlock(tmp_path):
+    """prune() calls replace(), and both are write paths."""
+    store = MemoryStore("owner", "chat", root=tmp_path)
+    for i in range(4):
+        store.add(MemoryRecord(text=f"fact {i}", source="user", importance=0.8,
+                               last_used=1_700_000_000.0 - i * 86400.0),
+                  save=False)
+    store._save()
+    assert store.prune(now=1_700_000_000.0, n_max=2) == 2
+    assert len(MemoryStore("owner", "chat", root=tmp_path).all()) == 2
+
+
+def test_the_lock_file_cannot_be_mistaken_for_a_namespace(tmp_path):
+    """backfill._namespaces globs ``*/*.jsonl``; the lock file is a sibling named
+    ``<ns>.jsonl.lock``, so it is excluded by construction rather than by a deny
+    list. If the name ever changes, the backfill would try to open it as a store."""
+    from localm.memory.backfill import _namespaces
+    store = MemoryStore("owner", "chat", root=tmp_path)
+    store.add(MemoryRecord(text="a fact", source="user", importance=0.8))
+    lockfile = _namespace_lockfile(store.path)
+    lockfile.write_text(json.dumps({"token": "x"}), encoding="utf-8")
+    assert lockfile.exists() and lockfile.parent == store.path.parent
+    assert list(_namespaces(tmp_path)) == [store.path]

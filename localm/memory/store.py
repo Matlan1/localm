@@ -24,15 +24,18 @@ This store imports no session/audit state; the privacy gate lives with the calle
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import math
+import threading
 import time
 from pathlib import Path
 from typing import Callable, Optional
 
 from localm.jsonl import split_jsonl
 from localm.rag import BM25
+from localm.rag.collection_lock import CollectionLockedError
 from localm.rag.bm25 import tokenize as _tokenize
 from localm.rag.store import _cosine
 from localm.storekit import NamespaceLockRegistry, atomic_write as _storekit_atomic_write
@@ -299,6 +302,95 @@ def _namespace_lock(ns_hash: str):
     return _NAMESPACE_LOCKS.get(ns_hash)
 
 
+# CHK-MEM-XPROC: the registry above serialises writers INSIDE one process, which
+# its own docstring says plainly. It cannot serialise `localm memory add|forget|
+# restore|accept|clear` - its own OS process, its own registry - against a running
+# server's consolidation pass. Both _load() the same state, mutate their copy and
+# _save(): last writer wins and the other write is gone. rag hit exactly this and
+# built collection_lock.py for it; memory had the same exposure and no guard.
+#
+# MEASURED 2026-08-19 against master, two real interpreters, reproduced twice: a
+# server-side write holding the namespace while `localm memory add` ran printed
+# "Remembered <id>" and exited 0, and the fact was ABSENT afterwards. A FALSE
+# SUCCESS (rule 5), not merely a lost update, which is what makes it worth a lock
+# rather than a note. The `localm memory` CLI is what made that second writer
+# routine, but it was reachable before it too: `localm setup-embeddings` writes
+# every memory namespace from its own process (cli/maintenance.py).
+#
+# WHY THE HEARTBEAT LOCK AND NOT config._cross_process_lock: that one reclaims any
+# holder older than 30s as abandoned, which is right for a config read-modify-write
+# and WRONG here - store.add()/replace() resolve the embedder INSIDE the lock, and
+# that can trigger a VRAM swap lasting minutes (BUG #648, documented at plug.py's
+# _off_loop). A 30s reclaim would reap a live holder and let both write, which is
+# the bug it was meant to prevent. collection_lock has no wall-clock limit and
+# keys staleness on a heartbeat instead, precisely because rag indexing has the
+# same long-legitimate-hold shape.
+#
+# Importing it from localm.rag is not a new layering edge: this module already
+# imports BM25, tokenize and _cosine from there. If that shared machinery is ever
+# moved to a neutral home (storekit is the obvious one), both consumers now call
+# the same function, so it is one import line each.
+
+# How long recall's reinforcement waits for a busy namespace before skipping the
+# bump. Short on purpose: it runs on the chat turn (see recall's comment).
+_REINFORCE_LOCK_WAIT = 2.0
+
+_XPROC_DEPTH = threading.local()
+
+
+def _namespace_lockfile(store_file: Path) -> Path:
+    """The cross-process lock file for a namespace: a sibling of the store file.
+
+    ``<ns>.jsonl.lock``, so it can never be mistaken for a namespace by
+    backfill._namespaces (which globs ``*/*.jsonl``) nor for any sidecar."""
+    return store_file.with_name(store_file.name + ".lock")
+
+
+@contextlib.contextmanager
+def _namespace_write_lock(ns_hash: str, store_file: Path, op: str,
+                          timeout: Optional[float] = None):
+    """The in-process lock AND the cross-process one, for a WRITE.
+
+    Reentrant on both halves. The in-process half is an RLock already; the
+    cross-process half is NOT (collection_write_lock turns a nested acquisition
+    into an error on purpose), and nesting here is normal rather than exotic -
+    prune() calls replace(), and store.lock() is public precisely so a caller can
+    batch several save=False mutations. So the file lock is taken by the OUTERMOST
+    acquisition only, tracked per thread and per namespace.
+
+    READS deliberately do NOT take this. _save() writes through
+    storekit.atomic_write (tmp + os.replace), so a concurrent reader sees the old
+    file or the new one, never a mix - the read side was already safe across
+    processes, and making every _load() contend for a file lock would put the chat
+    inlet behind whatever a background consolidation is doing.
+
+    Never returns without the lock: a refusal raises CollectionLockedError rather
+    than proceeding unprotected, because an unserialised write is the exact lost
+    update this exists to prevent. *timeout* bounds the wait for callers that must
+    not block (recall's reinforcement - see its own comment); the default budget
+    is collection_lock's, which is right for a caller that has to finish."""
+    from localm.rag.collection_lock import collection_write_lock
+    with _namespace_lock(ns_hash):
+        depth = getattr(_XPROC_DEPTH, "depth", None)
+        if depth is None:
+            depth = _XPROC_DEPTH.depth = {}
+        if depth.get(ns_hash):
+            depth[ns_hash] += 1
+            try:
+                yield
+            finally:
+                depth[ns_hash] -= 1
+            return
+        with collection_write_lock(_namespace_lockfile(store_file),
+                                   collection=ns_hash, op=op, timeout=timeout,
+                                   kind="Memory namespace"):
+            depth[ns_hash] = 1
+            try:
+                yield
+            finally:
+                depth[ns_hash] = 0
+
+
 class MemoryStore:
     """JSONL-backed store for one ``(principal, agent, scope_key)`` namespace."""
 
@@ -380,8 +472,17 @@ class MemoryStore:
         needs to batch several ``save=False`` mutations under ONE reload + save
         (e.g. plug.py's ``_migrate_legacy``) can hold it across the whole batch,
         mirroring how rag's ``_add_paths_locked`` reloads once before its loop
-        rather than once per file."""
-        return _namespace_lock(self._ns_hash)
+        rather than once per file.
+
+        This is the WRITE lock (CHK-MEM-XPROC): every documented use of it is a
+        batch of MUTATIONS, so it takes the cross-process lock too. Returns a
+        FRESH context manager per call - do not stash one and reuse it."""
+        return self._wlock("a batch")
+
+    def _wlock(self, op: str, timeout: Optional[float] = None):
+        """This namespace's write lock: in-process AND cross-process, reentrant."""
+        return _namespace_write_lock(self._ns_hash, self._file, op,
+                                     timeout=timeout)
 
     def _vec_file(self) -> Path:
         return self._file.with_suffix(".vec.json")
@@ -533,7 +634,7 @@ class MemoryStore:
         # save=False (a caller batching several mutations, e.g. plug.py's
         # _migrate_legacy) skips the reload - the caller already loaded fresh
         # once via store.lock() and must not have that in-progress batch wiped.
-        with _namespace_lock(self._ns_hash):
+        with self._wlock('an add'):
             if save:
                 self._load()
             record.text = record.text[:MAX_TEXT_LEN]
@@ -547,7 +648,7 @@ class MemoryStore:
 
     def update(self, mem_id: str, *, embed_fn: Optional[EmbedFn] = None,
                save: bool = True, **fields) -> Optional[MemoryRecord]:
-        with _namespace_lock(self._ns_hash):
+        with self._wlock('an update'):
             if save:
                 self._load()
             rec = self.get(mem_id)
@@ -576,7 +677,7 @@ class MemoryStore:
             return rec
 
     def delete(self, mem_id: str, *, save: bool = True) -> bool:
-        with _namespace_lock(self._ns_hash):
+        with self._wlock('a delete'):
             if save:
                 self._load()
             before = len(self._records)
@@ -606,7 +707,7 @@ class MemoryStore:
         existed before - and at the time of writing nothing else called clear() at
         all, so the only caller is the CLI, which passes True.
         """
-        with _namespace_lock(self._ns_hash):
+        with self._wlock('a clear'):
             self._records = []
             self._vectors = {}
             self._dim = None
@@ -678,7 +779,7 @@ class MemoryStore:
         concurrent add/update/delete's save."""
         if embed_fn is None:
             return 0
-        with _namespace_lock(self._ns_hash):
+        with self._wlock('a vector backfill'):
             self._load()
             done = 0
             for r in self._records:
@@ -715,7 +816,7 @@ class MemoryStore:
         reload would silently restore the stale vector straight from disk and
         undo the caller's invalidation - so it is a parameter here, not a
         separate ``invalidate_vectors()`` call the caller makes beforehand."""
-        with _namespace_lock(self._ns_hash):
+        with self._wlock('a replace'):
             self._load()
             if invalidate_ids:
                 self.invalidate_vectors(invalidate_ids)
@@ -970,23 +1071,44 @@ class MemoryStore:
             # bump. Lock + reload fresh state, then re-apply reinforcement by id
             # against the RELOADED records (not `results`, whose objects would
             # otherwise be orphaned by the reload) before saving.
-            with _namespace_lock(self._ns_hash):
-                self._load()
-                by_id = {r.id: r for r in self._records}
-                reinforced = []
-                for r in results:
-                    fresh = by_id.get(r.id)
-                    if fresh is not None:
-                        fresh.last_used = now
-                        fresh.uses += 1
-                        reinforced.append(fresh)
-                    else:
-                        # Concurrently deleted elsewhere: nothing to persist for
-                        # it, but still return it (best-effort) so the caller's
-                        # result count/content is not silently changed mid-call.
-                        reinforced.append(r)
-                self._save()
-                results = reinforced
+            #
+            # CHK-MEM-XPROC: this takes the cross-process lock too - an unlocked
+            # save here can resurrect a record `localm memory forget` just deleted
+            # in ANOTHER process, which is the same whole-namespace clobber the
+            # in-process note above describes, one boundary out.
+            #
+            # But BOUNDED, and skipped rather than waited out, because this runs on
+            # the chat turn: REG-520 exists precisely because this acquire used to
+            # wait minutes behind a consolidation, and an unbounded cross-process
+            # wait would reintroduce that with a longer rope. Reinforcement is a
+            # usage-counter bump - losing one costs a little recall ordering and
+            # nothing durable - so when the namespace is busy the right move is to
+            # skip the WRITE and still return the records. Never silent (rule 5).
+            try:
+                with self._wlock("reinforcement", timeout=_REINFORCE_LOCK_WAIT):
+                    self._load()
+                    by_id = {r.id: r for r in self._records}
+                    reinforced = []
+                    for r in results:
+                        fresh = by_id.get(r.id)
+                        if fresh is not None:
+                            fresh.last_used = now
+                            fresh.uses += 1
+                            reinforced.append(fresh)
+                        else:
+                            # Concurrently deleted elsewhere: nothing to persist for
+                            # it, but still return it (best-effort) so the caller's
+                            # result count/content is not silently changed mid-call.
+                            reinforced.append(r)
+                    self._save()
+                    results = reinforced
+            except CollectionLockedError as e:
+                from localm.debuglog import logger
+                logger.debug(
+                    "memory recall: skipped reinforcing %d record(s), the "
+                    "namespace is being written elsewhere (%s)", len(results), e)
+                if diagnostics is not None:
+                    diagnostics["reinforce_skipped"] = True
         if diagnostics is not None:
             # degrade_reason was set by _vector_relevance during _relevance above.
             diagnostics.setdefault("degrade_reason", None)
@@ -1139,7 +1261,7 @@ class MemoryStore:
         below. The applied entry is removed from the archive on success (the
         archive is a recovery queue, not an immutable audit log - mirrors
         ``resolve_correction`` clearing a resolved pending entry)."""
-        with _namespace_lock(self._ns_hash):
+        with self._wlock('a restore'):
             self._load()
             entries = self._load_forgotten()
             matches = [e for e in entries if e.get("id") == mem_id]
@@ -1193,7 +1315,7 @@ class MemoryStore:
         # deadlocking), so eviction is computed against the latest committed state,
         # not a stale in-memory snapshot that could re-evict an already-saved
         # record or miss one a concurrent writer just added.
-        with _namespace_lock(self._ns_hash):
+        with self._wlock('a prune'):
             self._load()
             now = time.time() if now is None else now
             kept = [
@@ -1355,7 +1477,7 @@ class MemoryStore:
         a consolidation pass cannot clobber a concurrent accept/reject."""
         if not proposals:
             return 0
-        with _namespace_lock(self._ns_hash):
+        with self._wlock('a correction proposal'):
             try:
                 existing = self._load_corrections()
                 dismissed = self._load_dismissed()
@@ -1387,25 +1509,44 @@ class MemoryStore:
     def corrections(self) -> list[PendingCorrection]:
         """Pending corrections whose target record still exists. A proposal whose
         target was deleted/evicted meanwhile is stale and dropped (and pruned from
-        the sidecar) so the modal never shows an un-actionable suggestion."""
-        with _namespace_lock(self._ns_hash):
-            self._load()
-            try:
-                corrs = self._load_corrections()
-            except OSError as e:
-                # Unreadable sidecar: show nothing this call rather than crash, and do
-                # NOT run the stale-prune save below over a phantom-empty list (which
-                # would wipe the file). Rule 5: warn, do not silently claim "none".
-                from localm.debuglog import logger as _dbg
-                _dbg.warning(
-                    "memory corrections %s: unreadable, showing none for now: %s",
-                    self._corrections_file(), e)
-                return []
-            ids = {r.id for r in self._records}
-            live = [c for c in corrs if c.target_id in ids]
-            if len(live) != len(corrs):
-                self._save_corrections(live)          # drop stale entries
-            return live
+        the sidecar) so the modal never shows an un-actionable suggestion.
+
+        CHK-MEM-XPROC: this READS but may also prune, so it wants the write lock -
+        yet it backs GET /api/memory and `localm memory corrections`, and a read
+        must not start failing because someone else holds the namespace. So the
+        lock is bounded and OPTIONAL: on contention the answer is still returned,
+        just without the opportunistic cleanup (which the next caller redoes).
+        Never silent (rule 5)."""
+        try:
+            with self._wlock("a stale-correction prune",
+                             timeout=_REINFORCE_LOCK_WAIT):
+                return self._corrections_locked(prune=True)
+        except CollectionLockedError as e:
+            from localm.debuglog import logger as _dbg
+            _dbg.debug("memory corrections: listing without the stale-prune, the "
+                       "namespace is being written elsewhere (%s)", e)
+            with _namespace_lock(self._ns_hash):
+                return self._corrections_locked(prune=False)
+
+    def _corrections_locked(self, *, prune: bool) -> list[PendingCorrection]:
+        """corrections()'s body, with the namespace lock already held."""
+        self._load()
+        try:
+            corrs = self._load_corrections()
+        except OSError as e:
+            # Unreadable sidecar: show nothing this call rather than crash, and do
+            # NOT run the stale-prune save below over a phantom-empty list (which
+            # would wipe the file). Rule 5: warn, do not silently claim "none".
+            from localm.debuglog import logger as _dbg
+            _dbg.warning(
+                "memory corrections %s: unreadable, showing none for now: %s",
+                self._corrections_file(), e)
+            return []
+        ids = {r.id for r in self._records}
+        live = [c for c in corrs if c.target_id in ids]
+        if prune and len(live) != len(corrs):
+            self._save_corrections(live)          # drop stale entries
+        return live
 
     def resolve_correction(self, correction_id: str, accept: bool, *,
                            embed_fn: Optional[EmbedFn] = None,
@@ -1420,7 +1561,7 @@ class MemoryStore:
         consolidation does not re-propose it (see ``_load_dismissed``). In BOTH
         cases the pending entry is removed. Atomic. If the target vanished
         meanwhile, the entry is simply dropped (nothing to apply)."""
-        with _namespace_lock(self._ns_hash):
+        with self._wlock('a correction'):
             self._load()
             try:
                 corrs = self._load_corrections()

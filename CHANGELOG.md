@@ -277,6 +277,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
   a failed load or the server becoming unreachable.
 
 ### Fixed
+- **A memory write can no longer be silently lost to another localm process.**
+  Two localm processes writing your memory at the same time - a `localm memory`
+  command, or `localm setup-embeddings`, alongside a running server distilling
+  facts in the background - could each save their own copy of the store, and
+  whichever finished last won. The other write disappeared with nothing said:
+  `localm memory add` printed "Remembered ..." and exited 0 for a fact that was
+  no longer there. Writes to one memory store are now serialised across
+  processes. They wait their turn, and if the store is genuinely busy for too
+  long the command names what is holding it and changes nothing, instead of
+  reporting a success that did not happen. Reading your memory is unaffected and
+  never waits.
 - **A restart no longer forgets what the server was in the middle of, and
   stopping the server no longer leaves the work running behind it.** A model
   pull, a runtime install or a ComfyUI setup was only ever remembered in

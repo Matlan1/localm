@@ -189,7 +189,15 @@ def _embed_fn():
 
 
 async def _off_loop(fn):
-    """Run a blocking store operation OFF the server event loop.
+    """Run a blocking store operation OFF the server event loop, mapping a
+    contended namespace to 409.
+
+    CHK-MEM-XPROC: memory writes now take a cross-process lock, so another
+    process (a `localm memory ...` command, another instance) can legitimately
+    hold the namespace. That is a normal, recoverable conflict - the store
+    refused and changed NOTHING - so it surfaces as 409 with the holder named,
+    exactly as the rag routes surface the same error, rather than as a 500 that
+    reads like a crash.
 
     BUG #648: a memory write resolves the shared embedder (via _embed_fn ->
     get_embedder), which can trigger a VRAM swap (vram.evict_chat_for_embedder).
@@ -198,7 +206,11 @@ async def _off_loop(fn):
     300s. Offloading to the default executor keeps the loop free (and lets the
     eviction actually complete off-loop) while the store write / embedder load runs.
     """
-    return await asyncio.get_running_loop().run_in_executor(None, fn)
+    from localm.rag.collection_lock import CollectionLockedError
+    try:
+        return await asyncio.get_running_loop().run_in_executor(None, fn)
+    except CollectionLockedError as e:
+        raise HTTPException(409, str(e))
 
 
 def _legacy_memory_file() -> Path:
@@ -460,7 +472,13 @@ async def memory_delete(mem_id: str, request: Request = None):
     _require_writable()
     store = _request_store(request)
 
-    return {"status": "deleted" if store.delete(mem_id) else "absent", "id": mem_id}
+    # Offloaded like every other mutating route here. It used to run inline
+    # because delete() neither embeds nor loads a model (so BUG #648 did not
+    # apply), but CHK-MEM-XPROC gave it a second reason: the write now waits on
+    # a cross-process lock, and waiting on the event-loop thread is exactly what
+    # REG-520 exists to prevent.
+    deleted = await _off_loop(lambda: store.delete(mem_id))
+    return {"status": "deleted" if deleted else "absent", "id": mem_id}
 
 
 @_router.post("/api/memory/corrections/{cid}/accept")

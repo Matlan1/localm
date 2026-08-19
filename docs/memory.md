@@ -117,7 +117,9 @@ Over the HTTP API (the routes the memory plugin mounts; see
 | `POST /api/memory/corrections/{id}/accept` | Apply a suggested correction (see below). |
 | `POST /api/memory/corrections/{id}/reject` | Dismiss a suggested correction; keep the fact as-is. |
 
-Writes are refused with `403` in privacy mode. There is no memory search,
+Writes are refused with `403` in privacy mode, and with `409` when another
+localm process is mid-write on the same store (nothing is changed - let it
+finish and retry; the terminal commands report the same thing in words). There is no memory search,
 export, or import yet, and the per-item `PATCH`/`DELETE` routes have no GUI or
 CLI surface: bulk editing goes through the `/memory` textarea, and moving a
 store between machines means copying the data directory.

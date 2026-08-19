@@ -41,6 +41,7 @@ the machine IS the owner; there is no bearer to hash.
 
 from __future__ import annotations
 
+import contextlib
 import json as _json
 import sys
 import time
@@ -48,7 +49,41 @@ import time
 import click
 
 
-@click.group(name="memory")
+@contextlib.contextmanager
+def _refuse_if_locked():
+    """Turn a cross-process write-lock refusal into a clear message and exit 1.
+
+    A memory write shares its namespace with a running server (its consolidation
+    pass, or an edit from the GUI). The store waits a bounded time for that other
+    process and then refuses rather than interleaving with it, so this command's
+    job is to report WHO holds it - which the error already names - instead of
+    showing "localm hit an unexpected error" and saving a bug report for what is a
+    normal, recoverable situation. Same shape, and the same reasoning, as
+    ``localm rag``'s handler for the identical error.
+
+    Nothing was written when this fires: the store refuses rather than proceeding
+    unprotected, so re-running once the other process finishes is always safe."""
+    from localm.rag.collection_lock import CollectionLockedError
+    try:
+        yield
+    except CollectionLockedError as e:
+        _fail(str(e))
+
+
+class _MemoryGroup(click.Group):
+    """Applies _refuse_if_locked to every subcommand, present and future.
+
+    Wrapping at the group rather than per command body on purpose: a verb added
+    later would otherwise silently get the traceback-and-bug-report behaviour
+    back, and nothing would flag it - the failure only shows up when a second
+    process happens to hold the namespace."""
+
+    def invoke(self, ctx):
+        with _refuse_if_locked():
+            return super().invoke(ctx)
+
+
+@click.group(name="memory", cls=_MemoryGroup)
 def main() -> None:
     """Read and manage what localm remembers about you across conversations."""
 

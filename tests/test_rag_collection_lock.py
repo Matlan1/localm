@@ -31,11 +31,9 @@ import os
 import re
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 import types
-from pathlib import Path
 
 import pytest
 
@@ -44,41 +42,11 @@ from localm.rag import Collection, CollectionLockedError, collection_names
 from localm.rag.collection_lock import collection_write_lock, lock_path_for
 
 
-@pytest.fixture
-def heavy_slot():
-    """Let only ONE subprocess-heavy test in this file run at a time, across all
-    xdist workers.
-
-    These tests start real Python interpreters, which is the whole point of them
-    - but four such tests landing on different workers at once measurably starved
-    a neighbour: tests/test_config_cross_process_lock.py's two writers exceeded
-    the product's own 10 s lock budget and the run went red. Measured, not
-    guessed: the same command without this file passed 69/69, and with it 5
-    failed. Serialising our own heavy tests keeps the cost to this file instead
-    of taxing whatever else the scheduler happens to run alongside it.
-
-    A plain O_EXCL file, because it has to work across PROCESSES (xdist workers
-    are separate interpreters, so a threading lock would not be seen) and under
-    a bare `-n auto` with no --dist loadgroup. The slot is force-taken if a
-    crashed test ever leaves it behind, so this convenience lock can never wedge
-    a suite run."""
-    slot = Path(tempfile.gettempdir()) / "localm-rag-collection-lock-heavy.slot"
-    deadline = time.time() + 240
-    while True:
-        try:
-            os.close(os.open(str(slot), os.O_CREAT | os.O_EXCL | os.O_WRONLY))
-            break
-        except FileExistsError:
-            if time.time() > deadline:
-                break             # a leftover slot must never block the suite
-            time.sleep(0.05)
-    try:
-        yield
-    finally:
-        try:
-            slot.unlink()
-        except OSError:
-            pass
+# heavy_slot (only ONE subprocess-heavy test at a time, box-wide) now lives in
+# tests/conftest.py so this file and tests/test_memory_cross_process_lock.py
+# share ONE slot. Two per-file copies under different slot names each
+# serialised their own file and raced each other, which is the starvation the
+# fixture exists to prevent. See its docstring.
 
 
 @pytest.fixture
