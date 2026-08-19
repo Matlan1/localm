@@ -238,6 +238,9 @@ def _fake_hf_api(siblings):
     info.siblings = siblings
 
     class _FakeHfApi:
+        def __init__(self, *a, **kw):
+            pass
+
         def model_info(self, repo_id, files_metadata=True):
             return info
     return _FakeHfApi
@@ -368,6 +371,9 @@ def _fake_hf_api_by_repo(files_by_repo: dict):
             self.siblings = siblings
 
     class _FakeHfApi:
+        def __init__(self, *a, **kw):
+            pass
+
         def model_info(self, repo_id, files_metadata=True):
             return _FakeInfo([SimpleNamespace(rfilename=name, size=len(content))
                               for name, content in files_by_repo[repo_id].items()])

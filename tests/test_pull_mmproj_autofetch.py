@@ -76,6 +76,9 @@ def fake_registry(tmp_path, monkeypatch):
 
 def _wire_repo_listing(monkeypatch, files):
     class _FakeHfApi:
+        def __init__(self, *a, **kw):
+            pass
+
         def list_repo_files(self, repo_id):
             return files
 
@@ -152,6 +155,9 @@ class TestNoCandidate:
         store, _ = fake_registry
 
         class _FailingHfApi:
+            def __init__(self, *a, **kw):
+                pass
+
             def list_repo_files(self, repo_id):
                 raise RuntimeError("simulated HF API outage")
 
@@ -321,6 +327,8 @@ class TestSkippedScopes:
         list_spy = MagicMock(side_effect=AssertionError("must not be called"))
 
         class _FakeHfApi:
+            def __init__(self, *a, **kw):
+                pass
             list_repo_files = list_spy
 
         import huggingface_hub
@@ -339,6 +347,8 @@ class TestSkippedScopes:
         list_spy = MagicMock(side_effect=AssertionError("must not be called"))
 
         class _FakeHfApi:
+            def __init__(self, *a, **kw):
+                pass
             list_repo_files = list_spy
 
         import huggingface_hub
@@ -357,6 +367,8 @@ class TestSkippedScopes:
         list_spy = MagicMock(side_effect=AssertionError("must not be called"))
 
         class _FakeHfApi:
+            def __init__(self, *a, **kw):
+                pass
             list_repo_files = list_spy
 
         import huggingface_hub
@@ -446,6 +458,9 @@ class TestSyncModelsDirBackfillsExistingEntry:
         called = []
 
         class _SpyHfApi:
+            def __init__(self, *a, **kw):
+                pass
+
             def list_repo_files(self, repo_id):
                 called.append(repo_id)
                 return ["main.gguf", "mmproj-main-f16.gguf"]
@@ -518,6 +533,9 @@ class TestSyncModelsDirBackfillsExistingEntry:
         called = []
 
         class _SpyHfApi:
+            def __init__(self, *a, **kw):
+                pass
+
             def list_repo_files(self, repo_id):
                 called.append(repo_id)
                 return []
@@ -541,6 +559,9 @@ class TestSyncModelsDirBackfillsExistingEntry:
         called = []
 
         class _SpyHfApi:
+            def __init__(self, *a, **kw):
+                pass
+
             def list_repo_files(self, repo_id):
                 called.append(repo_id)
                 return []
