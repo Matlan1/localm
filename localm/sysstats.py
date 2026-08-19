@@ -254,8 +254,30 @@ def _compute_vram() -> dict:
         # spawn a SECOND torch subprocess for data the first one already produced.
         # Measured: that doubled _compute_vram's wall time and broke this module's
         # own probe-timing tests.
+        # SOURCE ORDER MATTERS, and it is the whole reason this is not just
+        # last_known_gpus(). That reading comes from list_gpus(), which enumerates
+        # ONLY via torch.cuda (CUDA, or HIP under a ROCm torch) or nvidia-smi - it
+        # never calls the Vulkan loader, so it is STRUCTURALLY BLIND to any device
+        # only visible through Vulkan (discover._native_backend_has_vulkan spells
+        # this out; GPU-SPLIT-VKINDEX confirmed it live, where it reported a
+        # non-empty but VULKAN-INCOMPLETE list). On a vulkan build - which is how
+        # Intel Arc and plenty of AMD boards run - showing that list per card would
+        # present a partial inventory as the whole one.
+        #
+        # native_device_inventory() is the ggml runtime's OWN registry, so it sees
+        # whatever backend is actually loaded, Vulkan included. It is the fallback
+        # rather than the primary only because it needs the native lib resident,
+        # which in the server it already is.
+        raw = last_known_gpus()
+        if not raw:
+            try:
+                from localm.inference.backends.llamacpp._loader import (
+                    native_device_inventory)
+                raw = native_device_inventory() or []
+            except Exception:
+                raw = []
         devices = []
-        for g in last_known_gpus():
+        for g in raw:
             t = g.get("total")
             if not t:
                 continue
