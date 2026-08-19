@@ -31,8 +31,10 @@ Backends (``--backend``), so any machine has a working out-of-the-box path:
     needs that toolkit present to load - see ``_rocm_toolkit_present`` in
     hwdetect.py).
   * ``sycl`` / ``cpu`` - upstream llama.cpp prebuilts. ``sycl`` delivers peak
-    Intel performance but needs the oneAPI runtime (no toolkit-presence probe
-    for it yet, so it stays opt-in); ``cpu`` is self-contained.
+    Intel performance; the Windows build bundles the whole oneAPI DPC++
+    runtime and is self-contained, while the Linux build does not and needs
+    oneAPI installed separately (no Intel-GPU-presence probe for either yet,
+    so it stays opt-in); ``cpu`` is self-contained.
   * ``amd-rocm`` - the self-contained gfx103X (RDNA2) ROCm build (bundles its
     own ROCm runtime; the current default for AMD RX 6000 on Windows, since it
     needs no system toolkit at all).
@@ -2750,6 +2752,21 @@ def _floor_at_pinned_tag(chosen: str, with_cudart: bool, rejected_tag: str,
     return True, _PINNED_TAG
 
 
+def _sycl_backend_note() -> str:
+    """Describe the SYCL build's runtime dependency for the current OS.
+
+    Windows and Linux ship different SYCL archives. Confirmed by inspecting
+    both pinned b10375 assets: the Windows zip bundles the whole oneAPI
+    DPC++ runtime alongside ggml-sycl.dll (sycl8.dll, mkl_*.dll,
+    ur_adapter_level_zero*.dll, ur_adapter_opencl.dll, tbb12.dll,
+    libiomp5md.dll, dnnl.dll, sycl-ls.exe, ...), while the Linux tarball
+    ships only libggml-sycl.so with none of that - a separate oneAPI
+    install is still required there."""
+    if sys.platform == "win32":
+        return "Intel oneAPI build + self-contained oneAPI runtime"
+    return "Intel oneAPI build (needs the oneAPI runtime present)"
+
+
 def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
                              with_cudart: bool, assume_yes: bool = False,
                              cuda_line: str = _CUDA_LINE) -> tuple[str, Optional[str]]:
@@ -2797,7 +2814,7 @@ def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
         "vulkan": "universal GPU build (AMD/NVIDIA/Intel via the display driver)",
         "amd-rocm": "self-contained AMD ROCm build (gfx103X / RX 6000)",
         "cuda": "NVIDIA CUDA build + self-contained runtime",
-        "sycl": "Intel oneAPI build (needs the oneAPI runtime present)",
+        "sycl": _sycl_backend_note(),
         "hip": "AMD ROCm build (needs the ROCm/HIP runtime present)",
         "cpu": "CPU-only build (no GPU)",
         "metal": "Apple Silicon (Metal) build",
