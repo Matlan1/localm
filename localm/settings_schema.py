@@ -265,6 +265,11 @@ CORE_FIELDS: list = [
                  "one card (2+ needed to take effect). Blank still spreads a model "
                  "over every GPU by free VRAM; set this to choose which cards.",
                  group="Engine", applies=Applies.NEXT_LOAD),
+    # HIDDEN: rendered by a ratio-weight input beside each checked device in
+    # the "Split across GPUs" row (settings-perf.js renderGpuSplitRatioRow),
+    # not the generic settings form - same reasoning as gpu_split_indices
+    # above. Still accepted by PATCH /v1/config and `localm config
+    # gpu_split_ratios 3,1` like any other field.
     SettingField("gpu_split_ratios", Widget.HIDDEN, "GPU split ratios",
                  "Optional relative weight per device in Split across GPUs "
                  "(same order/length). Blank distributes by each card's free "

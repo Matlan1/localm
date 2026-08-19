@@ -400,6 +400,13 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
   font-size: 13px; color: var(--text);
 }
 .perf-backend-hint .btn-secondary { flex-shrink: 0; padding: 5px 12px; font-size: 12.5px; }
+/* GPU split ratio-weight inputs (settings-perf.js renderGpuSplitRatioRow):
+   one row per checked device, name/index on the left, a small weight box on
+   the right - not the full-width text/number styling .card input[type=
+   number] gives every other number field in this card, which would stretch
+   the box to the card's full width and push the label onto its own line. */
+.card label.perf-gpu-ratio-item { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
+#perf-gpu-ratio-list input[type="number"] { width: 90px; flex: 0 0 auto; }
 
 /* ---------------- main ---------------- */
 

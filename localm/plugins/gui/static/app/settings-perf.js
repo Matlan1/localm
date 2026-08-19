@@ -234,11 +234,79 @@ export function setupMainGpuSelector() {
   refreshMainGpuSelector();
 }
 
+// Last GPU list from refreshGpuSplitCheckboxes's own /api/gpus fetch, so a
+// checkbox toggle can re-render the ratio row (device names) without a
+// second network round trip.
+let _lastSplitGpus = [];
+
+/** Ratio inputs currently on screen, keyed by GPU index - read BEFORE a
+ *  rebuild so a value the user already typed survives a checkbox toggle
+ *  that does not affect that device (e.g. a 3rd box being checked while
+ *  devices 0/1 keep whatever weight was already entered for them). */
+function _currentRatioValues() {
+  const map = new Map();
+  const list = $("perf-gpu-ratio-list");
+  if (!list) return map;
+  for (const inp of list.querySelectorAll("input[type=number]")) {
+    if (inp.value.trim() !== "") map.set(Number(inp.dataset.gpuIndex), inp.value.trim());
+  }
+  return map;
+}
+
+/** (Re)render the ratio-weight row for the currently CHECKED devices, one
+ *  number input per entry in *checkedIndices*, in that exact order - the
+ *  PATCH body pairs gpu_split_ratios with gpu_split_indices BY POSITION
+ *  (discover.resolve_gpu_split), so the ratio inputs must be built and read
+ *  back in the same order the checkbox indices are collected in.
+ *
+ *  Called only when the CHECKED SET changes (a checkbox toggle), never on a
+ *  ratio input's own change - rebuilding on every ratio edit too would
+ *  replace the very node whose "change" event triggered the rebuild with a
+ *  fresh element, so a second edit fired against the caller's now-detached
+ *  reference would be silently lost. See onGpuSplitRatioChange, which saves
+ *  straight from the existing DOM instead.
+ *
+ *  *presetRatios* pre-fills from a server-stored gpu_split_ratios ONLY when
+ *  its length already matches checkedIndices - a mismatched length is stale
+ *  (left over from a different device selection) and is not shown as a
+ *  guess, same "do not fabricate a pairing" reasoning discover.py itself
+ *  uses before falling back to an equal split. A value the user already
+ *  typed for a device that stays checked always wins over presetRatios. */
+function renderGpuSplitRatioRow(gpus, checkedIndices, presetRatios) {
+  const list = $("perf-gpu-ratio-list"), hint = $("perf-gpu-ratio-hint");
+  if (!list) return;
+  const preserved = _currentRatioValues();
+  const aligned = Array.isArray(presetRatios) && presetRatios.length === checkedIndices.length
+    ? presetRatios : null;
+  list.replaceChildren();
+  const show = checkedIndices.length >= 2;
+  if (hint) hint.hidden = !show;
+  if (!show) return;
+  checkedIndices.forEach((idx, i) => {
+    const gpu = gpus.find((g) => g.index === idx);
+    const label = el("label", "perf-gpu-ratio-item");
+    label.appendChild(document.createTextNode(` ${idx}: ${gpu ? (gpu.name || "GPU " + idx) : "GPU " + idx} `));
+    const input = document.createElement("input");
+    input.type = "number";
+    input.min = "0";
+    input.step = "any";
+    input.placeholder = "auto";
+    input.dataset.gpuIndex = String(idx);
+    const preservedVal = preserved.get(idx);
+    if (preservedVal !== undefined) input.value = preservedVal;
+    else if (aligned) input.value = String(aligned[i]);
+    input.onchange = onGpuSplitRatioChange;
+    label.appendChild(input);
+    list.appendChild(label);
+  });
+}
+
 /** Populate the "Split across GPUs" checkbox list from GET /api/gpus: one
  *  checkbox per detected device, pre-checked for whatever gpu_split_indices
  *  currently holds. Hidden entirely on a single-GPU box, or when the
  *  endpoint is unreachable/empty - same gate (including the inconclusive-probe
- *  exception) as the Main GPU selector above. */
+ *  exception) as the Main GPU selector above. Also renders the ratio-weight
+ *  row beside it, pre-filled from gpu_split_ratios (see renderGpuSplitRatioRow). */
 export async function refreshGpuSplitCheckboxes() {
   const row = $("perf-gpu-split-row"), list = $("perf-gpu-split-list");
   if (!row || !list) return;
@@ -247,11 +315,13 @@ export async function refreshGpuSplitCheckboxes() {
     if (!r.ok) { row.hidden = true; syncIndexSpaceHint(); return; }
     const data = await r.json();
     const gpus = data.gpus || [];
+    _lastSplitGpus = gpus;
     if (gpus.length < 2) {
       if (data.probe_status && data.probe_status !== "ok") return;
       row.hidden = true; syncIndexSpaceHint(data.index_space ?? null); return;
     }
-    const current = new Set(Array.isArray(data.gpu_split_indices) ? data.gpu_split_indices : []);
+    const indices = Array.isArray(data.gpu_split_indices) ? data.gpu_split_indices : [];
+    const current = new Set(indices);
     list.replaceChildren();
     for (const g of gpus) {
       const label = el("label", "perf-gpu-split-item");
@@ -259,12 +329,15 @@ export async function refreshGpuSplitCheckboxes() {
       cb.type = "checkbox";
       cb.value = String(g.index);
       cb.checked = current.has(g.index);
-      cb.onchange = onGpuSplitChange;
+      cb.onchange = onGpuSplitCheckboxChange;
       label.appendChild(cb);
       const gb = typeof g.total === "number" ? ` (${_perfGiB(g.total)} GB)` : "";
       label.appendChild(document.createTextNode(` ${g.index}: ${g.name || "GPU " + g.index}${gb}`));
       list.appendChild(label);
     }
+    // indices (not `current`, a Set) preserves the stored ORDER, which is what
+    // gpu_split_ratios is position-paired against.
+    renderGpuSplitRatioRow(gpus, indices, data.gpu_split_ratios);
     row.hidden = false;
     syncIndexSpaceHint(data.index_space ?? null);   // after row.hidden - it reads it
   } catch (e) {
@@ -272,25 +345,73 @@ export async function refreshGpuSplitCheckboxes() {
   }
 }
 
-/** PATCH /v1/config with the currently-checked GPU indices whenever a
- *  checkbox changes. Fewer than 2 checked CLEARS the split (single-GPU
- *  behavior, Main GPU selector applies instead) - the saved value always
- *  matches exactly what is checked, never silently turning the split on. */
-export async function onGpuSplitChange() {
+/** PATCH /v1/config with the currently-checked GPU indices and their ratio
+ *  weights, read straight from the DOM as it stands right now. Fewer than 2
+ *  checked CLEARS both the split and its ratios (single-GPU behavior, Main
+ *  GPU selector applies instead) - the saved value always matches exactly
+ *  what is checked/typed, never silently turning the split on or guessing a
+ *  weight. A partially-filled ratio row (some devices weighted, others left
+ *  blank) is ambiguous - rather than guess a neutral weight for the blank
+ *  ones, gpu_split_ratios is left OUT of that PATCH (the previously-saved
+ *  value, if any, is untouched) and the user is told to fill every field or
+ *  clear them all. Shared by both the checkbox and the ratio-input handlers
+ *  below, which differ only in whether the ratio row needs rebuilding first. */
+async function _saveGpuSplit() {
   const list = $("perf-gpu-split-list");
   if (!list) return;
   const checked = [...list.querySelectorAll("input[type=checkbox]:checked")]
     .map((cb) => Number(cb.value));
   const value = checked.length >= 2 ? checked : null;
+  const body = { gpu_split_indices: value };
+  let ratioWarning = "";
+  if (!value) {
+    body.gpu_split_ratios = null;   // no split -> ratios are meaningless without it
+  } else {
+    const ratioList = $("perf-gpu-ratio-list");
+    const raw = ratioList
+      ? [...ratioList.querySelectorAll("input[type=number]")].map((inp) => inp.value.trim())
+      : [];
+    const filled = raw.filter((v) => v !== "").length;
+    if (filled === 0) {
+      body.gpu_split_ratios = null;
+    } else if (filled === raw.length) {
+      body.gpu_split_ratios = raw.map(Number);
+    } else {
+      // gpu_split_ratios stays OUT of this PATCH (see docstring); the rest of
+      // the change (the checked indices) still saves normally below.
+      ratioWarning = "Saved, but a weight is missing for one GPU - enter one "
+        + "for every checked device, or clear them all for automatic sizing";
+    }
+  }
   try {
     const r = await fetch("/v1/config", {
       method: "PATCH", headers: authHeaders(),
-      body: JSON.stringify({ gpu_split_indices: value }),
+      body: JSON.stringify(body),
     });
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
-    toast(value ? "Saved - applies on the next model load"
-                : "Split disabled - applies on the next model load");
+    toast(ratioWarning ? ratioWarning
+        : value ? "Saved - applies on the next model load"
+                : "Split disabled - applies on the next model load",
+          !!ratioWarning);
   } catch (e) { toast("Could not save: " + e.message, true); }
+}
+
+/** A "Split across GPUs" checkbox changed: the checked SET changed, so the
+ *  ratio row must be rebuilt (fewer/more inputs) before saving. */
+async function onGpuSplitCheckboxChange() {
+  const list = $("perf-gpu-split-list");
+  if (!list) return;
+  const checked = [...list.querySelectorAll("input[type=checkbox]:checked")]
+    .map((cb) => Number(cb.value));
+  renderGpuSplitRatioRow(_lastSplitGpus, checked.length >= 2 ? checked : [], null);
+  await _saveGpuSplit();
+}
+
+/** A ratio-weight input changed: the checked set is unaffected, so save
+ *  directly from the DOM - rebuilding here would replace the very input
+ *  whose change just fired, detaching it from any further edits. */
+async function onGpuSplitRatioChange() {
+  await _saveGpuSplit();
 }
 
 export function setupGpuSplitCheckboxes() {
