@@ -216,6 +216,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   did nothing at all, with no error or message to explain why. They now use
   localm's own in-page dialog instead, the same one already used for
   delete-confirmation prompts.
+- **`localm setup-llama --backend sycl` no longer tells Windows users they
+  need a separate Intel oneAPI install.** The Windows SYCL build actually
+  bundles the whole oneAPI runtime alongside the inference library, the same
+  self-contained shape as the CUDA and ROCm builds, so nothing beyond the
+  Intel GPU driver is needed there. The printed note was wrong for Windows;
+  it still correctly asks for a system oneAPI install on Linux, where the
+  runtime genuinely is not bundled.
 
 ### Security
 - **A form inside a model's reply can no longer send anything off your
