@@ -1505,6 +1505,14 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
    pill's type colour on its own text and is unreadable on several platforms. */
 .data-table select.model-type-select option { color: var(--text); background: var(--bg-input); }
 .job-state.st-running { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+/* interrupted: the server stopped while the operation was in flight, so its
+   outcome is UNKNOWN (localm/plugins/gui/jobs.py _JOB_STATUSES). Yellow
+   "needs attention", the same treatment st-skipped/st-unknown get - not the red
+   of st-failed, which would assert the work failed when nobody measured that. */
+.job-state.st-interrupted {
+  color: var(--yellow); border-color: var(--yellow);
+  background: color-mix(in srgb, var(--yellow) 15%, transparent);
+}
 /* pending / paused: quiet neutral (base pill look), named so the vocabulary is complete. */
 .job-state.st-pending, .job-state.st-paused { color: var(--text-dim); }
 .job-meta {
