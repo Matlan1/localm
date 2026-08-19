@@ -123,12 +123,22 @@ def test_a_plausible_library_with_no_vendor_blas_passes(tmp_path):
 
 def test_a_rocblas_install_with_no_kernel_data_fails_despite_a_good_library(tmp_path):
     """The silent one: the library is present and the right size, so every
-    presence check passes, and the first GEMM hard-crashes the native process."""
+    presence check passes, and the first GEMM hard-crashes the native process.
+
+    Note the assertion: `"rocblas" in res.summary` was the obvious one and it is
+    USELESS here, because pytest derives tmp_path's basename from this test's own
+    name - so the string appears in the healthy "llama.dll found in <tmp_path>"
+    line too, and the test passed even when the summary picked the wrong finding.
+    Found by fires-controlling this file (diff-review-discipline item 19: name a
+    value the fixture can never take). It asserts on wording only the FAILING
+    finding can produce, and that the green line is not what leads."""
     (tmp_path / "llama.dll").write_bytes(b"\0" * (d.TINY_LIB_BYTES + 1))
     (tmp_path / "rocblas.dll").write_bytes(b"\0" * 4096)
     res = d.check_llama_lib(lambda: tmp_path)
     assert res.status == d.FAIL
-    assert "rocblas" in res.summary
+    assert res.summary.startswith("rocblas is installed but its rocblas/ kernel")
+    assert "GPU matrix ops will crash" in res.summary
+    assert "found in" not in res.summary
     # The green line is still THERE - the terminal prints both - it is simply
     # not what a one-line surface leads with.
     assert [f.status for f in res.findings] == [d.OK, d.FAIL]
