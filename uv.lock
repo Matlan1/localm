@@ -602,7 +602,7 @@ wheels = [
 
 [[package]]
 name = "localm"
-version = "0.1.5rc3"
+version = "0.1.5"
 source = { editable = "." }
 dependencies = [
     { name = "certifi" },

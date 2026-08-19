@@ -171,3 +171,70 @@ def test_prerelease_suffix_shipped_tag_shape():
     assert _version._prerelease_suffix("0.1.5rc2") == ("rc", 2)
     assert _version._prerelease_suffix("0.1.5rc3") == ("rc", 3)
     assert _version._prerelease_suffix("0.1.5") is None
+
+
+# --------------------------------------------------------------------------- #
+#  Every hardcoded version literal must agree with the VERSION file            #
+#                                                                              #
+#  The release version lives in SEVEN places: the VERSION file, pyproject,     #
+#  uv.lock, and four hardcoded literals in the product itself. Bumping a        #
+#  release meant remembering all of them, and NOTHING checked that they agreed  #
+#  - so a missed site shipped silently, reporting a stale version in the API's  #
+#  OpenAPI document, to MCP clients, and from `localm --version` whenever the   #
+#  VERSION file was unreadable.                                                 #
+#                                                                              #
+#  Caught for real while cutting 0.1.5: the VERSION file and pyproject were     #
+#  bumped and `localm.__version__` still said 0.1.5rc3. These assert on the     #
+#  SOURCE literals rather than only on imported values, because a literal in    #
+#  an `except` fallback or a dict is not reachable at import time - and those   #
+#  are exactly the ones that rot unnoticed.                                     #
+# --------------------------------------------------------------------------- #
+
+import re                       # noqa: E402
+from pathlib import Path        # noqa: E402
+
+import pytest                   # noqa: E402
+
+_REPO = Path(__file__).resolve().parent.parent
+
+
+def _declared_version() -> str:
+    return (_REPO / "VERSION").read_text(encoding="utf-8").strip()
+
+
+# (path, regex capturing the version literal in group 1, what it feeds)
+_VERSION_SITES = [
+    ("localm/__init__.py", r'__version__ = "([^"]+)"',
+     "localm.__version__"),
+    ("localm/cli/_core.py", r'return "(\d[^"]*)"\s*$',
+     "the `localm --version` fallback when the VERSION file is unreadable"),
+    ("localm/inference/http_server.py", r'\n    app = FastAPI\((?:.|\n)*?version="([^"]+)"',
+     "the FastAPI app version (published in the OpenAPI document)"),
+    ("localm/plugins/coder/mcp.py", r'"clientInfo": \{"name": "localcoder", "version": "([^"]+)"\}',
+     "the clientInfo localm sends to an MCP server"),
+    ("localm/plugins/mcpserver/server.py", r'SERVER_VERSION = "([^"]+)"',
+     "the version localm's own MCP server reports to clients"),
+]
+
+
+@pytest.mark.parametrize("rel,pattern,what", _VERSION_SITES,
+                         ids=[s[0] for s in _VERSION_SITES])
+def test_hardcoded_version_matches_version_file(rel, pattern, what):
+    src = (_REPO / rel).read_text(encoding="utf-8")
+    m = re.search(pattern, src, re.M)
+    assert m, f"{rel}: no version literal matched - the site moved, update _VERSION_SITES"
+    assert m.group(1) == _declared_version(), (
+        f"{rel} declares {m.group(1)!r} but VERSION says {_declared_version()!r}. "
+        f"This literal feeds {what}; bump it with the release.")
+
+
+def test_pyproject_and_lock_match_version_file():
+    want = _declared_version()
+    pyproject = (_REPO / "pyproject.toml").read_text(encoding="utf-8")
+    m = re.search(r'^version = "([^"]+)"', pyproject, re.M)
+    assert m and m.group(1) == want, f"pyproject.toml version != VERSION ({want})"
+    # uv.lock pins the project's OWN version; a stale one makes the lockfile
+    # drift check fail in CI rather than here, which is a slower way to learn it.
+    lock = (_REPO / "uv.lock").read_text(encoding="utf-8")
+    m = re.search(r'\nname = "localm"\nversion = "([^"]+)"', lock)
+    assert m and m.group(1) == want, f"uv.lock localm version != VERSION ({want})"
