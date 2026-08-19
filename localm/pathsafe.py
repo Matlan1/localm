@@ -326,7 +326,49 @@ def is_unc_or_device_path(raw: str) -> bool:
     return bool(drive) and not (len(drive) == 2 and drive[1] == ":")
 
 
-def reject_unsafe_path_string(raw: str, *, require_absolute: bool = False) -> None:
+# Win32 GetDriveTypeW return code for a drive mapped to a network share
+# (docs.microsoft.com/windows/win32/api/fileapi/nf-fileapi-getdrivetypew).
+_DRIVE_REMOTE = 4
+
+
+def is_mapped_network_drive(raw: str) -> bool:
+    """True if *raw* names an ordinary Windows drive letter (``Z:\\...``) that
+    is actually MAPPED to a network share (``net use Z: \\\\host\\share``),
+    per a real ``GetDriveTypeW`` call.
+
+    This is NOT a syntax predicate like :func:`is_unc_or_device_path` - a
+    mapped drive is syntactically an ordinary "X:" local path (that function
+    correctly returns False for it: "Z:" IS the local-drive form its own
+    docstring describes), so telling the two apart requires asking the
+    RUNNING MACHINE what "Z:" actually is. That means this function only
+    means anything for a path being evaluated on the host that mapped the
+    drive - it is not a question a remote-supplied string can answer in the
+    abstract the way :func:`is_unc_or_device_path` can, so callers combine
+    the two rather than expecting either to cover both cases.
+
+    Windows-only: on any other platform, and for *raw* with no drive-letter
+    prefix at all (a UNC path, a relative path, a POSIX path), this always
+    returns False without any Win32 call - :func:`is_unc_or_device_path`
+    already owns the UNC/device shape.
+
+    Never raises: a Win32 call failure or a drive letter that does not exist
+    on this machine both return False - an absent/inaccessible drive is a
+    plain "not a directory" error for the caller's own next filesystem call,
+    not something this predicate needs to distinguish."""
+    if os.name != "nt":
+        return False
+    drive = ntpath.splitdrive(raw)[0]
+    if not (len(drive) == 2 and drive[1] == ":"):
+        return False
+    import ctypes
+    try:
+        return ctypes.windll.kernel32.GetDriveTypeW(drive + "\\") == _DRIVE_REMOTE
+    except (OSError, AttributeError, ValueError):
+        return False
+
+
+def reject_unsafe_path_string(raw: str, *, require_absolute: bool = False,
+                               reject_network_drives: bool = False) -> None:
     """Reject a caller-supplied path string LEXICALLY, before any filesystem call.
 
     This exists because the syscall itself is the vulnerability. ``Path.resolve``
@@ -357,6 +399,17 @@ def reject_unsafe_path_string(raw: str, *, require_absolute: bool = False) -> No
     :func:`is_unc_or_device_path` directly and refuse unconditionally, or
     :func:`confined_under`, which rejects any leading ``/`` on every platform.
 
+    *reject_network_drives*, OFF by default (matches every existing caller and
+    every pre-existing test byte for byte - an ordinary drive letter like
+    ``Q:\\ordinary`` must keep being accepted unless a caller opts in): when
+    True, also refuse *raw* if it names a Windows drive letter that
+    :func:`is_mapped_network_drive` reports is actually mapped to a network
+    share. This is a POLICY choice, not the SMB-dial-and-hang safety property
+    the rest of this function guards - a mapped drive is already connected
+    and does not carry the same stall/credential risk a fresh UNC dial does -
+    so it is opt-in per call, driven by the caller's own read of the
+    ``allow_network_drives`` config setting, never decided here.
+
     Raises ``ValueError`` (callers translate it to their own error shape).
     """
     s = raw or ""
@@ -372,5 +425,7 @@ def reject_unsafe_path_string(raw: str, *, require_absolute: bool = False) -> No
     # named, so refusing it there would break a legitimate local folder.
     if os.name == "nt" and is_unc_or_device_path(s):
         raise ValueError("UNC and device paths are not allowed")
+    if reject_network_drives and is_mapped_network_drive(s):
+        raise ValueError("network drives are not allowed")
     if require_absolute and not os.path.isabs(s):
         raise ValueError("path must be absolute")

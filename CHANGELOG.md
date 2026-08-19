@@ -104,6 +104,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   tick puts them back in. A **group by type** tick breaks the list into one
   section per kind (LLMs, Embedding, VAEs, ...), sorted inside each section by
   whichever column you are sorting on. Both are remembered in this browser only.
+- **A mapped network drive (e.g. `Z:\`) is now correctly recognized as a
+  network location, and a new setting lets you refuse them.** localm's checks
+  for a remote path only caught `\\host\share`-style UNC paths; a Windows
+  drive letter mapped to a network share looked like an ordinary local drive
+  and was never distinguished from one. It still worked exactly the same as
+  before, but a new toggle, **Settings > Security > "Allow network drives as
+  filesystem locations"** (on by default, matching the existing behavior),
+  now lets you refuse them across the folder picker, folder creation,
+  renaming, log export, and document indexing, if you would rather keep
+  localm confined to local disks.
 
 ### Changed
 - **The chat parameters drawer and the image, music and video generation forms

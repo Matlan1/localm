@@ -358,6 +358,19 @@ DEFAULT_CONFIG: dict = {
     # model that needs custom code is REFUSED with an explanatory error rather than
     # silently executed (see inference/backends/hf.py).
     "hf_trust_remote_code": False,
+    # Whether localm may treat a Windows drive letter mapped to a network share
+    # (`net use Z: \\host\share`) as a normal local folder - the GUI folder
+    # picker/create-folder/rename/log-export routes (pathsafe.
+    # reject_unsafe_path_string) and RAG document indexing (rag/store.py
+    # confine_index_path) both check it before touching such a path. True
+    # (default) preserves the existing behaviour: a mapped drive already works
+    # exactly like a local one today (pathsafe.is_unc_or_device_path never
+    # flagged it, since "Z:" is syntactically an ordinary local drive) and this
+    # setting does not change that unless turned off. Not a security floor - an
+    # already-mapped drive is already connected, not a fresh SMB dial - so
+    # turning it off is a preference (avoid remote-dependency latency/hangs,
+    # keep localm strictly local-disk), not a vulnerability fix.
+    "allow_network_drives": True,
     # Quick-select scope bundles for the "Keys & devices" manager (Settings),
     # each {name, scopes}, offered as one-tap presets when minting a key.
     # Re-seeded only when ABSENT (an emptied list stays empty). Privileged

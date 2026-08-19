@@ -516,8 +516,20 @@ class TestFsMkdir:
         # itself rather than exercise the route's own PermissionError handling.
         key = _cfgwrite_key()
 
+        # Scoped to the ACTUAL TARGET FOLDER, not every Path.mkdir call: the
+        # route now also reads config (allow_network_drives), which itself
+        # mkdir(exist_ok=True)s the already-existing LOCALM_HOME on every call
+        # (config.py's ensure_dirs(), unconditional regardless of exist_ok) -
+        # a blanket sabotage would fail THAT call first and never reach the
+        # route's own mkdir, testing an unrelated code path instead of this
+        # one's PermissionError handling.
+        real_mkdir = Path.mkdir
+        target = (browse_dir / "x").resolve()
+
         def flaky_mkdir(self, *a, **kw):
-            raise PermissionError(13, "Permission denied")
+            if self.resolve() == target:
+                raise PermissionError(13, "Permission denied")
+            return real_mkdir(self, *a, **kw)
         monkeypatch.setattr(Path, "mkdir", flaky_mkdir)
         with TestClient(fs_app) as c:
             r = c.post("/api/fs/mkdir", json={"path": str(browse_dir), "name": "x"},
@@ -796,3 +808,125 @@ class TestFsBrowserRefusedCrossOrigin:
         c = TestClient(app)
         r = c.get("/health", headers={"Origin": "http://127.0.0.1:3000"})
         assert r.status_code in (200, 503)
+
+
+# --------------------------------------------------------------------------- #
+#  allow_network_drives (S9): the fs picker/mkdir/rename/export routes must   #
+#  refuse a mapped network drive when the config setting is off, and leave    #
+#  an ordinary local path completely unaffected either way.                   #
+# --------------------------------------------------------------------------- #
+
+def _set_allow_network_drives(value: bool) -> None:
+    from localm.config import load_config, save_config
+    cfg = load_config()
+    cfg["allow_network_drives"] = value
+    save_config(cfg)
+
+
+@pytest.fixture
+def fake_remote_z(monkeypatch):
+    """Makes GetDriveTypeW report Z: as DRIVE_REMOTE, everything else as
+    DRIVE_FIXED - a real Win32 call, not a stand-in for one, so this exercises
+    the actual pathsafe.is_mapped_network_drive code path end to end."""
+    import ctypes
+    monkeypatch.setattr(
+        ctypes.windll.kernel32, "GetDriveTypeW",
+        lambda root: 4 if root == "Z:\\" else 3)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="GetDriveTypeW is Windows-only")
+class TestNetworkDriveToggle:
+
+    def test_fs_dirs_refuses_network_drive_when_disallowed(
+            self, fs_app, fake_remote_z):
+        _set_allow_network_drives(False)
+        with TestClient(fs_app) as c:
+            r = c.get("/api/fs/dirs", params={"path": r"Z:\shared"},
+                      headers=_hdr(_host_key()))
+        assert r.status_code == 400, r.text
+
+    def test_fs_dirs_allows_network_drive_by_default(self, fs_app, fake_remote_z):
+        """The default (setting untouched) must reproduce the exact
+        pre-existing behaviour: navigating into Z: fails only because the
+        fixture has no real Z: drive to list, never because of the gate."""
+        with TestClient(fs_app) as c:
+            r = c.get("/api/fs/dirs", params={"path": r"Z:\shared"},
+                      headers=_hdr(_host_key()))
+        # Not 400 (not the network-drive gate) - a genuinely absent drive on
+        # this box 404s instead, which is the correct, unrelated failure.
+        assert r.status_code != 400, r.text
+
+    def test_root_listing_hides_a_disallowed_network_drive(
+            self, fs_app, fake_remote_z, monkeypatch):
+        """The empty-path root listing must not even OFFER a disallowed
+        network drive as clickable, not merely refuse navigating into it."""
+        _set_allow_network_drives(False)
+        real_is_dir = Path.is_dir
+
+        def fake_is_dir(self, *a, **kw):
+            s = str(self)
+            if len(s) == 3 and s[1:] == ":\\":
+                return s[0] in ("C", "Z")   # only C: and Z: "exist"
+            return real_is_dir(self, *a, **kw)
+
+        monkeypatch.setattr(Path, "is_dir", fake_is_dir)
+        with TestClient(fs_app) as c:
+            r = c.get("/api/fs/dirs", headers=_hdr(_host_key()))
+        assert r.status_code == 200, r.text
+        dirs = r.json()["dirs"]
+        assert "Z:\\" not in dirs
+        assert "C:\\" in dirs, "an unrelated local drive must not be hidden too"
+
+    def test_root_listing_shows_network_drive_by_default(
+            self, fs_app, fake_remote_z, monkeypatch):
+        real_is_dir = Path.is_dir
+
+        def fake_is_dir(self, *a, **kw):
+            s = str(self)
+            if len(s) == 3 and s[1:] == ":\\":
+                return s[0] in ("C", "Z")
+            return real_is_dir(self, *a, **kw)
+
+        monkeypatch.setattr(Path, "is_dir", fake_is_dir)
+        with TestClient(fs_app) as c:
+            r = c.get("/api/fs/dirs", headers=_hdr(_host_key()))
+        assert r.status_code == 200, r.text
+        assert "Z:\\" in r.json()["dirs"]
+
+    def test_fs_mkdir_refuses_network_drive_parent_when_disallowed(
+            self, fs_app, fake_remote_z):
+        _set_allow_network_drives(False)
+        with TestClient(fs_app) as c:
+            r = c.post("/api/fs/mkdir",
+                       json={"path": r"Z:\shared", "name": "x"},
+                       headers=_hdr(_cfgwrite_key()))
+        assert r.status_code == 400, r.text
+
+    def test_fs_rename_refuses_network_drive_target_when_disallowed(
+            self, fs_app, fake_remote_z):
+        _set_allow_network_drives(False)
+        with TestClient(fs_app) as c:
+            r = c.post("/api/fs/rename",
+                       json={"path": r"Z:\shared\a.txt", "new_name": "b.txt"},
+                       headers=_hdr(_cfgwrite_key()))
+        assert r.status_code == 400, r.text
+
+    def test_logs_export_refuses_network_drive_dest_when_disallowed(
+            self, fs_app, fake_remote_z):
+        _set_allow_network_drives(False)
+        with TestClient(fs_app) as c:
+            r = c.post("/api/logs/export", json={"dest": r"Z:\shared"},
+                       headers=_hdr(_cfgwrite_key()))
+        assert r.status_code == 400, r.text
+
+    def test_ordinary_local_path_unaffected_when_disallowed(
+            self, fs_app, tmp_path, fake_remote_z):
+        """Control: a real, ordinary local folder must keep working exactly
+        as before, whether or not network drives are disallowed."""
+        _set_allow_network_drives(False)
+        d = tmp_path / "data"
+        d.mkdir()
+        with TestClient(fs_app) as c:
+            r = c.get("/api/fs/dirs", params={"path": str(d)},
+                      headers=_hdr(_host_key()))
+        assert r.status_code == 200, r.text

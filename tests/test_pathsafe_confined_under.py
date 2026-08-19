@@ -20,7 +20,8 @@ from pathlib import Path, PureWindowsPath
 import pytest
 
 from localm.pathsafe import (confined_absolute_or_under, confined_under,
-                             is_unc_or_device_path, reject_unsafe_path_string)
+                             is_mapped_network_drive, is_unc_or_device_path,
+                             reject_unsafe_path_string)
 
 
 # --------------------------------------------------------------------------- #
@@ -567,3 +568,136 @@ class TestRejectUnsafePathString:
             reject_unsafe_path_string(r"\\192.0.2.1\share")
         reject_unsafe_path_string(r"Q:\ordinary")
         assert called == []
+
+
+# --------------------------------------------------------------------------- #
+#  is_mapped_network_drive - the S9 classification gap                       #
+#  (is_unc_or_device_path correctly returns False for "Z:", the local-drive  #
+#  form - this is the separate, real-machine-state question of whether that  #
+#  drive letter is actually MAPPED to a network share.)                      #
+# --------------------------------------------------------------------------- #
+
+class TestIsMappedNetworkDrive:
+
+    @pytest.mark.parametrize("raw", [
+        r"\\192.0.2.1\share",   # UNC - not a drive letter at all
+        "relative/x",
+        "",
+        "   ",
+        "/usr/local/share/x.gguf",
+    ])
+    def test_false_without_any_win32_call(self, raw, monkeypatch):
+        """No drive-letter prefix (or a non-Windows platform) must short-
+        circuit before ever touching ctypes - proven by making the Win32 call
+        itself explode if reached."""
+        import ctypes
+
+        def boom(root):
+            raise AssertionError(f"GetDriveTypeW must not be called for {raw!r}")
+
+        if os.name == "nt":
+            monkeypatch.setattr(ctypes.windll.kernel32, "GetDriveTypeW", boom)
+        assert not is_mapped_network_drive(raw)
+
+    def test_false_on_non_windows(self, monkeypatch):
+        monkeypatch.setattr(os, "name", "posix")
+        assert not is_mapped_network_drive("Z:\\shared\\docs")
+
+    @pytest.mark.skipif(os.name != "nt", reason="GetDriveTypeW is Windows-only")
+    def test_true_when_getdrivetype_reports_remote(self, monkeypatch):
+        import ctypes
+        seen = []
+
+        def fake(root):
+            seen.append(root)
+            return 4   # DRIVE_REMOTE
+
+        monkeypatch.setattr(ctypes.windll.kernel32, "GetDriveTypeW", fake)
+        assert is_mapped_network_drive(r"Z:\shared\docs\a.gguf")
+        # Queried the DRIVE ROOT, not the full path - GetDriveTypeW's contract.
+        assert seen == ["Z:\\"]
+
+    @pytest.mark.skipif(os.name != "nt", reason="GetDriveTypeW is Windows-only")
+    def test_drive_relative_spelling_still_queries_the_drive(self, monkeypatch):
+        """"Q:x" (drive-relative, no separator) genuinely names drive Q -
+        ntpath.splitdrive("Q:x") == ("Q:", "x"), matching
+        is_unc_or_device_path's own test corpus comment for the same string.
+        So this MUST reach the Win32 call, unlike a string with no drive
+        prefix at all (test_false_without_any_win32_call above)."""
+        import ctypes
+        seen = []
+        monkeypatch.setattr(ctypes.windll.kernel32, "GetDriveTypeW",
+                            lambda root: seen.append(root) or 4)
+        assert is_mapped_network_drive("Q:x")
+        assert seen == ["Q:\\"]
+
+    @pytest.mark.skipif(os.name != "nt", reason="GetDriveTypeW is Windows-only")
+    @pytest.mark.parametrize("code", [0, 1, 2, 3, 5, 6])   # every non-REMOTE code
+    def test_false_for_every_non_remote_drive_type(self, monkeypatch, code):
+        import ctypes
+        monkeypatch.setattr(ctypes.windll.kernel32, "GetDriveTypeW",
+                            lambda root: code)
+        assert not is_mapped_network_drive(r"C:\Users")
+
+    @pytest.mark.skipif(os.name != "nt", reason="GetDriveTypeW is Windows-only")
+    def test_never_raises_when_win32_call_fails(self, monkeypatch):
+        import ctypes
+
+        def boom(root):
+            raise OSError("no such drive")
+
+        monkeypatch.setattr(ctypes.windll.kernel32, "GetDriveTypeW", boom)
+        assert is_mapped_network_drive(r"Q:\gone") is False
+
+    @pytest.mark.skipif(os.name != "nt", reason="asserts against THIS machine's "
+                        "real drive table")
+    def test_real_local_drive_is_not_reported_remote(self, tmp_path):
+        """Smoke test against the actual dev box, no mocking: tmp_path's own
+        drive is a real local disk, never a network share."""
+        drive = str(tmp_path)[:2]
+        assert drive[1] == ":", f"corpus error: {tmp_path} has no drive letter"
+        assert not is_mapped_network_drive(str(tmp_path))
+
+    def test_classification_gap_is_real(self, monkeypatch):
+        """Pins the S9 finding itself: is_unc_or_device_path's own docstring
+        says "Z:" is the ordinary local-drive form, and it must keep saying
+        so (this predicate's contract does not change) - is_mapped_network_drive
+        is what tells a REMOTE "Z:" apart from a local one, which
+        is_unc_or_device_path was never designed to answer."""
+        raw = r"Z:\shared\docs"
+        assert not is_unc_or_device_path(raw)
+        if os.name == "nt":
+            import ctypes
+            monkeypatch.setattr(ctypes.windll.kernel32, "GetDriveTypeW",
+                                lambda root: 4)
+            assert is_mapped_network_drive(raw)
+
+
+# --------------------------------------------------------------------------- #
+#  reject_unsafe_path_string(reject_network_drives=...) - opt-in gate         #
+# --------------------------------------------------------------------------- #
+
+class TestRejectUnsafePathStringNetworkDrives:
+
+    def test_ordinary_drive_allowed_regardless_of_the_flag(self, tmp_path):
+        """Control, matches TestRejectUnsafePathString.test_makes_no_filesystem_
+        call's existing pin byte-for-byte: an ordinary drive letter must never
+        be rejected merely because the new keyword exists."""
+        reject_unsafe_path_string(r"Q:\ordinary")
+        reject_unsafe_path_string(r"Q:\ordinary", reject_network_drives=True)
+
+    @pytest.mark.skipif(os.name != "nt", reason="GetDriveTypeW is Windows-only")
+    def test_network_drive_rejected_only_when_opted_in(self, monkeypatch):
+        import ctypes
+        monkeypatch.setattr(ctypes.windll.kernel32, "GetDriveTypeW",
+                            lambda root: 4)   # DRIVE_REMOTE
+        # Default (every pre-existing caller, unchanged): must NOT raise.
+        reject_unsafe_path_string(r"Z:\shared")
+        # Opted in: must raise.
+        with pytest.raises(ValueError):
+            reject_unsafe_path_string(r"Z:\shared", reject_network_drives=True)
+
+    def test_real_local_drive_never_rejected_even_when_opted_in(self, tmp_path):
+        """Control against this box's real (non-network) drive: opting in
+        must not turn into a blanket rejection of every drive letter."""
+        reject_unsafe_path_string(str(tmp_path), reject_network_drives=True)
