@@ -2,11 +2,18 @@
 // Per-type counts on the Registered-models tabs. The tabs stay exactly what they
 // were - a single-select strip, one type at a time - and only gain a number.
 //
-// The load-bearing test here is the LAST one: the page now narrows to the active
-// tab in the browser instead of through ?type=, so every tab must still show
-// precisely the rows the route would have returned. That includes the route's own
-// "llm" default for an entry with no recorded type, and it includes NOT sweeping
-// a type with no tab (mmproj) into Other, which the route never did either.
+// The load-bearing test here is the LAST one: the page narrows to the active tab
+// in the browser instead of through ?type=, so every NAMED-TYPE tab must still
+// show precisely the rows the route would have returned, including the route's
+// own "llm" default for an entry with no recorded type.
+//
+// UPDATED: that equivalence deliberately no longer covers the two multi-type
+// views. It was written to pin "moving the filter from the route into the
+// browser changed nothing", which it did not - it was never a decision that
+// Other must mean the single type "unknown" forever. Other now means every type
+// with no tab of its own (so mmproj has a home instead of living inside All
+// alone), and All leaves those out until the merge toggle asks for them. The
+// per-type tabs are untouched and still pinned against the route below.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -42,12 +49,15 @@ function rowNames(window) {
     .map((n) => n.textContent).sort();
 }
 
-test("tab-counts: each tab shows how many models it holds, and All shows the total", async () => {
+test("tab-counts: each tab shows how many models it holds, and All shows what All lists", async () => {
   const { window } = loadAppWithPages({ fetchImpl: makeFetch(REGISTRY) });
   await window.refreshModelsPage();
   await tick();
 
-  assert.equal(countOn(window, "all"), "6", "All counts the whole registry");
+  // 6 registered, of which the mmproj has no tab of its own, so All lists 5 and
+  // Other holds the 6th. The two partition the registry exactly.
+  assert.equal(countOn(window, "all"), "5", "All counts the rows All actually lists");
+  assert.equal(countOn(window, "other"), "1", "and the one with no tab of its own is on Other");
   assert.equal(countOn(window, "llm"), "3",
     "two typed LLMs plus the entry with no recorded type, matching the route's own default");
   assert.equal(countOn(window, "embedding"), "1");
@@ -98,20 +108,25 @@ test("tab-counts: counts survive switching to a narrowed tab", async () => {
   await tick();
 
   assert.equal(countOn(window, "llm"), "3", "the LLM count is still right while viewing VAEs");
-  assert.equal(countOn(window, "all"), "6", "and All still reads the whole registry");
+  assert.equal(countOn(window, "all"), "5", "and All still reads what All would list");
   assert.deepEqual(rowNames(window), ["ae-vae"], "while the table shows only the VAE");
 });
 
-test("tab-counts: every tab still shows EXACTLY the rows the ?type= route returned", async () => {
-  // Filtering moved into the browser, so this pins the equivalence. The expected
-  // sets are what localm/plugins/gui/routes/models.py produces for each ?type=:
-  // an exact match on model_type, with a missing model_type defaulting to llm.
+test("tab-counts: every named-type tab still shows EXACTLY the rows the ?type= route returned", async () => {
+  // Filtering moved into the browser, so this pins the equivalence for every tab
+  // that names a type. The expected sets are what
+  // localm/plugins/gui/routes/models.py produces for each ?type=: an exact match
+  // on model_type, with a missing model_type defaulting to llm.
+  //
+  // "all" and "other" are the two multi-type views and are deliberately NOT the
+  // route's answer any more - they have their own test file
+  // (models-other-tab.test.mjs). Listing them here with the route's sets would
+  // re-pin behaviour that was changed on purpose.
   const expected = {
-    all: ["ae-vae", "bge-small", "legacy-untyped", "llava-mmproj", "mistral", "qwen-7b"],
     llm: ["legacy-untyped", "mistral", "qwen-7b"],
     embedding: ["bge-small"],
     vae: ["ae-vae"],
-    unknown: [],   // mmproj is NOT swept into Other - the route never did that
+    lora: [],
   };
   const { window } = loadAppWithPages({ fetchImpl: makeFetch(REGISTRY) });
   await window.refreshModelsPage();

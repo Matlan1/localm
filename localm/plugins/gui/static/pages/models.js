@@ -35,6 +35,130 @@ export function fmtModelDate(mtime) {
 // always-visible Type checkboxes (discTypes()), so what the search covers is
 // never inferred silently from this tab.
 let currentTypeFilter = "all";
+
+// The Other tab's data-type is NOT a MODEL_TYPES value. It used to be "unknown",
+// which made the tab mean one particular type rather than what it is named for:
+// everything the strip has no tab for. "unknown" is still one of the types it
+// collects, alongside mmproj (which had no tab at all and was reachable from All
+// alone) and whatever the registry gains next.
+export const OTHER_TAB = "other";
+
+// Two browser-only display preferences for this list. Same mechanism as the
+// mmproj "show in search results" toggle (discoverFiles below): a localStorage
+// flag read at RENDER time rather than cached in a module variable, so the next
+// refresh picks up a change with nothing to keep in sync.
+export const SHOW_OTHER_KEY = "localm.showOtherModelsInAll";
+export const GROUP_BY_TYPE_KEY = "localm.modelsGroupByType";
+
+// Selectable model types - mirrors localm.model_manager.registry.MODEL_TYPES
+// (keep in sync). Powers the per-row one-click set-type control, and gives the
+// group-by-type headings a stable order for a type the tab strip does not name.
+const MODEL_TYPE_OPTIONS =
+  ["llm", "embedding", "mmproj", "diffusion-unet", "text-encoder", "vae", "lora", "unknown"];
+
+// The route's own default: an entry with no recorded model_type reads as "llm".
+// Every filter, count and grouping decision goes through this one helper so they
+// cannot disagree about what an untyped registry entry is.
+export function modelTypeOf(m) {
+  return (m && m.model_type) || "llm";
+}
+
+// Which types have a tab of their own, read from the strip ITSELF rather than
+// from a second list here. Add a tab to index.html and Other stops claiming that
+// type, with no matching edit in this file - the two cannot drift apart.
+export function typesWithOwnTab() {
+  const out = new Set();
+  const nav = $("models-tab-nav");
+  if (!nav) return out;
+  for (const btn of nav.querySelectorAll(".tab-btn")) {
+    const t = btn.dataset.type;
+    if (t && t !== "all" && t !== OTHER_TAB) out.add(t);
+  }
+  return out;
+}
+
+// A group heading borrows the tab strip's own label so the sections and the tabs
+// speak one vocabulary. A type with no tab has no label to borrow and shows its
+// raw registry value, which is exactly what its Role pill already reads.
+export function typeLabel(type) {
+  const nav = $("models-tab-nav");
+  if (nav && /^[a-z0-9-]+$/i.test(type)) {
+    const btn = nav.querySelector(`.tab-btn[data-type="${type}"]`);
+    if (btn) {
+      const clone = btn.cloneNode(true);
+      for (const c of clone.querySelectorAll(".tab-count")) c.remove();
+      const text = clone.textContent.trim();
+      if (text) return text;
+    }
+  }
+  return type;
+}
+
+// Heading order: the tab strip's order first (so grouped All reads down the same
+// sequence as the tabs across), then any remaining known type, then anything the
+// registry grew that neither list names. Only types actually PRESENT are ordered.
+function _groupOrder(present) {
+  const have = new Set(present);
+  const seen = new Set();
+  const order = [];
+  const push = (t) => {
+    if (have.has(t) && !seen.has(t)) { seen.add(t); order.push(t); }
+  };
+  const nav = $("models-tab-nav");
+  if (nav) for (const b of nav.querySelectorAll(".tab-btn")) push(b.dataset.type);
+  for (const t of MODEL_TYPE_OPTIONS) push(t);
+  for (const t of [...present].sort()) push(t);
+  return order;
+}
+
+// Turn an already-sorted model list into a flat render list of heading markers
+// and models. Flat (rather than one table per type) on purpose: a single table
+// keeps every group's columns aligned to the same widths, and keeps the
+// "exactly one table.data-table in #models-table" overlap guard below meaningful.
+export function groupModelsByType(models) {
+  const byType = new Map();
+  for (const m of models) {
+    const t = modelTypeOf(m);
+    if (!byType.has(t)) byType.set(t, []);
+    byType.get(t).push(m);
+  }
+  const out = [];
+  for (const t of _groupOrder([...byType.keys()])) {
+    const list = byType.get(t);
+    out.push({ head: true, type: t, label: typeLabel(t), count: list.length });
+    for (const m of list) out.push({ model: m });
+  }
+  return out;
+}
+
+// Grouping applies only to a view that can hold more than one type. On a
+// single-type tab every row lands in one section, which is the flat list with
+// extra furniture, so the control hides itself there (see _syncViewOptControls).
+function _groupingActive() {
+  if (localStorage.getItem(GROUP_BY_TYPE_KEY) !== "true") return false;
+  return currentTypeFilter === "all" || currentTypeFilter === OTHER_TAB;
+}
+
+// AGENTS.md rule 5: the All tab leaving rows out must never be silent. Names how
+// many and where they are, so a registered model is always findable - and it is
+// what stands in for the empty state when EVERY model is one of the hidden ones
+// ("No models yet. Pull your first one" would be false in that case).
+export function otherHiddenNote(n) {
+  const one = n === 1;
+  return el("div", "sub models-other-note",
+    `${n} model${one ? "" : "s"} of a type with no tab of its own ` +
+    `${one ? "is" : "are"} not listed here - see the Other tab, ` +
+    `or tick "show other types here".`);
+}
+
+// Each display toggle applies to some views and not others; showing a control
+// that silently does nothing is its own small dishonesty.
+function _syncViewOptControls() {
+  const showOther = $("models-show-other-wrap");
+  const group = $("models-group-wrap");
+  if (showOther) showOther.hidden = currentTypeFilter !== "all";
+  if (group) group.hidden = !(currentTypeFilter === "all" || currentTypeFilter === OTHER_TAB);
+}
 // Set when a discovery result is chosen, cleared on a successful add or a spec
 // edit. {spec, type} - the Add handler only attaches model_type when spec still
 // matches exactly what was prefilled, so a hand-edited spec silently falls back
@@ -158,21 +282,52 @@ export async function refreshModelsPage() {
   // Counts come from the WHOLE registry, so a tab keeps showing how many it
   // holds while you are looking at a different one.
   syncTabCounts(models);
-  // Narrow to the active tab. Deliberately the SAME comparison the /api/models
-  // route makes (its own "llm" default for an entry with no recorded type, and
-  // an exact match otherwise), so every tab shows exactly the rows it showed
-  // when the route did the filtering.
-  if (currentTypeFilter !== "all") {
-    models = models.filter((m) => (m.model_type || "llm") === currentTypeFilter);
+  _syncViewOptControls();
+
+  // Narrow to the active tab. A named type is still the SAME comparison the
+  // /api/models route makes (its own "llm" default for an entry with no
+  // recorded type, and an exact match otherwise). The two multi-type views are
+  // where this now differs from the route, deliberately:
+  //   Other - every model whose type has no tab of its own, so a type the strip
+  //           does not name has a home rather than existing only inside All.
+  //   All   - those same models are left OUT by default and merged back in on
+  //           demand, exactly as the mmproj toggle merges projector files into a
+  //           repo's file list. Nothing disappears quietly: whatever All leaves
+  //           out is counted on the Other tab and said out loud below.
+  const tabbed = typesWithOwnTab();
+  const mergeOther = localStorage.getItem(SHOW_OTHER_KEY) === "true";
+  let hiddenOther = 0;
+  if (currentTypeFilter !== "all" && currentTypeFilter !== OTHER_TAB) {
+    models = models.filter((m) => modelTypeOf(m) === currentTypeFilter);
+  } else if (tabbed.size === 0) {
+    // No strip to read, so "has a tab of its own" has no answer. Both branches
+    // below would then call EVERY type an Other and All would render empty -
+    // a missing element turning into "you have no models", which is the worst
+    // reading of an unanswerable question. Leave the list whole instead.
+  } else if (currentTypeFilter === OTHER_TAB) {
+    models = models.filter((m) => !tabbed.has(modelTypeOf(m)));
+  } else if (!mergeOther) {
+    const before = models.length;
+    models = models.filter((m) => tabbed.has(modelTypeOf(m)));
+    hiddenOther = before - models.length;
   }
 
   if (!models.length) {
-    box.appendChild(emptyState("models", "No models yet",
-      "Pull a model above, or search HuggingFace to add your first one."));
+    // "No models yet - pull your first one" is FALSE when the registry is not
+    // empty and All is merely hiding all of it, so say the true thing instead.
+    box.appendChild(hiddenOther
+      ? otherHiddenNote(hiddenOther)
+      : emptyState("models", "No models yet",
+                   "Pull a model above, or search HuggingFace to add your first one."));
     return;
   }
 
   models = sortModels(models, currentSortKey, currentSortDir);
+  // Sorted FIRST, then partitioned, so each section stays in the order the
+  // active column sort asked for instead of quietly reverting to registry order.
+  const renderList = _groupingActive()
+    ? groupModelsByType(models)
+    : models.map((m) => ({ model: m }));
 
   const table = el("table", "data-table");
   const thead = el("thead");
@@ -209,11 +364,24 @@ export async function refreshModelsPage() {
   thead.appendChild(hr);
   table.appendChild(thead);
   const tbody = el("tbody");
-  // Selectable model types - mirrors localm.model_manager.registry.MODEL_TYPES
-  // (keep in sync). Powers the per-row one-click set-type control.
-  const MODEL_TYPE_OPTIONS =
-    ["llm", "embedding", "mmproj", "diffusion-unet", "text-encoder", "vae", "lora", "unknown"];
-  for (const m of models) {
+  // MODEL_TYPE_OPTIONS is module-scope now (the group-by-type ordering needs it
+  // too); this loop's use of it - the per-row one-click set-type control - is
+  // unchanged.
+  for (const entry of renderList) {
+    if (entry.head) {
+      // A group heading spans the whole row rather than sitting in a column, so
+      // the data columns keep the widths the header row set for them.
+      const headTr = el("tr", "group-head");
+      const headTh = el("th", "group-head-cell");
+      headTh.colSpan = MODEL_COLUMNS.length;
+      headTh.setAttribute("scope", "colgroup");
+      headTh.appendChild(el("span", "group-head-label", entry.label));
+      headTh.appendChild(el("span", "group-head-count", String(entry.count)));
+      headTr.appendChild(headTh);
+      tbody.appendChild(headTr);
+      continue;
+    }
+    const m = entry.model;
     const tr = el("tr");
     const nameTd = el("td", "name-cell");
     // The icon/name/badge flex line lives on this inner span, never on the td: a
@@ -448,6 +616,7 @@ export async function refreshModelsPage() {
   }
   table.appendChild(tbody);
   if (myGen !== _modelsRenderGen) return;
+  if (hiddenOther) box.appendChild(otherHiddenNote(hiddenOther));
   box.appendChild(table);
 }
 
@@ -858,10 +1027,17 @@ export async function discoverFiles(repo, filesBox, btn, gpus, detectedType) {
         $("pull-spec").value = `${repo}:${f.file}`;
         $("pull-name").value = f.file.replace(/\.gguf$/i, "");
         // A vision-projector companion file is never the searched-for type
-        // (there is no mmproj tab/checkbox) - only hint a REGULAR file's own
-        // pull, not one drawn from data.mmprojs (same object reference, "show
-        // mmproj files" merge above). The hint resolves at click time from the
-        // repo's detected type and the current Type checkboxes.
+        // (the search Type checkboxes above have no mmproj entry) - only hint a
+        // REGULAR file's own pull, not one drawn from data.mmprojs (same object
+        // reference, "show mmproj files" merge above). The hint resolves at
+        // click time from the repo's detected type and the current Type
+        // checkboxes.
+        //
+        // This says CHECKBOX deliberately. It used to read "no mmproj
+        // tab/checkbox", which stopped being unambiguous once the
+        // Registered-models Other tab began collecting every type with no tab
+        // of its own - mmproj included. That strip is a different control from
+        // these search filters, and only the filters decide this hint.
         const isMmproj = Array.isArray(data.mmprojs) && data.mmprojs.includes(f);
         const typeHint = isMmproj ? null : resolveTypeHint(detectedType);
         pendingPullTypeHint = typeHint
@@ -1628,21 +1804,31 @@ $("pull-start").onclick = async () => {
 // untouched. A type with nothing registered shows no number rather than a "0",
 // which would add noise to six tabs on a fresh install; "All" carries the total.
 //
-// The per-type numbers can legitimately sum to LESS than All: a registry entry
-// whose model_type has no tab of its own (mmproj) is reachable from All only.
-// That is the same set of rows each tab has always shown, now visible.
+// Other counts every model whose type has no tab of its own, and All counts what
+// All actually SHOWS - not the registry total. A tab labelled "All" reporting a
+// number larger than the list under it would be the same quiet dishonesty the
+// merge toggle exists to avoid. So with the toggle off the numbers partition the
+// registry exactly (every model is on All or on Other); with it on, Other is a
+// subset of All, which is the relation every other tab already has to it.
 export function syncTabCounts(models) {
   const nav = $("models-tab-nav");
   if (!nav) return;
+  const tabbed = typesWithOwnTab();
   const counts = new Map();
+  let otherCount = 0;
   for (const m of models || []) {
-    const t = m.model_type || "llm";
+    const t = modelTypeOf(m);
     counts.set(t, (counts.get(t) || 0) + 1);
+    if (!tabbed.has(t)) otherCount++;
   }
+  const total = (models || []).length;
+  const mergeOther = localStorage.getItem(SHOW_OTHER_KEY) === "true";
   for (const btn of nav.querySelectorAll(".tab-btn")) {
     const n = btn.dataset.type === "all"
-      ? (models || []).length
-      : (counts.get(btn.dataset.type) || 0);
+      ? (mergeOther ? total : total - otherCount)
+      : (btn.dataset.type === OTHER_TAB
+         ? otherCount
+         : (counts.get(btn.dataset.type) || 0));
     let slot = btn.querySelector(".tab-count");
     if (!slot) {
       slot = el("span", "tab-count");
@@ -1666,6 +1852,22 @@ if (tabNav) {
     };
   }
 }
+
+// Both display toggles: reflect the stored value on load, write it back on
+// change, re-render. The RENDER reads localStorage directly (never this
+// element's .checked), so a value seeded before the page script ran still
+// applies - the same read-at-use-site shape as the mmproj toggle.
+function _bindModelsViewToggle(id, key) {
+  const box = $(id);
+  if (!box) return;
+  box.checked = localStorage.getItem(key) === "true";
+  box.addEventListener("change", (e) => {
+    localStorage.setItem(key, e.target.checked ? "true" : "false");
+    refreshModelsPage();
+  });
+}
+_bindModelsViewToggle("models-show-other", SHOW_OTHER_KEY);
+_bindModelsViewToggle("models-group-by-type", GROUP_BY_TYPE_KEY);
 
 // Turn a ComfyUI ScanResult (added / skipped / method) into a human toast. The
 // scanner's `method` field carries WHY an empty scan found nothing ("none

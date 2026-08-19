@@ -2586,8 +2586,65 @@ div:has(> .data-table) { overflow-x: auto; }
 }
 .scan-row {
   display: flex;
-  justify-content: flex-end;
+  /* Was flex-end with one child. The display toggles now sit at the left of the
+     same row, so the button keeps its right edge and they keep theirs; with both
+     toggles hidden the group measures zero and the button is right-aligned as
+     before. */
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
   margin-bottom: 12px;
+}
+
+/* Browser-only display toggles for the Registered-models list. */
+.models-view-opts {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+/* .inline-check carries margin-left:14px for sitting beside a button row; here
+   the flex gap does that job, so the first one is not indented off the edge. */
+.models-view-opts .inline-check { margin-left: 0; }
+/* .inline-check sets display:inline-flex, and author CSS outranks the browser's
+   own [hidden] { display: none } rule - so a toggle hidden on a tab it does not
+   apply to would otherwise stay visible. Same reason as .perf-backend-hint's
+   :not([hidden]) note above. */
+.models-view-opts .inline-check[hidden] { display: none; }
+
+/* Rule-5 note: what the All tab is leaving out, and where it went. */
+.models-other-note {
+  margin: 0 0 10px;
+  font-style: italic;
+}
+
+/* group-by-type section heading. One row spanning the whole table, so the data
+   columns keep the widths the header row set rather than re-measuring per
+   section (which one table per type would have done). */
+.data-table tr.group-head th.group-head-cell {
+  text-align: left;
+  padding: 14px 8px 6px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  background: transparent;
+}
+.data-table tr.group-head:first-child th.group-head-cell { padding-top: 4px; }
+/* A heading is not a record: it must not take the row hover that says "this
+   line is a thing you can act on". */
+.data-table tbody tr.group-head:hover { background: transparent; }
+.group-head-count {
+  margin-left: 8px;
+  font-size: 11px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+  text-transform: none;
+  opacity: 0.6;
 }
 
 .picker-type-select {
