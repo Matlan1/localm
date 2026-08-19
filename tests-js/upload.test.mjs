@@ -87,3 +87,58 @@ test("R37: Upload with no file chosen does not POST", async () => {
   assert.equal(calls.filter((c) => c.url === "/api/upload").length, 0,
     "nothing is uploaded without a chosen file");
 });
+
+// S2: the raw <input type=file> renders in the browser's OS locale (an English
+// app otherwise showing "Choose File" / "Datei auswählen" next to it), so it is
+// hidden and driven through a real button, matching the chat-file/coder-file
+// pattern. These pin that wiring so a future refactor cannot silently drop it
+// (the input reappearing, or the trigger button no longer forwarding the click)
+// without a test noticing.
+test("S2: #upload-input is hidden; #upload-choose forwards its click to it", async () => {
+  const { window } = loadAppWithPages({ fetchImpl: makeFetch([], []) });
+  const input = window.document.getElementById("upload-input");
+  const chooseBtn = window.document.getElementById("upload-choose");
+  assert.ok(input, "upload-input exists");
+  assert.ok(chooseBtn, "upload-choose exists");
+  assert.equal(input.style.display, "none", "the raw input is hidden, not left to render natively");
+
+  let clicked = false;
+  const orig = window.HTMLInputElement.prototype.click;
+  window.HTMLInputElement.prototype.click = function () {
+    if (this === input) clicked = true;
+    return orig.apply(this, arguments);
+  };
+  try {
+    chooseBtn.click();
+  } finally {
+    window.HTMLInputElement.prototype.click = orig;
+  }
+  assert.ok(clicked, "clicking the trigger button opens the hidden file input");
+});
+
+test("S2: selecting files updates the selected-files label; a successful upload clears it", async () => {
+  const calls = [];
+  const { window } = loadAppWithPages({ fetchImpl: makeFetch(calls, []) });
+  const input = window.document.getElementById("upload-input");
+  const label = window.document.getElementById("upload-selected");
+  assert.ok(label, "upload-selected label exists");
+  assert.equal(label.textContent, "", "no selection yet");
+
+  const files = [
+    new window.File(["a"], "one.txt", { type: "text/plain" }),
+    new window.File(["b"], "two.txt", { type: "text/plain" }),
+  ];
+  Object.defineProperty(input, "files", { value: files, configurable: true });
+  input.dispatchEvent(new window.Event("change", { bubbles: true }));
+
+  assert.match(label.textContent, /2 file\(s\) selected/, "shows how many files were chosen");
+  assert.match(label.textContent, /one\.txt/, "names the first file");
+  assert.match(label.textContent, /two\.txt/, "names the second file");
+
+  window.document.getElementById("upload-send").click();
+  await new Promise((r) => setTimeout(r, 0));
+
+  const post = calls.find((c) => c.url === "/api/upload" && c.method === "POST");
+  assert.ok(post, "the selection was actually uploaded");
+  assert.equal(label.textContent, "", "the label clears once the upload succeeds");
+});
