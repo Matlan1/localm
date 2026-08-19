@@ -186,3 +186,58 @@ test("a refused proxy fetch leaves the image blank instead of throwing", async (
   assert.ok(!(img.getAttribute("src") || "").startsWith("http"),
     "a failed proxy fetch must not fall back to the remote URL");
 });
+
+test("a remote srcset is stripped so the proxied src is what renders", async () => {
+  // DOMPurify's default allowlist passes srcset. When an <img> carries both, the
+  // browser picks a srcset candidate and IGNORES src - so proxying src alone
+  // would leave the element pointing at the remote host and, with the feature on,
+  // the image would not render at all.
+  const { win, calls } = loadReal();
+  const t = render(win,
+    '<img src="https://example.com/a.png" srcset="https://example.com/a2.png 2x">');
+  await settle();
+  const img = t.querySelector("img");
+  assert.equal(img.getAttribute("srcset"), null,
+    "a remote srcset survived, so the browser would still fetch it directly");
+  assert.equal(proxied(calls).length, 1, "the src should still be proxied");
+});
+
+test("a <picture><source srcset> pointing remote is emptied", async () => {
+  // <picture> and <source> are both in DOMPurify's default allowlist. A surviving
+  // remote <source> wins over the <img> fallback, so the proxy would be bypassed.
+  const { win, calls } = loadReal();
+  const t = render(win,
+    '<picture><source srcset="https://example.com/s.webp"><img src="https://example.com/f.png"></picture>');
+  await settle();
+  const src = t.querySelector("source");
+  assert.ok(!src || src.getAttribute("srcset") === null,
+    "a remote <source srcset> survived and would bypass the proxied <img>");
+  assert.equal(proxied(calls).length, 1);
+});
+
+test("a LOCAL srcset is left alone", async () => {
+  // Only remote candidates are the problem; stripping a local one would break a
+  // legitimate responsive image for no gain.
+  const { win } = loadReal();
+  const t = render(win, '<img src="/uploads/a.png" srcset="/uploads/a2.png 2x">');
+  await settle();
+  assert.equal(t.querySelector("img").getAttribute("srcset"), "/uploads/a2.png 2x");
+});
+
+test("clearImageProxyCache drops cached images so the OFF switch takes effect", async () => {
+  // Without this the route starts refusing but an already-fetched blob keeps
+  // rendering for the whole page session - strictly longer than the 5 minutes
+  // that made `Cache-Control: max-age` unacceptable.
+  const { win, calls } = loadReal();
+  render(win, "![x](https://example.com/a.png)");
+  await settle();
+  assert.equal(proxied(calls).length, 1);
+  render(win, "![x](https://example.com/a.png)");
+  await settle();
+  assert.equal(proxied(calls).length, 1, "second render should have used the cache");
+  win.clearImageProxyCache();
+  render(win, "![x](https://example.com/a.png)");
+  await settle();
+  assert.equal(proxied(calls).length, 2,
+    "after clearing, the image must be re-fetched (and so re-authorised by the route)");
+});

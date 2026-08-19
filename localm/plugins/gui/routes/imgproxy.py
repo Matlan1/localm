@@ -99,6 +99,18 @@ def register(app: FastAPI, ctx) -> None:
         except Exception as e:
             raise HTTPException(502, f"Could not fetch the image: {e}")
 
+        # safe_fetch_bytes TRUNCATES at the cap rather than refusing: it breaks out
+        # of the chunk loop and returns what it has (netpolicy.py, `if size >=
+        # max_bytes: break`). For a text fetch a clipped body is degraded but
+        # usable; for an IMAGE it is a corrupt file, and serving it with a 200 and
+        # a valid image/* type would be a step that failed reporting success. The
+        # browser would render a half-decoded strip or nothing, with no way for the
+        # client to tell that apart from a small image. Refuse instead.
+        if len(body) >= _MAX_BYTES:
+            raise HTTPException(
+                413, f"That image is larger than the {_MAX_BYTES // 1_000_000} MB "
+                     "limit for proxied images, so it was not fetched completely.")
+
         # Content-Type may carry parameters ("image/png; charset=binary").
         base_type = content_type.split(";", 1)[0].strip().lower()
         if base_type not in _ALLOWED_TYPES:

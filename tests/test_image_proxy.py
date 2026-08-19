@@ -183,6 +183,35 @@ def test_the_byte_cap_is_passed_to_the_fetch_layer(monkeypatch):
     assert imgproxy._MAX_BYTES <= 25_000_000, "a display image should not be unbounded"
 
 
+def test_a_truncated_oversize_image_is_REFUSED_not_served_corrupt(monkeypatch):
+    """safe_fetch_bytes truncates at the cap; serving that would be a false success.
+
+    netpolicy breaks out of its chunk loop at max_bytes and returns what it has.
+    For a text fetch a clipped body is degraded but usable. For an IMAGE it is a
+    corrupt file, and returning it with a 200 and a valid image/* type reports
+    success for a step that failed (AGENTS.md rule 5) - the browser renders a
+    half-decoded strip or nothing, and the client cannot tell that apart from a
+    small image.
+    """
+    truncated = b"IMGDATA" * ((imgproxy._MAX_BYTES // 7) + 2)
+    c = _client(monkeypatch, enabled=True,
+                fetch=lambda url, **kw: (url, "image/png", truncated[:imgproxy._MAX_BYTES]))
+    r = c.get("/api/image-proxy", params={"url": "https://example.com/huge.png"})
+    assert r.status_code == 413, (
+        f"an image that hit the byte cap was served as {r.status_code} rather than "
+        "refused, so a truncated/corrupt body reaches the page as a success")
+
+
+def test_an_image_just_under_the_cap_is_still_served(monkeypatch):
+    """The refusal above must not swallow legitimate large-but-complete images."""
+    body = b"z" * (imgproxy._MAX_BYTES - 100)
+    c = _client(monkeypatch, enabled=True,
+                fetch=lambda url, **kw: (url, "image/png", body))
+    r = c.get("/api/image-proxy", params={"url": "https://example.com/big.png"})
+    assert r.status_code == 200, r.text
+    assert r.content == body
+
+
 def test_a_fetch_failure_is_a_502_not_a_500(monkeypatch):
     """A dead remote host is not a localm bug and must not read as one."""
     def _boom(url, **kw):
