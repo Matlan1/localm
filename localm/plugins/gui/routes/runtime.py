@@ -123,6 +123,15 @@ def register(app: FastAPI, ctx) -> None:
                 400, f"{req.tag!r} is not a usable release tag. "
                      f"{setup_llama.TAG_HELP}")
 
+        # installed_backend() returns None for TWO different states - nothing
+        # provisioned, and provisioned by an install too old to have written the
+        # marker (or a hand-placed build). They are indistinguishable here, and
+        # the fallback to "auto" therefore re-detects hardware on the second one
+        # too, which can land on a different backend than the unmarked build on
+        # disk. That is deliberate rather than overlooked: it is exactly what a
+        # bare `localm setup-llama` does on the same box, the card has already
+        # told the user nothing is recorded as installed, and there is no
+        # recorded choice to override. An EXPLICIT backend always wins over both.
         installed = setup_llama.installed_backend()
         backend = wanted or installed or "auto"
         if jobs.has_running("runtime-update"):
