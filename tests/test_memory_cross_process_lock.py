@@ -28,6 +28,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -241,3 +242,81 @@ def test_the_lock_file_cannot_be_mistaken_for_a_namespace(tmp_path):
     lockfile.write_text(json.dumps({"token": "x"}), encoding="utf-8")
     assert lockfile.exists() and lockfile.parent == store.path.parent
     assert list(_namespaces(tmp_path)) == [store.path]
+
+
+def test_a_write_waiting_on_the_file_lock_does_not_block_reads_in_its_own_process(
+        heavy_slot, tmp_path, monkeypatch):
+    """The lock ORDER, pinned.
+
+    MEASURED 2026-08-19, as a shipped regression: the first version of this lock
+    took the namespace RLock and then waited for the FILE lock inside it. Because
+    ``MemoryStore.__init__`` takes that same RLock to ``_load()``, every read in
+    the writing process blocked for the writer's whole budget - `GET /api/memory`
+    measured 29.6s live against a foreign holder, while `/api/stats` stayed fast,
+    so it was never the event loop.
+
+    The fix waits for the file lock OUTSIDE the RLock. This test fails on the old
+    order and passes on the new one, which is the only reason it is worth having:
+    nothing else in the suite can tell the two apart.
+    """
+    monkeypatch.setenv("LOCALM_RAG_LOCK_WAIT", "20")
+    holder = _hold_from_another_process(tmp_path, 20)
+    try:
+        writer = threading.Thread(target=lambda: _swallow(
+            lambda: MemoryStore("owner", "chat", root=tmp_path).add(
+                MemoryRecord(text="waits", source="user", importance=0.8))))
+        writer.start()
+        time.sleep(2)                      # let the writer get into its wait
+        started = time.time()
+        MemoryStore("owner", "chat", root=tmp_path).all()
+        elapsed = time.time() - started
+        assert elapsed < 8, (
+            f"a read in the writer's own process waited {elapsed:.1f}s: the "
+            f"namespace RLock is being held across the cross-process wait")
+    finally:
+        holder.kill()
+        holder.communicate(timeout=60)
+        writer.join(timeout=120)
+
+
+def _swallow(fn):
+    """Run *fn*, ignoring a lock refusal: the test above is about the READ's
+    latency, and whether the writer eventually wins the race is not its subject."""
+    try:
+        fn()
+    except CollectionLockedError:
+        pass
+
+
+def test_a_bounded_caller_stays_bounded_behind_a_blocked_writer(heavy_slot,
+                                                                tmp_path,
+                                                                monkeypatch):
+    """corrections() passes a SHORT timeout so a read path never stalls. That
+    budget has to survive a sibling thread in the same process already waiting on
+    the long one.
+
+    MEASURED 2026-08-19: with the in-process gate unbounded, a writer blocked for
+    its full budget held the gate the whole time, so this call queued behind it and
+    took ~30s despite asking for 2s - which is how `GET /api/memory` still measured
+    29.6s live AFTER the RLock ordering was fixed. The gate now shares the budget.
+    """
+    monkeypatch.setenv("LOCALM_RAG_LOCK_WAIT", "25")
+    holder = _hold_from_another_process(tmp_path, 25)
+    writer = None
+    try:
+        writer = threading.Thread(target=lambda: _swallow(
+            lambda: MemoryStore("owner", "chat", root=tmp_path).add(
+                MemoryRecord(text="waits", source="user", importance=0.8))))
+        writer.start()
+        time.sleep(2)                      # let the writer own the gate
+        started = time.time()
+        MemoryStore("owner", "chat", root=tmp_path).corrections()
+        elapsed = time.time() - started
+        assert elapsed < 10, (
+            f"a bounded caller waited {elapsed:.1f}s behind a blocked writer: its "
+            f"short budget is not being applied to the in-process gate")
+    finally:
+        holder.kill()
+        holder.communicate(timeout=60)
+        if writer is not None:
+            writer.join(timeout=120)

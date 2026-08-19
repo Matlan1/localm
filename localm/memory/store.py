@@ -335,6 +335,13 @@ def _namespace_lock(ns_hash: str):
 # bump. Short on purpose: it runs on the chat turn (see recall's comment).
 _REINFORCE_LOCK_WAIT = 2.0
 
+# Only ONE thread per process ever contends for a namespace's FILE lock. Without
+# this, two threads here would each hit collection_write_lock's O_EXCL create, and
+# the loser would burn its whole budget fighting a holder inside its own process
+# that an in-process lock settles instantly. Same reason rag takes
+# _collection_lock before its file lock.
+_FILE_GATES = NamespaceLockRegistry()
+
 _XPROC_DEPTH = threading.local()
 
 
@@ -358,11 +365,14 @@ def _namespace_write_lock(ns_hash: str, store_file: Path, op: str,
     batch several save=False mutations. So the file lock is taken by the OUTERMOST
     acquisition only, tracked per thread and per namespace.
 
-    READS deliberately do NOT take this. _save() writes through
+    READS deliberately do NOT take the FILE lock. _save() writes through
     storekit.atomic_write (tmp + os.replace), so a concurrent reader sees the old
     file or the new one, never a mix - the read side was already safe across
     processes, and making every _load() contend for a file lock would put the chat
-    inlet behind whatever a background consolidation is doing.
+    inlet behind whatever a background consolidation is doing. Reads DO take the
+    namespace RLock (MemoryStore.__init__ does, to _load()), which is why the
+    ordering below matters: hold that RLock across the file-lock wait and every
+    read in this process waits with you.
 
     Never returns without the lock: a refusal raises CollectionLockedError rather
     than proceeding unprotected, because an unserialised write is the exact lost
@@ -370,25 +380,61 @@ def _namespace_write_lock(ns_hash: str, store_file: Path, op: str,
     not block (recall's reinforcement - see its own comment); the default budget
     is collection_lock's, which is right for a caller that has to finish."""
     from localm.rag.collection_lock import collection_write_lock
-    with _namespace_lock(ns_hash):
-        depth = getattr(_XPROC_DEPTH, "depth", None)
-        if depth is None:
-            depth = _XPROC_DEPTH.depth = {}
-        if depth.get(ns_hash):
-            depth[ns_hash] += 1
-            try:
+    depth = getattr(_XPROC_DEPTH, "depth", None)
+    if depth is None:
+        depth = _XPROC_DEPTH.depth = {}
+    if depth.get(ns_hash):
+        # Nested (prune -> replace, or a store.lock() batch). This thread already
+        # owns the gate and the file lock; only the RLock re-enters.
+        depth[ns_hash] += 1
+        try:
+            with _namespace_lock(ns_hash):
                 yield
-            finally:
-                depth[ns_hash] -= 1
-            return
+        finally:
+            depth[ns_hash] -= 1
+        return
+    # ORDER IS LOAD-BEARING: gate, then FILE lock, then the namespace RLock - and
+    # the RLock is taken only AFTER the file lock is held.
+    #
+    # MEASURED 2026-08-19: taking the RLock first and waiting for the file lock
+    # inside it made every READ in this process block for the writer's whole
+    # budget, because MemoryStore.__init__ takes that same RLock to _load(). A
+    # foreign holder could park GET /api/memory for 30s (measured 29.6s live,
+    # 23.3s in a two-process repro) while /api/stats stayed fast - so it was never
+    # the event loop, it was this lock. Waiting on the file lock OUTSIDE the RLock
+    # keeps a reader's block down to the short load/mutate/save section.
+    #
+    # No deadlock: every path takes them in this one order, and the gate means a
+    # sibling thread waits on a cheap mutex rather than racing for the file.
+    #
+    # THE GATE IS BOUNDED BY THE SAME BUDGET as the file lock, and that is not a
+    # detail. MEASURED 2026-08-19: an unbounded gate simply MOVED the starvation
+    # onto itself - a writer blocked for its full 30s held the gate throughout, so
+    # a caller that passes a short timeout (corrections(), reinforcement) queued
+    # behind it for 30s and its own 2s budget never applied. GET /api/memory still
+    # took 29.6s live, with the namespace RLock no longer the culprit.
+    from localm.rag.collection_lock import wait_budget
+    budget = wait_budget() if timeout is None else timeout
+    gate = _FILE_GATES.get(ns_hash)
+    started = time.monotonic()
+    if not gate.acquire(timeout=budget):
+        raise CollectionLockedError(ns_hash, None, budget, same_process=True,
+                                    kind="Memory namespace")
+    try:
+        # Whatever the gate cost comes out of the same budget, so a bounded caller
+        # stays bounded overall rather than paying budget twice.
+        left = max(0.5, budget - (time.monotonic() - started))
         with collection_write_lock(_namespace_lockfile(store_file),
-                                   collection=ns_hash, op=op, timeout=timeout,
+                                   collection=ns_hash, op=op, timeout=left,
                                    kind="Memory namespace"):
             depth[ns_hash] = 1
             try:
-                yield
+                with _namespace_lock(ns_hash):
+                    yield
             finally:
                 depth[ns_hash] = 0
+    finally:
+        gate.release()
 
 
 class MemoryStore:
