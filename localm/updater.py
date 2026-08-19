@@ -509,8 +509,9 @@ def _apply_lock_is_stale(lock_dir: Path) -> bool:
 
 
 @contextlib.contextmanager
-def _apply_lock():
-    """Cross-process, cross-thread single-flight guard for :func:`apply` (SEC-
+def _apply_lock(what: str = "update"):
+    """Cross-process, cross-thread single-flight guard for :func:`apply` and
+    :func:`rollback_last`, which mutate the SAME install tree (SEC-
     UPDATE-RACE, checkup 2026-08-11 item 7 - the only data-destroying finding in
     that run). ``mkdir`` is atomic, the same idiom this repo's own test-slot lock
     uses, so two concurrent callers - two browser tabs' ``POST /api/update/apply``
@@ -546,7 +547,7 @@ def _apply_lock():
         except FileExistsError:
             from localm.bugreport import LocalmError
             raise LocalmError(
-                "another update is already being applied",
+                f"another {what} is already being applied",
                 reason="wait for it to finish, then try again")
     # Record who holds it, so a future caller's staleness check can ask
     # instances.pid_alive() instead of guessing from elapsed time. Best-effort:
@@ -933,30 +934,39 @@ def rollback_last(*, installed=None) -> dict:
     backup_dir = _backup_dir(create=True)
     if not _backup_is_restorable(backup_dir):
         raise LocalmError("no update backup to roll back to", reason=str(backup_dir))
-    # Prefer the recorded full swap set (includes brand-new top-level entries the update
-    # added, which are NOT in the backup dir) so those are removed too; fall back to the
-    # backup listing for an older backup written before the manifest existed. au.rollback
-    # removes each name then restores whatever the backup holds, so a manifest-only (new)
-    # name is removed-not-restored and a backed-up name is removed-then-restored.
-    names = None
-    manifest = updir / "applied_names.json"
-    if manifest.is_file():
-        try:
-            import json
-            loaded = json.loads(manifest.read_text(encoding="utf-8"))
-            if isinstance(loaded, list) and all(isinstance(x, str) for x in loaded):
-                names = loaded
-        except (OSError, ValueError):
-            names = None
+    # SAME single-flight lock apply() takes, because both mutate the SAME install
+    # tree. This was previously unserialised and safe only by accident of having
+    # exactly ONE caller (the CLI); the GUI route makes an apply and a rollback two
+    # buttons in one Settings card, so "nobody would run both at once" stopped being
+    # true. A rollback interleaved with a swap removes names the swap is restoring,
+    # and the lock's own docstring already describes how that loses the true
+    # pre-update install for good. Cross-PROCESS on purpose: the contender can be the
+    # CLI in a terminal, which no in-process lock could see.
+    with _apply_lock("update or rollback"):
+        # Prefer the recorded full swap set (includes brand-new top-level entries the update
+        # added, which are NOT in the backup dir) so those are removed too; fall back to the
+        # backup listing for an older backup written before the manifest existed. au.rollback
+        # removes each name then restores whatever the backup holds, so a manifest-only (new)
+        # name is removed-not-restored and a backed-up name is removed-then-restored.
+        names = None
+        manifest = updir / "applied_names.json"
+        if manifest.is_file():
+            try:
+                import json
+                loaded = json.loads(manifest.read_text(encoding="utf-8"))
+                if isinstance(loaded, list) and all(isinstance(x, str) for x in loaded):
+                    names = loaded
+            except (OSError, ValueError):
+                names = None
+            if names is None:
+                # The manifest EXISTS but is unreadable or malformed (NOT the benign
+                # never-written case): we can still roll back from the backup dir, but that
+                # listing lacks the brand-new top-level entries the update ADDED, so those
+                # will not be removed. Surface the degraded rollback rather than silently
+                # doing a partial one (we do not hide problems).
+                _apply_warn("applied_names.json at %s exists but is unreadable; new files "
+                            "added by the update will not be removed by this rollback", manifest)
         if names is None:
-            # The manifest EXISTS but is unreadable or malformed (NOT the benign
-            # never-written case): we can still roll back from the backup dir, but that
-            # listing lacks the brand-new top-level entries the update ADDED, so those
-            # will not be removed. Surface the degraded rollback rather than silently
-            # doing a partial one (we do not hide problems).
-            _apply_warn("applied_names.json at %s exists but is unreadable; new files "
-                        "added by the update will not be removed by this rollback", manifest)
-    if names is None:
-        names = [p.name for p in backup_dir.iterdir()]
-    au.rollback(backup_dir, target, names)
-    return {"rolled_back": True, "backup": str(backup_dir)}
+            names = [p.name for p in backup_dir.iterdir()]
+        au.rollback(backup_dir, target, names)
+        return {"rolled_back": True, "backup": str(backup_dir)}

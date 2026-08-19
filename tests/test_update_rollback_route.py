@@ -200,6 +200,31 @@ def test_a_partial_restore_is_reported_as_such_and_does_not_restart(
         "never re-exec into an install that is half-restored"
 
 
+def test_rollback_is_refused_while_an_update_holds_the_lock(
+        tmp_path, monkeypatch, no_restart):
+    """apply() and rollback_last() mutate the SAME install tree. Before the GUI
+    route, rollback was unserialised and safe only by accident of having exactly one
+    caller; a route makes an apply and a rollback two buttons in one Settings card.
+    A rollback that interleaved with a swap would remove names the swap is restoring.
+
+    The lock dir is created DIRECTLY (an atomic mkdir at the real path), not
+    monkeypatched, so this exercises the cross-process guard as a separate process
+    would actually contend with it - the CLI in a terminal is a real contender that
+    no in-process lock could see."""
+    _open_mode(monkeypatch)
+    home, install = _seed_install(tmp_path, monkeypatch)
+    (home / "updates" / "apply.lock").mkdir()
+    (home / "updates" / "apply.lock" / "pid").write_text(str(__import__("os").getpid()),
+                                                         encoding="utf-8")
+    app = create_app(_engine())
+    with TestClient(app) as c:
+        r = c.post("/api/update/rollback", headers=_auth(app))
+    assert (install / "marker.txt").read_text(encoding="utf-8") == "new",         "a rollback ran while an update held the lock - the tree could be corrupted"
+    assert r.status_code == 409, r.text
+    assert "already being applied" in r.text
+    assert no_restart == [], "nothing was restored, so nothing may restart"
+
+
 # --------------------------------------------------------------------------- #
 #  (3) the owner gate                                                          #
 # --------------------------------------------------------------------------- #

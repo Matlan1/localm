@@ -176,9 +176,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   The button appears only when there is a backup to restore and names the build
   it would put back before you press it. It asks for the owner key rather than
   any key that may change settings, because restoring an older build can bring
-  back something the newer one fixed. Like `localm update --rollback`, it
-  restores that build's files; it does not undo package installs an update made
-  along the way.
+  back something the newer one fixed. If an update is being applied at that
+  moment, the roll back is refused with a clear message instead of running
+  alongside it. Like `localm update --rollback`, it restores that build's files;
+  it does not undo package installs an update made along the way.
 
 ### Changed
 - **The chat parameters drawer and the image, music and video generation forms

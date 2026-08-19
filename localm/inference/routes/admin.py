@@ -418,9 +418,11 @@ def register(app: FastAPI, ctx) -> None:
         try:
             res = await asyncio.to_thread(updater.rollback_last)
         except LocalmError as e:
-            # Precondition only: there is no backup, so NOTHING was touched. Kept
-            # distinct from the partial-restore case below, which looks similar to a
-            # caller and is the opposite situation.
+            # A precondition, so NOTHING was touched: either there is no backup, or
+            # an update/rollback already holds the single-flight lock. Both are a
+            # genuine 409 conflict, and both are kept distinct from the partial-
+            # restore case below, which looks similar to a caller and is the
+            # opposite situation (the install HAS been modified).
             raise HTTPException(409, format_localm_error(e))
         except Exception as e:
             # _apply_update.rollback reports a PARTIAL restore by raising, listing
