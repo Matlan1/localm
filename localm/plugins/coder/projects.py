@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Optional
 
 from localm.debuglog import logger
+from localm.pathsafe import is_unc_or_device_path
 
 # The mode that must never be recorded. Compared case-insensitively because the CLI
 # accepts the choice case-insensitively (cli/_main.py) and a differently-cased value
@@ -143,7 +144,16 @@ def list_projects() -> list:
         if not isinstance(e, dict) or not e.get("path"):
             continue
         try:
-            available = Path(e["path"]).is_dir()
+            # A UNC or device path is reported unavailable WITHOUT the stat.
+            # Nothing this module writes can produce one (record_project stores
+            # a resolved local cwd), but the store is a plain JSON file a user
+            # can edit, and is_dir() on a UNC path is a network round trip that
+            # blocks until it times out - the same reason the HTTP routes refuse
+            # that syntax before touching the filesystem.
+            if is_unc_or_device_path(str(e["path"])):
+                available = False
+            else:
+                available = Path(e["path"]).is_dir()
         except Exception:
             available = False
         out.append({**e, "available": available})
