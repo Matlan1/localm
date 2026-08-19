@@ -58,6 +58,22 @@ _QUEUE_MAX = 10_000
 _IDLE_REAP_SECONDS = 24 * 3600
 
 
+class SessionUnavailable(RuntimeError):
+    """The session refused a claim: it is already busy, or it is closed.
+
+    A DEDICATED type, not a bare RuntimeError with a magic string, because the
+    caller has to tell this apart from "the model call blew up" and those need
+    opposite answers - one is "try again in a moment" (409), the other is
+    "something is broken" (502). Matching on RuntimeError alone reported a real
+    model failure as a scheduling conflict, which is the more dangerous
+    direction: it hides a fault behind a status that invites a retry.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason          # "busy" | "closed"
+
+
 @dataclass
 class _PendingConfirm:
     id: str
@@ -81,6 +97,7 @@ class CoderSession:
         mode: str = "privacy",
         scope: Optional[str] = None,
         dry_run: bool = False,
+        patch_mode: bool = False,
         disabled_tools: Optional[frozenset] = None,
         restricted: bool = False,
         custom_instructions: Optional[str] = None,
@@ -88,6 +105,7 @@ class CoderSession:
         # holds: auto-detection assigns a list to this very field below.
         verify: Optional["_VerifyCommand"] = None,
         auto_verify: bool = True,
+        verify_max_retries: int = 2,
         **gen_kwargs,
     ) -> None:
         from localm.plugins.coder.agent import Agent
@@ -111,6 +129,22 @@ class CoderSession:
         self.auto_approve = auto_approve
         self.mode = mode
         self.dry_run = dry_run
+        # Writes are captured as a unified diff and never reach disk. The CLI's
+        # --patch-mode names an output FILE; a browser has no such thing, so the
+        # web form is "accumulate, then download" - see current_patch().
+        self.patch_mode = patch_mode
+        # Whether the caller ASKED for the OpenAI native tools protocol, and
+        # whether the connected server can actually honour it. Two fields, not
+        # one, because collapsing them is exactly how a request that was quietly
+        # dropped becomes indistinguishable from one that was applied.
+        self.native_tools_requested = bool(getattr(backend, "native_tools", False))
+        self.native_tools = (self.native_tools_requested
+                             and bool(getattr(backend, "supports_native_tools", True)))
+        # The last finished task's machine-readable result: the CLI's
+        # --output-format json payload, kept so a client that is not holding the
+        # SSE stream open can still read it (GET .../result). None until a task
+        # has actually finished.
+        self.last_result: Optional[dict] = None
         self.events: queue.Queue = queue.Queue(maxsize=_QUEUE_MAX)
         # Bounded replay buffer so a reloaded page can rebuild the feed.
         self.history: list = []
@@ -149,6 +183,7 @@ class CoderSession:
             mode=parse_mode(mode),
             scope=scope,
             dry_run=dry_run,
+            patch_mode=patch_mode,
             disabled_tools=disabled_tools,
             restricted=restricted,
             # None -> Agent reads .localcoder/system.md; a GUI-supplied string
@@ -157,6 +192,7 @@ class CoderSession:
             on_event=self._on_agent_event,
             confirm_handler=None if auto_approve else self._confirm,
             verify_cmd=verify_cmd,
+            verify_max_retries=verify_max_retries,
             **gen_kwargs,
         )
 
@@ -322,7 +358,7 @@ class CoderSession:
         def _run():
             try:
                 final = self.agent.run_task(text)
-                self._push({
+                payload = {
                     "type": "final",
                     "text": final,
                     "ok": self.agent.last_run_ok,
@@ -334,7 +370,16 @@ class CoderSession:
                     "total_tokens": self.agent.total_tokens,
                     "changed_files": [f["path"] for f in
                                       self.agent.changed_files()],
-                })
+                }
+                # Latch the same numbers for GET .../result before pushing, so a
+                # client woken by the event cannot race ahead of the record it
+                # is about to ask for. `response` mirrors the CLI's
+                # --output-format json key name; `text` stays for the SSE
+                # consumers that already read it.
+                self.last_result = {k: v for k, v in payload.items()
+                                    if k != "type"}
+                self.last_result["response"] = final
+                self._push(payload)
             except Exception as e:
                 self._push({"type": "error", "text": f"{type(e).__name__}: {e}"})
             finally:
@@ -355,6 +400,63 @@ class CoderSession:
         self._thread = threading.Thread(target=_run, daemon=True)
         self._thread.start()
         return "started"
+
+    def run_estimate(self, task: str) -> dict:
+        """One planning turn on this session, claimed like an ordinary task.
+
+        The claim matters and is not ceremony. Estimating is a second TRIGGER
+        for the shared backend, and before this the session had exactly one
+        (send_message). Two concurrent turns on one backend would interleave on
+        its per-call state - ``last_usage`` in particular, which this function
+        reads AFTER its own call returns, so a task turn finishing in that
+        window would make the estimate report the task's token numbers as its
+        own. Taking ``busy`` under the same lock ``send_message`` uses makes
+        the two mutually exclusive without inventing a second lock, and a
+        caller that loses the race is told (raises), never silently queued.
+
+        The drain in the ``finally`` is the other half: while an estimate holds
+        ``busy``, ``send_message`` queues rather than starts, and the only code
+        that ever re-runs a queued message is the task thread's own finally.
+        Without this, a message typed during an estimate would sit unsent until
+        the user typed again. No checkpoint is persisted: an estimate changes
+        no conversation, so there is nothing new to save.
+        """
+        from .estimate import estimate_task
+        with self._lock:
+            if self.closed:
+                raise SessionUnavailable("closed")
+            if self.busy:
+                raise SessionUnavailable("busy")
+            self.busy = True
+        try:
+            result = estimate_task(self.agent, task)
+        finally:
+            with self._lock:
+                self.busy = False
+            leftover = self.agent._drain_queued()
+            if leftover and not self.closed:
+                self._push({"type": "info",
+                            "text": "running queued message(s) as a follow-up"})
+                self.send_message("\n\n".join(leftover), _echo=False)
+        self.push_estimate(task, result)
+        return result
+
+    def push_estimate(self, task: str, result: dict) -> None:
+        """Put an estimate into the session feed (and the replay buffer).
+
+        A dedicated event type rather than an ``info`` line: the plan is
+        multi-paragraph prose that wants message rendering, and a consumer
+        (the export, a future filter) has to be able to tell a plan that was
+        never executed apart from a turn that was. It carries the task it
+        answered, because by the time it is replayed the composer no longer
+        shows what was asked."""
+        self._push({
+            "type": "estimate",
+            "task": task,
+            "text": result.get("estimate") or "",
+            "prompt_tokens": result.get("prompt_tokens"),
+            "total_tokens": result.get("total_tokens"),
+        })
 
     def undo(self) -> Optional[str]:
         """Revert the last undoable file operation. None when nothing to undo."""
@@ -483,6 +585,12 @@ class CoderSession:
             "mode": self.mode,
             "auto_approve": self.auto_approve,
             "dry_run": self.dry_run,
+            "patch_mode": self.patch_mode,
+            # EFFECTIVE, not requested. `native_tools_requested` alongside it so
+            # a UI can say "you asked and did not get it" rather than silently
+            # showing the box unticked (AGENTS.md rule 5).
+            "native_tools": self.native_tools,
+            "native_tools_requested": self.native_tools_requested,
             "busy": self.busy,
             "turns": self.agent.turns,
             "total_tokens": self.agent.total_tokens,
@@ -494,7 +602,23 @@ class CoderSession:
             # instead of leaving the user to guess whether one is running.
             "verify": (_verify_text(self.agent.verify_cmd)
                        if self.agent.verify_cmd is not None else None),
+            # How many fix attempts the exit-code oracle gets before it reports
+            # failure - the web equivalent of the CLI's --goal-max-iters, which
+            # had no web field at all.
+            "verify_max_retries": self.agent.verify_max_retries,
+            # Whether there is anything to download from GET .../patch. A count
+            # would be a lie about "files"; this is a plain has-it-or-not.
+            "has_patch": self.patch_mode and self.agent.has_patch(),
         }
+
+    def current_patch(self) -> str:
+        """The accumulated patch-mode diff, WITHOUT consuming it.
+
+        Never ``agent.flush_patch()``: that clears the buffer, so a second
+        reader (a reloaded tab, a retry, a status poll) would get an empty
+        patch and no error - the "a call made just to check is still a call"
+        shape. Draining is a deliberate act and this is not it."""
+        return self.agent.current_patch()
 
     def answer_confirm(self, confirm_id: str, approved: bool,
                        always_allow: bool = False) -> bool:

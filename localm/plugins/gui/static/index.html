@@ -200,8 +200,9 @@
         <span class="spacer"></span>
         <button class="btn-secondary" id="coder-undo" title="Revert the last file write">undo</button>
         <button class="btn-secondary" id="coder-files" title="Files changed this session, with diffs">files</button>
+        <button class="btn-secondary" id="coder-patch" style="display:none" title="Download the diff this patch-mode session captured instead of writing">patch</button>
         <button class="btn-secondary" id="coder-compact" title="Summarise old turns to free context">compact</button>
-        <button class="btn-secondary" id="coder-export" title="Download this session's feed as markdown">export</button>
+        <button class="btn-secondary" id="coder-export" title="Download this session's feed as markdown, or the last task's result as JSON">export</button>
         <button class="btn-secondary" id="coder-log" title="View the audit log">log</button>
         <button class="btn-secondary" id="coder-history" title="Browse past session logs">history</button>
         <button class="btn-secondary" id="coder-stop">Stop</button>
@@ -245,14 +246,28 @@
         <input type="text" id="setup-scope" placeholder="src/**/*.py" spellcheck="false">
         <label for="setup-system" title="Overrides this project's .localcoder/system.md for this session; leave blank to use that file. Extra guidance prepended to the agent's system prompt: conventions, style, constraints.">Custom instructions (optional - conventions, style, constraints)</label>
         <textarea id="setup-system" placeholder="e.g. Always run pytest before finishing. Prefer guard clauses." spellcheck="false" rows="2"></textarea>
+        <div class="grid2">
+          <div>
+            <label for="setup-verify" title="The harness runs this command and reads its exit code before a turn that changed files may finish, so the agent cannot declare success the check does not agree with. Leave blank to use the project's detected check.">Verification command (exit 0 = done)</label>
+            <input type="text" id="setup-verify" placeholder="detected automatically" spellcheck="false">
+          </div>
+          <div>
+            <label for="setup-verify-retries" title="How many times the agent is asked to fix a failing check before the task is reported as not verified.">Verification fix attempts</label>
+            <input type="number" id="setup-verify-retries" placeholder="default (2)" min="1" max="50" step="1">
+          </div>
+        </div>
         <div class="checks">
           <label><input type="checkbox" id="setup-auto"> Auto-approve destructive tools</label>
           <label title="Destructive tools report what they would do without touching anything"><input type="checkbox" id="setup-dry"> Dry run (nothing is written or executed)</label>
+          <label title="File writes are captured as a unified diff instead of being applied. Download it from the session toolbar when you are done."><input type="checkbox" id="setup-patch"> Patch mode (collect a diff, write nothing)</label>
+          <label title="Run no exit-code check at all, even when this project has an obvious one."><input type="checkbox" id="setup-no-verify"> Skip verification</label>
+          <label title="Ask the model server for the OpenAI-compatible native tools API. localm's own server does not implement it and will say so; it uses grammar-constrained tool calls instead."><input type="checkbox" id="setup-native-tools"> Native tools API (if the server supports it)</label>
         </div>
         <div class="actions">
           <button class="btn-primary" id="setup-start">Start session</button>
           <button class="btn-secondary" id="setup-cancel" style="display:none" title="Return to the running session without starting a new one">&#8617; back to session</button>
           <button class="btn-secondary" id="setup-history" title="Browse audit logs of past sessions (log/full modes)">past sessions</button>
+          <button class="btn-secondary" id="setup-episodes" title="Lessons the coder has stored from past sessions on this project">lessons</button>
         </div>
       </div>
 
@@ -267,7 +282,7 @@
           <button class="send" id="coder-send" data-icon="send" title="Send"></button>
         </div>
         <div class="composer-row">
-          <span></span>
+          <button class="btn-secondary" id="coder-estimate" title="Plan the task in the composer without running it: one turn, no tools, nothing written">estimate</button>
           <span id="coder-usage"></span>
         </div>
       </div>

@@ -235,6 +235,31 @@ class HTTPBackend(BaseLLMBackend):
         self._ctx_capacity_cached = False
         self._ctx_capacity: Optional[int] = None
 
+    @property
+    def supports_native_tools(self) -> bool:
+        """Can the CONNECTED server actually honour ``native_tools``?
+
+        False for localm's OWN server, and that is a measured fact rather than
+        a guess: ``localm.inference.protocol.ChatRequest`` declares no ``tools``
+        or ``tool_choice`` field, and pydantic's default ``extra`` policy is
+        ``ignore``, so a native-tools body reaches localm and is silently
+        dropped. Nothing errors; the model simply answers with the XML tool-call
+        convention the system prompt already teaches it (``native_tools`` does
+        not change that prompt), so the request is inert rather than broken.
+
+        True for everything else - the OpenAI and Anthropic backends are built
+        with ``native_tools=True`` precisely because those APIs implement it,
+        and a third-party OpenAI-compatible server reached by ``--url`` (Ollama,
+        vLLM, LM Studio) is exactly the case the flag exists for.
+
+        Kept as a capability QUESTION rather than folded into ``native_tools``
+        itself so the requested value and the effective one stay distinguishable:
+        a caller that asked for something it did not get has to be told
+        (AGENTS.md rule 5), which is impossible once the two are the same field.
+        localm's own grammar-constrained tool calls (``supports_grammar``) are
+        the equivalent guarantee on this path."""
+        return not self._is_local_server
+
     def context_capacity(self) -> Optional[int]:
         """The loaded model's RESOLVED context ceiling from the server's
         /v1/config (VRAM-derived under ctx_auto), cached after the first

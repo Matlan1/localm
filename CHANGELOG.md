@@ -45,6 +45,18 @@ permanent public record of what shipped and are never rewritten; the in-progress
   and net_mode=off remains absolute, with no bypass. The voice plugin also
   fetches its speech model right when it is installed (under the same rule),
   so the mic works on first click instead of stalling on a surprise download.
+- **Six coder options that only worked from the terminal now work in the app
+  too.** Under **Coder**: **estimate** (beside the composer) plans the task you
+  have typed without running it, so you can see the approach and what it will
+  cost before committing to it. **Patch mode** (a session toggle) collects every
+  file change as a single diff and writes nothing to disk, downloadable with the
+  new **patch** button. **Export** now offers the last task's result as JSON as
+  well as the readable transcript. **Lessons** lists what the coder has learned
+  from past sessions on a project. The session form gains a **verification
+  command** - a command whose exit code, not the model's own say-so, decides
+  whether a task is done - along with how many fix attempts it gets and a way to
+  turn it off. And a **native tools API** toggle for model servers that support
+  that protocol, which tells you plainly when the server you are on does not.
 - **Images a model links in a reply can now be displayed, without the site that
   hosts them learning anything about you.** Until now a linked image showed as
   broken: localm refuses to let the page load anything from the internet. Other

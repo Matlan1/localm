@@ -88,11 +88,18 @@ Pair with an AI agent on code tasks. Point it at a project directory and give it
 **Session management:**
 - Multiple sessions run side by side; the dropdown switches between them. Reload reattaches to running sessions.
 - **Files** button lists every file changed, with per-file cumulative diffs (original to current).
-- **Undo** reverts the last file write. **Compact** frees context. **Export** downloads the feed as markdown. **Log** shows the JSONL audit trail (with a filter box).
+- **Undo** reverts the last file write. **Compact** frees context. **Export** offers the feed as markdown, or the last finished task's result as JSON (the same payload `localcoder --output-format json` prints). **Log** shows the JSONL audit trail (with a filter box).
+- **Patch** appears for a patch-mode session and downloads the diff it captured. Reading it never consumes it, so you can take it as often as you like.
+- **Estimate** (under the composer) plans the task you have typed without running it: one turn, no tools, nothing written, and the plan does not enter the conversation. Same as `localcoder --estimate`.
 - **History** button lists audit logs from earlier log/full-mode sessions (surviving server restarts) and opens them in the log viewer.
 - **Stop** halts the agent at the next safe point. **End session** terminates it. Sessions survive a page reload and keep showing their outcome.
 
-**Setup:** The setup form accepts a model (switches the engine), max turns, temperature, a scope glob that confines file tools, and the dry-run toggle. Session persistence follows the mode: `privacy` (default, nothing saved), `log` (JSONL audit trail), `full` (audit trail plus markdown transcript).
+**Setup:** The setup form accepts a model (switches the engine), max turns, temperature, a scope glob that confines file tools, custom instructions, and the toggles below. Session persistence follows the mode: `privacy` (default, nothing saved), `log` (JSONL audit trail), `full` (audit trail plus markdown transcript).
+
+- **Verification command** is the exit-code oracle: the harness runs it before a turn that changed files may finish and reads its exit code, so the agent cannot declare a success the check disagrees with. Leave it blank to use the project's detected check, set **verification fix attempts** to bound the retries, or tick **skip verification** to run none. This is the same oracle `localcoder --until` uses for a one-shot task.
+- **Patch mode** captures every file write as a unified diff instead of applying it; nothing is written to disk and the **patch** button downloads the result.
+- **Native tools API** asks the model server for the OpenAI-compatible `tools` protocol. localm's own server does not implement it and says so when you tick this; it uses grammar-constrained tool calls instead, which give the same guarantee.
+- **Lessons** lists the episodic-memory lessons stored for the directory in the form, with the ids `localcoder --forget-episode` / `--restore-episode` take.
 
 **In-session commands:** Type `/` to open the coder command menu: `/undo`, `/files`, `/compact`, `/export`, `/log`, `/stop`, `/end`, `/help`.
 

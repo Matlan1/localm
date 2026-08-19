@@ -129,6 +129,10 @@ export function activateSession(id) {
     $("coder-usage").textContent = s.info.total_tokens
       ? `${s.info.total_tokens} tok · turn ${s.info.turns}` : "";
   }
+  // "patch" only exists for a patch-mode session: in any other session the
+  // writes went to disk, so the button would download an empty file and read
+  // as "the agent changed nothing".
+  $("coder-patch").style.display = s && s.info.patch_mode ? "" : "none";
   renderSessionSelect();
   showCoderUI(!!s);
 }
@@ -448,6 +452,20 @@ export function handleCoderEvent(s, ev) {
       feedAppend(s, el("div", "feed-info", label));
       break;
     }
+    case "estimate": {
+      // A plan that was never executed (the CLI's --estimate). Rendered as an
+      // assistant row because it is multi-paragraph prose, but labelled, so it
+      // cannot be mistaken on replay for a turn that actually ran.
+      flushAssistantBlock(s);
+      feedAppend(s, el("div", "feed-info", `Estimate for: ${ev.task || ""}`));
+      addMessageRow(s.feedEl, "assistant", ev.text || "");
+      if (ev.total_tokens) {
+        feedAppend(s, el("div", "feed-info",
+          `Planning turn used ${ev.total_tokens} tokens ` +
+          `(${ev.prompt_tokens ?? "?"} prompt). Nothing was run or written.`));
+      }
+      break;
+    }
     case "history": {
       // A recap row replayed when a past session is resumed (CODER-2): plain,
       // role-styled text, no streaming.
@@ -545,6 +563,13 @@ export async function startCoderSession(opts = {}) {
       cwd,
       auto_approve: $("setup-auto").checked,
       dry_run: $("setup-dry").checked,
+      // Writes become a unified diff instead of landing on disk (the CLI's
+      // --patch-mode); download it from the "patch" button in the session bar.
+      patch_mode: $("setup-patch").checked,
+      // The CLI's --native-tools. The server reports back whether it could
+      // actually be honoured - see info.notes below - rather than us guessing
+      // here, so this stays a plain request.
+      native_tools: $("setup-native-tools").checked,
       mode: $("setup-mode").value,
       resume,
     };
@@ -561,6 +586,15 @@ export async function startCoderSession(opts = {}) {
     if (scope) body.scope = scope;
     const system = $("setup-system").value.trim();
     if (system) body.custom_instructions = system;
+    // The exit-code oracle (the CLI's --until / --verify / --no-verify). Blank
+    // + auto_verify = the project's detected check; "skip verification" is the
+    // --no-verify half, and it wins over a typed command the same way the CLI's
+    // flag does.
+    const verify = $("setup-verify").value.trim();
+    if ($("setup-no-verify").checked) body.auto_verify = false;
+    else if (verify) body.verify = verify;
+    const verifyRetries = $("setup-verify-retries").value.trim();
+    if (verifyRetries !== "") body.verify_max_retries = Number(verifyRetries);
 
     const r = await fetch("/api/coder/sessions", {
       method: "POST",
@@ -574,6 +608,10 @@ export async function startCoderSession(opts = {}) {
     // has no history to replay (CODER-2).
     registerSession(info, { replay: !!info.resumed });
     activateSession(info.id);
+    // An option the server could not honour is SAID, not silently swallowed -
+    // otherwise a ticked box and an ignored one look identical (AGENTS.md
+    // rule 5). The server decides; this only relays.
+    for (const note of info.notes || []) toast(note, true);
     if (info.resumed) toast("Resumed your last session in this folder");
     else if (resume) toast("No saved session to resume - started fresh");
     refreshModels();
@@ -971,6 +1009,9 @@ export function exportCoderSession() {
         (ev.summary ? `: ${ev.summary}` : ""));
     } else if (ev.type === "info") {
       lines.push(`> ${ev.text}`, "");
+    } else if (ev.type === "estimate") {
+      lines.push("", `**Estimate (not run)** for: ${ev.task || ""}`, "",
+        ev.text || "", "");
     } else if (ev.type === "final") {
       lines.push("", `**Agent**: ${ev.text}`, "");
     }
@@ -983,8 +1024,140 @@ export function exportCoderSession() {
   URL.revokeObjectURL(a.href);
 }
 
+/** The last finished task as JSON: the web form of the CLI's
+ *  `--output-format json`. Fetched from the server rather than rebuilt from the
+ *  client's event log, so a tab that joined late (or reconnected mid-task, and
+ *  therefore never saw the final event) still gets the real result instead of
+ *  an empty object that looks like a task which produced nothing. */
+export async function exportCoderResultJson() {
+  const s = activeSession();
+  if (!s) { toast("No active session", true); return; }
+  try {
+    const r = await fetch(`/api/coder/sessions/${s.info.id}/result`,
+                          { headers: authHeaders() });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || r.statusText);
+    const blob = new Blob([JSON.stringify(data, null, 2)],
+                          { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `coder-result-${s.info.id}.json`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  } catch (e) {
+    toast("No result to export: " + e.message, true);
+  }
+}
+
+/** Download the patch a patch-mode session captured instead of writing - the
+ *  web form of `--patch-mode FILE`, where the file lands on THIS device because
+ *  that is the only disk a browser can write to. Reading it server-side does not
+ *  consume it, so this can be pressed as often as you like. */
+export async function downloadCoderPatch() {
+  const s = activeSession();
+  if (!s) { toast("No active session", true); return; }
+  try {
+    const r = await fetch(`/api/coder/sessions/${s.info.id}/patch/download`,
+                          { headers: authHeaders() });
+    if (!r.ok) {
+      const e = await r.json().catch(() => ({}));
+      throw new Error(e.detail || r.statusText);
+    }
+    const blob = await r.blob();
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `coder-session-${s.info.id}.patch`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(a.href);
+  } catch (e) {
+    toast("Patch download failed: " + e.message, true);
+  }
+}
+
+/** The episodic-memory lessons stored for the project in the setup form - the
+ *  web form of `localcoder --episodes`. Read-only: forgetting and restoring a
+ *  lesson stay CLI flags with their own destructive semantics. The id is shown
+ *  because it is what `--forget-episode` / `--restore-episode` address. */
+export async function openEpisodesModal() {
+  const cwd = ($("setup-cwd")?.value || "").trim();
+  if (!cwd) { toast("Enter a project directory first", true); return; }
+  try {
+    const r = await fetch("/api/coder/episodes?cwd=" + encodeURIComponent(cwd),
+                          { headers: authHeaders() });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || r.statusText);
+    openModal("Stored lessons", (body) => {
+      const rows = data.episodes || [];
+      if (!rows.length) {
+        body.appendChild(emptyState(
+          "No lessons stored for this project yet. The coder writes one when a "
+          + "session that changed files finishes, outside privacy mode."));
+        return;
+      }
+      body.appendChild(el("p", "sub",
+        `${rows.length} lesson(s) for ${data.cwd}. Forget or restore one with `
+        + "localcoder --forget-episode / --restore-episode <id>."));
+      for (const ep of rows) {
+        const card = el("div", "card");
+        card.appendChild(el("div", "row",
+          `${ep.lesson || ep.summary || ep.task || "(no lesson text)"}`));
+        card.appendChild(el("div", "sub",
+          `${ep.id} · ${ep.outcome} · ${ep.turns} turn(s)`
+          + (ep.merged ? ` · merged ${ep.merged}` : "")));
+        body.appendChild(card);
+      }
+    });
+  } catch (e) {
+    toast("Could not read lessons: " + e.message, true);
+  }
+}
+
+/** Plan the composer's task without running it (the CLI's `--estimate`): one
+ *  turn, no tools, nothing written. The plan arrives on the event stream, so
+ *  every open tab sees it; this only has to fire the request. */
+export async function estimateCoderTask() {
+  const s = activeSession();
+  if (!s) { toast("No active session", true); return; }
+  const text = $("coder-input").value.trim();
+  if (!text) { toast("Describe a task to estimate", true); return; }
+  const btn = $("coder-estimate");
+  btn.disabled = true;
+  try {
+    const r = await fetch(`/api/coder/sessions/${s.info.id}/estimate`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({ text }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || r.statusText);
+    // The task stays in the composer: an estimate is a pre-flight, and the
+    // usual next action is to send the very same text for real.
+  } catch (e) {
+    toast("Estimate failed: " + e.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 $("coder-files").onclick = openFilesModal;
-$("coder-export").onclick = exportCoderSession;
+$("coder-patch").onclick = downloadCoderPatch;
+$("coder-estimate").onclick = estimateCoderTask;
+$("setup-episodes").onclick = openEpisodesModal;
+$("coder-export").onclick = () => openModal("Export session", (body) => {
+  body.appendChild(el("p", "sub",
+    "Markdown is the readable transcript; JSON is the last finished task's "
+    + "result, the same payload localcoder --output-format json prints."));
+  const row = el("div", "actions");
+  const md = el("button", "btn-secondary", "markdown transcript");
+  md.onclick = () => { $("modal").style.display = "none"; exportCoderSession(); };
+  const js = el("button", "btn-secondary", "result JSON");
+  js.onclick = () => { $("modal").style.display = "none"; exportCoderResultJson(); };
+  row.appendChild(md);
+  row.appendChild(js);
+  body.appendChild(row);
+});
 
 $("coder-log").onclick = async () => {
   const s = activeSession();

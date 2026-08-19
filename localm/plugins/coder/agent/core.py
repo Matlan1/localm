@@ -79,6 +79,7 @@ class Agent(
         auto_approve: bool = True,
         always_confirm: Optional[set] = None,
         dry_run: bool = False,
+        patch_mode: bool = False,
         parent: Optional["Agent"] = None,
         mode: SessionMode = SessionMode.PRIVACY,
         scope: Optional[str] = None,
@@ -116,7 +117,11 @@ class Agent(
         # by _loop. spawn_agent reads it to route a child's confirmations to the
         # parent's REAL channel instead of hard-denying them (REG-507).
         self._interactive   = False
-        self.patch_mode     = False        # set via Agent.enable_patch_mode()
+        # Capture writes as a unified diff instead of touching disk. Settable
+        # here (the GUI session, which builds the Agent in one call) or assigned
+        # afterwards (the CLI, whose --patch-mode carries a FILE path and so
+        # checks truthiness of its own option, not this flag).
+        self.patch_mode     = patch_mode
         self._patch_chunks: list[str] = [] # accumulated diffs when patch_mode=True
         self.parent         = parent
         self.mode           = mode

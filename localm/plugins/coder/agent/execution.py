@@ -748,13 +748,36 @@ class _ExecutionMixin:
         old_text = read_old_content(self.cwd, path_arg)
         return compute_tool_diff(call.name, call.args, old_text)
 
+    def current_patch(self) -> str:
+        """The accumulated unified diff so far, WITHOUT clearing the buffer.
+
+        Split out of :meth:`flush_patch` for readers that only want to LOOK:
+        a GUI "show me the patch" request, a status poll, a preview. Reaching
+        for ``flush_patch`` there would destroy the very thing it was asked to
+        display, and the destruction is invisible at the call site because the
+        RESULT looks identical the first time.
+        """
+        return "\n".join(c for c in self._patch_chunks if c)
+
+    def has_patch(self) -> bool:
+        """Is there anything in the patch buffer? Cheap, and exactly equivalent
+        to ``bool(self.current_patch())``.
+
+        Separate from ``current_patch`` because ``CoderSession.info()`` needs
+        only the boolean and is called once PER SESSION by the session-list
+        route: joining every session's whole diff to throw the string away
+        would put an O(patch size) allocation on whatever timer that endpoint
+        ends up being polled on.
+        """
+        return any(c for c in self._patch_chunks)
+
     def flush_patch(self, output_path: Optional[Path] = None) -> str:
         """
         Return the accumulated unified diff (and optionally write it to a file).
 
         Clears the internal patch buffer.
         """
-        content = "\n".join(c for c in self._patch_chunks if c)
+        content = self.current_patch()
         self._patch_chunks.clear()
         if output_path is not None:
             output_path.parent.mkdir(parents=True, exist_ok=True)
