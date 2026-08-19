@@ -6,17 +6,29 @@ Routes (mounted by the engine, auto-scoped to the ``coder`` capability):
   POST   /api/coder/sessions                    - start a session (optional model switch)
   GET    /api/coder/sessions/{id}/events        - SSE event stream (?replay=true)
   POST   /api/coder/sessions/{id}/message       - send a task / steering message
+  POST   /api/coder/sessions/{id}/estimate      - plan a task without running it
   POST   /api/coder/sessions/{id}/confirm       - answer a pending confirmation
   POST   /api/coder/sessions/{id}/undo          - revert the last file write
   POST   /api/coder/sessions/{id}/compact       - summarise old history
   POST   /api/coder/sessions/{id}/model         - repoint this session's model
   GET    /api/coder/sessions/{id}/log           - parsed JSONL audit log (log/full)
+  GET    /api/coder/sessions/{id}/result        - last finished task, as JSON
   GET    /api/coder/sessions/{id}/files         - files changed this session
   GET    /api/coder/sessions/{id}/files/diff    - cumulative session diff
+  GET    /api/coder/sessions/{id}/patch         - patch-mode diff (non-consuming)
+  GET    /api/coder/sessions/{id}/patch/download- the same diff as a .patch file
   POST   /api/coder/sessions/{id}/stop          - interrupt the current task
   DELETE /api/coder/sessions/{id}               - terminate the session
   GET    /api/coder/history                     - browse past session audit logs
   GET    /api/coder/history/{name}              - read one past audit log
+  GET    /api/coder/episodes                    - stored lessons for a project
+
+Six options that were CLI-only until now have a web form here, per the standing
+CLI/GUI parity rule: --estimate (the estimate route), --patch-mode (the
+patch_mode field + the two patch routes), --native-tools (the native_tools
+field, with the effective value reported back), --output-format json (the result
+route), --episodes (the episodes route), and --until (unified onto the existing
+verify/auto_verify oracle, whose retry cap verify_max_retries now exposes).
 
 The agentic coder runs shell commands and writes files, so the engine gates every
 route above on the ``coder`` capability scope. Live sessions need the kernel GUI's
@@ -35,12 +47,12 @@ import queue
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import FileResponse, StreamingResponse
-from pydantic import BaseModel
+from fastapi.responses import FileResponse, Response, StreamingResponse
+from pydantic import BaseModel, Field
 
 from localm.pathsafe import confined_file as _confined_file
 from localm.pathsafe import is_unc_or_device_path as _is_unc_or_device_path
-from localm.plugins.coder.sessions import CoderSession
+from localm.plugins.coder.sessions import CoderSession, SessionUnavailable
 from localm.executor import get_plugin_executor
 
 _router = APIRouter()
@@ -70,9 +82,28 @@ class CreateSessionRequest(BaseModel):
     # Ignored for a restricted (scoped-key) session, which has no execution.
     verify: str | None = None
     auto_verify: bool = True
+    # How many fix attempts that oracle gets before it reports failure - the web
+    # equivalent of the CLI's --goal-max-iters, and bounded the same way (1-50)
+    # so a request cannot pin the shared engine on an unbounded retry loop. None
+    # keeps the Agent's own default.
+    verify_max_retries: int | None = Field(None, ge=1, le=50)
+    # Capture every file write as a unified diff and touch nothing on disk (the
+    # CLI's --patch-mode). The accumulated patch is read back from
+    # GET .../patch and saved with .../patch/download - a browser has no output
+    # FILE for the CLI's argument to name.
+    patch_mode: bool = False
+    # Ask for the OpenAI-compatible native tools protocol (the CLI's
+    # --native-tools). Wired straight to the backend; whether the connected
+    # server can honour it is reported back rather than assumed - see
+    # create_session.
+    native_tools: bool = False
 
 
 class MessageRequest(BaseModel):
+    text: str
+
+
+class EstimateRequest(BaseModel):
     text: str
 
 
@@ -227,13 +258,36 @@ async def create_session(req: CreateSessionRequest, request: Request):
         model=active_model(),
         api_key=os.environ.get("LOCALM_API_KEY") or "localm",
         localm_server=True,   # self-connection: grammar sampling available
+        native_tools=req.native_tools,
     )
+    # The request is wired to the backend for real; whether the SERVER honours
+    # it is a separate question and the caller is told the answer rather than
+    # left to assume. A localm self-connection does NOT implement the OpenAI
+    # tools API (its ChatRequest declares no tools/tool_choice, so the fields
+    # are dropped), and the session runs on localm's own grammar-constrained
+    # tool-call convention instead - which is the equivalent guarantee, not a
+    # downgrade. Nothing errors either way; saying nothing is what would make an
+    # ignored option indistinguishable from an applied one (AGENTS.md rule 5).
+    notes: list[str] = []
+    if req.native_tools and not backend.supports_native_tools:
+        notes.append(
+            "native_tools was not applied: this server does not implement the "
+            "OpenAI tools API. The session uses localm's own tool-call "
+            "convention (grammar-constrained where the loaded model supports "
+            "it).")
 
     gen_kwargs = {}
     if req.temperature is not None:
         gen_kwargs["temperature"] = req.temperature
     if req.max_tokens is not None:
         gen_kwargs["max_tokens"] = req.max_tokens
+
+    # Omitted -> the Agent's own default stays the single source of truth,
+    # matching how temperature/max_tokens above are handled rather than
+    # duplicating the number here.
+    verify_kwargs = {}
+    if req.verify_max_retries is not None:
+        verify_kwargs["verify_max_retries"] = req.verify_max_retries
 
     from localm.audit import effective_mode
     # Pass the session's project dir so a per-project .localcoder/config.toml mode
@@ -250,10 +304,12 @@ async def create_session(req: CreateSessionRequest, request: Request):
         mode=session_mode,
         scope=req.scope,
         dry_run=req.dry_run,
+        patch_mode=req.patch_mode,
         restricted=restricted,
         custom_instructions=req.custom_instructions,
         verify=req.verify,
         auto_verify=req.auto_verify,
+        **verify_kwargs,
         **gen_kwargs,
     ))
     session.principal = principal      # who owns this session (None = the owner)
@@ -265,7 +321,7 @@ async def create_session(req: CreateSessionRequest, request: Request):
     if req.resume and not restricted:
         resumed = await loop.run_in_executor(
             get_plugin_executor(), session.resume_from_checkpoint)
-    return {**session.info(), "resumed": resumed}
+    return {**session.info(), "resumed": resumed, "notes": notes}
 
 
 @_router.get("/api/coder/sessions/{session_id}/events")
@@ -353,6 +409,104 @@ async def session_message(session_id: str, req: MessageRequest, request: Request
     # "started" begins a task; "queued" steers the running one - the text
     # is injected into the conversation at the next turn boundary.
     return {"status": status}
+
+
+@_router.post("/api/coder/sessions/{session_id}/estimate")
+async def session_estimate(session_id: str, req: EstimateRequest, request: Request):
+    """Plan a task without running it: the web form of the CLI's --estimate.
+
+    One planning turn, zero tool calls, and NOTHING added to the conversation
+    (see ``coder.estimate.estimate_task`` for why that matters more here than in
+    the CLI, which exits immediately afterwards). Refused while the session is
+    busy: an estimate is a pre-flight on work you have not started, and running
+    one against the shared engine mid-task would both queue behind the running
+    turn and read as if it described it.
+
+    The busy/closed decision is the SESSION's, taken under its own lock in
+    ``run_estimate``, not a check made here - reading ``session.busy`` from the
+    route and acting on it afterwards is check-then-act with a real window, and
+    this route is a SECOND trigger for a backend that until now had exactly one.
+
+    The plan is pushed into the session feed as well as returned, so every open
+    tab sees it - the same contract every other session event has."""
+    session = _get_session(request, session_id)
+    if not req.text.strip():
+        raise HTTPException(400, "Empty task")
+    loop = asyncio.get_running_loop()
+    try:
+        result = await loop.run_in_executor(
+            get_plugin_executor(), session.run_estimate, req.text)
+    except SessionUnavailable as e:
+        # The session refused the claim. A DEDICATED type, never a broad
+        # RuntimeError: a model that raises RuntimeError would otherwise be
+        # reported as a busy session - a fault hidden behind a status that
+        # invites a retry. Measured while writing this route's tests.
+        raise HTTPException(
+            409, "Session is closed" if e.reason == "closed"
+            else "Session is busy - estimate before starting a task")
+    except Exception as e:                                     # noqa: BLE001
+        raise HTTPException(502, f"Estimate failed: {type(e).__name__}: {e}")
+    return result
+
+
+@_router.get("/api/coder/sessions/{session_id}/result")
+async def session_result(session_id: str, request: Request):
+    """The last finished task's machine-readable result.
+
+    The web equivalent of the CLI's ``--output-format json``: the same
+    ``{ok, response, turns, total_tokens}`` payload (plus this surface's
+    ``verify_state`` and ``changed_files``), readable by a client that is not
+    holding the SSE stream open. 404 while no task has finished yet - an empty
+    body would be indistinguishable from a task that produced nothing."""
+    session = _get_session(request, session_id)
+    if session.last_result is None:
+        raise HTTPException(404, "No finished task in this session yet")
+    return session.last_result
+
+
+@_router.get("/api/coder/sessions/{session_id}/patch")
+async def session_patch(session_id: str, request: Request):
+    """The unified diff a patch-mode session has captured instead of writing.
+
+    Reading NEVER consumes it (``session.current_patch()``, not
+    ``agent.flush_patch()``): a reloaded tab, a retry or a second reader must
+    see the same patch, and a drain-on-read would look identical the first time
+    and be empty ever after. 409 when the session is not in patch mode, because
+    an empty diff there means "everything was written to disk", which is the
+    opposite of what this endpoint reports."""
+    session = _get_session(request, session_id)
+    if not session.patch_mode:
+        raise HTTPException(
+            409, "This session is not in patch mode - its writes went to disk. "
+                 "Start a session with patch_mode=true to capture them instead.")
+    loop = asyncio.get_running_loop()
+    patch = await loop.run_in_executor(get_plugin_executor(), session.current_patch)
+    return {"patch": patch, "empty": not patch}
+
+
+@_router.get("/api/coder/sessions/{session_id}/patch/download")
+async def session_patch_download(session_id: str, request: Request):
+    """The same patch as a .patch attachment - the web form of the CLI's
+    ``--patch-mode FILE``, where the file lands on the CLIENT's disk because
+    that is the only disk a browser can write to.
+
+    Streamed from memory, never through a server-side temp file: the whole point
+    of patch mode is that this content did not touch a disk."""
+    session = _get_session(request, session_id)
+    if not session.patch_mode:
+        raise HTTPException(
+            409, "This session is not in patch mode - its writes went to disk.")
+    loop = asyncio.get_running_loop()
+    patch = await loop.run_in_executor(get_plugin_executor(), session.current_patch)
+    if not patch:
+        raise HTTPException(404, "Nothing captured yet - the agent has not written "
+                                 "anything in this session")
+    return Response(
+        content=patch,
+        media_type="text/x-patch",
+        headers={"Content-Disposition":
+                 f'attachment; filename="coder-session-{session.id}.patch"'},
+    )
 
 
 @_router.post("/api/coder/sessions/{session_id}/confirm")
@@ -609,6 +763,65 @@ async def coder_resumable(request: Request, cwd: str = ""):
     if not info:
         return {"resumable": False}
     return {"resumable": True, "cwd": str(p.resolve()), **info}
+
+
+@_router.get("/api/coder/episodes")
+async def coder_episodes(request: Request, cwd: str = ""):
+    """The episodic-memory lessons stored for *cwd*: the CLI's ``--episodes``.
+
+    OWNER-ONLY, for the same reason ``/api/coder/resumable`` is: these are the
+    owner's own past sessions on their own projects, and a restricted (scoped-
+    key) session is excluded from episodic memory entirely - it neither recalls
+    a lesson nor writes one - so there is nothing here that belongs to a shared
+    key. A non-owner gets an empty list rather than a 403, matching resumable:
+    the answer carries no information either way.
+
+    Read-only. Forgetting, restoring and consolidating a lesson are separate CLI
+    flags with their own destructive semantics and are not exposed here.
+
+    Lessons live under the localm data dir, never inside the project, so the
+    ``cwd`` here is only the KEY they are filed under; nothing in the project
+    tree is read."""
+    is_owner, _ = _principal_from_request(request)
+    if not is_owner:
+        return {"episodes": [], "cwd": None}
+    if not cwd.strip():
+        raise HTTPException(400, "cwd is required")
+    try:
+        p = Path(cwd).expanduser()
+    except (OSError, ValueError, RuntimeError):
+        raise HTTPException(400, "Invalid cwd")
+    # Same unconditional UNC/device refusal, on the EXPANDED string, as
+    # create_session and coder_resumable - see those for the full reasoning. A
+    # GET carries no CSRF check, and the store keys on this path.
+    if _is_unc_or_device_path(str(p)):
+        raise HTTPException(
+            400, "'cwd' must be a local directory path, not a UNC or device path.")
+    if not p.is_dir():
+        raise HTTPException(400, f"Not a directory: {cwd}")
+    root = p.resolve()
+
+    def _read():
+        from localm.plugins.coder.episodes import EpisodeStore
+        store = EpisodeStore(root)
+        return [
+            {"id": e.id, "outcome": e.outcome, "lesson": e.lesson,
+             "summary": e.summary, "task": e.task, "turns": e.turns,
+             "ts": e.ts, "merged": e.merged, "files": list(e.files)}
+            for e in store.all()
+        ]
+
+    loop = asyncio.get_running_loop()
+    try:
+        episodes = await loop.run_in_executor(get_plugin_executor(), _read)
+    except Exception as e:                                     # noqa: BLE001
+        # An unreadable store is NOT an empty one, and reporting it as empty
+        # would be the exact "clean negative for a step that failed" the CLI's
+        # own archive path refuses to do (see cli/_main.py's --episodes-archive).
+        raise HTTPException(
+            500, f"Could not read the episode store for {root}: "
+                 f"{type(e).__name__}: {e}")
+    return {"episodes": episodes, "cwd": str(root)}
 
 
 def register(host) -> None:

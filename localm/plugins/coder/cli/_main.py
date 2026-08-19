@@ -327,6 +327,23 @@ def main(
         provider, url, model, api_key, native_tools, port, no_server,
         force_new, work_dir, ci)
 
+    # --native-tools asked for a protocol the chosen server does not implement.
+    # Say so instead of letting it look applied: localm's own /v1/chat/completions
+    # declares no `tools`/`tool_choice` fields, so the request body carrying them
+    # is accepted and the fields are dropped, and the run proceeds on the XML
+    # tool-call convention exactly as if the flag had never been passed. Nothing
+    # breaks, which is precisely why the silence was the problem - the user has
+    # no way to tell an honoured flag from an ignored one. Not an error: the
+    # session is fine, and localm's grammar-constrained tool calls are the
+    # equivalent guarantee on this path (AGENTS.md rule 5).
+    if native_tools and not getattr(backend, "supports_native_tools", True):
+        print_warning(
+            "--native-tools was ignored: this server does not implement the "
+            "OpenAI tools API. The session uses localm's own tool-call "
+            "convention (grammar-constrained where the loaded model supports "
+            "it). Use --native-tools with --url against a server that does, "
+            "e.g. Ollama.")
+
     # Opt-in episodic consolidation needs a model, so unlike the other episode
     # flags it runs after the backend is up. Still a one-shot: consolidate, report,
     # exit - it never piggybacks on a normal session.

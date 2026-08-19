@@ -500,7 +500,8 @@ mid-session; turn it off with `--no-verify` or `/verify off`. When the check kee
 failing, the agent is told (and told not to edit the check to force a pass); when the
 attempts run out, the turn is reported as NOT verified rather than as done. Sessions
 opened with a shared, scoped key never run a verify command - those sessions have no
-process execution at all.
+process execution at all. In the GUI the same three controls sit in the coder setup
+form: a verification command, a fix-attempt cap, and a skip-verification toggle.
 
 **Reproducible runs.** `--seed N` pins the sampler's RNG, so the same seed with the same
 model, prompt and settings reproduces the same output. Measured bit-for-bit on one AMD
@@ -521,6 +522,13 @@ localm coder --forget-episodes             # erase ALL episodic memory for this 
 localm coder --restore-episode ID          # bring an archived lesson back into recall and exit
 localm coder --consolidate-episodes        # ask the model to merge related lessons (opt-in, manual only)
 ```
+
+The GUI shows the same list under **lessons** in the coder setup panel, ids included, so
+you can read them without a terminal; forgetting, restoring and consolidating stay CLI
+flags. The GUI also carries web forms of `--estimate` (the **estimate** button under the
+composer), `--patch-mode` (a setup toggle plus a **patch** download), `--native-tools` (a
+setup toggle, which reports back when the server cannot honour it) and
+`--output-format json` (the **export** dialog's result-JSON option).
 
 Give the agent standing guidance (conventions, style, constraints) with a `.localcoder/system.md` file in the repo - it is injected into the system prompt under "## User Instructions" for every session in that project. The `--system TEXT` flag overrides the file for a single run. This is separate from `LOCALCODER.md`, the project-memory file, which holds facts **you** add with `/remember` and drop with `/forget`; the agent does not write it itself (its own close-time reflection is stored in the localm data dir, not in your repo).
 
