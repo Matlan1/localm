@@ -100,6 +100,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   labeled parts, instead of three separate panels.
 
 ### Fixed
+- **A model pull can no longer be reported as failed after it actually
+  succeeded.** Once a download finishes, localm prints a green checkmark to
+  confirm the checksum was verified - and on some machines that confirmation
+  itself could crash. The download, checksum check and registration had
+  already completed by then, but the crash still made the whole pull come
+  back as failed (and, from the GUI, file a bug report) even though the model
+  was fully downloaded and ready to use. That confirmation can no longer turn
+  a completed, verified download into a false failure.
 - **Reading replies aloud now works with no internet connection.** The
   neural voice needed a piece of its engine downloaded from a public CDN
   every time it started, so on a machine that was offline, air-gapped, or
