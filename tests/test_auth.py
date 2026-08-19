@@ -733,3 +733,52 @@ def test_resolve_bearer_headers_matches_resolve_bearer_token(auth):
     assert auth.resolve_bearer_headers("inst-token-abc") == {
         "Authorization": "Bearer inst-token-abc"}
     assert auth.resolve_bearer_headers(None) == {}
+
+
+# --------------------------------------------------------------------------- #
+#  Per-key rag_roots (S4): the exact same shape as fs_access above - a per-key #
+#  field that defaults to "no restriction" so every key minted before it       #
+#  existed is unaffected, and that only the owner/ADMIN key is exempt from     #
+#  regardless of what is stored on it (see effective_rag_roots in              #
+#  inference/http_server.py and TestRagAddRouteKeyScopedRoots in               #
+#  test_rag_confinement.py for the confinement-enforcement side).              #
+# --------------------------------------------------------------------------- #
+
+def test_norm_rag_roots_coerces_and_dedupes(auth):
+    assert auth.norm_rag_roots(None) == []
+    assert auth.norm_rag_roots([]) == []
+    assert auth.norm_rag_roots("not-a-list") == []       # a bare str is not a list
+    assert auth.norm_rag_roots([123, None, "", "   "]) == []   # junk entries dropped
+    assert auth.norm_rag_roots(["D:/docs", "D:/docs", " D:/other "]) == \
+        ["D:/docs", "D:/other"]              # de-duped, stripped, order preserved
+
+
+def test_create_key_rag_roots_defaults_to_empty_and_round_trips(auth):
+    from localm import scopes as S
+    unrestricted = auth.create_key("n", [S.CHAT])
+    scoped = auth.create_key("s", [S.CHAT], rag_roots=["D:/shared/docs", "D:/other"])
+    assert unrestricted["rag_roots"] == []               # safe default: no restriction
+    assert scoped["rag_roots"] == ["D:/shared/docs", "D:/other"]
+    by_name = {k["name"]: k for k in auth.list_keys()}
+    assert by_name["n"]["rag_roots"] == []
+    assert by_name["s"]["rag_roots"] == ["D:/shared/docs", "D:/other"]
+
+
+def test_rag_roots_for_unknown_or_missing_token_is_default(auth):
+    assert auth.rag_roots_for("") == []
+    assert auth.rag_roots_for(None) == []
+    assert auth.rag_roots_for("not-a-real-key") == []
+    assert auth.rag_roots_for("not-a-real-key", default=["fallback"]) == ["fallback"]
+
+
+def test_rag_roots_for_reads_the_stored_list(auth):
+    made = auth.create_key("s", ["chat"], rag_roots=["D:/shared"])
+    assert auth.rag_roots_for(made["key"]) == ["D:/shared"]
+    plain = auth.create_key("p", ["chat"])
+    assert auth.rag_roots_for(plain["key"]) == []        # legacy/unset -> unrestricted
+
+
+def test_rag_roots_for_revoked_key_falls_back_to_default(auth):
+    made = auth.create_key("s", ["chat"], rag_roots=["D:/shared"])
+    auth.revoke_key(made["id"])
+    assert auth.rag_roots_for(made["key"]) == []          # gone -> the safe default

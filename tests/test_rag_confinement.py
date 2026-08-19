@@ -377,6 +377,127 @@ class TestIndexingPolicy:
 
 
 # --------------------------------------------------------------------------- #
+#  Per-key rag_roots (S4): indexing_policy(key_roots=...) and                 #
+#  confine_index_path()'s key_scoped branch. A key-scoped policy REPLACES the #
+#  whitelist set entirely - home/cwd/the global rag_allowed_roots are NOT     #
+#  implied on top of it, unlike the default (global) policy above, which      #
+#  always allows them. The hard floor (credential dirs, secret files,         #
+#  UNC/device paths) still applies underneath either policy shape unchanged.  #
+# --------------------------------------------------------------------------- #
+
+class TestIndexingPolicyKeyScoped:
+    def test_no_key_roots_is_unaffected(self, home_env):
+        # None and [] must both fall through to the ordinary global policy -
+        # existing behavior for every key minted before this field existed.
+        assert indexing_policy(key_roots=None).get("key_scoped") is not True
+        assert indexing_policy(key_roots=[]).get("key_scoped") is not True
+
+    def test_key_roots_forces_a_scoped_whitelist(self, home_env, tmp_path):
+        a = tmp_path / "a"
+        a.mkdir()
+        pol = indexing_policy(key_roots=[str(a)])
+        assert pol["mode"] == "whitelist"
+        assert pol["key_scoped"] is True
+        assert pol["allowed"] == [a.resolve()]
+        assert pol["denied"] == []
+
+    def test_key_roots_ignores_config_entirely(self, home_env, tmp_path, monkeypatch):
+        # Even if the global config sets blacklist mode + its own allow/deny
+        # lists, a non-empty key_roots overrides all of it - the point of a
+        # per-key allowlist is that it does not inherit the global policy.
+        a = tmp_path / "a"
+        cfg_allowed = tmp_path / "cfg_allowed"
+        a.mkdir()
+        cfg_allowed.mkdir()
+        import localm.config as cfg
+        monkeypatch.setattr(cfg, "load_config", lambda: {
+            "rag_indexing_mode": "blacklist",
+            "rag_allowed_roots": [str(cfg_allowed)],
+            "rag_denied_roots": []})
+        pol = indexing_policy(key_roots=[str(a)])
+        assert pol["mode"] == "whitelist"
+        assert pol["allowed"] == [a.resolve()]
+        assert cfg_allowed.resolve() not in pol["allowed"]
+
+    def test_unresolvable_key_root_is_dropped_not_crashed(self, home_env):
+        # Same fail-closed shape as the global _resolve() helper: an entry that
+        # cannot be resolved is dropped, not raised - the safe direction, since
+        # dropping an ALLOWED root only narrows what a key can reach.
+        pol = indexing_policy(key_roots=["\x00bad\x00path"])
+        assert pol["allowed"] == []
+
+
+class TestConfineIndexPathKeyScoped:
+    def _ks(self, *allowed):
+        """A key-scoped whitelist policy allowing ONLY *allowed* - no implicit
+        home/cwd, unlike _wl() above."""
+        return {"mode": "whitelist", "key_scoped": True,
+                "allowed": [Path(a) for a in allowed], "denied": []}
+
+    def test_path_inside_granted_root_ok(self, home_env, tmp_path):
+        granted = tmp_path / "granted"
+        granted.mkdir()
+        f = granted / "a.txt"
+        f.write_text("hi", encoding="utf-8")
+        assert confine_index_path(f, self._ks(granted)) == f.resolve()
+
+    def test_home_not_implicitly_allowed(self, home_env):
+        # The defining difference from the global whitelist: home is NOT
+        # granted just because it always is for the default policy.
+        home, _ = home_env
+        f = home / "docs" / "a.txt"
+        f.write_text("hi", encoding="utf-8")
+        other_root = home.parent / "elsewhere"
+        other_root.mkdir()
+        with pytest.raises(ConfinementError) as ei:
+            confine_index_path(f, self._ks(other_root))
+        assert ei.value.reason == "outside_allowed"
+
+    def test_cwd_not_implicitly_allowed(self, home_env, tmp_path, monkeypatch):
+        cwd = tmp_path / "workdir"
+        cwd.mkdir()
+        f = cwd / "a.txt"
+        f.write_text("hi", encoding="utf-8")
+        monkeypatch.chdir(cwd)
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        with pytest.raises(ConfinementError) as ei:
+            confine_index_path(f, self._ks(elsewhere))
+        assert ei.value.reason == "outside_allowed"
+
+    def test_outside_granted_root_rejected(self, home_env, tmp_path):
+        granted = tmp_path / "granted"
+        granted.mkdir()
+        outside = tmp_path / "elsewhere" / "x.txt"
+        outside.parent.mkdir(parents=True)
+        outside.write_text("secret", encoding="utf-8")
+        with pytest.raises(ConfinementError) as ei:
+            confine_index_path(outside, self._ks(granted))
+        assert ei.value.reason == "outside_allowed"
+
+    def test_hard_floor_still_applies_inside_granted_root(self, home_env, tmp_path):
+        # A credential folder is refused even INSIDE a key's own granted root -
+        # the hard floor is mode-independent and policy-independent.
+        granted = tmp_path / "granted"
+        ssh = granted / ".ssh"
+        ssh.mkdir(parents=True)
+        key = ssh / "id_rsa"
+        key.write_text("PRIVATE KEY", encoding="utf-8")
+        with pytest.raises(ConfinementError) as ei:
+            confine_index_path(key, self._ks(granted))
+        assert ei.value.reason == "credential"
+
+    def test_secret_file_still_refused_inside_granted_root(self, home_env, tmp_path):
+        granted = tmp_path / "granted"
+        granted.mkdir()
+        pem = granted / "deploy.pem"
+        pem.write_text(_PEM, encoding="utf-8")
+        with pytest.raises(ConfinementError) as ei:
+            confine_index_path(pem, self._ks(granted))
+        assert ei.value.reason == "secret_file"
+
+
+# --------------------------------------------------------------------------- #
 #  add_paths(policy=...) (unit)                                               #
 # --------------------------------------------------------------------------- #
 
@@ -605,6 +726,127 @@ class TestRagAddRoute:
             r2 = client.post("/api/rag/collections/kb/add",
                              json={"paths": [str(denied / "s.txt")], "embed": False})
             assert r2.status_code == 400, r2.text
+
+
+# --------------------------------------------------------------------------- #
+#  Per-key rag_roots at the HTTP route (S4): a key minted with an explicit    #
+#  rag_roots allowlist (auth.create_key(rag_roots=[...])) is confined to      #
+#  exactly those folders through the real /add route - home is NOT           #
+#  implicitly reachable for it, unlike an ordinary scoped key with no         #
+#  rag_roots set, which keeps today's home+cwd+global-allowed reach           #
+#  unchanged (test_non_owner_gets_403_not_409_on_whitelist_miss above already #
+#  proves that regression case for the unset-field default).                 #
+# --------------------------------------------------------------------------- #
+
+def _scoped_rag_app(tmp_path, monkeypatch, *, rag_roots=None):
+    """An owner-configured app (like test_non_owner_gets_403_not_409_on_whitelist_
+    miss above) plus a non-owner 'rag'-scoped key, optionally minted with a
+    per-key rag_roots allowlist. Returns (app, home, scoped_key_headers)."""
+    from localm.plugins.engine import PluginManager
+    from localm.plugins.gui.web import attach_gui
+    home = tmp_path
+    localm = home / ".localm"
+    localm.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("LOCALM_HOME", str(localm))
+    monkeypatch.setenv("LOCALM_API_KEY", "owner-key-xyz")   # owner configured
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
+    import localm.config as cfg
+    monkeypatch.setattr(cfg, "HOME_DIR", localm)
+    monkeypatch.setattr(cfg, "MODELS_DIR", localm / "models")
+    monkeypatch.setattr(cfg, "CONFIG_FILE", localm / "config.json")
+    monkeypatch.setattr(cfg, "REGISTRY_FILE", localm / "registry.json")
+    from localm import auth
+    scoped = auth.create_key("dev", ["rag"], rag_roots=rag_roots)["key"]
+
+    app = FastAPI()
+    PluginManager(app, external_root=tmp_path / "noplugins").install("rag")
+
+    async def switch_model(name):
+        pass
+    attach_gui(app, self_url="http://127.0.0.1:9/v1",
+              switch_model=switch_model, active_model=lambda: "model-a")
+    return app, home, {"Authorization": f"Bearer {scoped}"}
+
+
+class TestRagAddRouteKeyScopedRoots:
+    def test_path_inside_granted_root_indexes(self, tmp_path, monkeypatch):
+        granted = tmp_path / "granted"
+        granted.mkdir()
+        (granted / "a.md").write_text("rocm gfx1030 dll", encoding="utf-8")
+        app, _, hdr = _scoped_rag_app(tmp_path, monkeypatch,
+                                      rag_roots=[str(granted)])
+        with TestClient(app) as client:
+            client.post("/api/rag/collections", json={"name": "kb"}, headers=hdr)
+            r = client.post("/api/rag/collections/kb/add",
+                            json={"paths": [str(granted)], "embed": False},
+                            headers=hdr)
+            assert r.status_code == 200, r.text
+
+    def test_home_is_refused_when_key_has_its_own_roots(self, tmp_path, monkeypatch):
+        # The whole point of the field: a key given its own explicit roots does
+        # NOT also inherit the home-directory default every other caller gets.
+        granted = tmp_path / "granted"
+        granted.mkdir()
+        app, home, hdr = _scoped_rag_app(tmp_path, monkeypatch,
+                                         rag_roots=[str(granted)])
+        (home / "docs").mkdir()
+        (home / "docs" / "a.md").write_text("rocm gfx1030 dll", encoding="utf-8")
+        with TestClient(app) as client:
+            client.post("/api/rag/collections", json={"name": "kb"}, headers=hdr)
+            r = client.post("/api/rag/collections/kb/add",
+                            json={"paths": [str(home / "docs")], "embed": False},
+                            headers=hdr)
+            assert r.status_code == 403, r.text
+            assert "owner" in r.text.lower()
+
+    def test_owner_is_never_confined_by_a_key_scoped_field(self, tmp_path,
+                                                            monkeypatch):
+        # A key's own rag_roots field never applies to the OWNER caller: the
+        # owner authenticates with the owner key, not the scoped key, so this
+        # exercises effective_rag_roots' ADMIN short-circuit end to end.
+        granted = tmp_path / "granted"
+        granted.mkdir()
+        app, home, _hdr = _scoped_rag_app(tmp_path, monkeypatch,
+                                          rag_roots=[str(granted)])
+        (home / "docs").mkdir()
+        (home / "docs" / "a.md").write_text("rocm gfx1030 dll", encoding="utf-8")
+        owner_hdr = {"Authorization": "Bearer owner-key-xyz"}
+        with TestClient(app) as client:
+            client.post("/api/rag/collections", json={"name": "kb"},
+                        headers=owner_hdr)
+            r = client.post("/api/rag/collections/kb/add",
+                            json={"paths": [str(home / "docs")], "embed": False},
+                            headers=owner_hdr)
+            assert r.status_code == 200, r.text
+
+    def test_key_without_rag_roots_keeps_home_reach(self, tmp_path, monkeypatch):
+        # Regression control: a non-owner key that never had rag_roots set
+        # (the default, [] via auth.create_key) is UNCHANGED by this feature -
+        # it still reaches home, exactly like before this field existed.
+        app, home, hdr = _scoped_rag_app(tmp_path, monkeypatch, rag_roots=None)
+        (home / "docs").mkdir()
+        (home / "docs" / "a.md").write_text("rocm gfx1030 dll", encoding="utf-8")
+        with TestClient(app) as client:
+            client.post("/api/rag/collections", json={"name": "kb"}, headers=hdr)
+            r = client.post("/api/rag/collections/kb/add",
+                            json={"paths": [str(home / "docs")], "embed": False},
+                            headers=hdr)
+            assert r.status_code == 200, r.text
+
+    def test_credential_dir_still_refused_inside_a_granted_root(self, tmp_path,
+                                                                 monkeypatch):
+        granted = tmp_path / "granted"
+        ssh = granted / ".ssh"
+        ssh.mkdir(parents=True)
+        (ssh / "id_rsa").write_text("PRIVATE KEY", encoding="utf-8")
+        app, _, hdr = _scoped_rag_app(tmp_path, monkeypatch,
+                                      rag_roots=[str(granted)])
+        with TestClient(app) as client:
+            client.post("/api/rag/collections", json={"name": "kb"}, headers=hdr)
+            r = client.post("/api/rag/collections/kb/add",
+                            json={"paths": [str(ssh / "id_rsa")], "embed": False},
+                            headers=hdr)
+            assert r.status_code == 400, r.text
 
 
 # --------------------------------------------------------------------------- #

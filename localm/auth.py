@@ -988,19 +988,64 @@ def fs_access_for(token: str, default: str = "none") -> str:
     return norm_fs_access(rec.get("fs_access", default))
 
 
+def norm_rag_roots(roots) -> list:
+    """Coerce *roots* to a clean, order-preserving, de-duplicated list of
+    folder-path strings for a key's per-key RAG-indexing allowlist; anything
+    that is not a non-empty string is dropped. None/blank -> [] (no per-key
+    restriction - the key falls back to the global ``rag_allowed_roots`` policy,
+    see rag/store.py's ``confine_index_path``).
+
+    *roots* must be a list/tuple; a bare string is explicitly REJECTED (as [])
+    rather than iterated - a plain Python string is itself iterable character by
+    character, so without this guard a caller accidentally passing a single path
+    string (instead of ``[path]``) would silently explode it into one
+    single-character "root" per character."""
+    if not roots or not isinstance(roots, (list, tuple)):
+        return []
+    out: list = []
+    seen: set = set()
+    for r in roots:
+        if not isinstance(r, str):
+            continue
+        r = r.strip()
+        if r and r not in seen:
+            seen.add(r)
+            out.append(r)
+    return out
+
+
+def rag_roots_for(token: str, default: Optional[list] = None) -> list:
+    """The stored per-key RAG-indexing folder allowlist for the key behind
+    *token*, or *default* (``[]`` if not given) if the key is unknown or has no
+    list recorded. A legacy key minted before this attribute existed, and any
+    key that never had one set, resolves to the safe default of NO per-key
+    restriction - it falls back to the global policy, same "absent means
+    unrestricted-by-this-field" shape as ``fs_access_for``'s legacy default."""
+    if default is None:
+        default = []
+    if not token or not token.strip():
+        return default
+    rec = _find_keystore_record(token.strip(), _load_keystore())
+    if rec is None:
+        return default
+    return norm_rag_roots(rec.get("rag_roots", default))
+
+
 def list_keys() -> list:
     """Public metadata for every named key (never the hash)."""
     return [
         {"id": r.get("id"), "name": r.get("name", ""),
          "scopes": r.get("scopes", []), "created": r.get("created"),
          "expires": r.get("expires"), "last_used": r.get("last_used"),
-         "fs_access": norm_fs_access(r.get("fs_access", "none"))}
+         "fs_access": norm_fs_access(r.get("fs_access", "none")),
+         "rag_roots": norm_rag_roots(r.get("rag_roots", []))}
         for r in _load_keystore()
     ]
 
 
 def create_key(name: str, scope_list, *, allow_privileged: bool = False,
-               expires: Optional[float] = None, fs_access: str = "none") -> dict:
+               expires: Optional[float] = None, fs_access: str = "none",
+               rag_roots: Optional[list] = None) -> dict:
     """Mint a named key with *scope_list*, persist its hash, and return a record
     INCLUDING the plaintext key once - the caller must surface it now, it cannot
     be recovered. Raises ValueError on an unknown scope.
@@ -1009,6 +1054,19 @@ def create_key(name: str, scope_list, *, allow_privileged: bool = False,
     "host"); it defaults to the safe "none" so a new scoped key cannot browse the
     server disk unless the owner deliberately grants it. The owner/ADMIN key
     always resolves to "host" regardless of this field (see effective_fs_access).
+
+    *rag_roots* is an optional per-key RAG-indexing folder allowlist, following
+    the exact same shape as *fs_access*: empty/None (the default) grants no
+    per-key restriction, so the key falls back to the global
+    ``rag_allowed_roots`` policy that already applies to every caller
+    (rag/store.py's ``confine_index_path``) - unchanged behavior for every key
+    minted before this field existed. A non-empty list instead CONFINES the key
+    to exactly those folders: the home directory, the working directory and the
+    global allowed-roots list are deliberately not implied on top of it, so a
+    scoped key handed to an integration reaches only what it was explicitly
+    given - "each key gets its own explicit folder allowlist". The owner/ADMIN
+    key is never confined by this field regardless of what is stored (see
+    effective_rag_roots), exactly like fs_access.
 
     PRIVILEGED_SCOPES (admin / keys:admin / plugins:admin / config:write /
     coder:full) are refused with PermissionError unless *allow_privileged* is
@@ -1048,6 +1106,7 @@ def create_key(name: str, scope_list, *, allow_privileged: bool = False,
         "created": time.time(),
         "expires": float(expires) if expires is not None else None,
         "fs_access": norm_fs_access(fs_access),
+        "rag_roots": norm_rag_roots(rag_roots),
     }
     with _KEYSTORE_LOCK:
         records = _load_keystore()
@@ -1055,7 +1114,8 @@ def create_key(name: str, scope_list, *, allow_privileged: bool = False,
         _save_keystore(records)
     return {"id": record["id"], "name": record["name"],
             "scopes": record["scopes"], "expires": record["expires"],
-            "fs_access": record["fs_access"], "key": key}
+            "fs_access": record["fs_access"], "rag_roots": record["rag_roots"],
+            "key": key}
 
 
 def revoke_key(key_id: str) -> bool:

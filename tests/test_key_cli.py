@@ -179,6 +179,33 @@ class TestNamedKeys:
         secret = _SECRET_RE.findall(r.output)
         assert secret, "the new key must be printed once"
 
+    def test_create_with_rag_roots_round_trips_and_lists(self, runner):
+        # --rag-root is repeatable, following the exact CLI shape as --fs-access:
+        # a key created with it is CONFINED to exactly those folders for RAG.
+        # Short synthetic paths (not tmp_path, which under this repo's test
+        # workspace runs long): the RAG-roots column is a Rich table cell and
+        # gets ellipsized past a certain width, unrelated to the feature itself.
+        root_a, root_b = "C:/docs/a", "C:/docs/b"
+        r = runner.invoke(main, ["key", "create", "scoped-rag",
+                                 "--scope", "rag",
+                                 "--rag-root", root_a, "--rag-root", root_b])
+        assert r.exit_code == 0, r.output
+        assert "rag-roots" in r.output.lower()
+        keys = auth.list_keys()
+        assert len(keys) == 1
+        assert keys[0]["rag_roots"] == [root_a, root_b]
+        listed = runner.invoke(main, ["key", "list"])
+        assert root_a in listed.output and root_b in listed.output
+
+    def test_create_without_rag_roots_defaults_to_unrestricted(self, runner):
+        r = runner.invoke(main, ["key", "create", "plain", "--scope", "rag"])
+        assert r.exit_code == 0
+        assert auth.list_keys()[0]["rag_roots"] == []
+        # "rag-roots" (the note) must NOT appear when none were granted.
+        assert "rag-roots" not in r.output.lower()
+        listed = runner.invoke(main, ["key", "list"])
+        assert "unrestricted" in listed.output.lower()
+
     def test_create_privileged_scope_refused(self, runner):
         # NEGATIVE: a non-owner mint of keys:admin must fail and store nothing.
         r = runner.invoke(main, ["key", "create", "evil",
