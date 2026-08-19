@@ -27,8 +27,10 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import traceback
 import shutil
+from pathlib import Path
 
 # Isolate LOCALM_HOME globally at import time so that any module importing
 # localm.config during test collection or execution resolves HOME_DIR to a
@@ -988,6 +990,48 @@ def _no_giant_tmp_files(tmp_path, request):
             "  (see tests/test_auto_gpu_layers.py). If real bytes are genuinely\n"
             "  required, mark the test @pytest.mark.allow_large_tmp_files with a\n"
             "  why-comment.")
+
+
+@pytest.fixture
+def heavy_slot():
+    """Let only ONE subprocess-heavy test run at a time, across every test file
+    and every xdist worker.
+
+    These tests start real Python interpreters, which is the whole point of them
+    - but several landing on different workers at once measurably starves a
+    neighbour: a test whose own lock budget then expires goes red for reasons
+    that have nothing to do with its subject.
+
+    SHARED here rather than defined per file, and that is the load-bearing part.
+    It began as a private fixture in tests/test_rag_collection_lock.py; when
+    tests/test_memory_cross_process_lock.py arrived with its own copy under a
+    DIFFERENT slot filename, each file serialised its own heavy tests and the two
+    files raced each other - reintroducing exactly the starvation the fixture
+    exists to prevent, silently, because both copies looked correct in isolation.
+    A lock whose identity is a string duplicated in two places is not one lock.
+    Any new subprocess-heavy test should request this fixture.
+
+    A plain O_EXCL file, because it has to work across PROCESSES (xdist workers
+    are separate interpreters, so a threading lock would not be seen) and under a
+    bare `-n auto` with no --dist loadgroup. The slot is force-taken if a crashed
+    test ever leaves it behind, so this convenience lock can never wedge a run."""
+    slot = Path(tempfile.gettempdir()) / "localm-subprocess-heavy.slot"
+    deadline = time.time() + 240
+    while True:
+        try:
+            os.close(os.open(str(slot), os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+            break
+        except FileExistsError:
+            if time.time() > deadline:
+                break             # a leftover slot must never block the suite
+            time.sleep(0.05)
+    try:
+        yield
+    finally:
+        try:
+            slot.unlink()
+        except OSError:
+            pass
 
 
 @pytest.fixture

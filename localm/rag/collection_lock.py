@@ -115,7 +115,14 @@ class CollectionLockedError(RuntimeError):
 
     def __init__(self, name: str, holder: Optional[dict], waited: float,
                  last_alive: Optional[float] = None,
-                 lockpath: Optional[Path] = None, same_process: bool = False):
+                 lockpath: Optional[Path] = None, same_process: bool = False,
+                 kind: str = "Collection"):
+        # *kind* names WHAT is locked, for the message only. It defaults to
+        # "Collection" so every existing RAG raise site reads exactly as before;
+        # agent memory passes "Memory namespace" (see memory/store.py), because
+        # the same machinery now serialises both and "Collection 'a1b2..'" would
+        # be a lie in a memory refusal.
+        self.kind = kind
         self.collection = name
         self.holder = holder
         self.waited = waited
@@ -127,10 +134,9 @@ class CollectionLockedError(RuntimeError):
             # Nothing could be read about the holder, so give the user the one
             # concrete thing they can act on rather than an unexplained refusal.
             tail = (f" Its lock file is {lockpath}; if you are certain no localm "
-                    f"process is using this collection, deleting that file "
-                    f"releases it.")
+                    f"process is using it, deleting that file releases it.")
         super().__init__(
-            f"Collection '{name}' is being written by {who}. "
+            f"{kind} '{name}' is being written by {who}. "
             f"Waited {_duration(waited)} and gave up; nothing was changed. Let "
             f"that run finish and try again.{tail}")
 
@@ -424,7 +430,8 @@ def _note(message: str) -> None:
 def collection_write_lock(lockpath: Path, *, collection: str, op: str,
                           timeout: Optional[float] = None,
                           stale_after: Optional[float] = None,
-                          on_wait: Optional[Callable[[str], None]] = None):
+                          on_wait: Optional[Callable[[str], None]] = None,
+                          kind: str = "Collection"):
     """Hold the cross-process write lock for a collection, or refuse.
 
     Raises ``CollectionLockedError`` if another process still holds it after
@@ -483,7 +490,7 @@ def collection_write_lock(lockpath: Path, *, collection: str, op: str,
             waited = time.time() - started_waiting
             if time.time() >= deadline:
                 raise CollectionLockedError(collection, rec, waited, mtime,
-                                            lockpath)
+                                            lockpath, kind=kind)
             if on_wait and not announced and waited >= WAIT_NOTICE_AFTER:
                 announced = True
                 on_wait(f"waiting for the write lock on '{collection}': "
@@ -504,7 +511,7 @@ def collection_write_lock(lockpath: Path, *, collection: str, op: str,
             waited = time.time() - started_waiting
             if time.time() >= deadline:
                 raise CollectionLockedError(collection, rec, waited, mtime,
-                                            lockpath)
+                                            lockpath, kind=kind)
             if on_wait and not announced and waited >= WAIT_NOTICE_AFTER:
                 announced = True
                 on_wait(f"waiting for the write lock on '{collection}': "
