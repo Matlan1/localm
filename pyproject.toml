@@ -59,6 +59,13 @@ dependencies = [
     "huggingface-hub>=1.27.0",
     "pydantic>=2.13.4",
     "fastapi>=0.141.1",
+    # fastapi's own requirement is only starlette>=0.46.0, too weak to rely on:
+    # installs are lock-unaware (setup.sh/setup.bat run `uv pip install -e`,
+    # never `uv sync`), so a fresh install resolves this floor directly rather
+    # than uv.lock's pinned 1.3.1. Declared explicitly so the ASGI layer
+    # fastapi depends on cannot resolve to something far older than what this
+    # project is actually tested against.
+    "starlette>=1.3.1",
     "uvicorn>=0.52.3",
     # Built-in TLS (NET-1): localm mints a local CA + leaf cert so a network
     # bind serves HTTPS out of the box. Core, not an extra - encryption on an
