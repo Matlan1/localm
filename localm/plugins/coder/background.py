@@ -150,6 +150,16 @@ _KILL_GRACE = 3.0         # seconds to wait after a graceful terminate
 _DRAIN_GRACE = 2.0        # seconds to wait for reader threads at finish
 
 
+# Sentinel for "do not filter by owner" in list_status / dropped_for.
+#
+# A distinct object rather than None, because None is a REAL owner value: a job
+# started outside any agent (a direct ShellJob, a test) genuinely has no owner,
+# and "every job" and "the jobs belonging to nobody" are different questions. A
+# None-means-unfiltered default would make them the same call and there would be
+# no way left to ask the second one.
+_ANY_OWNER = object()
+
+
 class JobError(RuntimeError):
     """Base class for job-registry errors."""
 
@@ -286,9 +296,17 @@ class BackgroundJob:
 
     kind = "job"
 
-    def __init__(self, label: str) -> None:
+    def __init__(self, label: str, owner: Optional[str] = None) -> None:
         self.id = "job_" + uuid.uuid4().hex[:8]
         self.label = label
+        # Which agent session started this, or None. Opaque and never returned
+        # by status(): it exists so a caller can ask for ITS OWN jobs, not so a
+        # consumer can display it. The GUI needs it because one server process
+        # hosts many coder sessions over one process-wide registry, and a job
+        # label is a full command line - so an unfiltered list would show one
+        # session another's commands. The CLI has one session per process and
+        # asks unfiltered, which is the same answer there.
+        self.owner = owner
         self.started_at = time.time()
         self.finished_at: Optional[float] = None
         self.state = "running"          # running | done | killed | failed
@@ -466,8 +484,9 @@ class ShellJob(BackgroundJob):
 
     def __init__(self, argv: list | str, cwd: Path, *, label: str,
                  env: Optional[dict] = None,
-                 max_chars: int = _RING_MAX_CHARS) -> None:
-        super().__init__(label)
+                 max_chars: int = _RING_MAX_CHARS,
+                 owner: Optional[str] = None) -> None:
+        super().__init__(label, owner=owner)
         self.stdout = RingBuffer(max_chars)
         self.stderr = RingBuffer(max_chars)
 
@@ -809,8 +828,9 @@ class AgentJob(BackgroundJob):
     kind = "agent"
 
     def __init__(self, child: Any, task: str, *, label: str,
-                 token: Any = None, finalize: Any = None) -> None:
-        super().__init__(label)
+                 token: Any = None, finalize: Any = None,
+                 owner: Optional[str] = None) -> None:
+        super().__init__(label, owner=owner)
         self._child = child
         self._task = task
         # Optional teardown run on THIS job's worker thread once the child stops:
@@ -954,6 +974,11 @@ class JobRegistry:
         # take_dropped_undrained so a turn-boundary consumer warns about each
         # loss exactly once instead of repeating it every turn forever.
         self._unreported_drops: dict[str, int] = {}
+        # The same cumulative losses, split by OWNER as well as kind, so a
+        # per-session consumer reports what IT lost instead of what the whole
+        # process lost. Kept alongside the by-kind total rather than replacing
+        # it: the CLI reads the process-wide number and is right to.
+        self._dropped_by_owner: dict[tuple, int] = {}
         self._jobs: dict[str, BackgroundJob] = {}
         self._lock = threading.Lock()
         # A job the model started must not outlive the localm process: it was
@@ -1043,11 +1068,36 @@ class JobRegistry:
             return [j.id for j in self._jobs.values()
                     if kind is None or j.kind == kind]
 
-    def list_status(self, kind: Optional[str] = None) -> list:
+    def list_status(self, kind: Optional[str] = None, owner=_ANY_OWNER) -> list:
+        """Every tracked job, optionally narrowed to one *kind* and/or *owner*.
+
+        *owner* defaults to the "do not filter" sentinel, so an existing caller
+        is unaffected. Pass a real owner id (or None) to get exactly that
+        owner's jobs - see BackgroundJob.owner for why a GUI caller must.
+        """
         with self._lock:
             jobs = [j for j in self._jobs.values()
-                    if kind is None or j.kind == kind]
+                    if (kind is None or j.kind == kind)
+                    and (owner is _ANY_OWNER or j.owner == owner)]
         return [j.status() for j in jobs]
+
+    def dropped_for(self, owner=_ANY_OWNER) -> dict:
+        """Uncollected completions evicted from the table, per kind.
+
+        The per-owner view of ``dropped_undrained_by_kind``. Cumulative and
+        never reset, like that total: it is the standing session diagnostic, not
+        the report-once channel (that is take_dropped_undrained). Kinds with no
+        losses are omitted, so an empty dict means nothing was discarded rather
+        than nothing was looked at.
+        """
+        with self._lock:
+            if owner is _ANY_OWNER:
+                return dict(self.dropped_undrained_by_kind)
+            out: dict = {}
+            for (job_owner, kind), n in self._dropped_by_owner.items():
+                if job_owner == owner:
+                    out[kind] = out.get(kind, 0) + n
+            return out
 
     def drain_finished(self, kind: Optional[str] = None) -> list:
         """Status of every job that finished since the last drain, then mark them.
@@ -1100,6 +1150,9 @@ class JobRegistry:
                         self.dropped_undrained_by_kind.get(kind, 0) + 1)
                     self._unreported_drops[kind] = (
                         self._unreported_drops.get(kind, 0) + 1)
+                    key = (job.owner, kind)
+                    self._dropped_by_owner[key] = (
+                        self._dropped_by_owner.get(key, 0) + 1)
 
     def take_dropped_undrained(self, kind: Optional[str] = None) -> int:
         """Uncollected completions lost since the last call, and RESET the count.

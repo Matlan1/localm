@@ -11,6 +11,12 @@ Routes (mounted by the engine, auto-scoped to the ``coder`` capability):
   POST   /api/coder/sessions/{id}/undo          - revert the last file write
   POST   /api/coder/sessions/{id}/compact       - summarise old history
   POST   /api/coder/sessions/{id}/model         - repoint this session's model
+  POST   /api/coder/sessions/{id}/settings      - approve / scope / verify, live
+  POST   /api/coder/sessions/{id}/cwd           - move the session to another dir
+  GET    /api/coder/sessions/{id}/memory        - the project-memory file
+  POST   /api/coder/sessions/{id}/memory        - append a memory bullet
+  POST   /api/coder/sessions/{id}/memory/forget - drop matching bullets
+  GET    /api/coder/sessions/{id}/background    - this session's background jobs
   GET    /api/coder/sessions/{id}/log           - parsed JSONL audit log (log/full)
   GET    /api/coder/sessions/{id}/result        - last finished task, as JSON
   GET    /api/coder/sessions/{id}/files         - files changed this session
@@ -22,6 +28,13 @@ Routes (mounted by the engine, auto-scoped to the ``coder`` capability):
   GET    /api/coder/history                     - browse past session audit logs
   GET    /api/coder/history/{name}              - read one past audit log
   GET    /api/coder/episodes                    - stored lessons for a project
+
+The REPL's own session controls have a web form here for the same reason
+(parity audit O6): /approve, /scope and /verify are the settings route, /cd is
+the cwd route, /remember + /forget + /memory are the three memory routes, /bg is
+and /bg is the background route. Until now a GUI session could not revoke its
+own auto-approve, and the workaround suggested for the others (start again with
+resume) does not exist in privacy mode, which is the DEFAULT on both surfaces.
 
 Six options that were CLI-only until now have a web form here, per the standing
 CLI/GUI parity rule: --estimate (the estimate route), --patch-mode (the
@@ -133,6 +146,41 @@ class EpisodeTargetRequest(BaseModel):
 
 class SetModelRequest(BaseModel):
     model: str
+
+
+class SessionSettingsRequest(BaseModel):
+    """Live changes to a running session (the REPL's /approve, /scope, /verify).
+
+    Every field is optional, and ABSENT is not the same as NULL: a field the
+    caller did not send is left alone, a field sent as null is CLEARED. That
+    distinction is read off ``model_fields_set``, so one PATCH-shaped call can
+    say "turn scope off" without also having to restate the verify command, and
+    "leave scope as it is" without a magic sentinel string.
+    """
+    auto_approve: bool | None = None
+    scope: str | None = None
+    # A command to run, or null for no exit-code check at all. Mutually
+    # exclusive with auto_verify below: sending both asks for a specific command
+    # AND for re-detection, which cannot both be honoured, so it is refused
+    # rather than resolved by an ordering nobody can see.
+    verify: str | None = None
+    # True re-detects the project's own check (the REPL's `/verify auto`).
+    auto_verify: bool | None = None
+
+
+class SessionCwdRequest(BaseModel):
+    cwd: str
+
+
+class MemoryRequest(BaseModel):
+    text: str
+
+
+class MemoryForgetRequest(BaseModel):
+    """Which bullets to drop. A body rather than a query parameter for the same
+    reason as EpisodeTargetRequest: this destroys user content, so it must be an
+    unsafe method, and an unsafe method is what the CSRF check applies to."""
+    pattern: str
 
 
 class ConfirmRequest(BaseModel):
@@ -662,6 +710,185 @@ async def session_set_model(session_id: str, req: SetModelRequest, request: Requ
     if not session.set_model(req.model):
         raise HTTPException(409, "Session is busy; cannot switch models mid-task")
     return session.info()
+
+
+@_router.post("/api/coder/sessions/{session_id}/settings")
+async def session_settings(session_id: str, req: SessionSettingsRequest,
+                           request: Request):
+    """Change auto-approve, scope or verification on a LIVE session.
+
+    The REPL has had /approve, /scope and /verify since the beginning; the web
+    surface had none of them, and the workaround on record (start again with
+    resume) needs a checkpoint, which privacy mode never writes - and privacy is
+    the default on both surfaces. So for a default GUI session there was no
+    route to any of this at all.
+
+    DELIBERATELY NOT BUSY-GUARDED, unlike the model route. The safety-relevant
+    half of this is REVOKING auto-approve, and the moment a user reaches for
+    that is precisely the moment the agent is mid-run doing something they want
+    stopped. A 409 there would refuse the control in the only case it exists
+    for. Tightening a scope is the same shape. These are attribute writes read
+    at the next tool dispatch, not state a running turn can tear.
+    """
+    session = _get_session(request, session_id)
+    if session.closed:
+        raise HTTPException(409, "Session is closed")
+    sent = req.model_fields_set
+    if "verify" in sent and req.auto_verify:
+        raise HTTPException(
+            400, "Send either verify (a specific command) or auto_verify "
+                 "(re-detect the project's check), not both.")
+
+    changed: list[str] = []
+    if "auto_approve" in sent and req.auto_approve is not None:
+        session.set_auto_approve(req.auto_approve)
+        changed.append("auto_approve")
+    if "scope" in sent:
+        session.set_scope(req.scope)
+        changed.append("scope")
+    if "verify" in sent or req.auto_verify:
+        try:
+            session.set_verify(req.verify, detect=bool(req.auto_verify))
+        except SessionUnavailable as e:
+            raise HTTPException(409, str(e))
+        changed.append("verify")
+    # info() reports the EFFECTIVE state, so the caller reads back what actually
+    # took rather than an echo of what it asked for - a re-detect that found no
+    # check is the case that must not look like a check was set.
+    return {**session.info(), "changed": changed}
+
+
+@_router.post("/api/coder/sessions/{session_id}/cwd")
+async def session_set_cwd(session_id: str, req: SessionCwdRequest,
+                          request: Request):
+    """Move a live session to another project directory (the REPL's /cd).
+
+    Unreachable from the web surface in EVERY mode until now, including the
+    resume workaround, because a checkpoint is looked up by cwd - so there was
+    no shape of request that could move a conversation to another project.
+
+    REFUSED for a restricted (scoped-key) session, and that is the whole
+    containment: create_session forces such a session into the instance's
+    project root and ignores the cwd it was given, so a route that moved it
+    afterwards would hand back exactly what was taken away. Refused on the
+    SESSION's restriction rather than the caller's, so an owner cannot move a
+    shared key's session out of the root either.
+
+    Busy-guarded where /settings is not: this rebuilds the project map and the
+    system prompt, so applying it under a running turn would change the prompt
+    out from under a request already in flight.
+    """
+    session = _get_session(request, session_id)
+    if session.closed:
+        raise HTTPException(409, "Session is closed")
+    if session.restricted:
+        raise HTTPException(
+            403, "A shared-key session is confined to the project root and "
+                 "cannot change directory.")
+    # Client-supplied path: refuse UNC/device syntax unconditionally, on the
+    # EXPANDED string, BEFORE is_dir()/resolve() ever run - the same guard and
+    # the same reasoning as create_session's cwd check.
+    cwd = Path(req.cwd).expanduser()
+    if _is_unc_or_device_path(str(cwd)):
+        raise HTTPException(
+            400, "'cwd' must be a local directory path, not a UNC or device path.")
+    if not cwd.is_dir():
+        raise HTTPException(400, f"Not a directory: {req.cwd}")
+    cwd = cwd.resolve()
+
+    # A project that declared itself private does not get a transcript. The
+    # reasoning lives with the helper, which the REPL's /cd shares.
+    from localm.plugins.coder.privacy import refuse_move_into_stricter_project
+    refusal = refuse_move_into_stricter_project(session.mode, cwd)
+    if refusal:
+        raise HTTPException(409, refusal)
+
+    # Rebuilding the project map scans the tree - the same reason create_session
+    # builds its Agent in the executor rather than on the loop.
+    loop = asyncio.get_running_loop()
+    moved = await loop.run_in_executor(
+        get_plugin_executor(), session.set_cwd, cwd)
+    if not moved:
+        raise HTTPException(409, "Session is busy; cannot change directory "
+                                 "mid-task")
+    return session.info()
+
+
+@_router.get("/api/coder/sessions/{session_id}/memory")
+async def session_memory(session_id: str, request: Request):
+    """The project-memory file (LOCALCODER.md) this session injects.
+
+    NOT owner-gated, unlike history and episodes, and the difference is real
+    rather than an oversight: those are the owner's own records held in the
+    localm home directory, while this is a file in the session's own project
+    directory that a restricted session's confined write_file/edit_file can
+    already read and rewrite (SAFE_RESTRICTED_TOOLS). Gating it would refuse
+    through the front door what stays open at the side, which is theatre.
+    """
+    session = _get_session(request, session_id)
+    return session.memory()
+
+
+@_router.post("/api/coder/sessions/{session_id}/memory")
+async def session_remember(session_id: str, req: MemoryRequest, request: Request):
+    """Append a bullet to the project memory (the REPL's /remember).
+
+    The RELOAD is the point, not the write. A GUI session loads and injects
+    LOCALCODER.md but had no way to change it, and asking the agent to edit the
+    file does not call reload_memory - so an edit made that way sat in the file
+    without reaching the running session, taking effect only next session. This
+    goes through the agent, so the system prompt is rebuilt now.
+    """
+    session = _get_session(request, session_id)
+    if session.closed:
+        raise HTTPException(409, "Session is closed")
+    text = req.text.strip()
+    if not text:
+        raise HTTPException(400, "text is required")
+    try:
+        return session.remember(text)
+    except OSError as e:
+        raise HTTPException(500, f"Could not write the memory file: {e}")
+
+
+@_router.post("/api/coder/sessions/{session_id}/memory/forget")
+async def session_forget(session_id: str, req: MemoryForgetRequest,
+                         request: Request):
+    """Drop memory bullets matching a substring (the REPL's /forget).
+
+    ``removed`` and ``had_file`` come back alongside the new memory so a caller
+    can tell "there is no memory file" from "no entry matched" - both leave the
+    memory unchanged, and they call for different next steps.
+    """
+    session = _get_session(request, session_id)
+    if session.closed:
+        raise HTTPException(409, "Session is closed")
+    pattern = req.pattern.strip()
+    if not pattern:
+        raise HTTPException(400, "pattern is required")
+    try:
+        return session.forget(pattern)
+    except OSError as e:
+        raise HTTPException(500, f"Could not rewrite the memory file: {e}")
+
+
+@_router.get("/api/coder/sessions/{session_id}/background")
+async def session_background(session_id: str, request: Request):
+    """Background jobs THIS session started (the REPL's /bg).
+
+    An owner GUI session can start background shell jobs and sub-agents through
+    run_shell_background / spawn_agent_background, and had nowhere to enumerate
+    them - it could only poll an id the model happened to mention.
+
+    Scoped to this session's own jobs, never the whole registry: get_registry()
+    is process-wide, and a GUI server runs many sessions in one process, so an
+    unfiltered list would show one session another's work - and job labels are
+    full command lines, so it would also read the owner's commands out to a
+    scoped key. ``supported`` is reported because a restricted session has no
+    background tools at all, and "none yet" must not look the same as "never".
+    """
+    session = _get_session(request, session_id)
+    return {**session.background(), "supported": not session.restricted}
 
 
 @_router.delete("/api/coder/sessions/{session_id}")

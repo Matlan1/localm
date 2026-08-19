@@ -218,7 +218,21 @@ class CoderSession:
             # (setup form) overrides it, mirroring the CLI --system flag (rec#584).
             custom_instructions=custom_instructions,
             on_event=self._on_agent_event,
-            confirm_handler=None if auto_approve else self._confirm,
+            # ALWAYS, even under auto_approve. The agent only consults this when
+            # its gate has already decided a call needs confirmation, and under
+            # auto_approve that happens in two live cases: a tool named in
+            # always_confirm (interactive_confirm puts the shell family there),
+            # and a LENIENT call - one recovered by the name-gated parser
+            # fallback, which auto_approve deliberately must not wave through.
+            #
+            # Passing None for those left a web session with no channel to ask
+            # on, so the agent took its fail-closed branch and REFUSED the call
+            # outright: a GUI session runs _loop(interactive=False), so there is
+            # no terminal to fall back to. That is right as a default and wrong
+            # here - it made the "still confirm shell commands" checkbox refuse
+            # the command its own tooltip promises will stop for you, and it
+            # denied the human look the lenient gate exists to demand.
+            confirm_handler=self._confirm,
             verify_cmd=verify_cmd,
             verify_max_retries=verify_max_retries,
             **gen_kwargs,
@@ -501,6 +515,194 @@ class CoderSession:
                 return False
         return self.agent.compact()
 
+    # ------------------------------------------------------------------ #
+    #  Mid-session settings (the REPL's /approve, /scope, /verify, /cd)    #
+    # ------------------------------------------------------------------ #
+
+    def set_auto_approve(self, value: bool) -> None:
+        """Grant or REVOKE auto-approve on a live session (the REPL's /approve).
+
+        Deliberately NOT busy-guarded, unlike set_model(): the safety-relevant
+        half of this control is REVOKING, and refusing that while the agent is
+        mid-run refuses it in precisely the case a user reaches for it. The
+        writes are plain attribute assignments, read at the next tool dispatch,
+        so there is nothing to tear.
+
+        THE CONFIRM HANDLER IS THE LOAD-BEARING HALF, NOT THE FLAG. A GUI
+        session runs _loop(interactive=False), so when a destructive tool needs
+        confirmation and confirm_handler is None the agent takes its fail-closed
+        branch and DENIES the call outright - correct as a default, useless as a
+        revoke, because the user gets no approval card and the session can no
+        longer do anything at all. __init__ leaves the handler None for an
+        auto-approving session, so revoking without installing it here would
+        hand back a session that can only refuse.
+
+        __init__ now installs it for every session, so in practice this branch
+        is belt and braces - kept because it costs one comparison and covers a
+        CoderSession whose agent was built or swapped some other way (the tests
+        replace backends on a live session already). The gap it guards against
+        was real and shipped: fixing only this method left the identical denial
+        one constructor away, on a session created with auto_approve AND
+        interactive_confirm, where always_confirm={run_shell,
+        run_shell_background} met a None handler - under a checkbox whose own
+        tooltip promises the command "still stops for you".
+        """
+        self.auto_approve = bool(value)
+        self.agent.auto_approve = bool(value)
+        if self.agent.confirm_handler is None:
+            self.agent.confirm_handler = self._confirm
+
+    def set_scope(self, scope: Optional[str]) -> Optional[str]:
+        """Set or clear the file-tool glob confinement (the REPL's /scope).
+
+        Not busy-guarded, for the same reason as set_auto_approve: TIGHTENING a
+        scope mid-run is a safety action. The scope never enters the system
+        prompt (build_system_prompt takes no scope argument - checked, not
+        assumed), so there is no prompt to rebuild and no window in which the
+        model believes one boundary while the dispatcher enforces another.
+
+        Newly setting a scope re-emits the "a scope does not confine the shell
+        tools" notice. That warning exists so nobody holds a confinement belief
+        they do not have, and a scope set from here creates that belief exactly
+        as much as one passed at session start.
+        """
+        scope = (scope or "").strip() or None
+        had = self.agent.scope
+        self.agent.scope = scope
+        if scope and scope != had:
+            try:
+                self.agent._notify_scope_does_not_confine_shell()
+            except Exception:                                      # noqa: BLE001
+                # Best-effort: the notice is a courtesy on top of an enforcement
+                # change that has already been applied above. Losing the notice
+                # must not lose the scope.
+                pass
+        return scope
+
+    def set_verify(self, command: Optional[str], *, detect: bool = False):
+        """Set, re-detect, or turn off the exit-code oracle (the REPL's /verify).
+
+        Returns the new command (a shell string or an argv list), or None for
+        off. Raises SessionUnavailable for a RESTRICTED session: those have no
+        process execution at all (SAFE_RESTRICTED_TOOLS), and a verify command
+        IS process execution, so accepting one would hand a scoped key back the
+        capability the restriction exists to remove. __init__ refuses it at
+        creation for the same reason; refusing here keeps the two agreeing.
+        """
+        if self.restricted:
+            raise SessionUnavailable(
+                "A restricted session runs no commands, so it has no "
+                "verification check to set.")
+        if detect:
+            new = self._detect_verify(self.cwd)
+        elif command is None:
+            new = None
+        else:
+            new = command.strip() or None
+        self.agent.verify_cmd = new
+        self.verify_cmd = new
+        return new
+
+    def set_cwd(self, cwd: Path) -> bool:
+        """Move a live session to another project directory (the REPL's /cd).
+
+        False when the agent is mid-task. Busy-guarded where the settings above
+        are not, and for the opposite reason: this rebuilds the project map AND
+        the system prompt, so applying it under a running turn would change the
+        prompt out from under a request already in flight.
+
+        The CALLER owns the UNC/device refusal and running this off the event
+        loop - it scans the project tree.
+        """
+        with self._lock:
+            if self.busy:
+                return False
+        self.agent.set_cwd(cwd)
+        self.cwd = cwd
+        return True
+
+    # ------------------------------------------------------------------ #
+    #  Project memory (the REPL's /memory, /remember, /forget)             #
+    # ------------------------------------------------------------------ #
+
+    def memory(self) -> dict:
+        """The project-memory file as this session sees it.
+
+        TWO texts, not one, because they legitimately differ and collapsing them
+        hides which you are looking at: ``text`` is what is on disk, ``injected``
+        is what the model actually reads (capped at the injection budget, with a
+        visible notice appended when the file was cut). ``warning`` carries the
+        user-facing form of that cap plus the unreadable-file case, so a memory
+        that could not be read never looks like a memory that is simply empty.
+        """
+        from localm.plugins.coder.memory import find_memory_file, memory_warning
+        p = find_memory_file(self.cwd)
+        text = ""
+        unreadable = False
+        if p is not None:
+            try:
+                text = p.read_text(encoding="utf-8")
+            except OSError:
+                unreadable = True
+        return {
+            "path": str(p) if p is not None else None,
+            "exists": p is not None,
+            "unreadable": unreadable,
+            "text": text,
+            "injected": self.agent._memory,
+            "warning": memory_warning(self.cwd) or None,
+        }
+
+    def remember(self, text: str) -> dict:
+        """Append a bullet AND refresh the system prompt (agent.remember does
+        both).
+
+        The refresh is the whole reason this goes through the agent rather than
+        writing the file directly: asking the agent to edit LOCALCODER.md never
+        calls reload_memory, so a plain file edit does not reach the running
+        session at all - it only takes effect next session.
+        """
+        self.agent.remember(text)
+        return self.memory()
+
+    def forget(self, pattern: str) -> dict:
+        """Drop matching bullets and refresh the prompt.
+
+        ``removed`` and ``had_file`` are reported separately from the resulting
+        memory so "there is no memory file" and "no entry matched" stay
+        distinguishable - they are different situations calling for different
+        next steps, and one number cannot say which happened.
+        """
+        p, n = self.agent.forget(pattern)
+        return {"removed": n, "had_file": p is not None, **self.memory()}
+
+    # ------------------------------------------------------------------ #
+    #  Background work started by THIS session (the REPL's /bg)            #
+    # ------------------------------------------------------------------ #
+
+    def background(self) -> dict:
+        """This session's background jobs, plus what has aged out of the table.
+
+        Filtered by this session's own job-owner id, never the whole registry.
+        get_registry() is PROCESS-WIDE, so an unfiltered list would show one GUI
+        session another session's work under a heading claiming otherwise - and
+        job labels are full command lines, so it would also hand a scoped key
+        the owner's commands. The CLI passes no owner and keeps listing
+        everything, which for a one-session process is the same answer.
+
+        ``dropped`` is reported rather than omitted: an evicted sub-agent
+        completion is a real and unrecoverable loss, and a bounded table that
+        says nothing about what it discarded is the silent-truncation shape
+        AGENTS.md rule 5 forbids.
+        """
+        from localm.plugins.coder.background import get_registry
+        registry = get_registry()
+        owner = getattr(self.agent, "job_owner", None)
+        return {
+            "jobs": registry.list_status(owner=owner),
+            "dropped": registry.dropped_for(owner),
+        }
+
     def set_model(self, model: str) -> bool:
         """Repoint this session's backend at a different model, in place -
         conversation history, tools and agent state are untouched (no new
@@ -625,6 +827,17 @@ class CoderSession:
             "model": self.model,
             "mode": self.mode,
             "auto_approve": self.auto_approve,
+            # The LIVE glob, not the one passed at creation: it is settable
+            # mid-session now, so a creation-time snapshot would leave a client
+            # unable to show what is actually in force - and a control that can
+            # set a value but never display it is worse than no control.
+            "scope": self.agent.scope,
+            # Whether this is a shared-key session. Already implied by the
+            # background route's "supported", and needed here for the same
+            # reason: a client can then SAY that changing directory and setting
+            # a verification command are unavailable, instead of offering both
+            # and collecting a 403 and a 409.
+            "restricted": self.restricted,
             "dry_run": self.dry_run,
             "interactive_confirm": self.interactive_confirm,
             "patch_mode": self.patch_mode,

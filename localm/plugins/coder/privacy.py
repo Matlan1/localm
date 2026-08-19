@@ -57,6 +57,83 @@ from localm.readline_privacy import suppress_readline_history  # noqa: F401,E402
 #  2. Subprocess environment
 # ---------------------------------------------------------------------------
 
+# Persistence modes, least to most recording. Used to compare a live session's
+# mode against a directory's own declared one.
+_MODE_RANK = {"privacy": 0, "log": 1, "full": 2}
+
+
+def refuse_move_into_stricter_project(session_mode: str, dest_cwd) -> str | None:
+    """Reason to refuse moving a session into *dest_cwd*, or None to allow it.
+
+    A session's persistence mode is resolved ONCE, from the directory it started
+    in, and cannot be changed afterwards - the audit log is already open, which
+    is what the REPL's /mode tells anyone who asks. Changing the DIRECTORY is
+    therefore the one way a session's mode and its location can come to
+    disagree, and the disagreement is not harmless: the Markdown transcript is
+    written to the session's CURRENT cwd at close, so a ``full`` session moved
+    into a project marked private leaves a complete record inside a project that
+    asked for none. MEASURED before this guard existed: the transcript landed in
+    <dest>/.localcoder/sessions/, and the episodic store took the work too.
+
+    Since the mode cannot be lowered to match, such a move is REFUSED and the
+    reason named - the only option that neither writes into a project that
+    declared itself private nor pretends the setting was honoured (AGENTS.md
+    rule 5: a privacy step that cannot run must never report success).
+
+    KEYED ON THE PROJECT'S OWN DECLARATION, NOT ON effective_mode(). The global
+    default coder mode is ``privacy``, so effective_mode() answers "privacy" for
+    every ordinary directory that has said nothing at all - and keying on it
+    refused moving a recording session ANYWHERE, which is a blanket ban wearing
+    a privacy control's clothes. Only ``.localcoder/config.toml`` is a project
+    SAYING something, so only that is treated as a claim to respect. A project
+    that has said nothing is not asserting privacy; the session's own mode,
+    chosen when it started, still governs.
+
+    An UNREADABLE project config refuses too, for exactly the reason
+    audit.effective_mode gives at the same fork: the file is the one place a
+    user can mark a project private, and we cannot tell whether this one did.
+
+    Shared by the web cwd route and the REPL's /cd deliberately: fixing one
+    surface and not the other would put the two back out of step.
+    """
+    from pathlib import Path as _Path
+
+    from localm.plugins.coder.project_config import (
+        ProjectConfigUnreadable,
+        load_project_config,
+    )
+    try:
+        declared = load_project_config(_Path(dest_cwd)).get("mode")
+    except ProjectConfigUnreadable:
+        return (
+            "That project's .localcoder/config.toml could not be read, so there "
+            "is no way to tell whether it is marked private. This session "
+            f"records at '{session_mode}', and its persistence cannot be lowered "
+            "once it has started, so it is not moved there. Fix the file, or "
+            "start a new session in that directory."
+        )
+    except Exception:                                          # noqa: BLE001
+        # Any other failure to read the project's own config is not a claim of
+        # privacy - fall through and let the session's own mode govern, matching
+        # effective_mode's bare `except Exception: pass` at the same fork.
+        return None
+
+    if not isinstance(declared, str):
+        return None
+    declared = declared.strip().lower()
+    if declared not in _MODE_RANK:
+        return None
+    if _MODE_RANK[declared] >= _MODE_RANK.get(session_mode, 0):
+        return None
+    return (
+        f"This session records at '{session_mode}', but that project sets "
+        f"'{declared}' in its .localcoder/config.toml. A session's persistence "
+        "cannot be lowered once it has started, so moving it there would write a "
+        "record the project asked not to keep. Start a new session in that "
+        "directory instead."
+    )
+
+
 def subprocess_privacy_env() -> dict[str, str]:
     """
     Return a copy of the current environment with shell history vars zeroed.

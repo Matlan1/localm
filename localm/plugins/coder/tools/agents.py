@@ -131,7 +131,12 @@ def inherited_child_kwargs(
         # it after its own MCP/plugin/skill registration, not before.
         inherited_skill_tools=(parent.active_skill_tools()
                                if hasattr(parent, "active_skill_tools") else None),
+        # The parent's value AND a flag saying it was inherited. The copy is the
+        # confinement floor (it survives the parent reference going away); the
+        # flag is what lets Agent.scope follow a scope TIGHTENED after this child
+        # was spawned, which a bare copy froze out.
         scope=(getattr(parent, "scope", None) if scope is _INHERIT else scope),
+        scope_inherited=(scope is _INHERIT),
         # Narrows FURTHER still: the role's allowlist is subtracted from the live
         # registry on top of the inherited disabled set, never in place of it, so
         # this line can only ever take capability away from the child.
@@ -491,7 +496,16 @@ def tool_spawn_agent_background(
 
         job = get_registry().submit(
             lambda: AgentJob(child, full_task, label=name, token=token,
-                             finalize=_finalize_isolated_child(info)),
+                             finalize=_finalize_isolated_child(info),
+                             # Attributed to the PARENT's session, not the
+                             # child's own agent: the child is an implementation
+                             # detail of this call, and the session that asked
+                             # for the work is the one that must be able to list
+                             # it. (The child inherits the same id anyway, via
+                             # Agent.__init__'s parent lookup - taken from the
+                             # parent here so it holds even for a child built
+                             # some other way.)
+                             owner=getattr(_parent_agent, "job_owner", None)),
             kind="agent")
     except Exception as exc:                          # noqa: BLE001 - reported
         # Never leak the slot OR the worktree when the submit is refused or the

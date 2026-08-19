@@ -83,6 +83,7 @@ class Agent(
         parent: Optional["Agent"] = None,
         mode: SessionMode = SessionMode.PRIVACY,
         scope: Optional[str] = None,
+        scope_inherited: bool = False,
         disabled_tools: Optional[frozenset] = None,
         restricted: bool = False,
         role: Optional[str] = None,
@@ -108,7 +109,7 @@ class Agent(
         self.name           = name
         self.max_turns      = max_turns
         self.verbose        = verbose
-        self.auto_approve   = auto_approve
+        self._auto_approve  = auto_approve
         self.always_confirm = always_confirm or set()
         self.dry_run        = dry_run
         # True only while _loop(interactive=True) runs, i.e. this session owns a
@@ -125,7 +126,15 @@ class Agent(
         self._patch_chunks: list[str] = [] # accumulated diffs when patch_mode=True
         self.parent         = parent
         self.mode           = mode
-        self.scope          = scope        # optional glob filter on file-access tools
+        self._scope         = scope        # optional glob filter on file-access tools
+        # Whether _scope was INHERITED from the parent rather than chosen for
+        # this agent. Only an inherited scope follows the parent's later
+        # changes; an explicit one is a deliberate narrowing and is left alone.
+        # The inherited VALUE is still copied above, so a child confines itself
+        # even if the parent reference ever goes away - confinement must not
+        # depend on an object outliving the child (test_parallel_dispatch pins
+        # exactly that, and went red when the copy was dropped).
+        self._scope_inherited = bool(scope_inherited)
         # Restricted = a shareable, non-owner coder session: locked to the
         # SAFE_RESTRICTED_TOOLS allowlist (read + confined edits, no execution,
         # network, env, or sub-agents) and given no external (MCP/plugin/skill)
@@ -178,6 +187,23 @@ class Agent(
         # _checkpoint_path_for for why the project alone was not enough.
         import uuid
         self._checkpoint_id: str = uuid.uuid4().hex[:12]
+        # Stable identity for attributing BACKGROUND JOBS to this session (the
+        # REPL's /bg, and the GUI's per-session background list). The job
+        # registry is process-wide, so on a GUI server - many coder sessions in
+        # one process - this is the only thing that can tell one session's
+        # background work from another's.
+        #
+        # INHERITED from the parent, so a spawned sub-agent's background work
+        # still belongs to the session that spawned it. Without that, a child's
+        # job would be attributed to a short-lived agent nobody can query, and
+        # the parent's /bg would silently stop listing work it started - which
+        # is also what keeps the CLI's process-wide /bg answer unchanged.
+        #
+        # Deliberately NOT _checkpoint_id: that one is overwritten by
+        # load_checkpoint() when a conversation is resumed, so jobs started
+        # before and after a resume would land under two different owners.
+        self.job_owner: str = (getattr(parent, "job_owner", None)
+                               or uuid.uuid4().hex[:12])
         # The raw, pre-episodic-preamble text of this session's first task/
         # message - captured once in loop.py's run_task/chat, restored by
         # resume_checkpoint() so it survives a pause/resume. save_checkpoint()
@@ -374,6 +400,74 @@ class Agent(
                 d for d in _build_openai_tool_defs()
                 if d.get("function", {}).get("name") not in self.disabled_tools
             ])
+
+    # ------------------------------------------------------------------ #
+    #  Inherited-from-the-parent state: READ LIVE, never snapshotted      #
+    # ------------------------------------------------------------------ #
+    #
+    # A SUB-AGENT IS NOT A SEPARATE SESSION. It has no user of its own, no
+    # confirmation channel of its own, and nothing can address it from outside;
+    # the session that spawned it is the only thing a human can steer. So the
+    # two settings a human revokes MID-RUN have to be read through the parent at
+    # every dispatch instead of copied into the child once.
+    #
+    # MEASURED before this existed: a session with auto-approve on spawned a
+    # child, the user revoked auto-approve, the route reported success - and the
+    # child carried on writing files without asking anyone, because
+    # inherited_child_kwargs had copied the flag at construction. The panel, the
+    # route docstring and the changelog all say the revoke "stops a run already
+    # under way", so this was a safety property claimed and not held.
+    #
+    # Note the same reasoning is already written elsewhere in this file, in
+    # _notify_scope_does_not_confine_shell: "a sub-agent is not a separate
+    # session: the parent already said it".
+
+    @property
+    def auto_approve(self) -> bool:
+        """Whether destructive tools skip confirmation.
+
+        A child can only ever be NARROWER than its parent: once the parent's
+        approval is revoked the child's own True stops counting. It cannot work
+        the other way round - a parent turning auto-approve back ON does not
+        silently re-approve a child that was deliberately spawned without it,
+        because the child's own value still has to be True as well.
+        """
+        if not self._auto_approve:
+            return False
+        parent = getattr(self, "parent", None)
+        # Recursive through the property, so a grandchild is bounded by the whole
+        # ancestor chain rather than only by its immediate parent.
+        if parent is not None and not getattr(parent, "auto_approve", True):
+            return False
+        return True
+
+    @auto_approve.setter
+    def auto_approve(self, value: bool) -> None:
+        self._auto_approve = bool(value)
+
+    @property
+    def scope(self):
+        """The glob confining the file tools, or None.
+
+        A child that INHERITED its scope follows the parent's, live - so
+        tightening a scope mid-run reaches work already in flight. A child given
+        an EXPLICIT scope keeps it: an explicit child scope is a deliberate
+        narrowing (see inherited_child_kwargs), and following the parent over it
+        would widen the child, the one direction that must never happen.
+
+        The inherited copy in ``_scope`` is the floor and is never discarded, so
+        a child whose parent reference is gone still confines itself to whatever
+        it inherited rather than silently becoming unscoped.
+        """
+        if self._scope_inherited:
+            parent = getattr(self, "parent", None)
+            if parent is not None:
+                return parent.scope
+        return self._scope
+
+    @scope.setter
+    def scope(self, value) -> None:
+        self._scope = value
 
     #  Construction helpers (split out of __init__).
 
