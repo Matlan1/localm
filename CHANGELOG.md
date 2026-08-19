@@ -115,6 +115,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   tick puts them back in. A **group by type** tick breaks the list into one
   section per kind (LLMs, Embedding, VAEs, ...), sorted inside each section by
   whichever column you are sorting on. Both are remembered in this browser only.
+  A model registered long enough ago that localm never recorded a type for it
+  also lives on **Other** now, and its Role reads **not set** instead of
+  claiming it is an LLM, which is what the list used to show. Picking a type
+  there files it away properly. It stays selectable for chat throughout, exactly
+  as before.
 - **A mapped network drive (e.g. `Z:\`) is now correctly recognized as a
   network location, and a new setting lets you refuse them.** localm's checks
   for a remote path only caught `\\host\share`-style UNC paths; a Windows
