@@ -220,6 +220,13 @@ def comfy_start(media) -> None:
     if state not in ("ok", "unsupported"):
         report_server_failure(state, payload, "ask the localm server about ComfyUI")
         raise SystemExit(1)
+    # POSITIVELY established down, as opposed to merely not established up. The
+    # per-plugin launch routes are safe either way (ensure_available only brings
+    # ComfyUI up), but the kernel fallback below goes through /v1/comfy/restart,
+    # whose stop half ABORTS an in-flight render. That one is only allowed on a
+    # confirmed-down ComfyUI. An "unsupported" status read is a server too old
+    # to have the route; it is not evidence that nothing is rendering.
+    confirmed_down = state == "ok" and not (payload or {}).get("alive")
 
     cfg = load_config()
     timeout = _launch_timeout(cfg)
@@ -245,6 +252,13 @@ def comfy_start(media) -> None:
     # No media plugin is installed, so no per-plugin launch route exists. The
     # kernel restart route launches from the GLOBAL comfy_launch_cmd, and with
     # ComfyUI confirmed down above its stop half has nothing to abort.
+    if not confirmed_down:
+        console.print("[yellow]![/yellow]  No media plugin is installed, and this "
+                      "server cannot say whether ComfyUI is already running.")
+        console.print("[dim]The only remaining way to start it from here also "
+                      "aborts any render in progress, so it is not used blind. "
+                      "Install a media plugin, or start ComfyUI yourself.[/dim]")
+        raise SystemExit(1)
     console.print("[dim]No media plugin is installed - launching from the global "
                   "comfy_launch_cmd instead of a plugin's own.[/dim]")
     st, pl = server_call(url, headers, "POST", "/v1/comfy/restart",

@@ -495,6 +495,25 @@ def test_start_falls_back_to_the_kernel_route_when_no_media_plugin_exists(monkey
     assert "/api/video/comfy-launch" in srv.paths()
 
 
+def test_the_render_aborting_fallback_is_never_used_on_an_unconfirmed_comfyui(monkeypatch):
+    """A server too old to answer /v1/comfy/status has told us nothing about
+    whether a render is in flight. The per-plugin launch routes are safe there
+    (they only bring ComfyUI up), but /v1/comfy/restart aborts the running
+    prompt, so it must not be reached on a guess.
+
+    Relying on "those three routes shipped together, so an old server has
+    neither" would make this safe by accident of release history rather than by
+    construction."""
+    srv = _install(monkeypatch, comfy_cli,
+                   _Server({("GET", "/v1/comfy/status"): _Resp(404, {}),
+                            ("POST", "/v1/comfy/restart"): _LAUNCHED}))
+    result = _run(comfy_cli.comfy_start)
+    assert result.exit_code == 1, result.output
+    assert "/v1/comfy/restart" not in srv.paths(), srv.paths()
+    # It still TRIED the safe per-plugin routes before giving up.
+    assert "/api/imagine/comfy-launch" in srv.paths()
+
+
 def test_an_explicitly_named_missing_plugin_never_falls_back(monkeypatch):
     """--media music asks for THAT plugin's ComfyUI settings. Silently
     launching from the global config instead would answer a question the user

@@ -44,6 +44,21 @@ permanent public record of what shipped and are never rewritten; the in-progress
   declares its settings as it loads, so listing or changing those uses a running
   localm, and says so plainly when there is none instead of showing an empty
   list.
+- **The terminal can now start, stop and restart ComfyUI, and cancel something
+  the server is busy with.** `localm comfy status` used to answer only from
+  disk; it now also says whether the ComfyUI localm targets is actually
+  running and whether localm launched it (`--no-ping` keeps the old, instant
+  answer). `localm comfy start` brings it up without running a generation,
+  `localm comfy stop` aborts the render, clears the queue and frees its VRAM,
+  and `localm comfy restart` does both. A ComfyUI you started yourself is
+  never killed, only aborted, and localm says so rather than implying
+  otherwise. Separately, `localm status` now shows an id for each thing the
+  server is working on and `localm cancel <id>` stops one of them - so a
+  two-hour re-embed or a large download started from a phone can be called off
+  from the terminal that could previously only watch it. Pressing Ctrl-C during
+  `localm image`, `localm music` or `localm video` now tells ComfyUI to abort
+  that render and release its VRAM, instead of leaving it going after localm
+  has exited.
 - **Managing what the coder remembers no longer needs a terminal, and two more
   session settings arrived.** The **lessons** panel under Coder now has a
   **stored** and a **dropped** tab, so you can see both what the agent recalls
