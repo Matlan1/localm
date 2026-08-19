@@ -71,6 +71,23 @@ export function renderSessionSelect() {
 
 // R17: the coder's right-side open-sessions rail (mirrors the chat conversation
 // list). The #session-select dropdown stays as the mobile fallback.
+/** Put the session rail on the configured side.
+ *
+ * Drives a `data-rail` attribute rather than toggling a class per side: one
+ * attribute with one value cannot end up in the both-classes state that two
+ * independent toggles can reach, and CSS reads it directly.
+ *
+ * An unknown or absent value is left alone deliberately - the CSS default is the
+ * right-hand rail, so an older server, a partial config payload or a typo lays the
+ * page out correctly instead of producing a rail on neither side.
+ */
+export function applyCoderRailSide(side) {
+  const view = $("view-coder");
+  if (!view) return;
+  if (side === "left") view.dataset.rail = "left";
+  else delete view.dataset.rail;
+}
+
 export function renderCoderSessionList() {
   const list = $("coder-session-list");
   if (!list) return;

@@ -632,6 +632,7 @@ DEFAULT_CONFIG: dict = {
     # sees the browser's IP, User-Agent or referrer, and the fetch is subject to
     # the same SSRF guard and domain lists as every other outbound request.
     "gui_proxy_remote_images": False,
+    "coder_rail_side": "right",
     # Reach localm by NAME, not just IP, on a network bind (see localm/netname.py
     # and docs/naming.md). mDNS/Bonjour advertises "<mdns_name>.local" so a phone
     # opens https://localm.local:PORT with no IP; the name is folded into the TLS

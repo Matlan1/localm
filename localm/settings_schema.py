@@ -507,6 +507,17 @@ CORE_FIELDS: list = [
                  "Sidebar wordmark, chosen with the logo picker and shared with "
                  "the desktop launcher.",
                  group="General"),
+    # Right by DEFAULT on purpose, and configurable on purpose. Most tools put a
+    # session list on the left; putting it on the right is a deliberate difference,
+    # and the option exists so someone who is used to the usual arrangement can have
+    # it rather than being told their habit is wrong. The rail carries its own
+    # toggle as well - moving a panel is direct manipulation, and making someone
+    # open Settings to do it is the kind of friction that gets a feature disliked.
+    # Both surfaces write THIS key, so they cannot disagree.
+    SettingField("coder_rail_side", Widget.SELECT, "Coder session list side",
+                 "Which side the coder's session list sits on. right "
+                 "(default) or left.",
+                 group="Coder", options=["right", "left"]),
     SettingField("desktop_window_mode", Widget.SELECT, "Default window mode",
                  "How `localm gui` opens when the standalone-window extra "
                  "(localm[desktop]) is installed. auto (default): the app "

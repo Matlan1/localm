@@ -472,6 +472,17 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 /* R17: the coder view is a main column plus a right-side open-sessions rail that
    mirrors the chat conversation list (its own style so the two can diverge). */
 #view-coder.active { flex-direction: row; }
+/* LEFT rail: row-reverse rather than moving the element, so the DOM order stays
+   main-then-rail. That order is what a screen reader and keyboard tab follow, and
+   the session list is secondary to the session itself in both - flipping the DOM
+   to move a panel visually would reorder the reading sequence as a side effect.
+   The border has to move with it: a left rail with a border on its left draws a
+   line against the window edge and none against the content it separates. */
+#view-coder.active[data-rail="left"] { flex-direction: row-reverse; }
+#view-coder[data-rail="left"] #coder-sessions {
+  border-left: none;
+  border-right: 1px solid var(--border);
+}
 #coder-main { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 #coder-sessions {
   flex-shrink: 0;
