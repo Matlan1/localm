@@ -210,6 +210,12 @@ boundary) additionally require an owner (admin) key to see or set, mirroring
 the media backends' `launch_cmd`/`api_url` gate. A blank/`null` save clears an
 override back to the field's own `default`.
 
+`localm plugin config <name>` reaches the same fields from the terminal, over
+those same two routes. It needs a running localm to do it: your field list is
+declared when the plugin loads, so a process that has not loaded it (as the CLI
+deliberately never does) has nothing to list. With no server up the command says
+that, rather than reporting your plugin as having no settings.
+
 Because the field list is supplied at `register()` time rather than declared
 statically, it only exists while the plugin is loaded: there is no way to
 pre-configure a plugin's settings before installing/enabling it (unlike the
