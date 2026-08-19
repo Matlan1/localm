@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-import multiprocessing as mp
 import sys
 from typing import Optional
+
+from localm import diagnostics
 
 from ._core import console, main
 
@@ -16,6 +17,29 @@ _FAIL_SYM = "[red]✗[/red]"
 # opt-in feature the user simply may not know about). Distinct from _WARN_SYM so
 # it never reads as "something is wrong".
 _HINT_SYM = "[cyan]i[/cyan]"
+
+_SYM_FOR = {diagnostics.OK: _OK_SYM,
+            diagnostics.WARN: _WARN_SYM,
+            diagnostics.FAIL: _FAIL_SYM}
+
+
+def _render(result) -> None:
+    """Print one ``diagnostics.CheckResult`` the way doctor has always printed it.
+
+    The five ACTIVE probes live in ``localm/diagnostics.py`` so the GUI can run
+    the same code instead of parsing this output (ADR-0001's follow-up, which
+    also named the alternative: parsing doctor's console output would be a
+    facade). Everything terminal-specific stays here - the symbols, the dim
+    parenthetical, the seven-space hint indent.
+
+    A result with NO findings prints nothing, which is not an oversight: an
+    absent optional backend has never produced a line, and a report people read
+    under stress does not need one saying so."""
+    for f in result.findings:
+        note = f" [dim]({f.note})[/dim]" if f.note else ""
+        console.print(f"  {_SYM_FOR.get(f.status, _WARN_SYM)}  {f.text}{note}")
+        for hint in f.hints:
+            console.print(f"       [dim]{hint}[/dim]")
 
 
 def _check_python() -> None:
@@ -32,279 +56,33 @@ def _check_python() -> None:
 
 
 def _check_llama_lib(find_binary_dir) -> bool:
-    """Print the llama.dll/.so health line; return True if a healthy lib is present."""
-    binary_dir = find_binary_dir()
-    if not binary_dir:
-        console.print(f"  {_FAIL_SYM}  llama binary dir not found - GGUF backend unavailable")
-        return False
-    dll_names = ["llama.dll", "llama.so", "libllama.so", "llama"]
-    found_dll = next(
-        (binary_dir / d for d in dll_names if (binary_dir / d).exists()),
-        None,
-    )
-    if not found_dll:
-        files = [f.name for f in binary_dir.iterdir() if f.is_file()][:8]
-        console.print(
-            f"  {_WARN_SYM}  binary dir found ({binary_dir}) but no llama .dll/.so - "
-            f"contents: {files}"
-        )
-        return False
-    # Existence alone is not health: a zeroed or truncated llama.dll exists but
-    # cannot load. Check the file size, and flag a lib that is present but
-    # implausibly small to be a real native library.
-    try:
-        size = found_dll.stat().st_size
-    except OSError as e:
-        console.print(
-            f"  {_FAIL_SYM}  {found_dll.name} in {binary_dir} cannot be "
-            f"read (corrupt?): {e}"
-        )
-        return False
-    # A genuine llama.dll/.so is multiple MB. 64 KiB is a generous floor that
-    # still rejects 0/1-byte stubs and tiny placeholders.
-    TINY_LIB_BYTES = 64 * 1024
-    if size == 0:
-        console.print(
-            f"  {_FAIL_SYM}  {found_dll.name} in {binary_dir} is empty "
-            f"(0 bytes) - corrupt; re-run 'localm setup-llama'"
-        )
-        return False
-    if size < TINY_LIB_BYTES:
-        console.print(
-            f"  {_WARN_SYM}  {found_dll.name} found in {binary_dir} but "
-            f"is suspiciously small ({size} bytes, expected multiple MB) "
-            f"- it may be truncated/corrupt"
-        )
-        return False
-    console.print(f"  {_OK_SYM}  {found_dll.name} found in {binary_dir}")
-    return _check_blas_kernels(binary_dir)
-
-
-def _check_blas_kernels(binary_dir) -> bool:
-    """Report a ROCm/HIP install whose BLAS kernel data is missing; return health.
-
-    A found-and-loadable llama.dll is NOT the same as a usable install. rocBLAS
-    resolves its GPU-arch GEMM kernels at runtime from a data directory next to
-    the DLL, so an install can pass every check above with ZERO kernels and then
-    hard-crash the native process (uncatchable from Python) the first time a
-    workload dispatches through Tensile - the embedder's batch encode.
-
-    That state is reachable two ways, and this catches both: the original defect
-    where the provision copied the library and dropped its data, and a provision
-    interrupted part-way (a locked file on a machine with the runtime open).
-
-    FAIL rather than WARN, because the failure it predicts is a hard process
-    crash, and because the remedy is one command."""
-    from localm.setup_llama import blas_kernel_problems
-    problems = blas_kernel_problems(binary_dir)
-    if not problems:
-        return True
-    for p in problems:
-        console.print(
-            f"  {_FAIL_SYM}  {p} - GPU matrix ops will crash the native "
-            f"process; re-run 'localm setup-llama --force'"
-        )
-    return False
+    """Print the llama.dll/.so health line(s); return True if a healthy lib is
+    present. The probe itself (presence, 0-byte/truncated detection, and the
+    rocBLAS/hipBLASLt kernel-data check) is diagnostics.check_llama_lib."""
+    result = diagnostics.check_llama_lib(find_binary_dir)
+    _render(result)
+    return result.healthy
 
 
 def _check_native_abi() -> None:
-    """Native ABI self-check (struct layout vs the actual DLL). Runs in a
-    SUBPROCESS (like setup-llama's load test) so a broken/incompatible DLL can
-    never crash doctor itself, and so the GPU runtime is loaded out-of-process."""
-    from .errors import _run_probe_subprocess
-    abi_code = (
-        "import json;"
-        "from localm.inference.backends.llamacpp._abi import abi_report;"
-        "v=abi_report();"
-        "print('ABI_RESULT:'+json.dumps("
-        "{'status':v.status,'detail':v.detail,'failures':v.failures[:3],"
-        "'layout':v.layout,'context_layout':v.context_layout}))"
-    )
-    # Kept separately from the `or {}` fallback below: None means the PROBE never
-    # ran (subprocess timed out, crashed, or printed no matching line - see
-    # _run_probe_subprocess), which is a different fact from the probe running
-    # and reporting that it could not check. The reason line below has to tell
-    # those apart; the rest of this function does not care.
-    abi_raw = _run_probe_subprocess(abi_code, "ABI_RESULT:")
-    abi = abi_raw or {}
-    status = abi.get("status", "unchecked")
-    # WHICH of the two llama_model_params layouts was selected is worth showing:
-    # upstream reordered that struct in place at an unchanged size, so this is
-    # the only externally visible sign of which generation of runtime is
-    # installed, and it is the first thing anyone diagnosing a wrong-GPU or
-    # unexpected-memory-behaviour report needs. See llamacpp/_structs.py.
-    layout = abi.get("layout") or ""
-    context_layout = abi.get("context_layout") or ""
-    layout_bits = ", ".join(
-        s for s in (f"model params {layout}" if layout else "",
-                    f"context params {context_layout}" if context_layout else "")
-        if s)
-    suffix = f" [dim]({layout_bits})[/dim]" if layout_bits else ""
-    if status == "ok":
-        console.print(f"  {_OK_SYM}  native ABI: struct layout matches this build"
-                      + suffix)
-    elif status == "mismatch":
-        console.print(f"  {_FAIL_SYM}  native ABI MISMATCH - the runtime's struct "
-                      "layout differs from this build; loading is refused to avoid "
-                      "memory corruption. Run 'localm setup-llama --force'.")
-        for f in abi.get("failures", []):
-            console.print(f"       [dim]{f}[/dim]")
-    elif status == "skipped":
-        console.print(f"  {_WARN_SYM}  native ABI check skipped (LOCALM_SKIP_ABI_CHECK set)")
-    else:
-        # The verdict ("not verified") was always honest; the REASON was not.
-        # abi_report() populates detail on every path it can return from
-        # ("runtime not loadable: ...", "loader import failed: ..."), so the old
-        # hardcoded 'runtime not loadable' default could ONLY ever be reached
-        # when the probe did not run at all - precisely the case where that
-        # reason is least likely to be true, and it sent the user to
-        # 'setup-llama --force' for a subprocess timeout it cannot fix.
-        # _check_gpu_verdict already distinguishes its own probe's None (see
-        # marker_trustworthy); this line now does too.
-        if abi_raw is None:
-            detail = ("the ABI probe did not run - it timed out, crashed, or "
-                      "printed no result")
-        else:
-            detail = abi.get("detail") or "no reason reported"
-        console.print(f"  {_WARN_SYM}  native ABI not verified [dim]({detail})[/dim]")
-
-
-def _worker_spawn_probe(conn) -> None:
-    """Target of the spawn self-check below - runs ONLY in the spawned child.
-    Module-level (not a closure): the "spawn" start method re-imports the
-    target by its module path + name in the child, which only works for a
-    plain top-level function. Does nothing but confirm it started; the point
-    is proving the spawn ITSELF works, not anything the child does afterward."""
-    try:
-        conn.send("ok")
-    finally:
-        conn.close()
+    """Print the native ABI self-check line. The probe (a subprocess load of the
+    provisioned runtime, so a broken DLL can never crash doctor itself) is
+    diagnostics.check_native_abi."""
+    _render(diagnostics.check_native_abi())
 
 
 def _check_worker_spawn() -> None:
-    """Verify localm can actually spawn its isolated worker process - the SAME
-    ``multiprocessing.get_context("spawn")`` mechanism every GGUF model load and
-    the voice/STT engine depend on (see localm/_mp_spawn.py, #617).
-
-    The native-ABI and GPU-probe checks above isolate via a PLAIN subprocess
-    (``_run_probe_subprocess``), a different code path - that proves the native
-    library loads and computes correctly, but it does NOT exercise
-    multiprocessing's own spawn machinery, which on Windows redirects the
-    child's executable under conditions a renamed launcher (LocaLM.exe) can
-    break. That gap is exactly why #617 (every GGUF load failing with
-    "[WinError 2] The system cannot find the file specified") passed a doctor
-    run showing everything green. This check would have caught it."""
-    try:
-        from localm._mp_spawn import ensure_spawn_uses_venv_python
-        ensure_spawn_uses_venv_python()
-        ctx = mp.get_context("spawn")
-        parent_conn, child_conn = mp.Pipe(duplex=False)
-        proc = ctx.Process(target=_worker_spawn_probe, args=(child_conn,), daemon=True)
-    except Exception as e:
-        # Setup itself failed (e.g. the fix helper or Pipe() errored) - rarer
-        # and genuinely different from a spawn failure, so it gets its own line.
-        console.print(f"  {_FAIL_SYM}  background worker spawn check errored: {e}")
-        return
-
-    reply = None
-    error_detail = None
-    try:
-        proc.start()
-        got_reply = parent_conn.poll(20)
-        reply = parent_conn.recv() if got_reply else None
-        proc.join(5)
-        if proc.is_alive():
-            proc.terminate()
-            proc.join(5)
-    except Exception as e:
-        # This IS the #617 failure mode: proc.start() raises directly
-        # (FileNotFoundError: [WinError 2] ...) rather than the child ever
-        # running - treated the same as "no reply", not a separate error line,
-        # so every way this can fail reads as one consistent, actionable verdict.
-        error_detail = str(e)
-
-    if reply == "ok":
-        console.print(f"  {_OK_SYM}  background worker spawn: OK "
-                      "(model loads and voice transcription use this)")
-    else:
-        detail = f" ({error_detail})" if error_detail else ""
-        console.print(
-            f"  {_FAIL_SYM}  background worker spawn FAILED{detail} - GGUF "
-            "model loads and voice transcription will fail even though the "
-            "runtime above checks out")
+    """Print the isolated-worker-spawn line. The probe (a real
+    ``multiprocessing.get_context("spawn")`` round trip, #617) is
+    diagnostics.check_worker_spawn."""
+    _render(diagnostics.check_worker_spawn())
 
 
 def _check_venv_creation() -> None:
-    """Verify localm can actually create a nested venv via ``-m venv`` using
-    ``real_base_python()`` - the SAME mechanism the managed-ComfyUI installer
-    depends on (managed_comfy_fresh.py, #621). Creates and immediately discards a
-    throwaway venv under a temp dir; never touches LOCALM_HOME or any real install.
-
-    A DIFFERENT code path from the worker-spawn check above (that exercises
-    multiprocessing's spawn machinery; this exercises stdlib venv's own basename-
-    matching + mandatory ensurepip bootstrap): #621 (managed ComfyUI setup
-    silently failing with "[WinError 2]") passed a doctor run showing everything
-    green precisely because nothing probed this. This check would have caught it.
-
-    Also probes that pip actually landed inside the new venv (NEW-MANAGED-COMFY-
-    VENV-MISSING-PIP): ``-m venv`` can report success - return code 0, the
-    interpreter file present - while its own mandatory ensurepip bootstrap
-    silently failed (a base Python with ensurepip stripped, or a broken
-    install). The managed-ComfyUI installer pip-installs into a venv it just
-    created with no ``--without-pip`` fallback, so a pip-less venv here would
-    read as doctor-green right up until provisioning fails deep inside with an
-    opaque "No module named pip"."""
-    import subprocess
-    import tempfile
-    from pathlib import Path
-
-    from localm._mp_spawn import real_base_python
-
-    venv_python = real_base_python() or sys.executable
-    ok = False
-    detail = ""
-    pip_ok = True
-    pip_detail = ""
-    try:
-        with tempfile.TemporaryDirectory(prefix="localm-doctor-venv-") as tmp:
-            dest = Path(tmp) / "probe-venv"
-            r = subprocess.run(
-                [str(venv_python), "-m", "venv", str(dest)],
-                capture_output=True, text=True, timeout=60)
-            expected = dest / ("Scripts/python.exe" if sys.platform == "win32"
-                               else "bin/python3")
-            ok = r.returncode == 0 and expected.is_file()
-            if not ok:
-                tail = (r.stderr or r.stdout or "").strip().splitlines()
-                detail = tail[-1] if tail else ""
-            else:
-                pr = subprocess.run(
-                    [str(expected), "-m", "pip", "--version"],
-                    capture_output=True, text=True, timeout=30)
-                pip_ok = pr.returncode == 0
-                if not pip_ok:
-                    tail = (pr.stderr or pr.stdout or "").strip().splitlines()
-                    pip_detail = tail[-1] if tail else ""
-    except Exception as e:
-        console.print(f"  {_FAIL_SYM}  venv-creation check errored: {e}")
-        return
-
-    if ok and pip_ok:
-        console.print(f"  {_OK_SYM}  venv creation: OK "
-                      "(the managed-ComfyUI installer uses this)")
-    elif ok and not pip_ok:
-        console.print(
-            f"  {_FAIL_SYM}  venv creation FAILED"
-            + (f" ({pip_detail})" if pip_detail else "")
-            + " - the venv was created but has no working pip; managed ComfyUI "
-              "setup ('localm comfy setup') will fail even though the runtime "
-              "above checks out")
-    else:
-        console.print(
-            f"  {_FAIL_SYM}  venv creation FAILED"
-            + (f" ({detail})" if detail else "")
-            + " - managed ComfyUI setup ('localm comfy setup') will fail even "
-              "though the runtime above checks out")
+    """Print the nested-venv-creation line. The probe (a real ``-m venv`` plus a
+    pip-landed check, the mechanism the managed-ComfyUI installer depends on,
+    #621) is diagnostics.check_venv_creation."""
+    _render(diagnostics.check_venv_creation())
 
 
 def _check_gpu_driver() -> bool:
@@ -841,54 +619,16 @@ def _check_packages() -> dict:
 
 
 def _check_hf_backend_usable(torch_mod, transformers_mod) -> None:
-    """Prove the HF (transformers) backend is actually USABLE, not merely
-    importable. ``localm/inference/backends/hf.py`` loads models through
-    ``transformers.AutoTokenizer`` / ``AutoProcessor`` / ``AutoModelForCausalLM``,
-    which transformers resolves through a LAZY module: ``import transformers``
-    only sets up that machinery, and a heavy submodule (e.g. distributed/fsdp)
-    is imported for real only on the FIRST attribute access that needs it. So
-    ``import transformers`` can succeed - and ``_check_packages`` above reports
-    a clean version - while every one of those classes is dead.
+    """Print the HF-backend-usable line. The probe (resolving transformers' LAZY
+    Auto* classes for real, which is what separates "installed" from "usable" -
+    the 0.1.2 regression) is diagnostics.check_hf_backend.
 
-    This exact gap shipped in 0.1.2: transformers 5.14 hard-imports fsdp on the
-    tokenizer path, which needs ``torch._C._distributed_c10d`` - absent from the
-    pinned ROCm/Windows torch build - so EVERY HF model load died at "loading
-    processor..." while ``localm doctor`` printed both packages OK (found during
-    the 0.1.2 release verification; see tests/test_gpu_extra_pins.py for the
-    version-pin guard this backs up with a functional one).
-
-    Runs only when both packages actually import; an absent OPTIONAL backend
-    (reported above) is not a fault."""
-    if torch_mod is None or transformers_mod is None:
-        return
-    try:
-        for name in ("AutoTokenizer", "AutoProcessor", "AutoModelForCausalLM"):
-            getattr(transformers_mod, name)
-    except Exception as e:
-        # transformers' lazy loader re-raises a failed submodule import as a
-        # generic ModuleNotFoundError("Could not import module 'X'") chained
-        # (`raise ... from e`) onto the real cause - and since resolving one
-        # lazy attribute can walk through OTHER lazy submodules, that can
-        # repeat several layers deep before reaching the actual error. Printing
-        # only the top frame reproduces exactly the unhelpful message that hid
-        # this regression; walk the chain to the true root instead.
-        root = e
-        seen = {id(root)}
-        while True:
-            nxt = root.__cause__ or root.__context__
-            if nxt is None or id(nxt) in seen:
-                break
-            root = nxt
-            seen.add(id(root))
-        console.print(
-            f"  {_FAIL_SYM}  HF backend (transformers) is installed but UNUSABLE "
-            f"- every HF model load will fail: {type(root).__name__}: {root}"
-        )
-        return
-    console.print(
-        f"  {_OK_SYM}  HF backend (transformers): AutoTokenizer / AutoProcessor / "
-        "AutoModelForCausalLM load OK"
-    )
+    The two module handles come from ``_check_packages`` above, which has already
+    decided whether each is importable HERE - so ``resolved=True``: a None means
+    absent, and the core must not go re-importing torch in a process that may
+    have just been told not to."""
+    _render(diagnostics.check_hf_backend(torch_mod, transformers_mod,
+                                         resolved=True))
 
 
 def _check_plugin_deps() -> None:

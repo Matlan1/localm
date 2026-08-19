@@ -35,6 +35,12 @@ def test_worker_spawn_check_reports_failure_when_spawn_is_broken(monkeypatch):
     # importlib to get the actual module, not that Command object.
     import importlib
     doctor_mod = importlib.import_module("localm.cli.doctor")
+    # The spawn itself lives in localm.diagnostics now (doctor's
+    # _check_worker_spawn is a renderer over diagnostics.check_worker_spawn), so
+    # that is where `mp` has to be broken. The assertion below still reads
+    # doctor's RENDERED line: a spawn failure the terminal fails to name is the
+    # regression, not a return value.
+    diagnostics_mod = importlib.import_module("localm.diagnostics")
 
     class _BrokenProcess:
         def __init__(self, *a, **k):
@@ -48,7 +54,8 @@ def test_worker_spawn_check_reports_failure_when_spawn_is_broken(monkeypatch):
         def Process(self, *a, **k):
             return _BrokenProcess()
 
-    monkeypatch.setattr(doctor_mod.mp, "get_context", lambda name: _BrokenContext())
+    monkeypatch.setattr(diagnostics_mod.mp, "get_context",
+                        lambda name: _BrokenContext())
 
     from rich.console import Console
     import io

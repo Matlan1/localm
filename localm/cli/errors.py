@@ -52,18 +52,16 @@ def _run_probe_subprocess(code: str, prefix: str) -> dict | None:
     """Run *code* in a fresh subprocess (isolates a native-library-touching
     probe so a broken DLL/lib can never crash the caller) and parse the one
     stdout line starting with *prefix* as JSON, e.g. ``"GPU_PROBE:{...}"``.
-    Returns None on any failure (timeout, crash, no matching line)."""
-    import json
-    import subprocess
+    Returns None on any failure (timeout, crash, no matching line).
 
-    try:
-        r = subprocess.run([sys.executable, "-c", code],
-                           capture_output=True, text=True, timeout=120)
-        line = next((ln for ln in (r.stdout or "").splitlines()
-                     if ln.startswith(prefix)), "")
-        return json.loads(line[len(prefix):]) if line else None
-    except Exception:
-        return None
+    The implementation moved to ``localm.diagnostics`` when the active doctor
+    probes did (that module must not import click or rich, so it cannot import
+    this one). Kept here as the CLI's name for it rather than deleted: the GPU
+    device probe still calls it from doctor, and one copy of these ten lines is
+    the whole point of the move."""
+    from localm.diagnostics import run_probe_subprocess
+
+    return run_probe_subprocess(code, prefix)
 
 
 def _report_add_paths_result(result: dict) -> None:
