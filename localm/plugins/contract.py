@@ -115,7 +115,6 @@ class PluginSettingField:
     # second flag was forgotten).
 
 
-
 @dataclass
 class PluginSpec:
     """Validated manifest of a plugin (superset of loader.PluginManifest)."""
