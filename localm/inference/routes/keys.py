@@ -61,9 +61,23 @@ def register(app: FastAPI, ctx) -> None:
         # merely keys:admin must not be able to mint itself owner-equivalent
         # access. In open mode (caller is None) privileged grants are refused.
         is_owner = caller is not None and scopes.ADMIN in caller
+        # Same owner-only gate, extended to host-filesystem reach: a merely
+        # keys:admin-scoped caller minting fs_access=host would hand the new
+        # key access to the whole server disk, which is not a scope but is an
+        # equivalent-severity grant. Refuse rather than silently downgrading to
+        # "none" (AGENTS rule 5: a security step must never report success on a
+        # request it did not actually honour).
+        fs_access = auth.norm_fs_access(body.get("fs_access"))
+        if fs_access != "none" and not is_owner:
+            raise HTTPException(
+                403,
+                f"Refusing to grant fs_access={fs_access!r}: only the owner key "
+                "may grant a new key host-filesystem reach."
+            )
         try:
             created = create_key(body.get("name", ""), scope_list,
-                                 allow_privileged=is_owner, expires=expires)
+                                 allow_privileged=is_owner, expires=expires,
+                                 fs_access=fs_access)
         except PermissionError as e:
             raise HTTPException(403, str(e))
         except ValueError as e:
