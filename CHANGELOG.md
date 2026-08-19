@@ -32,6 +32,19 @@ permanent public record of what shipped and are never rewritten; the in-progress
   when ComfyUI is not running, the panel no longer stops at "not running": it
   lists the parts this workflow needs and which of your registered models could
   fill each one, which needs no ComfyUI at all.
+- **A one-time "download it now" for the two small helper models, without
+  touching your network settings.** Semantic search needs a small embedding
+  model and the mic button needs a Whisper speech model, each fetched exactly
+  once. With the network policy set to "ask", those one-time fetches used to
+  leave only a bad choice: flip net_mode for the whole app, or go without the
+  feature. Now the blocked state says exactly why (in the Knowledge page's
+  embedding panel and the mic button's tooltip) and offers a one-click download
+  of just that model. The permission that guards it is the same one that could
+  change the network policy itself, the download happens once, and nothing is
+  written to settings: net_mode stays where you put it for everything else,
+  and net_mode=off remains absolute, with no bypass. The voice plugin also
+  fetches its speech model right when it is installed (under the same rule),
+  so the mic works on first click instead of stalling on a surprise download.
 - **Images a model links in a reply can now be displayed, without the site that
   hosts them learning anything about you.** Until now a linked image showed as
   broken: localm refuses to let the page load anything from the internet. Other
@@ -177,6 +190,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   though a model were selected while generating still used the missing one. The
   dropdown now shows the file the workflow actually names, marked "not
   installed", so picking a different one is a deliberate choice.
+- **The mic button's speech-model download now obeys the network policy.** The
+  one-time Whisper fetch used to run regardless of net_mode; now "off" truly
+  blocks it, "ask" waits for your explicit go-ahead, and a model already on
+  disk loads with no network access at all. When the download is blocked, the
+  mic no longer lets you record and then fail: it is greyed out with the real
+  reason up front.
 - **A model pull can no longer be reported as failed after it actually
   succeeded.** Once a download finishes, localm prints a green checkmark to
   confirm the checksum was verified - and on some machines that confirmation
