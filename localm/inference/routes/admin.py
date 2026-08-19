@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import re
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 
 import localm.inference.http_server as _hs
 from localm import scopes
@@ -330,4 +330,120 @@ def register(app: FastAPI, ctx) -> None:
             _request_restart(update_watchdog=watchdog, port=port,
                              instance_id=getattr(app.state, "instance_id", None))
             res["restarting"] = True
+        return res
+
+    # -----------------------------------------------------------------------
+    #  CHK-UPDATE-ROLLBACK: why these two routes exist, why they are OWNER-only,
+    #  and why they carry no signature or anti-rollback check
+    # -----------------------------------------------------------------------
+    # `localm update --rollback` (cli/maintenance.py) had no GUI form at all, while
+    # the two rollback paths that DO exist cover the opposite situation: the
+    # post-apply health watchdog is a FAILURE handler (the new build did not come
+    # back), and rollback.bat / rollback.sh are for a build too broken to run at
+    # all. Neither covers "it applied cleanly, it runs, and it is worse" - which is
+    # the only case a user can actually judge, and the case in which they are
+    # sitting in the GUI having just pressed Update now, with no terminal.
+    #
+    # WHY NO SIGNATURE CHECK, and this is not an omission: there is nothing to
+    # verify. apply() verifies a downloaded build.zip against a pinned release key
+    # BEFORE extracting it (updater.verify_signature). A rollback restores a
+    # DIRECTORY that this install produced from its own files at the previous
+    # apply. It is not a signed artifact, it never crossed the network, and signing
+    # it locally would prove nothing against an attacker who can already write it.
+    # The integrity question for a local backup is filesystem access, not a
+    # signature - and anyone who can rewrite <home>/updates/backup can rewrite the
+    # install directly, without going through this route.
+    #
+    # WHY NO ANTI-ROLLBACK CHECK: updater._refuse_downgrade exists so a validly
+    # SIGNED but OLDER build cannot be replayed at an install by a compromised
+    # release channel. Applying it here would refuse every rollback, because a
+    # rollback IS a downgrade by definition. The freshness property it protects is
+    # not the property this operation has.
+    #
+    # WHAT THE REAL CONTROL IS: the residual risk is a principal reverting a
+    # security fix by restoring the previous build. config:write is privileged
+    # (scopes.PRIVILEGED_SCOPES) but it is NOT the owner, and it is what the rest of
+    # the Updates card is gated on - so gating a downgrade on it alone would hand a
+    # delegated key a capability it has nowhere else. These routes therefore use the
+    # same owner gate as the admin_only settings in routes/config.py: open mode
+    # (caller_scopes None) is the trusted local owner and passes; any key must hold
+    # scopes.ADMIN. That leaves the CLI and the GUI genuinely equivalent - both
+    # require the owner - rather than the GUI being the weaker door.
+
+    @app.get("/api/update/rollback",
+             dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
+    async def update_rollback_info_ep():
+        """Whether a rollback is possible and which build it would restore.
+        Read-only: it never rolls anything back, and never creates the updates dir.
+        Returns ``{available, backup, version, current}``. Scoped like its
+        /api/update/check sibling; the POST below is the owner-gated half."""
+        from localm import updater
+        return await asyncio.to_thread(updater.rollback_info)
+
+    @app.post("/api/update/rollback",
+              dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
+    async def update_rollback_ep(request: Request):
+        """Restore the previous build from the last update backup, then restart in
+        place so it actually loads. OWNER-only (see CHK-UPDATE-ROLLBACK above).
+
+        THE RESTART IS NOT A CONVENIENCE, it is what makes this correct on a server.
+        rollback_last() replaces the running install's own source ON DISK, including
+        the localm package. `localm update --rollback` gets away with printing
+        "restart to load it" because that process exits moments later; a server does
+        not, and localm imports lazily throughout, so every subsequent lazy import in
+        this process would load OLD code into a NEW-code process. Re-exec ends that
+        window instead of leaving the user in it.
+
+        No update watchdog on this restart, unlike /api/update/apply's: that
+        watchdog's failure action IS a rollback, so arming it here would answer a
+        failed rollback with another one.
+
+        HONEST LIMIT: this restores the previous build's FILES, which is exactly what
+        the CLI does. It does not undo a deps-class update's package installs, and
+        the class of the last apply is not recorded anywhere, so this cannot warn
+        about that specific case rather than guess at it."""
+        from localm import updater
+        from localm.bugreport import LocalmError
+        held = _hs.caller_scopes(request)
+        if held is not None and scopes.ADMIN not in held:
+            raise HTTPException(
+                403, "Rolling the install back to the previous build requires an "
+                "owner (admin) key: it replaces the running code with an earlier "
+                "version, which can put back a fixed defect.")
+        # Read the target version BEFORE restoring, so the reply can name what it
+        # put back. rollback_info() is a genuine read-only probe (it never calls
+        # rollback_last), so this is not the "a call made just to check is still a
+        # call" hazard - the whole reason that probe exists as its own function.
+        target_version = (await asyncio.to_thread(updater.rollback_info)).get("version")
+        try:
+            res = await asyncio.to_thread(updater.rollback_last)
+        except LocalmError as e:
+            # A precondition, so NOTHING was touched: either there is no backup, or
+            # an update/rollback already holds the single-flight lock. Both are a
+            # genuine 409 conflict, and both are kept distinct from the partial-
+            # restore case below, which looks similar to a caller and is the
+            # opposite situation (the install HAS been modified).
+            raise HTTPException(409, format_localm_error(e))
+        except Exception as e:
+            # _apply_update.rollback reports a PARTIAL restore by raising, listing
+            # which restores failed, and deliberately keeps the backup for manual
+            # recovery. The install may now be half-restored: that is the one
+            # outcome that must never read as a success or as the benign "nothing to
+            # roll back" above, so it is surfaced verbatim AND logged (a 500 body can
+            # be lost; the log is what a bug report carries). Broad on purpose - the
+            # exception class does not change the user's situation, and swallowing
+            # anything here would hide a half-applied install.
+            from localm.debuglog import logger
+            logger.error("update rollback failed partway; the install may be "
+                         "half-restored and the backup is kept: %s", e)
+            raise HTTPException(
+                500, f"The rollback failed partway, so the install may be "
+                     f"half-restored. The backup was kept for manual recovery. "
+                     f"Details: {e}")
+        # Only now: the restore completed, so re-exec into it. Same port pinning as
+        # /v1/server/restart, so the GUI's reconnect overlay finds the new process.
+        _request_restart(port=getattr(app.state, "instance_port", None),
+                         instance_id=getattr(app.state, "instance_id", None))
+        res["restarting"] = True
+        res["version"] = target_version
         return res

@@ -438,10 +438,17 @@ def download(asset_id, dest, *, timeout: float = 120.0, opener=None) -> Path:
 
 # ------------------------------ apply -----------------------------------
 
-def _updates_dir() -> Path:
+def _updates_dir(*, create: bool = True) -> Path:
+    """The data dir holding update scratch, the manifest, and the stable backup.
+
+    ``create=False`` is for READ-ONLY probes (:func:`rollback_info`): a status poll
+    must not bring an ``updates/`` tree into existence on an install that has never
+    updated. One derivation either way, so a probe and the action it describes can
+    never end up looking at different paths."""
     from localm.config import home_dir
     d = home_dir() / "updates"
-    d.mkdir(parents=True, exist_ok=True)
+    if create:
+        d.mkdir(parents=True, exist_ok=True)
     return d
 
 
@@ -502,8 +509,9 @@ def _apply_lock_is_stale(lock_dir: Path) -> bool:
 
 
 @contextlib.contextmanager
-def _apply_lock():
-    """Cross-process, cross-thread single-flight guard for :func:`apply` (SEC-
+def _apply_lock(what: str = "update"):
+    """Cross-process, cross-thread single-flight guard for :func:`apply` and
+    :func:`rollback_last`, which mutate the SAME install tree (SEC-
     UPDATE-RACE, checkup 2026-08-11 item 7 - the only data-destroying finding in
     that run). ``mkdir`` is atomic, the same idiom this repo's own test-slot lock
     uses, so two concurrent callers - two browser tabs' ``POST /api/update/apply``
@@ -539,7 +547,7 @@ def _apply_lock():
         except FileExistsError:
             from localm.bugreport import LocalmError
             raise LocalmError(
-                "another update is already being applied",
+                f"another {what} is already being applied",
                 reason="wait for it to finish, then try again")
     # Record who holds it, so a future caller's staleness check can ask
     # instances.pid_alive() instead of guessing from elapsed time. Best-effort:
@@ -626,7 +634,7 @@ def apply(asset_id, *, signature=None, installed=None, download_opener=None,
     from localm.bugreport import LocalmError
     target = Path(installed) if installed else repo_root()
     updir = _updates_dir()
-    backup_dir = updir / "backup"   # the STABLE location rollback_last() reads
+    backup_dir = _backup_dir(create=True)   # the STABLE location rollback_last() reads
 
     with _apply_lock():
         run_dir = _new_run_dir()
@@ -864,40 +872,101 @@ def _apply_warn(msg, *args) -> None:
         pass
 
 
+def _backup_dir(*, create: bool = False) -> Path:
+    """The ONE stable path :func:`apply` promotes each run's backup to and
+    :func:`rollback_last` restores from. Derived in a single place so a read-only
+    probe and the action it describes can never disagree about where to look."""
+    return _updates_dir(create=create) / "backup"
+
+
+def _backup_is_restorable(backup_dir: Path) -> bool:
+    """True when *backup_dir* holds something :func:`rollback_last` could restore.
+
+    ONE predicate, shared by the probe and the action, so a surface can never offer
+    a rollback the action then refuses, nor hide one it would have accepted. An
+    unreadable directory answers False: "we cannot look" and "there is nothing here"
+    lead to the same safe refusal HERE (both mean do not offer a rollback), and the
+    action re-checks and reports the real reason if it is actually attempted."""
+    try:
+        return backup_dir.is_dir() and any(backup_dir.iterdir())
+    except OSError:
+        return False
+
+
+def rollback_info() -> dict:
+    """What :func:`rollback_last` would restore, WITHOUT restoring anything.
+
+    Returns ``{available, backup, version, current}``. ``version`` is the backed-up
+    build's VERSION, or None when the backup predates that file or it is unreadable
+    (reported as unknown, never guessed from the running version).
+
+    STRICTLY READ-ONLY, and that is the point: an existence check must not be done by
+    calling the action and catching its refusal, because :func:`rollback_last` MOVES
+    THE INSTALL. It also does not create ``updates/`` (see :func:`_updates_dir`), so
+    a GUI status poll leaves an install that has never updated exactly as it was."""
+    backup_dir = _backup_dir()
+    available = _backup_is_restorable(backup_dir)
+    version = None
+    if available:
+        try:
+            version = (backup_dir / "VERSION").read_text(encoding="utf-8").strip() or None
+        except OSError:
+            version = None
+    return {"available": available,
+            "backup": str(backup_dir) if available else None,
+            "version": version,
+            "current": _version.read_version()}
+
+
 def rollback_last(*, installed=None) -> dict:
     """Restore the install from the most recent update backup. Returns
-    ``{rolled_back, backup}``. Raises LocalmError when there is no backup."""
+    ``{rolled_back, backup}``. Raises LocalmError when there is no backup.
+
+    NOT signature- or freshness-checked, and neither check is applicable rather than
+    merely omitted - see the CHK-UPDATE-ROLLBACK note above :func:`rollback_info`'s
+    HTTP callers in ``inference/routes/admin.py`` for why, and for the owner gate that
+    is the real control on this operation. Use :func:`rollback_info` to ask whether a
+    rollback is possible; calling this one to find out performs it."""
     from localm import _apply_update as au
     from localm.bugreport import LocalmError
     target = Path(installed) if installed else repo_root()
     updir = _updates_dir()
-    backup_dir = updir / "backup"
-    if not backup_dir.is_dir() or not any(backup_dir.iterdir()):
+    backup_dir = _backup_dir(create=True)
+    if not _backup_is_restorable(backup_dir):
         raise LocalmError("no update backup to roll back to", reason=str(backup_dir))
-    # Prefer the recorded full swap set (includes brand-new top-level entries the update
-    # added, which are NOT in the backup dir) so those are removed too; fall back to the
-    # backup listing for an older backup written before the manifest existed. au.rollback
-    # removes each name then restores whatever the backup holds, so a manifest-only (new)
-    # name is removed-not-restored and a backed-up name is removed-then-restored.
-    names = None
-    manifest = updir / "applied_names.json"
-    if manifest.is_file():
-        try:
-            import json
-            loaded = json.loads(manifest.read_text(encoding="utf-8"))
-            if isinstance(loaded, list) and all(isinstance(x, str) for x in loaded):
-                names = loaded
-        except (OSError, ValueError):
-            names = None
+    # SAME single-flight lock apply() takes, because both mutate the SAME install
+    # tree. This was previously unserialised and safe only by accident of having
+    # exactly ONE caller (the CLI); the GUI route makes an apply and a rollback two
+    # buttons in one Settings card, so "nobody would run both at once" stopped being
+    # true. A rollback interleaved with a swap removes names the swap is restoring,
+    # and the lock's own docstring already describes how that loses the true
+    # pre-update install for good. Cross-PROCESS on purpose: the contender can be the
+    # CLI in a terminal, which no in-process lock could see.
+    with _apply_lock("update or rollback"):
+        # Prefer the recorded full swap set (includes brand-new top-level entries the update
+        # added, which are NOT in the backup dir) so those are removed too; fall back to the
+        # backup listing for an older backup written before the manifest existed. au.rollback
+        # removes each name then restores whatever the backup holds, so a manifest-only (new)
+        # name is removed-not-restored and a backed-up name is removed-then-restored.
+        names = None
+        manifest = updir / "applied_names.json"
+        if manifest.is_file():
+            try:
+                import json
+                loaded = json.loads(manifest.read_text(encoding="utf-8"))
+                if isinstance(loaded, list) and all(isinstance(x, str) for x in loaded):
+                    names = loaded
+            except (OSError, ValueError):
+                names = None
+            if names is None:
+                # The manifest EXISTS but is unreadable or malformed (NOT the benign
+                # never-written case): we can still roll back from the backup dir, but that
+                # listing lacks the brand-new top-level entries the update ADDED, so those
+                # will not be removed. Surface the degraded rollback rather than silently
+                # doing a partial one (we do not hide problems).
+                _apply_warn("applied_names.json at %s exists but is unreadable; new files "
+                            "added by the update will not be removed by this rollback", manifest)
         if names is None:
-            # The manifest EXISTS but is unreadable or malformed (NOT the benign
-            # never-written case): we can still roll back from the backup dir, but that
-            # listing lacks the brand-new top-level entries the update ADDED, so those
-            # will not be removed. Surface the degraded rollback rather than silently
-            # doing a partial one (we do not hide problems).
-            _apply_warn("applied_names.json at %s exists but is unreadable; new files "
-                        "added by the update will not be removed by this rollback", manifest)
-    if names is None:
-        names = [p.name for p in backup_dir.iterdir()]
-    au.rollback(backup_dir, target, names)
-    return {"rolled_back": True, "backup": str(backup_dir)}
+            names = [p.name for p in backup_dir.iterdir()]
+        au.rollback(backup_dir, target, names)
+        return {"rolled_back": True, "backup": str(backup_dir)}

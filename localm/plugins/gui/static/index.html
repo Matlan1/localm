@@ -923,6 +923,24 @@
                 <div id="update-status" class="sub" hidden></div>
               </div>
 
+              <!-- The GUI half of `localm update --rollback`. Its OWN sub-block, not
+                   part of #app-update-block above: a backup outlives the update
+                   proxy's configuration, and that block hides when the proxy is
+                   absent, which would take the rollback with it. Revealed only when
+                   a backup actually exists (GET /api/update/rollback), so on an
+                   install that has never updated it is simply not there. -->
+              <div class="update-subsection" id="app-rollback-block" hidden>
+                <h4 class="update-sub-head">Roll back</h4>
+                <div class="sub">Restore the build you were running before the last update,
+                then restart. This is for an update that applied cleanly but turned out worse.
+                It restores that build's files; it does not undo package installs an update
+                made along the way.</div>
+                <div class="actions">
+                  <button class="btn-secondary" id="update-rollback">Roll back</button>
+                </div>
+                <div id="update-rollback-status" class="sub" hidden></div>
+              </div>
+
               <div class="update-subsection">
                 <h4 class="update-sub-head">Runtime update</h4>
                 <div class="sub">Check for a newer llama.cpp runtime build for your installed
