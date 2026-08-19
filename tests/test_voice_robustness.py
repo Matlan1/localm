@@ -159,9 +159,13 @@ def test_stt_request_carries_the_contained_download_root(monkeypatch, tmp_path):
 
     assert voice._run_in_worker(b"audio", "base", None, 5.0) == "hello"
     assert len(sent) == 1
-    data, name, language, download_root = sent[0]
+    data, name, language, download_root, local_files_only = sent[0]
     assert (data, name, language) == (b"audio", "base", None)
     assert download_root == str(tmp_path / "cache" / "whisper")
+    # The parent's network-policy decision crosses the queue too, and the
+    # DEFAULT is the fail-safe direction: no download unless a caller
+    # explicitly decided otherwise.
+    assert local_files_only is True
 
 
 @pytest.mark.skipif(not _has_faster_whisper(), reason="faster-whisper native lib unavailable")
@@ -277,6 +281,11 @@ def test_real_transcription_runs_in_worker(monkeypatch):
     import localm.config as _cfg
     base = dict(_cfg.load_config())
     base["voice_stt_model"] = "tiny"
+    # The one-time model download is policy-gated now: this integration test
+    # legitimately downloads (that is what it tests), so run it under
+    # net_mode=allow rather than whatever the box's config says.
+    base["net_mode"] = "allow"
+    monkeypatch.delenv("LOCALM_NET_MODE", raising=False)
     monkeypatch.setattr(_cfg, "load_config", lambda: base)
     try:
         text = voice.transcribe_bytes(_make_wav())

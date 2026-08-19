@@ -259,6 +259,14 @@ export async function refreshEmbeddingPanel() {
     statusEl.textContent += "  " + st.gpu_fallback_reason;
     statusEl.style.color = "var(--yellow)";
   }
+  // One-time download of the CONFIGURED model (not the dropdown selection),
+  // offered only when the server says this caller may authorize it - the
+  // "continue anyway" for a fetch blocked by net_mode=ask. Nothing persisted.
+  const dlBtn = $("kb-embed-download");
+  if (dlBtn) {
+    dlBtn.style.display = st.can_download ? "" : "none";
+    if (st.can_download) dlBtn.textContent = `Download '${st.model}' now`;
+  }
   // Options: the internal keys, then the user's registered models.
   const opts = [];
   for (const key of st.internal || []) {
@@ -393,6 +401,45 @@ if ($("kb-embed-apply")) {
     if (!model) { toast("Pick an embedding model", true); return; }
     applyEmbeddingModel(model);
   };
+}
+
+/** One-time download of the configured embedding model when the network policy
+ *  blocked its automatic fetch (net_mode=ask). Unlike "Set up / apply" this
+ *  writes nothing - no model switch, no config change - and the server gates it
+ *  on config:write and refuses under net_mode=off. */
+async function downloadEmbeddingModel() {
+  const log = $("kb-embed-log");
+  const btn = $("kb-embed-download");
+  log.style.display = "block";
+  log.textContent = "Requesting the one-time download…\n";
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fetch("/api/rag/embedding/download",
+                          { method: "POST", headers: authHeaders() });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || r.statusText);
+    if (data.job_id) {
+      const end = await streamJob(data.job_id, (line) => {
+        log.textContent += line + "\n";
+        log.scrollTop = log.scrollHeight;
+      });
+      const failed = /(^|\n)error:/i.test(log.textContent) || end.status !== "done";
+      toast(failed ? "Embedding model download did not complete - see the log"
+                   : "Embedding model ready", failed);
+    } else {
+      log.textContent += "Already installed.\n";
+    }
+    refreshEmbeddingPanel();
+  } catch (e) {
+    log.textContent += "failed: " + e.message + "\n";
+    toast("Download failed: " + e.message, true);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+if ($("kb-embed-download")) {
+  $("kb-embed-download").onclick = downloadEmbeddingModel;
 }
 
 $("kb-create").onclick = async () => {

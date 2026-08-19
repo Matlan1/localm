@@ -1059,7 +1059,15 @@ async def rag_embedding_status(request: Request):
     the boolean and the path itself are owner-only information: `embedding_model`
     is admin_only, so GET /v1/config already strips its value for a non-owner, and
     an absolute path also discloses the OS user's directory layout. The owner
-    (open mode, or an ADMIN key) sees everything, unchanged."""
+    (open mode, or an ADMIN key) sees everything, unchanged.
+
+    `can_download` tells the GUI whether to offer the one-time "download now"
+    action (POST /api/rag/embedding/download): the configured model is an
+    internal key that is not on disk (only those are fetchable - a registered
+    model or a path has nothing to download), net_mode is not "off" (off has no
+    bypass, by design), and the caller could authorize it - open mode, or a key
+    granting config:write, the same scope that governs net_mode itself. UI hint
+    only; the download route re-checks everything server-side."""
     import localm.inference.http_server as _hs
     from localm import scopes
     from localm.config import load_config, load_registry
@@ -1082,6 +1090,11 @@ async def rag_embedding_status(request: Request):
         installed = None
         status = "unknown"
         model = "(set by the owner)"
+    can_download = False
+    if installed is False and model in KNOWN_EMBEDDING_MODELS:
+        from localm.netpolicy import network_mode
+        if network_mode() != "off":
+            can_download = held is None or scopes.grants(held, scopes.CONFIG_WRITE)
     return {
         "model": model,
         "default": DEFAULT_EMBEDDING_MODEL,
@@ -1091,7 +1104,83 @@ async def rag_embedding_status(request: Request):
         "error": last_error() if may_answer else None,
         "gpu_fallback_reason": gpu_fallback_reason(),
         "status": status,
+        "can_download": can_download,
     }
+
+
+@_router.post("/api/rag/embedding/download")
+async def rag_embedding_download(request: Request):
+    """One-time download of the CURRENTLY CONFIGURED embedding model, for when
+    the network policy does not download it automatically (net_mode=ask blocks
+    the lazy fetch - see embedder._download_known).
+
+    Writes NOTHING: unlike POST /api/rag/embedding this never touches the
+    `embedding_model` config key (which is why config:write suffices here while
+    the model SWITCH stays owner-only - selecting a different file this process
+    opens widens a trust boundary; fetching the one already selected does not),
+    and the one-download authorization is a call argument
+    (``resolve_embedding_model_path(allow_download=True)``) consumed by the job
+    - net_mode itself stays exactly as configured for every other network path.
+    Gated on config:write, the same scope that could change net_mode itself, so
+    a key that could not lift the policy cannot bypass it here either; open
+    mode is the trusted local owner. net_mode=off always refuses: off is the
+    kill switch, and only a real config change lifts it. Only an internal
+    KNOWN_EMBEDDING_MODELS key is fetchable this way - a registered model or a
+    filesystem path has nothing to download, so those get an honest 409 (the
+    model name is quoted only for callers GET /api/rag/embedding would answer,
+    same disclosure rule)."""
+    import localm.inference.http_server as _hs
+    from localm import scopes
+    from localm.config import load_config, load_registry
+    from localm.inference.embedder import (
+        DEFAULT_EMBEDDING_MODEL, KNOWN_EMBEDDING_MODELS,
+        resolve_embedding_model_path)
+    held = _hs.caller_scopes(request)
+    if held is not None and not scopes.grants(held, scopes.CONFIG_WRITE):
+        raise HTTPException(
+            403, "Downloading the embedding model needs the config:write scope "
+                 "(the same permission that governs the network policy).")
+    model = str(load_config().get("embedding_model") or DEFAULT_EMBEDDING_MODEL)
+    if model not in KNOWN_EMBEDDING_MODELS:
+        is_owner = held is None or scopes.ADMIN in held
+        shown = model if (is_owner or model in load_registry()) else "(set by the owner)"
+        raise HTTPException(
+            409, f"The configured embedding model '{shown}' is not one of the "
+                 "internal downloadable models, so there is nothing to fetch "
+                 "here. Use the embedding picker to select and set up a model "
+                 "instead.")
+    if resolve_embedding_model_path(allow_download=False):
+        return {"status": "already_installed", "model": model}
+    from localm.netpolicy import network_mode
+    if network_mode() == "off":
+        raise HTTPException(
+            409, "Network access is disabled (net_mode=off), which blocks even "
+                 "an explicitly requested model download. Set net_mode to ask "
+                 "or allow first.")
+    jobs = _require_jobs(request)
+
+    def _run(job):
+        from localm.inference.embedder import last_error
+        job.push({"type": "line",
+                  "text": f"Downloading embedding model '{model}' (one-time)..."})
+        try:
+            path = resolve_embedding_model_path(allow_download=True)
+        except Exception as e:
+            job.push({"type": "line", "text": f"error: download failed ({e})"})
+            return False
+        if not path:
+            job.push({"type": "line", "text":
+                      f"error: {last_error() or 'the download was blocked or failed'}"})
+            return False
+        job.push({"type": "line",
+                  "text": f"Ready: '{model}' is installed - semantic search is "
+                          "on for new indexing. No settings were changed."})
+        return True
+
+    from localm.inference.http_server import principal_id
+    job = jobs.start_fn("embedding-model-download", _run,
+                        owner=principal_id(request))
+    return {"job_id": job.id, "model": model}
 
 
 @_router.post("/api/rag/embedding")
