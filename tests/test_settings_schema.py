@@ -308,6 +308,13 @@ def test_admin_only_keys_lists_the_owner_only_settings():
         # above it, but not itself an outbound endpoint, so kept on its own line
         # (see UPDATER-VERSION-RECOGNITION / prerelease-channel unit).
         | {"update_allow_prerelease"}
+        # gui_proxy_remote_images decides whether RENDERING A REPLY causes an
+        # outbound request at all - the same "where does data go" boundary as
+        # OUTBOUND_OWNER_KEYS, so a non-owner config:write key must not be able
+        # to switch it on. Own line, per the additive-resolution note above: it
+        # arrived with the remote-image proxy and this expected set was not
+        # updated with it, which is what the exactness above is for.
+        | {"gui_proxy_remote_images"}
         # update_ignore_net_policy EXEMPTS the update channel from net_mode=off
         # (a real kill switch everywhere else) - same trust-widening class as
         # update_allow_prerelease right above it, kept on its own line for the
