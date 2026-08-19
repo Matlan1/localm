@@ -10,6 +10,34 @@ import { loadApp, loadAppWithPages } from "./harness.mjs";
 
 const tick = () => new Promise((r) => setTimeout(r, 100));
 
+// Wait for the SIGNAL, not for a guessed number of ticks. Same shape as the
+// waitFor in backend-hint / gpu-index-space-hint / instance-id, with a longer
+// default because the boot paths exercised here are a CHAIN of awaited fetches
+// (bootAuthProbe -> refreshCsrf -> capsReady/clientPluginsReady/convReady ->
+// showView -> onViewShown -> the page's own reads), and every one of them sleeps
+// NET_MS on purpose (see the long note above NET_MS).
+//
+// A fixed `await tick(); await tick();` is a guess at that chain's total wall
+// time, and it was MEASURED wrong: on a loaded box 200 ms can elapse without the
+// intervening macrotasks having run, so the last call in the chain had not been
+// issued yet when the assertion read the list. Interleaved control on 2026-08-19
+// (alternating runs, so load hits both arms equally): clean master failed 1 of
+// 20 runs on the AUTHED restore case below, with the assertion CORRECT and only
+// the wait too short.
+//
+// Do NOT "fix" that by raising NET_MS or adding ticks: that trades one arbitrary
+// timing constant for another, and NET_MS is load-bearing for what these tests
+// express (an instant mock makes them pass against the UNFIXED code - measured).
+// The timeout here is a FAILURE BOUND, not a delay: a healthy boot satisfies the
+// predicate in a fraction of it, and a boot that genuinely drops the restore
+// still goes red, on the same assertion, with the same message.
+const settle = (ms = 0) => new Promise((r) => setTimeout(r, ms));
+async function waitFor(fn, timeout = 2000) {
+  const end = Date.now() + timeout;
+  while (Date.now() < end) { if (fn()) return true; await settle(15); }
+  return false;
+}
+
 const keyless401 = () => Promise.resolve({
   ok: false, status: 401,
   json: async () => ({ detail: "Missing or invalid API key" }),
@@ -401,12 +429,11 @@ test("P1a: an AUTHED boot still restores ?view=settings - the fix must sequence 
              json: async () => ({ models: [], active: "", items: [], conversations: [] }) };
   };
   const { window } = loadAppWithPages({ fetchImpl, url: "http://localhost:8642/?view=settings" });
-  await tick(); await tick();
 
   // Assert on a URL ONLY the settings page fetches. Matching "/api/models"
   // would prove nothing here: bootAuthProbe fetches it, and so does the 30 s
   // poll, so it is present whether or not the restore ran.
-  assert.ok(calls.some((u) => u.startsWith("/api/uploads")),
+  assert.ok(await waitFor(() => calls.some((u) => u.startsWith("/api/uploads"))),
     "the settings view was actually entered (refreshUploadsList ran)");
   assert.equal(window.__localmLocked, false, "sanity check: this boot is unlocked");
 });
