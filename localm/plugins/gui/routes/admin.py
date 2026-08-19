@@ -43,6 +43,17 @@ def _norm_path_str(s: str) -> str:
     return os.path.normcase(os.path.normpath(s))
 
 
+def _network_drives_allowed() -> bool:
+    """Whether a mapped network drive (``Z:\\...``) may be treated as an
+    ordinary local folder by the host-filesystem routes below - see
+    config.py's ``allow_network_drives`` comment for the full rationale.
+    Read fresh (one cheap config load) rather than cached, matching every
+    other route in this file that reads config per-request, so a change
+    takes effect on the next call with no restart."""
+    from localm.config import load_config
+    return bool(load_config().get("allow_network_drives", True))
+
+
 def register(app: FastAPI, ctx) -> None:
 
     @app.post("/api/logs/export",
@@ -75,7 +86,8 @@ def register(app: FastAPI, ctx) -> None:
         # BEFORE is_dir(): same UNC credential-leak/stall as the two handlers
         # below - the destination is caller-supplied and reaches the filesystem.
         try:
-            reject_unsafe_path_string(dest)
+            reject_unsafe_path_string(
+                dest, reject_network_drives=not _network_drives_allowed())
         except ValueError as e:
             raise HTTPException(400, f"Invalid destination: {e}")
         dest_dir = Path(dest).expanduser()
@@ -263,16 +275,23 @@ def register(app: FastAPI, ctx) -> None:
         # BEFORE Path()/is_dir(): a UNC path here dials SMB from the event loop.
         # No require_absolute - the picker legitimately accepts "~/..." (expanded
         # below) and relative input.
+        allow_net = _network_drives_allowed()
         if path:
             try:
-                reject_unsafe_path_string(path)
+                reject_unsafe_path_string(path, reject_network_drives=not allow_net)
             except ValueError as e:
                 raise HTTPException(400, f"Invalid path: {e}")
         if not path:
             if os.name == "nt":
                 import string
+                from localm.pathsafe import is_mapped_network_drive
+                # Skip a mapped network drive from the root listing entirely
+                # when disallowed, rather than leaving it clickable and only
+                # refusing once the picker navigates into it - the same
+                # policy, applied where the user actually sees it.
                 roots = [f"{letter}:\\" for letter in string.ascii_uppercase
-                         if Path(f"{letter}:\\").is_dir()]
+                         if Path(f"{letter}:\\").is_dir()
+                         and (allow_net or not is_mapped_network_drive(f"{letter}:\\"))]
                 result = {"path": "", "parent": None, "dirs": roots, "files": []}
                 if meta:
                     # Drives have no meaningful size/mtime; the picker just needs
@@ -361,7 +380,8 @@ def register(app: FastAPI, ctx) -> None:
             raise HTTPException(400, "Missing folder name")
         # BEFORE Path()/is_dir(): a UNC parent dials SMB, same as fs_dirs' path.
         try:
-            reject_unsafe_path_string(parent_raw)
+            reject_unsafe_path_string(
+                parent_raw, reject_network_drives=not _network_drives_allowed())
         except ValueError as e:
             raise HTTPException(400, f"Invalid path: {e}")
         parent = Path(parent_raw).expanduser()
@@ -418,7 +438,8 @@ def register(app: FastAPI, ctx) -> None:
             raise HTTPException(400, "Missing new name")
         # BEFORE Path()/exists(): a UNC target dials SMB, same as fs_dirs' path.
         try:
-            reject_unsafe_path_string(target_raw)
+            reject_unsafe_path_string(
+                target_raw, reject_network_drives=not _network_drives_allowed())
         except ValueError as e:
             raise HTTPException(400, f"Invalid path: {e}")
         p = Path(target_raw).expanduser()
@@ -458,7 +479,9 @@ def register(app: FastAPI, ctx) -> None:
 
         Plain `def` for the same reason as fs_dirs: probing A-Z drive roots calls
         is_dir() on each, and a mapped-but-disconnected network drive blocks. No
-        caller input reaches it, so there is nothing to reject here.
+        caller input reaches it, so there is nothing to REJECT here - but a
+        disallowed network drive is still omitted from the listing, same as
+        fs_dirs' own empty-path root listing.
         """
         places = []
         try:
@@ -482,10 +505,16 @@ def register(app: FastAPI, ctx) -> None:
         drives = []
         if os.name == "nt":
             import string
+            from localm.pathsafe import is_mapped_network_drive
+            # Same policy as fs_dirs' empty-path root listing: skip a
+            # disallowed network drive here too, rather than leaving it
+            # clickable in the Places rail only to refuse it a click later
+            # when /api/fs/dirs is asked to navigate into it.
+            allow_net = _network_drives_allowed()
             for letter in string.ascii_uppercase:
                 root = f"{letter}:\\"
                 try:
-                    if Path(root).is_dir():
+                    if Path(root).is_dir() and (allow_net or not is_mapped_network_drive(root)):
                         drives.append({"label": root, "path": root,
                                        "icon": "drive"})
                 except OSError:

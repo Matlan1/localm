@@ -375,6 +375,125 @@ class TestIndexingPolicy:
                             lambda: {"rag_indexing_mode": "bogus"})
         assert indexing_policy()["mode"] == "whitelist"
 
+    def test_allow_network_drives_defaults_true(self, home_env):
+        """Matches config.py's DEFAULT_CONFIG: preserves the pre-existing
+        behaviour (a mapped drive already worked like a local one) unless a
+        caller explicitly turns it off."""
+        assert indexing_policy()["allow_network_drives"] is True
+
+    def test_allow_network_drives_reads_config(self, home_env, monkeypatch):
+        import localm.config as cfg
+        monkeypatch.setattr(cfg, "load_config",
+                            lambda: {"allow_network_drives": False})
+        assert indexing_policy()["allow_network_drives"] is False
+
+
+# --------------------------------------------------------------------------- #
+#  Mapped network drive guard (S9, GetDriveTypeW classification gap)          #
+# --------------------------------------------------------------------------- #
+
+class TestNetworkDriveGuard:
+    """A mapped Windows drive letter (Z:\\...) is syntactically an ordinary
+    local path - is_unc_or_device_path correctly returns False for it, since
+    "Z:" IS the local-drive form. confine_index_path's own network-drive
+    check (pathsafe.is_mapped_network_drive) is what tells the two apart, and
+    unlike the UNC guard above it is a config-gated PREFERENCE, not an
+    unconditional hard floor: it must never fire unless GetDriveTypeW itself
+    says the drive is remote AND allow_network_drives is off."""
+
+    @pytest.mark.skipif(os.name != "nt", reason="GetDriveTypeW is Windows-only")
+    def test_rejected_in_whitelist_and_blacklist_mode_when_disallowed(
+            self, home_env, tmp_path, monkeypatch):
+        import ctypes
+        monkeypatch.setattr(ctypes.windll.kernel32, "GetDriveTypeW",
+                            lambda root: 4)   # DRIVE_REMOTE
+        f = tmp_path / "shared" / "a.txt"
+        f.parent.mkdir(parents=True)
+        f.write_text("x", encoding="utf-8")
+        for pol in ({**_wl(f.parent), "allow_network_drives": False},
+                    {**_bl(), "allow_network_drives": False}):
+            with pytest.raises(ConfinementError) as ei:
+                confine_index_path(f, pol)
+            assert ei.value.reason == "network_drive_denied"
+
+    @pytest.mark.skipif(os.name != "nt", reason="GetDriveTypeW is Windows-only")
+    def test_allowed_by_default_even_on_a_network_drive(
+            self, home_env, tmp_path, monkeypatch):
+        """The default (allow_network_drives unset -> True) must reproduce the
+        exact pre-existing behaviour: a mapped drive indexes normally."""
+        import ctypes
+        monkeypatch.setattr(ctypes.windll.kernel32, "GetDriveTypeW",
+                            lambda root: 4)
+        f = tmp_path / "shared" / "a.txt"
+        f.parent.mkdir(parents=True)
+        f.write_text("x", encoding="utf-8")
+        assert confine_index_path(f, _wl(f.parent)) == f.resolve()
+        assert confine_index_path(f, None) == f.resolve()
+
+    def test_ordinary_local_drive_never_rejected_even_when_disallowed(
+            self, home_env, tmp_path):
+        """Control: this box's real tmp_path drive is NOT a network share, so
+        turning allow_network_drives off must not reject it - proves the
+        guard is keyed on GetDriveTypeW's real answer, not merely on the
+        config flag."""
+        f = tmp_path / "a.txt"
+        f.write_text("x", encoding="utf-8")
+        pol = {**_wl(tmp_path), "allow_network_drives": False}
+        assert confine_index_path(f, pol) == f.resolve()
+
+    @pytest.mark.skipif(os.name != "nt", reason="GetDriveTypeW is Windows-only")
+    def test_policy_none_reads_config_fresh(self, home_env, tmp_path, monkeypatch):
+        """policy=None (the CLI / settings_schema.py's own save-time
+        validation) has no indexing_policy() dict to read the flag off, so it
+        must fall back to a fresh config read rather than silently skipping
+        the check."""
+        import ctypes
+        import localm.config as cfg
+        monkeypatch.setattr(ctypes.windll.kernel32, "GetDriveTypeW",
+                            lambda root: 4)
+        monkeypatch.setattr(cfg, "load_config",
+                            lambda: {"allow_network_drives": False})
+        f = tmp_path / "shared" / "a.txt"
+        f.parent.mkdir(parents=True)
+        f.write_text("x", encoding="utf-8")
+        with pytest.raises(ConfinementError) as ei:
+            confine_index_path(f, None)
+        assert ei.value.reason == "network_drive_denied"
+
+    @pytest.mark.skipif(os.name != "nt", reason="GetDriveTypeW is Windows-only")
+    def test_key_scoped_policy_still_respects_the_global_toggle(
+            self, home_env, tmp_path, monkeypatch):
+        """indexing_policy(key_roots=...) replaces the whitelist SET for a
+        per-key-scoped caller, but allow_network_drives is a WHOLE-MACHINE
+        preference, not a per-key one - a scoped key must not be able to
+        reach a network drive the owner disallowed just because its early
+        return never read config. Regression for a real gap the per-key
+        rag_roots feature's merge introduced: that branch used to build its
+        policy dict without ever loading cfg at all."""
+        import ctypes
+        import localm.config as cfg
+        monkeypatch.setattr(ctypes.windll.kernel32, "GetDriveTypeW",
+                            lambda root: 4)
+        monkeypatch.setattr(cfg, "load_config",
+                            lambda: {"allow_network_drives": False})
+        shared = tmp_path / "shared"
+        f = shared / "a.txt"
+        shared.mkdir(parents=True)
+        f.write_text("x", encoding="utf-8")
+        pol = indexing_policy(key_roots=[str(shared)])
+        assert pol["key_scoped"] is True
+        assert pol["allow_network_drives"] is False
+        with pytest.raises(ConfinementError) as ei:
+            confine_index_path(f, pol)
+        assert ei.value.reason == "network_drive_denied"
+
+    def test_key_scoped_policy_defaults_to_allowed(self, home_env, tmp_path):
+        """Control: with no config override, a key-scoped policy still
+        defaults to allowed, matching the global policy's own default."""
+        shared = tmp_path / "shared"
+        shared.mkdir()
+        assert indexing_policy(key_roots=[str(shared)])["allow_network_drives"] is True
+
 
 # --------------------------------------------------------------------------- #
 #  Per-key rag_roots (S4): indexing_policy(key_roots=...) and                 #

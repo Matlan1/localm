@@ -443,6 +443,21 @@ CORE_FIELDS: list = [
                  "default; a model needing it is refused. Turn on only for a "
                  "source you trust.",
                  group="Engine", applies=Applies.NEXT_LOAD, admin_only=True),
+    # admin_only: matches rag_allowed_roots/rag_denied_roots right above (same
+    # "which host locations may localm touch" trust boundary). On by default -
+    # a mapped network drive already works exactly like a local folder today
+    # (see config.py's DEFAULT_CONFIG comment for allow_network_drives: the
+    # classification gap this closes is that pathsafe.is_unc_or_device_path
+    # never flagged a mapped drive letter, not that anything was unconfined),
+    # so this must not silently break an existing setup. Turning it off is
+    # opt-in extra caution, not a vulnerability fix.
+    SettingField("allow_network_drives", Widget.TOGGLE,
+                 "Allow network drives as filesystem locations",
+                 "Let the folder picker, RAG indexing, and related routes "
+                 "treat a mapped network drive (e.g. Z:\\) as a normal local "
+                 "folder. Off refuses them, for keeping localm confined to "
+                 "local disks.",
+                 group="Security", admin_only=True),
     # ---- Interface ----
     # HIDDEN: chosen with the logo picker in the GUI (Settings -> GUI), not a
     # form control. Accepted by PATCH /v1/config so the launcher stays in sync.

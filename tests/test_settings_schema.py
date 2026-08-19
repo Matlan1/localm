@@ -332,7 +332,15 @@ def test_admin_only_keys_lists_the_owner_only_settings():
         # writable choice of downgrade target, so gating one without the other
         # would leave the decision reachable through the back door. Own line, per
         # the additive-resolution note above.
-        | {"llama_runtime_pin", "llama_runtime_history"})
+        | {"llama_runtime_pin", "llama_runtime_history"}
+        # allow_network_drives decides which HOST LOCATIONS the folder picker,
+        # folder creation/rename, log export and RAG indexing may treat as a
+        # normal local folder - the same "which host locations may localm
+        # touch" boundary as RAG_OWNER_KEYS right at the top of this union
+        # (S9: the classification gap that made a mapped drive letter
+        # indistinguishable from an ordinary local one). Own line, per the
+        # additive-resolution note above.
+        | {"allow_network_drives"})
 
 
 def test_outbound_endpoint_keys_are_owner_only():

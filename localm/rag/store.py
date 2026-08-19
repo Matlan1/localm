@@ -41,7 +41,7 @@ from typing import Callable, Optional
 
 from localm.debuglog import logger as _log
 from localm.jsonl import dumps_lines, split_jsonl
-from localm.pathsafe import is_unc_or_device_path
+from localm.pathsafe import is_mapped_network_drive, is_unc_or_device_path
 
 # numpy is optional here: it is NOT in pyproject.toml, and CI installs from
 # pyproject rather than uv.lock, so on those runners it is simply absent and the
@@ -411,15 +411,11 @@ def indexing_policy(cfg: Optional[dict] = None,
     applies underneath this exactly as it does for the global policy; only the
     whitelist SET changes.
     """
-    if key_roots:
-        resolved: list[Path] = []
-        for r in key_roots:
-            try:
-                resolved.append(Path(r).expanduser().resolve())
-            except (OSError, ValueError):
-                continue
-        return {"mode": "whitelist", "allowed": resolved, "denied": [],
-                "key_scoped": True}
+    # Loaded ONCE, before the key_roots branch too: allow_network_drives is a
+    # WHOLE-MACHINE preference (see the comment on the return below), not
+    # part of the per-key folder scoping key_roots exists for, so a key-scoped
+    # caller must still see the owner's real setting rather than silently
+    # defaulting to "allowed" because this branch never looked.
     if cfg is None:
         try:
             from localm.config import load_config
@@ -433,6 +429,16 @@ def indexing_policy(cfg: Optional[dict] = None,
             _dbg.debug("rag indexing_policy: could not load config, using an empty "
                        "fail-closed policy: %s", e)
             cfg = {}
+    if key_roots:
+        resolved: list[Path] = []
+        for r in key_roots:
+            try:
+                resolved.append(Path(r).expanduser().resolve())
+            except (OSError, ValueError):
+                continue
+        return {"mode": "whitelist", "allowed": resolved, "denied": [],
+                "key_scoped": True,
+                "allow_network_drives": bool(cfg.get("allow_network_drives", True))}
     mode = cfg.get("rag_indexing_mode", "whitelist")
     if mode not in _INDEX_MODES:
         mode = "whitelist"
@@ -465,7 +471,28 @@ def indexing_policy(cfg: Optional[dict] = None,
 
     return {"mode": mode,
             "allowed": _resolve("rag_allowed_roots"),
-            "denied": _resolve("rag_denied_roots")}
+            "denied": _resolve("rag_denied_roots"),
+            # NOT a hard-floor-fail-closed key like mode/allowed/denied above:
+            # allow_network_drives is a preference, not a security boundary
+            # (see config.py's DEFAULT_CONFIG comment), so a config we could
+            # not load resolves it to the same True default as a normal read,
+            # not to False. confine_index_path applies it regardless of mode.
+            "allow_network_drives": bool(cfg.get("allow_network_drives", True))}
+
+
+def _network_drives_allowed_fresh() -> bool:
+    """One-off config read for confine_index_path's ``policy=None`` callers
+    (settings_schema.py's PATHLIST save-time validation, and the bare CLI),
+    which have no ``indexing_policy()`` dict to read the value off. Mirrors
+    indexing_policy()'s own cfg-load-with-fallback: a config we cannot load
+    resolves to the same True default a normal read would (not a security
+    floor - see config.py's DEFAULT_CONFIG comment for allow_network_drives)."""
+    try:
+        from localm.config import load_config
+        cfg = load_config()
+    except Exception:
+        cfg = {}
+    return bool(cfg.get("allow_network_drives", True))
 
 
 def confine_index_path(p, policy: Optional[dict] = None) -> Path:
@@ -475,7 +502,13 @@ def confine_index_path(p, policy: Optional[dict] = None) -> Path:
     The HARD FLOOR is enforced ALWAYS, even when *policy* is None: well-known
     credential folders (``.ssh``, ``.aws``, ...) are never indexable - wherever
     they appear in the resolved path, so a nested ``~/proj/.ssh`` or a symlink
-    into one is caught too.
+    into one is caught too. A UNC/device path is refused unconditionally too
+    (see the ``is_unc_or_device_path`` check below). A mapped Windows network
+    drive (``Z:\\...``) is refused the same way, ALSO unconditionally by
+    caller kind, but only when the ``allow_network_drives`` config setting is
+    off (default on - preference, not a security floor; see
+    ``pathsafe.is_mapped_network_drive``'s docstring for why it is a separate
+    question from the UNC check).
 
     The localm data directory (LOCALM_HOME) is NOT refused, at all: localm is a
     local, single-user tool, and it is not localm's place to block the owner
@@ -538,6 +571,31 @@ def confine_index_path(p, policy: Optional[dict] = None) -> Path:
     if any(part.lower() in _SENSITIVE_NAMES for part in rp.parts):
         raise ConfinementError(f"Refusing to index a credential directory: {p}",
                                path=rp, reason="credential")
+
+    # allow_network_drives is a PREFERENCE, not part of the SMB-dial-safety
+    # hard floor above (a mapped drive is already connected, not a fresh UNC
+    # dial - see pathsafe.is_mapped_network_drive's docstring), but it is
+    # still checked here unconditionally, BEFORE the policy=None return below:
+    # it is a whole-machine setting, not a per-caller policy like
+    # whitelist/blacklist mode, so turning it off means "never index a
+    # network share" for the CLI operator too, not only the HTTP API.
+    # *policy* already carries the resolved value when given - indexing_policy()
+    # reads it once per request/resync, so reading it off *policy* here avoids
+    # a config load per file in the hot indexing-walk loops (_add_paths_locked,
+    # resync). `.get(...)`, not `[...]`: several tests build a minimal policy
+    # dict by hand without this key, and it must default exactly like a fresh
+    # config read would (True). With policy=None (settings_schema.py's own
+    # save-time validation call, and the bare CLI) it is read fresh here
+    # instead - a rare, non-hot-loop call, per the grep at the time this was
+    # added: every hot-loop confine_index_path call already guards on
+    # `policy is not None` before it is ever reached.
+    if policy is not None:
+        allow_net = bool(policy.get("allow_network_drives", True))
+    else:
+        allow_net = _network_drives_allowed_fresh()
+    if not allow_net and is_mapped_network_drive(str(rp)):
+        raise ConfinementError(f"Refusing to index a network drive: {p}",
+                               path=rp, reason="network_drive_denied")
 
     if policy is None:
         return rp
