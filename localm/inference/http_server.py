@@ -3090,11 +3090,12 @@ def _do_shutdown(*, instance_id: Optional[str] = None) -> None:
     # job runs `python -m localm <cmd>` as a real child (a model pull, a runtime
     # provision, a ComfyUI setup): os._exit below bypasses atexit, the job worker
     # thread is a daemon so its finally may never run, and the Popen carries no
-    # creationflags - so without this the child is simply ABANDONED. It keeps
-    # running with its stdout pipe dead, keeps writing into the shared data dir
-    # after this server is gone, and no record of it survives anywhere. ADR-0008
-    # inferred that from the code shape and deferred it as option E; it is
-    # measured now, and the child does outlive the exit.
+    # creationflags - so without this the child is simply ABANDONED. MEASURED
+    # 2026-08-19: a child that writes nothing to stdout SURVIVES and keeps
+    # working untracked, while one that flushes output DIES at its next write on
+    # the broken pipe, mid-operation and with no cleanup. See
+    # jobs.terminate_children_for_exit for both arms - ADR-0008 deferred this as
+    # option E and left it unmeasured.
     #
     # FIRST in the sequence, before the engine and embedder teardown below,
     # because a media child can itself hold VRAM and any child can keep writing
@@ -3242,11 +3243,12 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
     # job runs `python -m localm <cmd>` as a real child (a model pull, a runtime
     # provision, a ComfyUI setup): os.execv below bypasses atexit, the job worker
     # thread is a daemon so its finally may never run, and the Popen carries no
-    # creationflags - so without this the child is simply ABANDONED. It keeps
-    # running with its stdout pipe dead, keeps writing into the shared data dir
-    # after this server is gone, and no record of it survives anywhere. ADR-0008
-    # inferred that from the code shape and deferred it as option E; it is
-    # measured now, and the child does outlive the exit.
+    # creationflags - so without this the child is simply ABANDONED. MEASURED
+    # 2026-08-19: a child that writes nothing to stdout SURVIVES and keeps
+    # working untracked, while one that flushes output DIES at its next write on
+    # the broken pipe, mid-operation and with no cleanup. See
+    # jobs.terminate_children_for_exit for both arms - ADR-0008 deferred this as
+    # option E and left it unmeasured.
     #
     # FIRST in the sequence, before the engine and embedder teardown below,
     # because a media child can itself hold VRAM and any child can keep writing

@@ -1002,11 +1002,25 @@ def terminate_children_for_exit(*, grace: float = _CHILD_GRACE_S) -> int:
     Called from http_server._do_shutdown and _do_restart. Both end in a call that
     bypasses atexit (os._exit / os.execv), the job worker threads are daemons so
     their ``finally`` may never run, and the Popen carries no creationflags - so
-    without this a stop or restart simply ABANDONS the child: it keeps
-    downloading, keeps writing into the shared data dir, and its stdout pipe dies
-    with us, which turns a resumable download into a half-written file nobody is
-    tracking. ADR-0008 inferred that from the code shape and left it unmeasured;
-    it is measured now, and the child does outlive the exit."""
+    without this a stop or restart simply ABANDONS the child.
+
+    ADR-0008 inferred that from the code shape and recorded that it was NOT
+    measured. It is measured now, and the answer has two halves rather than the
+    one the inference expected. MEASURED 2026-08-19 on Windows, both children
+    spawned exactly as start_cli does and then abandoned by an os._exit(0):
+
+        writes NOTHING to stdout    SURVIVED, and kept working (its heartbeat
+                                    advanced after the parent was gone)
+        writes and FLUSHES          DIED at its next write, on the broken pipe
+
+    Neither outcome is acceptable, which is why this is unconditional. A quiet
+    child (a git clone, a pip install, a long file write between progress
+    emissions) keeps running untracked, holding VRAM in the media case and still
+    writing into the shared data dir. A chatty child - a pull flushes a progress
+    line constantly - is instead torn down at an arbitrary instant with no cleanup
+    and no record, which is not a graceful stop but a crash that happens to look
+    like nothing occurred. Terminating deliberately replaces both with one known
+    state, which the next start then reports as "interrupted"."""
     total = 0
     for manager in list(_MANAGERS):
         try:

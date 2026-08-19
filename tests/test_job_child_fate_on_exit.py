@@ -13,10 +13,18 @@ leave that child running after the server went away:
 
 ADR-0008 inferred exactly this from the code shape, recorded that it was "inferred
 from code shape and was not measured", and made measuring it the follow-up that
-would decide its option E. It is measured now: a child DOES outlive the exit (see
-``dev-notes/O3-job-durability-and-child-fate-2026-08-19.md`` for the three-phase
-real-process run), and its stdout pipe dies with the parent, so a resumable
-download becomes a half-written file nobody is tracking.
+would decide its option E.
+
+IT IS MEASURED NOW, AND THE ANSWER HAS TWO HALVES. On Windows, with both children
+spawned exactly as start_cli does and then abandoned by an os._exit(0): a child
+that writes NOTHING to stdout survived and kept working (heartbeat advancing after
+the parent was gone), while a child that writes and flushes DIED at its next write
+on the broken pipe. So a quiet child (a git clone, a pip install, a long write
+between progress emissions) becomes untracked work, and a chatty one (a pull
+flushes constantly) is instead torn down mid-operation with no cleanup and no
+record. Both are unacceptable and both are fixed by terminating deliberately, which
+leaves one known state for the next start to report as "interrupted". Evidence:
+``dev-notes/O3-job-durability-and-child-fate-2026-08-19.md``.
 
 WHY THE REAL-PROCESS TEST IS THE LOAD-BEARING ONE. Asserting that a recording
 double's ``terminate`` was CALLED would pass just as happily against a kill that
@@ -125,7 +133,7 @@ class TestRealChildIsKilled:
             assert _dead(proc), (
                 "the job's child survived the stop: os._exit bypasses atexit and "
                 "the worker thread is a daemon, so nothing else will ever reap it "
-                "- it keeps writing into the data dir with its stdout pipe dead")
+                "- a quiet child then keeps working untracked (measured)")
         finally:
             if proc.poll() is None:
                 proc.kill()

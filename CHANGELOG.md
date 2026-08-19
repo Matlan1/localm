@@ -138,6 +138,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
   a failed load or the server becoming unreachable.
 
 ### Fixed
+- **A restart no longer forgets what the server was in the middle of, and
+  stopping the server no longer leaves the work running behind it.** A model
+  pull, a runtime install or a ComfyUI setup was only ever remembered in
+  memory, so a restart (or a crash) came back reporting that nothing had been
+  happening - while the download itself kept running, invisible to every
+  surface, or was cut off part-way with no trace either way. localm now keeps a
+  record of what is in flight, and after it comes back the Activity panel and
+  `localm status` list anything that was interrupted, marked **interrupted**
+  rather than "failed", because whether the work finished is genuinely unknown.
+  Stopping or restarting the server now also stops the background work it
+  started, instead of abandoning it to keep writing to your data folder.
 - **A model pull can no longer be reported as failed after it actually
   succeeded.** Once a download finishes, localm prints a green checkmark to
   confirm the checksum was verified - and on some machines that confirmation
