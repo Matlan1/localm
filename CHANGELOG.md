@@ -25,6 +25,19 @@ permanent public record of what shipped and are never rewritten; the in-progress
   from another tab or after a reload. Nothing is installed or changed, and the
   summary says it covers these checks rather than claiming your whole system is
   healthy.
+- **Past coding sessions are now listed and can be picked up again.** The coder's
+  session list shows what is open right now, past sessions in the folder you have
+  selected, and collapsible groups for every other project you have worked in, so
+  reaching earlier work no longer means retyping its path and hoping the right
+  conversation comes back. Clicking a past session continues that particular one,
+  in its own project. A folder that has been moved or deleted still lists its
+  sessions and says the folder is missing, since the conversations do not live
+  inside the project. Privacy-mode sessions never appear, because that mode writes
+  nothing to disk, and the list says so permanently so a short list is never
+  mistaken for a complete history. Remembering which projects you have worked in
+  can be turned off or cleared in Settings > Coder, along with how many to keep.
+- **The coder's session list can sit on either side.** It stays on the right by
+  default; Settings > Coder, or the button on the list itself, moves it left.
 - **What localm remembers about you can now be managed from the terminal.**
   `localm memory` lists the facts it has learned, shows one in full, saves a fact
   you type yourself, deletes one, reviews the corrections that background

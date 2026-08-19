@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { loadApp } from "./harness.mjs";
+import { loadApp, loadAppWithPages } from "./harness.mjs";
 
 // ASYNC + a settle tick, for the reason banked while building the rail-side
 // unit: loadApp boots the real app, whose startup fetches resolve on a later
@@ -208,4 +208,35 @@ test("rail: a failed side save puts the rail back rather than lying about it", a
   // is worse than one that refuses now.
   assert.equal(view.dataset.rail, undefined,
     "the unsaved flip was undone, so the screen matches what was stored");
+});
+
+test("rail: arriving at the coder view loads past sessions by itself", async () => {
+  // loadAppWithPages, not loadApp: `onViewShown` is installed ONLY by
+  // pages/dispatch.js, and the harness names that omission as fixture blindness
+  // rather than a passing test. With plain loadApp this test throws instead of
+  // measuring anything.
+  const posts = [];
+  const { window } = loadAppWithPages({
+    fetchImpl: async (url, opts = {}) => {
+      const u = String(url);
+      if (opts.method && opts.method !== "GET") posts.push({ url: u, opts });
+      const body = u.startsWith("/api/coder/dormant") ? PAYLOAD : {};
+      return { ok: true, status: 200, json: async () => body,
+               text: async () => "", headers: { get: () => null } };
+    },
+  });
+  await settle();
+  // NOT calling refreshDormant() here, deliberately - that is the whole point.
+  // Every other test in this file calls it, so none of them could see that
+  // nothing TRIGGERS it on arrival. A browser found this: the rail read
+  // "No sessions yet" for a user with past work in three projects until they
+  // happened to type a directory, which is a false statement about their own
+  // history and exactly what the rail exists to prevent.
+  window.onViewShown("coder");
+  await settle();
+
+  const titles = [...rail(window).querySelectorAll(".coder-session-item .title")]
+    .map((n) => n.textContent);
+  assert.ok(titles.includes("build a calculator"),
+    "opening the coder view must populate the rail without any further input");
 });
