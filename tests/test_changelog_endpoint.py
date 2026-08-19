@@ -84,11 +84,11 @@ def test_changelog_endpoint_keeps_published_prereleases(monkeypatch, tmp_path):
     _open_mode(monkeypatch)
     (tmp_path / "CHANGELOG.md").write_text(
         "# Changelog\n\n## [Unreleased]\n\n- not shipped\n\n"
-        "## [0.1.5rc1] - 2026-08-07\n\nA published prerelease.\n",
+        "## [0.1.5rc2] - 2026-08-08\n\nA published prerelease.\n",
         encoding="utf-8")
     monkeypatch.setattr(updater, "repo_root", lambda: tmp_path)
     md = _get(create_app(_engine()), "/api/changelog").json()["markdown"]
-    assert "## [0.1.5rc1]" in md
+    assert "## [0.1.5rc2]" in md
     assert "A published prerelease." in md
     assert "not shipped" not in md
 
