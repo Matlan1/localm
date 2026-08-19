@@ -213,6 +213,18 @@ permanent public record of what shipped and are never rewritten; the in-progress
   no script is involved, neither the HTML sanitiser nor the script rules
   applied. Nothing in localm submits a form, so form submission is now refused
   outright, in the chat view and in the artifact pane alike.
+- **A credential you paste into a bug report is now removed, including the ways
+  a `.env` file actually writes one.** A report already stripped a secret that
+  appeared as a URL query parameter, but not one written as a plain
+  `api_key=...` line, one behind a prefix such as `OPENAI_API_KEY=`, or one
+  whose value was in quotes. The quoted form was the worst of the three,
+  because the secret stayed in the report with a "redacted" marker printed
+  immediately in front of it, so the line read as though it had been dealt
+  with. All three are now removed, in the report form, in `localm bug-report`,
+  and in the fallback reporter used when localm will not start. Settings are
+  deliberately left readable, so a report still shows you and the maintainer
+  things like `require_auth=true` and `n_gpu_layers=35` that are needed to
+  work out what went wrong.
 
 ## [0.1.5rc3] - 2026-08-13
 
