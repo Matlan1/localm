@@ -6,6 +6,7 @@ startup-scan deadline (_index_deadline) is resolvable standalone."""
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -37,6 +38,28 @@ def _project_map_path_for(cwd) -> Path:
     ``save_cache`` for the read/write side."""
     return _project_dir_for(cwd) / "projectmap.json"
 
+_ID_OK = re.compile(r"\A[A-Za-z0-9_-]{1,64}\Z")
+
+
+def is_valid_checkpoint_id(checkpoint_id: str) -> bool:
+    """Is *checkpoint_id* safe to use as a filename component?
+
+    Ids are minted as ``uuid4().hex[:12]``, so the real keyspace is hex; this
+    accepts the slightly wider word-character set so a hand-migrated or
+    future-format id is not rejected, while excluding every separator and dot.
+
+    It exists because the id is concatenated into a path by
+    _checkpoint_path_for, and a checkpoint id now arrives from an HTTP request
+    body (the web resume_id). MEASURED before this guard: an id of
+    ``../../../../windows/win.ini`` resolved clean outside the checkpoints tree,
+    and load_checkpoint RETAINS the id it was given, so the next
+    save_checkpoint - and the cwd-change migration - would mkdir and write
+    there. Validated at the path helper rather than only at the route, so every
+    caller is covered by construction.
+    """
+    return bool(_ID_OK.match(checkpoint_id or ""))
+
+
 def _checkpoint_path_for(cwd, checkpoint_id: str) -> Path:
     """One session's resume checkpoint:
     ``HOME/checkpoints/<project-digest>/<checkpoint-id>.json``.
@@ -56,6 +79,8 @@ def _checkpoint_path_for(cwd, checkpoint_id: str) -> Path:
     in the user's repo. Project-local config (.localcoder/config.toml), memory
     (LOCALCODER.md), and full-mode transcripts (.localcoder/sessions/) stay put;
     only the checkpoint moves."""
+    if not is_valid_checkpoint_id(checkpoint_id):
+        raise ValueError(f"Invalid checkpoint id: {checkpoint_id!r}")
     return _project_dir_for(cwd) / (checkpoint_id + ".json")
 
 def _legacy_checkpoint_path_for(cwd) -> Path:

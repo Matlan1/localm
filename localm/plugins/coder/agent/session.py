@@ -113,6 +113,24 @@ class _SessionMixin:
         )
 
     def set_cwd(self, cwd: Path) -> None:
+        """Point this session at another project directory (the REPL's /cd, and
+        the GUI's cwd route).
+
+        THE CHECKPOINT MOVES WITH THE SESSION. A checkpoint is filed under
+        ``<digest(cwd)>/<checkpoint_id>.json``, so changing the cwd changes
+        where the NEXT save lands. Leaving the old file behind would give one
+        conversation two resumable entries - and the abandoned one is frozen
+        forever at the moment of the cd while describing work that has since
+        moved elsewhere, so "continue last session" in the old project would
+        offer a phantom that can never catch up. Migrating keeps exactly one
+        copy, where the session actually is.
+
+        Best-effort, deliberately: the cwd change itself has already been
+        decided by the caller and must not fail because a stale file could not
+        be moved. A failure is logged rather than swallowed, and it is not
+        silent data loss - the old checkpoint simply stays where it was.
+        """
+        self._migrate_checkpoint(self.cwd, cwd)
         load_memory = _agent.load_memory  # live: honour a patched agent.load_memory
         load_custom_instructions = _agent.load_custom_instructions
         self.cwd = cwd
@@ -126,6 +144,33 @@ class _SessionMixin:
             else load_custom_instructions(cwd))
         self._rebuild_system_prompt()
         self._warn_injected_file_limits()
+
+    def _migrate_checkpoint(self, old_cwd: Path, new_cwd: Path) -> None:
+        """Move this session's own checkpoint file from *old_cwd*'s project
+        directory to *new_cwd*'s. See set_cwd for why.
+
+        Only ever touches THIS agent's own file (keyed on ``_checkpoint_id``),
+        never the whole project directory - a sibling session's checkpoint in
+        the same project is none of this session's business, exactly as
+        clear_checkpoint is careful not to reach one.
+        """
+        from .checkpoint import _checkpoint_path_for
+        try:
+            if Path(old_cwd).resolve() == Path(new_cwd).resolve():
+                return
+            src = _checkpoint_path_for(old_cwd, self._checkpoint_id)
+            if not src.is_file():
+                return                       # nothing saved yet: nothing to move
+            dst = _checkpoint_path_for(new_cwd, self._checkpoint_id)
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            src.replace(dst)   # atomic within a filesystem; overwrites a stale dst
+        except Exception as e:                                 # noqa: BLE001
+            import logging
+            logging.getLogger(__name__).warning(
+                "coder: could not move this session's checkpoint from %s to %s "
+                "(%s); the old copy stays where it is and this session's next "
+                "save will start a new one under the new directory",
+                old_cwd, new_cwd, e)
 
     def reindex(self) -> int:
         """Rebuild the full project map and regenerate the system prompt."""

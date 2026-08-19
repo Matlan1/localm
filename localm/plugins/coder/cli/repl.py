@@ -183,11 +183,21 @@ def _handle_command(raw: str, agent: Agent) -> bool:
             print_info("Usage: /cd <path>")
         else:
             new_dir = (agent.cwd / arg).resolve()
-            if new_dir.is_dir():
-                agent.set_cwd(new_dir)
-                print_info(f"Working directory: {new_dir}")
-            else:
+            if not new_dir.is_dir():
                 print_warning(f"Not a directory: {new_dir}")
+            else:
+                # A project that marked itself private must not receive this
+                # session's transcript, and the mode cannot be lowered to match
+                # once the audit log is open - see the helper for the full story.
+                # Shared with the web cwd route so the two surfaces agree.
+                from ..privacy import refuse_move_into_stricter_project
+                refusal = refuse_move_into_stricter_project(
+                    agent.mode.value, new_dir)
+                if refusal:
+                    print_warning(refusal)
+                else:
+                    agent.set_cwd(new_dir)
+                    print_info(f"Working directory: {new_dir}")
 
     elif cmd == "verbose":
         agent.verbose = not agent.verbose

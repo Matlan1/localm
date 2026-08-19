@@ -283,6 +283,20 @@ permanent public record of what shipped and are never rewritten; the in-progress
   alongside it. Like `localm update --rollback`, it restores that build's files;
   it does not undo package installs an update made along the way.
 
+- **A running coder session can now be steered from the app, not just at the
+  start.** The session toolbar gains **controls**, **memory** and **bg**.
+  **Controls** turns auto-approve on or off while the agent is working - so a run
+  you no longer trust stops asking for nothing and starts asking you, including
+  work it has handed to a sub-agent - and sets
+  the scope glob, the verification command, and the project directory the session
+  works in. Moving directory brings the conversation and its saved copy along
+  rather than stranding it under the old project. **Memory** shows the project's
+  LOCALCODER.md, the notes the agent reads every turn, and lets you add or drop
+  one; the running session picks the change up immediately instead of on the next
+  one. **bg** lists the background jobs this session started, which previously
+  ran with nowhere to see them. The setup form can also now pick which saved
+  session to continue when a project has several, rather than only the newest.
+
 ### Changed
 - **The chat parameters drawer and the image, music and video generation forms
   now keep their rarely-touched settings behind an "Advanced" section.** Chat
@@ -316,6 +330,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   a failed load or the server becoming unreachable.
 
 ### Fixed
+- **The coder no longer carries a recording session into a project you marked
+  private.** A session's persistence is fixed when it starts and cannot be
+  lowered afterwards, but its transcript is written wherever the session has got
+  to - so changing directory into a project whose `.localcoder/config.toml` asks
+  for privacy would have left a full record inside it. That move is now refused,
+  in the app and at the `/cd` prompt, naming the project's own setting; start a
+  fresh session in that directory instead.
 - **A memory write can no longer be silently lost to another localm process.**
   Two localm processes writing your memory at the same time - a `localm memory`
   command, or `localm setup-embeddings`, alongside a running server distilling
@@ -327,6 +348,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   long the command names what is holding it and changes nothing, instead of
   reporting a success that did not happen. Reading your memory is unaffected and
   never waits.
+- **"Still confirm shell commands" refused the command instead of asking you.**
+  Ticking it alongside auto-approve, as its own description invites, left a coder
+  session in the app with no way to put the question to anyone: every shell
+  command it reached was declined outright, reported as needing a confirmation
+  that could not be obtained. The approval card now appears, and the session no
+  longer needs to be restarted to get one.
 - **A restart no longer forgets what the server was in the middle of, and
   stopping the server no longer leaves the work running behind it.** A model
   pull, a runtime install or a ComfyUI setup was only ever remembered in

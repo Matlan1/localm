@@ -1486,3 +1486,376 @@ export async function openSessionHistory() {
 $("coder-history").onclick = openSessionHistory;
 $("setup-history").onclick = openSessionHistory;
 
+/* ================================================================ */
+/*  Live session controls - the REPL's /approve /scope /verify /cd,   */
+/*  /memory /remember /forget, /bg, and /sessions + /resume <id>.     */
+/*  None of these had a web form: the workaround on record (start     */
+/*  over with resume) needs a checkpoint, and privacy mode - the      */
+/*  DEFAULT on both surfaces - never writes one.                      */
+/* ================================================================ */
+
+/** POST a live settings change and refresh the cached session info.
+ *  Only the keys PRESENT in *body* are touched server-side, so a caller
+ *  changing one control cannot silently restate (and clobber) the others. */
+export async function postSessionSettings(body) {
+  const s = activeSession();
+  if (!s) throw new Error("No active session");
+  const r = await fetch(`/api/coder/sessions/${s.info.id}/settings`, {
+    method: "POST", headers: authHeaders(), body: JSON.stringify(body),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.detail || r.statusText);
+  s.info = data;                    // the EFFECTIVE state, not what we asked for
+  return data;
+}
+
+/** The running session's behaviour knobs. Reads back what the server actually
+ *  applied rather than assuming the request took - a re-detect that found no
+ *  check must not look like a check was set. */
+export function openSessionControls() {
+  const s = activeSession();
+  if (!s) { toast("Start a session first", true); return; }
+  openModal("Session controls - " + sessionLabel(s.info), (body) => {
+    const info = s.info || {};
+
+    body.appendChild(el("p", "sub",
+      "Changes apply to this running session immediately - including while a "
+      + "task is in flight, which is the point of the auto-approve switch."));
+
+    /* --- auto-approve (the REPL's /approve) --- */
+    const appRow = el("div", "card");
+    const appLbl = el("label", "", "");
+    const appBox = document.createElement("input");
+    appBox.type = "checkbox";
+    appBox.id = "ctl-auto-approve";
+    appBox.checked = !!info.auto_approve;
+    appLbl.appendChild(appBox);
+    appLbl.appendChild(document.createTextNode(" Auto-approve destructive tools"));
+    appRow.appendChild(appLbl);
+    appRow.appendChild(el("div", "sub",
+      "Unticking this takes effect on the very next tool call, so it stops a "
+      + "run already under way. You then get an approval card per action."));
+    appBox.onchange = async () => {
+      appBox.disabled = true;
+      try {
+        const d = await postSessionSettings({ auto_approve: appBox.checked });
+        appBox.checked = !!d.auto_approve;
+        toast(d.auto_approve ? "Auto-approve on" : "Auto-approve revoked");
+      } catch (e) {
+        appBox.checked = !appBox.checked;
+        toast("Could not change auto-approve: " + e.message, true);
+      } finally { appBox.disabled = false; }
+    };
+    body.appendChild(appRow);
+
+    /* --- scope (the REPL's /scope) --- */
+    const scopeCard = el("div", "card");
+    scopeCard.appendChild(el("label", "", "Scope (glob - file tools are confined to matching paths)"));
+    const scopeRow = el("div", "row");
+    const scopeIn = document.createElement("input");
+    scopeIn.type = "text";
+    scopeIn.id = "ctl-scope";
+    scopeIn.placeholder = "src/**/*.py";
+    scopeIn.spellcheck = false;
+    scopeIn.value = info.scope || "";
+    const scopeBtn = el("button", "btn-secondary", "apply");
+    scopeBtn.onclick = async () => {
+      scopeBtn.disabled = true;
+      try {
+        // "" is sent as null, which CLEARS - the server distinguishes an absent
+        // field (leave alone) from an explicit null (clear).
+        const v = scopeIn.value.trim();
+        const d = await postSessionSettings({ scope: v || null });
+        toast(d.scope ? `Scope set to '${d.scope}'` : "Scope cleared");
+      } catch (e) { toast("Could not set scope: " + e.message, true); }
+      finally { scopeBtn.disabled = false; }
+    };
+    scopeRow.appendChild(scopeIn);
+    scopeRow.appendChild(scopeBtn);
+    scopeCard.appendChild(scopeRow);
+    scopeCard.appendChild(el("div", "sub",
+      "Empty clears it. A scope confines the FILE tools; run_shell executes a "
+      + "process, which no path check can confine."));
+    body.appendChild(scopeCard);
+
+    /* --- verification (the REPL's /verify) --- */
+    const vCard = el("div", "card");
+    vCard.appendChild(el("label", "", "Verification command (exit 0 before a turn may finish)"));
+    if (info.restricted) {
+      vCard.appendChild(el("div", "modal-warn",
+        "A shared-key session runs no commands, so it has no verification "
+        + "check to set."));
+    }
+    const vRow = el("div", "row");
+    const vIn = document.createElement("input");
+    vIn.type = "text";
+    vIn.id = "ctl-verify";
+    vIn.placeholder = "(off)";
+    vIn.spellcheck = false;
+    vIn.value = info.verify || "";
+    const vSet = el("button", "btn-secondary", "set");
+    vSet.onclick = async () => {
+      vSet.disabled = true;
+      try {
+        const v = vIn.value.trim();
+        const d = await postSessionSettings({ verify: v || null });
+        vIn.value = d.verify || "";
+        toast(d.verify ? `Verification: ${d.verify}` : "Verification off");
+      } catch (e) { toast("Could not set verification: " + e.message, true); }
+      finally { vSet.disabled = false; }
+    };
+    const vAuto = el("button", "btn-secondary", "re-detect");
+    vAuto.title = "Look again for this project's own check";
+    vAuto.onclick = async () => {
+      vAuto.disabled = true;
+      try {
+        const d = await postSessionSettings({ auto_verify: true });
+        vIn.value = d.verify || "";
+        // A re-detect that found nothing is SAID, not left looking like a set.
+        toast(d.verify ? `Verification: ${d.verify}`
+                       : "No obvious check found in this project - verification is off", !d.verify);
+      } catch (e) { toast("Could not re-detect: " + e.message, true); }
+      finally { vAuto.disabled = false; }
+    };
+    vRow.appendChild(vIn);
+    vRow.appendChild(vSet);
+    vRow.appendChild(vAuto);
+    vCard.appendChild(vRow);
+    body.appendChild(vCard);
+
+    /* --- working directory (the REPL's /cd) --- */
+    const cdCard = el("div", "card");
+    cdCard.appendChild(el("label", "", "Working directory"));
+    const cdRow = el("div", "row");
+    const cdIn = document.createElement("input");
+    cdIn.type = "text";
+    cdIn.id = "ctl-cwd";
+    cdIn.spellcheck = false;
+    cdIn.value = info.cwd || "";
+    const cdBrowse = el("button", "btn-secondary", "browse…");
+    cdBrowse.onclick = async () => {
+      const picked = await pickDirectory("Move this session to", cdIn.value);
+      if (picked) cdIn.value = picked;
+    };
+    const cdBtn = el("button", "btn-secondary", "move");
+    cdBtn.onclick = async () => {
+      cdBtn.disabled = true;
+      try {
+        const r = await fetch(`/api/coder/sessions/${s.info.id}/cwd`, {
+          method: "POST", headers: authHeaders(),
+          body: JSON.stringify({ cwd: cdIn.value.trim() }),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.detail || r.statusText);
+        s.info = d;
+        $("coder-cwd").textContent = d.cwd;
+        toast("Working directory: " + d.cwd);
+      } catch (e) { toast("Could not change directory: " + e.message, true); }
+      finally { cdBtn.disabled = false; }
+    };
+    cdRow.appendChild(cdIn);
+    cdRow.appendChild(cdBrowse);
+    cdRow.appendChild(cdBtn);
+    cdCard.appendChild(cdRow);
+    cdCard.appendChild(el("div", "sub",
+      "The conversation moves with the session, and so does its saved "
+      + "checkpoint - it is not left behind under the old project. Not "
+      + "available mid-task."));
+    // Said up front rather than discovered by collecting a 403: a shared-key
+    // session is confined to the project root by design, and that is worth
+    // explaining once instead of looking like a failure each time.
+    if (info.restricted) {
+      cdIn.disabled = true;
+      cdBrowse.disabled = true;
+      cdBtn.disabled = true;
+      cdCard.appendChild(el("div", "modal-warn",
+        "This session was started with a shared key, so it is confined to the "
+        + "project root and cannot change directory."));
+    }
+    body.appendChild(cdCard);
+  });
+}
+
+/** The project-memory file (LOCALCODER.md): what the agent is reading, and the
+ *  two ways to change it. Editing the file by asking the agent does NOT reach
+ *  the running session; these routes reload it, which is the whole point.
+ *
+ *  NAMED openCoderMemoryModal, not openMemoryModal, and it must stay that way:
+ *  settings-perf.js already exports openMemoryModal for the CHAT memory (facts
+ *  remembered about the user), and these scripts share ONE global lexical
+ *  environment - so the shorter name silently shadowed it and the chat memory
+ *  chip stopped opening anything. Two different memories, two different names. */
+export async function openCoderMemoryModal() {
+  const s = activeSession();
+  if (!s) { toast("Start a session first", true); return; }
+  let data;
+  try {
+    const r = await fetch(`/api/coder/sessions/${s.info.id}/memory`,
+                          { headers: authHeaders() });
+    data = await r.json();
+    if (!r.ok) throw new Error(data.detail || r.statusText);
+  } catch (e) { toast("Could not read project memory: " + e.message, true); return; }
+
+  openModal("Project memory - " + sessionLabel(s.info), (body) => {
+    if (data.warning) body.appendChild(el("div", "modal-warn", data.warning));
+    if (!data.exists) {
+      body.appendChild(emptyState("book", "No project memory yet",
+        "Add a note below and it is written to LOCALCODER.md in this project, "
+        + "then injected into the agent's prompt from the next turn on."));
+    } else {
+      body.appendChild(el("p", "sub", data.path));
+      const pre = el("pre", "job-log");
+      // textContent, never innerHTML: this is user/project file content.
+      pre.textContent = data.text || "(empty)";
+      body.appendChild(pre);
+    }
+
+    const addCard = el("div", "card");
+    addCard.appendChild(el("label", "", "Remember something about this project"));
+    const addRow = el("div", "row");
+    const addIn = document.createElement("input");
+    addIn.type = "text";
+    addIn.id = "mem-add";
+    addIn.placeholder = "e.g. the test suite is run with npm test, not node --test";
+    const addBtn = el("button", "btn-secondary", "remember");
+    addBtn.onclick = async () => {
+      const text = addIn.value.trim();
+      if (!text) { toast("Type what to remember", true); return; }
+      addBtn.disabled = true;
+      try {
+        const r = await fetch(`/api/coder/sessions/${s.info.id}/memory`, {
+          method: "POST", headers: authHeaders(), body: JSON.stringify({ text }),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.detail || r.statusText);
+        toast("Remembered - the agent has it from the next turn");
+        openCoderMemoryModal();
+      } catch (e) { toast("Could not remember: " + e.message, true); }
+      finally { addBtn.disabled = false; }
+    };
+    addRow.appendChild(addIn);
+    addRow.appendChild(addBtn);
+    addCard.appendChild(addRow);
+    body.appendChild(addCard);
+
+    const dropCard = el("div", "card");
+    dropCard.appendChild(el("label", "", "Forget entries containing"));
+    const dropRow = el("div", "row");
+    const dropIn = document.createElement("input");
+    dropIn.type = "text";
+    dropIn.id = "mem-forget";
+    dropIn.placeholder = "substring, case-insensitive";
+    const dropBtn = el("button", "btn-secondary", "forget");
+    dropBtn.onclick = async () => {
+      const pattern = dropIn.value.trim();
+      if (!pattern) { toast("Type what to forget", true); return; }
+      dropBtn.disabled = true;
+      try {
+        const r = await fetch(`/api/coder/sessions/${s.info.id}/memory/forget`, {
+          method: "POST", headers: authHeaders(),
+          body: JSON.stringify({ pattern }),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.detail || r.statusText);
+        // "no memory file" and "nothing matched" are different situations and
+        // are reported as such, not both as a bare "removed 0".
+        if (!d.had_file) toast("There is no memory file for this project", true);
+        else if (!d.removed) toast(`No entries matching '${pattern}'`, true);
+        else toast(`Removed ${d.removed} entr${d.removed === 1 ? "y" : "ies"}`);
+        openCoderMemoryModal();
+      } catch (e) { toast("Could not forget: " + e.message, true); }
+      finally { dropBtn.disabled = false; }
+    };
+    dropRow.appendChild(dropIn);
+    dropRow.appendChild(dropBtn);
+    dropCard.appendChild(dropRow);
+    body.appendChild(dropCard);
+  });
+}
+
+/** Background work THIS session started (the REPL's /bg). An owner session can
+ *  start background shell jobs and sub-agents and, until now, could enumerate
+ *  them nowhere. */
+export async function openBackgroundModal() {
+  const s = activeSession();
+  if (!s) { toast("Start a session first", true); return; }
+  let data;
+  try {
+    const r = await fetch(`/api/coder/sessions/${s.info.id}/background`,
+                          { headers: authHeaders() });
+    data = await r.json();
+    if (!r.ok) throw new Error(data.detail || r.statusText);
+  } catch (e) { toast("Could not read background jobs: " + e.message, true); return; }
+
+  openModal("Background jobs - " + sessionLabel(s.info), (body) => {
+    const jobs = data.jobs || [];
+    const running = jobs.filter((j) => j.state === "running");
+    const done = jobs.filter((j) => j.state !== "running");
+
+    if (!jobs.length) {
+      // "none yet" and "this session can never have any" are different answers
+      // and the server tells us which, so we do not collapse them.
+      body.appendChild(data.supported
+        ? emptyState("clock", "No background work yet",
+            "The agent starts these with run_shell_background or "
+            + "spawn_agent_background; they show up here while they run.")
+        : emptyState("clock", "Not available in this session",
+            "A shared-key session runs nothing in the background - it has no "
+            + "shell or sub-agent tools at all."));
+    }
+
+    const section = (title, rows, cls) => {
+      if (!rows.length) return;
+      body.appendChild(el("h4", "media-sub-head", title));
+      for (const j of rows) {
+        const card = el("div", "card");
+        card.appendChild(el("div", "row", `${j.kind}  ${j.label}`));
+        const bits = [j.id, `${Math.round(j.elapsed)}s`];
+        if (j.state !== "running") bits.push(j.state);
+        const res = j.result || {};
+        if (j.kind === "shell" && res.exit_code !== undefined && res.exit_code !== null)
+          bits.push(`exit ${res.exit_code}`);
+        if (j.kind === "agent" && res.turns !== undefined)
+          bits.push(`${res.turns} turn(s)`);
+        if (res.branch) bits.push(`branch ${res.branch}`);
+        if (j.error) bits.push(j.error);
+        card.appendChild(el("div", cls, bits.join(" · ")));
+        // Non-fatal problems the job recorded are shown, not dropped.
+        for (const w of j.warnings || []) card.appendChild(el("div", "modal-warn", w));
+        body.appendChild(card);
+      }
+    };
+    section("Running", running, "sub");
+    section("Finished", done, "sub");
+
+    // What the bounded table discarded. A lost sub-agent result is a real,
+    // unrecoverable loss; an aged-out shell job is housekeeping and is still
+    // pollable by id, so the two are not rendered with the same alarm.
+    const dropped = data.dropped || {};
+    if (dropped.agent) {
+      body.appendChild(el("div", "modal-warn",
+        `${dropped.agent} background sub-agent result(s) were discarded before `
+        + "they could be collected, and are lost."));
+    }
+    const other = Object.entries(dropped)
+      .filter(([k]) => k !== "agent")
+      .reduce((n, [, v]) => n + v, 0);
+    if (other) {
+      body.appendChild(el("div", "sub",
+        `${other} older finished job(s) have aged out of this list (it is `
+        + "capped per kind)."));
+    }
+
+    const foot = el("div", "actions");
+    const refresh = el("button", "btn-secondary", "refresh");
+    refresh.onclick = () => openBackgroundModal();
+    foot.appendChild(refresh);
+    body.appendChild(foot);
+  });
+}
+
+$("coder-controls").onclick = openSessionControls;
+$("coder-memory").onclick = openCoderMemoryModal;
+$("coder-bg").onclick = openBackgroundModal;
+
+

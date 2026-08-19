@@ -228,6 +228,7 @@ def tool_run_shell_background(
     cwd: Path,
     command: str,
     _privacy: bool = False,
+    _owner: str | None = None,
 ) -> ToolResult:
     """
     Start a shell command in the background and return a job id immediately.
@@ -248,7 +249,8 @@ def tool_run_shell_background(
 
     try:
         job = registry.submit(
-            lambda: ShellJob(argv, cwd, label=command, env=env), kind="shell")
+            lambda: ShellJob(argv, cwd, label=command, env=env, owner=_owner),
+            kind="shell")
     except JobCapacityError as e:
         return ToolResult.error(str(e))
     except FileNotFoundError as e:

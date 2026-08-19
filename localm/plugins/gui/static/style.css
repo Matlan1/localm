@@ -1746,6 +1746,14 @@ div:has(> .data-table) { overflow-x: auto; }
 /* The reindex button when it is the fix for a .retrieval-badge row. */
 .data-table button.warn { color: var(--yellow); border-color: var(--yellow); }
 .data-table button.warn:hover { color: #fff; background: var(--yellow); border-color: var(--yellow); }
+/* A non-fatal problem stated inside a modal: a project-memory file over the
+   injection budget, or a warning a background job recorded. There was no
+   general-purpose in-modal notice class, and rendering these as .sub (the muted
+   style every other modal line uses) would understate a real loss - which is
+   the shape AGENTS.md rule 5 exists to stop. Yellow, matching .data-table
+   button.warn's severity vocabulary rather than inventing a second one. */
+.modal-warn { color: var(--yellow); font-size: .85rem; margin: .4rem 0; }
+
 /* The repair button when it is the fix for a .corrupt-badge row - red to
    match that badge's stronger severity, same shape as .warn for .retrieval-badge. */
 .data-table button.corrupt-fix { color: var(--red); border-color: var(--red); }

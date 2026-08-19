@@ -599,6 +599,14 @@ class _ExecutionMixin:
         if call.name in (*_SHELL_EXEC_TOOLS, "fetch_url", "web_search", "generate_image") \
                 and self.mode == SessionMode.PRIVACY:
             args["_privacy"] = True
+        # Which session a background job belongs to. Injected after the copy for
+        # the same reason as _parent_agent above: a model-supplied "_owner"
+        # would otherwise let a call attribute its job to another session, and
+        # the whole point of the field is that a caller can trust it. The
+        # sibling spawn_agent_background needs no injection - it already
+        # receives _parent_agent and reads job_owner straight off it.
+        if call.name == "run_shell_background":
+            args["_owner"] = self.job_owner
 
         # Timed around the invocation ONLY - not the bookkeeping below - so this
         # is genuinely "how long the tool took", the number the GUI shows next
