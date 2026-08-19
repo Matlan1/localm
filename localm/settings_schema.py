@@ -401,11 +401,10 @@ CORE_FIELDS: list = [
     # explicit -H was typed - that read is what makes the Settings > Restart
     # server flow work for a browser-only user.
     SettingField("bind_host", Widget.TEXT, "Bind address",
-                 "Network interface the server binds to. Blank = this computer "
-                 "only (127.0.0.1); 0.0.0.0 = every interface, so phones on "
-                 "your network can reach it (set an API key first, or the "
-                 "server stays on loopback); or one specific interface IP. "
-                 "Save, then click Restart server below.",
+                 "Which interface the server binds to. Blank = this computer "
+                 "only (127.0.0.1). 0.0.0.0 = every interface, so phones on "
+                 "your network reach it; set an API key first or it stays on "
+                 "loopback.",
                  group="Server", applies=Applies.RESTART, admin_only=True),
     # admin_only, all three: turning TLS off sends the API key over the network
     # in cleartext, and the cert/key pair decides what the server presents to
@@ -413,21 +412,19 @@ CORE_FIELDS: list = [
     # delegated config:write key's. CLI flags (--no-tls / --tls-cert/--tls-key)
     # win over all three for that process; see cli._resolve_tls.
     SettingField("tls_enabled", Widget.TOGGLE, "Encrypt network traffic (TLS)",
-                 "Serve HTTPS on a network bind with localm's built-in "
-                 "certificate (or the custom pair below). Off = plain HTTP: "
-                 "the API key crosses the network readable by anyone on it - "
-                 "only for a trusted, isolated network. Loopback binds always "
-                 "use plain HTTP either way.",
+                 "Serve HTTPS on a network bind (built-in certificate, or a "
+                 "custom pair). Off = plain HTTP, so the API key crosses the "
+                 "network readable by anyone on it. Loopback is always plain "
+                 "HTTP.",
                  group="Server", applies=Applies.RESTART, admin_only=True),
     SettingField("tls_cert", Widget.PATH, "Custom TLS certificate (PEM)",
-                 "Use this certificate instead of localm's built-in one. "
-                 "Requires the private key below; blank = built-in. If the "
-                 "pair cannot be loaded at startup, localm falls back to its "
-                 "built-in certificate (with a warning) rather than serving "
-                 "unencrypted or failing to start.",
+                 "Use this certificate instead of localm's built-in one; blank "
+                 "= built-in. Needs the matching private key. If the pair "
+                 "cannot be loaded, localm warns and falls back to its "
+                 "built-in certificate.",
                  group="Server", applies=Applies.RESTART, admin_only=True),
     SettingField("tls_key", Widget.PATH, "Custom TLS private key (PEM)",
-                 "Private key for the certificate above.",
+                 "Private key for the custom TLS certificate.",
                  group="Server", applies=Applies.RESTART, admin_only=True),
     # admin_only: this names WHICH BROWSER ORIGINS may call the authenticated
     # API - it widens a trust boundary exactly like net_allow_private (network
