@@ -223,3 +223,25 @@ test("a refresh that cannot reach the server leaves the card as it was", async (
   await win.refreshDiagnosticsCard();
   assert.equal(statusText(win), before);
 });
+
+test("mid-run, each row says where IT is rather than all claiming to be waiting", () => {
+  // The card said "4 of 5 done" on the line above while every row said
+  // "waiting..." - not false (the browser has no per-check result until the run
+  // ends) but self-contradictory. A finished row says it was checked and that
+  // the result is coming; it does NOT guess a verdict.
+  const win = load();
+  win.renderDoctorReport(body({
+    running: true,
+    progress: { phase: "Nested venv creation", done: 3, total: 5 },
+  }));
+  const said = rows(win).map((r) => r.querySelector(".sub").textContent);
+  assert.deepEqual(said, [
+    "checked - result when the run finishes",
+    "checked - result when the run finishes",
+    "checked - result when the run finishes",
+    "checking now...",
+    "waiting...",
+  ]);
+  // And still no verdict pill on any of them.
+  for (const row of rows(win)) assert.equal(pillOf(row).textContent, "not run");
+});

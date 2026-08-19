@@ -2622,11 +2622,23 @@ export function renderDoctorReport(body) {
 
   // Before the first run, still show the rows - so the card names what it is
   // about to check rather than presenting an unexplained button.
+  //
+  // MID-RUN, each row says where IT is, from the server's `done` count. Saying
+  // "waiting" on all five while the line above reads "4 of 5 done" contradicts
+  // itself, and the fix is not to guess a verdict for the four that finished:
+  // the browser genuinely does not have their results until the run ends (they
+  // arrive as one report). So a finished row says it was checked and that the
+  // result is coming, which is exactly what is true.
+  const done = (body.progress || {}).done || 0;
+  const placeholder = (i) => {
+    if (!body.running) return "not run yet";
+    if (i < done) return "checked - result when the run finishes";
+    return i === done ? "checking now..." : "waiting...";
+  };
   const rows = (report && report.checks && report.checks.length)
     ? report.checks
-    : covers.map((c) => ({ key: c.key, label: c.label, status: "skipped",
-                           summary: body.running ? "waiting..." : "not run yet",
-                           findings: [] }));
+    : covers.map((c, i) => ({ key: c.key, label: c.label, status: "skipped",
+                              summary: placeholder(i), findings: [] }));
   for (const c of rows) list.appendChild(renderDoctorCheck(c));
 }
 
