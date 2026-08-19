@@ -71,10 +71,14 @@ def _resolve_bind_host(cli_host: Optional[str]):
     with no terminal-free way back. Explicit CLI binds keep their fail-hard
     behavior (the operator typing -H is watching a terminal).
 
-    A config value that is not bindable (possible only via a hand-edited
-    config.json - PATCH /v1/config and `localm config` both validate at write
-    time) is treated as unset, with a warning: handing it to uvicorn would
-    kill the server at startup, the exact no-way-back failure above."""
+    A config value that is not even well-FORMED (possible only via a
+    hand-edited config.json - PATCH /v1/config and `localm config` both
+    validate at write time) is treated as unset, with a warning. Syntax is all
+    this helper can judge; whether the address is bindable RIGHT NOW (a
+    specific interface IP can go stale when DHCP reassigns the machine) is a
+    runtime question answered by _bind_preflight_error at the call site in
+    plugins/gui/cli.py - handing a stale address to uvicorn would kill the
+    server at startup, the exact no-way-back failure above."""
     if cli_host is not None:
         return str(cli_host), False
     from localm.config import load_config
@@ -91,6 +95,37 @@ def _resolve_bind_host(cli_host: Optional[str]):
         console.print(f"[yellow]{msg}[/yellow]")
         return "127.0.0.1", False
     return cfg_host, True
+
+
+def _bind_preflight_error(host: str) -> Optional[str]:
+    """Why *host* cannot be bound on this machine RIGHT NOW, or None when it
+    can. Probes with a real throwaway bind to an ephemeral port.
+
+    Exists because syntax validation cannot see the commonest real failure of
+    the ``bind_host`` config key's own recommended use: a SPECIFIC interface
+    IP that is no longer assigned, because DHCP gave the machine a different
+    address some time after the value was saved. Handing such a host to the
+    server kills the process at the socket bind (uvicorn exits on a failed
+    bind, and portmux's uvicorn fallback re-tries the same host) - for a
+    config-driven bind that is a locked-out user with no terminal, so the
+    caller falls back to loopback instead. Loopback and the wildcards bind
+    trivially; the probe costs one socket.
+
+    Known residual, stated rather than glossed: the address can still
+    disappear in the window between this probe and the real bind. The probe
+    closes the common stale-at-boot case; it is not a TOCTOU-free guarantee,
+    and the explicit-CLI path (-H) deliberately keeps today's fail-hard
+    behavior in front of the operator who typed it."""
+    import socket
+    try:
+        infos = socket.getaddrinfo(host, 0, type=socket.SOCK_STREAM,
+                                   flags=socket.AI_PASSIVE)
+        family, stype, proto, _name, addr = infos[0]
+        with socket.socket(family, stype, proto) as s:
+            s.bind(addr)
+        return None
+    except OSError as e:
+        return str(e)
 
 
 def _config_tls_pair(cfg: dict):

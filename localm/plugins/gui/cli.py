@@ -578,6 +578,38 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
         console.print(f"[bold yellow]{bind_warning}[/bold yellow]")
         console.print("[bold yellow]  Proceeding anyway (--insecure set).[/bold yellow]")
 
+    # A config-sourced address must also be BINDABLE right now, not merely
+    # well-formed: the field's own recommended use (one specific interface IP)
+    # goes stale when DHCP reassigns the machine, and handing a stale address
+    # to the server kills the process at the socket bind - the locked-out-user
+    # failure the auth fallback above exists to prevent, through a different
+    # door. Probed with a real throwaway bind (syntax checks cannot see it);
+    # same loud loopback fallback. Runs even under --insecure (that flag
+    # waives AUTH, not bindability - a dead process helps nobody). An explicit
+    # -H keeps failing hard in front of the operator who typed it.
+    if host_from_config and bind_fallback is None:
+        from localm.bindhost import is_loopback_host as _is_lb
+        if not _is_lb(host):
+            from localm.cli import _bind_preflight_error
+            _bind_err = _bind_preflight_error(host)
+            if _bind_err is not None:
+                bind_fallback = (
+                    f"The configured bind address ({host}) was not applied: "
+                    f"this machine has no usable interface with that address "
+                    f"right now ({_bind_err}). The server is on 127.0.0.1 "
+                    f"(this computer only). Fix Settings > Server > Bind "
+                    f"address (0.0.0.0 = every interface), then restart the "
+                    f"server.")
+                console.print(
+                    f"[bold yellow]The configured bind address {host} cannot "
+                    f"be bound on this machine right now ({_bind_err}) - "
+                    f"ignoring it and binding 127.0.0.1 (this computer "
+                    f"only).[/bold yellow]")
+                from localm.debuglog import logger as _plog
+                _plog.warning("config bind_host=%s not applied: %s",
+                              host, _bind_err)
+                host = "127.0.0.1"
+
     model_path = None
     display_name = ""
     if not model_less:

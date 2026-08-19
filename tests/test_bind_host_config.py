@@ -20,7 +20,13 @@ from click.testing import CliRunner
 
 from localm import settings_schema as ss
 from localm.bindhost import is_valid_bind_host
-from localm.cli import _resolve_bind_host, _resolve_tls
+from localm.cli import _bind_preflight_error, _resolve_bind_host, _resolve_tls
+
+# TEST-NET-2 (RFC 5737): reserved for documentation, never assigned to a real
+# interface - so binding it fails deterministically on any machine. This is
+# the shape of the field's commonest REAL failure: a specific interface IP
+# that DHCP has since reassigned. Syntactically valid, currently unbindable.
+STALE_IP = "198.51.100.23"
 
 
 @pytest.fixture
@@ -54,8 +60,7 @@ def _set(cfg_mod, **updates):
 
 class TestIsValidBindHost:
     @pytest.mark.parametrize("good", [
-        "127.0.0.1", "0.0.0.0", "192.168.1.20", "10.0.0.7", "::", "::1",
-        "fe80::1", "localhost",
+        "127.0.0.1", "0.0.0.0", "192.168.1.20", "10.0.0.7", "localhost",
     ])
     def test_accepts_bindable_literals(self, good):
         assert is_valid_bind_host(good) is True
@@ -63,6 +68,12 @@ class TestIsValidBindHost:
     @pytest.mark.parametrize("bad", [
         "", None, 0, "myhouse", "example.com", "0.0.0.0:8642",
         "http://0.0.0.0", "127.0.0.1 ", "0.0.0.0/0",
+        # IPv6 is well-formed but the server DIES on it today (the port probe
+        # is AF_INET; socket.gaierror at startup, reproduced live on all
+        # three). Accepting it here would let a Settings write brick a
+        # terminal-less user - see is_valid_bind_host's docstring. Widen only
+        # together with real end-to-end IPv6 support.
+        "::", "::1", "fe80::1",
     ])
     def test_rejects_everything_else(self, bad):
         assert is_valid_bind_host(bad) is False
@@ -84,7 +95,8 @@ class TestValidateUpdate:
     def test_bind_host_accepts_and_normalizes(self, val, stored):
         assert ss.validate_update({"bind_host": val})["bind_host"] == stored
 
-    @pytest.mark.parametrize("bad", ["myhouse", "0.0.0.0:8642", "http://x", "a b"])
+    @pytest.mark.parametrize("bad", ["myhouse", "0.0.0.0:8642", "http://x", "a b",
+                                     "::", "::1", "fe80::1"])
     def test_bind_host_rejects_unbindable(self, bad):
         with pytest.raises(ValueError, match="bind_host"):
             ss.validate_update({"bind_host": bad})
@@ -140,6 +152,22 @@ class TestResolveBindHost:
         cfg_home.CONFIG_FILE.write_text(
             json.dumps({"bind_host": "not-an-address"}), encoding="utf-8")
         assert _resolve_bind_host(None) == ("127.0.0.1", False)
+
+
+# ------------------------------------------------------------------ #
+#  _bind_preflight_error (runtime bindability, not syntax)            #
+# ------------------------------------------------------------------ #
+
+class TestBindPreflight:
+    def test_stale_interface_ip_is_reported(self):
+        # The field's own recommended use gone stale: valid syntax, no such
+        # interface on this machine. Must return the OS reason, not raise.
+        err = _bind_preflight_error(STALE_IP)
+        assert err is not None and isinstance(err, str)
+
+    @pytest.mark.parametrize("ok", ["127.0.0.1", "0.0.0.0"])
+    def test_bindable_hosts_pass(self, ok):
+        assert _bind_preflight_error(ok) is None
 
 
 # ------------------------------------------------------------------ #
@@ -302,6 +330,26 @@ class TestConfigBindGuard:
         assert calls["pick_port_host"] == "127.0.0.1"
         assert "cert_hosts" not in calls          # loopback: no TLS
         assert "Ignoring the configured bind address" not in r.output
+
+    def test_stale_config_ip_falls_back_to_loopback_alive(
+            self, cfg_home, gui_probe, monkeypatch):
+        """A config address that is well-formed but no longer assigned (DHCP
+        moved the machine) must not kill the server at the socket bind - the
+        stale address is refused by a REAL preflight bind probe (nothing
+        mocked at that layer; STALE_IP is genuinely unassigned) and startup
+        continues on loopback. Found by review: without the preflight this
+        died with exit 3 inside uvicorn, past every syntax check."""
+        invoke, calls = gui_probe
+        _set(cfg_home, bind_host=STALE_IP)
+        monkeypatch.setenv("LOCALM_API_KEY", "a-strong-secret-123")
+        r = invoke(["--no-model", "--no-browser"])
+        assert isinstance(r.exception, _Sentinel), (
+            f"startup stopped before the port pick: exit={r.exit_code} "
+            f"output={r.output!r}")
+        assert calls["pick_port_host"] == "127.0.0.1"
+        assert "cert_hosts" not in calls, "TLS must not be provisioned for a refused bind"
+        assert "cannot be bound on this machine" in r.output
+        assert r.exit_code != 2
 
     def test_builtin_tls_failure_on_config_bind_falls_back_to_loopback(
             self, cfg_home, gui_probe, monkeypatch):

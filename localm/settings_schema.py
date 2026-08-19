@@ -1341,11 +1341,12 @@ def _validate_one(key: str, val, field: "SettingField", default):
             return ""
         if not is_valid_bind_host(s):
             raise ValueError(
-                f"bind_host: {val!r} is not a bindable address - use an IP "
+                f"bind_host: {val!r} is not a bindable address - use an IPv4 "
                 f"literal (0.0.0.0 for every interface, or one interface's IP "
                 f"like 192.168.1.20) or localhost; blank = this computer only. "
-                f"Hostnames and host:port values are not accepted (the port "
-                f"has its own setting).")
+                f"Hostnames, host:port values and IPv6 literals are not "
+                f"accepted (the port has its own setting; IPv6 binds are not "
+                f"supported yet).")
         return s
     if key in ("tls_cert", "tls_key"):
         # A non-empty value must point at an existing file NOW, so a typo is a
