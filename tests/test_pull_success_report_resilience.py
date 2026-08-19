@@ -14,11 +14,23 @@ alone is one link short of the real bug: what actually decides the user-visible
 outcome is the CLI PROCESS'S EXIT CODE, which is why the last test below drives
 the real `pull` click command through CliRunner rather than stopping at the
 Python-level return value.
+
+The classes near the bottom of this file cover the SAME shape at three more
+call sites (S4): the mid-function "SHA256 verified" checkmark in
+pull_model()'s local-path branch, in _pull_gguf_file(), and in _pull_url() -
+each one printed BEFORE the function's own trailing _report_success()-guarded
+message, but still AFTER the real work (hashing, and in two of the three
+cases the registry write) is done. Unlike the trailing checkmark, these sit
+in the MIDDLE of their function, so the regression is not just "does the
+return value survive" but "does execution reach the registration code that
+follows the print at all".
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -173,3 +185,114 @@ class TestCliPullExitCode:
             f"its trailing status print crashed - exit_code={result.exit_code}, "
             f"output={result.output!r}"
         )
+
+
+# ------------------------------------------------------- S4: the mid-function
+# ------------------------------------------------ "SHA256 verified" checkmarks
+#
+# Three more raw console.print(f"[green]checkmark[/green] SHA256 verified...")
+# calls share the identical shape but sit BEFORE the rest of their function's
+# work, not after it - so the regression these guard against is not merely
+# "the return value survives a crash", it is "execution reaches the
+# registration code that the print used to sit in front of".
+
+class TestLocalPathSurvivesACrashingVerifiedPrint:
+    """pull_model()'s local-path branch (pull.py, is_local_path with
+    --sha256): the checkmark sits between the real digest check and the
+    add_local() call that actually registers the file."""
+
+    def test_pull_model_local_path_still_registers_when_the_verified_print_raises(
+            self, tmp_path, monkeypatch):
+        body = b"a real local model file's bytes"
+        f = tmp_path / "private-finetune.gguf"
+        f.write_bytes(body)
+        digest = hashlib.sha256(body).hexdigest()
+
+        add_local_calls = []
+        monkeypatch.setattr(
+            pull_mod._mm, "add_local",
+            lambda path_str, **kw: add_local_calls.append((path_str, kw)) or True)
+        monkeypatch.setattr(pull_mod.console, "print", _raise_on_checkmark)
+
+        result = pull_mod.pull_model(f.as_posix(), expected_sha256=digest)
+
+        assert result is True, (
+            "the SHA256 was already verified against the real bytes before "
+            "this print ran - a crash rendering the checkmark must not turn "
+            f"a verified local file into a reported failure, got {result!r}")
+        assert add_local_calls, (
+            "add_local() must still run after the crashing verified-checkmark "
+            "print - it sits AFTER the print in the source, so a caller that "
+            "does not swallow the crash never reaches it at all")
+
+
+class TestPullGgufFileSurvivesACrashingVerifiedPrint:
+    """_pull_gguf_file()'s FAC-5 --sha256 branch: the checkmark sits between
+    the real digest check on the freshly-downloaded bytes and the metadata
+    probe + _register() call that follows it."""
+
+    def test_pull_gguf_file_still_registers_when_the_verified_print_raises(
+            self, tmp_path, monkeypatch):
+        models_dir = tmp_path / "models"
+        models_dir.mkdir()
+        monkeypatch.setattr(mm, "MODELS_DIR", models_dir)
+        monkeypatch.setattr(mm, "ensure_dirs", lambda: None)
+        monkeypatch.setattr(mm, "find_by_sha256", lambda *a, **k: [])
+        monkeypatch.setattr(mm, "_check_disk_space", lambda *a, **k: True)
+        # None (not a real digest): the FAC-5 pre-download reconciliation at
+        # pull.py's "want and expected and want != expected" only fires when
+        # HF metadata is known: keep it unknown so the caller's --sha256 is
+        # the one actually verified against the downloaded bytes below.
+        monkeypatch.setattr(mm, "_hf_file_sha256", lambda repo_id, fn: None)
+
+        register_calls = []
+        monkeypatch.setattr(
+            mm, "_register",
+            lambda *a, **k: register_calls.append((a, k)))
+
+        body = b"a freshly downloaded gguf file's bytes"
+        digest = hashlib.sha256(body).hexdigest()
+
+        def _fake_download(repo_id, filename, local_dir, **kw):
+            p = Path(local_dir) / filename
+            p.write_bytes(body)
+            return str(p)
+
+        import huggingface_hub
+        monkeypatch.setattr(huggingface_hub, "hf_hub_download", _fake_download)
+        monkeypatch.setattr(pull_mod.console, "print", _raise_on_checkmark)
+
+        result = mm._pull_gguf_file("o/r:new.gguf", None, expected_sha256=digest)
+
+        assert result is True, (
+            "the download and SHA256 verification both completed - a crash "
+            f"rendering the checkmark must not report this as failed, got {result!r}")
+        assert register_calls, (
+            "_register() must still run after the crashing verified-checkmark "
+            "print - it sits AFTER the print in the source")
+
+
+class TestPullUrlSurvivesACrashingVerifiedPrint:
+    """_pull_url()'s --sha256 branch: the checkmark sits between the real
+    digest check on the downloaded bytes and the duplicate-check + _register()
+    call that follows it (distinct from TestPullUrlSurvivesACrashingSuccessPrint
+    above, which covers the function's TRAILING checkmark and never passes
+    expected_sha256, so it never reaches this earlier print at all)."""
+
+    def test_pull_url_still_registers_when_the_verified_print_raises(
+            self, url_env, monkeypatch):
+        body = b"0123456789"
+        digest = hashlib.sha256(body).hexdigest()
+        monkeypatch.setenv("LOCALM_PROGRESS_JSON", "1")
+        _wire_http(monkeypatch, len(body), _resp(200, body))
+        monkeypatch.setattr(pull_mod.console, "print", _raise_on_checkmark)
+
+        result = mm._pull_url("http://example.com/model.gguf", "mymodel",
+                              expected_sha256=digest)
+
+        assert result is True, (
+            "the download and SHA256 verification both completed - a crash "
+            f"rendering the checkmark must not report this as failed, got {result!r}")
+        assert mm._register.call_count == 1, (
+            "_register() must still run after the crashing verified-checkmark "
+            "print - it sits AFTER the print in the source")

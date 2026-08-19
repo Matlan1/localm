@@ -332,7 +332,8 @@ def pull_model(
                     f"[red]SHA256 mismatch![/red] {local} is {actual[:16]}…, not "
                     f"--sha256 {want[:16]}…. Refusing to register.")
                 return False
-            console.print(f"[green]✓[/green] SHA256 verified: {actual[:16]}…")
+            _report_success(f"[green]✓[/green] SHA256 verified: {actual[:16]}…",
+                            f"[green]OK[/green] SHA256 verified: {actual[:16]}…")
         # A local file gets no remote type probe: honour an explicit --type, else let
         # add_local deterministically detect it (GGUF -> llm, HF dir -> config.json,
         # otherwise the 'unknown' sentinel rather than a silent 'llm').
@@ -997,7 +998,8 @@ def _pull_gguf_file(
                 if p.exists():
                     p.unlink()
             return False
-        console.print(f"[green]✓[/green] SHA256 verified: {actual[:16]}…")
+        _report_success(f"[green]✓[/green] SHA256 verified: {actual[:16]}…",
+                        f"[green]OK[/green] SHA256 verified: {actual[:16]}…")
 
     if register:
         reg_type = model_type
@@ -1593,7 +1595,8 @@ def _pull_url(
     actual = _verify_digest(dest)
     if expected_sha256:
         if actual.lower() == expected_sha256.lower():
-            console.print(f"[green]✓[/green] SHA256 verified: {actual[:16]}…")
+            _report_success(f"[green]✓[/green] SHA256 verified: {actual[:16]}…",
+                            f"[green]OK[/green] SHA256 verified: {actual[:16]}…")
         else:
             console.print(
                 f"[red]SHA256 mismatch![/red] Expected {expected_sha256[:16]}…, "
