@@ -74,6 +74,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   location you are browsing and opens it; each listed file and folder has a
   rename control. Renaming never overwrites an existing file or folder with the
   same name.
+- **Split across GPUs now has a relative-weight control.** Next to each checked
+  device in Settings > Model > Live tuning, an optional weight input lets you
+  pin how a model is split (e.g. 3 and 1 gives the first card three times the
+  second's share) instead of only the automatic, free-VRAM-proportional split.
+  Leave every weight blank to keep the automatic sizing. This was previously
+  only settable by hand-editing `config.json`.
 
 ### Changed
 - **The chat parameters drawer and the image, music and video generation forms
