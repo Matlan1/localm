@@ -1164,13 +1164,20 @@ export function buildSettingsNav() {
     };
     nav.appendChild(link);
   }
-  let target = null;
-  if (_activeSettingsGroup && present.some((g) => g.id === _activeSettingsGroup)) {
-    target = _activeSettingsGroup;                 // the user's chosen group, still present
-  } else if (present.length) {
-    target = present[0].id;                         // default: the first group (Model)
-  }
+  const target = settingsTargetGroup(content);
   if (target) showSettingsGroup(target);
+}
+
+/** Which group the settings page should be SHOWING: the user's explicit choice if it
+ *  still has a visible section, else the first group that does (Model). Extracted from
+ *  buildSettingsNav so refreshSettingsPage can apply it to freshly built sections
+ *  IMMEDIATELY, before the awaited plugin builders run - see the why-comment there. */
+function settingsTargetGroup(content) {
+  const present = SETTINGS_GROUPS.filter((g) => groupHasVisibleSection(content, g.id));
+  if (_activeSettingsGroup && present.some((g) => g.id === _activeSettingsGroup)) {
+    return _activeSettingsGroup;                   // the user's chosen group, still present
+  }
+  return present.length ? present[0].id : null;    // default: the first group (Model)
 }
 
 /** In-page confirm before a PATCH /v1/config that would switch embedding_model
@@ -1351,6 +1358,26 @@ export async function refreshSettingsPage() {
     panel.appendChild(actions);
     form.appendChild(panel);
   }
+
+  // SHOW what was just built, NOW, before the three awaited builders below.
+  //
+  // Every .settings-section is `display: none` until it carries `.active`
+  // (style.css), and the only thing that adds `.active` is showSettingsGroup -
+  // which used to be reached ONLY from buildSettingsNav(), after all three
+  // awaited fetches. So a re-render inserted the whole form invisible and left
+  // it that way across three network round-trips: the page collapsed to less
+  // than one viewport, the browser clamped scrollTop to 0 because there was no
+  // longer anything to scroll, and the content came back 20-50 ms later with the
+  // position already gone. That is the settings half of the scroll jump - saving
+  // any section threw you back to the top. MEASURED before this line existed:
+  // scrollHeight 3157 -> 889 (== clientHeight) -> 3157, scrollTop 966 -> 0, with
+  // zero scroll calls from our own code and no reload.
+  //
+  // buildSettingsNav() still runs at the end and re-applies the same group; this
+  // is deliberately idempotent rather than a replacement for it, because the
+  // sections the builders below append need the nav rebuilt once they exist.
+  const activeNow = settingsTargetGroup($("settings-content"));
+  if (activeNow) showSettingsGroup(activeNow);
 
   // Per-plugin Media (ComfyUI) config: one "Media" section (its own top-level
   // nav group) with a compact managed-ComfyUI panel on top and one subsection
