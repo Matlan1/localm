@@ -413,3 +413,37 @@ def test_the_cycle_check_reads_the_config_the_write_is_based_on(env, monkeypatch
         ss.apply_local_plugin_config("image", "use_config_from", "music")
     # ... and the refusal aborted the write rather than leaving it half done.
     assert "use_config_from" not in _blocks(env).get("image", {})
+
+
+def test_a_remote_target_is_not_judged_by_this_machines_install_set(env, monkeypatch):
+    """LOCALM_URL points at an instance that is not this home. Its plugin list
+    is the server's business, so a plugin absent from THIS machine must not
+    produce a confident "No such plugin" about one the target is running."""
+    fields = [{"key": "greeting", "widget": "text", "label": "Greeting",
+               "value": "hi", "default": "hi", "is_override": False}]
+    calls = _stub_server(monkeypatch, fields=fields)      # sets LOCALM_URL
+    res = _run("widget")                                   # never installed locally
+    assert calls["get"] == 1                               # it ASKED, rather than assuming
+    assert res.exit_code == 0
+    assert "greeting" in res.output
+    assert "No such plugin" not in res.output
+
+
+def test_a_remote_that_has_no_section_says_what_it_observed(env, monkeypatch):
+    """The other arm: absent from the remote's list is reported as the remote's
+    answer, not as a claim about installation here."""
+    import requests
+    monkeypatch.setenv("LOCALM_URL", "http://127.0.0.1:1")
+    calls = {"get": 0}
+
+    def fake_get(url, **kw):
+        calls["get"] += 1
+        return _Resp({"plugins": []})           # the server answered, with nothing
+
+    monkeypatch.setattr(requests, "get", fake_get)
+    res = _run("widget")
+    assert calls["get"] == 1                    # it asked, and the stub intercepted
+    assert res.exit_code != 0
+    assert "reports no settings" in res.output
+    assert "No such plugin" not in res.output
+    assert "not enabled" not in res.output

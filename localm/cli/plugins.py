@@ -553,22 +553,36 @@ def _print_fields(name, fields, *, note=None):
 def _runtime_fields(name):
     """One plugin's add_settings() fields from a RUNNING server, or exit with a
     message that says which of the several "nothing to show" states this is."""
+    import os
+
     import requests
 
     from .. import tls
-    installed, active = _plugin_install_state(name)
-    if not installed:
-        console.print(f"[red]No such plugin:[/red] {name}")
-        console.print("[dim]See[/dim] localm plugin status [dim]for the "
-                      "installed ones.[/dim]")
-        sys.exit(1)
-    if not active:
-        console.print(f"[yellow]{name} is installed but not enabled[/yellow], so it "
-                      f"has declared no settings.")
-        console.print(f"[dim]Enable it with:[/dim]  localm plugin enable {name}")
-        sys.exit(1)
+
+    def _explain_from_local_state():
+        """Why this plugin has no fields, read from THIS machine's install set.
+        Only sound when the server we would ask is this home's own - see the
+        remote note below."""
+        installed, active = _plugin_install_state(name)
+        if not installed:
+            console.print(f"[red]No such plugin:[/red] {name}")
+            console.print("[dim]See[/dim] localm plugin status [dim]for the "
+                          "installed ones.[/dim]")
+            sys.exit(1)
+        if not active:
+            console.print(f"[yellow]{name} is installed but not enabled[/yellow], "
+                          f"so it has declared no settings.")
+            console.print(f"[dim]Enable it with:[/dim]  localm plugin enable {name}")
+            sys.exit(1)
+
     url, headers, why = _attached_server()
+    # LOCALM_URL points at an instance that is NOT this home, so the local
+    # installed/enabled set says nothing about what IT has loaded. Asking the
+    # wrong machine's plugin list would produce a confident "No such plugin"
+    # about a plugin the target is running perfectly well.
+    remote = bool(os.environ.get("LOCALM_URL", "").strip())
     if url is None:
+        _explain_from_local_state()
         # AGENTS.md rule 5: this is "could not ask", NOT "there is nothing
         # there". A plugin declares its settings while it LOADS, so only a
         # running localm knows this one's field list - reporting an empty
@@ -592,7 +606,15 @@ def _runtime_fields(name):
     for section in resp.json().get("plugins", []):
         if section.get("plugin") == name:
             return url, headers, section.get("fields") or []
-    # The server DID answer, and this plugin is not in its list: a real empty.
+    # The server DID answer and has no section for this plugin. Locally that is
+    # worth explaining (not installed / not enabled); against a remote instance
+    # this machine's install set cannot say, so report only what was observed.
+    if not remote:
+        _explain_from_local_state()
+    else:
+        console.print(f"[dim]The localm at {url} reports no settings for "
+                      f"{name}.[/dim]")
+        sys.exit(1)
     return url, headers, []
 
 
