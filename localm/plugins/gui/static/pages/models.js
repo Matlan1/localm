@@ -1509,48 +1509,106 @@ export async function updateRollback() {
 }
 if ($("update-rollback")) $("update-rollback").onclick = updateRollback;
 
-// Runtime update: the native llama.cpp binaries `localm setup-llama`
+// The inference runtime: the native llama.cpp binaries `localm setup-llama`
 // provisions, separate from the "Updates" card above (the Python source
-// tree). Check is read-only (GET /api/runtime/check); apply streams a job
-// (POST /api/runtime/update), since a real download + native load-test can
+// tree). Check is read-only (GET /api/runtime/check); provisioning streams a
+// job (POST /api/runtime/update), since a real download + native load-test can
 // take a while - same shape as the managed-ComfyUI update panel's job log,
 // unlike the plain source-tree update above which is a single blocking call.
+//
+// This block is the GUI's whole form of `localm setup-llama`. It used to offer
+// exactly one action (re-provision the backend already installed), so a user
+// who never opens a terminal could not install a runtime, switch backend, or
+// choose a build - while `localm doctor` and this very page told them to run
+// the command they could not reach.
+
+// The last SUCCESSFUL /api/runtime/check payload, or null when none has
+// succeeded yet. Kept so the button can be re-labelled the instant the
+// selection changes, with no round trip - and so "switch" can be told apart
+// from "install", which is the difference that decides whether to confirm.
+let runtimeCheckState = null;
+
+/** What pressing the button will actually do, given the current selection and
+ *  the last check. Pure, so the wording is testable without a DOM.
+ *
+ *  A null *state* means no check has succeeded, so "switch" versus "install"
+ *  is NOT knowable - say the neutral thing rather than assert either. */
+export function runtimeApplyLabel(wanted, tag, state) {
+  const installed = state && state.installed ? state.backend : null;
+  if (wanted === "auto") return installed ? "Re-detect and reinstall" : "Detect and install";
+  if (wanted && installed && wanted !== installed) return "Switch to " + wanted;
+  if (wanted && installed) return "Reinstall " + wanted;
+  if (wanted) return "Install " + wanted;
+  if (tag) return "Install build " + tag;
+  return installed ? "Update runtime" : "Install runtime";
+}
+
+/** Show or hide the action button, and label it for what it would do now.
+ *  Called after every check and on every change to the two controls. */
+export function syncRuntimeApply() {
+  const btn = $("runtime-update-apply");
+  if (!btn) return;
+  const sel = $("runtime-backend"), tagEl = $("runtime-tag");
+  const wanted = sel ? sel.value.trim() : "";
+  const tag = tagEl ? tagEl.value.trim() : "";
+  btn.textContent = runtimeApplyLabel(wanted, tag, runtimeCheckState);
+  // An EXPLICIT choice is actionable whatever the check said, including when
+  // the check failed outright. That case is not hypothetical: a box whose
+  // runtime is broken or absent is exactly the one whose check cannot answer,
+  // and it is the one that most needs this button. A failed read must never
+  // remove the only route to a repair.
+  if (wanted || tag) { btn.hidden = false; return; }
+  if (!runtimeCheckState) { btn.hidden = true; return; }
+  if (!runtimeCheckState.installed) { btn.hidden = false; return; }
+  btn.hidden = !runtimeCheckState.newer;
+}
+
 export async function runtimeUpdateCheck() {
-  const out = $("runtime-update-status"), applyBtn = $("runtime-update-apply");
+  const out = $("runtime-update-status");
   if (out) { out.hidden = false; out.textContent = "Checking..."; }
   try {
     const r = await fetch("/api/runtime/check", { headers: authHeaders() });
     const d = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(d.detail || r.statusText);
-    if (!out) return;
-    if (!d.installed) {
-      out.textContent = "No llama.cpp runtime is installed yet - run setup first.";
-      if (applyBtn) applyBtn.hidden = true;
-      return;
+    runtimeCheckState = d;
+    if (out) {
+      if (!d.installed) {
+        // An INVITATION, not a dead end. This used to read "run setup first",
+        // which was only accurate while the route refused to provision.
+        out.textContent = "No llama.cpp runtime is installed yet - choose a backend below and install one.";
+      } else {
+        const current = d.current || "an unrecorded build";
+        out.textContent = (d.newer
+          ? "A different build is available for " + d.backend + ": " + d.target +
+            " (you have " + current + ")."
+          : "Up to date (" + d.backend + " " + current + ").") +
+          (d.pinned ? " Pinned to " + d.pinned + "." : "");
+      }
     }
-    const current = d.current || "an unrecorded build";
-    if (d.newer) {
-      out.textContent = "A different build is available for " + d.backend + ": " +
-        d.target + " (you have " + current + ")." +
-        (d.pinned ? " Pinned to " + d.pinned + "." : "");
-      if (applyBtn) applyBtn.hidden = false;
-    } else {
-      out.textContent = "Up to date (" + d.backend + " " + current + ")." +
-        (d.pinned ? " Pinned to " + d.pinned + "." : "");
-      if (applyBtn) applyBtn.hidden = true;
-    }
-  } catch (e) { if (out) { out.hidden = false; out.textContent = "Could not check: " + e.message; } }
+  } catch (e) {
+    runtimeCheckState = null;
+    if (out) { out.hidden = false; out.textContent = "Could not check: " + e.message; }
+  }
+  syncRuntimeApply();
 }
 
-export async function runtimeUpdateApply() {
+/** POST the provision and stream its job. *backend* and *tag* are sent only
+ *  when non-empty, so an untouched card means exactly what it meant before
+ *  these controls existed: re-provision whatever is installed. */
+export async function runtimeProvision(backend, tag) {
   const out = $("runtime-update-status"), btn = $("runtime-update-apply");
   const log = $("runtime-update-log");
   if (btn) btn.disabled = true;
-  if (out) { out.hidden = false; out.textContent = "Updating the runtime..."; }
+  if (out) { out.hidden = false; out.textContent = "Provisioning the runtime..."; }
   if (log) { log.style.display = ""; log.textContent = ""; }
+  const body = {};
+  if (backend) body.backend = backend;
+  if (tag) body.tag = tag;
   let jobId;
   try {
-    const r = await fetch("/api/runtime/update", { method: "POST", headers: authHeaders() });
+    const r = await fetch("/api/runtime/update", {
+      method: "POST", headers: authHeaders(), body: JSON.stringify(body),
+    });
     const d = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(d.detail || r.statusText);
     jobId = d.job_id;
@@ -1570,14 +1628,53 @@ export async function runtimeUpdateApply() {
   });
   const ok = !!(end && end.status === "done");
   if (out) {
-    out.textContent = ok ? "Runtime updated." :
+    out.textContent = ok ? "Runtime provisioned." :
       (tail.join(" ").trim() || "The update did not finish. See the log below.");
   }
-  if (btn) { btn.disabled = false; if (ok) btn.hidden = true; }
-  if (ok) runtimeUpdateCheck();
+  if (btn) btn.disabled = false;
+  if (ok) {
+    // The request has been carried out, so clear it. Leaving "cuda" sitting in
+    // the select would go on offering an action that has already happened, and
+    // would keep the button lit for it forever.
+    if ($("runtime-backend")) $("runtime-backend").value = "";
+    if ($("runtime-tag")) $("runtime-tag").value = "";
+    runtimeUpdateCheck();   // re-checks, and syncRuntimeApply settles the button
+  } else {
+    syncRuntimeApply();     // failed: keep the retry affordance, correctly labelled
+  }
+}
+
+export function runtimeUpdateApply() {
+  const sel = $("runtime-backend"), tagEl = $("runtime-tag");
+  const wanted = sel ? sel.value.trim() : "";
+  const tag = tagEl ? tagEl.value.trim() : "";
+  const installed = runtimeCheckState && runtimeCheckState.installed
+    ? runtimeCheckState.backend : null;
+  // Replacing a WORKING runtime with a different backend is the one variant
+  // that can leave this machine worse off than it started, so it is the one
+  // that confirms first. A first install has nothing to lose, and a
+  // same-backend re-provision is what this button has always done. "auto"
+  // counts as different: it resolves from hardware detection, so it CAN land
+  // on another backend, and nothing here can know that it will not.
+  if (installed && wanted && wanted !== installed) {
+    confirmDanger(
+      "Switch the inference runtime",
+      "This replaces the installed " + installed + " runtime with " +
+      (wanted === "auto" ? "whichever backend localm detects for this machine"
+                         : "a " + wanted + " build") +
+      ". It cannot run while a model is loaded, and if the new build does not " +
+      "work here localm says so rather than leaving it installed.",
+      "Switch", () => runtimeProvision(wanted, tag));
+    return;
+  }
+  runtimeProvision(wanted, tag);
 }
 if ($("runtime-update-check")) $("runtime-update-check").onclick = runtimeUpdateCheck;
 if ($("runtime-update-apply")) $("runtime-update-apply").onclick = runtimeUpdateApply;
+// Re-label the moment the selection changes, so the button never promises the
+// action that was current one keystroke ago.
+if ($("runtime-backend")) $("runtime-backend").onchange = syncRuntimeApply;
+if ($("runtime-tag")) $("runtime-tag").oninput = syncRuntimeApply;
 
 // Changelog: show the RELEASED history (newest first) in the shared modal. The
 // endpoint strips the in-progress [Unreleased] section before serving, so this

@@ -230,9 +230,30 @@ test("gate-hidden sub-content never matches, but the card's always-shown content
   assert.ok(doc.getElementById("app-update-block").hidden,
     "the app-update sub-block starts gated off");
 
-  type("check for a newer localm build");
+  // THE PROBE MUST BE EXCLUSIVE TO THE GATED BLOCK, and picking one is subtler
+  // than it looks: filterMatches is an AND of independent SUBSTRING tests, so a
+  // query matches whenever every one of its words appears ANYWHERE in the
+  // card's visible text, adjacency and order irrelevant. This probe used to be
+  // "check for a newer localm build", whose only discriminating word was
+  // "localm" - every other word already appeared in the runtime block. The day
+  // that block's copy first said "localm" (explaining what --tag default
+  // returns to), the probe silently stopped testing anything and the test went
+  // red for a reason that had nothing to do with the property. "itself" is
+  // chosen instead because it appears nowhere else on the page, so the probe
+  // discriminates on a word the sentence is actually about.
+  const gatedProbe = "localm never updates itself";
+  type(gatedProbe);
   assert.equal(activeIds().includes("sec-updates"), false,
     "text scoped to the gated-off app-update sub-block does not match");
+
+  // ...and the SAME probe finds the card once that block is shown. Without this
+  // arm the assertion above passes just as happily for a probe that matches
+  // nothing anywhere, which is the failure the old probe actually had.
+  doc.getElementById("app-update-block").hidden = false;
+  type(gatedProbe);
+  assert.ok(activeIds().includes("sec-updates"),
+    "the same probe DOES match once the block is no longer gated");
+  doc.getElementById("app-update-block").hidden = true;
 
   type("check for a newer llama.cpp runtime build");
   assert.ok(activeIds().includes("sec-updates"),
