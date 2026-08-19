@@ -1186,6 +1186,11 @@ export async function refreshPluginCommands() {
       upBlock.hidden = !data.update_available;
       if (data.update_available) maybeAutoUpdateCheck();
     }
+    // The rollback sub-block is probed UNCONDITIONALLY, not under update_available:
+    // a backup left by an earlier update outlives the proxy configuration that
+    // block is gated on, and the probe is a read-only local check that reveals
+    // nothing when there is no backup (the overwhelmingly common case).
+    if (typeof window.__localmRollbackCheck === "function") window.__localmRollbackCheck();
     const isSec = $("sec-issues");
     if (isSec) isSec.hidden = !data.issues_available;
     renderNav();

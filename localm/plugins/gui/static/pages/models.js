@@ -1453,6 +1453,62 @@ export async function updateApply() {
 if ($("update-check")) $("update-check").onclick = updateCheck;
 if ($("update-apply")) $("update-apply").onclick = updateApply;
 
+// Roll back: the GUI form of `localm update --rollback`, for the one case the other
+// rollback paths do not cover - an update that applied cleanly, runs, and is worse.
+// (The post-apply watchdog handles "did not come back"; rollback.bat/.sh handle "too
+// broken to start".) PROBE first: GET is read-only and never performs the rollback,
+// so the control appears only when a backup really exists. The server owner-gates the
+// POST and restarts itself afterwards - see CHK-UPDATE-ROLLBACK in routes/admin.py.
+export async function updateRollbackCheck() {
+  const block = $("app-rollback-block"), out = $("update-rollback-status");
+  if (!block) return;
+  try {
+    const r = await fetch("/api/update/rollback", { headers: authHeaders() });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok || !d.available) { block.hidden = true; return; }
+    block.hidden = false;
+    if (out) {
+      out.hidden = false;
+      out.textContent = "This restores " + (d.version || "the previous build") +
+        (d.current ? " (you are running " + d.current + ")" : "") + ".";
+    }
+  } catch (e) {
+    // An optional affordance we could not confirm: stay hidden rather than offer a
+    // rollback that may not exist, but say so in the console instead of vanishing
+    // silently - the block is not a failure the user needs a banner about.
+    block.hidden = true;
+    console.warn("could not check for a rollback backup:", e);
+  }
+}
+window.__localmRollbackCheck = updateRollbackCheck;
+
+export async function updateRollback() {
+  const out = $("update-rollback-status"), btn = $("update-rollback");
+  confirmDanger("Roll back to the previous build?",
+    "This replaces the running LocaLM code with the build from before the last " +
+    "update, then restarts the server. Anything the newer build fixed comes back.",
+    "Roll back", async () => {
+      if (btn) btn.disabled = true;
+      if (out) { out.hidden = false; out.textContent = "Rolling back..."; }
+      try {
+        const r = await fetch("/api/update/rollback",
+                              { method: "POST", headers: authHeaders() });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.detail || r.statusText);
+        if (out) out.textContent = "Rolled back to " + (d.version || "the previous build") +
+          ". Restarting...";
+        // Deliberately NOT re-enabled: the server is re-execing, and the reconnect
+        // overlay takes over from here.
+        if (btn) btn.hidden = true;
+        if (window.onServerUnreachable) setTimeout(() => onServerUnreachable(), 800);
+      } catch (e) {
+        if (out) out.textContent = "Roll back failed: " + e.message;
+        if (btn) btn.disabled = false;
+      }
+    });
+}
+if ($("update-rollback")) $("update-rollback").onclick = updateRollback;
+
 // Runtime update: the native llama.cpp binaries `localm setup-llama`
 // provisions, separate from the "Updates" card above (the Python source
 // tree). Check is read-only (GET /api/runtime/check); apply streams a job

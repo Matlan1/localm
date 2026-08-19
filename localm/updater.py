@@ -438,10 +438,17 @@ def download(asset_id, dest, *, timeout: float = 120.0, opener=None) -> Path:
 
 # ------------------------------ apply -----------------------------------
 
-def _updates_dir() -> Path:
+def _updates_dir(*, create: bool = True) -> Path:
+    """The data dir holding update scratch, the manifest, and the stable backup.
+
+    ``create=False`` is for READ-ONLY probes (:func:`rollback_info`): a status poll
+    must not bring an ``updates/`` tree into existence on an install that has never
+    updated. One derivation either way, so a probe and the action it describes can
+    never end up looking at different paths."""
     from localm.config import home_dir
     d = home_dir() / "updates"
-    d.mkdir(parents=True, exist_ok=True)
+    if create:
+        d.mkdir(parents=True, exist_ok=True)
     return d
 
 
@@ -864,15 +871,67 @@ def _apply_warn(msg, *args) -> None:
         pass
 
 
+def _backup_dir(*, create: bool = False) -> Path:
+    """The ONE stable path :func:`apply` promotes each run's backup to and
+    :func:`rollback_last` restores from. Derived in a single place so a read-only
+    probe and the action it describes can never disagree about where to look."""
+    return _updates_dir(create=create) / "backup"
+
+
+def _backup_is_restorable(backup_dir: Path) -> bool:
+    """True when *backup_dir* holds something :func:`rollback_last` could restore.
+
+    ONE predicate, shared by the probe and the action, so a surface can never offer
+    a rollback the action then refuses, nor hide one it would have accepted. An
+    unreadable directory answers False: "we cannot look" and "there is nothing here"
+    lead to the same safe refusal HERE (both mean do not offer a rollback), and the
+    action re-checks and reports the real reason if it is actually attempted."""
+    try:
+        return backup_dir.is_dir() and any(backup_dir.iterdir())
+    except OSError:
+        return False
+
+
+def rollback_info() -> dict:
+    """What :func:`rollback_last` would restore, WITHOUT restoring anything.
+
+    Returns ``{available, backup, version, current}``. ``version`` is the backed-up
+    build's VERSION, or None when the backup predates that file or it is unreadable
+    (reported as unknown, never guessed from the running version).
+
+    STRICTLY READ-ONLY, and that is the point: an existence check must not be done by
+    calling the action and catching its refusal, because :func:`rollback_last` MOVES
+    THE INSTALL. It also does not create ``updates/`` (see :func:`_updates_dir`), so
+    a GUI status poll leaves an install that has never updated exactly as it was."""
+    backup_dir = _backup_dir()
+    available = _backup_is_restorable(backup_dir)
+    version = None
+    if available:
+        try:
+            version = (backup_dir / "VERSION").read_text(encoding="utf-8").strip() or None
+        except OSError:
+            version = None
+    return {"available": available,
+            "backup": str(backup_dir) if available else None,
+            "version": version,
+            "current": _version.read_version()}
+
+
 def rollback_last(*, installed=None) -> dict:
     """Restore the install from the most recent update backup. Returns
-    ``{rolled_back, backup}``. Raises LocalmError when there is no backup."""
+    ``{rolled_back, backup}``. Raises LocalmError when there is no backup.
+
+    NOT signature- or freshness-checked, and neither check is applicable rather than
+    merely omitted - see the CHK-UPDATE-ROLLBACK note above :func:`rollback_info`'s
+    HTTP callers in ``inference/routes/admin.py`` for why, and for the owner gate that
+    is the real control on this operation. Use :func:`rollback_info` to ask whether a
+    rollback is possible; calling this one to find out performs it."""
     from localm import _apply_update as au
     from localm.bugreport import LocalmError
     target = Path(installed) if installed else repo_root()
     updir = _updates_dir()
-    backup_dir = updir / "backup"
-    if not backup_dir.is_dir() or not any(backup_dir.iterdir()):
+    backup_dir = _backup_dir(create=True)
+    if not _backup_is_restorable(backup_dir):
         raise LocalmError("no update backup to roll back to", reason=str(backup_dir))
     # Prefer the recorded full swap set (includes brand-new top-level entries the update
     # added, which are NOT in the backup dir) so those are removed too; fall back to the
