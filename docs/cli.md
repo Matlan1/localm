@@ -400,7 +400,27 @@ localm plugin refresh [NAME]    # re-sync installed first-party plugin(s) with t
 localm plugin setup             # pick a starter set interactively
 localm plugin install-deps NAME # install a plugin's pip extras on this host
 localm plugin install-deps --all# fill in missing extras for every enabled plugin
+localm plugin config NAME       # show one plugin's own settings and their values
+localm plugin config NAME KEY   # show one setting
+localm plugin config NAME KEY VALUE   # set it (a blank VALUE clears the override)
 ```
+
+`plugin config` edits the per-plugin settings blocks the GUI edits under
+Settings. `localm config` cannot reach them: it writes top-level keys, while
+these live under a plugin of their own.
+
+```bash
+localm plugin config image workdir /srv/comfy   # for image only, not music/video
+localm plugin config video float_type fp16
+localm plugin config music use_config_from image  # reuse image's backend settings
+localm plugin config image workflow mine.json     # pick an uploaded workflow
+localm plugin config tts voice af_heart
+```
+
+`image`, `music`, `video` and `tts` work offline, and each can hold its own
+value for a field instead of sharing the global `comfy_*` default. Any other
+plugin declares its settings as it loads, so listing or setting those needs a
+running localm (found the way `localm status` finds it, or set `LOCALM_URL`).
 
 The store names are `coder`, `image`, `music`, `video`, `rag`, `web`, `memory`, `voice`, `tts`, `jobs`, and `mcp` (plus the protected `chat`). Plugins with heavy Python dependencies carry them in a pip extra, installed on the host by default (the `auto_install_plugin_deps` setting; `--no-deps` to skip, `--with-deps` to force, or `localm plugin install-deps` later). A running GUI server picks up new HTTP routes and tabs at runtime; stdio plugins like mcp take effect on the next `localm mcp`. See [docs/plugins.md](../docs/plugins.md).
 

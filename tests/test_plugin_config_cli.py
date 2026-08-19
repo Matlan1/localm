@@ -283,3 +283,110 @@ def test_the_cli_never_loads_a_plugin_to_answer(env, monkeypatch):
     _run("image")
     _run("tts")
     assert loaded == []
+
+
+# --------------------------------------------------------------------------- #
+#  The runtime path's own reporting, with the HTTP layer controlled            #
+#                                                                              #
+#  These drive _runtime_plugin_config against a stubbed server rather than a   #
+#  live one, so the reporting logic is pinned without a process to start. Each #
+#  asserts the CALL COUNT as well as the outcome: a stub that never intercepts #
+#  looks exactly like a passing test, and this file would otherwise be reading #
+#  the real requests module.                                                   #
+# --------------------------------------------------------------------------- #
+
+class _Resp:
+    def __init__(self, payload, status=200):
+        self._payload, self.status_code = payload, status
+
+    def json(self):
+        return self._payload
+
+
+def _stub_server(monkeypatch, *, fields, on_post=None):
+    """Point the CLI at a fake server and record what it sends."""
+    import requests
+    monkeypatch.setenv("LOCALM_URL", "http://127.0.0.1:1")
+    calls = {"get": 0, "post": 0, "body": None}
+
+    def fake_get(url, **kw):
+        calls["get"] += 1
+        return _Resp({"plugins": [{"plugin": "widget", "label": "Widget",
+                                   "fields": fields}]})
+
+    def fake_post(url, **kw):
+        calls["post"] += 1
+        calls["body"] = kw.get("json")
+        return on_post(kw.get("json")) if on_post else _Resp(
+            {"plugin": "widget", "fields": fields})
+
+    monkeypatch.setattr(requests, "get", fake_get)
+    monkeypatch.setattr(requests, "post", fake_post)
+    return calls
+
+
+def test_setting_a_secret_reports_a_set_not_a_clear(env, monkeypatch):
+    """REGRESSION. A SECRET field's value is deliberately never echoed back by
+    the server, so reading the reply's absent `value` said "cleared" for a write
+    that had in fact SET the key - reporting the exact opposite of what
+    happened. `is_override` is the field that distinguishes them."""
+    _install_widget(env, enable=True)
+    saved = [{"key": "api_key", "widget": "secret", "label": "API key",
+              "is_override": True, "admin_only": True}]        # no "value", by design
+    calls = _stub_server(monkeypatch, fields=saved,
+                         on_post=lambda body: _Resp({"plugin": "widget",
+                                                     "fields": saved}))
+    res = _run("widget", "api_key", "sk-secret")
+    assert calls["post"] == 1                       # the stub really intercepted
+    assert calls["body"] == {"api_key": "sk-secret"}
+    assert res.exit_code == 0
+    assert "set" in res.output
+    assert "cleared" not in res.output
+    assert "sk-secret" not in res.output            # and never echoes the value
+
+
+def test_clearing_a_secret_still_reports_a_clear(env, monkeypatch):
+    """The other arm: without it, a report that always says "set" would pass the
+    test above while being just as wrong in the opposite direction."""
+    _install_widget(env, enable=True)
+    cleared = [{"key": "api_key", "widget": "secret", "label": "API key",
+                "is_override": False, "admin_only": True}]
+    calls = _stub_server(monkeypatch, fields=cleared,
+                         on_post=lambda body: _Resp({"plugin": "widget",
+                                                     "fields": cleared}))
+    res = _run("widget", "api_key", "")
+    assert calls["post"] == 1
+    assert res.exit_code == 0
+    assert "cleared" in res.output
+
+
+def test_a_runtime_plugin_lists_and_sets_through_the_server(env, monkeypatch):
+    _install_widget(env, enable=True)
+    fields = [{"key": "greeting", "widget": "text", "label": "Greeting",
+               "value": "hi", "default": "hi", "is_override": False}]
+    calls = _stub_server(monkeypatch, fields=fields)
+    listing = _run("widget")
+    assert calls["get"] == 1 and listing.exit_code == 0
+    assert "greeting" in listing.output
+
+    updated = [dict(fields[0], value="yo", is_override=True)]
+    calls = _stub_server(monkeypatch, fields=fields,
+                         on_post=lambda body: _Resp({"plugin": "widget",
+                                                     "fields": updated}))
+    res = _run("widget", "greeting", "yo")
+    assert calls["post"] == 1 and calls["body"] == {"greeting": "yo"}
+    assert res.exit_code == 0 and "yo" in res.output
+
+
+def test_the_servers_own_refusal_is_reported_verbatim(env, monkeypatch):
+    """The runtime path does not re-implement validation; the plugin's field
+    list lives on the server and so does its validator. A refusal has to reach
+    the user with the server's own reason rather than a bare status."""
+    _install_widget(env, enable=True)
+    fields = [{"key": "greeting", "widget": "text", "label": "Greeting",
+               "value": "hi", "default": "hi", "is_override": False}]
+    _stub_server(monkeypatch, fields=fields,
+                 on_post=lambda body: _Resp({"detail": "greeting: too long"}, 400))
+    res = _run("widget", "greeting", "x" * 999)
+    assert res.exit_code != 0
+    assert "greeting: too long" in res.output

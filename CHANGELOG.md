@@ -30,6 +30,20 @@ permanent public record of what shipped and are never rewritten; the in-progress
   `LOCALM_API_KEY` is set in the server's environment it still overrides the
   stored key, and localm now says so instead of reporting a rotation that has not
   taken effect.
+- **A plugin's own settings are now editable from the terminal.**
+  `localm plugin config <name>` lists one plugin's settings with the values
+  actually in effect, and `localm plugin config <name> <key> <value>` sets one
+  (a blank value clears it again). These are the per-plugin blocks the web UI
+  edits under Settings; `localm config` could never reach them, because it
+  writes top-level keys while these live under a plugin of their own.
+  `image`, `music` and `video` can each hold their own value for a field now
+  instead of sharing one global default, so two of them can point at different
+  ComfyUI installs or run at different precisions, and each can pick its own
+  workflow. The text-to-speech block (voice, speed, model, device, precision) is
+  settable too. Those four work with no server running; any other plugin
+  declares its settings as it loads, so listing or changing those uses a running
+  localm, and says so plainly when there is none instead of showing an empty
+  list.
 - **Managing what the coder remembers no longer needs a terminal, and two more
   session settings arrived.** The **lessons** panel under Coder now has a
   **stored** and a **dropped** tab, so you can see both what the agent recalls
