@@ -600,6 +600,19 @@ class TestIsMappedNetworkDrive:
         assert not is_mapped_network_drive(raw)
 
     def test_false_on_non_windows(self, monkeypatch):
+        """A stale os.name check must be provably load-bearing, not merely
+        coincidental with this machine's real drive table. On a Windows box,
+        prime GetDriveTypeW to report REMOTE BEFORE patching os.name to
+        "posix" - if the `if os.name != "nt": return False` guard were ever
+        removed, the function would fall through to that primed mock and
+        return True, failing this assertion. Without priming it, "Z:"
+        probably does not exist on the test box, so a guard-less version
+        would coincidentally return False anyway (GetDriveTypeW answering
+        DRIVE_NO_ROOT_DIR) and this test would prove nothing."""
+        if os.name == "nt":
+            import ctypes
+            monkeypatch.setattr(ctypes.windll.kernel32, "GetDriveTypeW",
+                                lambda root: 4)   # DRIVE_REMOTE
         monkeypatch.setattr(os, "name", "posix")
         assert not is_mapped_network_drive("Z:\\shared\\docs")
 

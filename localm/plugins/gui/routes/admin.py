@@ -479,7 +479,9 @@ def register(app: FastAPI, ctx) -> None:
 
         Plain `def` for the same reason as fs_dirs: probing A-Z drive roots calls
         is_dir() on each, and a mapped-but-disconnected network drive blocks. No
-        caller input reaches it, so there is nothing to reject here.
+        caller input reaches it, so there is nothing to REJECT here - but a
+        disallowed network drive is still omitted from the listing, same as
+        fs_dirs' own empty-path root listing.
         """
         places = []
         try:
@@ -503,10 +505,16 @@ def register(app: FastAPI, ctx) -> None:
         drives = []
         if os.name == "nt":
             import string
+            from localm.pathsafe import is_mapped_network_drive
+            # Same policy as fs_dirs' empty-path root listing: skip a
+            # disallowed network drive here too, rather than leaving it
+            # clickable in the Places rail only to refuse it a click later
+            # when /api/fs/dirs is asked to navigate into it.
+            allow_net = _network_drives_allowed()
             for letter in string.ascii_uppercase:
                 root = f"{letter}:\\"
                 try:
-                    if Path(root).is_dir():
+                    if Path(root).is_dir() and (allow_net or not is_mapped_network_drive(root)):
                         drives.append({"label": root, "path": root,
                                        "icon": "drive"})
                 except OSError:

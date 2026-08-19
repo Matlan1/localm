@@ -893,6 +893,45 @@ class TestNetworkDriveToggle:
         assert r.status_code == 200, r.text
         assert "Z:\\" in r.json()["dirs"]
 
+    def test_fs_places_hides_a_disallowed_network_drive(
+            self, fs_app, fake_remote_z, monkeypatch):
+        """The Places rail's own drive listing (a separate endpoint from
+        fs_dirs, with its own A-Z probe) must apply the same policy - a
+        disallowed network drive must not be offered there either, even
+        though clicking it would still be refused by fs_dirs downstream."""
+        _set_allow_network_drives(False)
+        real_is_dir = Path.is_dir
+
+        def fake_is_dir(self, *a, **kw):
+            s = str(self)
+            if len(s) == 3 and s[1:] == ":\\":
+                return s[0] in ("C", "Z")
+            return real_is_dir(self, *a, **kw)
+
+        monkeypatch.setattr(Path, "is_dir", fake_is_dir)
+        with TestClient(fs_app) as c:
+            r = c.get("/api/fs/places", headers=_hdr(_host_key()))
+        assert r.status_code == 200, r.text
+        drive_paths = [d["path"] for d in r.json()["drives"]]
+        assert "Z:\\" not in drive_paths
+        assert "C:\\" in drive_paths, "an unrelated local drive must not be hidden too"
+
+    def test_fs_places_shows_network_drive_by_default(
+            self, fs_app, fake_remote_z, monkeypatch):
+        real_is_dir = Path.is_dir
+
+        def fake_is_dir(self, *a, **kw):
+            s = str(self)
+            if len(s) == 3 and s[1:] == ":\\":
+                return s[0] in ("C", "Z")
+            return real_is_dir(self, *a, **kw)
+
+        monkeypatch.setattr(Path, "is_dir", fake_is_dir)
+        with TestClient(fs_app) as c:
+            r = c.get("/api/fs/places", headers=_hdr(_host_key()))
+        assert r.status_code == 200, r.text
+        assert "Z:\\" in [d["path"] for d in r.json()["drives"]]
+
     def test_fs_mkdir_refuses_network_drive_parent_when_disallowed(
             self, fs_app, fake_remote_z):
         _set_allow_network_drives(False)
