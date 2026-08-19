@@ -626,8 +626,12 @@ def ps_cmd():
         alive = r.get("alive")
         status = "[green]live[/green]" if alive else "[yellow]no answer[/yellow]"
         scheme = r.get("scheme", "http")
+        # The BIND address, as this column has always shown (0.0.0.0 for a
+        # wildcard bind), only bracketed now so an IPv6 literal is legible.
+        # Deliberately NOT self_connect_host: this column answers "what did this
+        # instance bind", and the sibling `localm status` line says the same.
         addr = show_url(f"{scheme}://"
-                        f"{url_host(self_connect_host(r.get('host')))}"
+                        f"{url_host(r.get('host') or '127.0.0.1')}"
                         f":{r.get('port', '?')}")
         table.add_row(
             str(r.get("instance_id", ""))[:8], status, str(r.get("mode", "?")),
