@@ -4,6 +4,11 @@ version = "1.0.0"
 description = "Durable chat memory: remember facts about you across conversations."
 scope = "memory"
 register = "plug"
+# The `localm memory` command group. Without this key the plugin shipped NO
+# CLI at all, so every memory operation was GUI-only - while
+# `localm job add --memory` could still schedule the consolidation that
+# creates corrections the terminal then had no way to review.
+cli = "localm.plugins.builtin.memory.cli:main"
 data_subdir = "memory"
 # Off by default (opt-in): not preinstalled, not default_enabled. Install + enable
 # it from the Plugins page to turn chat memory on. Existing memory data under

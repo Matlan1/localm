@@ -43,6 +43,29 @@ localm setup-embeddings          # installs bge-small-en-v1.5 for semantic recal
 Without it, recall still works but is lexical only (exact-word BM25). See
 [How recall ranks](#how-recall-ranks-facts).
 
+## From the terminal
+
+`localm memory` manages the same store the app does - it was GUI-only until now,
+which mattered because `localm job add --memory` can schedule the consolidation
+that produces corrections you then had no way to review.
+
+```bash
+localm memory list [--all] [--json]   # what localm has remembered about you
+localm memory show ID                 # one fact in full, with its provenance
+localm memory add "..."               # save a fact yourself
+localm memory forget ID               # delete one fact (not recoverable)
+localm memory forgotten               # facts localm archived on its own
+localm memory restore ID              # bring an archived fact back
+localm memory corrections             # proposals waiting for your review
+localm memory accept ID | reject ID   # resolve one proposal
+localm memory clear                   # erase everything, archive included
+```
+
+`forget` and `forgotten` are not two halves of one thing. `forget` deletes
+outright; the archive `forgotten` lists is filled only when localm drops a fact
+itself - evicting one at the record cap, or replacing one you accepted a
+correction for - and `restore` can only reach those.
+
 ## What it stores
 
 Each record is a short, distilled memory, never a raw transcript:
