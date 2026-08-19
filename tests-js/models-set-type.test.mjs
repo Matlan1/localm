@@ -3,6 +3,13 @@
 // type='unknown' model, which otherwise has no actionable controls) gets a type
 // <select>; changing it POSTs the chosen type to /api/models/type. This is how a
 // bulk-imported / mis-detected 'unknown' model is corrected without the CLI.
+//
+// Both fixtures here hold ONE model, and it is an 'unknown' - which is a type
+// with no tab of its own, so it now lives on the Other tab rather than in All
+// (All lists it too once the merge toggle asks for it, and says so meanwhile).
+// So each test navigates to Other first. That is also the honest repair path a
+// user walks: the Other tab is where a mis-detected model is found and fixed.
+// The assertions about the control itself are unchanged.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -37,6 +44,8 @@ test("models-set-type: an unknown-type row shows a type control preset to 'unkno
   const { window } = loadAppWithPages({ fetchImpl: makeFetch(models, []) });
   await window.refreshModelsPage();
   await new Promise((r) => setTimeout(r, 0));
+  window.document.querySelector('#models-tab-nav .tab-btn[data-type="other"]').click();
+  await new Promise((r) => setTimeout(r, 0));
 
   const row = window.document.querySelector("#models-table tbody tr");
   assert.ok(row, "the unknown model renders a row");
@@ -55,6 +64,8 @@ test("models-set-type: changing the control POSTs the chosen type once", async (
   ];
   const { window } = loadAppWithPages({ fetchImpl: makeFetch(models, calls) });
   await window.refreshModelsPage();
+  await new Promise((r) => setTimeout(r, 0));
+  window.document.querySelector('#models-tab-nav .tab-btn[data-type="other"]').click();
   await new Promise((r) => setTimeout(r, 0));
 
   const sel = window.document.querySelector("#models-table tbody tr select");

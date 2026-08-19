@@ -361,9 +361,23 @@
             <button class="tab-btn" data-type="text-encoder">Encoders</button>
             <button class="tab-btn" data-type="vae">VAEs</button>
             <button class="tab-btn" data-type="lora">LoRAs</button>
-            <button class="tab-btn" data-type="unknown">Other</button>
+            <!-- Not a MODEL_TYPES value: this tab collects every model whose type has
+                 no tab of its own (a vision projector, an unclassified file, and
+                 whatever the registry gains next), so such a model has a home of its
+                 own instead of being reachable from All alone. -->
+            <button class="tab-btn" data-type="other">Other</button>
           </div>
           <div class="scan-row">
+            <div class="models-view-opts">
+              <label class="inline-check" id="models-show-other-wrap"
+                     title="Vision projectors and anything localm could not classify live on the Other tab. Tick this to list them here too.">
+                <input type="checkbox" id="models-show-other"> show other types here
+              </label>
+              <label class="inline-check" id="models-group-wrap"
+                     title="Break the list into one section per model type instead of one flat list.">
+                <input type="checkbox" id="models-group-by-type"> group by type
+              </label>
+            </div>
             <button class="btn-secondary" id="models-unload-all-btn" title="Release every currently-loaded model from GPU/CPU memory">Unload all</button>
           </div>
           <div id="models-table"></div>
