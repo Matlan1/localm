@@ -130,6 +130,7 @@ def register(app: FastAPI, ctx) -> None:
         # same "no filter" sentinel the sibling routes use (q="", model="").
         from localm.config import load_registry
         from localm.model_manager import _entry_path
+        from localm.model_manager import has_recorded_model_type as _has_recorded_model_type
         from localm.model_manager import model_vision_capability as _mvc
         registry = load_registry()
         current = active_model()
@@ -289,6 +290,20 @@ def register(app: FastAPI, ctx) -> None:
             _vis = vision_caps.get(name)
             if _vis is not None:
                 row_out["vision"] = _vis
+            # "model_type" above defaults a missing key to "llm", and that
+            # default is LOAD-BEARING: the chat-model picker asks this route for
+            # ?type=llm, so a legacy entry that predates the field must stay
+            # selectable for chat. But it is a guess, not a recorded fact, and
+            # rendering it as a Role reads as "somebody classified this as an
+            # LLM" when nobody did. Same tri-state discipline as vision above,
+            # and the same argument _register's docstring makes for
+            # expert_count=0 versus the key being absent.
+            #
+            # Emitted ONLY for an entry with no usable recorded type, so the
+            # payload stays byte-identical for every normal model and a client
+            # predating this field behaves exactly as before.
+            if not _has_recorded_model_type(entry):
+                row_out["model_type_recorded"] = False
             models.append(row_out)
         out = {"models": models, "active": current}
         # The model an UNNAMED request would resolve to when none is currently

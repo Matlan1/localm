@@ -34,7 +34,11 @@ const tick = () => new Promise((r) => setTimeout(r, 0));
 const REGISTRY = [
   { name: "qwen-7b", model_type: "llm", size_bytes: 10 },
   { name: "mistral", model_type: "llm", size_bytes: 10 },
-  { name: "legacy-untyped", size_bytes: 10 },              // no model_type key at all
+  // What the ROUTE emits for a registry entry with no model_type: the "llm"
+  // default it keeps for chat-picker candidacy, PLUS the flag saying that type
+  // is a guess. A fixture with the key simply missing is not a payload this
+  // client ever receives, so it could not exercise the real path.
+  { name: "legacy-untyped", model_type: "llm", model_type_recorded: false, size_bytes: 10 },
   { name: "bge-small", model_type: "embedding", size_bytes: 10 },
   { name: "ae-vae", model_type: "vae", size_bytes: 10 },
   { name: "llava-mmproj", model_type: "mmproj", size_bytes: 10 },   // no tab of its own
@@ -56,10 +60,14 @@ test("tab-counts: each tab shows how many models it holds, and All shows what Al
 
   // 6 registered, of which the mmproj has no tab of its own, so All lists 5 and
   // Other holds the 6th. The two partition the registry exactly.
-  assert.equal(countOn(window, "all"), "5", "All counts the rows All actually lists");
-  assert.equal(countOn(window, "other"), "1", "and the one with no tab of its own is on Other");
-  assert.equal(countOn(window, "llm"), "3",
-    "two typed LLMs plus the entry with no recorded type, matching the route's own default");
+  // 6 registered. The mmproj has no tab of its own and the legacy entry has no
+  // recorded type at all, so Other holds 2 and All lists the remaining 4.
+  assert.equal(countOn(window, "all"), "4", "All counts the rows All actually lists");
+  assert.equal(countOn(window, "other"), "2",
+    "the projector and the never-classified entry both live here");
+  assert.equal(countOn(window, "llm"), "2",
+    "ONLY the two models actually recorded as llm - the route's default is kept for "
+    + "chat-picker candidacy, but it is not a classification this tab may claim");
   assert.equal(countOn(window, "embedding"), "1");
   assert.equal(countOn(window, "vae"), "1");
 });
@@ -95,7 +103,7 @@ test("tab-counts: a repeated refresh updates the number instead of appending ano
   await tick();
   const btn = window.document.querySelector('.tab-btn[data-type="llm"]');
   assert.equal(btn.querySelectorAll(".tab-count").length, 1, "still one count node after 3 refreshes");
-  assert.equal(countOn(window, "llm"), "3", "and it still reads correctly");
+  assert.equal(countOn(window, "llm"), "2", "and it still reads correctly");
 });
 
 test("tab-counts: counts survive switching to a narrowed tab", async () => {
@@ -107,23 +115,26 @@ test("tab-counts: counts survive switching to a narrowed tab", async () => {
   window.document.querySelector('.tab-btn[data-type="vae"]').click();
   await tick();
 
-  assert.equal(countOn(window, "llm"), "3", "the LLM count is still right while viewing VAEs");
-  assert.equal(countOn(window, "all"), "5", "and All still reads what All would list");
+  assert.equal(countOn(window, "llm"), "2", "the LLM count is still right while viewing VAEs");
+  assert.equal(countOn(window, "all"), "4", "and All still reads what All would list");
   assert.deepEqual(rowNames(window), ["ae-vae"], "while the table shows only the VAE");
 });
 
-test("tab-counts: every named-type tab still shows EXACTLY the rows the ?type= route returned", async () => {
-  // Filtering moved into the browser, so this pins the equivalence for every tab
-  // that names a type. The expected sets are what
-  // localm/plugins/gui/routes/models.py produces for each ?type=: an exact match
-  // on model_type, with a missing model_type defaulting to llm.
+test("tab-counts: every named-type tab shows exactly the rows recorded as that type", async () => {
+  // Filtering moved into the browser, so this pins what each named-type tab
+  // holds: an exact match on a RECORDED model_type.
   //
-  // "all" and "other" are the two multi-type views and are deliberately NOT the
-  // route's answer any more - they have their own test file
-  // (models-other-tab.test.mjs). Listing them here with the route's sets would
-  // re-pin behaviour that was changed on purpose.
+  // The llm row is the one that diverges from `?type=llm` on purpose, and the
+  // divergence is the point rather than a gap. The route keeps defaulting a
+  // missing type to llm because the chat picker asks it for ?type=llm and a
+  // legacy model must stay selectable; this tab is a CLASSIFICATION, and a
+  // guess is not one. `model_type_recorded: false` is how the route tells the
+  // two apart. See tests/test_model_type_recorded.py for the route's half.
+  //
+  // "all" and "other" are the two multi-type views and have their own file
+  // (models-other-tab.test.mjs).
   const expected = {
-    llm: ["legacy-untyped", "mistral", "qwen-7b"],
+    llm: ["mistral", "qwen-7b"],
     embedding: ["bge-small"],
     vae: ["ae-vae"],
     lora: [],

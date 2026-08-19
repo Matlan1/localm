@@ -166,6 +166,15 @@ def register(app: FastAPI, ctx) -> None:
             "loaded": model_id in _hs._engines and _hs._engines[model_id].loaded,
             "model_type": entry.get("model_type", "llm"),
         }
+        # The "llm" above is a DEFAULT, not a recorded fact, and the default is
+        # kept because it is load-bearing for runtime candidacy. Say which one it
+        # is, so the detail view can read "not set" instead of asserting a type
+        # nobody chose - and so it cannot contradict the Models-page tab the row
+        # was opened from. Emitted only when there is nothing recorded, same
+        # omit-rather-than-null shape as `vision` immediately below.
+        from localm.model_manager import has_recorded_model_type
+        if not has_recorded_model_type(entry):
+            out["model_type_recorded"] = False
         # true / false / KEY ABSENT. Absent means "could not inspect the
         # model's files", which is NOT the same claim as false and must not be
         # rendered as one - see model_vision_capability's docstring. Omitting

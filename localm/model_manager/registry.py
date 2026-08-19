@@ -84,14 +84,40 @@ def models_of_type(model_type: str, registry: Optional[dict] = None) -> dict:
     for the CLI, and the media plugins read it to answer "which UNet / text
     encoder / VAE / LoRA does this box already have registered" for a plugin's
     declared model roles. A legacy entry with no ``model_type`` key counts as
-    'llm', the same default every other reader in this module applies, so the two
-    can never disagree about one entry.
+    'llm', the same default every other reader of the TYPE applies in this module,
+    so the two can never disagree about one entry. (``has_recorded_model_type``
+    below deliberately does not default: it answers whether a type was ever
+    recorded, not what it is.)
 
     *registry* lets a caller that already loaded the registry pass it in rather
     than paying a second read; omitted, it is loaded here."""
     reg = _mm.load_registry() if registry is None else registry
     return {k: v for k, v in reg.items()
             if isinstance(v, dict) and v.get("model_type", "llm") == model_type}
+
+
+def has_recorded_model_type(entry: dict) -> bool:
+    """True when a registry *entry* actually CARRIES a model type.
+
+    Both predicates above default a missing ``model_type`` to 'llm' on purpose,
+    and that default is load-bearing for RUNTIME CANDIDACY: a legacy entry from
+    before the field existed must stay auto-chat-eligible and stay in the chat
+    picker's ``?type=llm`` list. Nothing here changes that.
+
+    What it is NOT is a recorded fact. Presenting the guess as a Role reads as
+    "somebody classified this as an LLM" when nobody ever did, which is the same
+    collapse ``_register``'s docstring rejects for ``expert_count=0`` versus the
+    key being absent. A DISPLAY surface asks this instead of the predicates, so
+    it can say 'not set' rather than assert a type.
+
+    An empty or non-string value counts as NOT recorded: a hand-edited or
+    cross-version entry carrying ``null`` or ``""`` has no more classified this
+    model than an absent key has.
+    """
+    if not isinstance(entry, dict):
+        return False
+    value = entry.get("model_type")
+    return isinstance(value, str) and value.strip() != ""
 
 
 def _entry_path(entry, field: str = "path") -> Optional[str]:
