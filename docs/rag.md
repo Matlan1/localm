@@ -55,7 +55,10 @@ Indexing through the GUI or the HTTP API is confined by a folder policy
 working directory, and any folders you add to it; **blacklist** mode allows
 everywhere except the folders you deny. In both modes well-known credential
 folders (`.ssh`, `.aws`, `.gnupg`, ...) are always refused, wherever they
-appear in the path. The localm data directory (it holds your API key and
+appear in the path. A Windows drive mapped to a network share (`net use Z:
+\\host\share`) is treated as an ordinary local folder unless you turn off
+**Settings > Security > "Allow network drives as filesystem locations"**.
+The localm data directory (it holds your API key and
 registry) is NOT specially excluded from that confinement - if it falls within
 an allowed folder, its contents are indexable like any other file, since the
 owner already has direct filesystem access to their own data; this is a
