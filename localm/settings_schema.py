@@ -1919,3 +1919,108 @@ def validate_tts_block(updates: dict) -> dict:
             raise ValueError(f"unknown tts setting: {key!r}")
         merge[key] = _coerce_tts_value(f, val)
     return merge
+
+
+# --------------------------------------------------------------------------- #
+#  Generic plugin-contributed settings (host.add_settings()).                 #
+#                                                                              #
+#  Unlike the media/tts blocks above, this field LIST is not a static module  #
+#  constant here - it is supplied at runtime by whichever plugin (built-in or #
+#  third-party) called host.add_settings() at register() time (see            #
+#  localm/plugins/contract.py's PluginSettingField and                        #
+#  PluginManager.get_all_plugin_settings). Every field still lives at         #
+#  config["plugins"][<plugin>][key], exactly like the tts block - this is     #
+#  just the generic version of tts_schema_json/validate_tts_block, taking the #
+#  field list as a parameter instead of a hardcoded TTS_FIELDS.               #
+# --------------------------------------------------------------------------- #
+
+def plugin_settings_admin_only_fields(fields) -> set:
+    """Field keys (within ONE plugin's add_settings() fields) flagged
+    owner-only. Mirrors tts_admin_only_fields/media_admin_only_fields - the
+    single source of truth for both the read-side hide (plugin_settings_
+    schema_json) and the write-side gate (POST /v1/plugins/<name>/settings)."""
+    return {f.key for f in fields if f.admin_only}
+
+
+def plugin_settings_schema_json(fields, block: Optional[dict], *,
+                                is_owner: bool = True) -> list:
+    """Serialize one plugin's add_settings() fields with their RESOLVED values
+    (the block's own value when set, else the field's own declared default) -
+    the generic counterpart to tts_schema_json/media_schema_json.
+
+    When *is_owner* is False, admin_only fields are OMITTED entirely (never
+    merely masked), mirroring the tts/media/core schema's owner-only handling:
+    a non-owner config:read caller must not learn a value it is not allowed to
+    set either. A widget=SECRET field's value/default are never included (the
+    widget itself is masked client-side; the value must not round-trip in
+    plaintext at all) - derived from the widget alone, so there is no separate
+    flag a field could forget to set consistently with it."""
+    block = block if isinstance(block, dict) else {}
+    out = []
+    for f in fields:
+        if f.admin_only and not is_owner:
+            continue
+        own = block.get(f.key)
+        has_own = own not in (None, "")
+        d = {"key": f.key, "widget": f.widget, "label": f.label, "help": f.help,
+             "is_override": has_own, "admin_only": f.admin_only}
+        if f.widget != Widget.SECRET:
+            d["value"] = own if has_own else f.default
+            d["default"] = f.default
+        if f.options:
+            d["options"] = f.options
+        for attr in ("min", "max", "step"):
+            v = getattr(f, attr)
+            if v is not None:
+                d[attr] = v
+        out.append(d)
+    return out
+
+
+def _coerce_plugin_field_value(f, val):
+    """Coerce + check one plugin-contributed field value against its widget.
+    Mirrors _coerce_tts_value/_coerce_media_value's shape, generic over the
+    field's `widget` instead of a fixed key list - a third-party plugin's
+    keys are not known ahead of time, only the widget vocabulary is."""
+    if f.widget == Widget.TOGGLE:
+        return _to_bool(f.key, val)
+    if val is None:
+        return None
+    if f.widget == Widget.NUMBER:
+        if isinstance(val, str) and not val.strip():
+            return None
+        return _to_number(f.key, val, want_int=False, lo=f.min, hi=f.max)
+    if f.widget == Widget.SELECT:
+        s = "" if val is None else str(val).strip()
+        if not s:
+            return None
+        if f.options and s not in f.options:
+            shown = ", ".join(f.options[:12]) + ("..." if len(f.options) > 12 else "")
+            raise ValueError(f"{f.key}: {val!r} is not one of: {shown}")
+        return s
+    if f.widget == Widget.LIST:
+        return _to_str_list(f.key, val) or None
+    # TEXT / TEXTAREA / PATH / FOLDER / SECRET / HIDDEN / PATHLIST: free text.
+    # A plugin that needs stronger validation (a path confined to its own
+    # asset folder, a shape check) does that itself before calling
+    # save_plugin_config with the RESOLVED value, or the plugin author reads
+    # this block back through plugin_config() and validates there - this
+    # generic layer only guarantees the value round-trips as the widget's
+    # basic type, the same floor tts/media give TEXT/FOLDER fields.
+    s = str(val).strip()
+    return s or None
+
+
+def validate_plugin_settings_update(fields, updates: dict) -> dict:
+    """Coerce + validate a settings update against ONE plugin's add_settings()
+    fields. Raises ValueError on an unknown key or a bad value. Mirrors
+    validate_tts_block: a field set to "" (blank) is written as None, clearing
+    the override so the plugin falls back to its own declared default."""
+    by_key = {f.key: f for f in fields}
+    merge: dict = {}
+    for key, val in (updates or {}).items():
+        f = by_key.get(key)
+        if f is None:
+            raise ValueError(f"unknown setting: {key!r}")
+        merge[key] = _coerce_plugin_field_value(f, val)
+    return merge

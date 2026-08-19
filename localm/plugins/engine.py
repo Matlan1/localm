@@ -29,7 +29,8 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from localm.plugins.contract import (API_VERSION, KNOWN_PLUGIN_KEYS,
-                                     KNOWN_SURFACE_KEYS, PluginSpec, Surface)
+                                     KNOWN_SURFACE_KEYS, PluginSettingField,
+                                     PluginSpec, Surface)
 
 # User-facing log of the sequential plugin load (one line per plugin). Distinct
 # from the debug-only debuglog so it shows in normal server logs (U2).
@@ -513,6 +514,30 @@ class PluginHost:
             self._chat_phases = []
 
     def add_settings(self, fields: list) -> None:
+        """Contribute PluginSettingField entries for this plugin's own settings
+        section, stored under config["plugins"][<name>] and rendered/saved
+        generically by GET/POST /v1/plugins/<name>/settings (see
+        PluginManager.get_all_plugin_settings and settings_schema.py's
+        plugin_settings_* helpers).
+
+        Validates the SHAPE up front - real PluginSettingField instances with a
+        widget settings_schema.Widget actually knows - so a plugin author's
+        mistake fails loudly at register() time instead of silently never
+        rendering (contrast has_scope/require_scope above: those raise because
+        the capability genuinely cannot be implemented here; this raises
+        because the input is malformed, the capability itself is real)."""
+        from localm.settings_schema import all_widgets
+        widgets = all_widgets()
+        for f in fields:
+            if not isinstance(f, PluginSettingField):
+                raise TypeError(
+                    f"plugin {self._spec.name!r}: add_settings() fields must be "
+                    f"PluginSettingField instances (see localm.plugins.contract), "
+                    f"got {type(f).__name__}")
+            if f.widget not in widgets:
+                raise ValueError(
+                    f"plugin {self._spec.name!r}: add_settings() field {f.key!r} "
+                    f"has unknown widget {f.widget!r}; see localm.settings_schema.Widget")
         self.settings.extend(fields)
 
     def register_tab(self, surface: Surface) -> None:
@@ -743,6 +768,32 @@ class PluginManager:
                     })
         return roles
 
+    def get_all_plugin_settings(self) -> list[dict]:
+        """Settings sections contributed by currently ACTIVE (loaded) plugins
+        via host.add_settings(), one entry per plugin that registered at least
+        one field. Mirrors get_all_model_roles's aggregation shape.
+
+        Fields are returned as-is (PluginSettingField objects, not yet
+        resolved against config or filtered for a caller's ownership) -
+        GET/POST /v1/plugins/<name>/settings do that per-request, exactly like
+        media_schema_json/tts_schema_json take the config block and is_owner
+        as call-time arguments rather than baking them in here.
+
+        Disabling a plugin drops its whole loaded entry (_unload pops it from
+        _loaded and unmounts the host), so a disabled plugin's fields vanish
+        from this list automatically - the same mechanism that already
+        unmounts its routes, with no separate cleanup needed here."""
+        out = []
+        for name, entry in self._loaded.items():
+            spec, module, host, uniq = entry
+            fields = getattr(host, "settings", None)
+            if not fields:
+                continue
+            label = (spec.surface.settings_group
+                     if spec and spec.surface and spec.surface.settings_group
+                     else name)
+            out.append({"plugin": name, "label": label, "fields": list(fields)})
+        return out
 
     def run_startup_callbacks(self) -> None:
         """Run every queued startup callback once. Called by the app lifespan

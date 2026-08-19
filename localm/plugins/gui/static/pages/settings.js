@@ -1270,6 +1270,12 @@ export async function refreshSettingsPage() {
   await buildTtsSection(form);
   if (myToken !== _settingsRenderToken) return;  // a newer refresh superseded us
 
+  // Any OTHER active plugin's own contributed fields (host.add_settings()),
+  // one section per plugin - the generic counterpart to the tts block above
+  // for a plugin the core has no bespoke schema for.
+  await buildPluginSettingsSections(form);
+  if (myToken !== _settingsRenderToken) return;  // a newer refresh superseded us
+
   // Build the nav now that the schema sections exist, so the first config
   // section (not a static card) is the default tab. The owner-gated panels then
   // refresh: each may rebuild the nav, but they preserve the active section.
@@ -1698,6 +1704,110 @@ export async function saveTtsSettings() {
     msg = "Saved - the new voice applies on the next page load";
   }
   toast(msg);
+  refreshSettingsPage();
+}
+
+// ------------------------------------------------------------------ //
+//  Generic plugin-contributed settings (host.add_settings())          //
+// ------------------------------------------------------------------ //
+
+// Controls per plugin section, keyed by plugin name, mirroring _ttsControls -
+// saving section "myplug" reads only its own entry and POSTs to
+// /v1/plugins/myplug/settings.
+export let _pluginSettingsControls = {};
+
+/** Build one settings section per ACTIVE plugin that called host.add_settings()
+ *  (the generic seam for a plugin the core has no bespoke schema for - e.g.
+ *  the Open WebUI Valves interop path, see docs/plugin-interop.md). Unlike the
+ *  tts/media sections above, the field LIST is not known ahead of time: it
+ *  comes from GET /v1/plugins/settings, which reflects whatever the
+ *  currently-loaded plugins registered. A plugin that is inactive, or that
+ *  registered no fields (or only ones this caller cannot see), contributes no
+ *  section here. A FAILED fetch still renders a visible failure rather than
+ *  silently vanishing (rule 5), mirroring buildTtsSection. */
+export async function buildPluginSettingsSections(form) {
+  _pluginSettingsControls = {};        // reset first: a failed fetch renders no controls
+  let data;
+  try {
+    const r = await fetch("/v1/plugins/settings", { headers: authHeaders() });
+    if (!r.ok) throw new Error(r.statusText);
+    data = await r.json();
+  } catch (e) {
+    const fail = el("section", "card settings-section");
+    fail.id = "settings-sec-plugin-settings";
+    fail.dataset.sec = "plugin-settings";
+    fail.dataset.group = "plugins";
+    fail.dataset.secLabel = "Plugin settings";
+    fail.appendChild(settingsSectionHead("Plugin settings", "plugins"));
+    fail.appendChild(el("div", "sub",
+      "Could not load plugin-contributed settings (" + e.message + ")."));
+    form.appendChild(fail);
+    return;
+  }
+  for (const sec of data.plugins || []) {
+    const ctrls = [];
+    _pluginSettingsControls[sec.plugin] = ctrls;
+    const panel = el("section", "card settings-section");
+    panel.id = "settings-sec-plugin-" + sec.plugin;
+    panel.dataset.sec = "plugin-" + sec.plugin;
+    panel.dataset.group = "plugins";
+    panel.dataset.secLabel = sec.label;
+    panel.appendChild(settingsSectionHead(sec.label, "plugins"));
+    const grid = el("div", "settings-fields");
+    for (const f of sec.fields || []) {
+      // Same SELECT handling as buildTtsSection's mkControl: a value outside
+      // the option list (hand-edited config) must stay selectable so it
+      // survives a save, no options at all falls back to a text box rather
+      // than an empty value-destroying dropdown, and an overridden field
+      // offers "(inherit)" so the override is clearable from the GUI.
+      const hasOptions = !!(f.options || []).length;
+      const widget = (f.widget === "select" && !hasOptions) ? "text" : f.widget;
+      let options = hasOptions ? [...f.options] : f.options;
+      if (options && f.value != null && f.value !== "" && !options.includes(f.value)) {
+        options.unshift(f.value);
+      }
+      if (options && f.is_override) {
+        options.unshift("");                 // buildSettingControl labels it "(inherit)"
+      }
+      const ctrl = buildSettingControl({
+        key: f.key, widget, label: f.label, help: f.help,
+        default: f.value, options, min: f.min, max: f.max, step: f.step,
+      });
+      if (!ctrl) continue;             // HIDDEN
+      ctrl.orig = f.value;
+      if (!f.is_override) ctrl.node.classList.add("media-inherited");
+      ctrls.push(ctrl);
+      grid.appendChild(ctrl.node);
+    }
+    panel.appendChild(grid);
+    const actions = el("div", "actions");
+    const save = el("button", "btn-primary settings-section-save", "Save " + sec.label);
+    save.type = "button";
+    save.dataset.sec = "plugin-" + sec.plugin;
+    save.onclick = () => savePluginSettings(sec.plugin);
+    actions.appendChild(save);
+    panel.appendChild(actions);
+    form.appendChild(panel);
+  }
+}
+
+/** Save one plugin's add_settings() block: POST only the fields the user
+ *  actually changed (mirrors saveTtsSettings), so an untouched field is never
+ *  pinned as an override. */
+export async function savePluginSettings(name) {
+  const ctrls = _pluginSettingsControls[name] || [];
+  const updates = {};
+  for (const c of ctrls) {
+    const cur = c.read();
+    if (_mediaChanged(cur, c.orig)) updates[c.field.key] = cur === undefined ? "" : cur;
+  }
+  if (!Object.keys(updates).length) { toast("Nothing changed"); return; }
+  const r = await fetch("/v1/plugins/" + encodeURIComponent(name) + "/settings", {
+    method: "POST", headers: authHeaders(), body: JSON.stringify(updates),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) { toast(data.detail || "Save failed", true); return; }
+  toast("Saved");
   refreshSettingsPage();
 }
 
