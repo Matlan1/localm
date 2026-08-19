@@ -560,6 +560,31 @@ class TestEmbeddingRoutes:
         assert body["installed"] is True
         assert body["can_download"] is False
 
+    def test_embedder_off_beats_explicit_consent_at_the_inner_layer(
+            self, tmp_path, monkeypatch):
+        """The embedder-side twin of the voice off-floor test, pinned at
+        _download_known itself: allow_download=True (the explicit consent the
+        download route AND the existing change-model route pass) still refuses
+        under net_mode=off. This inner layer is what keeps the floor absolute
+        even if a future route forgets its own off pre-check."""
+        monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
+        monkeypatch.delenv("LOCALM_NET_MODE", raising=False)
+        import localm.config as _cfg
+        monkeypatch.setattr(_cfg, "load_config", lambda: {"net_mode": "off"})
+        monkeypatch.setattr(_cfg, "MODELS_DIR", tmp_path / "models")
+        from localm.inference import embedder as emb
+        emb.reset_embedder()
+        fetched = []
+        monkeypatch.setattr(huggingface_hub, "hf_hub_download",
+                            lambda *a, **kw: fetched.append(a))
+        try:
+            path = emb.resolve_embedding_model_path(allow_download=True)
+            assert fetched == [], "off must mean NO network call, even authorized"
+            assert path is None
+            assert "network is off" in (emb.last_error() or "")
+        finally:
+            emb.reset_embedder()
+
     def test_download_route_short_circuits_when_installed(self, rag_client,
                                                           monkeypatch):
         from localm.inference.embedder import (
