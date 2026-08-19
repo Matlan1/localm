@@ -330,6 +330,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   a failed load or the server becoming unreachable.
 
 ### Fixed
+- **Pages no longer jump back to the top when something on them changes.**
+  Sorting or filtering the model list, using a row action on it, and saving any
+  settings section all rebuilt the page in a way that briefly left it with
+  nothing to scroll, so the browser sent you back to the top and you had to find
+  your place again. Both pages now put their new contents in place in a single
+  step, without emptying or hiding what is already on screen, so your scroll
+  position stays exactly where it was. The model list also no longer flashes
+  empty while it reloads.
 - **IPv6 addresses can now be used as the bind address.** `localm gui -H ::`
   and `localm serve -H ::` (or any IPv6 literal, such as `::1` or one interface's
   own address) used to stop the server before it started, with an unexpected-error
