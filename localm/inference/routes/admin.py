@@ -21,13 +21,19 @@ from localm.inference.errors import format_localm_error
 
 def _watchdog_probe_host(bind_host) -> str:
     """The address the post-update health watchdog should probe: a wildcard bind
-    (0.0.0.0 / :: / unset) is not itself connectable, mapped to loopback exactly
-    like mount_gui_surface's own self-connect URL (http_server.py, self_url); a
-    concrete single-interface bind is used AS-IS - unlike mount_gui_surface, which
-    always hardcodes 127.0.0.1, that would be wrong here if the server is bound
-    ONLY to a non-loopback interface (loopback would then be unreachable)."""
-    h = (bind_host or "").strip()
-    return "127.0.0.1" if h in ("", "0.0.0.0", "::") else h
+    (0.0.0.0 / :: / unset) is not itself connectable, so it is mapped to the
+    loopback it covers; a concrete single-interface bind is used AS-IS, since
+    that is the only address it answers on.
+
+    Now delegates to ``bindhost.self_connect_host`` so there is one mapping
+    instead of three. That matters: this function returned ``127.0.0.1`` for
+    ``::`` while ``_hang_alarm._probe_host`` returned ``::1`` for the same bind,
+    and only one of those survives a ``::`` bind whose dual-stack upgrade did not
+    take. ``mount_gui_surface`` (http_server.py, self_url) no longer hardcodes
+    127.0.0.1 either - the note this docstring used to carry about that
+    divergence is resolved rather than merely described."""
+    from localm.bindhost import self_connect_host
+    return self_connect_host(bind_host)
 
 
 # Keep a Changelog's in-progress heading. Matched case-insensitively with flexible

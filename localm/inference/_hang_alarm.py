@@ -240,12 +240,16 @@ def _probe_once(host: str, port: int, timeout: float = 5.0) -> bool:
 def _probe_host(bind_host: Optional[str]) -> str:
     """The address the self-probe should dial for a given bind host: the
     wildcard binds are reachable on loopback; a specific address is only
-    guaranteed reachable on itself."""
-    if not bind_host or bind_host == "0.0.0.0":
-        return "127.0.0.1"
-    if bind_host == "::":
-        return "::1"
-    return bind_host
+    guaranteed reachable on itself.
+
+    Delegates to ``bindhost.self_connect_host``, which is the same mapping this
+    function used to carry inline. It was hoisted because four other places
+    needed it and one of them (the update watchdog) had independently written a
+    version that disagreed with this one about ``::``. The result feeds
+    ``socket.create_connection``, which takes a bare address, so it is NOT
+    passed through ``url_host`` here - bracketing is for URL authorities only."""
+    from localm.bindhost import self_connect_host
+    return self_connect_host(bind_host)
 
 
 def _restart_history() -> list[float]:

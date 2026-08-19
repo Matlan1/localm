@@ -3005,7 +3005,12 @@ def mount_gui_surface(app) -> bool:
         # app build fails loudly instead of dialling "http://127.0.0.1:None/v1".
         raise HTTPException(500, "Instance not fully started (no bind port); "
                             "cannot mount the GUI surface yet.")
-    self_url = f"{scheme}://127.0.0.1:{port}/v1"
+    # Follow the real bind: a server bound only on ::1, or on one specific
+    # interface, has nothing listening on the IPv4 loopback, so a hardcoded
+    # 127.0.0.1 self-call would dial an address that is not there.
+    from localm.bindhost import self_connect_host, url_host
+    _host = url_host(self_connect_host(getattr(app.state, "bind_host", None)))
+    self_url = f"{scheme}://{_host}:{port}/v1"
 
     def active_model() -> str:
         return _engine.display_name if _engine is not None else ""

@@ -22,6 +22,7 @@ peer always looks like 127.0.0.1 even for a genuinely remote client.
 from __future__ import annotations
 
 import ipaddress
+from typing import Optional
 
 
 def is_loopback_host(host: str) -> bool:
@@ -53,21 +54,91 @@ def is_valid_bind_host(host) -> bool:
     understands. A value carrying a port (``0.0.0.0:8642``) is rejected too -
     the port has its own config key.
 
-    IPv6 literals are deliberately REJECTED, not because they are malformed
-    but because localm cannot serve them today: the port-availability probe
-    (config.port_in_use) opens an AF_INET socket, so any IPv6 host raises
-    socket.gaierror at startup and kills the process - measured live on
-    ``::1``, ``::`` and ``fe80::1``, and true of ``-H ::`` on the CLI as well
-    (a pre-existing gap, recorded in the maintainer's backlog). A config field
-    that accepted a value the server then dies on would be exactly the
-    locked-out-without-a-terminal failure this validator exists to prevent.
-    Widen this ONLY together with real end-to-end IPv6 support (the port
-    probe, portmux's relay, the printed URLs, mDNS)."""
+    IPv6 literals ARE accepted, as of the end-to-end IPv6 support this
+    docstring's previous version made the precondition: the port probe resolves
+    the family instead of assuming AF_INET, the listening socket is built
+    family-aware (and dual-stack for ``::``), the printed URLs bracket a v6
+    literal, and mDNS advertises an address the bind actually answers on. Before
+    that work an IPv6 value raised ``socket.gaierror`` at startup and killed the
+    process, which is why this validator refused them.
+
+    A ZONE ID (``fe80::1%eth0``) is still rejected. The zone index names an
+    interface as numbered on ONE machine, so it is meaningless in a config file
+    that may be copied or restored elsewhere, and it does not survive the
+    ``getaddrinfo(..., AI_PASSIVE)`` this server binds through - measured on
+    this platform, where the scoped form fails with WinError 10049 while the
+    same address unscoped binds fine. Rejecting it at write time turns that into
+    a clear save-time error instead of a silent fallback at the next restart.
+
+    Bindability is NOT decided here and cannot be: an address that is perfectly
+    well-formed stops being bindable when DHCP moves the machine. That is
+    ``cli._bind_preflight_error``'s job at the read site, and it now runs for
+    every config-driven bind including loopback ones - ``::ffff:127.0.0.1`` is
+    both genuinely loopback and unbindable on Windows, so a probe that skipped
+    the loopback class would let this validator's own widening reopen the
+    dead-server hole it exists to prevent."""
     if not host or not isinstance(host, str):
         return False
     if host == "localhost":
         return True
     try:
-        return isinstance(ipaddress.ip_address(host), ipaddress.IPv4Address)
+        addr = ipaddress.ip_address(host)
     except ValueError:
         return False
+    return not getattr(addr, "scope_id", None)
+
+
+def url_host(host: str) -> str:
+    """*host* as it must appear inside a URL authority: an IPv6 literal gets
+    square brackets, everything else is returned unchanged.
+
+    ``f"https://{host}:{port}/"`` is correct for ``127.0.0.1`` and for
+    ``localm.local`` and silently wrong for ``::1`` - it produces
+    ``https://::1:8642/``, where the parser cannot tell the address's colons
+    from the port separator. Every place that builds a host:port string routes
+    through here so the bracketing rule lives once instead of at each caller
+    (RFC 3986 section 3.2.2).
+
+    Already-bracketed input is returned as-is, so a value that has been through
+    here once cannot be double-bracketed by a second caller downstream."""
+    if not host:
+        return host
+    if host.startswith("["):
+        return host
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        return host
+    return f"[{host}]" if addr.version == 6 else host
+
+
+def self_connect_host(bind_host: Optional[str]) -> str:
+    """The address THIS machine should dial to reach a server bound on
+    *bind_host*. Never a wildcard, because a wildcard is not itself a
+    connectable address.
+
+    The server calls its own API constantly (the coder agent, RAG
+    self-embedding, the chat/media VRAM handover, the activity route, the
+    post-update health watchdog, the hang alarm's self-probe). Every one of
+    those used to hardcode ``127.0.0.1``, which is right for the IPv4
+    wildcard and for loopback and WRONG for an IPv6 bind: a server bound only
+    on ``::1`` has nothing listening on ``127.0.0.1``, so every self-call
+    fails while the server itself is perfectly healthy.
+
+    ``::`` maps to ``::1`` rather than ``127.0.0.1`` deliberately. localm binds
+    the IPv6 wildcard dual-stack (see ``netlisten.create_listen_socket``), so
+    ``127.0.0.1`` does in fact work there today - but only for as long as that
+    upgrade succeeds, and its one documented fallback is a v6-only socket.
+    ``::1`` is reachable in BOTH cases, so the self-call does not depend on an
+    optimisation that is allowed to fail.
+
+    A specific literal is returned as itself: it is the only address that bind
+    is guaranteed to answer on. That is also the pre-existing behaviour of
+    ``admin._watchdog_probe_host``, whose docstring already made this exact
+    point about the hardcoded loopback URLs."""
+    h = (bind_host or "").strip()
+    if not h or h in ("0.0.0.0", "localhost"):
+        return "127.0.0.1"
+    if h == "::":
+        return "::1"
+    return h

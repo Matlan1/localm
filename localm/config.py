@@ -712,10 +712,47 @@ PORT_RANGE = (8642, 8741)
 
 
 def port_in_use(port: int, host: str = "127.0.0.1") -> bool:
-    """True when something is already listening on host:port."""
-    with socket.socket() as s:
-        s.settimeout(0.2)
-        return s.connect_ex((host, port)) == 0
+    """True when something is already listening on host:port.
+
+    Resolves *host* first instead of assuming a family. The old shape was a bare
+    ``socket.socket()``, which is AF_INET, so ``connect_ex(("::1", port))`` raised
+    ``socket.gaierror`` before it ever probed anything - and nothing between here
+    and the top-level CLI handler caught it, so ``localm gui -H ::`` died at
+    startup with a bug-report offer (NEW-IPV6-HOST-CRASH). Any IPv6 host hit it.
+
+    A name that resolves to several addresses (``localhost`` on a dual-stack box
+    is both ``::1`` and ``127.0.0.1``) is in use when ANY of them answers. That is
+    the conservative direction on purpose: reporting a busy port free hands the
+    bind a collision, while reporting a free port busy only moves us to the next
+    one in the range.
+
+    An unresolvable host returns False rather than raising. This function answers
+    "is the port taken", and it is not the right place to fail a bad address: the
+    caller goes on to bind it, and the bind produces the accurate error naming the
+    real problem. A config-driven bind has already been screened by
+    ``cli._bind_preflight_error`` before reaching here. The resolution failure is
+    logged rather than dropped, so it is never invisible.
+    """
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except OSError as e:
+        from localm.debuglog import logger
+        logger.debug("port_in_use: cannot resolve %r (%s); treating the port as "
+                     "free and leaving the real error to the bind", host, e)
+        return False
+    for family, socktype, proto, _canon, sockaddr in infos:
+        try:
+            with socket.socket(family, socktype, proto) as s:
+                s.settimeout(0.2)
+                if s.connect_ex(sockaddr) == 0:
+                    return True
+        except OSError:
+            # This family is unusable on this box (an IPv6 address with the
+            # stack disabled). Nothing is listening on it for us either, so
+            # keep probing the remaining addresses rather than claiming a
+            # conflict we did not observe.
+            continue
+    return False
 
 
 class PortInUseError(RuntimeError):

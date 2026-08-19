@@ -278,7 +278,8 @@ def cert_hostnames() -> list[str]:
     return out
 
 
-def network_targets(*, mdns_name: Optional[str] = None) -> list[tuple[str, str]]:
+def network_targets(*, mdns_name: Optional[str] = None,
+                    bind_host: Optional[str] = None) -> list[tuple[str, str]]:
     """Ordered ``(label, host)`` pairs a client can use to reach this server on a
     network bind - names before IPs (friendlier), IPs kept as fallbacks. Excludes
     loopback (callers print that themselves). Best-effort.
@@ -288,7 +289,22 @@ def network_targets(*, mdns_name: Optional[str] = None) -> list[tuple[str, str]]
     we never recommend a name this host does not own (a loopback/--isolated bind, a
     name-conflict, or a machine with no advertisable address). The Tailscale name is
     gated separately on its own reachability (MagicDNS), since we do not advertise
-    that - the tailnet resolves it."""
+    that - the tailnet resolves it.
+
+    *bind_host* is the address the server actually bound. A wildcard bind answers
+    on every interface, so every address below is genuinely reachable and the list
+    is returned as computed. A SPECIFIC literal answers on exactly one address, so
+    everything else here would be a printed URL that cannot connect - that bind
+    gets its own address, plus the mDNS name only when we are advertising THAT
+    address for it. Omitted (None) keeps the wildcard behaviour, which is what
+    every pre-IPv6 caller wanted.
+
+    Note what this deliberately does NOT do: enumerate this machine's global IPv6
+    addresses for a ``::`` bind. localm binds ``::`` dual-stack, so the IPv4 LAN
+    address below reaches it from any client, and picking a "the" IPv6 address out
+    of the several a host normally holds (temporary/privacy addresses, link-local
+    with its zone id, ULA) is a guess that would often print the least reachable
+    one. An honest IPv4 target beats a speculative IPv6 one."""
     from localm import tls
     addrs = tls.companion_addresses()
     status = tailscale_status()
@@ -304,6 +320,13 @@ def network_targets(*, mdns_name: Optional[str] = None) -> list[tuple[str, str]]
         out.append(("via Tailscale", ts_names[0]))
     if addrs.get("tailscale"):
         out.append(("via Tailscale (IP)", addrs["tailscale"]))
+
+    from localm.netlisten import is_wildcard_host
+    if bind_host is not None and not is_wildcard_host(bind_host):
+        kept = [(label, t) for (label, t) in out if t == bind_host or t == mdns_name]
+        if not any(t == bind_host for _label, t in kept):
+            kept.append(("on this network (IP)", bind_host))
+        return kept
     return out
 
 
@@ -341,6 +364,28 @@ class _Advertiser:
             self._zc.close()
         except Exception:
             pass
+
+
+def _packed_address(ip: str) -> Optional[bytes]:
+    """*ip* in the wire form zeroconf wants (4 bytes -> an A record, 16 -> AAAA),
+    or None when it is not an address we can advertise.
+
+    IPv6 is packed as well as IPv4 because a server bound to a specific IPv6
+    literal answers on that address and no other, so an A record holding this
+    machine's LAN IPv4 would publish a name that resolves to nothing listening.
+    A zone-scoped link-local (``fe80::1%eth0``) is deliberately NOT advertised:
+    the zone index is meaningful only on the machine that wrote it, so the
+    address is useless to the peers mDNS exists to serve."""
+    try:
+        return socket.inet_aton(ip)
+    except OSError:
+        pass
+    if "%" in ip:
+        return None
+    try:
+        return socket.inet_pton(socket.AF_INET6, ip)
+    except (OSError, AttributeError, ValueError):
+        return None
 
 
 def start_advertiser(port: int, *, tls: bool,
@@ -383,12 +428,11 @@ def start_advertiser(port: int, *, tls: bool,
             ips.append(prim)
     packed = []
     for ip in ips:
-        try:
-            packed.append(socket.inet_aton(ip))
-        except OSError:
-            continue
+        p = _packed_address(ip)
+        if p is not None:
+            packed.append(p)
     if not packed:
-        logger.warning("netname: no LAN IPv4 to advertise; name-based access "
+        logger.warning("netname: no advertisable address; name-based access "
                        "unavailable this run (IP access still works)")
         return None
 

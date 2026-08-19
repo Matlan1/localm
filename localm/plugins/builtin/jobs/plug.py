@@ -566,7 +566,9 @@ def _publish_self_url(host) -> None:
     if not port:
         return
     scheme = getattr(state, "instance_scheme", "http")
-    os.environ["LOCALM_SELF_URL"] = f"{scheme}://127.0.0.1:{port}/v1"
+    from localm.bindhost import self_connect_host, url_host
+    host_part = url_host(self_connect_host(getattr(state, "bind_host", None)))
+    os.environ["LOCALM_SELF_URL"] = f"{scheme}://{host_part}:{port}/v1"
 
 
 def unregister() -> None:

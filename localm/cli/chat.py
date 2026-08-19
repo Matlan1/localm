@@ -10,6 +10,7 @@ from rich.panel import Panel
 
 from ..config import load_config
 from ..model_manager import get_model_info
+from ..console import show_url
 from ._core import console, main, _complete_model_name
 
 
@@ -249,7 +250,8 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
                         target["base_url"],
                         token=resolve_bearer_token(target.get("token")),
                         model=model, display_name=model)
-                    console.print(f"[dim]connected to newly started server at {target['base_url']}[/dim]")
+                    console.print(f"[dim]connected to newly started server at "
+                                  f"{show_url(target['base_url'])}[/dim]")
                     break
         except Exception as e:
             attach_error = e

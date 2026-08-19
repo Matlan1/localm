@@ -347,7 +347,11 @@ def request_cooperative_unload(peer: dict, *, timeout: float = 5.0) -> bool:
     if not port or not token:
         return False
     scheme = peer.get("scheme") or "http"
-    url = f"{scheme}://127.0.0.1:{int(port)}/v1/instances/cooperate-unload"
+    # Same machine, so loopback - but WHICH loopback depends on what the peer
+    # bound: an IPv6-bound peer does not answer on 127.0.0.1.
+    from localm.bindhost import self_connect_host, url_host
+    _h = url_host(self_connect_host(peer.get("host")))
+    url = f"{scheme}://{_h}:{int(port)}/v1/instances/cooperate-unload"
 
     import requests
     try:

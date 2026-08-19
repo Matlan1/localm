@@ -9,9 +9,11 @@ from ..model_manager import (
     get_model_info, list_models, MODEL_TYPES, pull_model, relocate_model,
     remove_model, set_model_type, show_shortcuts, sync_models_dir,
 )
+from ..console import show_url
 from ._core import (console, main, _complete_model_name,
                     no_server_message, report_server_failure,
                     running_server, server_call)
+from ..bindhost import self_connect_host, url_host
 from ..selfclient import read_activity
 
 
@@ -457,7 +459,7 @@ def _rename_on_running_server(old_name: str, new_name: str):
         if entry is None:
             return None                      # nothing running: rename locally
         scheme = entry.get("scheme", "http")
-        url = f"{scheme}://{entry.get('host', '127.0.0.1')}:{entry.get('port')}"
+        url = f"{scheme}://{url_host(self_connect_host(entry.get('host')))}:{entry.get('port')}"
 
     headers = resolve_bearer_headers(entry.get("token") if entry is not None else None)
     try:
@@ -470,7 +472,8 @@ def _rename_on_running_server(old_name: str, new_name: str):
         # altitude it deserves and fall back, rather than refusing a rename
         # because of a dead entry. (ConnectTimeout subclasses this, and it
         # belongs here: no connection means no request.)
-        console.print(f"[dim]No reachable server at {url} ({e}) - renaming locally.[/dim]")
+        console.print(f"[dim]No reachable server at {show_url(url)} ({e}) - "
+                      f"renaming locally.[/dim]")
         return None
     except requests.RequestException as e:
         # The request WAS sent and the reply did not arrive (a read timeout
@@ -490,7 +493,7 @@ def _rename_on_running_server(old_name: str, new_name: str):
             console.print(f"[dim](no reply from the server: {e} - but the rename "
                           f"itself completed)[/dim]")
             return True
-        console.print(f"[yellow]No reply from {url} ({e}); the rename does not "
+        console.print(f"[yellow]No reply from {show_url(url)} ({e}); the rename does not "
                       f"appear to have been applied - doing it locally.[/yellow]")
         return None
 
@@ -623,7 +626,13 @@ def ps_cmd():
         alive = r.get("alive")
         status = "[green]live[/green]" if alive else "[yellow]no answer[/yellow]"
         scheme = r.get("scheme", "http")
-        addr = f"{scheme}://{r.get('host', '127.0.0.1')}:{r.get('port', '?')}"
+        # The BIND address, as this column has always shown (0.0.0.0 for a
+        # wildcard bind), only bracketed now so an IPv6 literal is legible.
+        # Deliberately NOT self_connect_host: this column answers "what did this
+        # instance bind", and the sibling `localm status` line says the same.
+        addr = show_url(f"{scheme}://"
+                        f"{url_host(r.get('host') or '127.0.0.1')}"
+                        f":{r.get('port', '?')}")
         table.add_row(
             str(r.get("instance_id", ""))[:8], status, str(r.get("mode", "?")),
             addr, str(r.get("pid", "?")), str(r.get("root_dir", "")))
@@ -648,9 +657,10 @@ def _fmt_age(seconds) -> str:
     return f"{s // 3600}h{(s % 3600) // 60:02d}m"
 
 
-def _print_activity(scheme: str, port, instance_token=None) -> None:
+def _print_activity(scheme: str, port, instance_token=None,
+                    bind_host=None) -> None:
     """Render what the server is doing, or why that could not be determined."""
-    state, payload = read_activity(scheme, port, instance_token)
+    state, payload = read_activity(scheme, port, instance_token, bind_host)
     console.print()
     if state == "unreachable":
         console.print("[yellow]![/yellow]  Could not ask this server what it is "
@@ -730,8 +740,10 @@ def status_cmd(project):
         return
     scheme = entry.get("scheme", "http")
     console.print(f"  [bold]directory[/bold]  {root}")
-    console.print(f"  [bold]address  [/bold]  "
-                  f"{scheme}://{entry.get('host', '127.0.0.1')}:{entry.get('port')}")
+    console.print("  [bold]address  [/bold]  "
+                  + show_url(f"{scheme}://"
+                             f"{url_host(entry.get('host') or '127.0.0.1')}"
+                             f":{entry.get('port')}"))
     console.print(f"  [bold]surface  [/bold]  {entry.get('mode')}")
     console.print(f"  [bold]pid      [/bold]  {entry.get('pid')}")
     console.print(f"  [bold]version  [/bold]  {entry.get('version')}")
@@ -740,7 +752,8 @@ def status_cmd(project):
     # fixed at process start; none of it can tell you a model pull is halfway
     # through. Printed last so the identity block still renders when the server
     # cannot be reached.
-    _print_activity(scheme, entry.get("port"), entry.get("token"))
+    _print_activity(scheme, entry.get("port"), entry.get("token"),
+                    entry.get("host"))
     console.print()
     console.print("[dim]Stop it with[/dim] localm stop")
 
@@ -982,7 +995,7 @@ def unload_cmd(model):
             console.print("[dim]Or set LOCALM_URL to target a different instance.[/dim]")
             sys.exit(1)
         scheme = entry.get("scheme", "http")
-        url = f"{scheme}://{entry.get('host', '127.0.0.1')}:{entry.get('port')}"
+        url = f"{scheme}://{url_host(self_connect_host(entry.get('host')))}:{entry.get('port')}"
 
     # Owner key (env, else persisted auth.key) wins; else the discovered
     # instance's own attach token (0600 per-instance registry file) - what
@@ -997,7 +1010,7 @@ def unload_cmd(model):
                              params={"model": model} if model else None,
                              timeout=180, verify=tls.requests_verify(url))
     except requests.RequestException as e:
-        console.print(f"[red]Could not reach {url}:[/red] {e}")
+        console.print(f"[red]Could not reach {show_url(url)}:[/red] {e}")
         sys.exit(1)
 
     if resp.status_code == 401:
@@ -1107,7 +1120,7 @@ def stop_cmd(instance_id, stop_all, timeout):
         root = entry.get("root_dir", "")
         pid = entry.get("pid")
         scheme = entry.get("scheme", "http")
-        url = f"{scheme}://{entry.get('host', '127.0.0.1')}:{entry.get('port')}"
+        url = f"{scheme}://{url_host(self_connect_host(entry.get('host')))}:{entry.get('port')}"
 
         # Per-target: --all / an id prefix can span several instances, each
         # with its OWN attach token, so the open-mode fallback must be

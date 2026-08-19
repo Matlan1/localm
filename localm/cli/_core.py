@@ -9,9 +9,12 @@ if sys.platform == "win32":
 
 import click
 from rich.console import Console
+from ..bindhost import self_connect_host, url_host
 
 
 console = Console()
+
+
 
 
 
@@ -402,7 +405,7 @@ def running_server(*, allow_url_override: bool = True):
     if entry is None:
         return None
     scheme = entry.get("scheme", "http")
-    url = f"{scheme}://{entry.get('host', '127.0.0.1')}:{entry.get('port')}"
+    url = f"{scheme}://{url_host(self_connect_host(entry.get('host')))}:{entry.get('port')}"
     return url, resolve_bearer_headers(entry.get("token"))
 
 

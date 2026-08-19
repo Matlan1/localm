@@ -330,6 +330,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   a failed load or the server becoming unreachable.
 
 ### Fixed
+- **IPv6 addresses can now be used as the bind address.** `localm gui -H ::`
+  and `localm serve -H ::` (or any IPv6 literal, such as `::1` or one interface's
+  own address) used to stop the server before it started, with an unexpected-error
+  message and a bug-report offer; Settings > Server > Bind address refused IPv6
+  values outright for the same reason. Both now work. `::` listens for IPv4 and
+  IPv6 clients alike, so binding it reaches everything `0.0.0.0` did and more, and
+  the addresses localm prints for you to open are written the way a browser needs
+  them. An address with a zone suffix (`fe80::1%eth0`) is still declined, with a
+  message saying so, because the zone number only means anything on the machine
+  that wrote it.
 - **The coder no longer carries a recording session into a project you marked
   private.** A session's persistence is fixed when it starts and cannot be
   lowered afterwards, but its transcript is written wherever the session has got

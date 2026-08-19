@@ -405,7 +405,9 @@ def _kernel_self_services(request: Request):
     if not port:
         return None, None
     scheme = getattr(request.app.state, "instance_scheme", None) or "http"
-    self_url = f"{scheme}://127.0.0.1:{port}/v1"
+    from localm.bindhost import self_connect_host, url_host
+    _h = url_host(self_connect_host(getattr(request.app.state, "bind_host", None)))
+    self_url = f"{scheme}://{_h}:{port}/v1"
 
     def _active() -> str:
         import localm.inference.http_server as _hs

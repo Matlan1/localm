@@ -21,3 +21,23 @@ from __future__ import annotations
 from rich.console import Console
 
 console = Console()
+
+def show_url(url: str) -> str:
+    """*url* made safe to interpolate into a ``console.print`` markup string.
+
+    Rich reads ``[...]`` as a style tag, and an IPv6 URL authority is bracketed
+    by RFC 3986 - so a printed address SILENTLY LOSES ITS HOST when the literal
+    happens to start with a lowercase hex letter, which is every link-local
+    (``fe80::``) and every unique-local (``fd..``) address. Measured: Rich
+    renders ``[fd7a:115c:a1e0::e44:2839]`` as the empty string, while ``[::1]``
+    and ``[2001:db8::5]`` survive because Rich's tag pattern needs a letter,
+    ``#``, ``/`` or ``@`` after the bracket. So the bug reaches only SOME
+    addresses, which is exactly the kind that gets shipped: the common test
+    cases print correctly.
+
+    Escaping here rather than inside ``bindhost.url_host`` is deliberate -
+    ``url_host`` builds URLs that are also handed to requests and to sockets,
+    where a Rich escape would be corruption. This is a display concern and it
+    belongs at the display boundary."""
+    from rich.markup import escape
+    return escape(url)
