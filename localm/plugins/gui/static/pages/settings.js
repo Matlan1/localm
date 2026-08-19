@@ -7,7 +7,7 @@
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { pickDirectory, pickFile } from "../app/picker.js";
-import { $, authHeaders, confirmDanger, el, openModal, streamJob, toast } from "../app/helpers.js";
+import { $, authHeaders, confirmDanger, el, openModal, promptText, streamJob, toast } from "../app/helpers.js";
 import { emptyState } from "../app/icons.js";
 import { applyServerTtsConfig, browserVoiceOverride, caps, capsReady, clearBrowserVoiceOverride } from "../app/settings-perf.js";
 
@@ -672,11 +672,11 @@ export async function saveKeyPresets(presets) {
   }
 }
 
-export function saveCurrentAsPreset(presets) {
+export async function saveCurrentAsPreset(presets) {
   const scopes = [...document.querySelectorAll("#key-scopes .key-scope-cb")]
     .filter((c) => c.checked).map((c) => c.value);
   if (!scopes.length) { toast("Check the scopes for the preset first"); return; }
-  const name = (prompt("Preset name:") || "").trim();
+  const name = (await promptText("Preset name:") || "").trim();
   if (!name) return;
   const next = presets.filter((p) => p.name !== name);   // replace an existing name
   next.push({ name, scopes });

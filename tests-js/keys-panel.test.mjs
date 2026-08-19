@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { loadAppWithPages } from "./harness.mjs";
+import { loadAppWithPages, runScript } from "./harness.mjs";
 
 // Settings -> API keys panel (pages.js refreshKeysPanel): mint named, scope-limited
 // keys, list them, revoke them - backed by the owner-gated /v1/keys API. Owner-only:
@@ -164,7 +164,7 @@ test("keys panel: owner can save and delete a preset (PATCH /v1/config)", async 
   await tick();
   assert.equal(patched.key_presets.length, 0);      // "Old" removed
   patched = null;
-  window.prompt = () => "Phone";
+  runScript(window, 'promptText = async () => "Phone";');
   [...window.document.querySelectorAll(".key-scope-cb")].find((c) => c.value === "chat").checked = true;
   window.document.querySelector(".key-preset-save").onclick();
   await tick();

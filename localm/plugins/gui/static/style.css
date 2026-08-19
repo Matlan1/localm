@@ -2027,6 +2027,12 @@ div:has(> .data-table) { overflow-x: auto; }
 }
 .modal-head button:hover { color: var(--red); }
 .modal-body { padding: 14px 16px; overflow-y: auto; font-size: 13px; }
+/* promptText()'s text input (helpers.js) - same chrome as .card's fields. */
+.modal-body input[type="text"] {
+  width: 100%; box-sizing: border-box; background: var(--bg-input);
+  border: 1px solid var(--border); border-radius: 8px; color: var(--text);
+  padding: 8px 10px; font-size: 13.5px; font-family: var(--sans); margin-bottom: 10px;
+}
 
 /* Companion onboarding / key gate (NET-1) */
 .modal.onboarding { width: min(440px, 94vw); }

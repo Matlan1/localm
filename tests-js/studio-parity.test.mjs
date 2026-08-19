@@ -266,7 +266,7 @@ test("music: rename POSTs the new name to the per-medium rename route", async ()
   const { window: win, calls, startRecording } = setup({ tracks: [track("song.flac")] });
   runScript(win, "refreshMusicHistory();");
   await settle();
-  runScript(win, 'window.prompt = () => "renamed.flac";');
+  runScript(win, 'promptText = async () => "renamed.flac";');
 
   win.document.getElementById("music-history").querySelector(".thumb").click();
   startRecording();
