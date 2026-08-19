@@ -479,9 +479,13 @@ def _gpu_util() -> dict:
     """{"gpu": {"percent": N}} via nvidia-smi (NVIDIA), or {} on any other box
     or before the first reading has landed.
 
-    VRAM (above) is the metric that matters for fitting a model; utilisation is a
-    nice-to-have, and a clean CSV probe only exists for NVIDIA. AMD/Intel boxes
-    simply omit it rather than ship a fragile, often-wrong parse.
+    NO LONGER NVIDIA-ONLY. nvidia-smi stays the first source where it exists, and
+    a vendor-neutral WDDM fallback covers every other Windows board. Until that
+    fallback landed, AMD and Intel machines showed no GPU load at all - which read
+    as "this box has no GPU utilisation" rather than "localm cannot see it", on a
+    status bar whose whole job is to show load. Windows publishes the number for
+    every vendor through the counters Task Manager itself reads, so omitting it
+    was a gap rather than an honest limitation.
 
     NEVER blocks the calling (poll) thread on nvidia-smi: the subprocess call
     runs single-flighted on its own daemon thread (:func:`_gpu_util_probe`),
@@ -534,7 +538,26 @@ def _gpu_util() -> dict:
             with _gpu_util_lock:
                 _gpu_util_inflight = False
     if last is None:
+        # Vendor-neutral WDDM fallback: works on AMD and Intel, and on NVIDIA when
+        # nvidia-smi is absent. Reads the busiest engine on the MAIN GPU's adapter.
+        # Cheap: a persistent PDH query, ~0.02 ms, no subprocess (see
+        # gpu_usage.adapter_utilisation). Returns {} on its first ever call, since
+        # a rate counter has nothing to rate against yet - omitted, never a fake 0%.
+        try:
+            from localm.gpu_usage import adapter_utilisation
+            per_adapter = adapter_utilisation()
+            if per_adapter:
+                # No LUID->device mapping is attempted here: the busiest adapter is
+                # the compute one on every board localm runs on, and inventing a
+                # mapping that has not been measured would be a guess dressed as a
+                # fact. A multi-card breakdown belongs with the per-card VRAM rows,
+                # which key off the device list rather than the LUID.
+                return {"gpu": {"percent": max(per_adapter.values())}}
+        except Exception as e:
+            from localm.debuglog import logger
+            logger.debug("_gpu_util: WDDM utilisation unavailable: %s", e)
         return {}
+
     return {"gpu": {"percent": last}}
 
 
