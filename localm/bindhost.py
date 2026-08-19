@@ -34,3 +34,30 @@ def is_loopback_host(host: str) -> bool:
         return ipaddress.ip_address(host).is_loopback
     except ValueError:
         return False
+
+
+def is_valid_bind_host(host) -> bool:
+    """True when *host* is a string a server could plausibly bind: ``localhost``
+    or a literal IP address (IPv4 or IPv6, including the ``0.0.0.0``/``::``
+    wildcards). Used by BOTH the write-time validation of the ``bind_host``
+    config key (settings_schema) and its read site (cli._resolve_bind_host) -
+    the read-time re-check matters because a hand-edited config.json bypasses
+    write-time validation entirely, and an unbindable value reaching uvicorn
+    would kill the server at startup, which for a config-driven bind may be a
+    user with no terminal to recover from (the GUI is how they would fix it).
+
+    Hostnames are deliberately NOT accepted: binding resolves them through the
+    OS resolver, which can change answers (or fail) between restarts, and every
+    consumer of the loopback/network split (is_loopback_host above) classifies
+    literals, not names. ``localhost`` is the one name every consumer already
+    understands. A value carrying a port (``0.0.0.0:8642``) is rejected too -
+    the port has its own config key."""
+    if not host or not isinstance(host, str):
+        return False
+    if host == "localhost":
+        return True
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        return False

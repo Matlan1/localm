@@ -37,8 +37,8 @@ from ..model_manager import (  # noqa: F401
 # _exposed_bind_warning / _setup_tls_or_exit from here.
 from ._core import (  # noqa: F401
     main, console_main, console, _GracefulGroup, _read_version_for_cli,
-    _exposed_bind_warning, _resolve_tls, _setup_tls_or_exit,
-    _complete_model_name,
+    _exposed_bind_warning, _resolve_bind_host, _resolve_tls,
+    _setup_tls_or_exit, _complete_model_name,
 )
 
 # Command submodules imported for their import-time side effect: registering

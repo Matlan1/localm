@@ -55,6 +55,30 @@ test("companionView: loopback bind shows the -H 0.0.0.0 hint and no address", ()
   assert.match(view.hint, /-H 0\.0\.0\.0/);
 });
 
+test("companionView: loopback hint names the GUI path (Bind address + Restart)", () => {
+  // F1: the card must no longer concede that only a terminal can cause the
+  // bind - Settings > Server > Bind address is the first-class route now.
+  const { window } = loadAppWithPages({});
+  const view = window.companionView(
+    { network_bind: false, lan: "", tailscale: "" },
+    { protocol: "http:", port: "8642" });
+  assert.match(view.hint, /Bind address/);
+  assert.match(view.hint, /Restart server/);
+});
+
+test("companionView: a bind_fallback reason outranks every generic hint", () => {
+  // The server REFUSED a configured network bind (e.g. no strong API key) and
+  // stayed on loopback: the card must say WHY, or the Settings change looks
+  // like it silently did nothing.
+  const { window } = loadAppWithPages({});
+  const reason = "The configured bind address (0.0.0.0) was not applied: no API key is set.";
+  const view = window.companionView(
+    { network_bind: false, lan: "", tailscale: "", bind_fallback: reason },
+    { protocol: "http:", port: "8642" });
+  assert.equal(view.urls.length, 0);
+  assert.equal(view.hint, reason);
+});
+
 test("companionView: network bind but no detectable IP -> generic hint, never loopback", () => {
   const { window } = loadAppWithPages({});
   const view = window.companionView(

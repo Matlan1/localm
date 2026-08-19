@@ -552,10 +552,16 @@ export function companionView(info, loc) {
     if (info.tailscale) urls.push(mk(info.tailscale, "Tailscale"));
   }
   let hint = "";
-  if (!urls.length) {
+  if (info.bind_fallback) {
+    // The server REFUSED a configured network bind at startup (no strong API
+    // key / TLS unavailable) and stayed on loopback. That reason outranks the
+    // generic hints below: without it, setting Bind address and restarting
+    // would look like it silently did nothing.
+    hint = info.bind_fallback;
+  } else if (!urls.length) {
     hint = info.network_bind
       ? "Could not detect this machine's network address - open its LAN or Tailscale address (with this port) on the phone."
-      : "Reachable only on this computer right now. To use it from a phone, restart bound to your network: localm gui -H 0.0.0.0 (set an API key first). See docs/phone.md.";
+      : "Reachable only on this computer right now. To use it from a phone: set an API key, set Server > Bind address to 0.0.0.0, then Restart server (or run: localm gui -H 0.0.0.0). See docs/phone.md.";
   }
   return { urls, hint };
 }
