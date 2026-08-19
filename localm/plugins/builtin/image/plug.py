@@ -320,7 +320,7 @@ async def imagine_history(request: Request):
 
 
 @_router.get("/api/imagine/comfy-models")
-async def imagine_comfy_models():
+async def imagine_comfy_models(request: Request):
     """Model-file slots the active image workflow exposes (for the Workflow
     panel's model-picker dropdowns), plus the LoRA files ComfyUI currently has
     installed (for the generation form's LoRA picker), resolved against the
@@ -333,6 +333,17 @@ async def imagine_comfy_models():
     ``_build_image_workflow``), so the ``workflow_model_slots`` node walk that
     builds ``slots`` would never surface it.
 
+    Each slot also carries the localm ``model_type`` its loader node holds, the
+    declared role it fills (``role_id``/``role_label`` from
+    ``host.register_model_role``), and ``installed`` - decided by the SAME rule
+    preflight uses to call a model missing, so the picker cannot call a slot fine
+    that generation then refuses. ``roles`` reports every declared role including
+    ones this workflow has no slot for, and ``registry_models`` lists this box's
+    own registered component models by type. Both are answered from the registry,
+    so they are returned even when ComfyUI is unreachable - "we could not ask
+    ComfyUI" is a different answer from "you have nothing" (rule 5), and the
+    panel is no longer a dead end when ComfyUI is down.
+
     The slot/LoRA resolution is a blocking urlopen of ComfyUI's /object_info
     (commonly several MB, 10s timeout), so it runs OFF the event loop - inline
     it froze the whole server, and every concurrent chat stream and job SSE
@@ -341,22 +352,30 @@ async def imagine_comfy_models():
 
     Bounded (follow-up to #1057) at a bit over comfy_object_info's own 10s
     urlopen timeout, so this only ever fires for a call genuinely stuck
-    beyond that (a wedged native call, not ordinary slow-ComfyUI load)."""
+    beyond that (a wedged native call, not ordinary slow-ComfyUI load). That
+    one budget now also covers the registry read the role join needs - a small
+    local JSON, well inside the ~10s of slack, and deliberately inside the SAME
+    offload so it cannot land back on the event loop."""
     from localm.config import load_config
     from localm.inference._threadpool_timeout import (
         ThreadCallTimeout, run_in_threadpool_bounded,
     )
+    from localm.plugins.media_roles import plugin_model_roles
     s = _backend.settings(load_config())
+    # Read in the request, not in the worker: this walks the plugin manager's
+    # in-memory descriptors (no I/O), and handing app state to a thread is not
+    # something to do for a lookup that costs nothing here.
+    roles = plugin_model_roles(request.app, "image")
     try:
-        slots = await run_in_threadpool_bounded(_backend._comfy_model_slots, s, timeout=20.0)
+        resolved = await run_in_threadpool_bounded(
+            _backend._comfy_model_roles, s, roles, timeout=20.0)
         loras = await run_in_threadpool_bounded(_backend._comfy_lora_options, s, timeout=20.0)
     except ThreadCallTimeout as e:
         raise HTTPException(504, f"Reading ComfyUI's model list timed out: {e}")
-    if slots is None:
-        return {"reachable": False, "api_url": s["api_url"], "slots": [], "loras": [],
-                "message": "ComfyUI is not running - launch it to see available models."}
-    return {"reachable": True, "api_url": s["api_url"], "slots": slots,
-            "loras": loras or []}
+    out = {"api_url": s["api_url"], "loras": loras or [], **resolved}
+    if not resolved["reachable"]:
+        out["message"] = "ComfyUI is not running - launch it to see available models."
+    return out
 
 
 @_router.post("/api/imagine/comfy-launch")

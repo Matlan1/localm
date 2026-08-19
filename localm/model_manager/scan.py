@@ -6,7 +6,9 @@ from typing import Optional, NamedTuple, Dict
 
 from localm.config import load_config, load_registry
 from localm.model_manager.registry import _register_with_dedup, _entry_path
-from localm.media.comfy_client import comfy_object_info, _MODEL_FILE_EXTS, _looks_like_model_files
+from localm.media.comfy_client import (
+    comfy_object_info, model_type_for_node, _MODEL_FILE_EXTS, _looks_like_model_files,
+)
 from localm.debuglog import logger
 
 # Table mapping ComfyUI model subdirectories to localm model_types. Deliberately
@@ -200,17 +202,12 @@ def _discover_comfy_files(models_path: Path, comfy_url: Optional[str] = None):
                     if isinstance(input_def, list) and input_def and isinstance(input_def[0], list):
                         options = [o for o in input_def[0] if isinstance(o, str)]
                         if _looks_like_model_files(options):
-                            inferred_type = "unknown"
-                            node_lower = node_name.lower()
-                            if "unet" in node_lower or "diffusion" in node_lower:
-                                inferred_type = "diffusion-unet"
-                            elif "clip" in node_lower or "textencode" in node_lower:
-                                inferred_type = "text-encoder"
-                            elif "vae" in node_lower:
-                                inferred_type = "vae"
-                            elif "lora" in node_lower:
-                                inferred_type = "lora"
-
+                            # ONE shared node-name -> model_type inference, not a
+                            # private copy: the media plugins' model-role wiring
+                            # reads the SAME table (comfy_client.model_type_for_node),
+                            # so a file this scan files as 'vae' is the file that
+                            # surface offers for a vae role.
+                            inferred_type = model_type_for_node(node_name)
                             if inferred_type != "unknown":
                                 for opt in options:
                                     opt_norm = opt.replace("\\", "/").lower()

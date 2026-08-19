@@ -3862,7 +3862,19 @@ class TestImageComfyModelPicker:
         assert r.status_code == 200
         data = r.json()
         assert data["reachable"] is True
-        assert data["slots"] == fake_slots
+        # Subset, not equality: the route also annotates each slot with the
+        # localm model_type its loader holds and the plugin role it fills (see
+        # tests/test_media_model_roles.py, which pins that wiring against a real
+        # plugin manager - this fixture attaches none, so role_id is None here).
+        # What THIS test owns is that the slots the backend resolved reach the
+        # response unaltered, so it asserts exactly that, plus that the
+        # annotation happened rather than silently letting new keys through.
+        assert len(data["slots"]) == len(fake_slots)
+        for got, sent in zip(data["slots"], fake_slots):
+            assert {k: got[k] for k in sent} == sent
+            assert got["model_type"] == "diffusion-unet"
+            assert got["installed"] is True          # "a.gguf" is among options
+            assert {"role_id", "role_label"} <= set(got)
 
     def test_comfy_launch_starts_comfy(self, img_app, monkeypatch):
         app, _ = img_app

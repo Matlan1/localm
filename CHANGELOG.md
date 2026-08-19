@@ -21,6 +21,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
   Saving only writes the fields you actually changed, and a field marked
   admin-only (a webhook secret, a script path) stays hidden from and
   unwritable by a non-owner key, matching every other privileged setting.
+- **The Image, Music and Video model pickers now say what each dropdown is
+  for, and know what you already have.** Every model row in the Workflow panel
+  was labelled with the raw name the workflow file happens to use (`unet_name`,
+  `clip_name1`), which told you nothing about which file belongs there. Each row
+  now carries a plain-English name for the part it fills, such as "Diffusion
+  model (UNet)" or "Text encoder 1 (CLIP-L)", with the raw name kept beside it.
+  If a model your ComfyUI does not have is registered in localm anyway, that is
+  now pointed out on the row that needs it, along with what to do about it. And
+  when ComfyUI is not running, the panel no longer stops at "not running": it
+  lists the parts this workflow needs and which of your registered models could
+  fill each one, which needs no ComfyUI at all.
 - **Images a model links in a reply can now be displayed, without the site that
   hosts them learning anything about you.** Until now a linked image showed as
   broken: localm refuses to let the page load anything from the internet. Other
@@ -159,6 +170,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   rather than "failed", because whether the work finished is genuinely unknown.
   Stopping or restarting the server now also stops the background work it
   started, instead of abandoning it to keep writing to your data folder.
+- **An Image, Music or Video model dropdown could show a file that is not the
+  one generation would use.** When the chosen workflow named a model your
+  ComfyUI does not have, but your ComfyUI had other files of the same kind, the
+  dropdown quietly displayed the first of those instead - so the panel read as
+  though a model were selected while generating still used the missing one. The
+  dropdown now shows the file the workflow actually names, marked "not
+  installed", so picking a different one is a deliberate choice.
 - **A model pull can no longer be reported as failed after it actually
   succeeded.** Once a download finishes, localm prints a green checkmark to
   confirm the checksum was verified - and on some machines that confirmation

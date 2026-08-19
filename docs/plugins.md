@@ -150,6 +150,7 @@ instant and clean.
 | `audit(event, data)` | Log a plugin event. |
 | `browse_dirs(path)` | Server-side folder picker helper. |
 | `register_chat_hook(phase, fn, *, priority=0)` | Register an inlet/stream/outlet transform that runs on every chat turn (see [Chat pipeline hooks](#chat-pipeline-hooks)). |
+| `register_model_role(descriptor)` | Declare a model slot the plugin needs, by registry `model_type` (see [Model roles](#model-roles)). |
 
 A routes-only plugin (`voice`) is:
 
@@ -334,6 +335,54 @@ Scope and limits:
 - In a streaming turn, `outlet` runs after all chunks have been sent, so it only
   shapes the recorded reply (audit / transcript). Use a `stream` hook to rewrite
   streamed output live.
+
+## Model roles
+
+A plugin that runs a model pipeline of its own (the image, music and video
+plugins each drive a ComfyUI graph) declares WHICH kinds of model it needs, so
+the rest of localm can talk about them by name instead of by raw field.
+
+```python
+from localm.plugins.contract import ModelRoleDescriptor
+
+def register(host):
+    host.register_model_role(ModelRoleDescriptor(
+        "image-unet", "Diffusion model (UNet)", "diffusion-unet"))
+    host.register_model_role(ModelRoleDescriptor(
+        "image-vae", "VAE", "vae", required=False))
+```
+
+| Field | Meaning |
+|-------|---------|
+| `role_id` | Stable id, unique within the plugin (e.g. `image-unet`). |
+| `label` | What a user sees (e.g. `Diffusion model (UNet)`). |
+| `model_type` | One of the registry's `MODEL_TYPES`. An unknown value raises. |
+| `required` | Default `True`. `False` marks an optional component. |
+| `description` | Optional longer text. |
+| `plugin_name` | Filled in by the host; do not set it. |
+
+`model_type` is the join: it is the same value the registry records per model
+(`localm set-type`, and the Import-from-ComfyUI scan), so a role says "this slot
+takes a VAE" in the same vocabulary the model library uses. Registration is
+validated against `MODEL_TYPES` (an unknown one raises at `register()` time
+rather than surfacing later as an empty picker). A disabled or uninstalled
+plugin's roles stop being reported: the roles live on the plugin's own host, and
+the engine only reads hosts that are currently loaded.
+
+What consumes them today:
+
+- `GET /api/models/roles` lists every declared role across active plugins.
+- The media plugins' `GET /api/{imagine,music,video}/comfy-models` joins the
+  declared roles to the active workflow's model slots and to the registry's own
+  models of each type, so the Workflow panel's picker can label each dropdown,
+  flag a required component the workflow has no slot for, and point out a model
+  you have registered that ComfyUI is not offering. That join lives in
+  `localm/plugins/media_roles.py`; a plugin only has to declare the roles.
+
+Two things a role does **not** do. It does not reserve or load anything - it is
+a declaration, not an allocation. And it does not constrain what a user may
+pick: selection stays fitness-for-purpose, so a model whose recorded type is
+imperfect is still choosable.
 
 ## Dependencies
 

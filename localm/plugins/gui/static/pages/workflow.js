@@ -120,6 +120,10 @@ async function comfyModelPicker(media) {
   if (!data.reachable) {
     wrap.appendChild(el("div", "sub", data.message
       || "ComfyUI is not running - launch it to pick models."));
+    // Not a dead end any more: the roles and this box's own registered models
+    // come from localm's registry and need no ComfyUI at all, so show what the
+    // workflow needs and what is already on this machine.
+    appendRegistryFallback(wrap, data);
     return wrap;
   }
   if (!data.slots || !data.slots.length) {
@@ -138,20 +142,46 @@ async function comfyModelPicker(media) {
       + "not found in ComfyUI - see below."));
   }
   const overrides = (modelOverrides[media] ??= {});
+  const roleById = new Map((data.roles || []).map((r) => [r.role_id, r]));
   for (const slot of data.slots) {
     const row = el("div", "comfy-model-row");
-    row.appendChild(el("label", "comfy-model-label", slot.input_name));
+    // The role label is a friendlier name for the same field, never a
+    // replacement for it: the server pairs roles to slots POSITIONALLY within a
+    // model type (a ComfyUI graph carries no role names), so on a hand-exported
+    // graph the caption can be off by one. Keeping the raw input_name visible
+    // means a wrong caption is cosmetic and never hides which field this is.
+    const label = el("label", "comfy-model-label",
+      slot.role_label ? `${slot.role_label} (${slot.input_name})` : slot.input_name);
+    row.appendChild(label);
     if (!slot.options || !slot.options.length) {
       // No live choices to render - a <select> with zero <option>s would show
       // blank and unusable. Name the workflow's own current value instead so
       // the user knows exactly what file to install.
       row.appendChild(el("span", "comfy-model-missing-value job-state st-error", `${slot.current} (not installed)`));
       wrap.appendChild(row);
+      // Deliberately BEFORE the continue: a slot ComfyUI has nothing for is
+      // exactly where "you already have one registered" matters most, and
+      // hanging the hint off the happy path only would skip it there.
+      appendRegistryOnlyHint(wrap, roleById.get(slot.role_id), slot.current);
       continue;
     }
     const sel = document.createElement("select");
     sel.className = "comfy-model-select";
     const chosen = overrides[slot.node_id]?.[slot.input_name] ?? slot.current;
+    if (!slot.options.includes(chosen)) {
+      // The workflow names a file ComfyUI does not have, but it HAS others of
+      // the same kind. With no matching <option> the browser silently displays
+      // the first one, so the row read as "ae.safetensors is selected" while
+      // generation would still use the workflow's own missing value - a
+      // dropdown lying about what will run. Show the real value, disabled, so
+      // the truth is on screen and picking a live one is a deliberate act.
+      const cur = document.createElement("option");
+      cur.value = chosen;
+      cur.textContent = `${chosen} (not installed)`;
+      cur.disabled = true;
+      cur.selected = true;
+      sel.appendChild(cur);
+    }
     for (const opt of slot.options) {
       const o = document.createElement("option");
       o.value = opt;
@@ -164,8 +194,56 @@ async function comfyModelPicker(media) {
     };
     row.appendChild(sel);
     wrap.appendChild(row);
+    appendRegistryOnlyHint(wrap, roleById.get(slot.role_id), slot.current);
   }
+  appendUnusedRoles(wrap, data.roles);
   return wrap;
+}
+
+/** "You have one of these registered, ComfyUI is not offering it" - shown only
+ *  on a slot ComfyUI could not serve, which is the one state where the registry
+ *  has something useful to add. The server already gates that; this leads with
+ *  the exact file the workflow names when it is among them, because "you HAVE
+ *  this file" and "you have other files of this kind" are different messages. */
+function appendRegistryOnlyHint(wrap, role, current) {
+  const extra = (role && role.registry_only) || [];
+  if (!extra.length) return;
+  const exact = extra.find((m) => m.filename === current);
+  wrap.appendChild(el("div", "sub comfy-model-registry-hint", exact
+    ? `${exact.filename} IS registered in localm (as "${exact.name}") but is not `
+      + "in a folder ComfyUI reads - copy it into ComfyUI's models folder."
+    : "Registered in localm but not offered by ComfyUI: "
+      + extra.map((m) => m.filename).join(", ")
+      + " - copy one into ComfyUI's models folder to use it here."));
+}
+
+/** Roles the plugin declares that the ACTIVE workflow has no slot for. Only
+ *  shown for a role that is genuinely absent (in_workflow === false); a null
+ *  means ComfyUI could not be asked, which is a different statement and is
+ *  handled by the unreachable branch instead. */
+function appendUnusedRoles(wrap, roles) {
+  const absent = (roles || []).filter((r) => r.in_workflow === false && r.required);
+  if (!absent.length) return;
+  wrap.appendChild(el("div", "sub comfy-model-missing",
+    `This workflow has no slot for: ${absent.map((r) => r.label).join(", ")}.`));
+}
+
+/** With ComfyUI unreachable, report what the workflow's declared roles are and
+ *  which of this box's registered models could fill each - all from localm's own
+ *  registry, so it stays true whether or not ComfyUI ever comes up. */
+function appendRegistryFallback(wrap, data) {
+  const roles = data.roles || [];
+  if (!roles.length) return;
+  wrap.appendChild(el("h5", "comfy-model-picker-head", "Models this needs"));
+  for (const role of roles) {
+    const row = el("div", "comfy-model-row");
+    row.appendChild(el("label", "comfy-model-label", role.label));
+    const known = role.registry_models || [];
+    row.appendChild(el("span", "comfy-model-known", known.length
+      ? `${known.length} registered: ${known.map((m) => m.name).join(", ")}`
+      : "none registered in localm"));
+    wrap.appendChild(row);
+  }
 }
 
 export function workflowRow(media, name, label, active, deletable) {

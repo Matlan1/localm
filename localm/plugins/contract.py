@@ -178,7 +178,23 @@ class Host(Protocol):
     def engine(self) -> Any: ...                          # inference engine handle
     def audit(self, event: str, data: dict) -> None: ...
     def browse_dirs(self, path: str) -> dict: ...         # server-side folder picker
-    def register_model_role(self, descriptor: ModelRoleDescriptor) -> None: ...
+    def register_model_role(self, descriptor: ModelRoleDescriptor) -> None:
+        """Declare a model slot this plugin needs, by registry ``model_type``.
+
+        ``descriptor.model_type`` must be one of the registry's ``MODEL_TYPES``;
+        anything else raises here, at ``register()`` time, rather than surfacing
+        later as a role that silently matches nothing. ``plugin_name`` is stamped
+        from this plugin's own spec, so a descriptor cannot claim another
+        plugin's roles. The host drops them with everything else when the plugin
+        is disabled or uninstalled.
+
+        This is a DECLARATION, not an allocation: nothing is reserved or loaded,
+        and a user's choice is never restricted to the declared type. What reads
+        the declarations is ``GET /api/models/roles`` and the media plugins'
+        model picker, which joins them to the active ComfyUI workflow's slots and
+        to the registry's own models of each type (``plugins/media_roles.py``).
+        See docs/plugins.md, "Model roles"."""
+        ...
 
 
     def register_chat_hook(self, phase: str, fn: Any, *,

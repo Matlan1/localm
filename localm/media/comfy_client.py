@@ -471,6 +471,50 @@ def _looks_like_model_files(options: list, current: Optional[str] = None) -> boo
     return bool(current) and current.lower().endswith(_MODEL_FILE_EXTS)
 
 
+def model_type_for_node(class_type: str) -> str:
+    """The localm ``MODEL_TYPES`` value a ComfyUI loader node's model-file input
+    holds, or ``"unknown"`` when the node name carries no usable signal.
+
+    ONE derivation, shared by every caller: the ComfyUI-folder scanner
+    (``model_manager/scan.py``, which reconciles its folder walk against
+    ``/object_info``) and the media plugins' model-role wiring both key off this.
+    A second copy of the heuristic elsewhere would drift, and the two would then
+    disagree about the same file.
+
+    Node-NAME based on purpose, not the input name: ComfyUI's ecosystem renames
+    inputs freely across custom nodes (``unet_name`` / ``model_name`` /
+    ``ckpt_name``) while the class name keeps the loader's role legible
+    (``UNETLoader``, ``UnetLoaderGGUFAdvanced``, ``DualCLIPLoader``,
+    ``VAELoader``, ``LoraLoader``). Order matters: a checkpoint loader is checked
+    LAST of the positive cases so a name carrying both signals resolves to the
+    more specific one.
+
+    ``checkpoint`` maps to ``diffusion-unet`` deliberately, matching
+    ``scan.SUBFOLDER_MAPPING["checkpoints"]``: an all-in-one checkpoint bundles
+    UNet + text encoder + VAE, and the registry already files it under the UNet
+    type from its folder. Without this case the scanner's ``/object_info`` pass
+    stayed silent on checkpoints (it only ever overwrites with a KNOWN type), and
+    the music plugin - whose shipped ACE workflow's only model slot is a
+    ``CheckpointLoaderSimple`` - could never match its own declared
+    ``music-unet`` role.
+
+    A node this cannot classify returns ``"unknown"`` rather than a guess: that
+    is a real answer ("we could not tell"), and callers must not collapse it into
+    "there is nothing here"."""
+    name = (class_type or "").lower()
+    if "unet" in name or "diffusion" in name:
+        return "diffusion-unet"
+    if "clip" in name or "textencode" in name:
+        return "text-encoder"
+    if "vae" in name:
+        return "vae"
+    if "lora" in name:
+        return "lora"
+    if "checkpoint" in name or "ckpt" in name:
+        return "diffusion-unet"
+    return "unknown"
+
+
 def _normalize_model_base(name: str) -> str:
     """A precision/quant-insensitive key for a model filename, so e.g.
     ``wan_5B_fp16.safetensors`` and ``wan_5B_fp8_scaled.safetensors`` share a base
@@ -655,16 +699,33 @@ def describe_missing_models(workflow: dict, api_url: str) -> list:
     slots = workflow_model_slots(workflow, api_url)
     if slots is None:
         return []
-    missing = []
-    for slot in slots:
-        value, options = slot["current"], slot["options"]
-        if value in options:
-            continue            # the file is present - good
-        if _pick_variant(value, options) is not None:
-            continue            # an unambiguous substitute exists - not "missing"
-        missing.append(MissingModelSlot(slot["class_type"], slot["input_name"],
-                                         value, options))
-    return missing
+    return [MissingModelSlot(slot["class_type"], slot["input_name"],
+                             slot["current"], slot["options"])
+            for slot in slots if not slot_is_satisfied(slot)]
+
+
+def slot_is_satisfied(slot: dict) -> bool:
+    """True when ComfyUI can actually serve the model file a *slot* asks for:
+    either the exact filename is among the live options, or a single unambiguous
+    precision/quant variant of it is (which ``preflight_models`` substitutes in).
+
+    Split out of ``describe_missing_models`` so the model-picker/role surfaces
+    report "installed" by the SAME rule preflight uses to decide "missing" -
+    two rules would eventually disagree, and a picker calling a slot fine while
+    generation refuses it is the worst version of that.
+
+    A non-string ``current`` is unsatisfied rather than an exception. It cannot
+    arise from ``workflow_model_slots`` (which only emits string-valued inputs),
+    so this changes no reachable behaviour; it only keeps a hand-built slot dict
+    from raising deep inside the filename normaliser."""
+    value = slot.get("current")
+    options = slot.get("options") or []
+    if not isinstance(value, str):
+        return False
+    if value in options:
+        return True             # the file is present - good
+    # an unambiguous substitute exists - not "missing"
+    return _pick_variant(value, options) is not None
 
 
 # ---------------------------------------------------------------------------

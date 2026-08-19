@@ -141,7 +141,16 @@ def test_comfy_models_still_reports_unreachable_honestly(tmp_path, monkeypatch,
 @pytest.mark.parametrize("plugin,route", PICKERS, ids=[p[0] for p in PICKERS])
 def test_comfy_models_returns_the_slots_it_resolved(tmp_path, monkeypatch,
                                                     plugin, route):
-    """The payload must survive the offload unchanged."""
+    """What the backend resolved must survive the offload unchanged.
+
+    Asserted as a SUBSET rather than by equality: the route now also annotates
+    each slot with its localm model_type and the plugin role it fills (see
+    tests/test_media_model_roles.py). Equality would make this test fail on any
+    added field, which is not what it is here to catch - the property it owns is
+    that moving the resolution into a threadpool does not alter or drop what the
+    backend returned. So it pins exactly that, and separately pins that the
+    annotation did happen, rather than being weakened to let new keys through
+    unchecked."""
     app = _media_app(tmp_path, monkeypatch, plugin)
     backend = _installed_backend(plugin)
     slots = [{"node": "4", "input": "ckpt_name", "value": "m.safetensors",
@@ -151,5 +160,8 @@ def test_comfy_models_returns_the_slots_it_resolved(tmp_path, monkeypatch,
     with TestClient(app) as client:
         body = client.get(route).json()
     assert body["reachable"] is True
-    assert body["slots"] == slots
+    assert len(body["slots"]) == len(slots)
+    for got, sent in zip(body["slots"], slots):
+        assert {k: got[k] for k in sent} == sent, "the offload altered the payload"
+        assert {"model_type", "role_id", "role_label", "installed"} <= set(got)
     assert body["api_url"]
