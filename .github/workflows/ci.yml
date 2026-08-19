@@ -1,9 +1,12 @@
 name: CI
 
 on:
-  # THIS WORKFLOW RUNS ONLY WHEN A HUMAN ASKS FOR IT. No push trigger, no
-  # pull_request trigger. Maintainer's directive, 2026-07-29, stated as: no
-  # 7-minute runs on PRs, and that means no runs on merge either.
+  # THIS WORKFLOW RUNS ONLY WHEN A HUMAN ASKS FOR IT, WITH ONE NARROW,
+  # DELIBERATE EXCEPTION (the `push:` block below, added 2026-08-19 - see
+  # dev-notes/GRILL-DECISIONS-2026-08-19-maintainer-audit.md item 7). No
+  # general push trigger, no pull_request trigger. Maintainer's directive,
+  # 2026-07-29, stated as: no 7-minute runs on PRs, and that means no runs on
+  # merge either.
   #
   # READ THE DIRECTIVE AS BEING ABOUT COST, NOT ABOUT WHICH TRIGGER. That
   # distinction is the whole reason this comment exists. When the pull_request
@@ -107,6 +110,29 @@ on:
   # READ THE JOB CONCLUSIONS, NOT THE RUN CONCLUSION, whenever this does run:
   # the steps run in order and stop at the first failure, so a red Tests step
   # silently skips the coverage floors, the jsdom GUI tests and ruff.
+  push:
+    # NARROW, DELIBERATE EXCEPTION to the no-automatic-CI policy above,
+    # decided 2026-08-19 (dev-notes/GRILL-DECISIONS-2026-08-19-maintainer-
+    # audit.md item 7), tracing back to the original design in dev-notes/
+    # abi-verification-design-2026-06-20.md: "Triggers: schedule (weekly) +
+    # paths filter on localm/inference/backends/llamacpp/** and
+    # localm/setup_llama.py + workflow_dispatch. NOT on every push."
+    #
+    # The weekly cron below is otherwise the only automatic path to the
+    # ABI-drift check, and it is measured to actually fire on its target
+    # window only about 1 time in 6 (see the schedule comment). A push that
+    # touches the native llama.cpp binding directly is exactly the change
+    # most likely to break it, so it gets its own trigger instead of waiting
+    # on an unreliable cron.
+    #
+    # Scoped to trigger ONLY the abi-check job below (see its `if:`), not the
+    # full lint+hygiene+tests matrix - that stays manual/scheduled per the
+    # policy above, so this does not reintroduce the push-run cost the top
+    # comment describes. Exactly these two paths; nothing else in the repo
+    # triggers a run through this block.
+    paths:
+      - "localm/inference/backends/llamacpp/**"
+      - "localm/setup_llama.py"
   workflow_dispatch:
     inputs:
       run_abi:
@@ -143,7 +169,10 @@ on:
     # `gh run list --workflow=CI` filtered to event=schedule before assuming.
     #
     # This matters more since the run_abi input landed: a plain dispatch no longer
-    # runs abi-check, so THIS CRON IS NOW ITS ONLY AUTOMATIC PATH.
+    # runs abi-check. Since 2026-08-19 the narrow push trigger above covers a
+    # touch to the two llamacpp/setup_llama.py paths; this cron remains the
+    # only automatic path for everything else that could drift (an upstream
+    # release moving under an unrelated commit, for instance).
     - cron: "37 6 * * 1"
 
 permissions:
@@ -157,6 +186,11 @@ jobs:
     # process spawning) must be caught here, not by a user on the other OS.
     name: lint + hygiene + tests (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # Stays OFF the narrow abi-drift push trigger above: that trigger exists
+    # to run abi-check specifically (see its own `if:` below), not to
+    # reintroduce the full two-platform matrix on every push - see the
+    # policy comment at the top of this file.
+    if: github.event_name != 'push'
     strategy:
       # Do not cancel the other OS on the first failure: a Linux-only break is
       # exactly the signal this matrix exists to surface, so let Windows finish.
@@ -297,9 +331,13 @@ jobs:
     name: native llama.cpp ABI drift
     runs-on: windows-latest
     # The weekly cron still runs it unconditionally; a dispatch must opt in.
-    # `inputs.run_abi` is undefined (falsy) for push and schedule events, so the
-    # schedule arm is what keeps the drift coverage.
-    if: github.event_name == 'schedule' || inputs.run_abi
+    # `inputs.run_abi` is undefined (falsy) for push and schedule events, so
+    # the schedule arm and the push arm are what keep the drift coverage
+    # outside a manual dispatch. The push arm fires only for the narrow,
+    # paths-scoped push trigger above (llamacpp backend + setup_llama.py) -
+    # GitHub Actions has already filtered the run to those paths before this
+    # condition is even evaluated.
+    if: github.event_name == 'schedule' || inputs.run_abi || github.event_name == 'push'
     steps:
       - uses: actions/checkout@v7
 
