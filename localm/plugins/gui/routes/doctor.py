@@ -60,14 +60,20 @@ def _blank_state() -> dict:
     it were current is exactly the kind of stale-but-plausible answer the checks
     exist to prevent."""
     return {"job_id": None, "started_at": None, "finished_at": None,
-            "phase": "", "done": 0, "total": len(diagnostics.CHECK_KEYS),
-            "report": None}
+            "progress": None, "report": None}
 
 
 def _snapshot(app: FastAPI, jobs) -> dict:
     """The GET body. ``running`` comes from the job manager rather than from a
     flag this module maintains, so a worker thread that died without finishing
-    cannot leave the card spinning forever."""
+    cannot leave the card spinning forever.
+
+    The worker WRITES this dict from a thread while the event loop READS it here.
+    Nothing is lost (one run at a time, so one writer), but the three progress
+    fields have to be read as a set: fetched one by one they could come from two
+    different updates and report a phase against the wrong count. They are stored
+    as ONE object and swapped in a single assignment, so a reader gets a
+    consistent triple or the previous one, never a mixture."""
     st = getattr(app.state, "diagnostics_run", None) or _blank_state()
     running = jobs.has_running(_KIND)
     return {
@@ -77,8 +83,7 @@ def _snapshot(app: FastAPI, jobs) -> dict:
         "finished_at": st["finished_at"],
         # Only while something is in flight: a phase left over from a finished
         # run reads as a check still going.
-        "progress": ({"phase": st["phase"], "done": st["done"],
-                      "total": st["total"]} if running else None),
+        "progress": st["progress"] if running else None,
         "report": st["report"],
         # What this endpoint checks, so a client can name the five before the
         # first run and never imply it covered more than it did.
@@ -124,17 +129,18 @@ def register(app: FastAPI, ctx) -> None:
             def _progress(key, label, done, total):
                 # Both surfaces of the same fact: job.progress feeds /api/activity
                 # and the job stream, the dict feeds this module's own GET (which
-                # a card can poll without holding a stream open).
+                # a card can poll without holding a stream open). ONE assignment,
+                # so a concurrent reader cannot see a phase from this update
+                # beside a count from the last - see _snapshot.
                 job.progress(phase=label, done=done, total=total, unit="checks")
-                state["phase"] = label
-                state["done"] = done
-                state["total"] = total
+                state["progress"] = {"phase": label, "done": done, "total": total}
 
             report = diagnostics.run_report_isolated(on_progress=_progress)
-            state["report"] = report.as_dict()
+            # finished_at BEFORE report, so a reader that can see the report can
+            # always see when it landed. The reverse order leaves a window where
+            # a finished report looks like it never finished.
             state["finished_at"] = time.time()
-            state["phase"] = ""
-            state["done"] = len(report.checks)
+            state["report"] = report.as_dict()
             job.push({"type": "line", "text": _job_line(report)})
             # The JOB failed only when the RUN could not be completed. A report
             # that ran and found a real fault is a successful run with a failing

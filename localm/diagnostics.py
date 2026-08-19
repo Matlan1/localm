@@ -205,8 +205,32 @@ def _result(key: str, label: str, findings, *, summary: str = "",
                        findings=findings)
 
 
-def run_probe_subprocess(code: str, prefix: str, *, timeout: float = 120
-                         ) -> Optional[dict]:
+# Every bound a single isolated run can spend, named rather than left as literals
+# at their call sites, because the OUTER deadline has to fit around their sum and
+# a relation between two numbers cannot be reviewed one number at a time
+# (diff-review-discipline item 1). test_diagnostics_core asserts the arithmetic,
+# not the literals, so retuning any one of these fails loudly instead of silently
+# making the outer deadline the first thing to fire.
+PROBE_TIMEOUT_S = 120.0        # the ABI probe's own subprocess
+VENV_TIMEOUT_S = 60.0          # `-m venv`
+VENV_PIP_TIMEOUT_S = 30.0      # the follow-up `-m pip --version`
+SPAWN_REPLY_TIMEOUT_S = 20.0   # waiting for the spawned child's one message
+SPAWN_JOIN_TIMEOUT_S = 5.0     # joining it, twice (once after terminate)
+# Headroom for everything with no timeout of its own: interpreter startup, the
+# localm import, and `import torch` + `import transformers` on a cold filesystem,
+# which is by far the largest of them and the one that grows with the wheel.
+UNBOUNDED_HEADROOM_S = 120.0
+
+
+def worst_case_run_seconds() -> float:
+    """Every bounded step's ceiling, plus headroom for the unbounded ones."""
+    return (PROBE_TIMEOUT_S + VENV_TIMEOUT_S + VENV_PIP_TIMEOUT_S
+            + SPAWN_REPLY_TIMEOUT_S + 2 * SPAWN_JOIN_TIMEOUT_S
+            + UNBOUNDED_HEADROOM_S)
+
+
+def run_probe_subprocess(code: str, prefix: str, *,
+                         timeout: float = PROBE_TIMEOUT_S) -> Optional[dict]:
     """Run *code* in a fresh subprocess and parse the one stdout line starting
     with *prefix* as JSON, e.g. ``"GPU_PROBE:{...}"``.
 
@@ -424,12 +448,12 @@ def check_worker_spawn() -> CheckResult:
     error_detail = None
     try:
         proc.start()
-        got_reply = parent_conn.poll(20)
+        got_reply = parent_conn.poll(SPAWN_REPLY_TIMEOUT_S)
         reply = parent_conn.recv() if got_reply else None
-        proc.join(5)
+        proc.join(SPAWN_JOIN_TIMEOUT_S)
         if proc.is_alive():
             proc.terminate()
-            proc.join(5)
+            proc.join(SPAWN_JOIN_TIMEOUT_S)
     except Exception as e:
         # This IS the #617 failure mode: proc.start() raises directly
         # (FileNotFoundError: [WinError 2] ...) rather than the child ever
@@ -491,7 +515,7 @@ def check_venv_creation() -> CheckResult:
             dest = Path(tmp) / "probe-venv"
             r = subprocess.run(
                 [str(venv_python), "-m", "venv", str(dest)],
-                capture_output=True, text=True, timeout=60)
+                capture_output=True, text=True, timeout=VENV_TIMEOUT_S)
             expected = dest / ("Scripts/python.exe" if sys.platform == "win32"
                                else "bin/python3")
             ok = r.returncode == 0 and expected.is_file()
@@ -501,7 +525,7 @@ def check_venv_creation() -> CheckResult:
             else:
                 pr = subprocess.run(
                     [str(expected), "-m", "pip", "--version"],
-                    capture_output=True, text=True, timeout=30)
+                    capture_output=True, text=True, timeout=VENV_PIP_TIMEOUT_S)
                 pip_ok = pr.returncode == 0
                 if not pip_ok:
                     tail = (pr.stderr or pr.stdout or "").strip().splitlines()
@@ -752,7 +776,7 @@ def run_report(on_check_start: Optional[Callable] = None) -> DiagnosticsReport:
 _CHILD_CODE = "import localm.diagnostics as d; d.main_json()"
 
 
-def run_report_isolated(*, timeout: float = 360.0,
+def run_report_isolated(*, timeout: Optional[float] = None,
                         on_progress: Optional[Callable] = None
                         ) -> DiagnosticsReport:
     """Run the checks in a FRESH child interpreter and parse its one JSON line.
@@ -788,10 +812,19 @@ def run_report_isolated(*, timeout: float = 360.0,
     """
     import threading
 
+    if timeout is None:
+        timeout = worst_case_run_seconds()
     try:
+        # stderr MERGED into stdout, not given its own pipe. Reading one pipe to
+        # EOF while the other fills its (64 KiB) buffer is the classic subprocess
+        # deadlock, and this child has every reason to write to stderr - localm
+        # warns there, and so does anything it imports. Merging removes the
+        # second pipe entirely. Nothing is lost: the result is picked out by
+        # prefix, and the non-prefixed lines are kept as the tail that explains a
+        # child which produced no result at all.
         proc = subprocess.Popen(
             [sys.executable, "-c", _CHILD_CODE],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     except Exception as e:
         return DiagnosticsReport(
             checks=(), verdict=ERROR,
@@ -811,12 +844,17 @@ def run_report_isolated(*, timeout: float = 360.0,
     watchdog.start()
 
     result_line = ""
+    # A bounded tail of whatever else the child said, so a run that produced no
+    # result can still be explained without holding an unbounded log in memory.
+    tail: list = []
     try:
         for raw in proc.stdout:
             line = raw.rstrip("\r\n")
             if line.startswith(JSON_PREFIX):
                 result_line = line
-            elif line.startswith(PROGRESS_PREFIX) and on_progress is not None:
+            elif line.startswith(PROGRESS_PREFIX):
+                if on_progress is None:
+                    continue
                 try:
                     ev = json.loads(line[len(PROGRESS_PREFIX):])
                     on_progress(ev.get("key", ""), ev.get("label", ""),
@@ -826,12 +864,12 @@ def run_report_isolated(*, timeout: float = 360.0,
                     # update, never the report. Deliberately not escalated: the
                     # result line is what this function exists to return.
                     pass
+            elif line.strip():
+                tail.append(line.strip())
+                if len(tail) > 8:
+                    tail.pop(0)
     finally:
         watchdog.cancel()
-        try:
-            stderr_text = proc.stderr.read() or ""
-        except Exception:
-            stderr_text = ""
         try:
             proc.wait(timeout=10)
         except Exception:
@@ -843,9 +881,8 @@ def run_report_isolated(*, timeout: float = 360.0,
             error=f"the diagnostics run did not finish within {int(timeout)}s")
     if not result_line:
         # Surface what the child actually said. A run that produced no result is
-        # already the worst case for a diagnostic; dropping its stderr would
+        # already the worst case for a diagnostic; dropping what it printed would
         # make it undiagnosable as well.
-        tail = stderr_text.strip().splitlines()
         why = tail[-1] if tail else "it printed no result"
         return DiagnosticsReport(
             checks=(), verdict=ERROR,

@@ -320,3 +320,46 @@ def test_a_real_isolated_run_returns_all_five_checks_in_order():
         assert c.label == d.CHECK_LABELS[c.key]
         assert c.status in (d.OK, d.WARN, d.FAIL, d.SKIPPED)
         assert c.summary, f"{c.key} produced no summary line"
+
+
+def test_the_outer_deadline_fits_around_every_inner_bound():
+    """The RELATION, not the literal (diff-review-discipline item 1).
+
+    ``run_report_isolated``'s deadline has to be larger than everything the child
+    can legitimately spend, or the outer timer becomes the first thing to fire and
+    every slow-but-working box reports "the diagnostics run did not finish" - a
+    fabricated failure on a healthy machine. Neither number is wrong alone; the
+    relation is the thing, and it cannot be reviewed one number at a time."""
+    inner = (d.PROBE_TIMEOUT_S + d.VENV_TIMEOUT_S + d.VENV_PIP_TIMEOUT_S
+             + d.SPAWN_REPLY_TIMEOUT_S + 2 * d.SPAWN_JOIN_TIMEOUT_S)
+    assert d.worst_case_run_seconds() > inner, (
+        "the default deadline must leave room for the steps that have no timeout "
+        "of their own (interpreter startup, importing torch and transformers)")
+    assert d.worst_case_run_seconds() - inner >= d.UNBOUNDED_HEADROOM_S
+
+
+def test_a_child_that_floods_its_output_still_yields_its_result(child):
+    """stderr is merged into stdout rather than given its own pipe: reading one
+    pipe to EOF while the other fills its buffer is the classic subprocess
+    deadlock, and this child's dependencies do write to stderr. 400 KiB is well
+    past a 64 KiB pipe buffer, so this hangs against a two-pipe implementation
+    and returns against the merged one."""
+    # chr(10) rather than a backslash escape: this string is Python source that
+    # becomes a `-c` program, so an escape has to survive two levels of quoting
+    # and getting it wrong puts a REAL newline inside the child's string literal.
+    # That is not a hypothetical - the first version of this test did exactly
+    # that, the child died with a SyntaxError, and the test went red for a reason
+    # that had nothing to do with pipes (item 24: prove the fault fired, not just
+    # that the test failed).
+    child(
+        "import sys, json;"
+        "nl = chr(10);"
+        "sys.stderr.write(('x' * 200 + nl) * 2000);"
+        "sys.stderr.flush();"
+        "sys.stdout.write('LOCALM_DIAGNOSTICS:' + json.dumps("
+        "{'verdict': 'ok', 'checks': []}) + nl)"
+    )
+    rep = d.run_report_isolated(timeout=90)
+    # The injection took: an ERROR verdict here would mean the child never ran.
+    assert rep.verdict == d.OK, rep.error
+    assert rep.error == ""
