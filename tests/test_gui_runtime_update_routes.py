@@ -7,7 +7,10 @@
                               re-implementing provisioning here.
 
 Mirrors test_managed_comfy_s5_gui.py's shape: the heavy CLI is stubbed so these
-assert only the DISPATCH contract (job id returned, correct argv, correct 409s).
+assert only the DISPATCH contract (job id returned, correct argv, correct 400s
+and 409s). A real run is deliberately never made: setup-llama provisions into
+the venv's localm_llama_runtime wheel, so an actual dispatch here would replace
+this machine's runtime.
 """
 
 from __future__ import annotations
@@ -142,9 +145,108 @@ def test_update_dispatches_job_with_force_and_yes(app, runtime_dir, no_subproces
     assert "--yes" in args
 
 
-def test_update_refuses_when_nothing_is_installed(app, no_subprocess):
+def test_update_with_nothing_installed_provisions_with_auto_detect(app, no_subprocess):
+    """The uninstalled case used to 409 ("nothing to update - run setup
+    first"), which made INITIAL PROVISIONING unreachable for a user who has
+    only the GUI - and left a box whose runtime failed to provision with no
+    route back, since the one surface still working refused the one action
+    that would fix it. With no backend named and none installed, this must
+    dispatch the same auto-detect a bare `localm setup-llama` performs."""
     with TestClient(app) as client:
         r = client.post("/api/runtime/update")
+
+    assert r.status_code == 200, r.text
+    assert len(no_subprocess) == 1, no_subprocess
+    assert no_subprocess[0]["args"] == [
+        "setup-llama", "--backend", "auto", "--force", "--yes"]
+
+
+def test_update_switches_backend_when_one_is_named(app, runtime_dir, no_subprocess):
+    """--backend, the switch a GUI user could not reach. The NAMED backend
+    wins over the installed one; that is the whole point of the option."""
+    sl._record_provisioned_backend(runtime_dir, "vulkan", build="b10300")
+
+    with TestClient(app) as client:
+        r = client.post("/api/runtime/update", json={"backend": "cuda"})
+
+    assert r.status_code == 200, r.text
+    assert no_subprocess[0]["args"] == [
+        "setup-llama", "--backend", "cuda", "--force", "--yes"]
+
+
+def test_update_forwards_a_tag(app, runtime_dir, no_subprocess):
+    """--tag installs AND PINS one exact build. Forwarded verbatim so the pin
+    is written by the same code path a terminal run uses."""
+    sl._record_provisioned_backend(runtime_dir, "vulkan", build="b10300")
+
+    with TestClient(app) as client:
+        r = client.post("/api/runtime/update", json={"tag": "b10355"})
+
+    assert r.status_code == 200, r.text
+    assert no_subprocess[0]["args"] == [
+        "setup-llama", "--backend", "vulkan", "--tag", "b10355",
+        "--force", "--yes"]
+
+
+def test_update_accepts_backend_and_tag_together(app, no_subprocess):
+    with TestClient(app) as client:
+        r = client.post("/api/runtime/update",
+                        json={"backend": "CPU", "tag": " latest "})
+
+    assert r.status_code == 200, r.text
+    # Cased/padded input is normalised the way the CLI normalises it, rather
+    # than reaching the child as a value click would then refuse.
+    assert no_subprocess[0]["args"] == [
+        "setup-llama", "--backend", "cpu", "--tag", "latest",
+        "--force", "--yes"]
+
+
+def test_update_treats_blank_fields_as_absent(app, runtime_dir, no_subprocess):
+    """An untouched select and an empty text box are the GUI's normal state,
+    so they must mean "no request", not a request for the empty string."""
+    sl._record_provisioned_backend(runtime_dir, "vulkan", build="b10300")
+
+    with TestClient(app) as client:
+        r = client.post("/api/runtime/update", json={"backend": "", "tag": "  "})
+
+    assert r.status_code == 200, r.text
+    assert no_subprocess[0]["args"] == [
+        "setup-llama", "--backend", "vulkan", "--force", "--yes"]
+
+
+def test_update_refuses_an_unknown_backend_before_dispatching(app, no_subprocess):
+    """400, not a job that starts and fails: the caller gets the reason now,
+    and the value set is setup_llama.BACKENDS - the same tuple the CLI's own
+    click.Choice is built from, so the two surfaces cannot disagree."""
+    with TestClient(app) as client:
+        r = client.post("/api/runtime/update", json={"backend": "rocm"})
+
+    assert r.status_code == 400, r.text
+    assert "vulkan" in r.json()["detail"]
+    assert no_subprocess == []
+
+
+def test_update_refuses_a_tag_the_cli_would_refuse(app, no_subprocess):
+    """The route validates with setup_llama.is_safe_tag, the SAME predicate
+    _validated_tag uses, so a tag is judged once. A leading '-' matters beyond
+    tidiness: it is the shape that would otherwise reach click as an option."""
+    with TestClient(app) as client:
+        for bad in ("--force", "b1/../x", "a b"):
+            r = client.post("/api/runtime/update", json={"tag": bad})
+            assert r.status_code == 400, (bad, r.text)
+
+    assert no_subprocess == []
+
+
+def test_update_refuses_when_already_running_whatever_was_asked_for(
+        app, runtime_dir, no_subprocess, monkeypatch):
+    """ONE job kind covers install, switch and update, so a switch cannot be
+    started on top of an update already rewriting the same directory."""
+    monkeypatch.setattr(gui_jobs.JobManager, "has_running", lambda self, kind: True)
+
+    with TestClient(app) as client:
+        r = client.post("/api/runtime/update", json={"backend": "cuda"})
+
     assert r.status_code == 409, r.text
     assert no_subprocess == []
 

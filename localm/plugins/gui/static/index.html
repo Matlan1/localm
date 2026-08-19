@@ -685,8 +685,9 @@
               <div id="perf-backend-row" class="sub perf-backend-row" hidden>Backend: <span id="perf-backend-value">-</span></div>
               <div id="perf-backend-hint" class="perf-backend-hint" hidden>
                 <span>An NVIDIA GPU was detected; the CUDA backend usually performs better than the
-                currently installed Vulkan backend. localm never switches this for you - re-run
-                <code>localm setup-llama --backend cuda</code> if you want to try it.</span>
+                currently installed Vulkan backend. localm never switches this for you - pick
+                <strong>cuda</strong> under Settings &gt; Updates &gt; Inference runtime if you want
+                to try it.</span>
                 <button type="button" id="perf-backend-hint-dismiss" class="btn-secondary">Dismiss</button>
               </div>
               <!-- label / control / .sub, the same primitive the schema-driven
@@ -959,17 +960,54 @@
                 <div id="update-rollback-status" class="sub" hidden></div>
               </div>
 
+              <!-- The inference runtime: install it, switch backend, or move to a
+                   different build. This block is the GUI's whole form of `localm
+                   setup-llama`, which is why the two controls below exist at all -
+                   without them a user who never opens a terminal could only ever
+                   re-provision the backend they already had, and a box with NOTHING
+                   provisioned had no way in at all.
+
+                   #runtime-backend's option VALUES are setup_llama.BACKENDS and are
+                   bound to it by tests/test_gui_runtime_backend_options.py, which
+                   reads THIS file. Do not add, rename or drop one here alone. -->
               <div class="update-subsection">
-                <h4 class="update-sub-head">Runtime update</h4>
+                <h4 class="update-sub-head">Inference runtime</h4>
                 <div class="sub">Check for a newer llama.cpp runtime build for your installed
-                backend. You always start it - it never re-provisions on its own. A build that
-                fails to load on this machine is never kept: setup-llama walks back to an older
-                one that does.</div>
+                backend, or install one on a machine that has none yet. You always start it -
+                it never re-provisions on its own. A build that fails to load on this machine
+                is never kept: setup-llama walks back to an older one that does.</div>
+                <div id="runtime-update-status" class="sub" hidden></div>
+                <label for="runtime-backend">Backend</label>
+                <select id="runtime-backend" style="max-width:340px">
+                  <option value="">Keep the installed backend</option>
+                  <option value="auto">auto - detect this machine's GPU</option>
+                  <option value="vulkan">vulkan - any GPU vendor, via the display driver</option>
+                  <option value="cuda">cuda - NVIDIA</option>
+                  <option value="sycl">sycl - Intel</option>
+                  <option value="hip">hip - AMD, with a system ROCm/HIP toolkit</option>
+                  <option value="cpu">cpu - no GPU</option>
+                  <option value="metal">metal - Apple Silicon</option>
+                  <option value="amd-rocm">amd-rocm - AMD RX 6000, self-contained</option>
+                </select>
+                <div class="sub">Which prebuilt to install. Changing this re-downloads the
+                runtime; nothing is replaced while a model is loaded, and your pick is never
+                swapped silently if it turns out not to load here.</div>
+                <label for="runtime-tag">Build</label>
+                <input type="text" id="runtime-tag" style="max-width:340px"
+                       placeholder="leave blank to keep the current build">
+                <div class="sub">Optional. A llama.cpp release tag such as
+                <code>b10355</code> installs exactly that build and pins it;
+                <code>default</code> returns to the build localm ships and confirmed, and
+                <code>latest</code> tracks upstream's newest, which localm has not tested.</div>
+                <!-- The action row sits BELOW the two controls, unlike the App update
+                     block above, because unlike that one it ACTS ON them: the primary
+                     button's label is computed from whatever is selected here, so a
+                     user who picks a backend and then has to scroll back up to press
+                     it has been made to work for no reason. -->
                 <div class="actions">
                   <button class="btn-secondary" id="runtime-update-check">Check for runtime update</button>
                   <button class="btn-primary" id="runtime-update-apply" hidden>Update runtime</button>
                 </div>
-                <div id="runtime-update-status" class="sub" hidden></div>
                 <pre id="runtime-update-log" class="comfy-managed-log" style="display:none"></pre>
               </div>
 

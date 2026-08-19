@@ -12,7 +12,7 @@ import { $, authHeaders } from "../app/helpers.js";
 import { refreshPerfEstimate, refreshPluginCommands } from "../app/settings-perf.js";
 import { refreshImageHistory } from "./images.js";
 import { refreshKnowledgePage } from "./knowledge.js";
-import { refreshModelsPage, refreshUploadsList } from "./models.js";
+import { refreshModelsPage, refreshUploadsList, runtimeUpdateCheck } from "./models.js";
 import { refreshPluginsPage, renderCatalogPlugins } from "./plugins.js";
 import { refreshSettingsPage } from "./settings.js";
 import { refreshMusicHistory } from "./music.js";
@@ -44,6 +44,14 @@ window.onViewShown = (name) => {
     // page while Settings was not on screen - re-fetch the VRAM estimate so it
     // always reflects the currently active model on (re-)entering the tab.
     refreshPerfEstimate();
+    // Inference runtime: report what is provisioned WITHOUT the user first
+    // pressing "Check for runtime update". The case that needs it is the one
+    // where nothing is installed at all - a user with no runtime should not
+    // have to press a button labelled "check for an UPDATE" to discover they
+    // can install one. Cheap by default: check_runtime_update() answers from
+    // the on-disk marker and a constant, and only reaches the network on an
+    // install that opted into tracking upstream.
+    runtimeUpdateCheck();
   }
 };
 
