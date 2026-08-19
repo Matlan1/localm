@@ -784,7 +784,11 @@
               it again from your launcher or terminal).</div>
               <div class="actions">
                 <button class="btn-secondary" id="server-restart">Restart server</button>
-                <button class="btn-secondary" id="server-shutdown">Shut down server</button>
+                <!-- btn-danger: gui-design.md rule 3 reserves it for destructive
+                     actions; shutting down the server is irreversible from this
+                     page (it has to be started again from the launcher/terminal),
+                     unlike Restart right beside it. -->
+                <button class="btn-secondary btn-danger" id="server-shutdown">Shut down server</button>
               </div>
             </section>
 
@@ -949,9 +953,11 @@
               on the host, separate from chat attachments. Large model weights use the model
               downloader instead.</div>
               <div class="actions">
-                <input type="file" id="upload-input" multiple>
+                <input type="file" id="upload-input" multiple style="display:none">
+                <button class="btn-secondary" id="upload-choose">Choose files…</button>
                 <button class="btn-primary" id="upload-send">Upload</button>
               </div>
+              <div id="upload-selected" class="sub"></div>
               <div id="upload-result" class="sub" hidden></div>
               <ul id="upload-list" class="upload-list"></ul>
             </section>

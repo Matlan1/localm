@@ -1451,6 +1451,21 @@ export async function deleteUpload(name) {
 }
 window.deleteUpload = deleteUpload;
 
+if ($("upload-choose")) {
+  $("upload-choose").onclick = () => $("upload-input").click();
+}
+if ($("upload-input")) {
+  $("upload-input").onchange = () => {
+    const files = Array.from($("upload-input").files || []);
+    const label = $("upload-selected");
+    if (label) {
+      label.textContent = files.length
+        ? `${files.length} file(s) selected: ${files.map((f) => f.name).join(", ")}`
+        : "";
+    }
+  };
+}
+
 if ($("upload-send")) {
   $("upload-send").onclick = async () => {
     const input = $("upload-input");
@@ -1473,6 +1488,8 @@ if ($("upload-send")) {
         out.textContent = `Uploaded ${n} file(s) to: ${data.dir || "uploads"}`;
       }
       input.value = "";
+      const label = $("upload-selected");
+      if (label) label.textContent = "";
       toast(`Uploaded ${n} file(s)`);
       refreshUploadsList();
     } catch (e) {
