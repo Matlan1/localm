@@ -1011,16 +1011,25 @@ CORE_FIELDS: list = [
     # net_search_url is - it decides whether rendering a reply causes an outbound
     # request at all, which is a "where does data go" boundary, and a non-owner
     # config:write key must not be able to switch it on.
+    # THE THREAT MODEL LIVES HERE, NOT IN THE HELP STRING (gui-design rule 9:
+    # rationale and threat models belong in a comment beside the field, because
+    # "a control's help is read while deciding; a paragraph is not read at all").
+    # It was a 488-character warning, which is precisely the shape that rule
+    # names as protecting nobody.
+    #
+    # The trade, in full: a remote image a model links is an exfiltration
+    # channel. The ADDRESS ITSELF carries the data, and the fetch happens the
+    # moment the reply renders. Turning this on does NOT close that channel - it
+    # only moves the request from the user's browser to this server, so the
+    # remote site never learns their IP, their browser, or which page they were
+    # on, and the fetch obeys the same SSRF guard and allow/deny domain lists as
+    # every other outbound request localm makes. That is why it ships OFF: the
+    # privacy win is real but partial, and the user should choose it knowingly.
     SettingField("gui_proxy_remote_images", Widget.TOGGLE,
                  "Show remote images in replies (fetched by this machine)",
-                 "Off by default, and the trade is worth knowing. A remote image "
-                 "a model links is how data can be smuggled out: the address "
-                 "itself carries it, and the fetch happens the moment the reply "
-                 "renders. Turning this on does NOT stop that - it moves the "
-                 "request from your browser to this server, so the remote site "
-                 "never learns your IP, browser or which page you were on, and "
-                 "the request obeys the same SSRF guard and domain lists as any "
-                 "other. Leave it off unless you want linked images to display.",
+                 "Off by default. When on, this machine fetches the image so "
+                 "the site never learns your IP or browser. It cannot stop a "
+                 "link carrying data out, so leave it off unless you need it.",
                  # Reachable in the default keyless install regardless: the schema
                  # route treats open mode as owner (is_owner = held is None or
                  # ADMIN in held), so admin_only hides this from a SCOPED key, not
