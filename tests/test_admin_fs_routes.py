@@ -913,11 +913,16 @@ class TestNetworkDriveToggle:
 
     def test_logs_export_refuses_network_drive_dest_when_disallowed(
             self, fs_app, fake_remote_z):
+        """export_logs returns 400 for BOTH the network-drive gate AND a
+        destination that is not a directory (there is no real Z: drive on
+        this box), so status code alone cannot tell them apart - assert on
+        the detail message, which is what actually distinguishes them."""
         _set_allow_network_drives(False)
         with TestClient(fs_app) as c:
             r = c.post("/api/logs/export", json={"dest": r"Z:\shared"},
                        headers=_hdr(_cfgwrite_key()))
         assert r.status_code == 400, r.text
+        assert "invalid destination" in r.json()["detail"].lower(), r.text
 
     def test_ordinary_local_path_unaffected_when_disallowed(
             self, fs_app, tmp_path, fake_remote_z):
