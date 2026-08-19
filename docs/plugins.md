@@ -142,7 +142,7 @@ instant and clean.
 |--------|---------|
 | `mount_router(router)` | Mount a FastAPI `APIRouter`; every route is auto-gated by the plugin's capability scope. |
 | `mount_static(directory, *, url_prefix="")` | Serve a static dir at `/plugins/<name>/` (the SPA import()s `client_entry` from here). Returns the URL prefix. |
-| `add_settings(fields)` | Add fields to the plugin's settings section in the GUI. |
+| `add_settings(fields)` | Add fields to the plugin's settings section in the GUI (see [Settings fields](#settings-fields)). |
 | `register_tab(surface)` | Register a GUI tab in the SPA. |
 | `plugin_config(name=None)` | Read this (or another) plugin's config block (`config["plugins"][name]`). |
 | `save_plugin_config(name, cfg)` | Write a plugin's config block, atomically (safe against a concurrent config write from another plugin, the CLI, or the HTTP API). |
@@ -174,6 +174,46 @@ Every plugin declares a `scope` (default: its name). `mount_router` gates all of
 the plugin's routes behind that scope, enforced per-request when an API key is
 configured (the server is fail-open with no key). Scopes keep a plugin's reach
 explicit and let a key be issued for a subset of capabilities.
+
+## Settings fields
+
+A plugin can contribute its own settings section without writing any GUI code:
+
+```python
+from localm.plugins.contract import PluginSettingField
+from localm.settings_schema import Widget
+
+def register(host):
+    host.add_settings([
+        PluginSettingField("api_key", Widget.SECRET, "API key",
+                           "Used to call the upstream service.", admin_only=True),
+        PluginSettingField("max_results", Widget.NUMBER, "Max results",
+                           "Results returned per query.", default=5, min=1, max=50),
+    ])
+```
+
+Each field lives at `config["plugins"][<name>][key]` - the same block
+`plugin_config()` / `save_plugin_config()` already read and write - and is
+rendered with the same per-widget control the core settings form and the
+tts/media sections use (see [settings_schema.py](../localm/settings_schema.py)'s
+`Widget` for the valid `widget` values). `add_settings()` validates the field
+shape immediately: a non-`PluginSettingField` entry or an unknown widget raises
+at `register()` time rather than silently never rendering.
+
+The GUI reads every active plugin's fields from `GET /v1/plugins/settings` and
+saves one plugin's block through `POST /v1/plugins/<name>/settings`, gated on
+`config:read` / `config:write` like the core settings form - not the plugin's
+own capability scope, so a key that may merely USE a plugin cannot reconfigure
+it. `admin_only` fields (a secret, a script URL, anything that widens a trust
+boundary) additionally require an owner (admin) key to see or set, mirroring
+the media backends' `launch_cmd`/`api_url` gate. A blank/`null` save clears an
+override back to the field's own `default`.
+
+Because the field list is supplied at `register()` time rather than declared
+statically, it only exists while the plugin is loaded: there is no way to
+pre-configure a plugin's settings before installing/enabling it (unlike the
+built-in tts block, which ships a fixed schema). This is the seam
+[plugin-interop.md](plugin-interop.md) maps Open WebUI's `Valves` onto.
 
 ## Shipping client-side assets
 

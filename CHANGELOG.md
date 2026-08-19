@@ -12,6 +12,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **A plugin can now contribute a working settings section.** `add_settings()`
+  was already documented as part of the plugin API, but calling it did
+  nothing - the fields simply never appeared anywhere. Any plugin, built-in or
+  third-party, that adds settings this way now gets a real section on the
+  Settings > Plugins page, rendered with the same text, number, toggle,
+  dropdown and masked-secret controls used everywhere else in Settings.
+  Saving only writes the fields you actually changed, and a field marked
+  admin-only (a webhook secret, a script path) stays hidden from and
+  unwritable by a non-owner key, matching every other privileged setting.
 - **Images a model links in a reply can now be displayed, without the site that
   hosts them learning anything about you.** Until now a linked image showed as
   broken: localm refuses to let the page load anything from the internet. Other

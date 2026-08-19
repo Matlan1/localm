@@ -74,6 +74,46 @@ class ModelRoleDescriptor:
     description: str = ""
 
 
+@dataclass
+class PluginSettingField:
+    """One field a plugin contributes to its own settings section via
+    ``host.add_settings()``.
+
+    Stored under ``config["plugins"][<plugin>][key]``, read/written through
+    the same ``plugin_config()`` / ``save_plugin_config()`` block the plugin
+    already uses for everything else - GET/POST ``/v1/plugins/<name>/settings``
+    is the generic write surface, and the GUI renders each field with the same
+    per-widget control the core settings form and the tts/media sections
+    already use. ``widget`` must be one of ``localm.settings_schema.Widget``'s
+    values (import it from there rather than hardcoding the strings, so a
+    typo is caught at ``register()`` time instead of silently never
+    rendering). This is the seam ``docs/plugin-interop.md`` maps Open WebUI's
+    ``Valves`` onto.
+
+    ``default`` is shown/used only until the user (or a config import) sets
+    an explicit value in the plugin's own block - it is never written to disk
+    by itself. A blank/None save clears an override back to it, exactly like
+    the tts plugin's own settings block.
+    """
+    key: str
+    widget: str
+    label: str
+    help: str = ""
+    options: Optional[list] = None       # for widget=SELECT
+    min: Optional[float] = None
+    max: Optional[float] = None
+    step: Optional[float] = None
+    default: Any = None
+    # Requires an owner (ADMIN) principal to see or set - use for a field that
+    # widens a trust boundary (a shell command, a script/network URL, a host
+    # path), mirroring REC-MEDIA-CMD / the tts library/wasm_paths fields.
+    admin_only: bool = False
+    # A widget=SECRET field's value/default are never included in GET/POST
+    # /v1/plugins/<name>/settings, regardless of admin_only - derived from the
+    # widget alone (not a separate flag a field could set inconsistently, e.g.
+    # widget=SECRET with the value still round-tripping in plaintext because a
+    # second flag was forgotten).
+
 
 @dataclass
 class PluginSpec:
@@ -120,7 +160,9 @@ class Host(Protocol):
 
     def mount_router(self, router: Any) -> None: ...
     def mount_static(self, directory: str, *, url_prefix: str = "") -> str: ...
-    def add_settings(self, fields: list) -> None: ...
+    # fields is a list[PluginSettingField]. Rendered/validated generically by
+    # GET/POST /v1/plugins/<name>/settings - see PluginSettingField above.
+    def add_settings(self, fields: "list[PluginSettingField]") -> None: ...
     def register_tab(self, surface: Surface) -> None: ...
     # Config r/w is CONFINED to the plugin's own block; a different name is refused
     # (compartmentalisation). name is optional and defaults to the plugin's own.

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Config routes: server config get/schema/patch, per-plugin media config, and
-ComfyUI status.
+"""Config routes: server config get/schema/patch, per-plugin media config,
+generic plugin-contributed settings (host.add_settings()), and ComfyUI status.
 
 Extracted verbatim from create_app(); behavior unchanged. Reads the live engine
 from the http_server module global and the session-scoped audit mode from ctx.
@@ -458,6 +458,102 @@ def register(app: FastAPI, ctx) -> None:
         except ThreadCallTimeout as e:
             raise HTTPException(504, f"Saving the tts config timed out: {e}")
         return _tts_payload(request)
+
+    # ---------------------------------------------------------------- #
+    #  Generic plugin-contributed settings (host.add_settings())         #
+    # ---------------------------------------------------------------- #
+
+    @app.get("/v1/plugins/settings",
+             dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
+    async def get_plugin_settings(request: Request):
+        """Settings sections any ACTIVE plugin contributed via host.add_settings(),
+        each with its RESOLVED values (the plugin's own config["plugins"][name]
+        block, else the field's own declared default) - the generic counterpart
+        to the tts/media sections above, for a plugin the core has no bespoke
+        schema for (docs/plugin-interop.md's Open WebUI Valves interop seam).
+
+        Unlike GET /v1/tts/config, there is no per-plugin "not active" flag to
+        check here: an inactive plugin simply has no entry (its fields are not
+        known anywhere while it is unloaded), so the list is naturally just the
+        currently active sections."""
+        from localm.config import load_config
+        from localm.settings_schema import plugin_settings_schema_json
+        manager = getattr(request.app.state, "plugin_manager", None)
+        if manager is None:
+            return {"plugins": []}
+        cfg = load_config()
+        plugins_cfg = cfg.get("plugins") if isinstance(cfg.get("plugins"), dict) else {}
+        held = _hs.caller_scopes(request)
+        is_owner = held is None or scopes.ADMIN in held
+        out = []
+        for sec in manager.get_all_plugin_settings():
+            block = plugins_cfg.get(sec["plugin"])
+            fields = plugin_settings_schema_json(sec["fields"], block, is_owner=is_owner)
+            if not fields:
+                continue        # every field was admin_only and hidden from this caller
+            out.append({"plugin": sec["plugin"], "label": sec["label"], "fields": fields})
+        return {"plugins": out}
+
+    @app.post("/v1/plugins/{name}/settings",
+              dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
+    async def set_plugin_settings(name: str, body: dict, request: Request):
+        """Save one plugin's add_settings() block, merged key by key so other
+        fields (and other plugins) are untouched. A blank field clears that
+        override back to the field's own declared default, same convention as
+        POST /v1/tts/config.
+
+        404s for a plugin with no active add_settings() fields: unlike the tts
+        block (a fixed schema known ahead of time, so it can be pre-configured
+        before the plugin is enabled), a dynamically-registered field list only
+        exists while the plugin is actually loaded - there is nothing to
+        validate against otherwise."""
+        from localm.config import load_config, update_config
+        from localm.settings_schema import (plugin_settings_admin_only_fields,
+                                            plugin_settings_schema_json,
+                                            validate_plugin_settings_update)
+        manager = getattr(request.app.state, "plugin_manager", None)
+        sections = {s["plugin"]: s["fields"]
+                   for s in (manager.get_all_plugin_settings() if manager else [])}
+        fields = sections.get(name)
+        if fields is None:
+            raise HTTPException(
+                404, f"No such plugin, or it has no active settings: {name!r}")
+        # Same shape as REC-MEDIA-CMD / the tts library/wasm_paths gate: an
+        # admin_only field widens a trust boundary, so a non-owner config:write
+        # key must not set it. Checked on the RAW body before validation.
+        locked = plugin_settings_admin_only_fields(fields) & set(body or {})
+        if locked:
+            held = _hs.caller_scopes(request)
+            if held is not None and scopes.ADMIN not in held:
+                raise HTTPException(
+                    403, "Changing " + ", ".join(sorted(locked)) + " requires an "
+                    "owner (admin) key.")
+        try:
+            merge = validate_plugin_settings_update(fields, body or {})
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+
+        def _mutate(cfg: dict) -> None:
+            plugins = cfg.get("plugins")
+            if not isinstance(plugins, dict):
+                plugins = cfg["plugins"] = {}
+            block = plugins.get(name)
+            if not isinstance(block, dict):
+                block = plugins[name] = {}
+            block.update(merge)
+
+        # Off the event loop / bounded, same reason as set_tts_config above.
+        try:
+            await run_in_threadpool_bounded(update_config, _mutate,
+                                            timeout=_CONFIG_RMW_TIMEOUT_S)
+        except ThreadCallTimeout as e:
+            raise HTTPException(504, f"Saving {name}'s settings timed out: {e}")
+        cfg = load_config()
+        block = (cfg.get("plugins") or {}).get(name) or {}
+        held = _hs.caller_scopes(request)
+        is_owner = held is None or scopes.ADMIN in held
+        return {"plugin": name,
+                "fields": plugin_settings_schema_json(fields, block, is_owner=is_owner)}
 
     @app.get("/v1/comfy/status", dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
     async def get_comfy_status():
