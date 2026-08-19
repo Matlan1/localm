@@ -1446,7 +1446,15 @@ class TestModelEndpoints:
         GUI's chat gate refused both, making the promise false."""
         from localm.inference import http_server as _hs
         app = self._app_with_no_active_model()
+        # ALL THREE links of the resolution chain are pinned, not just the one
+        # under test: _resolve_unnamed_model_name() returns
+        # `_active_model_name or _last_active_model_name or _default_model_name`,
+        # and those are module globals another test in the same worker can leave
+        # set. Pinning only _last_active_model_name passed alone and failed under
+        # -n auto, because an earlier test's _active_model_name won the `or`.
         with patch("localm.config.load_registry", return_value=_FAKE_REGISTRY), \
+             patch.object(_hs, "_active_model_name", None), \
+             patch.object(_hs, "_default_model_name", None), \
              patch.object(_hs, "_last_active_model_name", "model-a"):
             with TestClient(app) as client:
                 data = client.get("/api/models").json()
