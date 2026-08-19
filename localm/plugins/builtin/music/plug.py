@@ -323,8 +323,8 @@ async def music_comfy_models(request: Request):
     request server-wide while ComfyUI was slow (REG-638).
 
     Bounded (follow-up to #1057) at a bit over comfy_object_info's own 10s
-    urlopen timeout - see the image plugin's identical route for the full
-    rationale."""
+    urlopen timeout, which now also covers the registry read the role join
+    needs - see the image plugin's identical route for the full rationale."""
     from localm.config import load_config
     from localm.inference._threadpool_timeout import (
         ThreadCallTimeout, run_in_threadpool_bounded,

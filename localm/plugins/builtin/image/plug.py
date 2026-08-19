@@ -352,7 +352,10 @@ async def imagine_comfy_models(request: Request):
 
     Bounded (follow-up to #1057) at a bit over comfy_object_info's own 10s
     urlopen timeout, so this only ever fires for a call genuinely stuck
-    beyond that (a wedged native call, not ordinary slow-ComfyUI load)."""
+    beyond that (a wedged native call, not ordinary slow-ComfyUI load). That
+    one budget now also covers the registry read the role join needs - a small
+    local JSON, well inside the ~10s of slack, and deliberately inside the SAME
+    offload so it cannot land back on the event loop."""
     from localm.config import load_config
     from localm.inference._threadpool_timeout import (
         ThreadCallTimeout, run_in_threadpool_bounded,
