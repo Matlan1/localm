@@ -201,6 +201,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   finish before the restriction took hold. Loading a skill now happens on its
   own: anything the model asked for beforehand completes first, and nothing
   after it starts until the declared `allowed-tools` are in force.
+- **Setting a model alias, renaming a model or a generated file, saving a
+  named key preset, saving a persona, or moving a chat into a folder now
+  works on every browser.** These used the browser's own text-input popup,
+  which some mobile and PWA browsers block; on those, clicking any of them
+  did nothing at all, with no error or message to explain why. They now use
+  localm's own in-page dialog instead, the same one already used for
+  delete-confirmation prompts.
 
 ### Security
 - **A form inside a model's reply can no longer send anything off your
