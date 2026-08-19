@@ -59,6 +59,22 @@ permanent public record of what shipped and are never rewritten; the in-progress
   `localm image`, `localm music` or `localm video` now tells ComfyUI to abort
   that render and release its VRAM, instead of leaving it going after localm
   has exited.
+- **Installing, switching or pinning the llama.cpp runtime no longer needs a
+  terminal.** Settings > Updates could only ever re-provision the backend you
+  already had, and did nothing at all on a machine with no runtime yet - so
+  choosing a backend, trying a specific llama.cpp build, or setting one up in
+  the first place meant running `localm setup-llama` at a command line, which
+  `localm doctor` and the Settings page itself both told you to do. The block,
+  now called **Inference runtime**, adds a backend picker covering every
+  option the command accepts (auto-detect, vulkan, cuda, sycl, hip, cpu, metal
+  and the self-contained AMD ROCm build) and a **build** field that takes a
+  llama.cpp release tag to install and pin, or `default` for the build localm
+  ships and confirmed, or `latest` for upstream's newest. The button says which
+  of install, reinstall, switch or update it is about to do, and asks first only
+  when a switch would replace a runtime that currently works. A build that
+  cannot load on your machine is still never kept, and a machine whose runtime
+  is missing or broken can now be repaired from the same screen instead of
+  being locked out of the one action that would fix it.
 - **Managing what the coder remembers no longer needs a terminal, and two more
   session settings arrived.** The **lessons** panel under Coder now has a
   **stored** and a **dropped** tab, so you can see both what the agent recalls
