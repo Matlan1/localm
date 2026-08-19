@@ -788,8 +788,13 @@ pre:hover .canvas-btn { opacity: 1; }
 /* ---------------- coder ---------------- */
 
 #coder-setup {
-  max-width: 680px;
-  margin: 60px auto;
+  /* Was `max-width: 680px`, which on a wide window left the form as a narrow
+     column in a sea of background while its own flag row had no space to breathe.
+     The cap stays, because a form line stretched across an ultrawide is worse to
+     read than one that is too narrow, but it is now wide enough for the two-column
+     field rows AND the flag grid below to sit at a comfortable width. */
+  max-width: 1040px;
+  margin: 40px auto;
   background: var(--bg-raised);
   border: 1px solid var(--border);
   border-radius: 12px;
@@ -813,8 +818,28 @@ pre:hover .canvas-btn { opacity: 1; }
   font-family: var(--sans);
 }
 #coder-setup textarea { resize: vertical; }
-#coder-setup .checks { display: flex; gap: 22px; margin-top: 16px; font-size: 13.5px; }
-#coder-setup .checks label { display: flex; align-items: center; gap: 7px; margin: 0; cursor: pointer; }
+/* A GRID, not a single flex row. As a row, six labelled checkboxes shared whatever
+   width was left and each label wrapped to three or four lines - "Still confirm
+   shell commands (with auto-approve)" over four lines beside a checkbox is not a
+   readable control, and the row read as a wall of text rather than six choices.
+   auto-fit + minmax gives each one a floor and lets the row become as many columns
+   as actually fit, so it degrades to fewer columns on a narrow window instead of
+   crushing every label at once. */
+#coder-setup .checks {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 10px 22px;
+  margin-top: 18px;
+  font-size: 13.5px;
+}
+/* align-items: start, not center: a label that does wrap (a long one on a narrow
+   window) should keep its checkbox beside the FIRST line rather than floating to
+   the middle of a two-line block. */
+#coder-setup .checks label {
+  display: flex; align-items: start; gap: 8px; margin: 0; cursor: pointer;
+  line-height: 1.35;
+}
+#coder-setup .checks input[type="checkbox"] { margin-top: 2px; flex-shrink: 0; }
 #coder-setup .actions { margin-top: 24px; }
 .btn-primary {
   background: var(--accent);
