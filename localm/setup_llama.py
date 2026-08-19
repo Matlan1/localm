@@ -509,6 +509,17 @@ def installed_build() -> "Optional[str]":
 _RUNTIME_HISTORY_MAX = 20
 
 
+# The complete set of values --backend accepts, and the ONE place that decides
+# it. Public and module-level rather than inline in the click.Choice below,
+# because a second surface now offers the same choice: the GUI's runtime route
+# validates a caller-supplied backend against this, so a name the CLI accepts
+# and the route rejects (or the reverse) is not representable. "auto" is a real
+# member, not a sentinel - it is what a bare `setup-llama` resolves through
+# _auto_backend, and it is the right default for a first provision.
+BACKENDS: "tuple[str, ...]" = ("auto", "vulkan", "cuda", "sycl", "hip", "cpu",
+                               "metal", "amd-rocm")
+
+
 # A release tag is interpolated straight into a GitHub API path and a download
 # URL, so it is validated as a PATH SEGMENT, not merely as "looks like a tag": a
 # value carrying '/', '..', '?' or '#' would silently retarget the request at a
@@ -518,8 +529,25 @@ _RUNTIME_HISTORY_MAX = 20
 _TAG_SAFE_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 
 
-def _is_safe_tag(tag: "Optional[str]") -> bool:
-    """Whether *tag* is safe to interpolate into a release URL path segment."""
+# What a usable tag looks like, in one sentence, for whoever has to REFUSE one.
+# Shared for the same reason is_safe_tag is: the CLI raises a ClickException and
+# the GUI route raises a 400, and a user who reads one and then the other must
+# not be told two different rules (diff-review-discipline.md item 28 - a fact
+# stated in more than one place diverges exactly where it costs most).
+TAG_HELP = ("Use a tag as upstream publishes it, for example 'b10355' (letters, "
+            "digits, dot, dash and underscore only), or "
+            f"{_TRACK_DEFAULT!r} for the build localm ships and confirmed, or "
+            f"{_TRACK_LATEST!r} for upstream's newest.")
+
+
+def is_safe_tag(tag: "Optional[str]") -> bool:
+    """Whether *tag* is safe to interpolate into a release URL path segment.
+
+    PUBLIC because it is no longer only this module's business: the GUI's
+    runtime route accepts a caller-supplied tag and must refuse a bad one with
+    a 400 BEFORE dispatching a job, and it has to refuse EXACTLY what the CLI
+    refuses. One predicate, one answer, whichever surface asks - the same
+    reason _validated_tag delegates here rather than carrying its own regex."""
     tag = (tag or "").strip()
     return bool(_TAG_SAFE_RE.match(tag)) and ".." not in tag
 
@@ -568,7 +596,7 @@ def pinned_tag() -> "Optional[str]":
     raw = str(raw).strip()
     if not raw or raw.lower() == _TRACK_LATEST:
         return None
-    if not _is_safe_tag(raw):
+    if not is_safe_tag(raw):
         console.print(f"[yellow]Warning:[/yellow] ignoring the stored llama.cpp "
                       f"pin {raw!r} - it is not a usable release tag. Set one "
                       "with [bold]localm setup-llama --tag <tag>[/bold].")
@@ -647,7 +675,7 @@ def runtime_history() -> list:
     if not isinstance(raw, list):
         return []
     return [e for e in raw
-            if isinstance(e, dict) and _is_safe_tag(str(e.get("tag") or ""))]
+            if isinstance(e, dict) and is_safe_tag(str(e.get("tag") or ""))]
 
 
 def previous_tag(backend: str) -> "Optional[str]":
@@ -2970,15 +2998,12 @@ def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
 def _validated_tag(raw: str) -> str:
     """*raw* as a usable release tag, or a ClickException naming the problem.
 
-    The CLI-facing half of _is_safe_tag: same predicate, so the flag and the
+    The CLI-facing half of is_safe_tag: same predicate, so the flag and the
     stored-value check can never disagree about what a usable tag is."""
     tag = (raw or "").strip()
-    if not _is_safe_tag(tag):
+    if not is_safe_tag(tag):
         raise click.ClickException(
-            f"{raw!r} is not a usable release tag. Use a tag as upstream "
-            "publishes it, for example 'b10355' (letters, digits, dot, dash and "
-            f"underscore only), or {_TRACK_DEFAULT!r} for the build localm ships "
-            f"and confirmed, or {_TRACK_LATEST!r} for upstream's newest.")
+            f"{raw!r} is not a usable release tag. {TAG_HELP}")
     return tag
 
 
@@ -3091,8 +3116,7 @@ def _apply_version_request(tag: Optional[str], rollback: bool, backend: str,
 @click.option("--from", "from_dir", default=None, type=click.Path(exists=True, file_okay=False),
               help="Copy binaries from a local llama.cpp build directory instead of downloading.")
 @click.option("--backend", default="auto",
-              type=click.Choice(["auto", "vulkan", "cuda", "sycl", "hip", "cpu",
-                                 "metal", "amd-rocm"], case_sensitive=False),
+              type=click.Choice(list(BACKENDS), case_sensitive=False),
               help="Which prebuilt to fetch. 'auto' detects your GPU and picks "
                    "the best-performing backend it can run out of the box: cuda "
                    "for NVIDIA on both Windows and Linux (self-contained, falls "

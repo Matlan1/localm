@@ -273,7 +273,7 @@ def test_the_verbatim_set_is_exactly_what_we_think_it_is():
         # like the rest of this set, so the owner gate is what keeps a non-owner
         # out - but being owner-gated is NOT the whole story here, because the
         # value is interpolated into a GitHub API path and a download URL. It is
-        # therefore ALSO validated ON READ (_is_safe_tag, in setup_llama's
+        # therefore ALSO validated ON READ (is_safe_tag, in setup_llama's
         # pinned_tag/runtime_history), which is the check that covers a
         # hand-edited config.json too - something no route can police.
         "llama_runtime_pin",

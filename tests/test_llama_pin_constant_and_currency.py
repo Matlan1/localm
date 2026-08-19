@@ -48,7 +48,7 @@ def test_the_pin_is_a_tag_that_can_safely_reach_a_url():
     """The pin is interpolated into a release URL path segment exactly like a
     user's --tag, so it must pass the same predicate. It is written by hand in
     this file, which is the one entry point _validated_tag never sees."""
-    assert sl._is_safe_tag(sl._PINNED_TAG)
+    assert sl.is_safe_tag(sl._PINNED_TAG)
     assert sl._PINNED_TAG.lower() not in (sl._TRACK_LATEST, sl._TRACK_DEFAULT), (
         "the pin must not collide with the words that mean 'track upstream' or "
         "'use the pin' - either would make --tag ambiguous")

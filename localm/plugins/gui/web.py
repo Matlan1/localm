@@ -432,6 +432,24 @@ class PullTokenRedeemRequest(BaseModel):
     token: str
 
 
+class RuntimeSetupRequest(BaseModel):
+    """Body for POST /api/runtime/update - the GUI's form of the two
+    `localm setup-llama` options a GUI-only user could not otherwise reach.
+
+    BOTH FIELDS ARE OPTIONAL AND THE WHOLE BODY MAY BE ABSENT, deliberately:
+    an empty request still means exactly what it meant before they existed
+    ("re-provision what is installed"), so no existing caller changes.
+
+    backend: one of setup_llama.BACKENDS, or None to keep the installed one
+             (and "auto" when nothing is installed - the first-provision case).
+    tag:     a release tag to install AND PIN, exactly as --tag does, or None
+             to leave the pin alone. The two words 'default' and 'latest' carry
+             the same meaning here as on the command line."""
+
+    backend: str | None = None
+    tag: str | None = None
+
+
 class MediaPreflightRequest(BaseModel):
     """Model-relevant overrides for a pre-generate model-existence check. Only
     the fields that can change WHICH model filename a loader node references -
