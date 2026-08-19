@@ -162,12 +162,26 @@ async function comfyModelPicker(media) {
       // Deliberately BEFORE the continue: a slot ComfyUI has nothing for is
       // exactly where "you already have one registered" matters most, and
       // hanging the hint off the happy path only would skip it there.
-      appendRegistryOnlyHint(wrap, roleById.get(slot.role_id));
+      appendRegistryOnlyHint(wrap, roleById.get(slot.role_id), slot.current);
       continue;
     }
     const sel = document.createElement("select");
     sel.className = "comfy-model-select";
     const chosen = overrides[slot.node_id]?.[slot.input_name] ?? slot.current;
+    if (!slot.options.includes(chosen)) {
+      // The workflow names a file ComfyUI does not have, but it HAS others of
+      // the same kind. With no matching <option> the browser silently displays
+      // the first one, so the row read as "ae.safetensors is selected" while
+      // generation would still use the workflow's own missing value - a
+      // dropdown lying about what will run. Show the real value, disabled, so
+      // the truth is on screen and picking a live one is a deliberate act.
+      const cur = document.createElement("option");
+      cur.value = chosen;
+      cur.textContent = `${chosen} (not installed)`;
+      cur.disabled = true;
+      cur.selected = true;
+      sel.appendChild(cur);
+    }
     for (const opt of slot.options) {
       const o = document.createElement("option");
       o.value = opt;
@@ -180,22 +194,27 @@ async function comfyModelPicker(media) {
     };
     row.appendChild(sel);
     wrap.appendChild(row);
-    appendRegistryOnlyHint(wrap, roleById.get(slot.role_id));
+    appendRegistryOnlyHint(wrap, roleById.get(slot.role_id), slot.current);
   }
   appendUnusedRoles(wrap, data.roles);
   return wrap;
 }
 
-/** "You have this registered, ComfyUI is not offering it" - the actionable half
- *  of joining the registry slice to the live options. Silent when there is
- *  nothing to say, which is the normal case. */
-function appendRegistryOnlyHint(wrap, role) {
-  const extra = role && role.registry_only;
-  if (!extra || !extra.length) return;
-  wrap.appendChild(el("div", "sub comfy-model-registry-hint",
-    `Also registered in localm but not offered by ComfyUI: `
-    + extra.map((m) => m.filename).join(", ")
-    + " - copy into ComfyUI's models folder to use."));
+/** "You have one of these registered, ComfyUI is not offering it" - shown only
+ *  on a slot ComfyUI could not serve, which is the one state where the registry
+ *  has something useful to add. The server already gates that; this leads with
+ *  the exact file the workflow names when it is among them, because "you HAVE
+ *  this file" and "you have other files of this kind" are different messages. */
+function appendRegistryOnlyHint(wrap, role, current) {
+  const extra = (role && role.registry_only) || [];
+  if (!extra.length) return;
+  const exact = extra.find((m) => m.filename === current);
+  wrap.appendChild(el("div", "sub comfy-model-registry-hint", exact
+    ? `${exact.filename} IS registered in localm (as "${exact.name}") but is not `
+      + "in a folder ComfyUI reads - copy it into ComfyUI's models folder."
+    : "Registered in localm but not offered by ComfyUI: "
+      + extra.map((m) => m.filename).join(", ")
+      + " - copy one into ComfyUI's models folder to use it here."));
 }
 
 /** Roles the plugin declares that the ACTIVE workflow has no slot for. Only

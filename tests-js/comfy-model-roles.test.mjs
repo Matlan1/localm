@@ -83,9 +83,11 @@ test("a slot with no declared role falls back to the raw field name", async () =
 });
 
 test("a registered model ComfyUI is not offering is surfaced with what to do", async () => {
+  const unsatisfied = { ...VAE_SLOT, current: "nowhere.safetensors", installed: false };
   const box = await render({
-    reachable: true, api_url: "u", slots: [VAE_SLOT], loras: [],
+    reachable: true, api_url: "u", slots: [unsatisfied], loras: [],
     roles: [role("image-vae", "VAE", {
+      installed: false,
       registry_only: [{ name: "my-vae", filename: "my_own_vae.safetensors" }],
     })],
     registry_models: {},
@@ -96,10 +98,32 @@ test("a registered model ComfyUI is not offering is surfaced with what to do", a
   assert.match(hint.textContent, /models folder/, "it says what to do about it");
 });
 
+test("the hint LEADS with the exact file when the workflow's own file is registered", async () => {
+  // "you HAVE this file, it is in the wrong folder" is a different and much
+  // stronger message than "you have other files of this kind".
+  const unsatisfied = { ...VAE_SLOT, current: "ae.safetensors", installed: false, options: [] };
+  const box = await render({
+    reachable: true, api_url: "u", slots: [unsatisfied], loras: [],
+    roles: [role("image-vae", "VAE", {
+      installed: false,
+      registry_only: [
+        { name: "other", filename: "my_own_vae.safetensors" },
+        { name: "the-ae", filename: "ae.safetensors" },
+      ],
+    })],
+    registry_models: {},
+  });
+  const hint = box.querySelector(".comfy-model-registry-hint");
+  assert.match(hint.textContent, /ae\.safetensors IS registered/);
+  assert.match(hint.textContent, /the-ae/, "names the registry entry to look for");
+  assert.ok(!/my_own_vae/.test(hint.textContent),
+    "the exact match is the message; the also-rans would only dilute it");
+});
+
 test("the registry-only hint also renders on a slot ComfyUI has NOTHING for", async () => {
   // The path that skips the <select> entirely. Hanging the hint off the happy
   // path only would drop it exactly where "you already have one" matters most.
-  const empty = { ...VAE_SLOT, options: [], installed: false };
+  const empty = { ...VAE_SLOT, current: "nowhere.safetensors", options: [], installed: false };
   const box = await render({
     reachable: true, api_url: "u", slots: [empty], loras: [],
     roles: [role("image-vae", "VAE", {
@@ -174,4 +198,39 @@ test("an unreachable ComfyUI with no declared roles is unchanged from before", a
   assert.match(box.textContent, /not running/);
   assert.ok(!box.querySelector(".comfy-model-picker-head"),
     "no empty 'Models this needs' heading when there is nothing to list");
+});
+
+test("a dropdown never displays a file other than the one the workflow will use", async () => {
+  // Found by running the real app: the Wan workflow asks for wan2.2_vae, the
+  // ComfyUI in front of it only had ae.safetensors, and with no matching
+  // <option> the browser silently showed ae.safetensors as if it were selected
+  // - while Generate would still have sent wan2.2_vae. A picker that disagrees
+  // with what runs is worse than one that admits it cannot offer the file.
+  const mismatched = {
+    ...VAE_SLOT, current: "wan2.2_vae.safetensors",
+    options: ["ae.safetensors"], installed: false,
+  };
+  const box = await render({
+    reachable: true, api_url: "u", slots: [mismatched], loras: [],
+    roles: [role("image-vae", "VAE", { installed: false })],
+    registry_models: {},
+  });
+  const sel = box.querySelector(".comfy-model-select");
+  assert.equal(sel.value, "wan2.2_vae.safetensors",
+    "the select reports the value the workflow will actually use");
+  const shown = sel.options[sel.selectedIndex];
+  assert.match(shown.textContent, /wan2\.2_vae\.safetensors \(not installed\)/);
+  assert.equal(shown.disabled, true, "it cannot be re-picked, only replaced");
+  assert.ok([...sel.options].some((o) => o.value === "ae.safetensors" && !o.disabled),
+    "the live options are still offered");
+});
+
+test("a dropdown whose current value IS installed gains no extra option", async () => {
+  const box = await render({
+    reachable: true, api_url: "u", slots: [VAE_SLOT], loras: [],
+    roles: [role("image-vae", "VAE")], registry_models: {},
+  });
+  const sel = box.querySelector(".comfy-model-select");
+  assert.equal(sel.options.length, 1, "no phantom row on the healthy path");
+  assert.equal(sel.value, "ae.safetensors");
 });

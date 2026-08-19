@@ -195,10 +195,13 @@ def describe_roles(roles: list, slots: Optional[list],
       None when there is no slot to ask about.
     * ``registry_models`` - this box's registered models of the role's type.
       Independent of ComfyUI, so it is populated even when ComfyUI is down.
-    * ``registry_only`` - registered models whose filename is NOT among the
-      slot's live ComfyUI options: a model localm knows about that ComfyUI is not
-      offering, which is the actionable half (it lives outside ComfyUI's model
-      folders). Empty when there is no slot to compare against."""
+    * ``registry_only`` - registered models of this type that ComfyUI is NOT
+      offering for the slot, and ONLY when the slot is unsatisfied. That is the
+      one state where the registry can help: ComfyUI cannot serve what the
+      workflow asks for, and localm knows about models of the right kind sitting
+      outside ComfyUI's model folders. On a slot ComfyUI serves fine there is
+      nothing to say, and saying it anyway (measured: every same-type model you
+      own, under every working slot) drowns the case that matters."""
     from localm.config import load_registry
     reg = load_registry() if registry is None else registry
     paired = _pair_roles_to_slots(slots, roles) if slots is not None else {}
@@ -214,7 +217,13 @@ def describe_roles(roles: list, slots: Optional[list],
         mtype = role.get("model_type")
         slot = slot_by_role.get(role_id)
         known = registry_models_of_type(mtype, reg) if mtype else []
-        if slot is None:
+        installed = None if slot is None else slot_is_satisfied(slot)
+        if installed is not False:
+            # Only where ComfyUI has FAILED to serve the slot. MEASURED against a
+            # live server before this gate existed: every same-type model you own
+            # was listed under every satisfied slot too, so the video page
+            # advertised a flux UNet and a music checkpoint as things to go
+            # install. True, useless, and it buried the one case that is neither.
             registry_only = []
         else:
             options = {str(o).replace("\\", "/").rsplit("/", 1)[-1].lower()
@@ -233,7 +242,7 @@ def describe_roles(roles: list, slots: Optional[list],
             },
             "current": None if slot is None else slot.get("current"),
             "in_workflow": None if slots is None else slot is not None,
-            "installed": None if slot is None else slot_is_satisfied(slot),
+            "installed": installed,
             "registry_models": known,
             "registry_only": registry_only,
         })

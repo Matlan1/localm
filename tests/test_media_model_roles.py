@@ -314,11 +314,23 @@ class TestDescribeRoles:
             ["aevae", "offpiste"]
 
     def test_registry_only_names_what_comfyui_is_not_offering(self):
+        """The vae slot asks for nowhere.safetensors, which ComfyUI does not
+        have, so the registered VAEs it is not offering ARE the actionable
+        answer. ae is in the live options; my_own_vae is not."""
         out = {r["role_id"]: r for r in
                media_roles.describe_roles(IMAGE_ROLES, _slots(), REGISTRY)}
-        # the vae slot's live options are ["ae.safetensors"], so the registered
-        # my_own_vae.safetensors is the actionable one (it is outside ComfyUI)
+        assert out["image-vae"]["installed"] is False
         assert [m["name"] for m in out["image-vae"]["registry_only"]] == ["offpiste"]
+
+    def test_a_slot_comfyui_serves_fine_gets_no_registry_noise(self):
+        """MEASURED on a live server: without this gate, every same-type model
+        you own was advertised under every WORKING slot too - the video page
+        told you to go install a flux UNet. True and useless, and it buried the
+        one case that is neither."""
+        out = {r["role_id"]: r for r in
+               media_roles.describe_roles(IMAGE_ROLES, _slots(), REGISTRY)}
+        assert out["image-unet"]["installed"] is True
+        assert out["image-unet"]["registry_only"] == []
 
     def test_registry_only_is_empty_without_a_slot_to_compare_against(self):
         out = {r["role_id"]: r for r in
