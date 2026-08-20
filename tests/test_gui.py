@@ -3808,6 +3808,33 @@ class TestImageGeneration:
         assert "lora_strength_model" not in seen
         assert "lora_strength_clip" not in seen
 
+    def test_cfg_forwarded_to_backend(self, img_app, monkeypatch):
+        """S4 (CLI/GUI parity): the GUI's cfg field reaches the shared ComfyUI
+        plumbing's generate_image() the same way the CLI's --cfg already does -
+        mirrors test_lora_forwarded_to_backend."""
+        app, _ = img_app
+        import localm.image_gen.comfy as comfy
+        monkeypatch.setattr(comfy, "ensure_comfy", lambda *a, **k: (True, "up"))
+        monkeypatch.setattr(comfy, "free_comfy_vram", lambda *a, **k: False)
+        monkeypatch.setattr("localm.vram.decide_media_swap", lambda *a, **k: False)
+        seen = {}
+
+        def fake_gen(prompt, out_path, **kw):
+            seen.update(kw)
+            Path(out_path).write_bytes(b"x")
+            return True, "ok"
+        monkeypatch.setattr(comfy, "generate_image", fake_gen)
+
+        with TestClient(app) as client:
+            r = client.post("/api/imagine", json={
+                "prompt": "a fox in snow",
+                "negative_prompt": "blurry",
+                "cfg": 4.2,
+            })
+            assert r.status_code == 200, r.text
+            self._wait_job(client, r.json()["job_id"])
+        assert seen.get("cfg") == 4.2
+
     @pytest.mark.parametrize("bad_name", [
         "../secrets.safetensors", "..\\secrets.safetensors",
         "sub/dir.safetensors", "sub\\dir.safetensors",

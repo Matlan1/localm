@@ -30,7 +30,7 @@ const SURFACES = {
   },
   "studio images": {
     fold: "img-advanced",
-    advanced: ["img-seed", "img-guidance", "img-denoise",
+    advanced: ["img-seed", "img-guidance", "img-denoise", "img-cfg",
                "img-lora-strength-model", "img-lora-strength-clip"],
     primary: ["img-prompt", "img-negative", "img-lora", "img-input", "img-reload-llm"],
   },
@@ -210,6 +210,29 @@ test("'reuse settings' reveals the seed and guidance it just restored", () => {
     "reuse toasts 'Settings restored', so the restored seed must be visible");
 });
 
+test("'reuse settings' reveals the cfg it just restored (S4: CLI/GUI parity)", () => {
+  const { window: win } = loadAppWithPages({
+    fetchImpl: async () => ({
+      ok: true, status: 200, json: async () => ({}), text: async () => "",
+      blob: async () => ({ type: "image/png" }),
+    }),
+  });
+  runScript(win, `showImageDetail({
+    name: "fox.png",
+    meta: { prompt: "a fox", negative_prompt: "blurry", cfg: 4.2 },
+  });`);
+  const reuse = [...win.document.querySelectorAll("button")]
+    .find((b) => b.textContent === "reuse settings");
+
+  const fold = win.document.getElementById("img-advanced");
+  assert.equal(fold.open, false, "precondition: the fold starts shut");
+  reuse.click();
+  assert.equal(win.document.getElementById("img-cfg").value, "4.2",
+    "precondition: reuse really did write cfg into its folded field");
+  assert.equal(fold.open, true,
+    "reuse toasts 'Settings restored', so the restored cfg must be visible");
+});
+
 test("'reuse settings' leaves the fold shut for an entry with no advanced values", () => {
   const { window: win } = loadAppWithPages({
     fetchImpl: async () => ({
@@ -219,7 +242,7 @@ test("'reuse settings' leaves the fold shut for an entry with no advanced values
   });
   runScript(win, `showImageDetail({
     name: "plain.png",
-    meta: { prompt: "a fox", seed: null, guidance: null, denoise: null,
+    meta: { prompt: "a fox", seed: null, guidance: null, denoise: null, cfg: null,
             lora_strength_model: null, lora_strength_clip: null },
   });`);
   const reuse = [...win.document.querySelectorAll("button")]

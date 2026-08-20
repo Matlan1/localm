@@ -47,14 +47,15 @@ const imageGallery = createGallery({
     $("img-seed").value = m.seed ?? "";
     $("img-guidance").value = m.guidance ?? "";
     $("img-denoise").value = m.denoise ?? "";
+    $("img-cfg").value = m.cfg ?? "";
     $("img-input").value = m.input_image || "";
     $("img-lora").value = m.lora_name || "";
     $("img-lora-strength-model").value = m.lora_strength_model ?? "";
     $("img-lora-strength-clip").value = m.lora_strength_clip ?? "";
     // Most of those ids live behind this page's Advanced fold. Without this the
-    // toast claims the settings were restored while the seed, guidance, denoise
-    // and both LoRA strengths sit invisible behind a closed triangle - and the
-    // seed is the whole reason anyone reuses settings.
+    // toast claims the settings were restored while the seed, guidance, denoise,
+    // cfg and both LoRA strengths sit invisible behind a closed triangle - and
+    // the seed is the whole reason anyone reuses settings.
     revealFilledAdvanced($("view-images"));
   },
 
@@ -188,6 +189,7 @@ $("img-generate").onclick = async () => {
     negative_prompt: $("img-negative").value.trim() || null,
     seed: num("img-seed"),
     guidance: num("img-guidance"),
+    cfg: num("img-cfg"),
     denoise: num("img-denoise"),
     input_image: $("img-input").value.trim() || null,
   };
