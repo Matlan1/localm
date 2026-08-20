@@ -19,10 +19,19 @@ subprocess split can use it without duplicating logic or cross-process calls:
 
 None of these methods call the abort-prone ``llama_load_model_from_file``/
 ``llama_init_from_model``/``llama_decode`` - they only call
-``torch.cuda.mem_get_info`` (exception-safe) or the already subprocess-isolated
+``torch.cuda.mem_get_info`` or the already subprocess-isolated
 ``loader.gpu_memory_isolated()`` (see ``_loader.py``), so none of them need to
 run inside the isolated worker for safety - only ``_check_context_fit`` needs
 to be there, for the latency reason above.
+
+That torch call used to be described here as "exception-safe", which is true
+and was read as though it settled the question. It does not: exception-safe is
+not TIME-safe, and neither ``import torch`` nor a ``torch.cuda`` call has any
+bound of its own. On a box where the driver is wedged or contended they simply
+never return, and a model load that reaches this file then stalls with no
+error and no timeout - reproduced, QA 2026-08-20 item 8. Every entry into torch
+from here is now both latch-guarded and deadline-bounded; see
+``_free_total_vram_bytes``.
 """
 
 from __future__ import annotations
@@ -104,12 +113,79 @@ class VramSizingMixin:
     # this codebase.
     _torch_rocm_init_broken: bool = False
 
+    # Latched once a torch VRAM read has BLOWN ITS DEADLINE in this process.
+    # Deliberately NOT folded into _torch_rocm_init_broken above: that one names
+    # a specific, root-caused DLL entry-point conflict that raises, and this one
+    # is a wait that never returns at all. They need the same response (stop
+    # asking torch) for opposite reasons, and collapsing "it faulted" into "it
+    # never answered" is the rule-5 shape this whole change is about.
+    #
+    # Latched rather than retried because a wedged driver does not un-wedge
+    # mid-process, and each retry costs another full deadline plus another
+    # abandoned thread - the same argument discover._isolated_torch_unavailable
+    # makes for the child probe, applied to the in-process read.
+    _torch_vram_read_wedged: bool = False
+
+    @staticmethod
+    def _torch_vram_read_deadline() -> float:
+        """How long a torch VRAM read may block its caller, in seconds.
+
+        DERIVED from discover._GPU_PROBE_DEADLINE rather than restated, because
+        it answers the identical question ("how long may a GPU driver probe hold
+        up its caller") about the identical hardware, and that number is already
+        tuned to wait out a legitimate COLD driver/runtime init rather than
+        misreport it. Two independently-chosen constants for one property drift,
+        and the direction that hurts is this one becoming the shorter of the two:
+        a load would then start reporting VRAM unmeasurable on exactly the cold
+        boxes discover was widened to tolerate.
+
+        A method rather than a module constant so the relation is re-read on
+        every call (never captured at import time), and so a test can shrink it
+        without touching discover's own budget."""
+        from localm import discover
+        return float(discover._GPU_PROBE_DEADLINE)
+
     @staticmethod
     def _free_total_vram_bytes() -> "tuple[Optional[int], Optional[int]]":
         """(free, total) bytes on the configured main GPU device (device 0 when
         unset - see main_gpu_index / discover.resolve_main_gpu_index), or
         (None, None) when not measurable. Shared by _free_vram_bytes() and
         _total_vram_bytes() so both read the same device in one call.
+
+        NEVER BLOCKS ITS CALLER WITHOUT A BOUND, and that is the point of the
+        two guards in front of the read (QA 2026-08-20 item 8, reproduced):
+
+        - **The discover latch.** When the out-of-process torch probe has
+          already PROVEN torch cannot finish enumerating on this box
+          (``discover.isolated_torch_unavailable()``), no attempt is made at
+          all. That latch's own docstring states the rule - an in-process retry
+          "would reproduce the multi-minute startup hang the isolation exists to
+          prevent, so this one must never fall back that way" - and this method,
+          sitting on the model-LOAD path, was the one place that fell back that
+          way anyway. Measured on master: with the latch set and torch wedged,
+          this call entered ``torch.cuda.is_available()`` and never returned, so
+          the load stopped after "Loading <model> (backend: Gguf)" with no
+          native-loader output, no error and no timeout, for as long as the
+          server ran. The latch is only consulted when torch is NOT already
+          resident: once it is in ``sys.modules`` the reads below are ordinary
+          calls on an imported module, and refusing them would throw away a
+          working reading on the strength of a probe that failed for its own
+          reasons.
+        - **A deadline.** Everything else runs on a helper thread with
+          :meth:`_torch_vram_read_deadline`, and on overrun the caller is
+          released with (None, None) - which is this method's existing,
+          well-travelled "unmeasurable" answer, so every caller already handles
+          it: ``_free_vram_bytes`` falls through to the crash-isolated native
+          probe, and if that cannot answer either, sizing degrades to the
+          configured n_gpu_layers and the load proceeds to its OWN bounded
+          native timeout. A bound is needed on top of the latch because the
+          latch answers "has the child probe already failed", not "will this
+          import return" - the first torch touch in a process can be this call.
+
+        The abandoned thread is the same accepted residual
+        ``discover._list_gpus_with_status`` documents for its own probe: Python
+        cannot stop a thread, so it finishes eventually or never, and its result
+        is discarded. It costs one thread ONCE, because the overrun latches.
 
         Skips the attempt entirely once `import torch` has been CONFIRMED
         broken in this process (see below) - not merely "torch unavailable"
@@ -140,7 +216,13 @@ class VramSizingMixin:
         cannot safely coexist in one process on this box - caching the
         failure stops the pointless, noisy retry loop without hiding the
         underlying incompatibility."""
+        import sys
+        import threading
+
+        from localm.debuglog import logger as _dbg
         if VramSizingMixin._torch_rocm_init_broken:
+            return None, None
+        if VramSizingMixin._torch_vram_read_wedged:
             return None, None
         # ROOT-CAUSE FIX, not a catch: once llama.cpp's own native runtime is
         # already loaded IN THIS PROCESS (see _loader.native_lib_loaded -
@@ -155,6 +237,70 @@ class VramSizingMixin:
         from localm.inference.backends.llamacpp import _loader
         if _loader.native_lib_loaded():
             return None, None
+        # THE LATCH THIS METHOD USED TO IGNORE. Gated on torch not already being
+        # resident: a torch that is in sys.modules has, by definition, finished
+        # importing here, so the reads below are ordinary calls and the child
+        # probe's verdict says nothing about them. See the docstring.
+        if "torch" not in sys.modules:
+            from localm import discover
+            if discover.isolated_torch_unavailable():
+                _dbg.debug(
+                    "free-vram: skipping the in-process torch read - the "
+                    "isolated probe already proved torch cannot answer on this "
+                    "box; using the isolated native probe instead")
+                return None, None
+        # Bounded, because neither the import nor a torch.cuda call has a
+        # timeout of its own and the caller here is a model load. Same
+        # abandon-the-thread shape as discover._list_gpus_with_status; see the
+        # docstring for why (None, None) is a safe release value.
+        result: dict = {}
+        done = threading.Event()
+
+        def _read() -> None:
+            try:
+                result["value"] = VramSizingMixin._torch_free_total_uncapped()
+            except BaseException as e:      # noqa: BLE001 - re-reported below
+                result["error"] = e
+            finally:
+                done.set()
+
+        try:
+            threading.Thread(target=_read, name="localm-torch-vram-read",
+                             daemon=True).start()
+        except Exception as e:
+            # Could not spawn (OS thread exhaustion, or a loader lock already
+            # held by an abandoned import - the very hazard this bound exists
+            # for). Degrade to unmeasurable rather than run it unbounded on the
+            # caller's own thread, which is what a "fall back to inline" rescue
+            # would do and is the exact stall being fixed.
+            _dbg.warning("free-vram: could not start the bounded torch read "
+                         "(%s); treating VRAM as unmeasurable for this call",
+                         type(e).__name__)
+            return None, None
+        deadline = VramSizingMixin._torch_vram_read_deadline()
+        if not done.wait(deadline):
+            VramSizingMixin._torch_vram_read_wedged = True
+            # WARNING, not debug, and exactly once per process (the latch above
+            # guarantees that): this is a real capability loss with a visible
+            # consequence - GPU sizing now runs on the isolated native probe, or
+            # on the configured n_gpu_layers if that cannot answer either - and
+            # the whole defect being fixed was that it happened in silence.
+            _dbg.warning(
+                "free-vram: torch did not answer within %.1fs; it is being "
+                "skipped for the rest of this process and VRAM will be read "
+                "via the isolated native probe. The GPU driver may be busy or "
+                "wedged.", deadline)
+            return None, None
+        if "error" in result:
+            raise result["error"]
+        return result["value"]
+
+    @staticmethod
+    def _torch_free_total_uncapped() -> "tuple[Optional[int], Optional[int]]":
+        """The actual torch read, with NO bound - call
+        :meth:`_free_total_vram_bytes`, not this. Split out unchanged so the
+        guards and the deadline live in one place and this stays a plain,
+        readable description of what is being asked of torch."""
         try:
             import torch
         except Exception as e:
@@ -186,9 +332,12 @@ class VramSizingMixin:
         measurable.
 
         Prefers torch.cuda on the configured main GPU (honours main_gpu_index for
-        a multi-GPU split) when torch is available - cheap, in-process, and
-        exception-safe. Falls back to loader.gpu_memory_isolated() when torch
-        cannot answer (Vulkan/Metal builds ship with no CUDA/ROCm torch at all;
+        a multi-GPU split) when torch is available - cheap in the ordinary case,
+        in-process, exception-safe, and (since QA 2026-08-20 item 8) bounded, so
+        "cheap" can no longer quietly mean "or forever" on a wedged driver; see
+        _free_total_vram_bytes. Falls back to loader.gpu_memory_isolated() when
+        torch cannot answer, which now INCLUDES "did not answer in time"
+        (Vulkan/Metal builds ship with no CUDA/ROCm torch at all;
         also covers a torch-less CPU build, or an NVIDIA box without a separately
         installed CUDA torch - see the note on this project's torch packaging
         below). Never calls loader.gpu_memory() directly in this process.
