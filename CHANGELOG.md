@@ -451,6 +451,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
   error, and made other pages stop responding for as long as it lasted. The
   second attempt is now declined with a message telling you the first one is
   still going, and the first one carries on normally.
+- **Four things that could freeze the whole app, not just the request that
+  caused them, no longer do.** Warming up the embedding model, the Knowledge
+  page's own status check, an embedding request that fails, and sending a bug
+  report each waited for something slow without letting anything else through -
+  so while one of them waited, every open tab, every reply being streamed and
+  every background job stopped too. The worst was a picture in a reply: with the
+  proxy for remote images turned on, one link to a host that never answers froze
+  everything for 15 seconds, and the link comes from the model, not from you.
+  Each of them now waits on its own without stopping anything else - an unrelated
+  request during that same stalled image fetch went from 14 seconds to a
+  hundredth of a second - and they still do exactly what they did before.
 - **The GPU load figure on AMD cards now reports the whole GPU.** It was reading
   a Windows per-engine counter and showing whichever engine was busiest, which
   could be another program entirely: with the card at 99 percent, the sidebar

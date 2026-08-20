@@ -1073,9 +1073,11 @@ async def rag_embedding_status(request: Request):
     import localm.inference.http_server as _hs
     from localm import scopes
     from localm.config import load_config, load_registry
+    from localm.inference._threadpool_timeout import (
+        ThreadCallTimeout, run_in_threadpool_bounded)
     from localm.inference.embedder import (
-        DEFAULT_EMBEDDING_MODEL, KNOWN_EMBEDDING_MODELS, gpu_fallback_reason,
-        last_error, loaded_dim, resolve_embedding_model_path)
+        DEFAULT_EMBEDDING_MODEL, KNOWN_EMBEDDING_MODELS, READ_TIMEOUT_S,
+        gpu_fallback_reason, last_error, loaded_dim, resolve_embedding_model_path)
     model = str(load_config().get("embedding_model") or DEFAULT_EMBEDDING_MODEL)
     held = _hs.caller_scopes(request)
     is_owner = held is None or scopes.ADMIN in held
@@ -1097,14 +1099,42 @@ async def rag_embedding_status(request: Request):
         from localm.netpolicy import network_mode
         if network_mode() != "off":
             can_download = held is None or scopes.grants(held, scopes.CONFIG_WRITE)
+
+    # The three embedder readers go OFF THE EVENT LOOP, together. The docstring
+    # above is right that this route never LOADS a model, and that is the trap:
+    # each of loaded_dim / last_error / gpu_fallback_reason does `with _LOCK:`,
+    # and get_embedder holds that same lock across a process spawn plus a native
+    # load (up to 300s). This is the Knowledge page's poll, so on a cold server
+    # it lands exactly while a first load is running - the same defect the hang
+    # alarm caught on POST /api/embedding/warmup, at a second call site.
+    #
+    # READ, not PEEK: unlike the warm-up route, these values ARE this route's
+    # answer, so there is nothing useful to do with a short timeout and no
+    # honest reply to invent. Waiting for a load to finish was always this
+    # route's behaviour and is kept exactly; what changes is that the wait now
+    # costs the ONE request instead of the whole server. Every field is left as
+    # it was, so no client contract moves with this fix.
+    def _embedder_state():
+        return (loaded_dim(), last_error() if may_answer else None,
+                gpu_fallback_reason())
+
+    try:
+        dim, error, fallback = await run_in_threadpool_bounded(
+            _embedder_state, timeout=READ_TIMEOUT_S)
+    except ThreadCallTimeout as e:
+        # Past READ_TIMEOUT_S the lock is not busy, it is wedged. Say so instead
+        # of returning `dim: null, error: null`, which reads as "nothing loaded,
+        # nothing wrong" - a could-not-check reported as a clean answer is the
+        # rule-5 shape this whole class keeps producing.
+        raise HTTPException(504, f"Could not read the embedder state: {e}")
     return {
         "model": model,
         "default": DEFAULT_EMBEDDING_MODEL,
         "internal": list(KNOWN_EMBEDDING_MODELS),
         "installed": installed,
-        "dim": loaded_dim(),
-        "error": last_error() if may_answer else None,
-        "gpu_fallback_reason": gpu_fallback_reason(),
+        "dim": dim,
+        "error": error,
+        "gpu_fallback_reason": fallback,
         "status": status,
         "can_download": can_download,
     }

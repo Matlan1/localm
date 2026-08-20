@@ -40,12 +40,39 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import Response
 
 from localm import scopes
+from localm.inference._threadpool_timeout import (ThreadCallTimeout,
+                                                  run_in_threadpool_bounded)
 from localm.inference.http_server import require_scope
 
 # Display images, not model inputs. media.py allows 25 MB for a vision payload;
 # this is the smaller cap that fits "something a person is looking at in a chat
 # bubble", and it bounds what one rendered reply can make this server pull.
 _MAX_BYTES = 10_000_000
+
+def _fetch_budget_s() -> float:
+    """Deadline for the offloaded fetch, DERIVED from netpolicy's own bounds
+    rather than written as a literal.
+
+    run_in_threadpool_bounded must never fire for a slow-but-working call, only
+    for a wedged one, so the budget has to sit above safe_fetch_bytes' real
+    worst case - and that case is not one timeout. netpolicy applies its timeout
+    separately to the connect and to each read, and follows redirects MANUALLY
+    (so every hop re-pays both), up to ``_MAX_REDIRECTS``. A literal 40.0 - the
+    first version of this - covered a single connect+read pair and would have
+    expired part-way down a legitimate three-hop CDN chain, turning a working
+    image into a 504.
+
+    Computed from the two constants so the relation cannot break silently when
+    either is retuned: the numbers live in netpolicy and the arithmetic here,
+    which is exactly the shape that goes wrong quietly.
+    ``test_the_fetch_budget_stays_above_netpolicy_s_own_worst_case`` asserts the
+    RELATION rather than the number. Falls back to the same arithmetic on
+    today's values if either private name ever disappears, rather than to an
+    unrelated guess."""
+    from localm import netpolicy
+    per_call = float(getattr(netpolicy, "_DEFAULT_TIMEOUT", 15))
+    hops = int(getattr(netpolicy, "_MAX_REDIRECTS", 5)) + 1
+    return hops * 2 * per_call + 20.0        # connect + read per hop, plus slack
 
 # image/svg+xml is DELIBERATELY ABSENT and it is the sharpest edge in this file.
 # An SVG is an image in an <img>, but served from OUR origin it renders as a
@@ -88,9 +115,32 @@ def register(app: FastAPI, ctx) -> None:
             raise HTTPException(400, "Only http and https images can be proxied.")
 
         from localm import netpolicy
+        # OFF THE EVENT LOOP, like /api/gpus, /api/backend and /api/stats, and
+        # for a sharper reason than any of them: safe_fetch_bytes is a blocking
+        # urlopen whose worst case is a 15s connect plus a 15s read plus up to
+        # _MAX_BYTES of transfer, AND the URL comes from a model-authored
+        # `<img src>`. Called inline, a rendered reply chose how long the whole
+        # server stalled. MEASURED before this offload: GET /api/activity went
+        # from 0.018s to 13.76s with ONE in-flight proxy fetch to an unroutable
+        # host, and the hang alarm fired independently with this frame on top.
+        # The budget is derived from netpolicy's own bounds - see
+        # _fetch_budget_s - so it cannot silently fall under the legitimate
+        # worst case when either of those constants is retuned.
+        #
+        # A CLOSURE, not `run_in_threadpool_bounded(safe_fetch_bytes, url,
+        # max_bytes=..., timeout=...)`, and that is not style: safe_fetch_bytes
+        # has its OWN `timeout` keyword, while the wrapper's `timeout` is
+        # keyword-only. Passing one `timeout=` would silently be eaten by the
+        # wrapper and leave the fetch on its 15s default - two different waits
+        # sharing one name, with no error either way.
+        def _fetch():
+            return netpolicy.safe_fetch_bytes(url, max_bytes=_MAX_BYTES)
+
         try:
-            _final, content_type, body = netpolicy.safe_fetch_bytes(
-                url, max_bytes=_MAX_BYTES)
+            _final, content_type, body = await run_in_threadpool_bounded(
+                _fetch, timeout=_fetch_budget_s())
+        except ThreadCallTimeout as e:
+            raise HTTPException(504, f"Fetching the image timed out: {e}")
         except netpolicy.NetworkPolicyError as e:
             # The SSRF guard, the domain lists and the redirect re-check all land
             # here. Surface the reason rather than a bare failure: this is the one

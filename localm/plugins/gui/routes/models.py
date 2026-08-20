@@ -20,6 +20,8 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from localm import pathsafe
 from localm import scopes
 from localm.debuglog import logger
+from localm.inference._threadpool_timeout import (ThreadCallTimeout,
+                                                  run_in_threadpool_bounded)
 from localm.inference.http_server import (principal_id, require_fs_host,
                                           require_scope, unload_all_models,
                                           unload_one_model)
@@ -510,8 +512,27 @@ def register(app: FastAPI, ctx) -> None:
         embedder child's own load/embed IPC protocol is untouched. Uses the same
         JobManager/SSE mechanism as model pull/remove - a 9th consumer of an
         already-proven primitive, not a new channel."""
-        from localm.inference.embedder import get_embedder, last_error, loaded_dim
-        already = loaded_dim()
+        from localm.inference.embedder import (PEEK_TIMEOUT_S, get_embedder,
+                                               last_error, loaded_dim)
+        # OFF THE EVENT LOOP, and the reason is not what loaded_dim's own
+        # docstring suggests. That docstring says "Does NOT trigger a load - safe
+        # for a cheap status probe", which is true about WORK and false about
+        # WAITING: it does `with _LOCK:`, and get_embedder holds that same _LOCK
+        # across an entire IsolatedEmbedder construction - a process spawn plus a
+        # native model load, ceiling 300s. Called inline here it froze the whole
+        # server; localm's own hang alarm caught it at 47s and still climbing,
+        # with this exact frame on top (NEW-EMBEDDING-WARMUP-FREEZES-THE-EVENT-LOOP).
+        try:
+            already = await run_in_threadpool_bounded(
+                loaded_dim, timeout=PEEK_TIMEOUT_S)
+        except ThreadCallTimeout:
+            # The budget expiring MEANS a load is holding _LOCK right now, which
+            # in turn means nothing is loaded yet - so "not already warm" is the
+            # same answer the blocking call would eventually have given, and
+            # falling through starts a job that attaches to that load's result.
+            # A 504 here would be worse: the warm-up the caller asked for IS
+            # happening.
+            already = None
         if already is not None:
             def _already_warm(job):
                 job.push({"type": "line",

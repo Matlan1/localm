@@ -245,3 +245,97 @@ def test_unload_embedder_if_matches_offloads_active_requests_check(hsclean, monk
     assert _offloaded(calls, emb.reset_embedder), (
         "reset_embedder() must run via loop.run_in_executor - same hazard as "
         "loaded_path() just above it in this same function")
+
+
+# --------------------------------------------------------------------------- #
+#  QA 2026-08-20: the SAME hazard, three more routes, found four weeks after   #
+#  the tests above were written. The mechanism is unchanged - a cheap-looking  #
+#  embedder reader taking _LOCK on an `async def` handler - so these reuse     #
+#  _assert_event_loop_stays_responsive rather than inventing a new instrument. #
+#                                                                             #
+#  What made them survive the earlier pass is worth stating, because it is     #
+#  the same sentence every time: each reader's docstring says "Does NOT        #
+#  trigger a load - safe for a cheap status probe", and each of these three    #
+#  handlers repeats that reassurance in its OWN docstring. It is true about    #
+#  WORK and silent about WAITING, and the second is what freezes the server.   #
+#  POST /api/embedding/warmup was measured in the field at 47s and climbing,   #
+#  by localm's own hang alarm, with loaded_dim on top of the stack.            #
+#                                                                             #
+#  These are behavioural, not structural: they hold the real _LOCK and require #
+#  an unrelated coroutine to still get its turn. A route that stops offloading #
+#  fails them regardless of HOW it was written to offload.                     #
+# --------------------------------------------------------------------------- #
+
+def _gui_endpoint(path: str, method: str = "POST"):
+    from fastapi import FastAPI
+    from localm.plugins.gui.web import attach_gui
+    app = FastAPI()
+    attach_gui(app, self_url="http://127.0.0.1:9/v1",
+               switch_model=lambda name: None, active_model=lambda: None)
+    for route in app.routes:
+        if getattr(route, "path", None) == path and method in getattr(route, "methods", ()):
+            return route.endpoint
+    raise AssertionError(f"no {method} {path} route was mounted")
+
+
+def test_embedding_warmup_does_not_freeze_event_loop(hsclean, monkeypatch):
+    """POST /api/embedding/warmup - QA #5, NEW-EMBEDDING-WARMUP-FREEZES-THE-EVENT-LOOP.
+
+    Its first statement is a loaded_dim() fast-path check ("already warm?").
+    Held against a load, that read waits for the whole load."""
+    endpoint = _gui_endpoint("/api/embedding/warmup")
+
+    # The route's `jobs` comes from its register() closure, not a module global,
+    # so it is NOT patchable from here and the real JobManager runs. That is
+    # fine and better - the assertion below is on the real contract - but the
+    # background job it starts must not go off and attempt a genuine 300s load
+    # once the lock holder releases, so the one thing that IS bound at call time
+    # (the handler re-imports from localm.inference.embedder on every request)
+    # is stubbed.
+    monkeypatch.setattr("localm.plugins.gui.routes.models.principal_id",
+                        lambda request: None)
+    monkeypatch.setattr(emb, "get_embedder", lambda **kw: _FakeLoadedEmbedder())
+
+    async def _drive():
+        return await _assert_event_loop_stays_responsive(
+            lambda: endpoint(request=None))
+
+    result = asyncio.run(_drive())
+    # A job is still started, and the route still answers with its id: the
+    # offload moves WHO waits, it does not change the contract.
+    assert isinstance(result.get("job_id"), str) and result["job_id"]
+
+
+def test_rag_embedding_status_does_not_freeze_event_loop(monkeypatch):
+    """GET /api/rag/embedding - the Knowledge page's own poll, so on a cold
+    server it lands exactly while the first embedder load is running.
+
+    Three readers in one handler (loaded_dim, last_error, gpu_fallback_reason),
+    all on the same lock, under a docstring that says "Cheap: it never loads a
+    model"."""
+    from localm.plugins.builtin.rag import plug as ragplug
+
+    endpoint = None
+    for route in ragplug._router.routes:
+        if getattr(route, "path", None) == "/api/rag/embedding" \
+                and "GET" in getattr(route, "methods", ()):
+            endpoint = route.endpoint
+    assert endpoint is not None, "GET /api/rag/embedding is not mounted"
+
+    monkeypatch.setattr("localm.inference.http_server.caller_scopes",
+                        lambda request: None)
+    monkeypatch.setattr("localm.config.load_config", lambda *a, **k: {})
+    monkeypatch.setattr("localm.config.load_registry", lambda *a, **k: {})
+    monkeypatch.setattr("localm.inference.embedder.resolve_embedding_model_path",
+                        lambda **k: None)
+
+    async def _drive():
+        return await _assert_event_loop_stays_responsive(
+            lambda: endpoint(request=None))
+
+    result = asyncio.run(_drive())
+    # Every field the client already relies on is still present and unchanged -
+    # the fix moves WHO waits, never what is answered.
+    assert result["dim"] is None
+    assert result["status"] == "not_installed"
+    assert "gpu_fallback_reason" in result and "error" in result
