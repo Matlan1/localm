@@ -303,6 +303,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
   downloaded file that does not match is deleted and never registered; a local
   file that does not match is simply refused. The box has no effect on a full
   HuggingFace repository, which has no single file to check.
+- **A model whose file was moved can now be re-pointed from the Models page.**
+  When a registered model lives outside the managed models folder and its
+  file goes away (moved to a new drive or folder), the row now reads
+  **missing**, the same flag `localm list` already showed in the terminal but
+  that the app never surfaced at all. A **relocate** button on that row asks
+  for the new location - a moved `.gguf` file, or a HuggingFace model folder -
+  pre-filled with where it used to be. Until now the only way to recover was
+  removing the entry and adding it back, which mints a new registration and
+  drops its aliases, its recorded source and its stored sha256; relocating
+  keeps all three, the same registry entry `localm relocate` re-points from
+  the terminal.
 
 ### Changed
 - **The chat parameters drawer and the image, music and video generation forms
