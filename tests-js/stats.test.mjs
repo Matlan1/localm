@@ -93,7 +93,11 @@ test("renderHwStats shows VRAM total-only when free is unknown", () => {
   const { window } = loadApp({ fetchImpl: goodFetch() });
   const el = window.document.getElementById("hw-stats");
   window.renderHwStats({ vram: { total: 8 * GIB } });
-  assert.match(el.textContent, /VRAM 8\.0 GB/);
+  // "total" is LOAD-BEARING. Without it this reads as 8 GB IN USE, which is the
+  // inverse of the truth when nothing is loaded. Note /VRAM 8\.0 GB/ alone would
+  // pass either way, since it matches the qualified string as a substring - so
+  // the word itself has to be asserted or this test cannot fail.
+  assert.match(el.textContent, /VRAM 8\.0 GB total/);
   assert.doesNotMatch(el.textContent, /\//, "no used/total slash when free unknown");
 });
 
@@ -123,7 +127,27 @@ test("renderHwStats gives the VRAM figure NO colour when only total is known", (
   const el = window.document.getElementById("hw-stats");
   window.renderHwStats({ vram: { total: 16 * GIB } });
   assert.equal(el.querySelector(".vram-usage"), null, "no .vram-usage span when free is unknown");
-  assert.match(el.textContent, /VRAM 16\.0 GB/);
+  assert.match(el.textContent, /VRAM 16\.0 GB total/);
+});
+
+test("the two VRAM states never render the same way", () => {
+  // The defect: with used unknown the readout printed the card's TOTAL under the
+  // same "VRAM" label used for used-of-total, so an empty card and a completely
+  // full one produced strings a user cannot tell apart. Measured live as
+  // "VRAM 16.0 GB" while the model selector said "No model loaded".
+  const { window } = loadApp({ fetchImpl: goodFetch() });
+  const el = window.document.getElementById("hw-stats");
+
+  window.renderHwStats({ vram: { used: 16 * GIB, total: 16 * GIB } });
+  const full = el.textContent;
+  window.renderHwStats({ vram: { total: 16 * GIB } });
+  const unknown = el.textContent;
+
+  assert.notEqual(full, unknown, "a full card and an unmeasured one must differ");
+  assert.match(full, /VRAM 16\.0\/16\.0 GB/);
+  assert.match(unknown, /total/);
+  assert.doesNotMatch(unknown, /16\.0\/16\.0/,
+    "the unmeasured state must not look like a used/total figure");
 });
 
 test("pollHwStats fetches /api/stats and renders the result", async () => {
