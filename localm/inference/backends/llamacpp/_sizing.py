@@ -642,12 +642,24 @@ class VramSizingMixin:
         single call (reproduced live via a real_gguf-marked test that loads a
         native GGUF backend before a later call reaches this method in the
         same process, e.g. test_grammar_sampling.py). This return value has no
-        lossless fallback of its own to protect (the caller only uses it for a
-        cosmetic before/after log line - see gguf.py's ``_load_native``), so a
-        blanket skip on the same proven precondition costs nothing - exactly
-        the trade-off ``_free_total_vram_bytes`` already made. Contrast
+        lossless fallback of its own to protect, so a blanket skip on the same
+        proven precondition costs nothing - exactly the trade-off
+        ``_free_total_vram_bytes`` already made. Contrast
         ``discover._torch_gpu_probe_known_doomed``'s narrower combo, needed
-        THERE because its fallback (nvidia-smi) cannot see AMD devices."""
+        THERE because its fallback (nvidia-smi) cannot see AMD devices.
+
+        THIS SENTENCE USED TO NAME A CALLER IT NO LONGER HAS: "the caller only
+        uses it for a cosmetic before/after log line - see gguf.py's
+        ``_load_native``". #960 replaced that read with ``discover.list_gpus``
+        (so it gets the cross-process correction and the trust gate), and
+        MEASURED 2026-08-20 nothing in ``localm/`` calls this method at all any
+        more - only tests do. Corrected rather than left standing, because it
+        is load-bearing in the wrong direction: it is the sentence that says
+        this torch import is harmless, and the reason it is harmless today is
+        that nobody reaches it, not that its caller is cosmetic. Unlike
+        ``_free_total_vram_bytes``, this method's ``import torch`` is still
+        UNBOUNDED; that is tolerable only while it stays unreachable, so
+        anything that gives it a caller again owes it the same deadline."""
         from localm.inference.backends.llamacpp import _loader
         if _loader.native_lib_loaded():
             from localm.debuglog import logger as _dbg
