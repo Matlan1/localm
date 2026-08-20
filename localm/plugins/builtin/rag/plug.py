@@ -1277,7 +1277,18 @@ async def rag_embedding_set(req: EmbeddingModelRequest, request: Request):
         # get_embedder swallows the load error but records it; surface it verbatim
         # so the user learns exactly why a wrong pick failed.
         line("Loading and testing the model…")
-        emb = get_embedder()
+        # on_progress=line, not a bare get_embedder(): this call is the one that
+        # can legitimately run for minutes (a VRAM-eviction wait plus the
+        # isolated child's spawn and native load, each with its own 300s
+        # window), and without the sink the job emitted NOTHING for that whole
+        # time. That silence is half of what QA 2026-08-20 item 7 reported -
+        # "no further event and no error" - and it is indistinguishable from a
+        # wedge to anyone watching. get_embedder has announced its stages since
+        # ADR-0004 Unit B; the warm-up route (/api/embedding/warmup) already
+        # consumes them, and this route was simply throwing them away.
+        # _emit_stage swallows anything the sink raises, so a push failure can
+        # never turn a working load into a failed one.
+        emb = get_embedder(on_progress=line)
         if emb is None:
             why = last_error() or "the model could not be loaded"
             line(f"error: '{model}' could not produce embeddings ({why}). It may "

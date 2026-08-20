@@ -201,3 +201,53 @@ class TestConcurrentEmbedSetupIsRefused:
             assert dry.json()["needs_confirm"] is True
 
             release.set()
+
+
+class TestTheSetupJobIsNotSilentWhileItLoads:
+    """The other half of QA item 7's report: "no further event and no error".
+
+    ``get_embedder`` has announced coarse stages since ADR-0004 Unit B - the
+    VRAM/eviction wait and the native load each carry their own 300 s window,
+    so this is the one call in the job that can legitimately run for minutes.
+    This route passed no sink, so the stream stopped dead at "Loading and
+    testing the model..." for that entire time, which is indistinguishable
+    from a wedge to whoever is watching. /api/embedding/warmup already
+    consumes the same stages.
+    """
+
+    def test_the_load_stages_reach_the_job_stream(
+            self, embedding_route_app, monkeypatch):
+        import localm.inference.embedder as emb
+
+        seen = {}
+
+        def _staged_get_embedder(*, on_progress=None, **kw):
+            seen["sink"] = on_progress
+            if on_progress is not None:
+                on_progress("QA7-STAGE-EVICTING-THEN-LOADING")
+            return _StubEmbedder()
+
+        monkeypatch.setattr(emb, "resolve_embedding_model_path",
+                            lambda **kw: "/fake/new-model.gguf")
+        monkeypatch.setattr(emb, "get_embedder", _staged_get_embedder)
+
+        from fastapi.testclient import TestClient
+        app = embedding_route_app
+        with TestClient(app) as c:
+            r = c.post("/api/rag/embedding",
+                       json={"model": "model-one", "confirm": True})
+            assert r.status_code == 200, r.text
+            job = app.state.jobs.get(r.json()["job_id"])
+            deadline = time.time() + 10
+            while job.status == "running" and time.time() < deadline:
+                time.sleep(0.02)
+            assert job.status == "done", job.status
+            lines = [e.get("text", "") for e in job._history
+                     if e.get("type") == "line"]
+
+        # The sink itself first: a stage string could in principle arrive from
+        # somewhere else, but a sink that was never handed over cannot.
+        assert seen.get("sink") is not None, (
+            "the setup job ran get_embedder with no progress sink, so the "
+            "minutes-long load stage emits nothing at all")
+        assert "QA7-STAGE-EVICTING-THEN-LOADING" in lines
