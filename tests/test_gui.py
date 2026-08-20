@@ -449,6 +449,55 @@ def test_set_model_type_endpoint(gui_app, monkeypatch):
                            json={"model": "m1", "model_type": "bogus"}).status_code == 400
 
 
+class TestModelShortcutsEndpoint:
+    """S6: GET /api/models/shortcuts serializes MODEL_SHORTCUTS + _SHORTCUT_SIZES
+    for the Add-a-model dialog's curated picker. The audit finding it fixes
+    (PARITY-AUDIT-CLI-GUI-2026-08-19.md #14) is specifically that this must be a
+    fixed local list rather than a HuggingFace query, so it stays usable under
+    net_mode=off - unlike /api/discover/search (see TestDiscoverEndpoints's
+    test_net_off_is_403 for that route's contrasting behavior)."""
+
+    def test_returns_every_shortcut_alias_spec_and_size(self, gui_app):
+        from localm.model_manager import MODEL_SHORTCUTS, _SHORTCUT_SIZES
+        app, _ = gui_app
+        with TestClient(app) as client:
+            r = client.get("/api/models/shortcuts")
+        assert r.status_code == 200, r.text
+        rows = r.json()["shortcuts"]
+        assert len(rows) == len(MODEL_SHORTCUTS)
+        by_alias = {row["alias"]: row for row in rows}
+        assert set(by_alias) == set(MODEL_SHORTCUTS)
+        for alias, spec in MODEL_SHORTCUTS.items():
+            assert by_alias[alias]["spec"] == spec
+            assert by_alias[alias]["size"] == _SHORTCUT_SIZES[alias]
+
+    def test_resolve_spec_expands_a_returned_alias_back_to_its_spec(self, gui_app):
+        """The route's own reason to exist: an alias is only a useful shortcut if
+        pulling it (resolve_spec, which model_pull's CLI subprocess calls) lands
+        on exactly the spec this route advertised for it - otherwise the picker
+        would show one download and the pull would fetch another."""
+        from localm.model_manager import resolve_spec
+        app, _ = gui_app
+        with TestClient(app) as client:
+            rows = client.get("/api/models/shortcuts").json()["shortcuts"]
+        assert rows, "MODEL_SHORTCUTS must not be empty for this test to mean anything"
+        for row in rows:
+            assert resolve_spec(row["alias"]) == row["spec"]
+
+    def test_still_serves_data_under_net_mode_off(self, gui_app, monkeypatch):
+        """Reproduces the audit's exact claim: /api/discover/search 403s with
+        net_mode=off (test_net_off_is_403), but this route must not - it never
+        reaches HuggingFace at all, so a user with the network off still gets a
+        working model-discovery path."""
+        import localm.netpolicy as netpolicy
+        monkeypatch.setattr(netpolicy, "network_mode", lambda: "off")
+        app, _ = gui_app
+        with TestClient(app) as client:
+            r = client.get("/api/models/shortcuts")
+        assert r.status_code == 200, r.text
+        assert r.json()["shortcuts"], "must still return real data, not an empty stub"
+
+
 class TestEmbeddingWarmupRoute:
     """ADR-0004 Unit B: POST /api/embedding/warmup triggers get_embedder() from an
     explicit user action (instead of the first real request paying the cost

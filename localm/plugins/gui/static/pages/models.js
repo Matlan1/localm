@@ -260,9 +260,18 @@ export function sortModels(models, sortKey, sortDir) {
 // refreshModelsPage), and it also makes the duplicate impossible by construction
 // rather than only by the counter: a replace cannot leave two tables behind.
 let _modelsRenderGen = 0;
+let _pullShortcutsLoaded = false;   // guards _loadPullShortcuts() below, fetched once
 
 export async function refreshModelsPage() {
   const myGen = ++_modelsRenderGen;
+  // Fire-and-forget, and only once per page lifetime: the picker's own onchange
+  // handler is wired at module load (no fetch involved), but the DATA fetch must
+  // wait until here - onViewShown (dispatch.js) only calls refreshModelsPage()
+  // once the boot auth probe has confirmed this client is authed. Fetching it
+  // eagerly at module-eval time instead would run this authenticated read before
+  // that confirmation, on every boot path, keyed or not (see keygate.test.mjs's
+  // "still fires ONLY the auth probe" contract).
+  if (!_pullShortcutsLoaded) { _pullShortcutsLoaded = true; _loadPullShortcuts(); }
   await refreshModels();
 
   const box = $("models-table");
@@ -1219,6 +1228,50 @@ _bindDiscToggle($("disc-fmt-hf"), "localm.discFmtHf");
 // sticks across reloads (keyed by value, e.g. localm.discType.vae).
 for (const box of document.querySelectorAll(".disc-type")) {
   _bindDiscToggle(box, "localm.discType." + box.value);
+}
+
+// S6: curated model shortcuts (`localm pull <alias>`, see MODEL_SHORTCUTS in
+// model_manager/registry.py). Using a shortcut already worked from this box - the
+// pull endpoint resolves an alias same as the CLI - but the alias keyspace was
+// unlisted, so a GUI-only user had no way to discover it. It is also the only
+// model-discovery path that still works with net_mode=off, since it is a fixed
+// local list rather than a HuggingFace search. Picking one prefills the Add box
+// exactly like a discover result row does (the resolved repo:file, not the bare
+// alias), so what lands in pull-spec is what a user clicking "files" on a search
+// result would also see.
+//
+// Fetched from refreshModelsPage() (above), not eagerly here at module load: this
+// is an authenticated read (MODELS_READ), and the boot deep-link/restore path
+// must fire ONLY the auth probe until it confirms this client is authed - see
+// keygate.test.mjs. onchange needs no such gating (it fires no request itself),
+// so it is wired here unconditionally.
+async function _loadPullShortcuts() {
+  const sel = $("pull-shortcut");
+  if (!sel) return;
+  try {
+    const r = await fetch("/api/models/shortcuts", { headers: authHeaders() });
+    if (!r.ok) return;
+    const data = await r.json();
+    const shortcuts = Array.isArray(data.shortcuts) ? data.shortcuts : [];
+    for (const s of shortcuts) {
+      const opt = el("option", null, `${s.alias} (${s.size || "size unknown"})`);
+      opt.value = s.spec;
+      opt.dataset.alias = s.alias;
+      sel.appendChild(opt);
+    }
+  } catch (e) {
+    // Best-effort convenience list - the spec field still works typed by hand.
+  }
+}
+
+if ($("pull-shortcut")) {
+  $("pull-shortcut").onchange = (e) => {
+    const opt = e.target.selectedOptions[0];
+    if (!opt || !opt.value) return;
+    $("pull-spec").value = opt.value;
+    $("pull-name").value = opt.dataset.alias || "";
+    e.target.selectedIndex = 0;   // reverts to the placeholder - this is an action, not a state
+  };
 }
 
 // add-models-disk: make adding a model already on disk discoverable - pick a
