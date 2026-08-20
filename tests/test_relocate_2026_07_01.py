@@ -63,6 +63,34 @@ def test_relocate_rejects_bad_inputs(env):
     assert mm.relocate_model("unknown-model", str(good)) is False         # no such model
 
 
+def test_relocate_target_shared_validator(env):
+    """relocate_target is the validator relocate_model AND the GUI's POST
+    /api/models/relocate route both call - so it needs its own direct coverage,
+    not just indirect coverage through relocate_model's bool return."""
+    import localm.model_manager as mm
+    tmp, _ = env
+    good = _gguf(tmp / "ok.gguf")
+    p, reason = mm.relocate_target(str(good))
+    assert reason is None
+    assert p == good.resolve()
+
+    p, reason = mm.relocate_target(str(tmp / "nope.gguf"))
+    assert p is None
+    assert "does not exist" in reason
+
+    bad = tmp / "not-really.gguf"
+    bad.write_bytes(b"NOPE not a gguf")
+    p, reason = mm.relocate_target(str(bad))
+    assert p is None
+    assert "Not a GGUF" in reason
+
+    not_hf_dir = tmp / "empty-dir"
+    not_hf_dir.mkdir()
+    p, reason = mm.relocate_target(str(not_hf_dir))
+    assert p is None
+    assert "HuggingFace" in reason
+
+
 def test_relocate_cli_command(env, monkeypatch):
     from click.testing import CliRunner
     from localm.cli import models as models_cli
