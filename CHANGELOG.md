@@ -373,6 +373,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   `localm job show ID` now prints the full definition, and `localm job results
   ID` lists past runs newest first with each one's status and output or error,
   paged with `--limit`/`--offset` for a long history.
+- **ComfyUI workflows can now be uploaded, listed and deleted from the
+  terminal.** `localm comfy workflow list <media>` shows every uploaded
+  workflow and which one is active, `add` uploads one (`--use` to select it
+  right away), `use` selects an already-uploaded one (or `--clear` to fall
+  back to the shipped default), and `rm` deletes one - refusing to delete
+  whichever is active. Until now a terminal-only user could point
+  `localm image`/`music`/`video` at a chosen workflow (`localm plugin config
+  <media> workflow <file>`), but had no way to see what was actually
+  uploaded, add a new one, or remove one - the same picker the GUI's
+  Image/Music/Video pages already had.
 
 ### Changed
 - **The chat parameters drawer and the image, music and video generation forms

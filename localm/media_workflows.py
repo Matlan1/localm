@@ -117,9 +117,24 @@ def workflows_dir(media: str) -> Path:
 
 
 def _confined(media: str, name: str) -> Path:
-    """A path-safe handle inside the media dir (raises on a traversal name)."""
+    """A path-safe handle inside the media dir. Raises ValueError on a
+    traversal/invalid name.
+
+    confined_name() itself raises fastapi.HTTPException by design (pathsafe.py
+    documents it as being for HTTP call sites only) - but this module claims to
+    be framework-free (see the module docstring) and now has a non-HTTP caller
+    (the CLI), so normalize here. Every function in this module already
+    documents "Raises ValueError" for its own bad-name case; without this, that
+    was only true when the failure came from the name-not-found checks below,
+    never from confinement itself. make_workflow_router's routes already catch
+    ValueError and convert it to HTTPException(400, str(e)) themselves, so the
+    HTTP response (400, "Invalid file name") is unchanged."""
+    from fastapi import HTTPException
     from localm.pathsafe import confined_name
-    return confined_name(workflows_dir(media), name)
+    try:
+        return confined_name(workflows_dir(media), name)
+    except HTTPException as e:
+        raise ValueError(str(e.detail)) from e
 
 
 def selected_name(media: str) -> Optional[str]:

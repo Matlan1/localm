@@ -231,6 +231,25 @@ Whether localm targets the managed instance is decided by one setting,
 uses the managed instance only when it is `own` AND an instance is installed;
 otherwise it uses your own ComfyUI.
 
+### ComfyUI workflows
+
+Each media plugin can generate with an uploaded ComfyUI workflow (in ComfyUI:
+Save > API format) instead of the shipped default - the same picker the GUI's
+Image/Music/Video pages expose. This governs `localm image`/`music`/`video`
+too, not just the GUI, and works fully offline (no running server needed).
+
+```bash
+localm comfy workflow list image                    # uploaded workflows, and which is active
+localm comfy workflow add image my_flux.json --use   # upload, and select it
+localm comfy workflow use image my_flux.json         # select an already-uploaded one
+localm comfy workflow use image --clear              # back to the shipped default
+localm comfy workflow rm image my_flux.json          # delete (refuses the active one)
+```
+
+`localm plugin config <name> workflow <file>` reaches the same selection - it
+is what `add --use`/`use` write to - but only `workflow list` shows what is
+actually uploaded.
+
 ---
 
 ## Knowledge (RAG)
