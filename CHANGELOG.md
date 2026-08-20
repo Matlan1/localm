@@ -365,6 +365,22 @@ permanent public record of what shipped and are never rewritten; the in-progress
   a failed load or the server becoming unreachable.
 
 ### Fixed
+- **Loading a model no longer hangs indefinitely when the graphics driver is
+  busy.** Before loading, localm reads how much video memory is free. That read
+  had no time limit, so on a machine where the graphics driver was wedged or
+  heavily contended it could simply never come back: loading stopped after
+  "Loading <model>", nothing further was printed, no error appeared, and the
+  server reported the model as not loaded for as long as it ran. The read is now
+  time-limited, and it is skipped entirely when localm has already established
+  that the graphics stack is not answering. If it does run out of time it says
+  so once and falls back to its other measurement, so the load either continues
+  or fails with a real message.
+- **Starting a second embedding-model setup while one is running is now
+  refused.** Choosing a new embedding model twice in quick succession left both
+  setups stuck on "Loading and testing the model..." with no progress and no
+  error, and made other pages stop responding for as long as it lasted. The
+  second attempt is now declined with a message telling you the first one is
+  still going, and the first one carries on normally.
 - **The GPU load figure on AMD cards now reports the whole GPU.** It was reading
   a Windows per-engine counter and showing whichever engine was busiest, which
   could be another program entirely: with the card at 99 percent, the sidebar

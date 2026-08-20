@@ -1198,6 +1198,32 @@ _isolated_torch_unavailable = False
 # probe - roughly every 2.5s under the live VRAM meter.
 _isolated_torch_broken_warned = False
 
+
+def isolated_torch_unavailable() -> bool:
+    """True once the isolated probe has PROVEN, in a child process, that torch
+    cannot finish enumerating on this box (see
+    :func:`_torch_gpus_isolated_once`, which sets the latch this reads).
+
+    Public because the conclusion is not this module's alone to act on. The
+    latch's own contract - "retrying this import IN-PROCESS would reproduce the
+    multi-minute startup hang the isolation exists to prevent, so this one must
+    never fall back that way" - binds every OTHER caller that was about to
+    ``import torch`` on a hot path too, and until this reader existed the only
+    way to honour it was to be inside this module.
+
+    Specifically it binds ``_sizing.VramSizingMixin._free_total_vram_bytes``,
+    which sits on the model-LOAD path: it used to import torch here regardless,
+    with no bound, so a box that had just proven torch wedges went on to wedge
+    the whole load, silently and forever (QA 2026-08-20 item 8).
+
+    False means "not proven unavailable", NOT "torch works" - the probe may
+    simply never have run. It is a reason to SKIP an attempt, never evidence
+    that an attempt will succeed, so a caller still needs its own bound.
+    """
+    with _gpu_probe_lock:
+        return _isolated_torch_unavailable
+
+
 # Field evidence (a real user's debug log): the child probe's stderr routinely
 # starts with a long virtualenv install-path prefix from Python's own
 # warnings.warn() formatting (``<path>:<line>: <Category>: <message>``) - on
