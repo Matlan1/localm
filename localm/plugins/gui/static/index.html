@@ -972,6 +972,25 @@
                 <div id="update-rollback-status" class="sub" hidden></div>
               </div>
 
+              <!-- The GUI form of `localm make-launcher`. Its OWN sub-block, not part
+                   of #app-update-block above: rebuilding the launcher has nothing to
+                   do with the update proxy that block gates on. ALWAYS shown, like
+                   the runtime block below - this is local disk state, not a proxy
+                   capability. Its one real use is refreshing the copied interpreter
+                   after a Python upgrade, which is precisely when only the GUI (not
+                   a fresh terminal) is available to ask for it. -->
+              <div class="update-subsection" id="app-launcher-block">
+                <h4 class="update-sub-head">App launcher</h4>
+                <div class="sub">Rebuild the native launcher (LocaLM.exe on Windows, the
+                LocaLM menu entry on Linux) so Task Manager and the taskbar show LocaLM
+                instead of python. Needed again after a Python upgrade, which replaces
+                the interpreter this launcher is a copy of.</div>
+                <div class="actions">
+                  <button class="btn-secondary" id="rebuild-launcher">Rebuild launcher</button>
+                </div>
+                <div id="rebuild-launcher-status" class="sub" hidden></div>
+              </div>
+
               <!-- The inference runtime: install it, switch backend, or move to a
                    different build. This block is the GUI's whole form of `localm
                    setup-llama`, which is why the two controls below exist at all -

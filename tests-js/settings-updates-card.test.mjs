@@ -75,6 +75,8 @@ test("capabilities-absent: app-update is hidden, runtime-update and the toggles 
   // Always shown, regardless of update_available.
   assert.equal(doc.getElementById("runtime-update-check").closest(".update-subsection").hidden,
     false, "the runtime-update block is never gated");
+  assert.equal(doc.getElementById("app-launcher-block").hidden, false,
+    "App launcher is local disk state too - same rule as runtime-update");
   assert.equal(doc.getElementById("update-toggles-block").hidden, false,
     "the update-behavior toggles render regardless of update_available");
   assert.ok(doc.querySelector('#settings-sec-core-Updates [data-field-key="update_allow_prerelease"]'),
@@ -91,6 +93,8 @@ test("capabilities-present: app-update, runtime-update and the toggles are all s
     "app-update reveals once the proxy advertises update_available");
   assert.equal(doc.getElementById("runtime-update-check").closest(".update-subsection").hidden,
     false, "runtime-update is unaffected by the app-update gate flipping on");
+  assert.equal(doc.getElementById("app-launcher-block").hidden, false,
+    "App launcher is likewise unaffected by the app-update gate flipping on");
   assert.equal(doc.getElementById("update-toggles-block").hidden, false);
 });
 

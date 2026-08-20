@@ -2123,6 +2123,20 @@ export async function renderManagedComfyPanel(host, toggleFields) {
                 + "changed them; slower)");
     if (st.updatable !== false) host.appendChild(deps);
 
+    // Advanced/testing knob, matching `localm comfy update --commit` exactly - update
+    // to a specific ComfyUI commit instead of the shipped pin. Left blank (the common
+    // case) it is omitted entirely, so update_managed_comfy() falls back to its own
+    // COMFYUI_PINNED_COMMIT default rather than the GUI silently pinning "".
+    const commitRow = el("label", "comfy-managed-commit");
+    commitRow.append("Advanced: update to a specific commit ");
+    const commitBox = el("input");
+    commitBox.type = "text";
+    commitBox.className = "comfy-managed-commit-box";
+    commitBox.style.maxWidth = "220px";
+    commitBox.placeholder = "leave blank for the shipped pin";
+    commitRow.appendChild(commitBox);
+    if (st.updatable !== false) host.appendChild(commitRow);
+
     const ulog = el("pre", "comfy-managed-log");
     ulog.style.display = "none";
     host.appendChild(ulog);
@@ -2139,7 +2153,11 @@ export async function renderManagedComfyPanel(host, toggleFields) {
       const indicator = startComfyJobIndicator(update, ulog);
       let jobId;
       try {
-        const q = depsBox.checked ? "?reinstall_requirements=true" : "";
+        const params = new URLSearchParams();
+        if (depsBox.checked) params.set("reinstall_requirements", "true");
+        const commitVal = commitBox.value.trim();
+        if (commitVal) params.set("commit", commitVal);
+        const q = params.toString() ? "?" + params.toString() : "";
         const r = await fetch("/api/comfy/update" + q,
                               { method: "POST", headers: authHeaders() });
         const d = await r.json().catch(() => ({}));

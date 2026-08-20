@@ -368,6 +368,48 @@ def test_update_defaults_to_not_reinstalling_requirements(home, app, no_subproce
     assert "--reinstall-requirements" not in no_subprocess[0]["args"]
 
 
+def test_update_forwards_commit(home, app, no_subprocess):
+    """S8 (PARITY-AUDIT-CLI-GUI-2026-08-19 #17): `--commit` was CLI-only, an
+    advanced/testing knob to update to a specific ComfyUI commit instead of the
+    shipped pin. Not validated here - update_managed_comfy() owns checking out
+    whatever it is given and reports a bad ref honestly through the job's own
+    output, same split as the non-git refusal above."""
+    _install_managed_at("oldcommit")
+    with TestClient(app) as client:
+        r = client.post("/api/comfy/update", params={"commit": "abc123def"})
+    assert r.status_code == 200, r.text
+    assert no_subprocess[0]["args"] == ["comfy", "update", "--commit", "abc123def"]
+
+
+def test_update_defaults_to_the_shipped_pin(home, app, no_subprocess):
+    """No commit entered -> no --commit at all, so update_managed_comfy() falls
+    back to its own COMFYUI_PINNED_COMMIT default rather than being passed an
+    empty string as a target ref."""
+    _install_managed_at("oldcommit")
+    with TestClient(app) as client:
+        client.post("/api/comfy/update")
+    assert "--commit" not in no_subprocess[0]["args"]
+
+
+def test_update_ignores_a_blank_commit(home, app, no_subprocess):
+    """A whitespace-only value from the text field must not become `--commit ""`
+    on the argv - that would try to check out an empty ref instead of falling
+    back to the pin, the exact case the field's placeholder promises."""
+    _install_managed_at("oldcommit")
+    with TestClient(app) as client:
+        client.post("/api/comfy/update", params={"commit": "   "})
+    assert "--commit" not in no_subprocess[0]["args"]
+
+
+def test_update_forwards_commit_and_reinstall_requirements_together(home, app, no_subprocess):
+    _install_managed_at("oldcommit")
+    with TestClient(app) as client:
+        client.post("/api/comfy/update",
+                    params={"commit": "abc123def", "reinstall_requirements": "true"})
+    assert no_subprocess[0]["args"] == [
+        "comfy", "update", "--reinstall-requirements", "--commit", "abc123def"]
+
+
 def test_update_conflicts_when_nothing_installed(home, app, no_subprocess):
     """Nothing to update -> 409 and NO job, rather than dispatching a job that would
     fail minutes later with the CLI's own 'nothing to update'."""

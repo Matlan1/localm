@@ -340,6 +340,18 @@ permanent public record of what shipped and are never rewritten; the in-progress
   (its directory, address and whether it answers) with a Stop button per row.
   The server behind the page you are looking at is not listed there; use
   Server controls, right above, for that one.
+- **Settings can now rebuild the native app launcher.** `localm make-launcher
+  --force` was terminal-only, and its one real use, refreshing the copied
+  interpreter after a Python upgrade, is exactly when the GUI is what is
+  running rather than a fresh terminal. A Rebuild launcher button under
+  Settings > Updates does the same thing the command does, and reports the
+  same notes back (for example when it could not stamp the icon, or removed a
+  build that failed its own self-check) instead of a bare success or failure.
+- **The ComfyUI update panel can now target a specific commit.** `localm comfy
+  update --commit` was an advanced, terminal-only testing knob for trying a
+  candidate ComfyUI version before it is pinned. Settings > Media's Update
+  action gains the same optional field; left blank, an update behaves exactly
+  as before and moves to the shipped pin.
 
 ### Changed
 - **The chat parameters drawer and the image, music and video generation forms
