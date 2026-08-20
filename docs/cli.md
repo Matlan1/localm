@@ -262,7 +262,9 @@ Enable the rag plugin and install `pip install "localm[rag]"` for PDF parsing. S
 localm job add NAME --prompt "..." [--cron "0 9 * * 1-5" | --every SECONDS]
 localm job add NAME --prompt "..." --coder --cwd DIR --scope "tests/**"
 localm job list                  # id, name, schedule, state, last status
+localm job show JOB_ID           # full definition: schedule, prompt, cwd/scope, allow_shell
 localm job run JOB_ID            # run once now, record the result
+localm job results JOB_ID        # past run results, newest first
 localm job enable JOB_ID
 localm job disable JOB_ID
 localm job remove JOB_ID         # delete the job and its results

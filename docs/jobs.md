@@ -56,7 +56,9 @@ localm job add nightly-tests \
 localm job add sync-manuals --rag --collection manuals --cron "0 3 * * *"
 
 localm job list                 # id, name, schedule, enabled state, last status
+localm job show <job_id>        # full definition: schedule, prompt, cwd/scope, allow_shell
 localm job run <job_id>         # run once now and record the result
+localm job results <job_id>     # past run results, newest first
 localm job disable <job_id>     # keep it but stop it firing
 localm job enable <job_id>
 localm job remove <job_id>      # delete the job and its stored results
