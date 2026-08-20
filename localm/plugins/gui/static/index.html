@@ -346,6 +346,7 @@
             <select id="pull-mmproj" style="display:none; max-width:200px">
               <option value="">No vision projector</option>
             </select>
+            <input type="text" id="pull-sha256" placeholder="sha256 (optional)" spellcheck="false" maxlength="64" style="max-width:180px" title="Expected SHA256. Verified against the downloaded (or local) file; refused on a mismatch. Not supported for a full HuggingFace repo or a local folder - both are many files with no single digest.">
             <select id="pull-store" style="max-width:180px" title="Only applies to a local folder/file path - a HuggingFace or URL download always lands in ~/.localm/models on its own.">
               <option value="">Register in place</option>
               <option value="copy">Copy into library</option>

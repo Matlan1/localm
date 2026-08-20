@@ -417,6 +417,12 @@ class PullRequest(BaseModel):
     spec: str
     name: str | None = None
     mmproj: str | None = None
+    # Expected SHA256 hex digest, mirroring `localm pull --sha256`. A supply-chain
+    # integrity assertion, not just a convenience: without it a GUI user pulling
+    # from an arbitrary https URL has no way to verify the download at all. The
+    # CLI's own pull_model() already does the real verification (and the
+    # full-repo-snapshot refusal) - this only has to reach the argv.
+    sha256: str | None = None
     # "copy" | "move" | None (default: register a local path in place, unchanged).
     # Ignored for a HuggingFace/URL spec - only the local-path pull branch uses it.
     store: str | None = None

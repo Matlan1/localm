@@ -1648,6 +1648,35 @@ class TestModelEndpoints:
                 r = client.post("/api/models/pull", json={"spec": bad})
                 assert r.status_code == 400
 
+    def test_pull_sha256_forwarded_to_cli(self, gui_app, monkeypatch):
+        """The GUI's #pull-sha256 field (S2, PARITY-AUDIT-CLI-GUI-2026-08-19) is
+        the only integrity assertion a GUI user pulling an arbitrary https URL
+        has - it must reach the CLI as --sha256, exactly like `localm pull
+        --sha256`. pull_model() does the real verification/refusal downstream;
+        this route's only job is to not drop the flag."""
+        app, _ = gui_app
+        captured = self._capture_pull_args(monkeypatch)
+        digest = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b85"
+        with TestClient(app) as client:
+            r = client.post(
+                "/api/models/pull",
+                json={"spec": "owner/repo:file.gguf", "name": "alias1",
+                      "sha256": digest})
+        assert r.status_code == 200
+        assert captured["args"] == [
+            "pull", "--name", "alias1", "--sha256", digest,
+            "--", "owner/repo:file.gguf"]
+
+    def test_pull_sha256_omitted_when_not_requested(self, gui_app, monkeypatch):
+        """No digest entered -> no --sha256 at all, so the CLI keeps today's
+        no-verification default rather than being passed an empty string."""
+        app, _ = gui_app
+        captured = self._capture_pull_args(monkeypatch)
+        with TestClient(app) as client:
+            r = client.post("/api/models/pull", json={"spec": "owner/repo"})
+        assert r.status_code == 200
+        assert "--sha256" not in captured["args"]
+
     @pytest.mark.parametrize("store", ["copy", "move"])
     def test_pull_store_forwarded_to_cli(self, gui_app, monkeypatch, store):
         """The GUI's 'Copy into library' / 'Move into library' picker (index.html

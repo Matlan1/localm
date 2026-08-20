@@ -709,6 +709,8 @@ def register(app: FastAPI, ctx) -> None:
             args += ["--name", req.name]
         if req.mmproj:
             args += ["--mmproj", req.mmproj]
+        if req.sha256:
+            args += ["--sha256", req.sha256]
         if req.store:
             if req.store not in ("copy", "move"):
                 raise HTTPException(400, "store must be 'copy' or 'move'")

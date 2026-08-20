@@ -296,6 +296,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   one. **bg** lists the background jobs this session started, which previously
   ran with nowhere to see them. The setup form can also now pick which saved
   session to continue when a project has several, rather than only the newest.
+- **Pulling a model from the app can now verify its checksum.** The "Add a
+  model" field gains an optional **sha256** box, matching `localm pull
+  --sha256` on the terminal: enter the expected digest and a download, or a
+  local file you point at, is checked against it before anything is kept. A
+  downloaded file that does not match is deleted and never registered; a local
+  file that does not match is simply refused. The box has no effect on a full
+  HuggingFace repository, which has no single file to check.
 
 ### Changed
 - **The chat parameters drawer and the image, music and video generation forms
