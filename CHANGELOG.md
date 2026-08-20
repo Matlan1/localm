@@ -12,6 +12,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **A collection's individual documents can now be listed and removed from the
+  terminal.** `localm rag docs NAME` shows each indexed document with its chunk
+  count and whether its source file has since gone missing or was added via an
+  upload; `localm rag rm-doc NAME PATH` drops just that one document from the
+  index, leaving the original file and the rest of the collection untouched.
+  Until now the only CLI removal was `rag rm`, which deletes the whole
+  collection - so fixing one bad document meant losing every other one too.
 - **Diagnostics moved into the app: Settings > System > Diagnostics.** Until now
   the only way to run localm's active self-checks was `localm doctor` in a
   terminal, so anyone using the app alone could not run them at all. The card

@@ -238,11 +238,13 @@ otherwise it uses your own ComfyUI.
 ```bash
 localm rag add NAME PATH...      # index files/folders into a collection
 localm rag list                  # collections with doc/chunk counts
+localm rag docs NAME             # list a collection's documents: path, chunks, status
 localm rag query NAME "text"     # show the top matching excerpts
 localm rag resync NAME           # re-walk the indexed folders: pick up new and
                                  # changed files, flag ones that have vanished
 localm rag repair NAME           # re-index every known document from scratch
 localm rag reembed NAME          # recompute vectors with the current embedding model, without re-reading source files
+localm rag rm-doc NAME PATH      # remove one document from the index (file kept)
 localm rag rm NAME [--yes]       # delete a collection (index only, files kept)
 ```
 
