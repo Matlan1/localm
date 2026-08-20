@@ -1629,6 +1629,40 @@ export async function updateRollback() {
 }
 if ($("update-rollback")) $("update-rollback").onclick = updateRollback;
 
+// The GUI form of `localm make-launcher --force`: the CLI's only real use case
+// (refreshing the copied interpreter after a Python upgrade) is precisely when a
+// GUI-only user has no terminal to run it from. Always passes force=true - unlike
+// the CLI's own bare default, a user who clicks "Rebuild" wants a rebuild, not the
+// idempotent no-op a launcher already on disk would otherwise return. A single
+// blocking POST, same shape as updateApply above: make_launcher() runs in seconds
+// and reports a structured result rather than streaming progress, so this needs no
+// job.
+export async function rebuildLauncher() {
+  const out = $("rebuild-launcher-status"), btn = $("rebuild-launcher");
+  if (btn) btn.disabled = true;
+  if (out) { out.hidden = false; out.textContent = "Rebuilding..."; }
+  try {
+    const r = await fetch("/api/app/rebuild-launcher?force=true",
+                          { method: "POST", headers: authHeaders() });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.detail || r.statusText);
+    // notes carries the human-readable surface even on a success (e.g. "could not
+    // stamp the exe icon") - show it either way rather than only on failure, or a
+    // partial success reads as a silent full one (AGENTS.md rule 5).
+    const notes = (d.notes || []).join(" ");
+    if (out) {
+      out.textContent = d.ok
+        ? "Launcher rebuilt" + (d.path ? ": " + d.path : "") + (notes ? " (" + notes + ")" : ".")
+        : "Could not rebuild the launcher" + (notes ? ": " + notes : ".");
+    }
+  } catch (e) {
+    if (out) out.textContent = "Rebuild failed: " + e.message;
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+if ($("rebuild-launcher")) $("rebuild-launcher").onclick = rebuildLauncher;
+
 // The inference runtime: the native llama.cpp binaries `localm setup-llama`
 // provisions, separate from the "Updates" card above (the Python source
 // tree). Check is read-only (GET /api/runtime/check); provisioning streams a

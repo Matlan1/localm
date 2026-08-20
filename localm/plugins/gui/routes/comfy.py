@@ -16,7 +16,8 @@ no provisioning logic of their own (S2/S3 own that in localm/media/managed_comfy
                                      and whether an update is available/possible.
   POST /api/comfy/update          -> dispatch `localm comfy update` as a background
                                      JOB, moving the managed instance to the pinned
-                                     commit localm ships; returns {"job_id"}.
+                                     commit localm ships (or an advanced ``commit``
+                                     override); returns {"job_id"}.
   POST /api/comfy/remove          -> delete the managed instance under the data dir
                                      (the shared remove_managed_comfy helper).
   POST /api/comfy/repair          -> clear an INCOMPLETE install (never a genuinely
@@ -32,6 +33,7 @@ Design: dev-notes/DESIGN-localm-managed-comfyui-2026-07-08.md (decision 8).
 from __future__ import annotations
 
 import json
+from typing import Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 
@@ -223,7 +225,8 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.post("/api/comfy/update",
               dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
-    async def comfy_update(request: Request, reinstall_requirements: bool = False):
+    async def comfy_update(request: Request, reinstall_requirements: bool = False,
+                           commit: Optional[str] = None):
         """Move localm's managed ComfyUI to the pinned commit localm ships, by running
         the EXISTING `localm comfy update` entry point as a background job. An update
         re-checks-out the source and can reinstall requirements, so it takes minutes
@@ -239,6 +242,14 @@ def register(app: FastAPI, ctx) -> None:
         not exactly rollback-able, so only the git source rollback is guaranteed), but
         it MUST be reachable from here: when a pin advances across a dependency change,
         an update without it leaves a checkout that moved without its new deps.
+
+        ``commit`` forwards `--commit <sha>`, the CLI's own "advanced: update to a
+        specific ComfyUI commit instead of the shipped pin" testing knob
+        (localm/cli/comfy.py). Not validated here: update_managed_comfy() resolves and
+        checks out whatever it is given and reports a bad ref honestly through the
+        job's own output, the same "own it, report honestly" split as the non-git
+        refusal above - a route-side format check would just duplicate that failure
+        path for a value nothing but git itself can actually verify.
 
         Refuses (409) when nothing is installed, when an update is already running, or
         while a setup/repair job is still in flight - never two writers on one checkout.
@@ -259,6 +270,9 @@ def register(app: FastAPI, ctx) -> None:
         args = ["comfy", "update"]
         if reinstall_requirements:
             args.append("--reinstall-requirements")
+        commit = (commit or "").strip() or None
+        if commit:
+            args.extend(["--commit", commit])
         job = jobs.start_cli("comfy-update", args,
                              host_label="ComfyUI update", owner=principal_id(request))
         return {"job_id": job.id}

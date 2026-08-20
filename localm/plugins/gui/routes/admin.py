@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""GUI local-admin routes: log export, the ComfyUI launcher writer, and the
-directory picker (browse, create folder, rename).
+"""GUI local-admin routes: log export, the ComfyUI launcher writer, the native
+app launcher builder, and the directory picker (browse, create folder, rename).
 
 Extracted verbatim from attach_gui(); behavior unchanged. These are local
 filesystem operations gated on CONFIG_READ / CONFIG_WRITE; none need the shared
@@ -10,6 +10,7 @@ filesystem operations gated on CONFIG_READ / CONFIG_WRITE; none need the shared
 from __future__ import annotations
 
 import os
+import threading
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException
@@ -18,6 +19,10 @@ from localm import scopes
 from localm.inference.http_server import require_fs_host, require_scope
 from localm.pathsafe import confined_name, reject_unsafe_path_string
 from localm.plugins.gui.web import FsMkdirRequest, FsRenameRequest, LogExportRequest
+
+# Serializes concurrent /api/app/rebuild-launcher requests (see the route below).
+# Module-level, matching managed_comfy.py's own _remove_lock: one process, one lock.
+_launcher_build_lock = threading.Lock()
 
 # Cap a single /api/fs/dirs listing so pointing the browser at a directory with an
 # enormous number of entries cannot spike CPU/IO/memory (one stat() per child with
@@ -239,6 +244,48 @@ def register(app: FastAPI, ctx) -> None:
             raise HTTPException(500, f"Failed to create launcher: {e}")
 
         return {"status": "ok"}
+
+    @app.post("/api/app/rebuild-launcher",
+              dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
+    def rebuild_launcher(force: bool = False):
+        """The GUI form of `localm make-launcher` (localm/cli/maintenance.py).
+        Until now this was CLI-only, and its one real use - refreshing the
+        copied interpreter after a Python upgrade, via --force - is precisely
+        the moment the server (and therefore only the GUI) is running. `force`
+        mirrors the CLI flag exactly. make_launcher() already returns a
+        structured LauncherResult and never raises, so this is a thin
+        passthrough.
+
+        Plain `def`, NOT `async def`: make_launcher() copies the interpreter
+        (+ DLLs) and spawns a self-check subprocess, all blocking - same
+        reasoning as export_logs/create_comfy_launcher above. Starlette
+        threadpools a sync handler instead of stalling the event loop.
+
+        _launcher_build_lock: make_launcher() had exactly ONE caller before
+        this route (a human at a terminal, who cannot double-click a CLI
+        invocation mid-run) and no locking of its own
+        (diff-review-discipline.md item 26). A GUI button CAN be
+        double-clicked, and --force's fast path overwrites the launcher exe
+        + DLLs with no coordination of its own - two overlapping copies to the
+        same destination file is a real race the idempotent force=False path
+        never had. This only serializes IN-PROCESS (concurrent GUI requests);
+        it cannot see a concurrent terminal `localm make-launcher`, which is
+        the same residual risk that already existed (two terminals could
+        already race each other)."""
+        if not _launcher_build_lock.acquire(blocking=False):
+            raise HTTPException(409, "A launcher rebuild is already in progress.")
+        try:
+            from localm import applaunch
+            res = applaunch.make_launcher(force=force)
+        finally:
+            _launcher_build_lock.release()
+        return {
+            "ok": res.ok,
+            "path": str(res.path) if res.path else None,
+            "desktop_file": str(res.desktop_file) if res.desktop_file else None,
+            "icon_stamped": res.icon_stamped,
+            "notes": res.notes,
+        }
 
     @app.get("/api/fs/dirs", dependencies=[Depends(require_fs_host)])
     def fs_dirs(path: str = "", include_files: bool = False,

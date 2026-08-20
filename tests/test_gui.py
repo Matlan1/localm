@@ -4624,3 +4624,89 @@ def test_remove_route_still_allows_a_registered_but_unloaded_engine(gui_app, ali
     finally:
         hs._engines.clear()
         hs._engines_lru.clear()
+
+
+# --------------------------------------------------------------------------- #
+#  POST /api/app/rebuild-launcher (S8, PARITY-AUDIT-CLI-GUI-2026-08-19 #16)     #
+# --------------------------------------------------------------------------- #
+# The GUI form of `localm make-launcher`, which had no route at all: a GUI-only
+# user could never refresh the launcher after a Python upgrade. applaunch.make_
+# launcher() itself is exercised directly in tests/test_applaunch.py; these tests
+# cover only the route's OWN job - forwarding `force` and never hiding a failure.
+
+class TestRebuildLauncherEndpoint:
+    def test_forwards_force_true(self, gui_app, monkeypatch):
+        from localm.applaunch import LauncherResult
+        calls = []
+        # str(Path(...)) renders with the platform's native separator, so the
+        # expected value must go through the same Path round-trip - a hardcoded
+        # forward-slash literal is wrong on Windows (see diff-review-discipline.md
+        # item 19: a fixture that cannot take the real platform's value).
+        fake_path = Path("C:/fake/LocaLM.exe")
+
+        def _fake(**kw):
+            calls.append(kw)
+            return LauncherResult(ok=True, path=fake_path, notes=["built LocaLM.exe"])
+
+        monkeypatch.setattr("localm.applaunch.make_launcher", _fake)
+        app, _ = gui_app
+        with TestClient(app) as client:
+            r = client.post("/api/app/rebuild-launcher", params={"force": "true"})
+        assert r.status_code == 200, r.text
+        assert calls == [{"force": True}]
+        body = r.json()
+        assert body["ok"] is True
+        assert body["path"] == str(fake_path)
+        assert body["notes"] == ["built LocaLM.exe"]
+
+    def test_defaults_force_to_false(self, gui_app, monkeypatch):
+        """No `force` in the request -> the CLI's own default (do not overwrite an
+        existing launcher), not the GUI silently rebuilding every click."""
+        from localm.applaunch import LauncherResult
+        calls = []
+        monkeypatch.setattr(
+            "localm.applaunch.make_launcher",
+            lambda **kw: calls.append(kw) or LauncherResult(ok=True))
+        app, _ = gui_app
+        with TestClient(app) as client:
+            r = client.post("/api/app/rebuild-launcher")
+        assert r.status_code == 200, r.text
+        assert calls == [{"force": False}]
+
+    def test_a_failed_build_is_reported_honestly(self, gui_app, monkeypatch):
+        """make_launcher() never raises - a failure is a normal ok=False result, not
+        an exception - so the route must pass that through as-is (200 + ok:false),
+        never translate "the build failed" into a generic 500 or a false success."""
+        from localm.applaunch import LauncherResult
+        monkeypatch.setattr(
+            "localm.applaunch.make_launcher",
+            lambda **kw: LauncherResult(
+                ok=False, notes=["could not locate the base interpreter to copy"]))
+        app, _ = gui_app
+        with TestClient(app) as client:
+            r = client.post("/api/app/rebuild-launcher")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["ok"] is False
+        assert body["notes"] == ["could not locate the base interpreter to copy"]
+
+    def test_refuses_a_concurrent_rebuild(self, gui_app, monkeypatch):
+        """make_launcher() had exactly one caller before this route (a terminal, which
+        cannot double-click a CLI invocation mid-run) and no locking of its own
+        (diff-review-discipline.md item 26). A GUI button CAN be double-clicked, and
+        --force's fast path overwrites the launcher exe with no coordination - so the
+        route's own lock must refuse a second concurrent request rather than let two
+        copies race the same destination file."""
+        from localm.plugins.gui.routes import admin as admin_routes
+        calls = []
+        monkeypatch.setattr("localm.applaunch.make_launcher",
+                            lambda **kw: calls.append(kw))
+        app, _ = gui_app
+        assert admin_routes._launcher_build_lock.acquire(blocking=False)
+        try:
+            with TestClient(app) as client:
+                r = client.post("/api/app/rebuild-launcher")
+            assert r.status_code == 409, r.text
+            assert calls == [], "must not call make_launcher while the lock is held"
+        finally:
+            admin_routes._launcher_build_lock.release()

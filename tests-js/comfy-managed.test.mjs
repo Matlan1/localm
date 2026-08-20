@@ -447,6 +447,35 @@ test("ticking the dependencies box forwards reinstall_requirements", async () =>
             + "checkout without them: " + post.url);
 });
 
+// S8 (PARITY-AUDIT-CLI-GUI-2026-08-19 #17): `localm comfy update --commit` was
+// CLI-only. The GUI's field is the "same shape as the checkbox already there".
+test("typing a commit forwards it to the update route", async () => {
+  const calls = [];
+  const { window: win } = loadAppWithPages({
+    fetchImpl: makeFetch(calls, { installed: true, statusExtra: UPDATE_DUE }) });
+  await render(win);
+  win.document.querySelector(".comfy-managed-commit-box").value = "abc123def ";
+  win.document.querySelector(".comfy-managed-update-btn").onclick();
+  for (let i = 0; i < 4; i++) await new Promise((r) => setTimeout(r, 0));
+  const post = calls.find((c) => c.url.startsWith("/api/comfy/update") && c.method === "POST");
+  assert.ok(post.url.includes("commit=abc123def"),
+            "the field must reach the route, or the advanced override does nothing: "
+            + post.url);
+});
+
+test("leaving the commit field blank omits it (falls back to the shipped pin)", async () => {
+  const calls = [];
+  const { window: win } = loadAppWithPages({
+    fetchImpl: makeFetch(calls, { installed: true, statusExtra: UPDATE_DUE }) });
+  await render(win);
+  win.document.querySelector(".comfy-managed-update-btn").onclick();
+  for (let i = 0; i < 4; i++) await new Promise((r) => setTimeout(r, 0));
+  const post = calls.find((c) => c.url.startsWith("/api/comfy/update") && c.method === "POST");
+  assert.ok(!post.url.includes("commit="),
+            "no commit entered -> no ?commit= at all, not an empty-string override: "
+            + post.url);
+});
+
 test("a non-git install -> Update is disabled and the REASON is visible text", async () => {
   // The whole point of surfacing this in the GUI: a disabled button with the
   // explanation only in a hover title is still an opaque dead end.
