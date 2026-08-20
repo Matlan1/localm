@@ -86,6 +86,7 @@ def test_check_reports_not_installed(app):
     body = r.json()
     assert body["installed"] is False
     assert body["newer"] is False
+    assert body["previous"] is None
 
 
 def test_check_reports_a_newer_build_available(app, runtime_dir, monkeypatch):
@@ -121,6 +122,31 @@ def test_check_reports_up_to_date(app, runtime_dir, monkeypatch):
         r = client.get("/api/runtime/check")
 
     assert r.json()["newer"] is False
+
+
+def test_check_reports_a_previous_build_when_one_is_on_record(app, runtime_dir):
+    """`previous` is --rollback's own target (setup_llama.previous_tag), folded
+    into the same read-only check so the runtime card can decide whether a
+    rollback affordance has anything to offer without a second round trip."""
+    sl._record_provisioned_backend(runtime_dir, "vulkan", build="b10300")
+    sl._record_runtime_history("vulkan", "b10300")
+    sl._record_provisioned_backend(runtime_dir, "vulkan", build="b10361")
+    sl._record_runtime_history("vulkan", "b10361")
+
+    with TestClient(app) as client:
+        r = client.get("/api/runtime/check")
+
+    assert r.json()["previous"] == "b10300"
+
+
+def test_check_reports_no_previous_with_only_one_build_on_record(app, runtime_dir):
+    sl._record_provisioned_backend(runtime_dir, "vulkan", build="b10300")
+    sl._record_runtime_history("vulkan", "b10300")
+
+    with TestClient(app) as client:
+        r = client.get("/api/runtime/check")
+
+    assert r.json()["previous"] is None
 
 
 # --------------------------------------------------------------------------- #
@@ -257,5 +283,125 @@ def test_update_refuses_when_already_running(app, runtime_dir, monkeypatch):
 
     with TestClient(app) as client:
         r = client.post("/api/runtime/update")
+
+    assert r.status_code == 409, r.text
+
+
+# --------------------------------------------------------------------------- #
+#  POST /api/runtime/update  --  rollback (S12: the GUI form of --rollback)   #
+# --------------------------------------------------------------------------- #
+
+def _seed_two_builds(runtime_dir, backend="vulkan"):
+    """Two successive provisions, so there is exactly one build to roll back
+    to: the marker (installed_build()) lands on the newer one and history
+    holds both, matching what a real setup-llama run leaves behind."""
+    sl._record_provisioned_backend(runtime_dir, backend, build="b10300")
+    sl._record_runtime_history(backend, "b10300")
+    sl._record_provisioned_backend(runtime_dir, backend, build="b10361")
+    sl._record_runtime_history(backend, "b10361")
+
+
+def test_rollback_dispatches_with_the_rollback_flag_not_a_tag(app, runtime_dir, no_subprocess):
+    _seed_two_builds(runtime_dir)
+
+    with TestClient(app) as client:
+        r = client.post("/api/runtime/update", json={"rollback": True})
+
+    assert r.status_code == 200, r.text
+    assert no_subprocess[0]["args"] == [
+        "setup-llama", "--backend", "vulkan", "--rollback", "--force", "--yes"]
+    assert "--tag" not in no_subprocess[0]["args"]
+
+
+def test_rollback_honors_an_explicit_backend(app, runtime_dir, no_subprocess):
+    """The installed backend is cuda, but a build is on record for vulkan (e.g.
+    from before a switch) - an explicit backend must look up ITS history, the
+    same as `setup-llama --backend vulkan --rollback` would."""
+    _seed_two_builds(runtime_dir, backend="vulkan")
+    sl._record_provisioned_backend(runtime_dir, "cuda", build="b10361")
+
+    with TestClient(app) as client:
+        r = client.post("/api/runtime/update",
+                        json={"backend": "vulkan", "rollback": True})
+
+    assert r.status_code == 200, r.text
+    assert no_subprocess[0]["args"] == [
+        "setup-llama", "--backend", "vulkan", "--rollback", "--force", "--yes"]
+
+
+def test_rollback_refuses_tag_and_rollback_together(app, runtime_dir, no_subprocess):
+    _seed_two_builds(runtime_dir)
+
+    with TestClient(app) as client:
+        r = client.post("/api/runtime/update",
+                        json={"tag": "b10355", "rollback": True})
+
+    assert r.status_code == 400, r.text
+    assert no_subprocess == []
+
+
+def test_rollback_refuses_when_nothing_is_recorded_to_roll_back_to(app, runtime_dir, no_subprocess):
+    """Only ONE build recorded (the one installed now) - previous_tag has
+    nothing that is not the current build, so this must 400 before dispatch
+    rather than start a job the CLI would refuse anyway."""
+    sl._record_provisioned_backend(runtime_dir, "vulkan", build="b10300")
+    sl._record_runtime_history("vulkan", "b10300")
+
+    with TestClient(app) as client:
+        r = client.post("/api/runtime/update", json={"rollback": True})
+
+    assert r.status_code == 400, r.text
+    assert "nothing to roll back to" in r.json()["detail"]
+    assert no_subprocess == []
+
+
+def test_rollback_treats_an_explicit_auto_backend_as_unnamed(app, runtime_dir, no_subprocess):
+    """setup_llama._apply_version_request treats `--backend auto --rollback`
+    as "no backend named" (falls back to installed_backend()), because 'auto'
+    is the CLI's hardware-detect default, not a real provisioned backend that
+    could ever have history. This route must resolve the SAME way, or a
+    caller sending {"backend": "auto", "rollback": true} would get a
+    confusing "nothing recorded for the auto backend" 400 instead of rolling
+    back the real installed one."""
+    _seed_two_builds(runtime_dir)
+
+    with TestClient(app) as client:
+        r = client.post("/api/runtime/update",
+                        json={"backend": "auto", "rollback": True})
+
+    assert r.status_code == 200, r.text
+    assert no_subprocess[0]["args"] == [
+        "setup-llama", "--backend", "vulkan", "--rollback", "--force", "--yes"]
+
+
+def test_rollback_refuses_when_nothing_is_installed(app, no_subprocess):
+    with TestClient(app) as client:
+        r = client.post("/api/runtime/update", json={"rollback": True})
+
+    assert r.status_code == 400, r.text
+    assert no_subprocess == []
+
+
+def test_rollback_refuses_amd_rocm(app, runtime_dir, no_subprocess):
+    """amd-rocm's build is fixed by the localm release, not chosen from
+    upstream releases, so there is nothing for --rollback to move - same
+    refusal setup_llama's own _apply_version_request gives on the CLI."""
+    sl._record_provisioned_backend(runtime_dir, "amd-rocm", build=sl._ROCM_TAG)
+    sl._record_runtime_history("amd-rocm", sl._ROCM_TAG)
+
+    with TestClient(app) as client:
+        r = client.post("/api/runtime/update", json={"rollback": True})
+
+    assert r.status_code == 400, r.text
+    assert "amd-rocm" in r.json()["detail"]
+    assert no_subprocess == []
+
+
+def test_rollback_refuses_when_already_running(app, runtime_dir, monkeypatch):
+    _seed_two_builds(runtime_dir)
+    monkeypatch.setattr(gui_jobs.JobManager, "has_running", lambda self, kind: True)
+
+    with TestClient(app) as client:
+        r = client.post("/api/runtime/update", json={"rollback": True})
 
     assert r.status_code == 409, r.text

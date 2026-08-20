@@ -122,7 +122,7 @@ test("keys panel: presets (from /v1/keys) populate checkboxes; coder vs coder:fu
   assert.deepEqual(checked, ["chat", "image"]);   // preset set exactly its scopes
 });
 
-test("keys panel: owner-only scopes (coder:full, admin) are disabled for a non-owner", async () => {
+test("keys panel: all five privileged scopes are disabled for a non-owner", async () => {
   const { window } = loadAppWithPages({
     fetchImpl: router({
       "GET /v1/keys": () => ({ status: 200, body: { keys: [], is_owner: false, presets: [] } }),
@@ -133,11 +133,44 @@ test("keys panel: owner-only scopes (coder:full, admin) are disabled for a non-o
   await tick();
   const byVal = {};
   for (const c of window.document.querySelectorAll(".key-scope-cb")) byVal[c.value] = c;
-  assert.equal(byVal["coder:full"].disabled, true);
-  assert.equal(byVal["admin"].disabled, true);
+  // S12: keys:admin / plugins:admin / config:write used to have no checkbox at
+  // all; now that they do, they must be gated exactly like admin / coder:full
+  // always were - never enabled for a device that is merely keys:admin.
+  for (const priv of ["admin", "coder:full", "keys:admin", "plugins:admin", "config:write"]) {
+    assert.equal(byVal[priv].disabled, true, `${priv} must be disabled for a non-owner`);
+    assert.ok(byVal[priv].closest(".key-scope").classList.contains("key-scope-danger"),
+      `${priv} must render with the danger styling`);
+  }
   assert.equal(byVal["coder"].disabled, false);     // plain coder stays available
   assert.equal(byVal["chat"].disabled, false);
+  assert.equal(byVal["config:read"].disabled, false);   // read is not privileged
   assert.equal(window.document.querySelector(".key-preset-save"), null);  // no edit for non-owner
+});
+
+test("keys panel: the owner CAN check the three newly-offered privileged scopes", async () => {
+  let posted = null;
+  const { window } = loadAppWithPages({
+    fetchImpl: router({
+      "GET /v1/keys": () => ({ status: 200, body: { keys: [], is_owner: true, presets: [] } }),
+      "POST /v1/keys": (_p, opts) => {
+        posted = JSON.parse(opts.body);
+        return { status: 200, body: { id: "n", name: posted.name, scopes: posted.scopes, key: "K" } };
+      },
+    }),
+  });
+  await tick();
+  await window.refreshKeysPanel();
+  await tick();
+  window.document.getElementById("key-name").value = "admin-device";
+  for (const priv of ["keys:admin", "plugins:admin", "config:write"]) {
+    const cb = [...window.document.querySelectorAll(".key-scope-cb")].find((c) => c.value === priv);
+    assert.equal(cb.disabled, false, `${priv} must be mintable by the owner`);
+    cb.checked = true;
+  }
+  await window.document.getElementById("key-create").onclick();
+  await tick();
+  assert.deepEqual(posted.scopes.sort(),
+    ["config:write", "keys:admin", "plugins:admin"]);
 });
 
 test("keys panel: owner can save and delete a preset (PATCH /v1/config)", async () => {

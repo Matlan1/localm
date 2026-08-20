@@ -725,16 +725,20 @@ def check_runtime_update() -> dict:
     says whether the installed build differs from the candidate, and never
     re-provisions anything.
 
-    Returns ``{installed, backend, current, target, newer, pinned}``.
+    Returns ``{installed, backend, current, target, newer, pinned, previous}``.
     ``installed`` is False when nothing has been provisioned yet (there is no
     "update" for a runtime that was never set up - that is initial setup, a
-    different action). Never raises: an unreadable pin/marker degrades to the
-    safe "nothing to report" shape rather than breaking the check (mirrors
-    ``pinned_tag()``'s own never-raises contract)."""
+    different action). ``previous`` is ``--rollback``'s own target
+    (``previous_tag(backend)``), included here so the same read-only check
+    that powers the "update available" card can also decide whether a
+    rollback affordance has anything to offer, without a second round trip.
+    Never raises: an unreadable pin/marker degrades to the safe "nothing to
+    report" shape rather than breaking the check (mirrors ``pinned_tag()``'s
+    own never-raises contract)."""
     backend = installed_backend()
     if not backend:
         return {"installed": False, "backend": None, "current": None,
-                "target": None, "newer": False, "pinned": None}
+                "target": None, "newer": False, "pinned": None, "previous": None}
     current = installed_build()
     pin = pinned_tag()
     if backend == "amd-rocm":
@@ -747,7 +751,8 @@ def check_runtime_update() -> dict:
         target = _PINNED_TAG
     newer = bool(target) and target != current
     return {"installed": True, "backend": backend, "current": current,
-            "target": target, "newer": newer, "pinned": pin}
+            "target": target, "newer": newer, "pinned": pin,
+            "previous": previous_tag(backend)}
 
 
 def _tag_for(backend: str) -> str:

@@ -383,6 +383,24 @@ permanent public record of what shipped and are never rewritten; the in-progress
   <media> workflow <file>`), but had no way to see what was actually
   uploaded, add a new one, or remove one - the same picker the GUI's
   Image/Music/Video pages already had.
+- **The inference runtime can now be rolled back from Settings, the same
+  build `setup-llama --rollback` returns to.** The runtime picker could
+  already install a specific build by its release tag, but had no way to
+  know or reach the one that was actually working before a bad upstream
+  release. A **Roll back** button appears next to it only when an earlier
+  build is on record for the installed backend, names that build before you
+  press it, and asks for confirmation since it replaces a runtime that
+  currently works. The self-contained AMD ROCm build has nothing to offer
+  here, matching the terminal command: its build is fixed by the localm
+  release, not chosen from upstream.
+- **Minting a key from the app can now grant three more privileged scopes:
+  `keys:admin`, `plugins:admin` and `config:write`.** Only `admin` and
+  `coder:full` had a checkbox, so an owner minting a device key from Settings
+  could hand out full admin or shell access but not a narrower key that only
+  manages other keys, only manages plugins, or only changes settings. All
+  five scopes the server treats as privileged are now offered and, exactly
+  like the two that were already there, greyed out and refused for anyone
+  minting from a merely `keys:admin` device.
 
 ### Changed
 - **The chat parameters drawer and the image, music and video generation forms
