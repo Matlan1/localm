@@ -110,7 +110,10 @@ localm process's own permissions rather than a sandbox:
   deliberate choice for a local, single-user tool, not an oversight.
   The `localm rag` CLI is unconfined (a local user can already read their own files).
   A `rag`-scoped key can still read documents under the allowed roots back through a
-  query, so issue one only to clients you trust.
+  query, so issue one only to clients you trust. A key can also be confined to a
+  specific folder allowlist at mint time (`rag_roots`) instead of that default
+  reach - which REPLACES it rather than narrowing it, so it can point at a folder
+  outside the default reach too, and only the owner key may grant it.
 - **`image` / `video` / `music`** read a source image for img2img only from the
   uploads folder and the generated-media galleries - never the rest of the data
   directory (which holds your owner key and sessions) and never the localm
@@ -138,8 +141,9 @@ localm process's own permissions rather than a sandbox:
   malicious plugin source cannot smuggle a file's contents out through a link
   or drive a large copy through a self-referencing cycle.
 - **`config:write` / `plugins:admin` / `keys:admin` / `coder:full` / `admin`**
-  are privileged and are never granted implicitly - only the owner key may
-  mint keys carrying them.
+  are privileged and are never granted implicitly: an owner-authenticated
+  `POST /v1/keys` call, or `localm key create --allow-privileged` from this
+  machine's terminal, must ask for one deliberately.
 
 These are deliberate grants to *you*: a scoped key (or an exposed GUI) grants its
 holder that capability on your machine, so only issue keys to - or expose the GUI to -

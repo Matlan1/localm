@@ -339,7 +339,7 @@ Scope: `keys:admin`.
 | Route | Purpose |
 |---|---|
 | `GET /v1/keys` | List every scoped key (metadata only, never the plaintext key) plus whether the caller is the owner and the configured key presets. |
-| `POST /v1/keys` | Mint a new scoped key. Body: `name`, `scopes` (list of scope strings), and either `expires_in` (seconds from now) or `expires` (epoch seconds); returns the plaintext key exactly once. Only an owner/`admin` caller may grant a privileged scope (`admin`, `plugins:admin`, `keys:admin`, `config:write`, `coder:full`); a non-owner request for one gets 403. Minting the very first key from an open-mode loopback GUI also seeds an owner key and hands that browser a session cookie, so the local user is never locked out. |
+| `POST /v1/keys` | Mint a new scoped key. Body: `name`, `scopes` (list of scope strings), `fs_access` (`none` or `host`), `rag_roots` (list of folder paths to confine RAG indexing to; omit for the key's normal, unconfined RAG reach), and either `expires_in` (seconds from now) or `expires` (epoch seconds); returns the plaintext key exactly once. Only an owner/`admin` caller may grant a privileged scope (`admin`, `plugins:admin`, `keys:admin`, `config:write`, `coder:full`), `fs_access=host`, or a non-empty `rag_roots` list - each is host-filesystem reach in some form, and a non-owner request for any of them gets 403. Minting the very first key from an open-mode loopback GUI also seeds an owner key and hands that browser a session cookie, so the local user is never locked out. |
 | `DELETE /v1/keys/{key_id}` | Revoke a key. 404 if no such key exists. |
 
 `POST /api/auth/key/clear` (scope `config:write`; CSRF-protected for
