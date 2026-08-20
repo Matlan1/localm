@@ -320,6 +320,15 @@ def amd_whole_gpu_activity() -> Optional[float]:
     None means "not measured", never "idle" - the caller must omit the field
     rather than render a 0%.
 
+    WHAT THIS NUMBER IS, because it is easy to over-read: the fraction of TIME
+    the graphics engine had work, which is what "GPU utilisation" means in AMD's
+    control panel, GPU-Z and nvidia-smi alike. It is NOT how hard the card is
+    working. MEASURED: it reads 99% at 87 W under a light continuous workload and
+    99% again at 295 W under saturating compute, and it correctly falls to 6% when
+    the card parks at 39 MHz. So it distinguishes BUSY from IDLE, never BUSY from
+    FLAT OUT - a saturating property every time-based utilisation metric shares.
+    Anything wanting "how much headroom is left" needs power or clock, not this.
+
     MULTI-CARD: the busiest AMD adapter wins. localm's stats payload carries ONE
     system-wide ``gpu.percent`` (the sidebar shows a single GPU metric), so some
     card has to be chosen. The busiest is picked because that is the one a user
@@ -410,14 +419,24 @@ def adapter_utilisation() -> Dict[str, float]:
     this module already keeps a persistent PDH query open for adapter memory.
 
     NOT THE RIGHT SOURCE ON AMD - USE :func:`amd_whole_gpu_activity` THERE FIRST.
-    MEASURED 2026-08-20 on an RX 6900 XT: ROCm/HIP compute is INVISIBLE to this
-    counter. Every ``Compute*`` engine read 0.0% across 12 consecutive samples
-    while the card was genuinely at 99% busy (ADL, corroborated by 2569 MHz core,
-    ~90 W and a 73 C hotspot). With compute reading zero, "the busiest engine
-    type" resolves to whatever unrelated engine happens to be active - there, a
-    game-streaming encoder on ``Video Codec 1`` at 6.0% mean, which localm then
-    displayed as GPU load. The fold below is not wrong about what it measures; it
-    is measuring engines that do not include this vendor's compute work.
+
+    MEASURED 2026-08-20 on an RX 6900 XT, in a controlled idle/load/idle A/B:
+    THIS NUMBER DOES NOT TRACK THE CARD'S STATE. Across a card PARKED at 46 W and
+    39 MHz and the same card BOOSTED to 87 W and 2574 MHz, it reported 7.1-7.2%
+    in BOTH - because those 7.2% were a screen-streaming process's ``Video Codec
+    1`` engine, not the GPU. Over the same samples its correlation with core
+    clock was -0.010, while the card's own activity sensor read 6% parked and 99%
+    boosted and correlated +0.971 with clock. That is the reported defect: the
+    maximum over engine types is whatever unrelated engine happens to lead, and
+    localm displayed it as GPU load.
+
+    IT IS NOT UNIFORMLY BLIND, and the honest version matters because the tidy
+    version ("this vendor's compute is invisible here") is FALSE and was measured
+    false: under a synthetic 295 W pure-compute load ``Compute 0`` did read
+    93-100% and the fold tracked power at +0.956. So it is UNRELIABLE rather than
+    dead - it sees work that lands squarely on one countable engine, and misses
+    or misattributes the rest. Unreliable is the harder failure to spot, because
+    it is right often enough to look sound.
 
     Counter: ``GPU Engine`` / ``Utilization Percentage``, aggregated the way Task
     Manager aggregates it. Instances are per PROCESS and per ENGINE (3D, Copy,

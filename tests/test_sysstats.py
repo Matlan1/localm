@@ -924,14 +924,18 @@ _REAL_AMD_ACTIVITY = _gpu_usage_for_capture.amd_whole_gpu_activity
 class TestAmdWholeGpuActivity:
     """The AMD readout must be WHOLE-GPU load, not whichever engine is busiest.
 
-    MEASURED 2026-08-20 on an RX 6900 XT, 117 samples at the real 2.5s poll
-    cadence. The WDDM ``GPU Engine`` max-over-engine-types fold does not track
-    the card: across samples with no GPU compute running it averaged 1.0% while
-    the card's own sensor averaged 91.1%, and its correlation with ASIC power
-    was -0.042 (i.e. none). The card's activity sensor correlated 0.999 with
-    core clock over those same samples, reading 0% at 20W/5MHz (asleep) and 99%
-    at 83W/2560MHz (working). In the originally-reported failure the fold's
-    maximum was a DIFFERENT PROCESS's video encoder at ~7%, shown as GPU load.
+    MEASURED 2026-08-20 on an RX 6900 XT in a controlled idle/load/idle A/B.
+    The WDDM ``GPU Engine`` max-over-engine-types fold does not track the card:
+    with the card PARKED at 46W/39MHz and then BOOSTED to 87W/2574MHz it
+    reported 7.1-7.2% in BOTH states, because that number was a screen-streaming
+    process's video encoder. The card's own sensor read 6% and 99% across those
+    same two states, correlating +0.971 with core clock against -0.010 for the
+    fold. That is the reported defect exactly.
+
+    The fold is UNRELIABLE, not dead - under a synthetic 295W pure-compute load
+    it did read 93-100%. Stated because the tidier claim ("this vendor's compute
+    is invisible to it") is false and was measured false, and a test whose
+    premise is wrong outlives the person who wrote it.
     """
 
     @staticmethod

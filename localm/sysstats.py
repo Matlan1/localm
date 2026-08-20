@@ -550,15 +550,19 @@ def _gpu_util() -> dict:
         # Cheap: a persistent PDH query, ~0.02 ms, no subprocess (see
         # gpu_usage.adapter_utilisation). Returns {} on its first ever call, since
         # a rate counter has nothing to rate against yet - omitted, never a fake 0%.
-        # AMD FIRST, and it is not a preference - the WDDM fold below is
-        # STRUCTURALLY WRONG on this vendor. MEASURED 2026-08-20 on an RX 6900 XT:
-        # ROCm/HIP compute does not appear on any WDDM `GPU Engine` instance, so
-        # every Compute* engine read 0.0% while the card sat at 99% busy, and
-        # "busiest engine" therefore selected an unrelated game-streaming
-        # encoder's 6.0% - which localm displayed as GPU load. ADL reads the
-        # card's own whole-GPU activity sensor (the one AMD's own control panel
-        # and GPU-Z show), so it counts every workload on the board regardless of
-        # which process or engine produced it. See
+        # AMD FIRST, and it is not a preference: the fold below does not track
+        # this card. MEASURED 2026-08-20 on an RX 6900 XT in a controlled
+        # idle/load/idle A/B - parked at 46 W and 39 MHz, and boosted to 87 W and
+        # 2574 MHz, the fold reported 7.1-7.2% BOTH TIMES, because that figure
+        # was a screen-streaming process's video encoder rather than the GPU.
+        # The card's own sensor read 6% and 99% across those same two states
+        # (correlation with core clock +0.971, against -0.010 for the fold).
+        # ADL reads that sensor - the one AMD's control panel and GPU-Z show - so
+        # the figure covers every workload on the board whoever caused it.
+        #
+        # NOTE the fold is unreliable here, NOT dead: under a 295 W pure-compute
+        # load it did read 93-100%. It is right often enough to look sound, which
+        # is why it is demoted rather than deleted. See
         # gpu_usage.amd_whole_gpu_activity for the entry-point evidence.
         try:
             from localm.gpu_usage import amd_whole_gpu_activity
