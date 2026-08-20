@@ -341,6 +341,9 @@
             <div class="card-head-text"><h3>Add a model</h3></div></div>
           <div class="sub">From HuggingFace (owner/repo[:file.gguf]) or an https URL, or add one already on disk - paste a folder/file path, or use Browse to pick a folder.</div>
           <div class="row">
+            <select id="pull-shortcut" style="max-width:200px" title="Curated small models that work even with network access set to Off - picks a known-good quant and fills in the fields below">
+              <option value="">Curated shortcuts…</option>
+            </select>
             <input type="text" id="pull-spec" placeholder="owner/repo:file.gguf  ·  https://…  ·  a local folder or .gguf path" spellcheck="false">
             <input type="text" id="pull-name" placeholder="name (optional)" spellcheck="false" style="max-width:180px">
             <select id="pull-mmproj" style="display:none; max-width:200px">

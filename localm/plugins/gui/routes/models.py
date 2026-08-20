@@ -452,6 +452,22 @@ def register(app: FastAPI, ctx) -> None:
             return {"roles": []}
         return {"roles": manager.get_all_model_roles()}
 
+    @app.get("/api/models/shortcuts", dependencies=[Depends(require_scope(scopes.MODELS_READ))])
+    async def gui_model_shortcuts():
+        """Curated `localm pull <alias>` aliases (MODEL_SHORTCUTS), for the
+        Add-a-model dialog's shortcut picker. A fixed local list, not a HuggingFace
+        query, so unlike /api/discover/search this needs no network call and works
+        under net_mode=off - the pull path already resolves an alias typed into
+        pull-spec (resolve_spec()); this just makes the alias keyspace discoverable
+        instead of requiring the user to already know it from the CLI docs."""
+        from localm.model_manager import MODEL_SHORTCUTS, _SHORTCUT_SIZES
+        return {
+            "shortcuts": [
+                {"alias": alias, "spec": spec, "size": _SHORTCUT_SIZES.get(alias, "")}
+                for alias, spec in MODEL_SHORTCUTS.items()
+            ]
+        }
+
     @app.post("/api/models/load", dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
     async def gui_load_model(req: LoadModelRequest):
         _require_registered(req.model)
