@@ -28,9 +28,11 @@ localm is a local-first, single-owner application. API access is gated by a
   an unauthenticated liveness probe that returns the status, model name, and load state.
 
 Manage the key from the CLI: `localm key show` / `generate` / `set` / `clear`, and
-mint named, scope-limited keys with `localm key create --scope <scope>` - the CLI
-never mints a privileged scope into a named key; only an owner-authenticated API
-call (`POST /v1/keys`) can (see *Capability scopes* below).
+mint named, scope-limited keys with `localm key create --scope <scope>` - by
+default `key create` refuses to mint a privileged scope into a named key (pass
+`--allow-privileged` to override, since a terminal on this machine is already
+owner-equivalent trust); an owner-authenticated API call (`POST /v1/keys`) can
+mint one too (see *Capability scopes* below).
 
 A key you chose yourself (`localm key set`, `LOCALM_API_KEY`, or writing
 `auth.key` by hand) can be short or memorable, so its fingerprint - recorded in

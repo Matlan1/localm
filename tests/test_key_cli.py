@@ -213,6 +213,67 @@ class TestNamedKeys:
         assert r.exit_code == 1
         assert auth.list_keys() == []
 
+    def test_create_allow_privileged_mints_privileged_scope(self, runner):
+        # --allow-privileged is the explicit opt-in: same scope as the refused
+        # case above succeeds once asked for deliberately, and the confirmation
+        # message calls it out rather than blending it in silently.
+        r = runner.invoke(main, ["key", "create", "manager",
+                                 "--scope", "keys:admin", "--allow-privileged"])
+        assert r.exit_code == 0, r.output
+        assert auth.list_keys()[0]["scopes"] == ["keys:admin"]
+        assert "privileged" in r.output.lower()
+
+    def test_create_without_allow_privileged_flag_default_unchanged(self, runner):
+        # A plain, ordinary-scope create is unaffected by the new flag existing.
+        r = runner.invoke(main, ["key", "create", "plain",
+                                 "--scope", "models:read"])
+        assert r.exit_code == 0
+        assert "privileged" not in r.output.lower()
+
+    def test_create_with_expires_in_sets_deadline_and_lists(self, runner):
+        import time as _time
+
+        before = _time.time()
+        r = runner.invoke(main, ["key", "create", "temp",
+                                 "--scope", "models:read", "--expires-in", "3600"])
+        assert r.exit_code == 0, r.output
+        assert "expires" in r.output.lower()
+        rec = auth.list_keys()[0]
+        assert before + 3600 - 5 <= rec["expires"] <= _time.time() + 3600 + 5
+        listed = runner.invoke(main, ["key", "list"])
+        assert "never" not in listed.output.lower()
+
+    def test_create_without_expires_in_never_expires(self, runner):
+        r = runner.invoke(main, ["key", "create", "perm",
+                                 "--scope", "models:read"])
+        assert r.exit_code == 0
+        assert "expires" not in r.output.lower()   # note only appears when set
+        assert auth.list_keys()[0]["expires"] is None
+        listed = runner.invoke(main, ["key", "list"])
+        assert "never" in listed.output.lower()
+
+    def test_list_flags_an_expired_key(self, runner):
+        r = runner.invoke(main, ["key", "create", "stale",
+                                 "--scope", "models:read",
+                                 "--expires-in", "-1"])   # deadline already past
+        assert r.exit_code == 0, r.output
+        listed = runner.invoke(main, ["key", "list"])
+        assert "expired" in listed.output.lower()
+
+    def test_list_shows_age_expires_used_columns(self, runner):
+        # Columns are named Age/Expires/Used (not Created/Last used) - short
+        # relative headers, since the absolute-timestamp form does not fit
+        # alongside the five pre-existing columns at a normal terminal width.
+        runner.invoke(main, ["key", "create", "dash", "--scope", "models:read"])
+        r = runner.invoke(main, ["key", "list"])
+        assert r.exit_code == 0
+        assert "Age" in r.output
+        assert "Expires" in r.output
+        assert "Used" in r.output
+        assert "never" in r.output.lower()      # no --expires-in given
+        # a brand-new key's age is a real short duration, not the "-" placeholder
+        assert re.search(r"\b\d+s\b", r.output), r.output
+
     def test_create_unknown_scope_refused(self, runner):
         r = runner.invoke(main, ["key", "create", "x", "--scope", "not:a:scope"])
         assert r.exit_code == 1
@@ -239,3 +300,39 @@ class TestNamedKeys:
     def test_rm_unknown_id_errors(self, runner):
         r = runner.invoke(main, ["key", "rm", "deadbeef", "--yes"])
         assert r.exit_code == 1
+
+
+# --------------------------------------------------------------------------- #
+#  Timestamp formatting helpers used by `key list`                             #
+# --------------------------------------------------------------------------- #
+
+class TestTimestampFormatting:
+    def test_fmt_ts_none_is_dash(self):
+        from localm.cli.keys import _fmt_ts
+        assert _fmt_ts(None) == "-"
+
+    def test_fmt_ts_formats_a_real_epoch(self):
+        from localm.cli.keys import _fmt_ts
+        # 2026-01-01 00:00:00 UTC-ish; only checking it renders the year/date
+        # shape, not a specific timezone-dependent clock reading.
+        out = _fmt_ts(1767225600)
+        assert out != "-"
+        assert "2025" in out or "2026" in out
+
+    def test_fmt_expires_none_is_never(self):
+        from localm.cli.keys import _fmt_expires
+        assert _fmt_expires(None) == "never"
+
+    def test_fmt_expires_future_has_no_expired_marker(self):
+        import time
+
+        from localm.cli.keys import _fmt_expires
+        out = _fmt_expires(time.time() + 3600)
+        assert "expired" not in out.lower()
+
+    def test_fmt_expires_past_is_flagged(self):
+        import time
+
+        from localm.cli.keys import _fmt_expires
+        out = _fmt_expires(time.time() - 3600)
+        assert "expired" in out.lower()

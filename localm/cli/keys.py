@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 import os
 import sys
+import time
+from datetime import datetime
 
 import click
 
@@ -19,6 +21,78 @@ def _mask_key(key: str) -> str:
     if len(key) <= 8:
         return "*" * len(key)
     return f"{key[:4]}...{key[-4:]}"
+
+
+def _fmt_ts(ts) -> str:
+    """A readable local timestamp for a single-line message (the 'key create'
+    confirmation), or '-' when unset. Full precision is fine there - it is one
+    line of prose, not a table column under width pressure."""
+    if ts is None:
+        return "-"
+    try:
+        return datetime.fromtimestamp(float(ts)).strftime("%Y-%m-%d %H:%M")
+    except (TypeError, ValueError, OSError):
+        return "-"
+
+
+def _fmt_age(seconds) -> str:
+    """A coarse human duration (Ns / Nm / NhMMm / Nd), mirroring
+    localm.cli.models._fmt_age's granularity for the same reason: this is "how
+    long", not a stopwatch, so a precise-looking figure would overstate what a
+    once-per-list-call reading actually has."""
+    s = int(max(0, seconds))
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m"
+    if s < 86400:
+        return f"{s // 3600}h{(s % 3600) // 60:02d}m"
+    return f"{s // 86400}d"
+
+
+def _fmt_since(ts) -> str:
+    """Compact elapsed-time for a 'key list' table column (Age/Used) - '-' when
+    unset. An absolute timestamp does not fit alongside five other columns at a
+    normal terminal width; see _fmt_ts for the single-line form. No 'ago' suffix
+    - the column header (Age/Used) already supplies that context, and every
+    character here is one Rich has to take from a narrower column elsewhere."""
+    if ts is None:
+        return "-"
+    try:
+        ts = float(ts)
+    except (TypeError, ValueError):
+        return "-"
+    return _fmt_age(time.time() - ts)
+
+
+def _print_wide_table(table) -> None:
+    """Print a Rich table, giving it more room than Rich's 80-column
+    non-terminal fallback when output is piped or redirected - a file, `less`,
+    or a test harness has no real screen width to respect, and an 80-column
+    guess is not enough for the 8 columns `key list` now carries (every column
+    would collapse to an ellipsis). A real, attached terminal's actual width is
+    left untouched - only the no-real-terminal fallback changes."""
+    if console.is_terminal:
+        console.print(table)
+        return
+    from rich.console import Console as _Console
+    _Console(width=max(console.size.width, 120)).print(table)
+
+
+def _fmt_expires(ts) -> str:
+    """Compact expiry for the 'key list' table: 'never' (no deadline), 'in
+    <age>' (still valid), or 'expired' - list_keys() does not filter expired
+    keys out, so without that marker a dead key looks identical to a live one."""
+    if ts is None:
+        return "never"
+    try:
+        ts = float(ts)
+    except (TypeError, ValueError):
+        return "-"
+    delta = ts - time.time()
+    if delta >= 0:
+        return f"in {_fmt_age(delta)}"
+    return "[red]expired[/red]"
 
 
 
@@ -231,13 +305,19 @@ def key_list():
     table.add_column("Scopes")
     table.add_column("FS access")
     table.add_column("RAG roots")
+    table.add_column("Age")
+    table.add_column("Expires")
+    table.add_column("Used")
     for k in keys:
         rag_roots = k.get("rag_roots", [])
         table.add_row(str(k.get("id", "")), str(k.get("name", "")),
                       ", ".join(k.get("scopes", [])),
                       str(k.get("fs_access", "none")),
-                      ", ".join(rag_roots) if rag_roots else "(unrestricted)")
-    console.print(table)
+                      ", ".join(rag_roots) if rag_roots else "(unrestricted)",
+                      _fmt_since(k.get("created")),
+                      _fmt_expires(k.get("expires")),
+                      _fmt_since(k.get("last_used")))
+    _print_wide_table(table)
 
 
 
@@ -259,12 +339,22 @@ def key_list():
                    "folders instead of your home dir + working dir + configured "
                    "allowed roots. Omit to leave the key unrestricted (falls back "
                    "to the global RAG indexing policy, same as today).")
-def key_create(name, scopes, fs_access, rag_roots):
+@click.option("--expires-in", "expires_in", type=float, default=None,
+              help="Expire this key after N seconds from now (e.g. 3600 for "
+                   "1 hour, 86400 for 1 day). Omit for a key that never expires.")
+@click.option("--allow-privileged", "allow_privileged", is_flag=True, default=False,
+              help="Allow granting privileged scopes (admin, keys:admin, "
+                   "plugins:admin, config:write, coder:full) to this key. "
+                   "Refused by default so a routine 'key create' cannot mint "
+                   "an owner-equivalent credential; pass this to mint one "
+                   "deliberately instead of always reaching for the wildcard "
+                   "owner key.")
+def key_create(name, scopes, fs_access, rag_roots, expires_in, allow_privileged):
     """Mint a named key limited to SCOPES; print the secret once.
 
-    Privileged scopes (admin, keys:admin, plugins:admin, config:write) are
-    refused here - only the owner key carries those, so a minted key can never
-    escalate itself.
+    Privileged scopes (admin, keys:admin, plugins:admin, config:write,
+    coder:full) are refused unless --allow-privileged is given, so a routine
+    mint can never escalate itself by accident.
 
     --fs-access grants host filesystem reach (default none). The owner key always
     has full host access; this is how you let (or deny) a shared device key browse
@@ -273,20 +363,31 @@ def key_create(name, scopes, fs_access, rag_roots):
     --rag-root grants a per-key RAG-indexing folder allowlist (repeatable, default
     unrestricted). The owner key is never confined by this; use it to hand a
     shared key access to specific document folders only.
+
+    --expires-in sets a relative time-to-live in seconds from now. Omit for a
+    key that never expires.
     """
     from localm import auth
+    from localm import scopes as S
+    expires = time.time() + expires_in if expires_in is not None else None
     try:
-        rec = auth.create_key(name, list(scopes), allow_privileged=False,
+        rec = auth.create_key(name, list(scopes), allow_privileged=allow_privileged,
                               fs_access=fs_access,
-                              rag_roots=list(rag_roots) or None)
+                              rag_roots=list(rag_roots) or None,
+                              expires=expires)
     except (ValueError, PermissionError) as e:
         console.print(f"[red]{e}[/red]")
         sys.exit(1)
     rag_note = (f"; rag-roots {', '.join(rec['rag_roots'])}"
                 if rec.get("rag_roots") else "")
+    expires_note = (f"; expires {_fmt_ts(rec['expires'])}"
+                     if rec.get("expires") else "")
+    priv_granted = [s for s in rec["scopes"] if s in S.PRIVILEGED_SCOPES]
+    priv_note = (f"; [yellow]privileged:[/yellow] {', '.join(priv_granted)}"
+                 if priv_granted else "")
     console.print(f"[green]New key '{rec['name']}' "
                   f"({', '.join(rec['scopes'])}; fs-access {rec['fs_access']}"
-                  f"{rag_note}) - shown once:[/green]")
+                  f"{rag_note}{expires_note}{priv_note}) - shown once:[/green]")
     console.print(f"  [bold]{rec['key']}[/bold]")
     console.print(f"[dim]id {rec['id']}; revoke with: "
                   f"localm key rm {rec['id']}[/dim]")
