@@ -68,7 +68,9 @@ def _report_add_paths_result(result: dict) -> None:
     """Print each ``Collection.add_paths()`` failure and exit(1) if anything
     failed. Shared by ``rag add``/``rag repair``, whose summary lines differ
     but whose failure reporting is identical."""
+    from rich.markup import escape
+
     for f in result["failed"]:
-        console.print(f"  [yellow]failed:[/yellow] {f['path']}: {f['error']}")
+        console.print(f"  [yellow]failed:[/yellow] {escape(f['path'])}: {escape(f['error'])}")
     if result["failed"]:
         sys.exit(1)
