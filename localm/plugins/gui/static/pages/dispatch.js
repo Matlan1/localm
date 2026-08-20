@@ -12,7 +12,7 @@ import { $, authHeaders } from "../app/helpers.js";
 import { refreshPerfEstimate, refreshPluginCommands } from "../app/settings-perf.js";
 import { refreshImageHistory } from "./images.js";
 import { refreshKnowledgePage } from "./knowledge.js";
-import { refreshModelsPage, refreshUploadsList, runtimeUpdateCheck } from "./models.js";
+import { refreshInstancesCard, refreshModelsPage, refreshUploadsList, runtimeUpdateCheck } from "./models.js";
 import { refreshPluginsPage, renderCatalogPlugins } from "./plugins.js";
 import { refreshDiagnosticsCard, refreshSettingsPage } from "./settings.js";
 import { refreshMusicHistory } from "./music.js";
@@ -46,6 +46,7 @@ window.onViewShown = (name) => {
   if (name === "settings") {
     refreshSettingsPage();
     refreshUploadsList();
+    refreshInstancesCard();
     // Paints the last diagnostics report, and REATTACHES to a run still in
     // flight - one started in another tab, or in this one before a reload
     // (ADR-0008: a background operation the server knows about must not be
