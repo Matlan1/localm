@@ -89,6 +89,12 @@ test("clearing the cap field PATCHes max_resident_models to null", async () => {
   const patch = calls.filter((c) => c.u.endsWith("/v1/config") && c.method === "PATCH").at(-1);
   assert.equal(JSON.parse(patch.body).max_resident_models, null,
     "a blank field clears the cap rather than leaving it out or coercing to 0");
+  // Same PATCH-recorded-before-toast-resolves timing as the pinned-models
+  // clear test below - the toast needs its own wait.
+  const toastEl = window.document.getElementById("toast");
+  assert.ok(await waitFor(() => /Cap cleared/.test(toastEl.textContent)),
+    "clearing the cap gets its own confirmation, not the generic 'Saved' text "
+    + "shared with setting a real value");
 });
 
 test("a cap below 1 is rejected client-side: no PATCH, a toast explains why", async () => {

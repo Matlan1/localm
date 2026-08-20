@@ -448,7 +448,7 @@ export function setupResidencyControls() {
         body: JSON.stringify({ max_resident_models: value }),
       });
       if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
-      toast("Saved - applies on the next model load");
+      toast(value === null ? "Cap cleared" : "Saved - applies on the next model load");
     } catch (e) { toast("Could not save: " + e.message, true); }
   };
   pinned.onchange = async () => {
