@@ -88,6 +88,7 @@ export function setupPerfCard() {
     .catch(() => { sync(); refreshPerfEstimate(); });
   setupMainGpuSelector();
   setupGpuSplitCheckboxes();
+  setupResidencyControls();
   setupBackendHintDismiss();
   refreshBackendInfo();
 }
@@ -417,6 +418,60 @@ async function onGpuSplitRatioChange() {
 export function setupGpuSplitCheckboxes() {
   if (!$("perf-gpu-split-row")) return;
   refreshGpuSplitCheckboxes();
+}
+
+/** Wire "Max resident models" (a nullable int cap on concurrently resident
+ *  chat models) and "Pinned models" (display names an eviction pass may never
+ *  pick as its victim) - both HIDDEN NEXT_LOAD settings the generic schema
+ *  form does not render (see their settings_schema.py comment). Same
+ *  "saves immediately" pattern as the Main GPU selector above rather than the
+ *  Apply button: each PATCHes /v1/config the moment it changes, independent
+ *  of the GPU-layers/context sliders. Self-contained (its own /v1/config GET
+ *  to seed the fields), matching how setupMainGpuSelector and
+ *  setupGpuSplitCheckboxes each own their own /api/gpus fetch above. */
+export function setupResidencyControls() {
+  const cap = $("perf-max-resident"), pinned = $("perf-pinned-models");
+  if (!cap || !pinned) return;
+  cap.onchange = async () => {
+    const raw = cap.value.trim();
+    let value = null;
+    if (raw !== "") {
+      value = Number(raw);
+      if (!Number.isInteger(value) || value < 1) {
+        toast("Max resident models must be blank or a whole number of 1 or more", true);
+        return;
+      }
+    }
+    try {
+      const r = await fetch("/v1/config", {
+        method: "PATCH", headers: authHeaders(),
+        body: JSON.stringify({ max_resident_models: value }),
+      });
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+      toast(value === null ? "Cap cleared" : "Saved - applies on the next model load");
+    } catch (e) { toast("Could not save: " + e.message, true); }
+  };
+  pinned.onchange = async () => {
+    // Same CSV-splitting rule settings_schema._to_str_list applies server-side
+    // (a comma-separated string, empty entries dropped) - done here too so the
+    // field the user sees matches exactly what gets saved.
+    const names = pinned.value.split(",").map((s) => s.trim()).filter(Boolean);
+    try {
+      const r = await fetch("/v1/config", {
+        method: "PATCH", headers: authHeaders(),
+        body: JSON.stringify({ pinned_models: names.length ? names : null }),
+      });
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+      toast(names.length ? "Saved - applies on the next model load" : "Pins cleared");
+    } catch (e) { toast("Could not save: " + e.message, true); }
+  };
+  fetch("/v1/config", { headers: authHeaders() })
+    .then((r) => (r.ok ? r.json() : {}))
+    .then((cfg) => {
+      if (typeof cfg.max_resident_models === "number") cap.value = cfg.max_resident_models;
+      if (Array.isArray(cfg.pinned_models)) pinned.value = cfg.pinned_models.join(", ");
+    })
+    .catch(() => { /* server unreachable - fields stay at their blank defaults */ });
 }
 
 /* ---- web access (model-initiated, via the params-drawer toggle) ---- */

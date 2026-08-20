@@ -19,6 +19,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   index, leaving the original file and the rest of the collection untouched.
   Until now the only CLI removal was `rag rm`, which deletes the whole
   collection - so fixing one bad document meant losing every other one too.
+- **Max resident models and pinned models are now settable from the GUI.** Two
+  new controls sit in Settings > Model > Live tuning, beside Main GPU and Split
+  across GPUs: "Max resident models" caps how many models may stay loaded at
+  once (blank leaves it to free-VRAM arithmetic), and "Pinned models" takes a
+  comma-separated list of names that are never evicted to make room for
+  another. Both were previously reachable only through `localm config` or a
+  raw API call.
 - **Diagnostics moved into the app: Settings > System > Diagnostics.** Until now
   the only way to run localm's active self-checks was `localm doctor` in a
   terminal, so anyone using the app alone could not run them at all. The card
