@@ -122,15 +122,16 @@ def test_add_with_a_traversal_name_is_a_clean_error_not_a_crash(cli_runner, tmp_
     """Regression for the leaky abstraction in media_workflows._confined():
     confined_name() (its underlying path-safety check) raises
     fastapi.HTTPException by design - documented in pathsafe.py as being for
-    HTTP call sites only - so a bad --name here used to escape every
-    `except ValueError` in this file uncaught, past click's own error
-    formatting, into the generic crash/bug-report handler instead of a plain
-    "Error: ..." message. _confined() now normalizes to ValueError."""
+    HTTP call sites only. Before _confined() normalized that to ValueError, a
+    bad --name here escaped every `except ValueError` in this file uncaught -
+    fires-controlled by reverting the normalization: result.output came back
+    EMPTY (nothing had a chance to print) with a raw HTTPException object in
+    result.exception, never click's own "Error: ..." formatting."""
     f = _write_workflow_file(tmp_path)
     result = cli_runner.invoke(
         comfy_cli.workflow_add, ["image", str(f), "--name", "../escape.json"])
     assert result.exit_code == 1, result.output
-    # Click's own ClickException format, not the crash handler's.
+    # Click's own ClickException format - proves it was CAUGHT, not crashed.
     assert result.output.startswith("Error:"), result.output
     assert "Invalid file name" in result.output
 
