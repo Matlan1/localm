@@ -48,6 +48,7 @@ class ImagineRequest(BaseModel):
     negative_prompt: str | None = None
     seed: int | None = None
     guidance: float | None = None
+    cfg: float | None = None          # negative-prompt CFG scale; no effect without one
     input_image: str | None = None    # path on this machine (img2img)
     denoise: float | None = None
     # {node_id: {input_name: value}} - see comfy_client.workflow_model_slots /
@@ -186,6 +187,7 @@ async def imagine(req: ImagineRequest, request: Request):
             # privacy mode: the prompt never touches disk
             write_sidecar=not is_privacy,
             guidance=req.guidance,
+            cfg=req.cfg,
             negative_prompt=req.negative_prompt,
             seed=req.seed,
             input_image=input_image,

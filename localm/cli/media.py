@@ -178,7 +178,8 @@ def _generate_or_abort(api_url: str, run):
 @click.option("--guidance", type=float, default=None,
               help="FluxGuidance scale (default ~3.5; higher = follows prompt harder).")
 @click.option("--cfg", type=float, default=None,
-              help="CFG scale for the negative-prompt path (default keeps the workflow's).")
+              help="CFG scale for the negative-prompt path (only applies with "
+                   "--negative; default 3.5).")
 @click.option("--seed", type=int, default=None, help="Reproducible seed.")
 @click.option("--image", "input_image", type=click.Path(exists=True), default=None,
               help="Use this picture as a base (image-to-image) instead of noise.")
