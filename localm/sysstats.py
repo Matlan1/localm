@@ -479,13 +479,20 @@ def _gpu_util() -> dict:
     """{"gpu": {"percent": N}} via nvidia-smi (NVIDIA), or {} on any other box
     or before the first reading has landed.
 
-    NO LONGER NVIDIA-ONLY. nvidia-smi stays the first source where it exists, and
-    a vendor-neutral WDDM fallback covers every other Windows board. Until that
-    fallback landed, AMD and Intel machines showed no GPU load at all - which read
-    as "this box has no GPU utilisation" rather than "localm cannot see it", on a
-    status bar whose whole job is to show load. Windows publishes the number for
-    every vendor through the counters Task Manager itself reads, so omitting it
-    was a gap rather than an honest limitation.
+    NO LONGER NVIDIA-ONLY, and the non-NVIDIA path is now PER VENDOR rather than
+    one shared counter. Source order: nvidia-smi where it exists, then ADL's own
+    whole-GPU activity sensor on AMD, then the vendor-neutral WDDM counter for
+    everything else. Until a non-NVIDIA source landed at all, AMD and Intel
+    machines showed no GPU load - which read as "this box has no GPU utilisation"
+    rather than "localm cannot see it", on a status bar whose whole job is to show
+    load.
+
+    The AMD branch exists because the vendor-neutral counter is not merely less
+    precise there, it is blind to the workload localm itself creates: ROCm/HIP
+    compute appears on no WDDM engine, so that counter reported another process's
+    video encoder as GPU load while the card was saturated. Every figure this
+    returns is WHOLE-GPU - all work on the board, whichever process caused it -
+    never localm's own share.
 
     NEVER blocks the calling (poll) thread on nvidia-smi: the subprocess call
     runs single-flighted on its own daemon thread (:func:`_gpu_util_probe`),
@@ -543,15 +550,50 @@ def _gpu_util() -> dict:
         # Cheap: a persistent PDH query, ~0.02 ms, no subprocess (see
         # gpu_usage.adapter_utilisation). Returns {} on its first ever call, since
         # a rate counter has nothing to rate against yet - omitted, never a fake 0%.
+        # AMD FIRST, and it is not a preference: the fold below does not track
+        # this card. MEASURED 2026-08-20 on an RX 6900 XT in a controlled
+        # idle/load/idle A/B - parked at 46 W and 39 MHz, and boosted to 87 W and
+        # 2574 MHz, the fold reported 7.1-7.2% BOTH TIMES, because that figure
+        # was a screen-streaming process's video encoder rather than the GPU.
+        # The card's own sensor read 6% and 99% across those same two states
+        # (correlation with core clock +0.971, against -0.010 for the fold).
+        # ADL reads that sensor - the one AMD's control panel and GPU-Z show - so
+        # the figure covers every workload on the board whoever caused it.
+        #
+        # NOTE the fold is unreliable here, NOT dead: under a 295 W pure-compute
+        # load it did read 93-100%. It is right often enough to look sound, which
+        # is why it is demoted rather than deleted. See
+        # gpu_usage.amd_whole_gpu_activity for the entry-point evidence.
+        try:
+            from localm.gpu_usage import amd_whole_gpu_activity
+            amd = amd_whole_gpu_activity()
+            if amd is not None:
+                return {"gpu": {"percent": amd}}
+        except Exception as e:
+            from localm.debuglog import logger
+            logger.debug("_gpu_util: ADL utilisation unavailable: %s", e)
         try:
             from localm.gpu_usage import adapter_utilisation
             per_adapter = adapter_utilisation()
             if per_adapter:
-                # No LUID->device mapping is attempted here: the busiest adapter is
-                # the compute one on every board localm runs on, and inventing a
-                # mapping that has not been measured would be a guess dressed as a
-                # fact. A multi-card breakdown belongs with the per-card VRAM rows,
-                # which key off the device list rather than the LUID.
+                # Non-AMD Windows boards (Intel especially), where there is no ADL
+                # and this is the only device-global source localm has. Also the
+                # runtime safety net if ADL is present but momentarily refuses.
+                #
+                # No LUID->device mapping is attempted here: localm's payload
+                # carries ONE system-wide gpu.percent, so a card has to be picked,
+                # and inventing a LUID->device mapping that has not been measured
+                # would be a guess dressed as a fact. A multi-card breakdown
+                # belongs with the per-card VRAM rows, which key off the device
+                # list rather than the LUID.
+                #
+                # KNOWN LIMIT, stated rather than assumed away: this is the
+                # busiest ENGINE TYPE, so it under-reports any compute a vendor
+                # does not publish through the WDDM counters, and can be carried
+                # by an unrelated process's engine when it does. That is exactly
+                # what it did on AMD before the branch above existed. It is kept
+                # because a partial vendor-neutral reading beats no reading on the
+                # boards that have nothing else, not because it is equivalent.
                 return {"gpu": {"percent": max(per_adapter.values())}}
         except Exception as e:
             from localm.debuglog import logger
