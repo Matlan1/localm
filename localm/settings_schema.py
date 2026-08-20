@@ -275,9 +275,11 @@ CORE_FIELDS: list = [
                  "(same order/length). Blank distributes by each card's free "
                  "VRAM at load time (evenly when that cannot be measured).",
                  group="Engine", applies=Applies.NEXT_LOAD),
-    # HIDDEN, like the GPU knobs above: these tune the same VRAM-residency
-    # decision and are set from the CLI / PATCH /v1/config, not the generic
-    # settings form. HIDDEN also routes them to the explicit branches in
+    # HIDDEN, like the GPU knobs above: rendered by a dedicated "Max resident
+    # models" number input in the Live Tuning card (settings-perf.js
+    # setupResidencyControls), not the generic settings form. Still accepted
+    # by PATCH /v1/config and `localm config max_resident_models 2` like any
+    # other field. HIDDEN also routes it to the explicit branch in
     # _validate_one - a Widget.NUMBER field whose default is None derives
     # want_int=False and would store a cap of 2 as 2.0.
     SettingField("max_resident_models", Widget.HIDDEN, "Max resident models",
@@ -285,6 +287,12 @@ CORE_FIELDS: list = [
                  "arithmetic decide (a model loads alongside the others only "
                  "when it provably fits); 1 forces strict single-resident.",
                  group="Engine", applies=Applies.NEXT_LOAD, min=1),
+    # HIDDEN: rendered by a "Pinned models" text input beside the one above
+    # (same Live Tuning card, same setupResidencyControls), not the generic
+    # settings form - a plain comma-separated field, no picker, since a pin
+    # protects a model by name whether or not it happens to be resident right
+    # now. Still accepted by PATCH /v1/config and `localm config pinned_models
+    # a,b` like any other field.
     SettingField("pinned_models", Widget.HIDDEN, "Pinned models",
                  "Model names that are never evicted to make room for another. "
                  "Pinning only protects an already-loaded model; it never loads "
