@@ -489,6 +489,64 @@ def rag_query(collection, text, k, embed, url):
 
 
 
+@rag_group.command("docs")
+@click.argument("collection")
+def rag_docs(collection):
+    """List COLLECTION's indexed documents: path, chunk count, and status.
+
+    A document flagged (missing) was indexed but its source file is no longer
+    on disk (see 'rag resync'); its chunks stay searchable until removed. One
+    flagged (uploaded) was added via the GUI/API upload path rather than from
+    a file path, so 'rag repair'/'rag resync' cannot re-read it from disk.
+    """
+    from rich.console import Console
+    from ..rag import Collection
+    from .errors import run_or_die
+    console = Console()
+    coll = run_or_die(Collection, collection)
+    if not coll.exists():
+        console.print(f"[red]No such collection:[/red] {collection}")
+        sys.exit(1)
+    docs = coll.docs()
+    if not docs:
+        console.print(f"[dim]'{collection}' has no indexed documents.[/dim]")
+        return
+    for d in docs:
+        n = d.get("chunks", 0)
+        tags = ""
+        if d.get("missing"):
+            tags += "  [yellow](missing)[/yellow]"
+        if d.get("uploaded"):
+            tags += "  [dim](uploaded)[/dim]"
+        console.print(f"{d['path']}  [dim]{n} chunk{'s' if n != 1 else ''}[/dim]{tags}")
+
+
+@rag_group.command("rm-doc")
+@click.argument("collection")
+@click.argument("path")
+def rag_rm_doc(collection, path):
+    """Remove one document from COLLECTION (see 'rag docs' for PATH values).
+
+    Drops only this document's chunks (and vectors) from the index; the
+    original file on disk is untouched. Use 'rag rm' to delete the whole
+    collection instead.
+    """
+    from rich.console import Console
+    from ..rag import Collection
+    from .errors import run_or_die
+    console = Console()
+    coll = run_or_die(Collection, collection)
+    if not coll.exists():
+        console.print(f"[red]No such collection:[/red] {collection}")
+        sys.exit(1)
+    with _refuse_if_locked(console):
+        if coll.remove_doc(path):
+            console.print(f"[green]Removed '{path}' from '{collection}'.[/green]")
+        else:
+            console.print(f"[red]Not in this collection:[/red] {path}")
+            sys.exit(1)
+
+
 @rag_group.command("rm")
 @click.argument("collection")
 @click.option("-y", "--yes", is_flag=True, help="Skip confirmation.")
