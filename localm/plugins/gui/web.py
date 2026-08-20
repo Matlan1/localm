@@ -512,6 +512,11 @@ class SetTypeRequest(BaseModel):
     model_type: str
 
 
+class RelocateModelRequest(BaseModel):
+    model: str
+    new_path: str
+
+
 class ScanRequest(BaseModel):
     # None (the default, and an empty/absent POST body - the old Scan button
     # sends no body at all) scans the configured comfy_workdir, unchanged. An

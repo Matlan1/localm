@@ -452,6 +452,11 @@ export async function refreshModelsPage() {
     // highlight for a merely-resident model); job-state's "on" variant gives it
     // its own distinct look instead.
     else if (m.loaded) nameLine.appendChild(el("span", "loaded-tag job-state on", "loaded"));
+    // The file behind this entry is gone (moved or deleted) - the CLI's own red
+    // "missing" row (registry.py), now visible here too. The relocate action
+    // below in the actions cell is the fix; this badge is what tells you it
+    // is needed.
+    if (m.missing) nameLine.appendChild(el("span", "missing-tag job-state st-error", "missing"));
     tr.appendChild(nameTd);
     
     // Role column. The set-type control IS this column - one pill that both shows
@@ -521,6 +526,29 @@ export async function refreshModelsPage() {
     const detail = el("button", "secondary", "info");
     detail.onclick = () => showModelDetail(m.name);
     actions.appendChild(detail);
+
+    // Not gated on isLlm below: any model type (embedding, diffusion-unet, a
+    // LoRA, ...) can be an externally-referenced file that gets moved, same as
+    // an LLM. Only rendered when actually missing - a relocate control on every
+    // healthy row would have no use and would just clutter the row.
+    if (m.missing) {
+      const relocateBtn = el("button", "secondary", "relocate");
+      relocateBtn.title = "Point this entry at the file's new location";
+      relocateBtn.onclick = async () => {
+        const path = await promptText(
+          `New location for '${m.name}' (a .gguf file, or a HuggingFace model folder):`,
+          m.last_path || "");
+        if (!path || !path.trim()) return;
+        const r = await fetch("/api/models/relocate", {
+          method: "POST", headers: authHeaders(),
+          body: JSON.stringify({ model: m.name, new_path: path.trim() }),
+        });
+        const data = await r.json().catch(() => ({}));
+        if (r.ok) { toast(`Relocated '${m.name}'`); refreshModelsPage(); }
+        else toast(data.detail || "Relocate failed", true);
+      };
+      actions.appendChild(relocateBtn);
+    }
 
     // Only LLMs support use/alias/remove in Phase 1
     const isLlm = !m.model_type || m.model_type === "llm";

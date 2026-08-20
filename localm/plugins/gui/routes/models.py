@@ -28,8 +28,8 @@ from localm.executor import get_plugin_executor
 from localm.plugins.gui.web import (AliasRequest, ComfyPullRequest,
                                     LoadModelRequest, MediaPreflightRequest,
                                     PullRequest, PullTokenRedeemRequest,
-                                    RemoveModelRequest, RenameModelRequest,
-                                    ScanRequest,
+                                    RelocateModelRequest, RemoveModelRequest,
+                                    RenameModelRequest, ScanRequest,
                                     SetTypeRequest, UnloadModelRequest,
                                     consume_pull_grant)
 
@@ -174,6 +174,12 @@ def register(app: FastAPI, ctx) -> None:
         def _probe_rows() -> tuple:
             sizes: dict = {}
             mtimes: dict = {}
+            # True when the entry's file has no file on disk (CLI: `localm list`'s
+            # red "missing" row, registry.py:961) - distinct from sizes[ep] is None,
+            # which is ALSO true for a perfectly healthy HF model directory
+            # (stat.S_ISREG false for a dir). Populated from the same stat() below,
+            # not a second filesystem call.
+            missing: dict = {}
             resolved: dict = {}
             # Keyed by NAME, not by path: two aliases can share one path but
             # model_vision_capability() is looked up per registered name (a
@@ -227,18 +233,20 @@ def register(app: FastAPI, ctx) -> None:
                     st_res = p.stat()
                     sizes[ep] = st_res.st_size if stat.S_ISREG(st_res.st_mode) else None
                     mtimes[ep] = st_res.st_mtime
+                    missing[ep] = False
                 except (OSError, ValueError):
                     sizes[ep] = None
                     mtimes[ep] = None
+                    missing[ep] = True
                 if emb_resolved is None:
                     continue
                 try:
                     resolved[ep] = p.resolve()
                 except (OSError, ValueError):
                     resolved[ep] = None
-            return sizes, mtimes, resolved, emb_resolved, vision
+            return sizes, mtimes, missing, resolved, emb_resolved, vision
 
-        sizes, mtimes, resolved_paths, emb_resolved, vision_caps = \
+        sizes, mtimes, missing_flags, resolved_paths, emb_resolved, vision_caps = \
             await loop.run_in_executor(get_plugin_executor(), _probe_rows)
 
         models = []
@@ -304,6 +312,16 @@ def register(app: FastAPI, ctx) -> None:
             # predating this field behaves exactly as before.
             if not _has_recorded_model_type(entry):
                 row_out["model_type_recorded"] = False
+            # Absent-when-false, same discipline as vision/model_type_recorded
+            # above: an old client keeps receiving the exact pre-existing payload
+            # shape for every healthy row. `last_path` rides along ONLY on a
+            # missing row - it is the CLI's own registry.py `str(path)` column,
+            # so this exposes nothing the CLI's `localm list` does not already
+            # print for every row - and gives the GUI relocate control a real
+            # starting point instead of an empty prompt.
+            if missing_flags.get(epath):
+                row_out["missing"] = True
+                row_out["last_path"] = epath
             models.append(row_out)
         out = {"models": models, "active": current}
         # The model an UNNAMED request would resolve to when none is currently
@@ -1007,6 +1025,40 @@ def register(app: FastAPI, ctx) -> None:
         if not ok:
             raise HTTPException(400, f"Could not set type for {req.model}")
         return {"status": "typed", "model": req.model, "model_type": req.model_type}
+
+    @app.post("/api/models/relocate", dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
+    async def model_relocate(req: RelocateModelRequest, request: Request):
+        """GUI form of `localm relocate MODEL NEW_PATH`: re-point a registered
+        model's file after it was MOVED (the CLI's 'missing' row, mirrored here
+        as `missing`/`last_path` on /api/models). No route re-pointed a registry
+        entry before this - the only prior GUI recourse was remove + re-add,
+        which mints a new registration and drops aliases/source/sha256.
+
+        require_fs_host, unconditionally: unlike a pull spec (which may name a
+        remote HuggingFace repo), new_path here always names a location on the
+        SERVER's own disk, the same capability class as /api/models/scan and
+        /api/models/pull-comfy-source. Without this gate, a models:write-only
+        key (fs_access="none") could use the specific validation error below
+        (does not exist / not a GGUF / not a HF dir) as an existence-and-
+        validity oracle over the server's filesystem - exactly what
+        _spec_names_a_host_path's docstring warns a plain write scope must not
+        grant.
+        """
+        require_fs_host(request)
+        _require_registered(req.model)
+        from localm.model_manager.registry import relocate_model, relocate_target
+        p, reason = relocate_target(req.new_path)
+        if p is None:
+            raise HTTPException(400, reason)
+        loop = asyncio.get_running_loop()
+        ok = await loop.run_in_executor(
+            get_plugin_executor(), relocate_model, req.model, req.new_path)
+        if not ok:
+            raise HTTPException(400, f"Could not relocate {req.model}")
+        # .resolve() to match what relocate_model actually wrote (it resolves its
+        # own, separately-computed `p` before saving) - not the pre-resolution
+        # path relocate_target returned above.
+        return {"status": "relocated", "model": req.model, "path": str(p.resolve())}
 
     # ------------------------ model discovery --------------------- #
     # Search HuggingFace for GGUF and/or HF (transformers) models and show

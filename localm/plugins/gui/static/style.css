@@ -1718,7 +1718,7 @@ div:has(> .data-table) { overflow-x: auto; }
 }
 .data-table .mono { font-family: var(--mono); font-size: 12px; color: var(--text-dim); }
 .data-table .name { font-weight: 600; }
-.data-table .active-tag, .data-table .loaded-tag { margin-left: 8px; }
+.data-table .active-tag, .data-table .loaded-tag, .data-table .missing-tag { margin-left: 8px; }
 /* Knowledge page: a collection stuck on BM25 while the embedding model is
    ready is actionable (reindex fixes it), so it gets a visible inline flag
    instead of only a tooltip - same shape as .active-tag, warning color.

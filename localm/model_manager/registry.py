@@ -1000,27 +1000,36 @@ def model_is_external(name: str) -> bool:
     return epath is not None and is_external_path(epath)
 
 
+def relocate_target(new_path: str) -> "tuple[Path | None, str | None]":
+    """Validate *new_path* as a relocate destination: a real GGUF file or a
+    HuggingFace model directory. Returns (resolved Path, None) when valid, or
+    (None, reason) when not - the single source of truth `relocate_model` (CLI)
+    and the GUI's POST /api/models/relocate route both call, so the two surfaces
+    can never disagree about what counts as a valid target (REC-EXTPATH-RELOCATE)."""
+    p = Path(new_path).expanduser()
+    if not p.exists():
+        return None, f"Path does not exist: {p}"
+    if p.is_dir():
+        from localm.inference.engine import _is_hf_dir
+        if not _is_hf_dir(str(p)):
+            return None, f"Not a HuggingFace model directory: {p}"
+    elif p.suffix.lower() != ".gguf" or not _has_gguf_magic(p):
+        return None, f"Not a GGUF model file: {p}"
+    return p, None
+
+
 def relocate_model(name: str, new_path: str) -> bool:
     """Re-point a registered model to *new_path* - for an EXTERNAL model whose file
     was MOVED (it shows 'missing' but is not gone, just relocated). Validates the new
     path is a real GGUF file or HF dir, updates the registry, and clears the missing
     flag. Returns True on success (REC-EXTPATH-RELOCATE)."""
-    from localm.model_manager.gguf import _has_gguf_magic
     reg = _mm.load_registry()
     if name not in reg:
         console.print(f"[red]No such registered model:[/red] {name}")
         return False
-    p = Path(new_path).expanduser()
-    if not p.exists():
-        console.print(f"[red]Path does not exist:[/red] {p}")
-        return False
-    if p.is_dir():
-        from localm.inference.engine import _is_hf_dir
-        if not _is_hf_dir(str(p)):
-            console.print(f"[red]Not a HuggingFace model directory:[/red] {p}")
-            return False
-    elif p.suffix.lower() != ".gguf" or not _has_gguf_magic(p):
-        console.print(f"[red]Not a GGUF model file:[/red] {p}")
+    p, reason = relocate_target(new_path)
+    if p is None:
+        console.print(f"[red]{reason}[/red]")
         return False
     entry = reg[name]
     if not isinstance(entry, dict):
