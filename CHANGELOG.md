@@ -359,6 +359,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   candidate ComfyUI version before it is pinned. Settings > Media's Update
   action gains the same optional field; left blank, an update behaves exactly
   as before and moves to the shipped pin.
+- **`localm job show` and `localm job results` read a scheduled job from the
+  terminal.** `job list` only ever printed a one-line summary, so seeing a
+  job's prompt, model, working directory, file-access scope, or whether it can
+  run the shell-capable coder (`allow_shell`) meant opening the Jobs tab.
+  `localm job show ID` now prints the full definition, and `localm job results
+  ID` lists past runs newest first with each one's status and output or error,
+  paged with `--limit`/`--offset` for a long history.
 
 ### Changed
 - **The chat parameters drawer and the image, music and video generation forms

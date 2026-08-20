@@ -515,6 +515,176 @@ def test_cli_add_cron_and_every_conflict(home):
 
 
 # --------------------------------------------------------------------------- #
+#  CLI: `job show` / `job results` (parity audit S10 - read verbs for the CLI) #
+# --------------------------------------------------------------------------- #
+
+def test_cli_show_full_definition(home):
+    """`job show` is the CLI's only window onto allow_shell/cwd/scope - the
+    audit's 'sharpest loss' (a CLI operator could not audit which unattended
+    jobs run the shell-capable coder, nor in which cwd/scope)."""
+    from click.testing import CliRunner
+    from localm.plugins.builtin.jobs.cli import main
+    from localm.plugins.builtin.jobs.store import JobStore
+
+    cli = CliRunner()
+    r = cli.invoke(main, ["add", "auditme", "--coder", "--cwd", str(home),
+                          "--scope", "tests/**", "--allow-shell",
+                          "--prompt", "run the tests", "--every", "1800"])
+    assert r.exit_code == 0, r.output
+    job_id = JobStore().list()[0].id
+
+    r = cli.invoke(main, ["show", job_id])
+    assert r.exit_code == 0, r.output
+    assert f"Job {job_id}" in r.output and "auditme" in r.output
+    assert "kind:        coder" in r.output
+    assert "state:       enabled" in r.output
+    assert "schedule:    every 1800s" in r.output
+    assert f"cwd:         {home}" in r.output
+    assert "scope:       tests/**" in r.output
+    assert "allow_shell: yes" in r.output
+    assert "prompt:      run the tests" in r.output
+    assert "last_run:    -" in r.output           # never run yet
+    assert "last_result: -" in r.output
+    # `_job_dict` strips the internal principal-binding fields; `show` must
+    # not re-derive them from the raw Job object and leak them back out.
+    assert "owner" not in r.output.lower()
+
+
+def test_cli_show_defaults_for_non_coder_job(home):
+    """A plain chat job has no cwd/scope/collection/allow_shell - `show` must
+    render that as '-'/'no', not omit the lines (this command's whole point is
+    a complete, predictable definition, never a kind-conditional one)."""
+    from click.testing import CliRunner
+    from localm.plugins.builtin.jobs.cli import main
+    from localm.plugins.builtin.jobs.store import JobStore
+
+    cli = CliRunner()
+    r = cli.invoke(main, ["add", "digest", "--prompt", "summarise",
+                          "--cron", "0 9 * * 1-5"])
+    assert r.exit_code == 0, r.output
+    job_id = JobStore().list()[0].id
+
+    r = cli.invoke(main, ["show", job_id])
+    assert r.exit_code == 0, r.output
+    assert "kind:        chat" in r.output
+    assert "schedule:    cron '0 9 * * 1-5'" in r.output
+    assert "cwd:         -" in r.output
+    assert "scope:       -" in r.output
+    assert "collection:  -" in r.output
+    assert "allow_shell: no" in r.output
+
+
+def test_cli_show_unknown_job(home):
+    from click.testing import CliRunner
+    from localm.plugins.builtin.jobs.cli import main
+    r = CliRunner().invoke(main, ["show", "does-not-exist"])
+    assert r.exit_code == 1
+    assert "No such job" in r.output
+
+
+def test_cli_results_reports_status_and_output(home):
+    from click.testing import CliRunner
+    from localm.plugins.builtin.jobs.cli import main
+    from localm.plugins.builtin.jobs.store import JobStore
+
+    store = JobStore()
+    job = store.add(_make_job(name="hasresults"))
+    store.record_result(job.id, {"status": "ok", "output": "line one\nline two",
+                                 "error": None, "started": 1000.0, "finished": 1000.5})
+    store.record_result(job.id, {"status": "error", "output": "",
+                                 "error": "boom: disk full",
+                                 "started": 2000.0, "finished": 2000.5})
+
+    r = CliRunner().invoke(main, ["results", job.id])
+    assert r.exit_code == 0, r.output
+    assert "line one" in r.output and "line two" in r.output
+    assert "boom: disk full" in r.output
+    assert " ok " in r.output or r.output.count(" ok") >= 1
+    assert " error " in r.output or r.output.count(" error") >= 1
+    # An error result must show the ERROR text, never a blank/"no output"
+    # standing in for it - the two are different outcomes (diff-review-
+    # discipline item 3: outcomes that need different handling collapsed
+    # into one).
+    assert "(no output)" not in r.output
+
+
+def test_cli_results_empty_is_not_unknown_job(home):
+    """A job with zero runs and a job that does not exist must print
+    DIFFERENT things - collapsing them would hide a typo'd id behind an
+    'ok, nothing happened yet' reading."""
+    from click.testing import CliRunner
+    from localm.plugins.builtin.jobs.cli import main
+    from localm.plugins.builtin.jobs.store import JobStore
+
+    store = JobStore()
+    job = store.add(_make_job(name="neverrun"))
+
+    r = CliRunner().invoke(main, ["results", job.id])
+    assert r.exit_code == 0, r.output
+    assert "No results." in r.output
+
+    r = CliRunner().invoke(main, ["results", "does-not-exist"])
+    assert r.exit_code == 1
+    assert "No such job" in r.output
+
+
+def test_cli_results_limit_and_offset(home):
+    from click.testing import CliRunner
+    from localm.plugins.builtin.jobs.cli import main
+    from localm.plugins.builtin.jobs.store import JobStore
+
+    store = JobStore()
+    job = store.add(_make_job(name="paged"))
+    for i in range(3):
+        store.record_result(job.id, {"status": "ok", "output": f"r{i}",
+                                     "started": 1000.0 + i, "finished": 1000.0 + i})
+
+    r = CliRunner().invoke(main, ["results", job.id, "--limit", "1"])
+    assert r.exit_code == 0, r.output
+    assert r.output.count("(result ") == 1
+
+    r = CliRunner().invoke(main, ["results", job.id, "--limit", "1", "--offset", "1"])
+    assert r.exit_code == 0, r.output
+    assert r.output.count("(result ") == 1
+
+    r = CliRunner().invoke(main, ["results", job.id])
+    assert r.exit_code == 0, r.output
+    assert r.output.count("(result ") == 3        # no --limit: every result
+
+
+def test_cli_run_then_results_round_trip(home, monkeypatch):
+    """A run recorded through the pre-existing `job run` command must be
+    readable back through the new `job results` - the two compose against the
+    same store, exactly like the GUI's run-now + results panel do."""
+    from click.testing import CliRunner
+    from localm.plugins.builtin.jobs import runner
+    from localm.plugins.builtin.jobs.cli import main
+    from localm.plugins.builtin.jobs.store import JobStore
+
+    monkeypatch.setattr(
+        runner, "run_job",
+        lambda job, engine=None: {"status": "ok", "output": "ROUND-TRIP-OUTPUT",
+                                  "error": None, "started": 0.0, "finished": 0.0})
+
+    cli = CliRunner()
+    r = cli.invoke(main, ["add", "rt", "--prompt", "p", "--every", "60"])
+    assert r.exit_code == 0, r.output
+    job_id = JobStore().list()[0].id
+
+    r = cli.invoke(main, ["run", job_id])
+    assert r.exit_code == 0, r.output
+
+    r = cli.invoke(main, ["results", job_id])
+    assert r.exit_code == 0, r.output
+    assert "ROUND-TRIP-OUTPUT" in r.output
+
+    r = cli.invoke(main, ["show", job_id])
+    assert r.exit_code == 0, r.output
+    assert "(ok)" in r.output                      # last_run carries the status
+    assert "last_result: -" not in r.output         # a real result id is stamped
+
+
+# --------------------------------------------------------------------------- #
 #  Plugin routes + presence in the catalog/manifest                           #
 # --------------------------------------------------------------------------- #
 
