@@ -23,10 +23,14 @@ it, so the CLI asks that process. This is the same discover-instance-and-POST
 shape `localm stop` and `localm unload` already use.
 """
 
+import time
+from pathlib import Path
+
 import click
 
 from ._core import (console, main, no_server_message, report_server_failure,
                     running_server, server_call)
+from ..media_workflows import MEDIA_TYPES
 
 # Each client timeout must exceed the SERVER-side budget for the same call, or
 # the CLI gives up while the server is still working and reports a failure that
@@ -491,3 +495,154 @@ def comfy_update(reinstall_requirements: bool, commit) -> None:
     # that follows it, not after.
     _emit_outcome("done")
     console.print(f"[green]{escape(result.message)}[/green]")
+
+
+@comfy_group.group("workflow")
+def workflow_group() -> None:
+    """Manage each media plugin's uploaded ComfyUI workflows (image / music /
+    video).
+
+    Each media plugin resolves ITS ACTIVE workflow in this order: the file
+    selected here, then a legacy override, then the shipped example template -
+    so `localm image`/`music`/`video` are governed by whatever is selected
+    here, exactly like the GUI's own picker on each media page. Works fully
+    offline; no running server needed.
+    """
+
+
+def _fmt_wf_size(n: int) -> str:
+    """A short size for a workflow JSON file - these run tens of KB, never the
+    GB range `localm list`'s model-file formatting assumes."""
+    if n >= 1024 * 1024:
+        return f"{n / 1024**2:.1f} MB"
+    return f"{n / 1024:.1f} KB"
+
+
+def _fmt_wf_age(seconds) -> str:
+    """A coarse human duration for the 'Modified' column - mirrors
+    localm.cli.keys._fmt_age's granularity (this is "how long ago", not a
+    stopwatch)."""
+    s = int(max(0, seconds))
+    if s < 60:
+        return f"{s}s ago"
+    if s < 3600:
+        return f"{s // 60}m ago"
+    if s < 86400:
+        return f"{s // 3600}h{(s % 3600) // 60:02d}m ago"
+    return f"{s // 86400}d ago"
+
+
+@workflow_group.command("list")
+@click.argument("media", type=click.Choice(MEDIA_TYPES))
+def workflow_list(media: str) -> None:
+    """List MEDIA's uploaded workflows and show which one is active."""
+    from ..media_workflows import list_workflows, selected_name
+
+    active = selected_name(media)
+    console.print(f"[bold]{media} workflow[/bold]: "
+                 + (f"[green]{active}[/green]" if active
+                    else "[dim](built-in default - none selected)[/dim]"))
+    items = list_workflows(media, active=active)
+    if not items:
+        console.print("[dim]No uploaded workflows. Add one with[/dim] "
+                      f"localm comfy workflow add {media} <file.json>")
+        return
+
+    from rich.table import Table
+    table = Table(header_style="bold cyan")
+    table.add_column("Name", style="bold")
+    table.add_column("Active")
+    table.add_column("Size")
+    table.add_column("Modified")
+    now = time.time()
+    for w in items:
+        table.add_row(w["name"], "[green]yes[/green]" if w["is_active"] else "",
+                      _fmt_wf_size(w["size_bytes"]), _fmt_wf_age(now - w["mtime"]))
+    console.print(table)
+
+
+@workflow_group.command("add")
+@click.argument("media", type=click.Choice(MEDIA_TYPES))
+@click.argument("file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--name", "name", default=None,
+              help="Stored filename [default: FILE's own name].")
+@click.option("--use", "activate", is_flag=True,
+              help="Also select it as MEDIA's active workflow.")
+def workflow_add(media: str, file: Path, name, activate: bool) -> None:
+    """Upload a ComfyUI workflow (in ComfyUI: Save > API format) for MEDIA.
+
+    \b
+    Examples:
+      localm comfy workflow add image my_flux.json --use
+      localm comfy workflow add music alt_ace.json
+
+    Validates FILE is ComfyUI's API-format JSON (a dict of nodes, each with a
+    class_type) before storing it, so a bad upload fails now instead of every
+    later generation.
+    """
+    from ..media_workflows import save_workflow, select_workflow
+
+    content = file.read_bytes()
+    try:
+        saved = save_workflow(media, name or file.name, content)
+        if activate:
+            select_workflow(media, saved)
+    except ValueError as e:
+        raise click.ClickException(str(e))
+    console.print(f"[green]Saved[/green] {media} workflow [bold]{saved}[/bold]"
+                 + (" and selected it." if activate else "."))
+    if not activate:
+        console.print("[dim]Select it with[/dim] "
+                      f"localm comfy workflow use {media} {saved}")
+
+
+@workflow_group.command("use")
+@click.argument("media", type=click.Choice(MEDIA_TYPES))
+@click.argument("name", required=False)
+@click.option("--clear", is_flag=True,
+              help="Clear the selection instead (fall back to the built-in "
+                   "default), rather than passing NAME.")
+def workflow_use(media: str, name, clear: bool) -> None:
+    """Select MEDIA's active workflow (or clear it with --clear).
+
+    Governs `localm image`/`music`/`video` too, not just the GUI's own picker
+    on the same page. (The same selection `localm plugin config <media>
+    workflow <name>` writes - this is the discoverable, dedicated form of it.)
+    """
+    from ..media_workflows import select_workflow
+
+    if clear:
+        if name:
+            raise click.UsageError("Pass either NAME or --clear, not both.")
+    elif not name:
+        raise click.UsageError(
+            "Missing argument NAME (or pass --clear to fall back to the "
+            "built-in default).")
+    try:
+        selected = select_workflow(media, None if clear else name)
+    except ValueError as e:
+        raise click.ClickException(str(e))
+    if selected:
+        console.print(f"[green]{media} now uses[/green] [bold]{selected}[/bold]")
+    else:
+        console.print(f"[green]{media} cleared[/green] - falling back to the "
+                      "built-in default.")
+
+
+@workflow_group.command("rm")
+@click.argument("media", type=click.Choice(MEDIA_TYPES))
+@click.argument("name")
+@click.option("-y", "--yes", is_flag=True, help="Skip confirmation.")
+def workflow_rm(media: str, name: str, yes: bool) -> None:
+    """Delete an uploaded MEDIA workflow (refuses to delete the active one -
+    select another first)."""
+    from ..media_workflows import delete_workflow
+
+    if not yes:
+        click.confirm(f"Delete {media} workflow '{name}'? This can't be undone.",
+                      abort=True)
+    try:
+        delete_workflow(media, name)
+    except ValueError as e:
+        raise click.ClickException(str(e))
+    console.print(f"[green]Deleted[/green] {media} workflow [bold]{name}[/bold].")
