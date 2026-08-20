@@ -1897,6 +1897,8 @@ $("pull-start").onclick = async () => {
   const name = $("pull-name").value.trim();
   const mmprojInput = $("pull-mmproj");
   const mmproj = mmprojInput && mmprojInput.style.display !== "none" ? mmprojInput.value : null;
+  const sha256Input = $("pull-sha256");
+  const sha256 = sha256Input ? sha256Input.value.trim() : "";
   const storeInput = $("pull-store");
   const store = storeInput && storeInput.value ? storeInput.value : null;
 
@@ -1919,6 +1921,7 @@ $("pull-start").onclick = async () => {
   try {
     const payload = { spec, name: name || null };
     if (mmproj) payload.mmproj = mmproj;
+    if (sha256) payload.sha256 = sha256;
     if (store) payload.store = store;
     // Only attach the type hint if the spec still matches exactly what it was
     // prefilled for - a hand-edited spec after picking a discovery result
@@ -1976,6 +1979,7 @@ $("pull-start").onclick = async () => {
       toast("Pull finished");
       $("pull-spec").value = "";
       $("pull-name").value = "";
+      if (sha256Input) sha256Input.value = "";
       if (storeInput) storeInput.value = "";
       pendingPullTypeHint = null;
       refreshModelsPage();
