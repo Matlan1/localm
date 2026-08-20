@@ -1194,6 +1194,11 @@ async def rag_embedding_set(req: EmbeddingModelRequest, request: Request):
     silently swaps the user's choice - on failure the selection stands and the UI
     offers the internal default.
 
+    Refuses (409) when an ``embed-setup`` job is already running: a second one
+    cannot proceed anyway (both block on the embedder's unbounded load locks),
+    and queueing it silently is what produced two jobs stuck at "Loading and
+    testing the model..." with no error. See the comment above ``start_fn``.
+
     Two-step by *confirm* (NEW-RAG-DIM-NO-REEMBED item 3). Without it (the
     default), this is a DRY RUN: no config write, no embedder reset, no job -
     just ``localm.rag.collection_provenance_report()``'s honest "these
@@ -1336,6 +1341,32 @@ async def rag_embedding_set(req: EmbeddingModelRequest, request: Request):
         return True
 
     from localm.inference.http_server import principal_id
+    # Refuse a SECOND concurrent setup instead of queueing it behind the first
+    # (QA 2026-08-20 item 7). Two of these jobs both call get_embedder(), whose
+    # `with _LOAD_LOCK:` / `with _LOCK:` are BARE acquires with no timeout, so
+    # the loser sits at its last emitted line ("Loading and testing the
+    # model...") with no further event and no error for as long as the winner
+    # takes - and, because each job also runs the pre-load VRAM swap check
+    # (which round-trips through the event loop), the pair can hold unrelated
+    # reads off the server the whole time. An unbounded silent wait is the
+    # failure AGENTS.md rule 5 forbids; a 409 the caller can read is the same
+    # answer, immediately. This is the shape every sibling long job on this
+    # server already uses - runtime-update, comfy-setup/update, doctor.
+    #
+    # Check-then-act IS atomic here, and only because of where it sits: this is
+    # an `async def` on the server's single event loop and there is NO `await`
+    # between this check and start_fn below, so no other request coroutine can
+    # interleave. Keep it that way - adding an await in this window silently
+    # reopens the race (diff-review-discipline item 26).
+    #
+    # It does NOT serialise against another PROCESS (a terminal `localm
+    # setup-embeddings`, or a second server on the same LOCALM_HOME); that is
+    # the same, deliberately stated limit runtime.py's own 409 carries, and the
+    # in-process case is the one the GUI can actually produce by double-click.
+    if jobs.has_running("embed-setup"):
+        raise HTTPException(
+            409, "An embedding-model setup is already running. Wait for it to "
+                 "finish (the Knowledge page shows its progress), then try again.")
     job = jobs.start_fn("embed-setup", _setup, owner=principal_id(request))
     return {"job_id": job.id}
 
