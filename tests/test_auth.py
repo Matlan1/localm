@@ -542,6 +542,57 @@ def test_keys_endpoint_wires_fs_access_owner_only(auth, monkeypatch):
         assert stored["fs_access"] == "host"
 
 
+def test_keys_endpoint_wires_rag_roots_owner_only(auth, monkeypatch):
+    """POST /v1/keys forwards rag_roots from the request body into create_key()
+    (it used to be dropped silently: every GUI/API-minted key was RAG-unconfined
+    regardless of what the body asked for, while GET /v1/keys already returned
+    the field for display). A key-scoped rag_roots list REPLACES the whitelist
+    rather than narrowing it (rag/store.py's confine_index_path), so it can point
+    a new key at a folder outside the caller's own reach - granting one follows
+    the same owner-only gate as fs_access=host: a non-owner keys:admin caller is
+    refused (403) and nothing is persisted, while the owner key succeeds and the
+    minted key actually carries the roots."""
+    from fastapi.testclient import TestClient
+    from localm import scopes as S
+    from localm.inference.http_server import create_app
+
+    manager = auth.create_key("mgr", [S.KEYS_ADMIN], allow_privileged=True)
+    app = create_app(None)
+    with TestClient(app) as client:
+        hdr = {"Authorization": f"Bearer {manager['key']}"}
+        # non-owner requesting a rag_roots confinement: refused, nothing minted.
+        before = len(auth.list_keys())
+        refused = client.post(
+            "/v1/keys",
+            json={"name": "pwn", "scopes": [S.CHAT], "rag_roots": ["C:/secret"]},
+            headers=hdr)
+        assert refused.status_code == 403
+        assert len(auth.list_keys()) == before   # nothing persisted on refusal
+        # non-owner omitting rag_roots still works and gets the safe default.
+        ok = client.post(
+            "/v1/keys", json={"name": "reader", "scopes": [S.CHAT]}, headers=hdr)
+        assert ok.status_code == 200
+        assert ok.json()["rag_roots"] == []
+        # a malformed (non-list) rag_roots 400s rather than being silently coerced.
+        bad = client.post(
+            "/v1/keys",
+            json={"name": "x", "scopes": [S.CHAT], "rag_roots": "C:/not-a-list"},
+            headers=hdr)
+        assert bad.status_code == 400
+        # the owner CAN grant rag_roots, and it is actually stored (not silently
+        # dropped to unrestricted).
+        monkeypatch.setenv("LOCALM_API_KEY", "ownersecret")
+        granted = client.post(
+            "/v1/keys",
+            json={"name": "device", "scopes": [S.CHAT],
+                  "rag_roots": ["C:/docs/a", "C:/docs/b"]},
+            headers={"Authorization": "Bearer ownersecret"})
+        assert granted.status_code == 200
+        assert granted.json()["rag_roots"] == ["C:/docs/a", "C:/docs/b"]
+        stored = [k for k in auth.list_keys() if k["name"] == "device"][0]
+        assert stored["rag_roots"] == ["C:/docs/a", "C:/docs/b"]
+
+
 def test_keys_endpoint_expires_in_is_server_clock(auth, monkeypatch):
     """POST /v1/keys with expires_in (relative seconds) sets the deadline from the
     SERVER clock (not the client's), verify() honours it, and a bad expires_in 400s."""

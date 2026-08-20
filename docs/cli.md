@@ -397,7 +397,7 @@ localm key recover              # recover owner access after a lockout (run loca
 
 The owner key can also be set outside these commands: the `LOCALM_API_KEY` env var, or a `<data dir>/auth.key` file.
 
-Privileged scopes (`config:write`, `plugins:admin`, `keys:admin`, `admin`, `coder:full`) are never minted into a named key; only the owner key carries them. See [SECURITY.md](../SECURITY.md) for the auth and scope model, and [docs/tls.md](../docs/tls.md) for serving over a LAN.
+Privileged scopes (`config:write`, `plugins:admin`, `keys:admin`, `admin`, `coder:full`) are refused by `key create` unless you pass `--allow-privileged`; an owner-authenticated `POST /v1/keys` API call can mint them too. See [SECURITY.md](../SECURITY.md) for the auth and scope model, and [docs/tls.md](../docs/tls.md) for serving over a LAN.
 
 ---
 

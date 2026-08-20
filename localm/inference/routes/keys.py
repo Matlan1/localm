@@ -74,10 +74,29 @@ def register(app: FastAPI, ctx) -> None:
                 f"Refusing to grant fs_access={fs_access!r}: only the owner key "
                 "may grant a new key host-filesystem reach."
             )
+        # Same owner-only gate, extended to RAG-indexing reach: a key-scoped
+        # rag_roots list REPLACES the whitelist rather than narrowing it
+        # (rag/store.py's confine_index_path), so it can point a new key at any
+        # folder on the host disk - including ones outside home/cwd/the
+        # configured rag_allowed_roots a merely keys:admin caller's own keys are
+        # bound to. That is host-filesystem reach, not a scope, so it gets the
+        # same refusal as fs_access=host rather than silently downgrading to
+        # unrestricted (AGENTS rule 5: a security step must never report success
+        # on a request it did not actually honour).
+        rag_roots_in = body.get("rag_roots")
+        if rag_roots_in is not None and not isinstance(rag_roots_in, list):
+            raise HTTPException(400, "'rag_roots' must be a list of folder paths")
+        rag_roots = auth.norm_rag_roots(rag_roots_in)
+        if rag_roots and not is_owner:
+            raise HTTPException(
+                403,
+                "Refusing to set rag_roots: only the owner key may confine a "
+                "new key's RAG-indexing reach to specific folders."
+            )
         try:
             created = create_key(body.get("name", ""), scope_list,
                                  allow_privileged=is_owner, expires=expires,
-                                 fs_access=fs_access)
+                                 fs_access=fs_access, rag_roots=rag_roots or None)
         except PermissionError as e:
             raise HTTPException(403, str(e))
         except ValueError as e:

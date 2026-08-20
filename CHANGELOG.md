@@ -314,6 +314,23 @@ permanent public record of what shipped and are never rewritten; the in-progress
   drops its aliases, its recorded source and its stored sha256; relocating
   keeps all three, the same registry entry `localm relocate` re-points from
   the terminal.
+- **`localm key create` can now set an expiry and mint privileged scopes, and
+  `key list` now shows a key's age, expiry and last use.** A CLI-minted key was
+  permanent with no way to set a deadline, and there was no way to see one
+  either, even though the server already tracked it. `--expires-in <seconds>`
+  sets a deadline now; `key list` gains Age/Expires/Used columns, and a key
+  whose deadline has passed is marked rather than looking identical to a live
+  one. `--allow-privileged` lets `key create` mint a key holding `admin`,
+  `keys:admin`, `plugins:admin`, `config:write` or `coder:full` - refused by
+  default, since a routine mint should not escalate itself by accident, but
+  this machine's terminal is already fully trusted (it can already roll or
+  recover the owner key with no credential presented), so the option exists to
+  grant one deliberately.
+- **A key minted from the GUI or the raw API can now be confined to specific
+  RAG folders.** `localm key create --rag-root` already did this from the
+  terminal, but `POST /v1/keys` silently dropped the field, so every GUI- or
+  API-minted key stayed RAG-unconfined no matter what was asked for. Only the
+  owner key may grant it, the same rule host filesystem access already follows.
 
 ### Changed
 - **The chat parameters drawer and the image, music and video generation forms
