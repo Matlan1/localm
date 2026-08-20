@@ -331,6 +331,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
   terminal, but `POST /v1/keys` silently dropped the field, so every GUI- or
   API-minted key stayed RAG-unconfined no matter what was asked for. Only the
   owner key may grant it, the same rule host filesystem access already follows.
+- **Other localm servers running on this machine can now be seen and stopped
+  from the app.** `localm ps` and `localm stop <id>` had no GUI form, so a
+  second `localm gui`/`localm serve` running for a different project (or
+  started from the terminal) was invisible from the app: nothing showed its
+  address, and there was no way to stop it without a terminal. Settings >
+  Server & network now lists every other instance registered on this machine
+  (its directory, address and whether it answers) with a Stop button per row.
+  The server behind the page you are looking at is not listed there; use
+  Server controls, right above, for that one.
 
 ### Changed
 - **The chat parameters drawer and the image, music and video generation forms
