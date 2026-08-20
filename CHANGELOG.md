@@ -330,6 +330,20 @@ permanent public record of what shipped and are never rewritten; the in-progress
   a failed load or the server becoming unreachable.
 
 ### Fixed
+- **The GPU load figure on AMD cards now reports the whole GPU.** It was reading
+  a Windows per-engine counter and showing whichever engine was busiest, which
+  could be another program entirely: with the card at 99 percent, the sidebar
+  showed 7 percent, because that 7 percent was a screen-recording program's
+  video encoder and the counter did not reflect what the card was really doing.
+  localm now asks the card itself, through the same AMD interface the vendor's
+  own tools use, so the figure covers all work on the GPU whoever caused it and
+  matches what AMD's control panel and GPU-Z show. NVIDIA cards are unchanged,
+  and other cards keep the previous counter. If the card cannot be asked, the
+  figure is left out rather than shown as zero.
+- **The sidebar no longer shows total VRAM as though it were VRAM in use.** When
+  the amount in use could not be read, the readout printed the card's total
+  under the same "VRAM" label used for used-of-total, so an empty card read as a
+  completely full one. It now says "16.0 GB total" in that case.
 - **Pages no longer jump back to the top when something on them changes.**
   Sorting or filtering the model list, using a row action on it, and saving any
   settings section all rebuilt the page in a way that briefly left it with

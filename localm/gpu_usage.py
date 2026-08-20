@@ -86,6 +86,19 @@ _ADL_MAX_PATH = 256
 _ADL_OK = 0
 _ADL_VENDOR_AMD = 1002        # decimal, NOT 0x1002 - ADL reports it in base 10
 
+# ADL's PMLog sensor array is a fixed 256 slots, each a (supported, value) pair.
+_ADL_PMLOG_MAX_SENSORS = 256
+# ADL_PMLOG_INFO_ACTIVITY_GFX. MEASURED on this driver rather than taken from a
+# header, because a wrong index reads a DIFFERENT sensor and still returns a
+# plausible 0-100 number - a silent wrong answer, not an error. The whole
+# supported-sensor set was dumped and identified by INTERNAL CONSISTENCY against
+# physical reality: 1=GFXCLK 2564MHz and 2=MEMCLK 1988MHz (a 6900 XT's real
+# clocks), 14=FAN_RPM 692 alongside 15=FAN_PERCENT 20 (a matching pair),
+# 8=TEMP_EDGE 67C below 27=TEMP_HOTSPOT 73C (hotspot is always the higher of the
+# two), 23=ASIC_POWER 91W. Index 19 moved 0->99 across a load change while power
+# tracked it 41W->91W and the clock 0->2570MHz, which no unrelated sensor would.
+_ADL_PMLOG_ACTIVITY_GFX = 19
+
 _lock = threading.Lock()
 _adl_state: Optional[dict] = None      # None = not tried yet; {} = tried and unusable
 _pdh_state: Optional[dict] = None
@@ -115,6 +128,20 @@ class _AdapterInfo(ctypes.Structure):
         ("strPNPString", ctypes.c_char * _ADL_MAX_PATH),
         ("iOSDisplayIndex", ctypes.c_int),
     ]
+
+
+class _ADLSingleSensorData(ctypes.Structure):
+    """One PMLog sensor slot. ``supported`` is a flag, not a status code: a zero
+    there means the board does not publish that sensor, and ``value`` is then
+    meaningless rather than zero-valued."""
+    _fields_ = [("supported", ctypes.c_int), ("value", ctypes.c_int)]
+
+
+class _ADLPMLogDataOutput(ctypes.Structure):
+    """ADL's PMLogDataOutput. Same ABI hazard as :class:`_AdapterInfo`: the sensor
+    array is a FIXED 256 entries and a short array silently marshals garbage."""
+    _fields_ = [("size", ctypes.c_int),
+                ("sensors", _ADLSingleSensorData * _ADL_PMLOG_MAX_SENSORS)]
 
 
 _ADL_ALLOC = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_int)
@@ -209,6 +236,103 @@ def _adl_used_by_bus() -> Dict[int, int]:
         return {}
 
 
+def _adl_activity_by_bus() -> Dict[int, float]:
+    """``{pci_bus_number: whole_gpu_busy_percent}`` per present AMD adapter, or ``{}``.
+
+    THE WHOLE-GPU FIGURE, whoever is causing the load - which is the one thing the
+    WDDM ``GPU Engine`` counter cannot give us on this vendor. See
+    :func:`adapter_utilisation` for that counter's measured blind spot; this is the
+    source that fixes it.
+
+    WHY PMLog AND NOT ONE OF THE Overdrive ACTIVITY CALLS, measured on this driver
+    (RX 6900 XT, RDNA2) rather than taken from a doc, because the commonly-cited
+    names all FAIL here and each fails differently:
+
+        ADL2_Overdrive_Caps                     -> supported=1 enabled=1 VERSION=8
+        ADL2_Overdrive5_CurrentActivity_Get     -> rc=-1  (generic error)
+        ADL2_Overdrive6_CurrentStatus_Get       -> rc=-8  ADL_ERR_NOT_SUPPORTED
+        ADL2_OverdriveN_PerformanceStatus_Get   -> rc=-8  ADL_ERR_NOT_SUPPORTED
+        ADL2_New_QueryPMLogData_Get             -> rc=0, 12 supported sensors
+
+    The board is Overdrive **8**, and Overdrive8 exposes activity ONLY through
+    PMLog - so an implementation written against Overdrive5/6/N compiles, runs,
+    returns rc != 0 forever and reports nothing on exactly the hardware it was
+    added for. Do not "fix" this by reaching for one of those names.
+
+    ``ADL2_New_QueryPMLogData_Get`` needs no ``PMLog_Start`` and no shared-memory
+    session: called cold it answers rc=0 immediately (measured).
+
+    HONESTY (AGENTS.md rule 5): a sensor the board does not publish, or a value
+    outside 0-100, yields NO ENTRY rather than a fabricated 0%. A card reported
+    idle when nothing was measured is exactly the failed reading presented as a
+    successful one that rule 5 forbids.
+    """
+    state = _adl_open()
+    if not state:
+        return {}
+    dll, ctx = state["dll"], state["ctx"]
+    try:
+        n = ctypes.c_int(0)
+        if dll.ADL2_Adapter_NumberOfAdapters_Get(ctx, ctypes.byref(n)) != _ADL_OK:
+            return {}
+        if n.value <= 0:
+            return {}
+        arr = (_AdapterInfo * n.value)()
+        size = ctypes.sizeof(_AdapterInfo) * n.value
+        if dll.ADL2_Adapter_AdapterInfo_Get(ctx, ctypes.byref(arr), size) != _ADL_OK:
+            return {}
+        out: Dict[int, float] = {}
+        seen = set()
+        for info in arr:
+            if not info.iPresent or info.iVendorID != _ADL_VENDOR_AMD:
+                continue
+            # ADL reports several LOGICAL adapters per physical card (7 for the one
+            # here), so dedupe on the PCI triple exactly as _adl_used_by_bus does -
+            # otherwise one card is counted repeatedly.
+            key = (info.iBusNumber, info.iDeviceNumber, info.iFunctionNumber)
+            if key in seen:
+                continue
+            data = _ADLPMLogDataOutput()
+            rc = dll.ADL2_New_QueryPMLogData_Get(
+                ctx, info.iAdapterIndex, ctypes.byref(data))
+            if rc != _ADL_OK:
+                continue   # one adapter failing never hides the rest
+            sensor = data.sensors[_ADL_PMLOG_ACTIVITY_GFX]
+            if not sensor.supported:
+                continue
+            pct = float(sensor.value)
+            if not (0.0 <= pct <= 100.0):
+                # Out of range means we are not reading what we think we are.
+                # Say nothing rather than publish a number we cannot stand behind.
+                logger.debug("gpu_usage: ADL activity out of range (%s); ignoring", pct)
+                continue
+            seen.add(key)
+            out[int(info.iBusNumber)] = pct
+        return out
+    except Exception as e:
+        logger.debug("gpu_usage: ADL activity query failed: %s", e)
+        return {}
+
+
+def amd_whole_gpu_activity() -> Optional[float]:
+    """Whole-GPU busy percent on AMD, or None when this box cannot answer.
+
+    None means "not measured", never "idle" - the caller must omit the field
+    rather than render a 0%.
+
+    MULTI-CARD: the busiest AMD adapter wins. localm's stats payload carries ONE
+    system-wide ``gpu.percent`` (the sidebar shows a single GPU metric), so some
+    card has to be chosen. The busiest is picked because that is the one a user
+    asking "is my GPU busy" means, and an average across an idle second card
+    would hide a saturated first one. A genuine per-card breakdown belongs with
+    the per-card VRAM rows, which key off the device list rather than a bus.
+    """
+    by_bus = _adl_activity_by_bus()
+    if not by_bus:
+        return None
+    return round(max(by_bus.values()), 1)
+
+
 def _pdh_adapter_used() -> list:
     """Device-global used bytes per WDDM adapter instance, via the vendor-neutral
     PDH counter, or [] when unavailable.
@@ -285,6 +409,16 @@ def adapter_utilisation() -> Dict[str, float]:
     for EVERY vendor through the same WDDM counters Task Manager itself reads, and
     this module already keeps a persistent PDH query open for adapter memory.
 
+    NOT THE RIGHT SOURCE ON AMD - USE :func:`amd_whole_gpu_activity` THERE FIRST.
+    MEASURED 2026-08-20 on an RX 6900 XT: ROCm/HIP compute is INVISIBLE to this
+    counter. Every ``Compute*`` engine read 0.0% across 12 consecutive samples
+    while the card was genuinely at 99% busy (ADL, corroborated by 2569 MHz core,
+    ~90 W and a 73 C hotspot). With compute reading zero, "the busiest engine
+    type" resolves to whatever unrelated engine happens to be active - there, a
+    game-streaming encoder on ``Video Codec 1`` at 6.0% mean, which localm then
+    displayed as GPU load. The fold below is not wrong about what it measures; it
+    is measuring engines that do not include this vendor's compute work.
+
     Counter: ``GPU Engine`` / ``Utilization Percentage``, aggregated the way Task
     Manager aggregates it. Instances are per PROCESS and per ENGINE (3D, Copy,
     Video Codec, Compute, ...), so per-process values are summed WITHIN an engine
@@ -292,6 +426,10 @@ def adapter_utilisation() -> Dict[str, float]:
     across them. Summing across types double-counts work that ran concurrently on
     separate engines and routinely exceeds 100% (measured on a real board: 26.1%
     summed against 11.0% for the busiest engine).
+
+    Kept because it is still the only vendor-neutral device-global source on
+    Windows, and it is the ONLY one on Intel, where localm has no equivalent of
+    ADL. Its limitation is stated here rather than silently inherited.
 
     Keyed by adapter LUID, read from the instance name, so a multi-GPU board
     reports each card separately rather than one blended figure.

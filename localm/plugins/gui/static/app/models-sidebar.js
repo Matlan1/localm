@@ -52,8 +52,11 @@ export function setStatus(state, text) {
 
 // Live hardware monitor in the status bar (CPU/RAM/VRAM/GPU). Renders whatever
 // /api/stats reports; any section the box can't measure is simply absent (no
-// psutil -> no CPU/RAM; AMD -> no GPU%). VRAM shows used/total when free is
-// known, otherwise just total.
+// psutil -> no CPU/RAM). The "AMD -> no GPU%" caveat that used to sit here is
+// gone: AMD boards report GPU load through the card's own activity sensor.
+// VRAM shows used/total when the used figure is known, and an explicitly
+// labelled "N GB total" when it is not - never a bare total, which reads as a
+// full card.
 export function renderHwStats(data) {
   const el = $("hw-stats");
   if (!el) return;
@@ -124,13 +127,20 @@ export function renderHwStats(data) {
         if (d.used != null) {
           add("vram", `${gib(d.used)}/${gib(d.total)} GB`, `vram-usage ${band(d.used, d.total)}`);
         } else {
-          add("vram", `${gib(d.total)} GB`);
+          // "total" is LOAD-BEARING, not decoration. Without it this renders
+          // "16.0 GB" under a VRAM label that means used/total everywhere else,
+          // so a card with nothing resident reads as a card that is completely
+          // full - the exact inverse of the truth. Two different meanings must
+          // never share one label with nothing to tell them apart.
+          add("vram", `${gib(d.total)} GB total`);
         }
       });
     } else if (v.used != null) {
       add("vram", `VRAM ${gib(v.used)}/${gib(v.total)} GB`, `vram-usage ${band(v.used, v.total)}`);
     } else {
-      add("vram", `VRAM ${gib(v.total)} GB`);
+      // See the per-card branch above: unqualified, this reads as "16 GB IN USE"
+      // while nothing is loaded.
+      add("vram", `VRAM ${gib(v.total)} GB total`);
     }
   }
   el.textContent = "";

@@ -846,6 +846,12 @@ def _no_wddm_fallback(monkeypatch):
     """
     from localm import gpu_usage
     monkeypatch.setattr(gpu_usage, "adapter_utilisation", lambda: {})
+    # The AMD source needs stubbing for exactly the same reason, and it is the
+    # MORE urgent of the two: it answers from the card's own sensor with no
+    # rate-counter warmup, so on this box it returns a real percentage on the
+    # very first call and every nvidia-probe test would silently assert against
+    # live hardware. Tests that ARE about the AMD path stub it back on.
+    monkeypatch.setattr(gpu_usage, "amd_whole_gpu_activity", lambda: None)
 
 
 class TestVendorNeutralGpuUtilisation:
@@ -903,3 +909,205 @@ class TestAdapterUtilisationAggregation:
         assert a == b, "same adapter, different process and engine"
         assert a != c, "different adapter"
         assert _luid_of("no_luid_here") is None
+
+
+from localm import gpu_usage as _gpu_usage_for_capture
+
+# Captured at IMPORT time, before the autouse _no_wddm_fallback fixture can
+# replace it. Without this the fixture's stub shadows the real function in the
+# very tests that exist to exercise it - and two of them would still have PASSED,
+# because the stub returns None and those tests assert None. A test that passes
+# because the thing under test was never called is worse than no test.
+_REAL_AMD_ACTIVITY = _gpu_usage_for_capture.amd_whole_gpu_activity
+
+
+class TestAmdWholeGpuActivity:
+    """The AMD readout must be WHOLE-GPU load, not whichever engine is busiest.
+
+    MEASURED 2026-08-20 on an RX 6900 XT, 117 samples at the real 2.5s poll
+    cadence. The WDDM ``GPU Engine`` max-over-engine-types fold does not track
+    the card: across samples with no GPU compute running it averaged 1.0% while
+    the card's own sensor averaged 91.1%, and its correlation with ASIC power
+    was -0.042 (i.e. none). The card's activity sensor correlated 0.999 with
+    core clock over those same samples, reading 0% at 20W/5MHz (asleep) and 99%
+    at 83W/2560MHz (working). In the originally-reported failure the fold's
+    maximum was a DIFFERENT PROCESS's video encoder at ~7%, shown as GPU load.
+    """
+
+    @staticmethod
+    def _fake_adl(monkeypatch, *, adapters, sensors, activity_rc=0):
+        """Fake ADL whose calls write through ctypes byref, as the real DLL does.
+
+        *adapters*: list of (bus, device, function, present, vendor_id).
+        *sensors*:  {adapter_index: {sensor_index: (supported, value)}}.
+        """
+        from localm import gpu_usage
+
+        class _FakeDll:
+            def ADL2_Adapter_NumberOfAdapters_Get(self, _ctx, ref):
+                ref._obj.value = len(adapters)
+                return 0
+
+            def ADL2_Adapter_AdapterInfo_Get(self, _ctx, ref, _size):
+                for i, (bus, dev, fn, present, vendor) in enumerate(adapters):
+                    a = ref._obj[i]
+                    a.iAdapterIndex = i
+                    a.iBusNumber, a.iDeviceNumber, a.iFunctionNumber = bus, dev, fn
+                    a.iPresent, a.iVendorID = present, vendor
+                return 0
+
+            def ADL2_New_QueryPMLogData_Get(self, _ctx, idx, ref):
+                if activity_rc != 0:
+                    return activity_rc
+                for si, (sup, val) in sensors.get(idx, {}).items():
+                    ref._obj.sensors[si].supported = sup
+                    ref._obj.sensors[si].value = val
+                return 0
+
+        monkeypatch.setattr(gpu_usage, "_adl_open",
+                            lambda: {"dll": _FakeDll(), "ctx": None})
+        # Undo the autouse stub: these tests ARE the AMD path.
+        monkeypatch.setattr(gpu_usage, "amd_whole_gpu_activity",
+                            _REAL_AMD_ACTIVITY)
+
+    _ONE_CARD = [(45, 0, 0, 1, 1002)]
+
+    def test_reports_the_cards_own_activity_sensor(self, monkeypatch):
+        from localm import gpu_usage
+        self._fake_adl(monkeypatch, adapters=self._ONE_CARD,
+                       sensors={0: {19: (1, 73)}})
+        assert gpu_usage._adl_activity_by_bus() == {45: 73.0}
+        assert gpu_usage.amd_whole_gpu_activity() == 73.0
+
+    def test_reads_sensor_19_and_not_a_neighbour(self, monkeypatch):
+        """A wrong sensor index returns a plausible 0-100 number rather than an
+        error, so it would be a SILENT wrong answer. Neighbouring slots are
+        populated with values that would be obviously wrong if picked up."""
+        from localm import gpu_usage
+        self._fake_adl(monkeypatch, adapters=self._ONE_CARD,
+                       sensors={0: {18: (1, 11), 19: (1, 73), 20: (1, 22)}})
+        assert gpu_usage.amd_whole_gpu_activity() == 73.0
+
+    def test_an_unsupported_sensor_yields_no_reading_not_zero_percent(
+            self, monkeypatch):
+        """AGENTS.md rule 5: a card reported IDLE on a measurement that never
+        happened is a failed reading presented as a successful one. Distinguishing
+        busy from idle is the whole point of the metric, so the idle end of the
+        range is precisely the value we must never invent."""
+        from localm import gpu_usage
+        self._fake_adl(monkeypatch, adapters=self._ONE_CARD,
+                       sensors={0: {19: (0, 0)}})
+        assert gpu_usage._adl_activity_by_bus() == {}
+        assert gpu_usage.amd_whole_gpu_activity() is None
+
+    def test_an_out_of_range_value_is_refused(self, monkeypatch):
+        """Outside 0-100 means we are not reading the sensor we think we are -
+        a wrong index or a struct-layout drift. Publishing it would turn an ABI
+        bug into a confident wrong number on the status bar."""
+        from localm import gpu_usage
+        self._fake_adl(monkeypatch, adapters=self._ONE_CARD,
+                       sensors={0: {19: (1, 4294967295)}})
+        assert gpu_usage._adl_activity_by_bus() == {}
+        assert gpu_usage.amd_whole_gpu_activity() is None
+
+    def test_logical_adapters_of_one_card_are_deduped(self, monkeypatch):
+        """ADL reports several logical adapters per physical card (7 for the one
+        measured here). Without the PCI-triple dedupe one card is counted many
+        times."""
+        from localm import gpu_usage
+        self._fake_adl(monkeypatch,
+                       adapters=[(45, 0, 0, 1, 1002)] * 4,
+                       sensors={i: {19: (1, 55)} for i in range(4)})
+        assert gpu_usage._adl_activity_by_bus() == {45: 55.0}
+
+    def test_non_amd_and_absent_adapters_are_skipped(self, monkeypatch):
+        from localm import gpu_usage
+        self._fake_adl(
+            monkeypatch,
+            adapters=[(1, 0, 0, 1, 4318),     # NVIDIA vendor id, present
+                      (2, 0, 0, 0, 1002),     # AMD but NOT present
+                      (45, 0, 0, 1, 1002)],   # the real one
+            sensors={i: {19: (1, 41)} for i in range(3)})
+        assert gpu_usage._adl_activity_by_bus() == {45: 41.0}
+
+    def test_busiest_card_wins_on_a_multi_gpu_box(self, monkeypatch):
+        from localm import gpu_usage
+        self._fake_adl(monkeypatch,
+                       adapters=[(45, 0, 0, 1, 1002), (67, 0, 0, 1, 1002)],
+                       sensors={0: {19: (1, 12)}, 1: {19: (1, 88)}})
+        assert gpu_usage.amd_whole_gpu_activity() == 88.0
+
+    def test_adl_unavailable_is_not_an_idle_card(self, monkeypatch):
+        from localm import gpu_usage
+        monkeypatch.setattr(gpu_usage, "_adl_open", lambda: {})
+        assert gpu_usage._adl_activity_by_bus() == {}
+        assert gpu_usage.amd_whole_gpu_activity() is None
+
+    def test_a_failing_adl_call_never_breaks_the_readout(self, monkeypatch):
+        from localm import gpu_usage
+        self._fake_adl(monkeypatch, adapters=self._ONE_CARD, sensors={},
+                       activity_rc=-8)   # ADL_ERR_NOT_SUPPORTED
+        assert gpu_usage._adl_activity_by_bus() == {}
+
+
+class TestGpuUtilSourceOrder:
+    """nvidia-smi, then the card's own AMD sensor, then the vendor-neutral fold."""
+
+    @staticmethod
+    def _cold(monkeypatch):
+        from localm import sysstats
+        monkeypatch.setattr(sysstats, "_gpu_util_last", None, raising=False)
+        monkeypatch.setattr(sysstats, "_gpu_util_last_t", 0.0, raising=False)
+
+    def test_amd_sensor_beats_the_wddm_fold(self, monkeypatch):
+        """THE REGRESSION GUARD. With both sources answering, the fold is the one
+        that was reporting another process's video encoder as GPU load, so it
+        must not win. Fires on the pre-fix code, which had no AMD branch at all
+        and returned the fold's 7.1%."""
+        from localm import gpu_usage, sysstats
+        self._cold(monkeypatch)
+        monkeypatch.setattr(gpu_usage, "amd_whole_gpu_activity", lambda: 99.0)
+        monkeypatch.setattr(gpu_usage, "adapter_utilisation",
+                            lambda: {"0x0_0xA": 7.1})
+        assert sysstats._gpu_util() == {"gpu": {"percent": 99.0}}
+
+    def test_falls_back_to_the_fold_when_there_is_no_amd_sensor(self, monkeypatch):
+        """Intel and any other Windows board: ADL does not exist there, and the
+        vendor-neutral counter is the only device-global source localm has."""
+        from localm import gpu_usage, sysstats
+        self._cold(monkeypatch)
+        monkeypatch.setattr(gpu_usage, "amd_whole_gpu_activity", lambda: None)
+        monkeypatch.setattr(gpu_usage, "adapter_utilisation",
+                            lambda: {"0x0_0xA": 7.1, "0x0_0xB": 0.0})
+        assert sysstats._gpu_util() == {"gpu": {"percent": 7.1}}
+
+    def test_a_zero_reading_from_the_card_is_reported_not_discarded(
+            self, monkeypatch):
+        """0.0 is a real measurement of an idle card (measured: 20W, 5MHz core).
+        A falsy check here would silently drop it into the fallback path and
+        report the fold's number instead of the truth."""
+        from localm import gpu_usage, sysstats
+        self._cold(monkeypatch)
+        monkeypatch.setattr(gpu_usage, "amd_whole_gpu_activity", lambda: 0.0)
+        monkeypatch.setattr(gpu_usage, "adapter_utilisation",
+                            lambda: {"0x0_0xA": 7.1})
+        assert sysstats._gpu_util() == {"gpu": {"percent": 0.0}}
+
+    def test_a_broken_amd_source_falls_through_rather_than_breaking(
+            self, monkeypatch):
+        from localm import gpu_usage, sysstats
+        self._cold(monkeypatch)
+
+        def boom():
+            raise OSError("ADL exploded")
+        monkeypatch.setattr(gpu_usage, "amd_whole_gpu_activity", boom)
+        monkeypatch.setattr(gpu_usage, "adapter_utilisation",
+                            lambda: {"0x0_0xA": 7.1})
+        assert sysstats._gpu_util() == {"gpu": {"percent": 7.1}}
+
+    def test_neither_source_fabricates_a_zero(self, monkeypatch):
+        from localm import gpu_usage, sysstats
+        self._cold(monkeypatch)
+        monkeypatch.setattr(gpu_usage, "amd_whole_gpu_activity", lambda: None)
+        monkeypatch.setattr(gpu_usage, "adapter_utilisation", lambda: {})
+        assert sysstats._gpu_util() == {}
