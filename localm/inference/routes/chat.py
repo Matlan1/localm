@@ -400,7 +400,15 @@ def register(app: FastAPI, ctx) -> None:
                 # Surface the real cause as a clean, actionable 503 instead.
                 raise HTTPException(503, f"Embedding failed: {e}")
             if vecs_emb is None:
-                why = last_error() or "embedding model unavailable"
+                # OFF THE EVENT LOOP for the same reason embed_texts above is:
+                # last_error() does `with embedder._LOCK:`, and get_embedder
+                # holds that lock across a spawn plus a native load. The
+                # embed itself was already offloaded; taking the lock inline
+                # here to fetch the REASON would have frozen the whole server
+                # on the failure path - which is precisely when a concurrent
+                # load is the likely cause of the failure.
+                why = await loop.run_in_executor(None, last_error) \
+                    or "embedding model unavailable"
                 raise HTTPException(422, f"Embedding model unavailable ({why}). "
                                     "Run 'localm setup-embeddings'.")
 

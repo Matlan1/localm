@@ -255,3 +255,91 @@ def test_the_schema_still_shows_the_toggle_in_a_keyless_install():
     hidden = {f["key"] for f in schema_json(values={}, is_owner=False)}
     assert "gui_proxy_remote_images" not in hidden, (
         "expected the field to be owner-gated in the schema for a scoped key")
+
+
+# --------------------------------------------------------------------------- #
+#  QA 2026-08-20 (#6): the fetch must not run ON the event loop.               #
+#                                                                             #
+#  safe_fetch_bytes is a blocking urlopen with a 15s connect and a 15s read.   #
+#  Called inline from this `async def` handler it stopped the WHOLE server for #
+#  the length of the fetch - MEASURED, an unrelated GET /api/activity went     #
+#  from 0.018s to 13.76s with one in-flight proxy fetch to an unroutable host, #
+#  and the hang alarm fired independently with this frame on top. The URL      #
+#  comes from a model-authored <img src>, so a rendered reply chose how long   #
+#  the server stalled.                                                        #
+#                                                                             #
+#  Behavioural, not structural: it holds a real blocking call and requires an  #
+#  unrelated coroutine to still get its turn, so it fails for any handler that #
+#  stops offloading regardless of how the offload was written.                #
+# --------------------------------------------------------------------------- #
+
+def test_the_fetch_does_not_block_the_event_loop(monkeypatch):
+    import asyncio
+    import time
+    from fastapi import FastAPI
+
+    BLOCK_S = 2.0
+
+    def _slow_fetch(url, **kw):
+        time.sleep(BLOCK_S)          # stands in for a connect to a dead host
+        return (url, "image/png", PNG)
+
+    app = FastAPI()
+    imgproxy.register(app, MagicMock())
+    monkeypatch.setattr("localm.config.load_config",
+                        lambda *a, **k: {"gui_proxy_remote_images": True})
+    monkeypatch.setattr("localm.netpolicy.safe_fetch_bytes", _slow_fetch)
+    endpoint = next(r.endpoint for r in app.routes
+                    if getattr(r, "path", None) == "/api/image-proxy")
+
+    async def _drive():
+        trivial_done = []
+
+        async def _trivial():
+            for _ in range(3):
+                await asyncio.sleep(0)
+            trivial_done.append(time.monotonic())
+
+        t0 = time.monotonic()
+        trivial = asyncio.ensure_future(_trivial())
+        main = asyncio.ensure_future(endpoint(url="https://example.com/a.png"))
+        try:
+            await asyncio.wait_for(trivial, timeout=BLOCK_S * 0.5)
+        except asyncio.TimeoutError:
+            main.cancel()
+            raise AssertionError(
+                "a concurrent trivial coroutine never got to run while the "
+                "image fetch was in flight - the fetch is on the event loop, "
+                "so ONE slow image URL freezes the whole server")
+        elapsed = trivial_done[0] - t0
+        resp = await asyncio.wait_for(main, timeout=BLOCK_S + 10)
+        return elapsed, resp
+
+    elapsed, resp = asyncio.run(_drive())
+    assert elapsed < BLOCK_S * 0.5, (
+        f"an unrelated coroutine took {elapsed:.2f}s while a {BLOCK_S}s fetch "
+        "was in flight - the event loop was blocked")
+    # The route still does its job; the offload changes who waits, not the answer.
+    assert resp.status_code == 200
+    assert resp.body == PNG
+
+
+def test_the_fetch_budget_stays_above_netpolicy_s_own_worst_case():
+    """The offload's deadline must never fire for a slow-but-WORKING fetch, only
+    for a wedged one - so it has to sit above safe_fetch_bytes' real worst case.
+
+    That case is not one timeout. netpolicy applies its timeout separately to
+    the connect and to each read, and follows redirects manually, so every hop
+    re-pays both. This asserts the RELATION rather than the number, because the
+    two bounds live in netpolicy and the arithmetic lives in imgproxy - the shape
+    that breaks quietly when someone retunes one side. A literal 40.0 (the first
+    version of this) covered a single connect+read pair and would have expired
+    part-way down a legitimate three-hop CDN chain, turning a working image into
+    a 504."""
+    from localm import netpolicy
+    worst_case = (netpolicy._MAX_REDIRECTS + 1) * 2 * netpolicy._DEFAULT_TIMEOUT
+    assert imgproxy._fetch_budget_s() > worst_case, (
+        f"the offload budget ({imgproxy._fetch_budget_s()}s) is below "
+        f"safe_fetch_bytes' own legitimate worst case ({worst_case}s: "
+        f"{netpolicy._MAX_REDIRECTS + 1} hops x connect+read x "
+        f"{netpolicy._DEFAULT_TIMEOUT}s), so a slow but working image would 504")

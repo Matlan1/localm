@@ -63,6 +63,14 @@ _UNRELEASED_LINKDEF = re.compile(r"^\[unreleased\]:[ \t]", re.IGNORECASE)
 _BUG_REPORT_OWN_WORK_TIMEOUT_S = 10.0
 _BUG_REPORT_SAVE_TIMEOUT_S = 2 * _BUG_REPORT_OWN_WORK_TIMEOUT_S
 
+# The optional UPLOAD is a separate, slower call and needs its own budget:
+# bugreport.upload_report defaults to a 15s socket timeout, which urllib applies
+# to the connect and to each read independently. 2x that pair, on the same
+# reasoning as the save budget above - generously past the legitimate worst case
+# so it only fires for a call genuinely wedged, never for a slow proxy that is
+# still working.
+_BUG_REPORT_UPLOAD_TIMEOUT_S = 60.0
+
 
 def _strip_unreleased(markdown: str) -> str:
     """Return *markdown* with the ``[Unreleased]`` section (and its link-reference
@@ -193,8 +201,20 @@ def register(app: FastAPI, ctx) -> None:
             title = (title_source.splitlines()[0] if title_source else "")[:120] \
                 or "user-reported issue"
             report_text = result.get("report_markdown") or path.read_text(encoding="utf-8")
+
+            # OFF THE EVENT LOOP, exactly like the save above and for a strictly
+            # worse case than the one that earned that offload. The save was
+            # moved off for a measured loop_lag of 0.67s; this is a blocking
+            # HTTPS POST to the upload proxy on upload_report's own 15s timeout,
+            # so an unreachable proxy froze every other client for up to 15s -
+            # and the offload comment explaining why that is unacceptable sat
+            # three lines above the call that did it.
+            def _upload():
+                return bugreport.upload_report(title, report_text)
+
             try:
-                up = bugreport.upload_report(title, report_text)
+                up = await run_in_threadpool_bounded(
+                    _upload, timeout=_BUG_REPORT_UPLOAD_TIMEOUT_S)
                 result["uploaded"] = True
                 if isinstance(up, dict) and up.get("url"):
                     result["issue_url"] = up["url"]
@@ -212,6 +232,27 @@ def register(app: FastAPI, ctx) -> None:
                 result["upload_stage"] = e.stage or "unknown"
                 result["upload_message"] = e.hint or e.summary
                 result["upload_error"] = format_localm_error(e)
+            except ThreadCallTimeout:
+                # The offload's own budget, not upload_report's. Reported in the
+                # SAME shape as every other upload failure rather than raised:
+                # the report is on disk, the GUI must still offer the download
+                # and the retry, and a 500 here would throw away a saved report
+                # over a send that did not go through. A failed send is never
+                # reported as success (rule 5) - it is reported as failed.
+                result["uploaded"] = False
+                result["upload_stage"] = "upload"
+                result["upload_message"] = (
+                    "The upload did not complete in time. The report is saved - "
+                    "you can retry, or download it and send it by hand.")
+                # NOT str(e): ThreadCallTimeout's message names the offloaded
+                # callable by __qualname__ ("...<locals>._upload"), which is
+                # internal detail the client has no use for - the GUI only ever
+                # reads this field to decide that the send FAILED, and shows
+                # upload_message instead. The budget and the callable are
+                # already logged at WARNING by run_in_threadpool_bounded, so
+                # nothing is hidden by keeping them out of the response.
+                result["upload_error"] = (
+                    f"the upload did not finish within {_BUG_REPORT_UPLOAD_TIMEOUT_S:.0f}s")
         return result
 
     @app.get("/api/issues", dependencies=[Depends(require_scope(scopes.CONFIG_READ))])

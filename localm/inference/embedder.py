@@ -1311,7 +1311,40 @@ class IsolatedEmbedder(VramSizingMixin):
 # against every concurrent model load. That exact inversion wedged the whole
 # server permanently on 2026-08-18 (see get_embedder, the one site that
 # needs both locks, which takes them in the legal order).
+#
+# HOLD TIME: microseconds normally, UP TO 300s during a load. get_embedder holds
+# it across an entire IsolatedEmbedder construction (process spawn + native model
+# load, _embedder_runner.LOAD_TIMEOUT_DEFAULT). So the cheap-looking readers below
+# - loaded_dim, loaded_path, last_error, gpu_fallback_reason - are cheap in WORK
+# and unbounded in WAITING, and each one's "Does NOT trigger a load" line means
+# only the first of those. NONE OF THEM MAY BE CALLED FROM AN `async def` ROUTE
+# HANDLER: on the event loop that wait is the whole server, every client and every
+# route, not one request. That is not hypothetical - it shipped, and localm's own
+# hang alarm caught it at 47s and climbing on POST /api/embedding/warmup.
+# `scripts/check_event_loop_offload.py` now fails on a new instance.
 _LOCK = threading.RLock()
+
+# Two budgets for offloading one of those readers, e.g.
+# `run_in_threadpool_bounded(loaded_dim, timeout=PEEK_TIMEOUT_S)`. Which one a
+# caller wants depends on whether it has something useful to do with a timeout,
+# and _LOCK's own shape is what makes that a real choice: it is either free (the
+# read costs microseconds) or held by a load (it costs minutes), with nothing in
+# between. So a budget expiring is not noise, it is the fact "a load is running
+# right now" arriving by another route.
+#
+#   PEEK   for a caller that can ACT on that fact. POST /api/embedding/warmup
+#          reads loaded_dim only to skip work it is about to do anyway, so a
+#          timeout means "not already warm", which is the same answer the
+#          blocking call would have given, minutes later.
+#   READ   for a caller whose ANSWER is the value. Waiting is then correct and
+#          the offload is the whole fix: one request waiting is fine, the event
+#          loop waiting is the defect. Sized past a legitimate cold load
+#          (_embedder_runner.LOAD_TIMEOUT_DEFAULT, 300s) plus the queue behind
+#          engine._LOAD_LOCK it may sit in first, so it only ever fires for a
+#          genuinely wedged lock - see run_in_threadpool_bounded's docstring on
+#          picking a budget generously above the legitimate worst case.
+PEEK_TIMEOUT_S = 2.0
+READ_TIMEOUT_S = 660.0
 _EMBEDDER: Optional[IsolatedEmbedder] = None
 # A model that is present on disk but fails to LOAD (corrupt / OOM) is cached as
 # failed so the expensive load is not retried on every call. A *missing* model is

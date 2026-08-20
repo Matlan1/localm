@@ -77,6 +77,49 @@ def test_save_does_not_run_on_the_event_loop(monkeypatch):
         "log digest or disk write would stall every other concurrent request")
 
 
+def test_upload_does_not_run_on_the_event_loop(monkeypatch):
+    """QA 2026-08-20 sweep: the optional UPLOAD had the same defect the SAVE
+    above was already fixed for, three lines below that fix's own comment.
+
+    upload_report is a blocking HTTPS POST to the proxy on a 15s socket
+    timeout, so an unreachable proxy froze every other client for up to 15s -
+    strictly worse than the 0.67s loop_lag that earned the save its offload.
+    Same oracle as that sibling test, deliberately: asyncio.get_running_loop()
+    succeeds only on the event-loop thread, so this is structural rather than
+    timed and cannot go flaky under load."""
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
+    import asyncio
+
+    from localm import bugreport
+
+    seen: dict = {}
+
+    def _probing_upload(title, body, **kw):
+        try:
+            asyncio.get_running_loop()
+            seen["on_loop"] = True      # ON the event-loop thread: the defect
+        except RuntimeError:
+            seen["on_loop"] = False     # off-loop (threadpool worker): correct
+        return {"url": "https://example.invalid/issues/1"}
+
+    monkeypatch.setattr(bugreport, "upload_report", _probing_upload)
+    app = create_app(_engine())
+    with TestClient(app) as c:
+        r = c.post(
+            "/api/bug-report",
+            json={"description": "must not stall the loop", "upload": True},
+            headers={"Authorization": f"Bearer {app.state.shell_token}"},
+        )
+    assert r.status_code == 200, r.text
+    assert r.json().get("uploaded") is True
+    assert seen.get("on_loop") is False, (
+        "file_bug_report_ep called upload_report ON the event loop: an "
+        "unreachable proxy would stall every other concurrent request for the "
+        "length of its 15s timeout - and this fires exactly when the user is "
+        "already having a problem, which is why they are filing")
+
+
 def test_a_scrub_failure_does_not_write_or_report_success(monkeypatch):
     """save_user_report SCRUBS before it saves (home paths, secrets - HON-03/
     HON-15). Moving the whole call into a worker thread via
