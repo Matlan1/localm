@@ -16,11 +16,13 @@ def _refuse_if_locked(console):
     and then refuses rather than interleaving with it, so the CLI's job here is
     to report WHO holds the collection - which the error already names - instead
     of showing a traceback for what is a normal, recoverable situation."""
+    from rich.markup import escape
+
     from ..rag import CollectionLockedError
     try:
         yield
     except CollectionLockedError as e:
-        console.print(f"[red]{e}[/red]")
+        console.print(f"[red]{escape(str(e))}[/red]")
         sys.exit(1)
 
 
@@ -42,6 +44,8 @@ def rag_group():
 def rag_list():
     """List collections with document and chunk counts."""
     from rich.console import Console
+    from rich.markup import escape
+
     from ..rag import Collection, collection_names
     console = Console()
     names = collection_names()
@@ -54,7 +58,7 @@ def rag_list():
         retrieval = "hybrid" if s["has_vectors"] else "BM25"
         marker = ("  [yellow](corrupt index - run 'localm rag repair')[/yellow]"
                   if s.get("corrupt") else "")
-        console.print(f"[cyan]{n}[/cyan]  {s['n_docs']} docs · "
+        console.print(f"[cyan]{escape(n)}[/cyan]  {s['n_docs']} docs · "
                       f"{s['n_chunks']} chunks · {retrieval}{marker}")
 
 
@@ -86,6 +90,8 @@ def rag_add(collection, paths, force, embed, url):
       localm rag add project path/to/myapp --embed
     """
     from rich.console import Console
+    from rich.markup import escape
+
     from ..rag import Collection
     from .errors import _report_add_paths_result, run_or_die
     console = Console()
@@ -105,10 +111,10 @@ def rag_add(collection, paths, force, embed, url):
         coll.create()             # a write too: takes the same lock
         result = coll.add_paths(
             list(paths), force=force, embed_fn=embed_fn, model_name=model_name,
-            on_progress=lambda t: console.print(f"  [dim]{t}[/dim]"))
+            on_progress=lambda t: console.print(f"  [dim]{escape(t)}[/dim]"))
     console.print(f"[green]{result['added']} added, {result['updated']} updated, "
                   f"{result['skipped']} unchanged[/green] - "
-                  f"{result['chunks']} chunks in '{collection}'")
+                  f"{result['chunks']} chunks in '{escape(collection)}'")
     _report_add_paths_result(result)
 
 
@@ -141,6 +147,8 @@ def rag_repair(collection, embed, url, yes):
     to recompute them explicitly.
     """
     from rich.console import Console
+    from rich.markup import escape
+
     from ..rag import Collection
     from .errors import _report_add_paths_result, run_or_die
     console = Console()
@@ -150,10 +158,10 @@ def rag_repair(collection, embed, url, yes):
         if coll.corrupt:
             # Corrupt is not the same as empty: say so instead of the misleading
             # "no indexed documents" (AGENTS rule 5 - do not hide the problem).
-            console.print(f"[yellow]'{collection}' index is corrupt and no "
+            console.print(f"[yellow]'{escape(collection)}' index is corrupt and no "
                           "document sources survived to rebuild from.[/yellow]")
         else:
-            console.print(f"[yellow]'{collection}' has no indexed documents.[/yellow]")
+            console.print(f"[yellow]'{escape(collection)}' has no indexed documents.[/yellow]")
         return
     # An `upload:<name>` doc has no server-side source - the uploaded bytes are
     # never retained (add_uploads' own docstring) - so add_paths silently drops
@@ -167,22 +175,22 @@ def rag_repair(collection, embed, url, yes):
     if not repairable:
         if coll.corrupt:
             console.print(
-                f"[yellow]'{collection}' index is corrupt, but every document "
+                f"[yellow]'{escape(collection)}' index is corrupt, but every document "
                 "here was added via upload and has no server-side source to "
                 "rebuild from - repair cannot fix it. Re-upload the affected "
                 "file(s) instead.[/yellow]")
         else:
             console.print(
-                f"[yellow]'{collection}' has no server-side document sources "
+                f"[yellow]'{escape(collection)}' has no server-side document sources "
                 "to repair (every document here was added via upload).[/yellow]")
         return
     paths = repairable
     if coll.corrupt:
-        console.print(f"[yellow]'{collection}' index was corrupt; rebuilding "
+        console.print(f"[yellow]'{escape(collection)}' index was corrupt; rebuilding "
                       f"from {len(paths)} source(s).[/yellow]")
     if upload_only:
         console.print(
-            f"[yellow]{upload_only} uploaded document(s) in '{collection}' have "
+            f"[yellow]{upload_only} uploaded document(s) in '{escape(collection)}' have "
             "no server-side source and will be left as-is.[/yellow]")
     # A repair is force=True on every doc: without --embed, every re-indexed
     # chunk gets NO vector, silently dropping a collection that currently has
@@ -192,7 +200,7 @@ def rag_repair(collection, embed, url, yes):
     # yes rather than hiding a real capability loss (AGENTS rule 5).
     if not embed and coll.stats().get("has_vectors") and not yes:
         console.print(
-            f"[yellow]'{collection}' currently has semantic (hybrid) search. "
+            f"[yellow]'{escape(collection)}' currently has semantic (hybrid) search. "
             "Repairing without --embed will REMOVE the existing embeddings for "
             "every re-indexed document (it goes back to BM25/lexical-only).[/yellow]")
         # Deliberately NOT `abort=True`: it collapses "the user answered no" and
@@ -229,10 +237,10 @@ def rag_repair(collection, embed, url, yes):
     with _refuse_if_locked(console):
         result = coll.add_paths(
             paths, force=True, embed_fn=embed_fn, model_name=model_name,
-            on_progress=lambda t: console.print(f"  [dim]{t}[/dim]"))
+            on_progress=lambda t: console.print(f"  [dim]{escape(t)}[/dim]"))
     console.print(f"[green]repaired: {result['updated']} re-indexed, "
                   f"{result['added']} added[/green] - "
-                  f"{result['chunks']} chunks in '{collection}'")
+                  f"{result['chunks']} chunks in '{escape(collection)}'")
     _report_add_paths_result(result)
 
 
@@ -269,21 +277,23 @@ def rag_resync(collection, embed, url, prune_missing):
     `localm job add sync-docs --rag --collection COLLECTION --cron "0 3 * * *"`.
     """
     from rich.console import Console
+    from rich.markup import escape
+
     from ..rag import Collection
     from .errors import _report_add_paths_result, run_or_die
     console = Console()
     coll = run_or_die(Collection, collection)
     if not coll.exists():
-        console.print(f"[red]No such collection:[/red] {collection}")
+        console.print(f"[red]No such collection:[/red] {escape(collection)}")
         sys.exit(1)
     if not coll.roots():
         # Not an error: the collection works, it just has no folder to re-walk,
         # so a re-sync can only refresh the files it already knows. Say which it
         # is rather than reporting a bare "0 added" that looks like a no-op.
         console.print(
-            f"[yellow]'{collection}' has no indexed folders recorded, so this "
+            f"[yellow]'{escape(collection)}' has no indexed folders recorded, so this "
             f"only re-checks its {len(coll.documents())} known document(s). "
-            f"Index a folder (localm rag add {collection} <folder>) to have new "
+            f"Index a folder (localm rag add {escape(collection)} <folder>) to have new "
             f"files in it picked up.[/yellow]")
     embed_fn = _cli_rag_embed_fn(url) if embed else None
     # See `rag add`: record the model any newly-embedded document used.
@@ -302,10 +312,10 @@ def rag_resync(collection, embed, url, prune_missing):
         result = coll.resync(
             embed_fn=embed_fn, policy=None, prune_missing=prune_missing,
             model_name=model_name,
-            on_progress=lambda t: console.print(f"  [dim]{t}[/dim]"))
+            on_progress=lambda t: console.print(f"  [dim]{escape(t)}[/dim]"))
     console.print(f"[green]{result['added']} added, {result['updated']} updated, "
                   f"{result['skipped']} unchanged[/green] - "
-                  f"{result['chunks']} chunks in '{collection}' over "
+                  f"{result['chunks']} chunks in '{escape(collection)}' over "
                   f"{len(result['roots'])} folder(s)")
     if result["restored"]:
         console.print(f"[green]{len(result['restored'])} previously missing "
@@ -316,22 +326,22 @@ def rag_resync(collection, embed, url, prune_missing):
             f"disk. They are flagged, NOT removed - re-run with --prune-missing "
             f"to delete them from the index:[/yellow]")
         for p in result["missing"][:10]:
-            console.print(f"  [yellow]missing:[/yellow] {p}")
+            console.print(f"  [yellow]missing:[/yellow] {escape(p)}")
     if result["pruned"]:
         console.print(f"[yellow]pruned {len(result['pruned'])} entr"
                       f"{'y' if len(result['pruned']) == 1 else 'ies'} whose file "
                       f"is gone.[/yellow]")
     for r in result["unavailable_roots"] + result["blocked_roots"]:
-        console.print(f"[yellow]skipped folder {r['root']}: {r['reason']} - "
+        console.print(f"[yellow]skipped folder {escape(r['root'])}: {escape(r['reason'])} - "
                       f"nothing under it was indexed, flagged, or removed."
                       f"[/yellow]")
     if result.get("vector_degrade_reason"):
         # The store logs this, but a CLI user does not read the debug log.
         console.print(
             f"[yellow]Semantic search is degraded: "
-            f"{result['vector_degrade_reason']}. The stored vector index was "
+            f"{escape(result['vector_degrade_reason'])}. The stored vector index was "
             f"left in place, not deleted - rebuild it with "
-            f"'localm rag repair {collection} --embed'.[/yellow]")
+            f"'localm rag repair {escape(collection)} --embed'.[/yellow]")
     _report_add_paths_result(result)
 
 
@@ -352,6 +362,7 @@ def rag_reembed(collection, url, yes):
     when they have moved or the documents arrived as uploads.
     """
     from rich.console import Console
+    from rich.markup import escape
     from localm.config import load_config
     from localm.inference.embedder import DEFAULT_EMBEDDING_MODEL
     from localm.rag.store import Collection
@@ -359,19 +370,19 @@ def rag_reembed(collection, url, yes):
     console = Console()
     coll = Collection(collection)
     if not coll.exists():
-        console.print(f"[red]No collection named '{collection}'.[/red]")
+        console.print(f"[red]No collection named '{escape(collection)}'.[/red]")
         raise SystemExit(1)
 
     n = len(coll._chunks)
     if not n:
-        console.print(f"[yellow]'{collection}' has no chunks to re-embed.[/yellow]")
+        console.print(f"[yellow]'{escape(collection)}' has no chunks to re-embed.[/yellow]")
         return
     model = str(load_config().get("embedding_model") or DEFAULT_EMBEDDING_MODEL).strip()
     was = coll.embedding_model()
     console.print(
-        f"Re-embedding [bold]{collection}[/bold]: {n} chunks"
-        + (f", built with {was}" if was else "")
-        + f" -> {model}.")
+        f"Re-embedding [bold]{escape(collection)}[/bold]: {n} chunks"
+        + (f", built with {escape(was)}" if was else "")
+        + f" -> {escape(model)}.")
     if not yes and not click.confirm("  Proceed?", default=True):
         console.print("[dim]Cancelled - nothing changed.[/dim]")
         return
@@ -379,17 +390,17 @@ def rag_reembed(collection, url, yes):
     with _refuse_if_locked(console):
         try:
             res = coll.reembed(embed_fn=_cli_rag_embed_fn(url), model_name=model,
-                               on_progress=lambda m, **_: console.print(f"[dim]{m}[/dim]"))
+                               on_progress=lambda m, **_: console.print(f"[dim]{escape(m)}[/dim]"))
         except Exception as e:
             # The previous index is intact by construction (reembed only swaps it
             # in after the whole set is computed and validated), so say so - the
             # user's next question is always "did I just lose my collection?".
-            console.print(f"[red]Re-embed failed: {e}[/red]")
+            console.print(f"[red]Re-embed failed: {escape(str(e))}[/red]")
             console.print("[dim]The previous index was left untouched.[/dim]")
             raise SystemExit(1)
     console.print(
         f"[green]Done.[/green] {res['chunks']} chunks re-embedded at "
-        f"{res['dim']} dimensions with {model}.")
+        f"{res['dim']} dimensions with {escape(model)}.")
 
 
 def _cli_rag_embed_fn(url):
@@ -469,11 +480,13 @@ def rag_query(collection, text, k, embed, url):
     query against a running localm server, matching the GUI's hybrid ranking.
     """
     from rich.console import Console
+    from rich.markup import escape
+
     from ..rag import Collection
     console = Console()
     coll = Collection(collection)
     if not coll.exists():
-        console.print(f"[red]No such collection:[/red] {collection}")
+        console.print(f"[red]No such collection:[/red] {escape(collection)}")
         sys.exit(1)
     embed_fn = _cli_rag_embed_fn(url) if embed else None
     hits = coll.query(text, k=k, embed_fn=embed_fn)
@@ -481,10 +494,10 @@ def rag_query(collection, text, k, embed, url):
         console.print("[dim](no matches)[/dim]")
         return
     for i, h in enumerate(hits, 1):
-        console.print(f"[cyan][{i}][/cyan] [bold]{h['source']}[/bold]:{h['pos']} "
+        console.print(f"[cyan][{i}][/cyan] [bold]{escape(h['source'])}[/bold]:{h['pos']} "
                       f"[dim](score {h['score']})[/dim]")
         excerpt = h["text"][:300].replace("\n", " ")
-        console.print(f"    {excerpt}\n")
+        console.print(f"    {escape(excerpt)}\n")
 
 
 
@@ -500,16 +513,18 @@ def rag_docs(collection):
     a file path, so 'rag repair'/'rag resync' cannot re-read it from disk.
     """
     from rich.console import Console
+    from rich.markup import escape
+
     from ..rag import Collection
     from .errors import run_or_die
     console = Console()
     coll = run_or_die(Collection, collection)
     if not coll.exists():
-        console.print(f"[red]No such collection:[/red] {collection}")
+        console.print(f"[red]No such collection:[/red] {escape(collection)}")
         sys.exit(1)
     docs = coll.docs()
     if not docs:
-        console.print(f"[dim]'{collection}' has no indexed documents.[/dim]")
+        console.print(f"[dim]'{escape(collection)}' has no indexed documents.[/dim]")
         return
     for d in docs:
         n = d.get("chunks", 0)
@@ -518,7 +533,7 @@ def rag_docs(collection):
             tags += "  [yellow](missing)[/yellow]"
         if d.get("uploaded"):
             tags += "  [dim](uploaded)[/dim]"
-        console.print(f"{d['path']}  [dim]{n} chunk{'s' if n != 1 else ''}[/dim]{tags}")
+        console.print(f"{escape(d['path'])}  [dim]{n} chunk{'s' if n != 1 else ''}[/dim]{tags}")
 
 
 @rag_group.command("rm-doc")
@@ -532,18 +547,20 @@ def rag_rm_doc(collection, path):
     collection instead.
     """
     from rich.console import Console
+    from rich.markup import escape
+
     from ..rag import Collection
     from .errors import run_or_die
     console = Console()
     coll = run_or_die(Collection, collection)
     if not coll.exists():
-        console.print(f"[red]No such collection:[/red] {collection}")
+        console.print(f"[red]No such collection:[/red] {escape(collection)}")
         sys.exit(1)
     with _refuse_if_locked(console):
         if coll.remove_doc(path):
-            console.print(f"[green]Removed '{path}' from '{collection}'.[/green]")
+            console.print(f"[green]Removed '{escape(path)}' from '{escape(collection)}'.[/green]")
         else:
-            console.print(f"[red]Not in this collection:[/red] {path}")
+            console.print(f"[red]Not in this collection:[/red] {escape(path)}")
             sys.exit(1)
 
 
@@ -553,6 +570,8 @@ def rag_rm_doc(collection, path):
 def rag_rm(collection, yes):
     """Delete a collection (the index only - original files are untouched)."""
     from rich.console import Console
+    from rich.markup import escape
+
     from ..rag import delete_collection
     console = Console()
     if not yes:
@@ -564,11 +583,11 @@ def rag_rm(collection, yes):
             # is sitting there, rather than looking hung for up to 30 seconds.
             if delete_collection(
                     collection,
-                    on_wait=lambda t: console.print(f"  [dim]{t}[/dim]")):
-                console.print(f"[green]Deleted '{collection}'.[/green]")
+                    on_wait=lambda t: console.print(f"  [dim]{escape(t)}[/dim]")):
+                console.print(f"[green]Deleted '{escape(collection)}'.[/green]")
             else:
-                console.print(f"[red]No such collection:[/red] {collection}")
+                console.print(f"[red]No such collection:[/red] {escape(collection)}")
                 sys.exit(1)
         except ValueError as e:
-            console.print(f"[red]{e}[/red]")
+            console.print(f"[red]{escape(str(e))}[/red]")
             sys.exit(1)
