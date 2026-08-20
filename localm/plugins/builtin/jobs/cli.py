@@ -7,7 +7,11 @@ Subcommands:
                                      [--rag --collection NAME]
                                      [--model M] [--disabled]
   localm job list
+  localm job show JOB_ID             full definition: schedule, prompt, cwd/
+                                     scope, allow_shell (everything `list`
+                                     leaves out)
   localm job run JOB_ID              run a job once now (records a result)
+  localm job results JOB_ID          past run results, newest first
   localm job remove JOB_ID
   localm job enable JOB_ID
   localm job disable JOB_ID
@@ -19,6 +23,7 @@ picks changes up on its next scheduler tick.
 from __future__ import annotations
 
 import sys
+from datetime import datetime
 
 import click
 
@@ -31,6 +36,26 @@ def main() -> None:
 def _store():
     from localm.plugins.builtin.jobs.store import JobStore
     return JobStore()
+
+
+def _fmt_schedule(schedule_kind: str, schedule) -> str:
+    """One-line schedule rendering, shared so `list` and `show` never disagree
+    on how the same job reads."""
+    return (f"every {schedule}s" if schedule_kind == "interval"
+            else f"cron '{schedule}'")
+
+
+def _fmt_ts(ts) -> str:
+    """Readable local timestamp for a detail view, or '-' when unset (never
+    run / a result missing its own timing). Seconds-precision, unlike
+    cli.keys._fmt_ts's minute-precision: a results listing can hold several
+    runs a minute apart and needs to tell them apart."""
+    if ts is None:
+        return "-"
+    try:
+        return datetime.fromtimestamp(float(ts)).strftime("%Y-%m-%d %H:%M:%S")
+    except (TypeError, ValueError, OSError):
+        return "-"
 
 
 @main.command("add")
@@ -141,12 +166,51 @@ def job_list():
         click.echo("No jobs.")
         return
     for j in jobs:
-        sched = (f"every {j.schedule}s" if j.schedule_kind == "interval"
-                 else f"cron '{j.schedule}'")
+        sched = _fmt_schedule(j.schedule_kind, j.schedule)
         state = "enabled" if j.enabled else "disabled"
         last = j.last_status or "never run"
         click.echo(f"  {j.id}  {j.name}  [{j.task_kind}, {sched}, {state}]  "
                    f"last: {last}")
+
+
+@main.command("show")
+@click.argument("job_id")
+def job_show(job_id):
+    """Show a job's full definition: schedule, prompt, cwd/scope, allow_shell -
+    everything `list`'s one-line summary leaves out."""
+    job = _store().get(job_id)
+    if job is None:
+        click.echo(f"No such job: {job_id}", err=True)
+        sys.exit(1)
+
+    # Reuse the API's own redaction rather than re-deriving it: `_job_dict`
+    # strips `owner`/`owner_is_owner_key` (internal principal bindings never
+    # meant to reach a client), so this shows exactly what `GET /api/jobs/{id}`
+    # would - the same fields the docstring above promises, no more, no less.
+    from localm.plugins.builtin.jobs.plug import _job_dict
+    d = _job_dict(job)
+
+    click.echo(f"Job {d['id']}  ({d['name']})")
+    click.echo(f"  kind:        {d['task_kind']}")
+    click.echo(f"  state:       {'enabled' if d['enabled'] else 'disabled'}")
+    click.echo(f"  schedule:    {_fmt_schedule(d['schedule_kind'], d['schedule'])}")
+    click.echo(f"  model:       {d['model'] or '(default)'}")
+    # Printed unconditionally rather than only for task_kind == 'coder'/'rag':
+    # this command exists so an operator can AUDIT a job, and hiding a field
+    # because it looks irrelevant to the current task_kind would hide the one
+    # case worth seeing - a stale/oddly-edited job carrying a value that no
+    # longer matches its kind.
+    click.echo(f"  cwd:         {d['cwd'] or '-'}")
+    click.echo(f"  scope:       {d['scope'] or '-'}")
+    click.echo(f"  collection:  {d['collection'] or '-'}")
+    click.echo(f"  allow_shell: {'yes' if d['allow_shell'] else 'no'}")
+    click.echo(f"  prompt:      {d['prompt'] or '-'}")
+    click.echo(f"  created:     {_fmt_ts(d['created'])}")
+    last_run = _fmt_ts(d['last_run'])
+    if d['last_status']:
+        last_run += f"  ({d['last_status']})"
+    click.echo(f"  last_run:    {last_run}")
+    click.echo(f"  last_result: {d['last_result_id'] or '-'}")
 
 
 @main.command("run")
@@ -167,6 +231,38 @@ def job_run(job_id):
     else:
         click.echo(f"Job failed: {result.get('error')}", err=True)
         sys.exit(1)
+
+
+@main.command("results")
+@click.argument("job_id")
+@click.option("--limit", type=int, default=None,
+              help="Show at most N results (newest first). Default: all.")
+@click.option("--offset", type=int, default=0, show_default=True,
+              help="Skip the newest N results before applying --limit.")
+def job_results(job_id, limit, offset):
+    """Show a job's past run results, newest first."""
+    store = _store()
+    if store.get(job_id) is None:
+        # Checked explicitly rather than trusting an empty result list: without
+        # this, "no such job" and "this job has never run" print identically,
+        # and only one of those means the id was wrong (diff-review-discipline
+        # item 3 - two outcomes that need different handling collapsed into one).
+        click.echo(f"No such job: {job_id}", err=True)
+        sys.exit(1)
+    results = store.list_results(job_id, limit=limit, offset=offset)
+    if not results:
+        click.echo("No results.")
+        return
+    for r in results:
+        when = _fmt_ts(r.get("finished") or r.get("started"))
+        status = r.get("status") or "?"
+        click.echo(f"[{when}] {status}  (result {r.get('result_id', '-')})")
+        is_error = status == "error"
+        text = (r.get("error") or "(error, no detail)") if is_error \
+            else (r.get("output") or "(no output)")
+        for line in text.splitlines() or [""]:
+            click.echo(f"    {line}")
+        click.echo()
 
 
 @main.command("remove")
