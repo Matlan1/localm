@@ -853,6 +853,16 @@
               </div>
             </section>
 
+            <section class="card settings-section" id="sec-instances" data-group="server" data-sec-label="Other running instances">
+              <div class="card-head"><span class="ic cat-ic cat-cyan" data-icon="folder"></span>
+                <div class="card-head-text"><h3>Other running instances</h3></div></div>
+              <div class="sub">Each <code>localm gui</code>/<code>localm serve</code> you start
+              advertises itself, so other launches can find it instead of double-loading a model.
+              This lists every one running on this machine right now (the server behind this page
+              is not shown here - use Server controls above for that).</div>
+              <div id="instances-list"></div>
+            </section>
+
             <section class="card settings-section" id="sec-privacy-data" data-group="privacy" data-sec-label="Your data">
               <div class="card-head"><span class="ic cat-ic cat-green" data-icon="memory"></span>
                 <div class="card-head-text"><h3>Your data</h3></div></div>

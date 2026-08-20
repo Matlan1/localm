@@ -1277,6 +1277,88 @@ if ($("server-shutdown")) {
   };
 }
 
+// PARITY-AUDIT-CLI-GUI-2026-08-19.md CLI-only gap #7: the GUI form of `localm
+// ps` / `localm stop <id>`. /api/instances returns every registered instance
+// (this one included, flagged `self`) so it stays a faithful `ps` equivalent
+// for any other caller; the card below filters `self` out client-side, since
+// that row is already covered by the Server controls card right above it.
+//
+// Guarded by a generation counter and written with one replaceChildren(),
+// same discipline as refreshModelsPage above: a stale in-flight fetch must
+// never overwrite a newer render, and the box must never sit empty across an
+// await (that is the exact shape of the scroll-jump bug already fixed
+// elsewhere on this page).
+let _instancesRenderGen = 0;
+
+export async function refreshInstancesCard() {
+  const box = $("instances-list");
+  if (!box) return;
+  const myGen = ++_instancesRenderGen;
+  let rows;
+  try {
+    const r = await fetch("/api/instances", { headers: authHeaders() });
+    if (myGen !== _instancesRenderGen) return;
+    if (!r.ok) { box.replaceChildren(); return; }   // e.g. a read-only key: hide, like uploads
+    const data = await r.json().catch(() => ({ instances: [] }));
+    rows = (data.instances || []).filter((i) => !i.self);
+  } catch (e) {
+    return;   // transient error - leave the card as it was
+  }
+  if (myGen !== _instancesRenderGen) return;
+
+  if (!rows.length) {
+    box.replaceChildren(emptyState("folder", "No other instances running",
+      "Only the server behind this page is running right now."));
+    return;
+  }
+
+  const table = el("table", "data-table");
+  const thead = el("thead");
+  const hr = el("tr");
+  for (const label of ["Directory", "Surface", "Address", "Status", ""]) {
+    hr.appendChild(el("th", "", label));
+  }
+  thead.appendChild(hr);
+  const tbody = el("tbody");
+  for (const inst of rows) {
+    const tr = el("tr");
+    tr.appendChild(el("td", "", inst.root_dir || ""));
+    tr.appendChild(el("td", "", inst.mode || "?"));
+    tr.appendChild(el("td", "", inst.address || ""));
+    tr.appendChild(el("td", "", inst.alive ? "live" : "no answer"));
+    const actionsTd = el("td");
+    const stopBtn = el("button", "btn-secondary btn-danger", "Stop");
+    stopBtn.onclick = () => {
+      confirmDanger("Stop this instance?",
+        `This stops the LocaLM server at ${inst.address} (serving ` +
+        `${inst.root_dir || "an unknown directory"}). Its model is unloaded ` +
+        "first when possible.",
+        "Stop", async () => {
+          stopBtn.disabled = true;
+          try {
+            const resp = await fetch(
+              `/api/instances/${encodeURIComponent(inst.instance_id)}/stop`,
+              { method: "POST", headers: authHeaders() });
+            const d = await resp.json().catch(() => ({}));
+            if (!resp.ok) throw new Error(d.detail || resp.statusText);
+            toast(`Stopped ${inst.root_dir || inst.instance_id}`);
+            refreshInstancesCard();
+          } catch (e) {
+            toast("Could not stop: " + e.message, true);
+            stopBtn.disabled = false;
+          }
+        });
+    };
+    actionsTd.appendChild(stopBtn);
+    tr.appendChild(actionsTd);
+    tbody.appendChild(tr);
+  }
+  table.appendChild(thead);
+  table.appendChild(tbody);
+  box.replaceChildren(table);
+}
+window.refreshInstancesCard = refreshInstancesCard;
+
 // R47: file a bug report from Settings. "Save report" writes an editable markdown
 // report to the data folder (safe snapshot, optional log tail - never secrets or
 // chat). "Send to maintainer" (shown only when an upload endpoint is configured,
