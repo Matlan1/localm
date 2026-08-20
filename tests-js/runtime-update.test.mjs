@@ -28,9 +28,9 @@ async function flush() {
 }
 
 const INSTALLED_VULKAN = { installed: true, backend: "vulkan", current: "b10300",
-  target: "b10361", newer: true, pinned: null };
+  target: "b10361", newer: true, pinned: null, previous: null };
 const NOTHING_INSTALLED = { installed: false, backend: null, current: null,
-  target: null, newer: false, pinned: null };
+  target: null, newer: false, pinned: null, previous: null };
 
 /** Stub the job stream so a provision completes without a real subprocess.
  *  `status` is what the job ends with. */
@@ -372,4 +372,102 @@ test("Runtime: a 409 (already running) is reported without a job stream", async 
   await flush();
   assert.match(doc.getElementById("runtime-update-status").textContent,
     /A runtime update is already running/);
+});
+
+// --------------------------------------------------------------------------- //
+//  Roll back (S12: the GUI form of `setup-llama --rollback`)                   //
+// --------------------------------------------------------------------------- //
+
+const INSTALLED_WITH_PREVIOUS = { ...INSTALLED_VULKAN, current: "b10361",
+  target: "b10361", newer: false, previous: "b10300" };
+
+test("Runtime: a recorded previous build reveals Roll back and names it", async () => {
+  const { window } = loadAppWithPages({ fetchImpl: makeFetch([
+    ["/api/runtime/check", INSTALLED_WITH_PREVIOUS],
+  ]) });
+  const doc = window.document;
+  doc.getElementById("runtime-update-check").click();
+  await flush();
+  const btn = doc.getElementById("runtime-rollback");
+  assert.equal(btn.hidden, false);
+  assert.match(doc.getElementById("runtime-rollback-status").textContent, /b10300/);
+});
+
+test("Runtime: no previous build keeps Roll back hidden", async () => {
+  const { window } = loadAppWithPages({ fetchImpl: makeFetch([
+    ["/api/runtime/check", INSTALLED_VULKAN],   // previous: null
+  ]) });
+  const doc = window.document;
+  doc.getElementById("runtime-update-check").click();
+  await flush();
+  assert.equal(doc.getElementById("runtime-rollback").hidden, true);
+  assert.equal(doc.getElementById("runtime-rollback-status").hidden, true);
+});
+
+test("Runtime: nothing installed keeps Roll back hidden even if 'previous' were set", async () => {
+  // installed:false must win over any stray previous value - there is no
+  // backend to roll back FOR.
+  const { window } = loadAppWithPages({ fetchImpl: makeFetch([
+    ["/api/runtime/check", { ...NOTHING_INSTALLED, previous: "b10300" }],
+  ]) });
+  const doc = window.document;
+  doc.getElementById("runtime-update-check").click();
+  await flush();
+  assert.equal(doc.getElementById("runtime-rollback").hidden, true);
+});
+
+test("Runtime: Roll back confirms first, names the backend and target build", async () => {
+  const bodies = [];
+  const { window } = loadAppWithPages({ fetchImpl: makeFetch([
+    ["/api/runtime/check", INSTALLED_WITH_PREVIOUS],
+    ["/api/runtime/update", (opts) => { bodies.push(opts.body); return { job_id: "j1" }; }],
+  ]) });
+  stubJobStream(window, "done", ["Rolling back the vulkan runtime to llama.cpp b10300 ..."]);
+  stubConfirm(window);
+  const doc = window.document;
+  doc.getElementById("runtime-update-check").click();
+  await flush();
+  doc.getElementById("runtime-rollback").click();
+  await flush();
+  assert.ok(window.__confirmCall, "a rollback replaces a working runtime - confirm it");
+  assert.match(window.__confirmCall.message, /vulkan/);
+  assert.match(window.__confirmCall.message, /b10300/);
+  assert.deepEqual(JSON.parse(bodies[0]), { rollback: true },
+    "no backend/tag: the button rolls back whatever is installed");
+  assert.match(doc.getElementById("runtime-update-log").textContent, /Rolling back/);
+});
+
+test("Runtime: declining the rollback confirm sends nothing", async () => {
+  const bodies = [];
+  const { window } = loadAppWithPages({ fetchImpl: makeFetch([
+    ["/api/runtime/check", INSTALLED_WITH_PREVIOUS],
+    ["/api/runtime/update", (opts) => { bodies.push(opts.body); return { job_id: "j1" }; }],
+  ]) });
+  stubJobStream(window);
+  stubConfirm(window, { accept: false });
+  const doc = window.document;
+  doc.getElementById("runtime-update-check").click();
+  await flush();
+  doc.getElementById("runtime-rollback").click();
+  await flush();
+  assert.ok(window.__confirmCall);
+  assert.deepEqual(bodies, [], "cancelling must not roll back anything");
+});
+
+test("Runtime: a failed rollback shows the job's reason and keeps the button", async () => {
+  const { window } = loadAppWithPages({ fetchImpl: makeFetch([
+    ["/api/runtime/check", INSTALLED_WITH_PREVIOUS],
+    ["/api/runtime/update", { job_id: "j2" }],
+  ]) });
+  stubJobStream(window, "failed", ["Cannot replace the installed runtime: it is in use."]);
+  stubConfirm(window);
+  const doc = window.document;
+  doc.getElementById("runtime-update-check").click();
+  await flush();
+  doc.getElementById("runtime-rollback").click();
+  await flush();
+  assert.match(doc.getElementById("runtime-update-status").textContent, /it is in use/);
+  const btn = doc.getElementById("runtime-rollback");
+  assert.equal(btn.hidden, false, "the user has to be able to retry");
+  assert.equal(btn.disabled, false);
 });

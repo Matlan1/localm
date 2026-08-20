@@ -804,7 +804,7 @@ def test_check_runtime_update_reports_not_installed_when_nothing_provisioned(
     monkeypatch.setattr(sl, "_repo_runtime_lib", lambda: tmp_path)
     assert sl.check_runtime_update() == {
         "installed": False, "backend": None, "current": None,
-        "target": None, "newer": False, "pinned": None}
+        "target": None, "newer": False, "pinned": None, "previous": None}
 
 
 def test_check_runtime_update_compares_against_the_confirmed_pin_by_default(
@@ -822,7 +822,8 @@ def test_check_runtime_update_compares_against_the_confirmed_pin_by_default(
     result = sl.check_runtime_update()
 
     assert result == {"installed": True, "backend": "vulkan", "current": "b10300",
-                      "target": sl._PINNED_TAG, "newer": True, "pinned": None}
+                      "target": sl._PINNED_TAG, "newer": True, "pinned": None,
+                      "previous": None}
 
 
 def test_check_runtime_update_compares_against_latest_when_tracking(
@@ -835,7 +836,8 @@ def test_check_runtime_update_compares_against_latest_when_tracking(
     result = sl.check_runtime_update()
 
     assert result == {"installed": True, "backend": "vulkan", "current": "b10300",
-                      "target": "b10361", "newer": True, "pinned": None}
+                      "target": "b10361", "newer": True, "pinned": None,
+                      "previous": None}
 
 
 def test_check_runtime_update_reports_up_to_date_when_matching(monkeypatch, tmp_path, home):
@@ -864,7 +866,8 @@ def test_check_runtime_update_prefers_the_pin_over_a_release_lookup(
     result = sl.check_runtime_update()
 
     assert result == {"installed": True, "backend": "vulkan", "current": "b10300",
-                      "target": "b10355", "newer": True, "pinned": "b10355"}
+                      "target": "b10355", "newer": True, "pinned": "b10355",
+                      "previous": None}
 
 
 def test_check_runtime_update_amd_rocm_compares_against_the_fixed_tag(monkeypatch, tmp_path):

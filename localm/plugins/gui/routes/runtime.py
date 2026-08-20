@@ -7,16 +7,18 @@ NATIVE runtime `localm setup-llama` provisions, not the Python source tree.
                                the currently installed backend, per
                                setup_llama.check_runtime_update().
   POST /api/runtime/update  -> dispatch `localm setup-llama --backend <b>
-                               [--tag <t>] --force --yes` as a background JOB
-                               (a real download + native load-test can take a
-                               while, same shape as /api/comfy/update); returns
-                               {"job_id"} to stream.
+                               [--tag <t> | --rollback] --force --yes` as a
+                               background JOB (a real download + native
+                               load-test can take a while, same shape as
+                               /api/comfy/update); returns {"job_id"} to stream.
 
-WHY THE POST TAKES A BACKEND AND A TAG. It used to hardcode the INSTALLED
-backend and refuse (409) when nothing was installed, which made three things
-CLI-only for a user who has only the GUI: installing a runtime in the first
-place, switching backend, and choosing a build. `localm doctor` and the GUI's
-own Settings copy both told such a user to run a command they cannot reach.
+WHY THE POST TAKES A BACKEND, A TAG AND A ROLLBACK FLAG. It used to hardcode
+the INSTALLED backend and refuse (409) when nothing was installed, which left
+a user who has only the GUI unable to reach the CLI: installing a runtime in
+the first place, switching backend, choosing a build, and going back to the
+build that worked before a bad upstream release. `localm doctor` and the
+GUI's own Settings copy both told such a user to run a command they cannot
+reach.
 Dropping that 409 also removes a trap of its own: a box whose runtime failed to
 provision had NO route back, so the one surface still working refused the one
 action that would fix it.
@@ -99,7 +101,10 @@ def register(app: FastAPI, ctx) -> None:
         The backend is the one asked for, else the one already installed, else
         'auto' - so an empty body still means exactly what it meant before this
         route took one, and a box with nothing provisioned gets the same
-        hardware detection a bare `localm setup-llama` performs.
+        hardware detection a bare `localm setup-llama` performs. `rollback`
+        pins and installs the previous build recorded for that backend
+        instead of `tag`'s explicit one; the two are mutually exclusive, same
+        as the CLI.
 
         Refuses (409) only when a runtime job is already running. A concurrent
         `localm update` re-provision or a bare terminal `setup-llama` is
@@ -122,6 +127,12 @@ def register(app: FastAPI, ctx) -> None:
             raise HTTPException(
                 400, f"{req.tag!r} is not a usable release tag. "
                      f"{setup_llama.TAG_HELP}")
+        rollback = bool(req.rollback)
+        if rollback and tag is not None:
+            raise HTTPException(
+                400, "'tag' and 'rollback' both choose a build; send only "
+                     "one. Rollback goes to the previous recorded build; "
+                     "tag names one.")
 
         # installed_backend() returns None for TWO different states - nothing
         # provisioned, and provisioned by an install too old to have written the
@@ -133,12 +144,39 @@ def register(app: FastAPI, ctx) -> None:
         # told the user nothing is recorded as installed, and there is no
         # recorded choice to override. An EXPLICIT backend always wins over both.
         installed = setup_llama.installed_backend()
-        backend = wanted or installed or "auto"
+        if rollback:
+            # "auto" is not a real backend to hold history for - it is the
+            # CLI's own hardware-detect default - so it is treated as "not
+            # named" here too, exactly like setup_llama._apply_version_request
+            # treats an explicit `--backend auto --rollback`: fall through to
+            # whatever is installed rather than looking up history for a
+            # backend called "auto" (which can never exist).
+            backend = wanted if wanted and wanted != "auto" else installed
+            if not backend:
+                raise HTTPException(
+                    400, "Rollback needs to know which backend - nothing is "
+                         "recorded as installed on this machine. Name one "
+                         "explicitly.")
+            if backend == "amd-rocm":
+                raise HTTPException(
+                    400, "The amd-rocm backend cannot be rolled back: its "
+                         "build is fixed by the localm release, not chosen "
+                         "from upstream llama.cpp releases.")
+            prev = setup_llama.previous_tag(backend)
+            if not prev:
+                raise HTTPException(
+                    400, f"No earlier llama.cpp build is recorded for the "
+                         f"{backend} backend, so there is nothing to roll "
+                         "back to.")
+        else:
+            backend = wanted or installed or "auto"
         if jobs.has_running("runtime-update"):
             raise HTTPException(409, "A runtime update is already running.")
 
         args = ["setup-llama", "--backend", backend]
-        if tag:
+        if rollback:
+            args += ["--rollback"]
+        elif tag:
             args += ["--tag", tag]
         args += ["--force", "--yes"]
         job = jobs.start_cli(

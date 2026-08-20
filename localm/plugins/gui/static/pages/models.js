@@ -1797,20 +1797,42 @@ export async function runtimeUpdateCheck() {
     if (out) { out.hidden = false; out.textContent = "Could not check: " + e.message; }
   }
   syncRuntimeApply();
+  syncRuntimeRollback();
+}
+
+/** Show or hide the Roll back button, from the last check's "previous" field -
+ *  the same shape as syncRuntimeApply, but with nothing for the user to pick:
+ *  a build is either on record to go back to, or it is not. */
+export function syncRuntimeRollback() {
+  const btn = $("runtime-rollback"), out = $("runtime-rollback-status");
+  const prev = runtimeCheckState && runtimeCheckState.installed
+    ? runtimeCheckState.previous : null;
+  if (btn) btn.hidden = !prev;
+  if (out) {
+    out.hidden = !prev;
+    if (prev) out.textContent = "A previous build is on record: " + prev + ".";
+  }
 }
 
 /** POST the provision and stream its job. *backend* and *tag* are sent only
  *  when non-empty, so an untouched card means exactly what it meant before
- *  these controls existed: re-provision whatever is installed. */
-export async function runtimeProvision(backend, tag) {
+ *  these controls existed: re-provision whatever is installed. *rollback*
+ *  sends {rollback: true} instead of a tag, for the Roll back button. */
+export async function runtimeProvision(backend, tag, rollback) {
   const out = $("runtime-update-status"), btn = $("runtime-update-apply");
+  const rbBtn = $("runtime-rollback");
   const log = $("runtime-update-log");
   if (btn) btn.disabled = true;
-  if (out) { out.hidden = false; out.textContent = "Provisioning the runtime..."; }
+  if (rbBtn) rbBtn.disabled = true;
+  if (out) {
+    out.hidden = false;
+    out.textContent = rollback ? "Rolling back the runtime..." : "Provisioning the runtime...";
+  }
   if (log) { log.style.display = ""; log.textContent = ""; }
   const body = {};
   if (backend) body.backend = backend;
-  if (tag) body.tag = tag;
+  if (rollback) body.rollback = true;
+  else if (tag) body.tag = tag;
   let jobId;
   try {
     const r = await fetch("/api/runtime/update", {
@@ -1820,8 +1842,9 @@ export async function runtimeProvision(backend, tag) {
     if (!r.ok) throw new Error(d.detail || r.statusText);
     jobId = d.job_id;
   } catch (e) {
-    if (out) out.textContent = "Update failed: " + e.message;
+    if (out) out.textContent = (rollback ? "Roll back failed: " : "Update failed: ") + e.message;
     if (btn) btn.disabled = false;
+    if (rbBtn) rbBtn.disabled = false;
     if (log) log.style.display = "none";
     return;
   }
@@ -1835,19 +1858,21 @@ export async function runtimeProvision(backend, tag) {
   });
   const ok = !!(end && end.status === "done");
   if (out) {
-    out.textContent = ok ? "Runtime provisioned." :
+    out.textContent = ok ? (rollback ? "Rolled back." : "Runtime provisioned.") :
       (tail.join(" ").trim() || "The update did not finish. See the log below.");
   }
   if (btn) btn.disabled = false;
+  if (rbBtn) rbBtn.disabled = false;
   if (ok) {
     // The request has been carried out, so clear it. Leaving "cuda" sitting in
     // the select would go on offering an action that has already happened, and
     // would keep the button lit for it forever.
     if ($("runtime-backend")) $("runtime-backend").value = "";
     if ($("runtime-tag")) $("runtime-tag").value = "";
-    runtimeUpdateCheck();   // re-checks, and syncRuntimeApply settles the button
+    runtimeUpdateCheck();   // re-checks; settles both the update and rollback buttons
   } else {
     syncRuntimeApply();     // failed: keep the retry affordance, correctly labelled
+    syncRuntimeRollback();
   }
 }
 
@@ -1876,8 +1901,22 @@ export function runtimeUpdateApply() {
   }
   runtimeProvision(wanted, tag);
 }
+/** Roll back the INSTALLED backend to its previous recorded build. Always
+ *  confirms: unlike a forward update, this is a deliberate downgrade of a
+ *  runtime that is currently working, mirroring the "switch backend" confirm
+ *  above rather than the plain "Update runtime" button, which does not. */
+export function runtimeRollbackApply() {
+  const state = runtimeCheckState;
+  if (!state || !state.installed || !state.previous) return;
+  confirmDanger(
+    "Roll back the inference runtime",
+    "This replaces the installed " + state.backend + " runtime with the " +
+    "previous build (" + state.previous + ") and restarts loading with it.",
+    "Roll back", () => runtimeProvision("", "", true));
+}
 if ($("runtime-update-check")) $("runtime-update-check").onclick = runtimeUpdateCheck;
 if ($("runtime-update-apply")) $("runtime-update-apply").onclick = runtimeUpdateApply;
+if ($("runtime-rollback")) $("runtime-rollback").onclick = runtimeRollbackApply;
 // Re-label the moment the selection changes, so the button never promises the
 // action that was current one keystroke ago.
 if ($("runtime-backend")) $("runtime-backend").onchange = syncRuntimeApply;

@@ -593,8 +593,9 @@ export async function refreshCompanion() {
 }
 
 // Scopes offered in the GUI key minter (label per scope). Privileged scopes
-// (coder:full, admin) are shown but OWNER-ONLY: the /v1/keys API refuses them for
-// a non-owner key, so a keys:admin device cannot hand out shell / admin access.
+// are shown but OWNER-ONLY: the /v1/keys API refuses them for a non-owner key
+// (create_key's allow_privileged gate), so a keys:admin device cannot hand
+// itself a broader grant through this form.
 export const KEY_SCOPES = [
   ["coder", "Coder agent - restricted: read + edit this project (no shell)"],
   ["coder:full", "Coder agent - FULL: shell + edit (owner-only, dangerous)"],
@@ -609,8 +610,21 @@ export const KEY_SCOPES = [
   ["web", "Web access"],
   ["mcp", "MCP"],
   ["config:read", "Read settings"],
+  ["config:write", "Change settings (owner-only, dangerous)"],
+  ["plugins:admin", "Enable, disable, install, or uninstall plugins (owner-only, dangerous)"],
+  ["keys:admin", "Create, scope, and revoke API keys (owner-only, dangerous)"],
   ["admin", "Full admin - owner-equivalent (dangerous, owner-only)"],
 ];
+
+// Mirrors localm.scopes.PRIVILEGED_SCOPES exactly, and is bound to it by
+// tests/test_gui_key_scope_options.py, which reads this file: a scope here
+// that drifted from the Python set would either dim a safe scope for no
+// reason or, worse, leave a real privileged one un-dimmed - the /v1/keys API
+// would still refuse the mint, but only after the confusing failed-submit
+// round trip this list exists to avoid.
+export const PRIVILEGED_KEY_SCOPES = new Set([
+  "admin", "coder:full", "keys:admin", "plugins:admin", "config:write",
+]);
 
 // Quick-select preset buttons. Presets + owner-flag come from the /v1/keys envelope
 // (so a keys:admin device that lacks config:read still sees the bundles). Clicking a
@@ -652,11 +666,12 @@ export function applyKeyPreset(want) {
 }
 
 // Disable + dim the owner-only (privileged) scopes for a non-owner key minter, so a
-// keys:admin device cannot even try to mint a coder:full / admin key (the API would
-// 403 anyway; this avoids the confusing failed-submit round-trip).
+// keys:admin device cannot even try to mint a coder:full / admin / keys:admin /
+// plugins:admin / config:write key (the API would 403 anyway; this avoids the
+// confusing failed-submit round-trip).
 export function applyOwnerGate(isOwner) {
   for (const cb of document.querySelectorAll("#key-scopes .key-scope-cb")) {
-    const ownerOnly = cb.value === "admin" || cb.value.endsWith(":full");
+    const ownerOnly = PRIVILEGED_KEY_SCOPES.has(cb.value);
     cb.disabled = ownerOnly && !isOwner;
     if (cb.disabled) cb.checked = false;
     const lab = cb.closest(".key-scope");
@@ -747,7 +762,7 @@ export async function refreshKeysPanel() {
 
   if (!scopesBox.childElementCount) {           // render the checkboxes once
     for (const [scope, label] of KEY_SCOPES) {
-      const danger = scope === "admin" || scope.endsWith(":full");
+      const danger = PRIVILEGED_KEY_SCOPES.has(scope);
       const lab = el("label", "key-scope" + (danger ? " key-scope-danger" : ""));
       const cb = document.createElement("input");
       cb.type = "checkbox"; cb.value = scope; cb.className = "key-scope-cb";

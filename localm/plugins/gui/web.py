@@ -439,21 +439,25 @@ class PullTokenRedeemRequest(BaseModel):
 
 
 class RuntimeSetupRequest(BaseModel):
-    """Body for POST /api/runtime/update - the GUI's form of the two
+    """Body for POST /api/runtime/update - the GUI's form of the three
     `localm setup-llama` options a GUI-only user could not otherwise reach.
 
-    BOTH FIELDS ARE OPTIONAL AND THE WHOLE BODY MAY BE ABSENT, deliberately:
+    ALL FIELDS ARE OPTIONAL AND THE WHOLE BODY MAY BE ABSENT, deliberately:
     an empty request still means exactly what it meant before they existed
     ("re-provision what is installed"), so no existing caller changes.
 
-    backend: one of setup_llama.BACKENDS, or None to keep the installed one
-             (and "auto" when nothing is installed - the first-provision case).
-    tag:     a release tag to install AND PIN, exactly as --tag does, or None
-             to leave the pin alone. The two words 'default' and 'latest' carry
-             the same meaning here as on the command line."""
+    backend:  one of setup_llama.BACKENDS, or None to keep the installed one
+              (and "auto" when nothing is installed - the first-provision case).
+    tag:      a release tag to install AND PIN, exactly as --tag does, or None
+              to leave the pin alone. The two words 'default' and 'latest' carry
+              the same meaning here as on the command line.
+    rollback: mirrors --rollback: pin and install the previous build recorded
+              for the chosen (or installed) backend. Mutually exclusive with
+              tag, exactly as the CLI refuses both at once."""
 
     backend: str | None = None
     tag: str | None = None
+    rollback: bool = False
 
 
 class MediaPreflightRequest(BaseModel):
