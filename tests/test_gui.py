@@ -1342,7 +1342,12 @@ class TestCompanionEndpoint:
         assert r.status_code == 200
         data = r.json()
         assert data["network_bind"] is False
-        assert set(data) == {"network_bind", "lan", "tailscale"}
+        assert data["lan"] == "192.168.1.50"
+        assert data["tailscale"] == ""
+        # gui_app never sets app.state.bind_fallback (no config-driven bind was
+        # ever attempted), so the route's getattr(..., None) or "" falls through
+        # to "" - pinning the no-fallback-reason case explicitly.
+        assert data["bind_fallback"] == ""
 
     def test_network_bind_passes_through_addresses(self, gui_app):
         app, _ = gui_app
