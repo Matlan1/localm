@@ -1929,11 +1929,17 @@ class LlamaCpp:
 
     def _can_reuse_kv(self, needed_tokens: int) -> bool:
         """True when the live context and its KV cache can serve this call."""
-        return (
-            self._ctx_ptr is not None
-            and needed_tokens <= self._ctx_capacity
-            and self._memory_api_available()
-        )
+        if (
+            self._ctx_ptr is None
+            or needed_tokens > self._ctx_capacity
+            or not self._memory_api_available()
+        ):
+            return False
+        # M-RoPE models use multi-dimensional RoPE coordinate grids that cannot be
+        # partially rewound by sequence removal; always start clean from fresh context.
+        if api.llama_model_has_mrope(self._model_ptr):
+            return False
+        return True
 
     def _prefill_with_reuse(self, prompt_tokens: List[int]) -> None:
         """
