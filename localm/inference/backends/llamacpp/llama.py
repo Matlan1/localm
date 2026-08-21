@@ -1477,6 +1477,7 @@ class LlamaCpp:
                     grammar_lazy=grammar_lazy,
                     grammar_triggers=grammar_triggers,
                 )
+                draft_sampler = api.llama_sampler_init_greedy() if self._mtp_ctx_ptr is not None else None
 
                 pos = n_prompt
                 # Why generation ended, read by callers as self.last_finish_reason.
@@ -1542,7 +1543,7 @@ class LlamaCpp:
 
                         # --- Speculative MTP drafting (if draft context is active) ---
                         draft_token = None
-                        if self._mtp_ctx_ptr is not None:
+                        if self._mtp_ctx_ptr is not None and draft_sampler is not None:
                             with self._gen_lock:
                                 if not (self._stop.is_set() or self._ctx_ptr is None):
                                     try:
@@ -1550,7 +1551,7 @@ class LlamaCpp:
                                         d_ret = api.llama_decode(self._mtp_ctx_ptr, d_batch)
                                         api.llama_batch_free(d_batch)
                                         if d_ret == 0:
-                                            draft_token = api.llama_sampler_sample(sampler, self._mtp_ctx_ptr, -1)
+                                            draft_token = api.llama_sampler_sample(draft_sampler, self._mtp_ctx_ptr, -1)
                                     except Exception:
                                         draft_token = None
 
@@ -1565,9 +1566,19 @@ class LlamaCpp:
                                     ret = api.llama_decode(self._ctx_ptr, batch)
                                     if ret == 0:
                                         # Verify if target model agrees with draft at pos
-                                        verified_token = api.llama_sampler_sample(sampler, self._ctx_ptr, 0)
+                                        verified_token = api.llama_sampler_sample(draft_sampler, self._ctx_ptr, 0)
                                         if verified_token == draft_token:
                                             # Draft MATCHED / ACCEPTED!
+                                            api.llama_sampler_accept(sampler, draft_token)
+                                            # Keep MTP context KV cache in sync with accepted draft token
+                                            if self._mtp_ctx_ptr is not None:
+                                                try:
+                                                    d_acc = self._create_batch([draft_token], pos + 1, logits_at_last_only=False)
+                                                    api.llama_decode(self._mtp_ctx_ptr, d_acc)
+                                                    api.llama_batch_free(d_acc)
+                                                except Exception:
+                                                    pass
+
                                             self._cached_tokens.extend([token, draft_token])
                                             pos += 2
                                             yield draft_token
@@ -1680,6 +1691,8 @@ class LlamaCpp:
             finally:
                 if sampler is not None:
                     api.llama_sampler_free(sampler)
+                if draft_sampler is not None:
+                    api.llama_sampler_free(draft_sampler)
 
     @staticmethod
     def _messages_with_markers(messages: List[Dict], marker: str):
