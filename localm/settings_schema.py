@@ -229,6 +229,10 @@ CORE_FIELDS: list = [
                  "allows at load: an oversized model runs some layers on CPU and "
                  "still loads instead of being refused. An explicit value is kept.",
                  group="Engine", applies=Applies.NEXT_LOAD),
+    SettingField("mtp_enabled", Widget.TOGGLE, "Multi-Token Prediction (MTP)",
+                 "Enable speculative drafting on models trained with MTP/next-n "
+                 "prediction heads for faster inference.",
+                 group="Engine", applies=Applies.NEXT_LOAD),
     # Trimmed to the 200-char budget; the consequence now leads. The removed
     # explanation, kept here because it is the WHY and a future reader will want
     # it: this is VRAM reserved beyond model weights for the KV cache's compute

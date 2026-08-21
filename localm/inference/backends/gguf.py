@@ -62,6 +62,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         n_gpu_layers_auto: bool = False,
         vram_overhead_bytes: Optional[int] = None,
         n_cpu_moe: int = 0,
+        mtp_enabled: bool = True,
     ) -> None:
         self.model_path = str(Path(model_path).resolve())
         self.mmproj_path = mmproj_path   # multimodal projection GGUF
@@ -70,6 +71,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         # Opt-in MoE expert placement: keep the expert weights of the first N
         # layers in system RAM (llama.cpp's --n-cpu-moe). 0 = off, the default.
         self.n_cpu_moe = n_cpu_moe
+        self.mtp_enabled = mtp_enabled
         self.n_ctx_max = n_ctx_max       # ceiling for dynamic growth (0/None = unlimited)
         self.n_ctx_grow = n_ctx_grow
         self.ctx_auto = ctx_auto         # derive n_ctx_max from free VRAM at load
@@ -108,6 +110,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         # used to read self._llm.supports_images directly; the real LlamaCpp
         # instance now lives in the child, so this is cached instead.
         self._supports_images = False
+        self._supports_mtp = False
         # Kept only for the VramSizingMixin test-monkeypatch surface (e.g.
         # test_kv_bytes_offload.py assigns a stub here to drive
         # _check_context_fit directly) - never set to a real object in
@@ -156,6 +159,13 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         than read live off a real LlamaCpp instance - that instance now lives
         in the isolated worker process, not here."""
         return bool(self.loaded and self._supports_images)   # property: a dead worker has no vision
+
+    @property
+    def supports_mtp(self) -> bool:
+        """True once loaded with active Multi-Token Prediction heads (MTP).
+
+        Cached from the child's load response (self._supports_mtp)."""
+        return bool(self.loaded and self._supports_mtp)
 
     # ------------------------------------------------------------------ #
     #  Load / unload                                                       #
@@ -322,6 +332,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             vram_overhead_bytes=self._VRAM_OVERHEAD_BYTES,
             gpu_split_ratios=auto_ratios,
             n_cpu_moe=self.n_cpu_moe,
+            mtp_enabled=self.mtp_enabled,
         )
         timeout = self._load_timeout_seconds()
 
@@ -346,6 +357,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
 
         self._loaded = True
         self._supports_images = bool(meta.get("supports_images"))
+        self._supports_mtp = bool(meta.get("supports_mtp"))
 
         # Remember the model's true transformer layer count (reported once by
         # the child, the only place it is knowable) so the next load and the

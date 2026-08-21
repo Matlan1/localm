@@ -813,6 +813,51 @@ def llama_memory_seq_rm(
     return bool(fn(mem, seq_id, p0, p1))
 
 
+def llama_kv_cache_seq_rm(
+    ctx: ctypes.c_void_p, seq_id: int, p0: int, p1: int
+) -> bool:
+    """Remove cached tokens of sequence *seq_id* in position range [p0, p1) for
+    the given context (works across llama_memory_seq_rm and legacy llama_kv_cache_seq_rm)."""
+    lib = load_lib()
+    if hasattr(lib, "llama_memory_seq_rm") and hasattr(lib, "llama_get_memory"):
+        mem = llama_get_memory(ctx)
+        if mem:
+            return llama_memory_seq_rm(mem, seq_id, p0, p1)
+    if hasattr(lib, "llama_kv_cache_seq_rm"):
+        fn = _bind(
+            "llama_kv_cache_seq_rm",
+            ctypes.c_bool,
+            LlamaContext,
+            ctypes.c_int32,
+            ctypes.c_int32,
+            ctypes.c_int32,
+        )
+        return bool(fn(ctx, seq_id, p0, p1))
+    return False
+
+
+def llama_model_has_mtp(model: ctypes.c_void_p) -> bool:
+    """True when the loaded GGUF model includes Multi-Token Prediction (MTP) heads."""
+    lib = load_lib()
+    if hasattr(lib, "llama_model_has_mtp"):
+        return bool(_bind("llama_model_has_mtp", ctypes.c_bool, LlamaModel)(model))
+    if has_model_meta_api():
+        arch = llama_model_meta_val_str(model, "general.architecture")
+        candidates = ["nextn_predict_layers", "general.mtp_head_count"]
+        if arch:
+            candidates.append(f"{arch}.nextn_predict_layers")
+            candidates.append(f"{arch}.mtp_head_count")
+        for key in candidates:
+            val = llama_model_meta_val_str(model, key)
+            if val is not None:
+                try:
+                    if int(val) > 0:
+                        return True
+                except (ValueError, TypeError):
+                    pass
+    return False
+
+
 # ---------------------------------------------------------------------------
 #  System info (useful for diagnostics)
 # ---------------------------------------------------------------------------

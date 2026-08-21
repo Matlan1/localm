@@ -371,8 +371,10 @@ def get_use_mmap(mp) -> bool:
 #
 # Fields that did not move (everything before n_threads, and everything from
 # cb_eval onward) are named identically in both classes, so call sites that
-# only set/read those - which is every current caller - work unchanged
-# regardless of which layout is bound.
+# enum llama_context_type
+LLAMA_CONTEXT_TYPE_DEFAULT = 0
+LLAMA_CONTEXT_TYPE_MTP     = 1
+
 
 class LlamaContextParamsV1(ctypes.Structure):
     _fields_ = [

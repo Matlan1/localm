@@ -275,6 +275,12 @@ class BaseBackend(ABC):
         """
         return False
 
+    @property
+    def supports_mtp(self) -> bool:
+        """True when this backend has active Multi-Token Prediction (MTP) heads
+        loaded for speculative drafting. Default False."""
+        return False
+
     def validate_grammar(self, grammar: Optional[str], *, lazy: bool = False) -> None:
         """Check *grammar* against this backend before generation starts.
 

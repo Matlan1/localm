@@ -12,6 +12,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Multi-Token Prediction (MTP) model support.** Models trained with MTP or
+  next-n prediction heads (such as DeepSeek-V3/R1 and Qwen MTP variants) can now
+  speculatively generate draft tokens via a dedicated MTP draft context and
+  verify them in batches on the main model graph, speeding up generation without
+  requiring a separate draft model. Configurable via `mtp_enabled` (default true)
+  with seamless fallback to standard autoregressive decoding on standard models.
 - **A collection's individual documents can now be listed and removed from the
   terminal.** `localm rag docs NAME` shows each indexed document with its chunk
   count and whether its source file has since gone missing or was added via an

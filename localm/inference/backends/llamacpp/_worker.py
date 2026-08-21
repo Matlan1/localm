@@ -50,11 +50,13 @@ class GgufWorker(VramSizingMixin):
         vram_overhead_bytes: Optional[int] = None,
         gpu_split_ratios: Optional[list] = None,
         n_cpu_moe: int = 0,
+        mtp_enabled: bool = True,
     ) -> None:
         self.model_path = model_path
         self.mmproj_path = mmproj_path
         self.n_ctx = n_ctx
         self.n_gpu_layers = n_gpu_layers
+        self.mtp_enabled = mtp_enabled
         # Already resolved by the parent - VramSizingMixin's _check_context_fit
         # reads this in preference to n_gpu_layers, matching GgufBackend's shape.
         self.effective_gpu_layers = n_gpu_layers
@@ -162,6 +164,7 @@ class GgufWorker(VramSizingMixin):
             vram_check=self._check_context_fit,   # guard context GROWTH too
             gpu_split_ratios=self.gpu_split_ratios,
             n_cpu_moe=self.n_cpu_moe,
+            mtp_enabled=self.mtp_enabled,
             verbose=False,
         )
         self._loaded = True
@@ -169,6 +172,7 @@ class GgufWorker(VramSizingMixin):
             "n_layers": getattr(self._llm, "n_layers", None),
             "kv_bytes_per_token": getattr(self._llm, "kv_bytes_per_token", 0),
             "supports_images": bool(self._llm.supports_images),
+            "supports_mtp": bool(getattr(self._llm, "supports_mtp", False)),
             "weight_placement": getattr(self._llm, "weight_placement", []),
             "moe_skip_reason": getattr(self._llm, "moe_skip_reason", None),
         }
