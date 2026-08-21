@@ -558,6 +558,7 @@ class HFRunner:
         # parent (see debuglog.child_crash_trace_path for why it is not
         # recomputed child-side) and set in _spawn(); None before the first spawn.
         self._crash_trace_path = None
+        self._shutdown_requested = False
 
     def is_alive(self) -> bool:
         return self._proc is not None and self._proc.is_alive()
@@ -654,6 +655,7 @@ class HFRunner:
         return self._death_report()[1]
 
     def _spawn(self) -> None:
+        self._shutdown_requested = False
         from localm._mp_spawn import ensure_spawn_uses_venv_python
         ensure_spawn_uses_venv_python()   # #617: avoid a renamed-launcher WinError 2
         ctx = mp.get_context("spawn")   # explicit: identical on every OS
@@ -749,9 +751,15 @@ class HFRunner:
                         first_budget if awaiting_first else _STREAM_CHUNK_TIMEOUT)
                     result = None
                     while result is None:
+                        if self._shutdown_requested:
+                            logger.debug("hf: shutdown requested, ending chat_stream")
+                            return
                         try:
                             result = self._resp_q.get(timeout=_POLL_INTERVAL)
-                        except _queue.Empty:
+                        except (ValueError, _queue.Empty):
+                            if self._shutdown_requested:
+                                logger.debug("hf: shutdown requested during queue get, ending chat_stream")
+                                return
                             if not self.is_alive():
                                 # Do NOT call this a native fault unless the
                                 # evidence says so. An uncaught Python exception
@@ -842,7 +850,7 @@ class HFRunner:
         child so its control-thread can tell this genuine, still-current
         cancel apart from a stale one left over from an already-finished
         stream - see ``_ctrl_msg_cancels_seq``."""
-        if not self.is_alive():
+        if self._shutdown_requested or not self.is_alive():
             return
         try:
             self._ctrl_q.put(("cancel_stream", seq))
@@ -929,6 +937,7 @@ class HFRunner:
         """Best-effort teardown: ask the worker to close cleanly, then kill it
         if it does not exit within *grace* seconds. Safe to call more than
         once, or when nothing is running."""
+        self._shutdown_requested = True
         proc = self._proc
         if proc is None:
             return
