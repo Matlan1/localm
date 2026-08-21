@@ -1956,10 +1956,24 @@ class LlamaCpp:
         # new prompt decodes onto stale KV at shifted positions (U-1: "sees earlier
         # text out of order"). When empty, prefix is 0, so seq_rm(0, 0, -1) drops the
         # residual and the suffix decodes cleanly from position 0.
-        if prefix < len(self._cached_tokens) or not self._cached_tokens:
+        if prefix == 0:
+            api.llama_memory_clear(mem, True)
+            if self._mtp_ctx_ptr is not None:
+                try:
+                    mem_mtp = api.llama_get_memory(self._mtp_ctx_ptr)
+                    api.llama_memory_clear(mem_mtp, True)
+                except Exception:
+                    pass
+        elif prefix < len(self._cached_tokens) or not self._cached_tokens:
             if not api.llama_memory_seq_rm(mem, 0, prefix, -1):
-                # Partial removal unsupported (e.g. SWA cache) - start over
+                # Partial removal unsupported (e.g. SWA cache / M-RoPE) - start over
                 api.llama_memory_clear(mem, True)
+                if self._mtp_ctx_ptr is not None:
+                    try:
+                        mem_mtp = api.llama_get_memory(self._mtp_ctx_ptr)
+                        api.llama_memory_clear(mem_mtp, True)
+                    except Exception:
+                        pass
                 prefix = 0
 
         suffix = prompt_tokens[prefix:]
@@ -1974,14 +1988,27 @@ class LlamaCpp:
             ret = api.llama_decode(self._ctx_ptr, batch)
             api.llama_batch_free(batch)
             if ret != 0:
-                # Cache state is now unknown - wipe it so the next call
-                # starts clean rather than trusting a half-decoded prefix
+                # If partial reuse failed (e.g. M-RoPE position mismatch or recurrent state conflict),
+                # perform a full clean prefill from position 0
                 self._cached_tokens = []
                 try:
                     api.llama_memory_clear(mem, True)
+                    if self._mtp_ctx_ptr is not None:
+                        mem_mtp = api.llama_get_memory(self._mtp_ctx_ptr)
+                        api.llama_memory_clear(mem_mtp, True)
                 except Exception:
                     pass
-                raise RuntimeError(f"llama_decode failed during prefill (code {ret})")
+                if prefix > 0:
+                    for j in range(0, len(prompt_tokens), _PREFILL_CHUNK):
+                        full_chunk = prompt_tokens[j:j + _PREFILL_CHUNK]
+                        full_batch = self._create_batch(full_chunk, j, logits_at_last_only=True)
+                        full_ret = api.llama_decode(self._ctx_ptr, full_batch)
+                        api.llama_batch_free(full_batch)
+                        if full_ret != 0:
+                            raise RuntimeError(f"llama_decode failed during prefill (code {full_ret})")
+                    break
+                else:
+                    raise RuntimeError(f"llama_decode failed during prefill (code {ret})")
 
         if self._mtp_ctx_ptr is not None:
             try:
