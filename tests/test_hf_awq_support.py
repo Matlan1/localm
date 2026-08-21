@@ -128,6 +128,8 @@ def test_native_awq_quantizer_replaces_layers():
             super().__init__()
             self.block = DummyBlock()
             self.lm_head = nn.Linear(64, 100, bias=False)
+            self.visual_layer = nn.Linear(64, 64, bias=False)
+            self.in_proj_a = nn.Linear(64, 64, bias=False)
 
     model = DummyModel()
     quantizer = quantizer_cls(DummyConfig())
@@ -135,9 +137,13 @@ def test_native_awq_quantizer_replaces_layers():
 
     assert isinstance(model.block.q_proj, NativeAWQLinear)
     assert isinstance(model.block.v_proj, NativeAWQLinear)
-    # lm_head is preserved in full precision
+    # lm_head, visual, and in_proj_a are preserved in full precision
     assert isinstance(model.lm_head, nn.Linear)
     assert not isinstance(model.lm_head, NativeAWQLinear)
+    assert isinstance(model.visual_layer, nn.Linear)
+    assert not isinstance(model.visual_layer, NativeAWQLinear)
+    assert isinstance(model.in_proj_a, nn.Linear)
+    assert not isinstance(model.in_proj_a, NativeAWQLinear)
 
 
 def test_register_native_awq_quantizer_in_transformers():

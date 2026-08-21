@@ -138,7 +138,28 @@ def _try_create_native_awq_quantizer_cls():
         def _process_model_before_weight_loading(self, model, **kwargs):
             group_size = getattr(self.quantization_config, "group_size", 128)
             bits = getattr(self.quantization_config, "bits", 4)
-            modules_to_not_convert = getattr(self, "modules_to_not_convert", None)
+            try:
+                base_skips = self.get_modules_to_not_convert(
+                    model,
+                    getattr(self.quantization_config, "modules_to_not_convert", None),
+                    getattr(model, "_keep_in_fp32_modules", None),
+                    add_default_skips=True,
+                )
+            except Exception:
+                base_skips = list(
+                    getattr(self.quantization_config, "modules_to_not_convert", None) or []
+                ) + list(getattr(model, "_keep_in_fp32_modules", None) or [])
+
+            # Multimodal and hybrid attention layers that remain unquantized in AWQ checkpoints
+            extra_skips = [
+                "visual",
+                "vision_tower",
+                "merger",
+                "multi_modal_projector",
+                "in_proj_a",
+                "in_proj_b",
+            ]
+            self.modules_to_not_convert = list(set(base_skips + extra_skips))
 
             try:
                 from transformers.pytorch_utils import Conv1D
@@ -150,8 +171,8 @@ def _try_create_native_awq_quantizer_cls():
             for module_name, module in model.named_modules():
                 if not isinstance(module, linear_classes):
                     continue
-                if modules_to_not_convert and not should_convert_module(
-                    module_name, modules_to_not_convert
+                if self.modules_to_not_convert and not should_convert_module(
+                    module_name, self.modules_to_not_convert
                 ):
                     continue
                 if module_name.endswith("lm_head"):
