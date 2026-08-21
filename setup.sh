@@ -569,7 +569,7 @@ if [ -n "$TORCHSPEC" ]; then
   # shellcheck disable=SC2086
   uv pip install -p .venv $TORCHSPEC \
     || say "  [!] torch install failed - install a matching torch manually (see docs/gpu-setup.md)."
-  uv pip install -p .venv "transformers[kernels]~=5.12" "tokenizers==0.22.2" "accelerate>=1.0" "pillow>=10.0" "soundfile>=0.12" "gptqmodel>=7.3.0" || true
+  uv pip install -p .venv "transformers[kernels]~=5.12" "tokenizers==0.22.2" "accelerate>=1.0" "pillow>=10.0" "soundfile>=0.12" || true
 else
   say ""
   say "  Skipping the PyTorch/transformers stack (not needed for GGUF chat)."

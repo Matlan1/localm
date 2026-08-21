@@ -103,14 +103,3 @@ def test_locked_torch_is_the_pinned_rocm_wheel_on_windows():
         "transformers cap in this module is still needed (it exists only because that "
         "wheel lacks torch._C._distributed_c10d)."
     )
-
-
-def test_locked_gptqmodel_is_present_in_gpu_extra():
-    """Verify gptqmodel is declared in [gpu] extra and present in uv.lock for AWQ/GPTQ models."""
-    packaging_requirements = pytest.importorskip("packaging.requirements")
-    specs = [packaging_requirements.Requirement(r) for r in _gpu_requirements()]
-    gptqmodel = [s for s in specs if s.name == "gptqmodel"]
-    assert gptqmodel, "the [gpu] extra must include gptqmodel for AWQ/GPTQ dequantization"
-
-    locked = _locked_version("gptqmodel")
-    assert locked, "gptqmodel must be present in uv.lock"

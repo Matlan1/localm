@@ -540,7 +540,7 @@ class HFWorker:
         logger.debug("hf load: loading weights")
         load_kwargs = {
             **device_map_kwargs,
-            "dtype": dtype,
+            "torch_dtype": dtype,
             "trust_remote_code": trust_remote_code,
         }
 

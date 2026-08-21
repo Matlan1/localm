@@ -18,9 +18,6 @@ permanent public record of what shipped and are never rewritten; the in-progress
   verify them in batches on the main model graph, speeding up generation without
   requiring a separate draft model. Configurable via `mtp_enabled` (default true)
   with seamless fallback to standard autoregressive decoding on standard models.
-- **AWQ and GPTQ quantized model support in HuggingFace backend.** Added `gptqmodel`
-  to the `[gpu]` optional dependencies, enabling `transformers` to load and run
-  AWQ and GPTQ quantized checkpoints out of the box without manual package installs.
 - **A collection's individual documents can now be listed and removed from the
   terminal.** `localm rag docs NAME` shows each indexed document with its chunk
   count and whether its source file has since gone missing or was added via an
