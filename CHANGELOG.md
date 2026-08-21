@@ -12,6 +12,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Native HuggingFace AWQ model loading and inference.** HuggingFace AWQ
+  (Activation-aware Weight Quantization) 4-bit checkpoints can now be loaded
+  and executed natively across Windows ROCm, Linux ROCm, NVIDIA CUDA, Intel XPU,
+  and CPU without external compiled binary dependencies (bypassing gptqmodel,
+  autoawq, and torchao incompatibilities on Windows ROCm).
 - **Multi-Token Prediction (MTP) model support.** Models trained with MTP or
   next-n prediction heads (such as DeepSeek-V3/R1 and Qwen MTP variants) can now
   speculatively generate draft tokens via a dedicated MTP draft context and

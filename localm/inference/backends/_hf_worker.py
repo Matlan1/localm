@@ -85,6 +85,8 @@ def _trust_remote_code_enabled() -> bool:
 def _require_transformers():
     try:
         import transformers
+        from localm.inference.backends.awq import register_native_awq_quantizer
+        register_native_awq_quantizer()
         return transformers
     except ImportError:
         # logger.error, not console.print - see _require_torch's identical note.
