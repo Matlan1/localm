@@ -178,9 +178,6 @@ gpu = [
     # on psutil today, so this path has been working on a transitive dep by luck;
     # declare what we actually import so an accelerate change cannot break it.
     "psutil>=7.2.2",
-    # AWQ and GPTQ quantized HuggingFace model dequantization support for
-    # AutoModelForCausalLM / transformers.
-    "gptqmodel>=7.3.0",
     "torch==2.11.0+rocm7.13.0; sys_platform == 'win32'",
     "torchvision==0.26.0+rocm7.13.0; sys_platform == 'win32'",
     "rocm; sys_platform == 'win32'",
