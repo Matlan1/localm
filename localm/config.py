@@ -225,6 +225,10 @@ DEFAULT_CONFIG: dict = {
     # being refused. An explicit n_gpu_layers (any value other than 99, e.g.
     # `-g 24`) is always honoured verbatim. Off => request full offload as-is.
     "n_gpu_layers_auto": True,
+    # Enable Multi-Token Prediction (MTP) speculative decoding for models with
+    # native MTP/next-n prediction heads (e.g. DeepSeek-V3/R1, Qwen MTP models).
+    # True = active when model supports it; False = force standard autoregressive.
+    "mtp_enabled": True,
     # VRAM (MB) that n_gpu_layers_auto/ctx_auto/_check_vram always reserve beyond
     # model weights for the GGUF backend, before deciding how many layers fit or
     # refusing outright. This is NOT a discardable safety margin - it funds the

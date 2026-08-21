@@ -851,9 +851,11 @@ class LlamaCpp:
         vram_check: Optional[Callable[[int, int], Optional[bool]]] = None,
         gpu_split_ratios: Optional[list] = None,
         n_cpu_moe: int = 0,
+        mtp_enabled: bool = True,
         **_ignored,
     ) -> None:
         self._n_ctx       = n_ctx
+        self._mtp_enabled = mtp_enabled
         # Optional preflight consulted by _prefill_fresh_context() before
         # (re)creating a BIGGER context (conversation growth, not just the
         # initial load already guarded by the caller's own preflight). Called
@@ -873,6 +875,8 @@ class LlamaCpp:
         self._verbose     = verbose
         self._model_ptr   = None   # type: ignore[assignment]
         self._ctx_ptr     = None   # type: ignore[assignment]
+        self._mtp_ctx_ptr = None   # Multi-Token Prediction draft context
+        self.supports_mtp = False  # True when MTP heads and draft context are active
         self._mmproj_path = mmproj_path
         self._mtmd        = None   # MtmdContext (vision) when an mmproj is loaded
         self._tokenizer   = None   # type: ignore[assignment]
@@ -907,6 +911,8 @@ class LlamaCpp:
         # --- load model ---
         mp = api.llama_model_default_params()
         mp.n_gpu_layers = n_gpu_layers
+        if hasattr(mp, "load_mtp") and mtp_enabled:
+            mp.load_mtp = True
         if n_gpu_layers >= 99:
             # Newer builds replaced use_mmap/use_mlock/use_direct_io with a
             # single load_mode enum at a DIFFERENT offset; set_use_mmap writes
@@ -1140,6 +1146,29 @@ class LlamaCpp:
             api.llama_free_model(self._model_ptr)
             raise RuntimeError("Failed to create llama context")
 
+        # Multi-Token Prediction (MTP) draft context initialization
+        if self._mtp_enabled:
+            try:
+                if api.llama_model_has_mtp(self._model_ptr):
+                    cp_mtp = api.llama_context_default_params()
+                    cp_mtp.n_ctx = min(n_ctx, 2048)
+                    cp_mtp.n_batch = cp_mtp.n_ctx
+                    cp_mtp.n_ubatch = cp_mtp.n_batch
+                    if hasattr(cp_mtp, "ctx_type"):
+                        from ._structs import LLAMA_CONTEXT_TYPE_MTP
+                        cp_mtp.ctx_type = LLAMA_CONTEXT_TYPE_MTP
+                    cp_mtp.offload_kqv = True
+                    if n_threads is not None:
+                        cp_mtp.n_threads = n_threads
+                        cp_mtp.n_threads_batch = n_threads
+                    with _ctx():
+                        self._mtp_ctx_ptr = api.llama_init_from_model(self._model_ptr, cp_mtp)
+                    if self._mtp_ctx_ptr:
+                        self.supports_mtp = True
+            except Exception:
+                self._mtp_ctx_ptr = None
+                self.supports_mtp = False
+
         self._tokenizer = _Tokenizer(self._model_ptr, self._ctx_ptr)
 
         # Optional in-process vision (C1): load the mmproj via mtmd so image
@@ -1274,6 +1303,12 @@ class LlamaCpp:
         if getattr(self, "_mtmd", None) is not None:
             self._mtmd.free()
             self._mtmd = None
+        if getattr(self, "_mtp_ctx_ptr", None) is not None:
+            try:
+                api.llama_free(self._mtp_ctx_ptr)
+            except Exception:
+                pass
+            self._mtp_ctx_ptr = None
         if self._ctx_ptr:
             api.llama_free(self._ctx_ptr)
             self._ctx_ptr = None
@@ -1487,52 +1522,126 @@ class LlamaCpp:
                             break   # last_finish_reason stays "stop"
 
                         yield token   # consumer runs here; an unload can interleave
+                        tokens_generated += 1
 
-                        # --- locked native region 2: feed the token back ---
-                        with self._gen_lock:
-                            if self._stop.is_set() or self._ctx_ptr is None:
-                                self.last_finish_reason = "error"
-                                break
-                            batch = self._create_batch([token], pos, logits_at_last_only=True)
-                            try:
-                                ret = api.llama_decode(self._ctx_ptr, batch)
-                                if ret != 0:
-                                    # KV cache full or error.
-                                    # Attempt mid-generation context growth if there is headroom.
-                                    current_needed = pos + 512
-                                    target = self._target_ctx(current_needed)
-                                    if target > self._ctx_capacity:
-                                        # We can grow! Re-prefill the context. Free the
-                                        # old batch (its layout matches the OLD context)
-                                        # BEFORE the re-prefill, because
-                                        # _prefill_fresh_context can raise (NULL context,
-                                        # a decode failure, an unload) and the native
-                                        # batch must not leak if it does. AUDIT: a
-                                        # llama_batch_init allocation is freed only by
-                                        # llama_batch_free.
+                        if max_new_tokens > 0 and tokens_generated >= max_new_tokens:
+                            # Final token budget reached, update KV cache bookkeeping
+                            with self._gen_lock:
+                                if not (self._stop.is_set() or self._ctx_ptr is None):
+                                    batch = self._create_batch([token], pos, logits_at_last_only=True)
+                                    try:
+                                        api.llama_decode(self._ctx_ptr, batch)
+                                        self._cached_tokens.append(token)
+                                        pos += 1
+                                    except Exception:
+                                        pass
+                                    finally:
+                                        if batch is not None:
+                                            api.llama_batch_free(batch)
+                            break
+
+                        # --- Speculative MTP drafting (if draft context is active) ---
+                        draft_token = None
+                        if self._mtp_ctx_ptr is not None:
+                            with self._gen_lock:
+                                if not (self._stop.is_set() or self._ctx_ptr is None):
+                                    try:
+                                        d_batch = self._create_batch([token], pos, logits_at_last_only=True)
+                                        d_ret = api.llama_decode(self._mtp_ctx_ptr, d_batch)
+                                        api.llama_batch_free(d_batch)
+                                        if d_ret == 0:
+                                            draft_token = api.llama_sampler_sample(sampler, self._mtp_ctx_ptr, -1)
+                                    except Exception:
+                                        draft_token = None
+
+                        if draft_token is not None and not self._tokenizer.is_eog(draft_token):
+                            # Multi-token verification on main context: decode [token, draft_token]
+                            with self._gen_lock:
+                                if self._stop.is_set() or self._ctx_ptr is None:
+                                    self.last_finish_reason = "error"
+                                    break
+                                batch = self._create_batch([token, draft_token], pos, logits_at_last_only=False)
+                                try:
+                                    ret = api.llama_decode(self._ctx_ptr, batch)
+                                    if ret == 0:
+                                        # Verify if target model agrees with draft at pos
+                                        verified_token = api.llama_sampler_sample(sampler, self._ctx_ptr, 0)
+                                        if verified_token == draft_token:
+                                            # Draft MATCHED / ACCEPTED!
+                                            self._cached_tokens.extend([token, draft_token])
+                                            pos += 2
+                                            yield draft_token
+                                            tokens_generated += 1
+                                            if self._tokenizer.is_eog(draft_token):
+                                                break
+                                            continue
+                                        else:
+                                            # Draft REJECTED: remove the speculative token slot at pos + 1
+                                            api.llama_kv_cache_seq_rm(self._ctx_ptr, 0, pos + 1, -1)
+                                            if self._mtp_ctx_ptr is not None:
+                                                api.llama_kv_cache_seq_rm(self._mtp_ctx_ptr, 0, pos + 1, -1)
+                                            self._cached_tokens.append(token)
+                                            pos += 1
+                                    else:
+                                        # Decode failed, fall back to single token
                                         api.llama_batch_free(batch)
-                                        batch = None
-                                        prompt_and_gen = self._cached_tokens.copy()
-                                        self._prefill_fresh_context(prompt_and_gen, current_needed)
-                                        # Retry decode on the newly grown context.
                                         batch = self._create_batch([token], pos, logits_at_last_only=True)
                                         ret = api.llama_decode(self._ctx_ptr, batch)
-
+                                        if ret == 0:
+                                            self._cached_tokens.append(token)
+                                            pos += 1
+                                        else:
+                                            self.last_finish_reason = "length"
+                                            self._cached_tokens = []
+                                            break
+                                finally:
+                                    if batch is not None:
+                                        api.llama_batch_free(batch)
+                        else:
+                            # --- locked native region 2: feed single token back ---
+                            with self._gen_lock:
+                                if self._stop.is_set() or self._ctx_ptr is None:
+                                    self.last_finish_reason = "error"
+                                    break
+                                batch = self._create_batch([token], pos, logits_at_last_only=True)
+                                try:
+                                    ret = api.llama_decode(self._ctx_ptr, batch)
                                     if ret != 0:
-                                        # The reply was cut short and we cannot grow further.
-                                        # The cache bookkeeping has diverged from native KV
-                                        # state, so invalidate it.
-                                        self.last_finish_reason = "length"
-                                        self._cached_tokens = []
-                                        break
-                                self._cached_tokens.append(token)
-                                pos += 1
-                                tokens_generated += 1
-                            finally:
-                                # Always release the native batch - including when
-                                # _prefill_fresh_context above raises mid-growth.
-                                if batch is not None:
-                                    api.llama_batch_free(batch)
+                                        # KV cache full or error.
+                                        # Attempt mid-generation context growth if there is headroom.
+                                        current_needed = pos + 512
+                                        target = self._target_ctx(current_needed)
+                                        if target > self._ctx_capacity:
+                                            # We can grow! Re-prefill the context. Free the
+                                            # old batch (its layout matches the OLD context)
+                                            # BEFORE the re-prefill, because
+                                            # _prefill_fresh_context can raise (NULL context,
+                                            # a decode failure, an unload) and the native
+                                            # batch must not leak if it does. AUDIT: a
+                                            # llama_batch_init allocation is freed only by
+                                            # llama_batch_free.
+                                            api.llama_batch_free(batch)
+                                            batch = None
+                                            prompt_and_gen = self._cached_tokens.copy()
+                                            self._prefill_fresh_context(prompt_and_gen, current_needed)
+                                            # Retry decode on the newly grown context.
+                                            batch = self._create_batch([token], pos, logits_at_last_only=True)
+                                            ret = api.llama_decode(self._ctx_ptr, batch)
+
+                                        if ret != 0:
+                                            # The reply was cut short and we cannot grow further.
+                                            # The cache bookkeeping has diverged from native KV
+                                            # state, so invalidate it.
+                                            self.last_finish_reason = "length"
+                                            self._cached_tokens = []
+                                            break
+                                    self._cached_tokens.append(token)
+                                    pos += 1
+                                finally:
+                                    # Always release the native batch - including when
+                                    # _prefill_fresh_context above raises mid-growth.
+                                    if batch is not None:
+                                        api.llama_batch_free(batch)
                         # Coarse heartbeat, OUTSIDE the lock above (never add
                         # work to a native-call-holding region). DEBUG, not
                         # INFO: the file-side ring-buffer precedent this whole
@@ -1861,6 +1970,16 @@ class LlamaCpp:
                     pass
                 raise RuntimeError(f"llama_decode failed during prefill (code {ret})")
 
+        if self._mtp_ctx_ptr is not None:
+            try:
+                for i in range(0, len(suffix), _PREFILL_CHUNK):
+                    chunk = suffix[i:i + _PREFILL_CHUNK]
+                    mtp_batch = self._create_batch(chunk, prefix + i, logits_at_last_only=True)
+                    api.llama_decode(self._mtp_ctx_ptr, mtp_batch)
+                    api.llama_batch_free(mtp_batch)
+            except Exception:
+                pass
+
         self._cached_tokens = list(prompt_tokens)
 
     def _prefill_fresh_context(self, prompt_tokens: List[int], needed: int) -> None:
@@ -1933,6 +2052,16 @@ class LlamaCpp:
                 self._cached_tokens = []
                 raise RuntimeError(f"llama_decode failed during prefill (code {ret})")
 
+        if self._mtp_ctx_ptr is not None:
+            try:
+                for i in range(0, len(prompt_tokens), n_batch):
+                    chunk = prompt_tokens[i:i + n_batch]
+                    mtp_batch = self._create_batch(chunk, i, logits_at_last_only=True)
+                    api.llama_decode(self._mtp_ctx_ptr, mtp_batch)
+                    api.llama_batch_free(mtp_batch)
+            except Exception:
+                pass
+
         self._cached_tokens = list(prompt_tokens)
 
     def _reset_kv_for_image(self) -> None:
@@ -1946,6 +2075,12 @@ class LlamaCpp:
             try:
                 mem = api.llama_get_memory(self._ctx_ptr)
                 api.llama_memory_clear(mem, True)
+                if self._mtp_ctx_ptr is not None:
+                    try:
+                        mem_mtp = api.llama_get_memory(self._mtp_ctx_ptr)
+                        api.llama_memory_clear(mem_mtp, True)
+                    except Exception:
+                        pass
                 return
             except Exception:
                 pass

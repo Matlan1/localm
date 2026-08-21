@@ -124,6 +124,7 @@ def create_backend(
             ctx_auto=bool(cfg.get("ctx_auto", False)),
             n_gpu_layers_auto=bool(cfg.get("n_gpu_layers_auto", True)),
             n_cpu_moe=int(cfg.get("n_cpu_moe", 0) or 0),
+            mtp_enabled=bool(cfg.get("mtp_enabled", True)),
             vram_overhead_bytes=_resolve_vram_overhead_bytes(cfg),
         )
 
@@ -307,6 +308,11 @@ class Engine:
         """True when the backend class could support images, so it is worth
         loading the model to find out. False for text-only backends (GGUF)."""
         return getattr(self._backend, "can_be_multimodal", False)
+
+    @property
+    def supports_mtp(self) -> bool:
+        """True when the loaded model has active Multi-Token Prediction (MTP) heads."""
+        return getattr(self._backend, "supports_mtp", False)
 
     def count_tokens(self, text: str) -> int:
         """
