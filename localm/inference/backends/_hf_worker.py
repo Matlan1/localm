@@ -437,6 +437,8 @@ class HFWorker:
         # Reported back to the parent proxy for its post-load status line
         # (the child cannot print it directly - see load()'s own note).
         self.resolved_device: Optional[str] = None
+        # Maximum context capacity extracted from model config at load time.
+        self.context_capacity: Optional[int] = None
         # Why the most recent chat_stream() call ended - "stop" (EOS) or
         # "length" (max_tokens exhausted first). Mirrors GgufWorker's
         # identical attribute; recomputed for real by chat_stream() below.
@@ -589,6 +591,18 @@ class HFWorker:
                     "the xpu wheel index.") from e
 
         self._loaded = True
+
+        config = getattr(self._model, "config", None)
+        self.context_capacity = None
+        if config is not None:
+            max_pos = (
+                getattr(config, "max_position_embeddings", None) or
+                getattr(config, "seq_length", None) or
+                getattr(config, "max_sequence_length", None) or
+                getattr(config, "n_positions", None)
+            )
+            if isinstance(max_pos, int) and max_pos > 0:
+                self.context_capacity = max_pos
 
         # VRAM usage after load - debug log only (see the note at the top of
         # this method for why). The final "Model loaded" user-facing line
@@ -965,6 +979,17 @@ class HFWorker:
             inputs = tokenizer(
                 text, return_tensors="pt", add_special_tokens=False
             ).to(model.device)
+
+        # Check prompt token length against context capacity before generate
+        input_ids = inputs.get("input_ids")
+        if input_ids is not None and self.context_capacity:
+            n_prompt = int(input_ids.shape[-1])
+            if n_prompt > self.context_capacity:
+                from .base import ContextCapacityExceededError
+                raise ContextCapacityExceededError(
+                    f"Conversation ({n_prompt} tokens) has outgrown the maximum "
+                    f"context window (context_capacity={self.context_capacity})."
+                )
 
         # --- Streaming generation ---
         streamer = TextIteratorStreamer(

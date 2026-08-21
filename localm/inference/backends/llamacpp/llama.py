@@ -1766,14 +1766,15 @@ class LlamaCpp:
         """
         Clamp the generation budget so prompt + reply fits under n_ctx_max.
 
-        Raises RuntimeError when the prompt alone leaves no usable room -
+        Raises ContextCapacityExceededError when the prompt alone leaves no usable room -
         the conversation has genuinely outgrown the configured ceiling.
         """
         if not self._n_ctx_max:
             return max_new_tokens
         room = self._n_ctx_max - n_prompt - 64
         if room < 32:
-            raise RuntimeError(
+            from localm.inference.backends.base import ContextCapacityExceededError
+            raise ContextCapacityExceededError(
                 f"Conversation ({n_prompt} tokens) has outgrown the maximum "
                 f"context window (n_ctx_max={self._n_ctx_max}). Start a new "
                 f"chat, or raise it:  localm config n_ctx_max 32768  "

@@ -435,6 +435,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
   a failed load or the server becoming unreachable.
 
 ### Fixed
+- **Oversized prompts exceeding model context capacity are now rejected up front
+  without crashing the inference worker or evicting loaded models.** Sending a
+  prompt whose token count exceeded `n_ctx_max` previously reached the native
+  worker process, where an uncaught context ceiling error terminated the worker
+  process (`worker exit 1`). This caused the model to be evicted from memory and
+  VRAM for all users. The `/v1/chat/completions` and `/v1/completions` routes now
+  validate prompt token length against context capacity before dispatch, returning
+  HTTP 413 Payload Too Large with clear capacity guidance, and backend workers
+  cleanly catch and marshal context overflow errors without process termination.
 - **Loading a model no longer hangs indefinitely when the graphics driver is
   busy.** Before loading, localm reads how much video memory is free. That read
   had no time limit, so on a machine where the graphics driver was wedged or
