@@ -38,6 +38,7 @@ from fastapi.security import HTTPBearer
 from localm import scopes
 from localm.bindhost import is_loopback_host as _is_loopback_host  # noqa: F401  (re-export for back-compat)
 from localm.inference.backends.base import (
+    ContextCapacityExceededError,
     EmbedBatchTooLargeError,
     GrammarUnsupportedError,
     ImageDecodeUnavailable,
@@ -4752,6 +4753,7 @@ async def _stream_sse(
     transcript=None,
     pipeline=None,
     ctx=None,
+    prompt_tokens: Optional[int] = None,
     **gen_kwargs,
 ) -> AsyncIterator[str]:
     from localm.inference.protocol import ChoiceDelta, StreamChoice
@@ -4761,29 +4763,30 @@ async def _stream_sse(
     ts = int(time.time())
     think = ThinkSplitter()   # route <think> reasoning into delta.reasoning_content (H4)
 
-    prompt_tokens = await asyncio.get_running_loop().run_in_executor(None, engine.count_messages_tokens, messages)
+    if prompt_tokens is None:
+        prompt_tokens = await asyncio.get_running_loop().run_in_executor(None, engine.count_messages_tokens, messages)
 
-    # Context-limit handling: compact_messages when close to the limit; reserve a
-    # 2048-token buffer for compaction overhead + response generation.
-    capacity = engine.context_capacity()
-    if capacity is not None and len(messages) > 3:
-        buffer = max(2048, int(capacity * 0.10))
-        if capacity - prompt_tokens < buffer:
-            from localm.inference.compact import compact_messages
-            def _gen_for_compact(ms: list[dict], max_t: int) -> str:
-                return "".join(engine.chat_stream(ms, max_tokens=max_t, temperature=0.3))
-            # Off the event loop: compact_messages runs a FULL summarization
-            # generation (engine.chat_stream holds the per-model inference lock for
-            # up to ~1024 tokens). Run directly on the single-threaded loop it would
-            # freeze every other request, the heartbeat, and the disconnect watchers
-            # for its whole duration - the same event-loop-block class #541 fixed for
-            # the GPU probes. So offload it, exactly as the real generation below is.
-            _loop = asyncio.get_running_loop()
-            new_messages, changed = await _loop.run_in_executor(
-                None, compact_messages, messages, _gen_for_compact)
-            if changed:
-                messages = list(new_messages)
-                prompt_tokens = await asyncio.get_running_loop().run_in_executor(None, engine.count_messages_tokens, messages)
+        # Context-limit handling: compact_messages when close to the limit; reserve a
+        # 2048-token buffer for compaction overhead + response generation.
+        capacity = engine.context_capacity()
+        if isinstance(capacity, int) and capacity > 0 and len(messages) > 3:
+            buffer = max(2048, int(capacity * 0.10))
+            if capacity - prompt_tokens < buffer:
+                from localm.inference.compact import compact_messages
+                def _gen_for_compact(ms: list[dict], max_t: int) -> str:
+                    return "".join(engine.chat_stream(ms, max_tokens=max_t, temperature=0.3))
+                # Off the event loop: compact_messages runs a FULL summarization
+                # generation (engine.chat_stream holds the per-model inference lock for
+                # up to ~1024 tokens). Run directly on the single-threaded loop it would
+                # freeze every other request, the heartbeat, and the disconnect watchers
+                # for its whole duration - the same event-loop-block class #541 fixed for
+                # the GPU probes. So offload it, exactly as the real generation below is.
+                _loop = asyncio.get_running_loop()
+                new_messages, changed = await _loop.run_in_executor(
+                    None, compact_messages, messages, _gen_for_compact)
+                if changed:
+                    messages = list(new_messages)
+                    prompt_tokens = await asyncio.get_running_loop().run_in_executor(None, engine.count_messages_tokens, messages)
 
     # Role announcement
     role_chunk = ChatChunk(
@@ -4947,14 +4950,16 @@ async def _stream_sse_completion(
     transcript=None,
     pipeline=None,
     ctx=None,
+    prompt_tokens: Optional[int] = None,
     **gen_kwargs,
 ) -> AsyncIterator[str]:
     chunk_id = make_chunk_id()
     ts = int(time.time())
     # *messages* arrive already inlet-transformed; count tokens on what
-    # inference sees (matches the chat path).
-    prompt_tokens = await asyncio.get_running_loop().run_in_executor(
-        None, engine.count_tokens, _messages_prompt_text(messages))
+    # inference sees (matches the chat path) if not already provided.
+    if prompt_tokens is None:
+        prompt_tokens = await asyncio.get_running_loop().run_in_executor(
+            None, engine.count_tokens, _messages_prompt_text(messages))
 
     loop = asyncio.get_running_loop()
     token_queue: asyncio.Queue = asyncio.Queue()
@@ -5240,6 +5245,7 @@ _BACKEND_ERROR_STATUS: tuple = (
     (TriggerValidatorUnavailableError, 503),
     (InvalidGrammarError, 400),
     (EmbedBatchTooLargeError, 413),
+    (ContextCapacityExceededError, 413),
 )
 
 # The same classes as a plain tuple, for use as an `except` clause. Derived from
@@ -5302,6 +5308,7 @@ async def _complete(
     pipeline=None,
     ctx=None,
     request=None,
+    prompt_tokens: Optional[int] = None,
     **gen_kwargs,
 ):
     # Call the engine's real methods directly. The previous hasattr-guarded
@@ -5309,23 +5316,24 @@ async def _complete(
     # completion tokens) let a method-less mock pass through, so a broken engine
     # returned a fabricated 200 instead of surfacing the failure (AUDIT rule 5 /
     # no facade).
-    prompt_tokens = await asyncio.get_running_loop().run_in_executor(None, engine.count_messages_tokens, messages)
-
     capacity = engine.context_capacity()
-    if capacity is not None and len(messages) > 3:
-        buffer = max(2048, int(capacity * 0.10))
-        if capacity - prompt_tokens < buffer:
-            from localm.inference.compact import compact_messages
-            def _gen_for_compact(ms: list[dict], max_t: int) -> str:
-                return "".join(engine.chat_stream(ms, max_tokens=max_t, temperature=0.3))
-            # Off the event loop (see the same fix in _stream_sse): compaction runs a
-            # full generation and must not block the single-threaded loop.
-            _loop = asyncio.get_running_loop()
-            new_messages, changed = await _loop.run_in_executor(
-                None, compact_messages, messages, _gen_for_compact)
-            if changed:
-                messages = list(new_messages)
-                prompt_tokens = await asyncio.get_running_loop().run_in_executor(None, engine.count_messages_tokens, messages)
+    if prompt_tokens is None:
+        prompt_tokens = await asyncio.get_running_loop().run_in_executor(None, engine.count_messages_tokens, messages)
+
+        if isinstance(capacity, int) and capacity > 0 and len(messages) > 3:
+            buffer = max(2048, int(capacity * 0.10))
+            if capacity - prompt_tokens < buffer:
+                from localm.inference.compact import compact_messages
+                def _gen_for_compact(ms: list[dict], max_t: int) -> str:
+                    return "".join(engine.chat_stream(ms, max_tokens=max_t, temperature=0.3))
+                # Off the event loop (see the same fix in _stream_sse): compaction runs a
+                # full generation and must not block the single-threaded loop.
+                _loop = asyncio.get_running_loop()
+                new_messages, changed = await _loop.run_in_executor(
+                    None, compact_messages, messages, _gen_for_compact)
+                if changed:
+                    messages = list(new_messages)
+                    prompt_tokens = await asyncio.get_running_loop().run_in_executor(None, engine.count_messages_tokens, messages)
 
     # Serialise inference - only one request runs at a time
     gen_error: Exception | None = None

@@ -366,6 +366,7 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
                     "supports_images": worker.supports_images,
                     "can_embed": worker.can_embed,
                     "device": worker.resolved_device,
+                    "context_capacity": getattr(worker, "context_capacity", None),
                 }))
             except Exception as e:
                 resp_q.put(("error", str(e)))
@@ -387,6 +388,11 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
                 for token in gen:
                     resp_q.put(("chunk", token))
                 resp_q.put(("done", {"finish_reason": worker.last_finish_reason}))
+            except ContextCapacityExceededError as e:
+                # An oversized prompt exceeding the model's context capacity.
+                # Raised in pure Python before native generation - the loaded model
+                # is unharmed and the worker keeps running.
+                resp_q.put(("error", str(e), "ContextCapacityExceededError"))
             except UnsupportedInputError as e:
                 # A clean, expected refusal (e.g. an image against a
                 # text-only checkpoint) - the loaded model is unharmed.
@@ -812,6 +818,9 @@ class HFRunner:
                         if tag == "InvalidGrammarError":
                             from localm.inference.backends.base import InvalidGrammarError
                             raise InvalidGrammarError(msg)
+                        if tag == "ContextCapacityExceededError":
+                            from localm.inference.backends.base import ContextCapacityExceededError
+                            raise ContextCapacityExceededError(msg)
                         raise RuntimeError(msg)
                     else:
                         raise RuntimeError(f"Unexpected response during generation: {result!r}")

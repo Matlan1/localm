@@ -144,6 +144,20 @@ class EmbedBatchTooLargeError(ValueError):
     """
 
 
+class ContextCapacityExceededError(ValueError):
+    """Raised when a prompt or conversation exceeds the model's maximum context
+    capacity or leaves insufficient room for generation under the configured ceiling.
+
+    Why this must be a ValueError subclass and carried across IPC as a typed error:
+    the GGUF and HF worker dispatch loops deliberately treat an uncaught exception
+    as an unrecoverable native fault that left the model in an unknown state (which
+    kills the worker process and evicts the loaded model from memory/VRAM). An
+    oversized prompt is checked in pure Python before native generation begins -
+    the loaded model is completely unharmed and the worker must keep serving other
+    requests without an expensive reload.
+    """
+
+
 class ModelLoadCancelled(Exception):
     """Raised by ``load()`` when an in-flight model load was deliberately aborted
     because a newer model selection superseded it (preemptive model switching).

@@ -114,6 +114,7 @@ import time
 from typing import Optional
 
 from localm.inference.backends.base import (
+    ContextCapacityExceededError,
     GrammarUnsupportedError, InvalidGrammarError, ModelLoadCancelled,
     UnsupportedInputError)
 
@@ -368,6 +369,12 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
                     "grammar_unsupported": worker.grammar_unsupported_this_call,
                     "chatml_fallback_reason": worker.chatml_fallback_reason,
                 }))
+            except ContextCapacityExceededError as e:
+                # An oversized prompt exceeding the configured context capacity or
+                # leaving insufficient generation room. Raised in pure Python before
+                # any native inference begins - the loaded model is unharmed and
+                # the worker can keep serving requests without reloading.
+                resp_q.put(("error", str(e), "ContextCapacityExceededError"))
             except GrammarUnsupportedError as e:
                 # Same shape as the InvalidGrammarError arm below, and it must be
                 # caught for the same reason: _build_sampler now REFUSES a lazy
@@ -997,6 +1004,11 @@ class ModelRunner:
                             # a perfectly healthy worker, so it must not evict a
                             # loaded model. UnsupportedInputError is a ValueError.
                             raise UnsupportedInputError(msg)
+                        if tag == "ContextCapacityExceededError":
+                            # An oversized prompt exceeding the configured context ceiling.
+                            # Deliberately NOT a RuntimeError so GgufBackend does not unload
+                            # the model. ContextCapacityExceededError is a ValueError.
+                            raise ContextCapacityExceededError(msg)
                         raise RuntimeError(msg)
                     else:
                         raise RuntimeError(f"Unexpected response during generation: {result!r}")
@@ -1096,6 +1108,8 @@ class ModelRunner:
                     # "the worker faulted" and unloads the model. That is a
                     # dangerous default to leave a gap in front of.
                     raise GrammarUnsupportedError(msg)
+                if tag == "ContextCapacityExceededError":
+                    raise ContextCapacityExceededError(msg)
                 raise RuntimeError(msg)
             raise RuntimeError(f"Unexpected response for '{name}': {result!r}")
         finally:

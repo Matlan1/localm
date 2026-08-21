@@ -157,6 +157,8 @@ class HFBackend(BaseBackend):
         # Cached from the child's load response - the real HFWorker instance
         # now lives in the child, so these can no longer be read live off it.
         self._supports_images = False
+        self.effective_ctx_max: Optional[int] = None
+        self.n_ctx_max: Optional[int] = None
         # Unloaded -> True ("unknown, load to find out"): unlike
         # supports_images, this is NOT gated on current liveness once known -
         # see the can_embed property below for why that distinction matters.
@@ -300,6 +302,8 @@ class HFBackend(BaseBackend):
         meta = self._runner.spawn_and_load(params, timeout=self._load_timeout_seconds())
         self._supports_images = bool(meta.get("supports_images"))
         self._can_embed = bool(meta.get("can_embed", True))
+        self.effective_ctx_max = meta.get("context_capacity")
+        self.n_ctx_max = self.effective_ctx_max
         self._loaded = True
         # Printed HERE, in the parent, not inside the child - mirrors
         # GgufBackend.load()'s identical choice (gguf.py's "Model loaded"

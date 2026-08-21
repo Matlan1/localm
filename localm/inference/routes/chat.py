@@ -279,6 +279,38 @@ def register(app: FastAPI, ctx) -> None:
                         503, f"Grammar validation failed: the model worker "
                         f"faulted ({e}).")
 
+            # Pre-dispatch context capacity guard: count prompt tokens on the
+            # inlet-transformed messages and run compaction if approaching ceiling.
+            # Reject oversized requests up front with HTTP 413 rather than letting
+            # the backend worker fault or crash.
+            loop = asyncio.get_running_loop()
+            prompt_tokens = await loop.run_in_executor(
+                None, engine.count_messages_tokens, messages)
+
+            capacity = engine.context_capacity()
+            if (isinstance(capacity, int) and capacity > 0
+                    and isinstance(prompt_tokens, int) and len(messages) > 3):
+                buffer = max(2048, int(capacity * 0.10))
+                if capacity - prompt_tokens < buffer:
+                    from localm.inference.compact import compact_messages
+                    def _gen_for_compact(ms: list[dict], max_t: int) -> str:
+                        return "".join(engine.chat_stream(ms, max_tokens=max_t, temperature=0.3))
+                    new_messages, changed = await loop.run_in_executor(
+                        None, compact_messages, messages, _gen_for_compact)
+                    if changed:
+                        messages = list(new_messages)
+                        prompt_tokens = await loop.run_in_executor(
+                            None, engine.count_messages_tokens, messages)
+
+            if (isinstance(capacity, int) and capacity > 0
+                    and isinstance(prompt_tokens, int) and prompt_tokens > capacity):
+                raise HTTPException(
+                    413,
+                    f"Prompt ({prompt_tokens} tokens) exceeds the model's maximum "
+                    f"context capacity ({capacity} tokens). Start a new chat, "
+                    f"or raise it:  localm config n_ctx_max 32768  (or set ctx_auto "
+                    f"true to size it from free VRAM).")
+
             if req.stream:
                 # Ownership of the pin transfers to _pin_engine, which releases it
                 # when the stream ends - do NOT unpin in the finally below.
@@ -286,7 +318,7 @@ def register(app: FastAPI, ctx) -> None:
                 return StreamingResponse(
                     _pin_engine(engine, _stream_sse(engine, messages, reported_model, sem,
                                 audit=_audit, transcript=_transcript,
-                                pipeline=pipeline, ctx=ctx, **gen_kwargs)),
+                                pipeline=pipeline, ctx=ctx, prompt_tokens=prompt_tokens, **gen_kwargs)),
                     media_type="text/event-stream",
                     headers={
                         "Cache-Control": "no-cache",
@@ -300,7 +332,7 @@ def register(app: FastAPI, ctx) -> None:
             resp = await _complete(engine, messages, reported_model, sem,
                                    audit=_audit, transcript=_transcript,
                                    pipeline=pipeline, ctx=ctx,
-                                   request=request, **gen_kwargs)
+                                   request=request, prompt_tokens=prompt_tokens, **gen_kwargs)
             for _hk, _hv in _memory_used_header(ctx).items():
                 resp.headers[_hk] = _hv          # F11: same surface, non-streaming
             return resp
@@ -619,25 +651,33 @@ def register(app: FastAPI, ctx) -> None:
                         503, f"Grammar validation failed: the model worker "
                         f"faulted ({e}).")
 
+            # Count tokens on the (possibly inlet-transformed) messages - what
+            # inference actually sees, matching the chat path. Off the event
+            # loop: count_tokens is a native tokenizer call, same reasoning as
+            # the /v1/embeddings usage count above.
+            loop = asyncio.get_running_loop()
+            prompt_tokens = await loop.run_in_executor(
+                None, engine.count_tokens, _messages_prompt_text(messages))
+
+            capacity = engine.context_capacity()
+            if (isinstance(capacity, int) and capacity > 0
+                    and isinstance(prompt_tokens, int) and prompt_tokens > capacity):
+                raise HTTPException(
+                    413,
+                    f"Prompt ({prompt_tokens} tokens) exceeds the model's maximum "
+                    f"context capacity ({capacity} tokens). Start a new chat, "
+                    f"or raise it:  localm config n_ctx_max 32768  (or set ctx_auto "
+                    f"true to size it from free VRAM).")
+
             if req.stream:
                 streaming_handoff = True
                 return StreamingResponse(
                     _pin_engine(engine, _stream_sse_completion(engine, messages, reported_model, sem,
                                            audit=_audit, transcript=_transcript,
-                                           pipeline=pipeline, ctx=ctx, **gen_kwargs)),
+                                           pipeline=pipeline, ctx=ctx, prompt_tokens=prompt_tokens, **gen_kwargs)),
                     media_type="text/event-stream",
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
                 )
-
-            # Count tokens on the (possibly inlet-transformed) messages - what
-            # inference actually sees, matching the chat path. Off the event
-            # loop: count_tokens is a native tokenizer call, same reasoning as
-            # the /v1/embeddings usage count above (this route's own
-            # docstring-equivalent - a direct call here freezes every other
-            # request for the duration of the native call).
-            loop = asyncio.get_running_loop()
-            prompt_tokens = await loop.run_in_executor(
-                None, engine.count_tokens, _messages_prompt_text(messages))
 
             gen_error: Exception | None = None
             async with sem:

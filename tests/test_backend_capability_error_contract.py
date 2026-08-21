@@ -33,6 +33,7 @@ import localm.inference.http_server as hs
 from localm.inference.backends.base import (
     GRAMMAR_UNSUPPORTED_MESSAGE,
     BaseBackend,
+    ContextCapacityExceededError,
     EmbedBatchTooLargeError,
     GrammarUnsupportedError,
     ImageDecodeUnavailable,
@@ -309,6 +310,7 @@ class TestBackendErrorStatusTable:
         (InvalidGrammarError("bad grammar"), 400),
         (TriggerValidatorUnavailableError("probe pool busy"), 503),
         (EmbedBatchTooLargeError("too many"), 413),
+        (ContextCapacityExceededError("too long"), 413),
     ])
     def test_each_family_maps_to_its_status(self, exc, status):
         assert backend_error_status(exc) == status
