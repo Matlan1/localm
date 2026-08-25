@@ -1,12 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Tests for the global child-agent concurrency gate (localm.plugins.coder.child_limit).
-
-The gate exists so that two independent child-spawning features cannot each admit
-their own 2 children and jointly run 4 on a box whose ceiling is about 2 resident
-models. The tests that matter here are therefore the ATOMICITY one (two spawns
-racing for one free slot) and the IDEMPOTENT-RELEASE one (a double release must not
-silently widen the cap) - both are invisible in ordinary single-threaded use.
-"""
+"""Tests for the global child-agent concurrency gate (localm.plugins.coder.child_limit)."""
 
 from __future__ import annotations
 
@@ -72,12 +65,7 @@ def test_holders_names_the_running_children(gate):
 
 
 def test_concurrent_acquires_never_exceed_the_cap(gate):
-    """THE RACE TEST. 24 threads start simultaneously against a 2-slot gate.
-
-    A non-atomic check-then-insert lets several threads all observe a free slot
-    and all admit. Nothing about ordinary sequential use would reveal that, which
-    is exactly why this test exists.
-    """
+    """THE RACE TEST. 24 threads start simultaneously against a 2-slot gate."""
     n_threads = 24
     barrier = threading.Barrier(n_threads)
     won: list[cl.Token] = []
@@ -136,12 +124,7 @@ def test_contended_slot_has_exactly_one_winner(gate):
 
 
 def test_no_blocking_acquire_is_exposed():
-    """The silent queue must be impossible to reintroduce by accident.
-
-    A blocking acquire would turn "budget full" into an invisible wait, defeating
-    a background-spawn caller and hanging a caller that meant to reject. The module
-    deliberately offers no such entry point.
-    """
+    """The silent queue must be impossible to reintroduce by accident."""
     assert not hasattr(cl, "acquire"), "a blocking acquire() was added"
     assert not hasattr(cl.ChildLimit, "acquire"), "a blocking acquire() was added"
 

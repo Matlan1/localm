@@ -1,37 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The shared outbound-HTTPS opener (localm/http_ssl.py) and a regression guard
-that every outbound client actually goes through it.
-
-Background: setup-llama, `localm update` (proxy check + release-CDN download), the
-issues list, and the bug-report upload all did raw urllib HTTPS with no explicit SSL
-context, so they verified against whatever the machine's OS cert store happened to
-have cached. Python's OpenSSL on Windows does not keep that store current, so a
-fresh box failed every call with CERTIFICATE_VERIFY_FAILED (#765). The fix then
-hardcoded a certifi-only context - which verifies fine on a fresh box, but a
-corporate/security-product TLS-intercepting proxy's re-signed certificate is not in
-certifi's public root list either, so that DIDN'T help a managed machine behind one
-(#825 - confirmed live: uv's own equivalent bundled-root default fails identically
-on such a network with "invalid peer certificate: UnknownIssuer").
-
-verified_urlopen() tries the platform's NATIVE certificate store first (the same
-trust a browser, or an IT-provisioned proxy root, already has - so a managed
-machine behind a proxy like that verifies on the very first attempt, nothing ever
-shown) and falls back to certifi ONLY on a certificate-verification failure
-specifically (rescuing the original #765 fresh-Windows case). These tests lock in
-that ordering, that a non-certificate failure never triggers the fallback, and that
-a certificate failure surviving both attempts is never silently swallowed.
-(setup-llama's own two call sites are guarded in tests/test_setup_llama_backends.py.)
-
-They also lock the WIRING of the redirect guard - that HttpsOnlyRedirect is
-installed even when the caller passes no handlers, and that a caller's own
-redirect policy replaces it rather than joining it. What the guard DOES is
-proven over real sockets in tests/test_https_downgrade_redirect.py; asserting it
-here would only re-test the class, not the fact that anything installs it.
-
-NOTE THE SEAM: verified_urlopen no longer calls urllib.request.urlopen (it has to
-build an opener to install a handler), so patching urlopen no longer intercepts
-anything and lets the real network through. Use patch_https_transport.
-"""
+"""The shared outbound-HTTPS opener (localm/http_ssl.py) and a regression guard that every outbound client actually goes through it."""
 from __future__ import annotations
 
 import ssl
@@ -47,8 +15,7 @@ from tests._fake_https import patch_https_transport
 
 
 class _Resp:
-    """A minimal urlopen/opener response: one-shot body, works for a single
-    ``read()`` (proxy/bugreport) and for a chunked ``read(n)`` loop (updater)."""
+    """A minimal urlopen/opener response: one-shot body, works for a single ``read()`` (proxy/bugreport) and for a chunked ``read(n)`` loop (updater)."""
     def __init__(self, status=200, body=b"{}"):
         self.status = status
         self._body = body

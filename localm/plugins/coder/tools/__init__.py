@@ -1,13 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Tool implementations for the coding agent.
-
-This package replaces the former single-file ``localm/plugins/coder/tools.py``.
-It is split by concern (base primitives, file ops, shell, git, env, web,
-sub-agents, media, and the registry) but keeps the exact public surface the rest
-of the coder and the test suite import from ``localm.plugins.coder.tools``:
-``ToolResult``, ``ToolDef``, ``TOOL_REGISTRY``, ``SAFE_RESTRICTED_TOOLS``, the
-shared helpers, and every ``tool_*`` function. ``TOOL_REGISTRY`` is re-exported by
-name (the same dict mcp/plugin/skill registration mutates in place)."""
+"""Tool implementations for the coding agent."""
 
 # Preserve the monkeypatch surface tests rely on: the single-file tools.py exposed
 # ``subprocess`` and ``os`` as module attributes, so tests patch

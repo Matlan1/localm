@@ -1,10 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""dest_dir/register routing added to _pull_gguf_file() / pull_model() (gap B):
-a download routed to a ComfyUI models subfolder must land there (not
-MODELS_DIR), skip localm's own registry when asked, still run the traversal
-guard against the REAL destination, and refuse rather than silently fall back
-to MODELS_DIR when dest_dir is paired with a spec that doesn't dispatch to the
-single-file backend."""
+"""dest_dir/register routing added to _pull_gguf_file() / pull_model() (gap B): a download routed to a ComfyUI models subfolder must land there (not MODELS_DIR), skip localm's own registry when asked, still run the traversal guard against the REAL destination, and refuse rather than silently fall back..."""
 
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -16,8 +11,7 @@ from localm import model_manager as mm
 
 @pytest.fixture()
 def fake_registry(tmp_path, monkeypatch):
-    """In-memory registry + temp MODELS_DIR wired into model_manager (mirrors
-    test_model_manager_phase3.py's fixture of the same name)."""
+    """In-memory registry + temp MODELS_DIR wired into model_manager (mirrors test_model_manager_phase3.py's fixture of the same name)."""
     store: dict = {}
     models_dir = tmp_path / "models"
     models_dir.mkdir()
@@ -114,9 +108,7 @@ class TestPullGgufFileDestDir:
 
     def test_already_downloaded_short_circuit_uses_dest_dir(
             self, fake_registry, tmp_path, monkeypatch):
-        """The 'already downloaded' fast path must check dest_dir, not
-        MODELS_DIR, or a file already routed to a ComfyUI folder would look
-        'missing' forever and re-download every time."""
+        """The 'already downloaded' fast path must check dest_dir, not MODELS_DIR, or a file already routed to a ComfyUI folder would look 'missing' forever and re-download every time."""
         store, _ = fake_registry
         dest_dir = tmp_path / "comfyui-models" / "clip"
         dest_dir.mkdir(parents=True)
@@ -184,9 +176,7 @@ _DIGEST = "ab" * 32
 class TestDestDirDuplicateSkip:
     def test_dest_dir_download_happens_even_when_the_sha256_is_registered(
             self, fake_registry, tmp_path, monkeypatch):
-        """The file must physically land in dest_dir. Reporting success without
-        writing it is an AGENTS.md rule 5 violation (a step reporting success
-        after not doing the work)."""
+        """The file must physically land in dest_dir."""
         store, models_dir = fake_registry
         # The very same bytes are already registered in localm's own registry...
         already = models_dir / "flux1-dev-Q8_0.gguf"
@@ -209,9 +199,7 @@ class TestDestDirDuplicateSkip:
 
     def test_dest_dir_pull_does_not_alias_into_the_registry(
             self, fake_registry, tmp_path, monkeypatch):
-        """A dest_dir pull is explicitly register=False. Aliasing the dup (the
-        other half of the dup branch) would write localm's registry for a file
-        the caller asked to keep out of it, and STILL not deliver it."""
+        """A dest_dir pull is explicitly register=False."""
         store, models_dir = fake_registry
         already = models_dir / "clip_l.safetensors"
         already.write_bytes(b"fake-model-bytes")
@@ -231,10 +219,7 @@ class TestDestDirDuplicateSkip:
 
     def test_a_normal_pull_still_skips_a_known_duplicate(
             self, fake_registry, tmp_path, monkeypatch):
-        """Negative case: with NO dest_dir the destination IS localm's models dir,
-        so an already-registered identical file is a real duplicate and the
-        no-TTY skip must still apply. The fix must be scoped to dest_dir, not
-        disable dedup for every pull."""
+        """Negative case: with NO dest_dir the destination IS localm's models dir, so an already-registered identical file is a real duplicate and the no-TTY skip must still apply."""
         store, models_dir = fake_registry
         already = models_dir / "other.gguf"
         already.write_bytes(b"fake-model-bytes")

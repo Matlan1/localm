@@ -1,12 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Regression tests for the 2026-07-01 setup/UX backlog cluster.
-
-  NEW-J           - console-script venv guard (localm / localcoder)
-  REC-DEBUGENV    - LOCALM_DEBUG=1 must actually open the debug log file
-  REC-LLAMALIB-SILENT - a bad LLAMA_CPP_LIB override warns instead of silent fallback
-  REC-RUNTIME-BROKEN  - a broken (installed but unimportable-as-expected)
-                        localm_llama_runtime warns instead of silent fallback
-"""
+"""Regression tests for the 2026-07-01 setup/UX backlog cluster."""
 
 import logging
 import sys

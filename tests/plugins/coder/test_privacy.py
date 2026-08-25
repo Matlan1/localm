@@ -1,15 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""
-Tests for localm.plugins.coder.privacy
-
-Covers:
-  - suppress_readline_history(): no crash when readline unavailable; when
-    available, sets history length to 0 and clears history
-  - subprocess_privacy_env(): returns dict with expected vars zeroed
-  - warn_external_provider(): calls console.print with expected text
-  - tool_run_shell with _privacy=True: subprocess receives zeroed HISTFILE
-  - spawn_agent mode inheritance (via agent._execute_tool injection)
-"""
+"""Tests for localm.plugins.coder.privacy."""
 
 import os
 import sys
@@ -218,15 +208,7 @@ class TestScrubHistoryFile:
 
 
 class TestScrubHistoryFileFailureWarnings:
-    """A failure to scrub a history file must always be surfaced, on both the
-    read and the write path - a silent failure here means secret-bearing
-    command lines stay on disk with no indication anything went wrong
-    (AGENTS.md rule 5: privacy/security steps must never fail quietly).
-
-    The write-failure branch already warns (localm/plugins/coder/privacy.py
-    ~204-213); the read-failure branch (~171-174) did not - it returned False
-    with zero output, an asymmetry a prior "codebase honesty pass" (commit
-    5296e13) fixed on the write side and missed on the read side."""
+    """A failure to scrub a history file must always be surfaced, on both the read and the write path - a silent failure here means secret-bearing command lines stay on disk with no indication anything went wrong (AGENTS.md rule 5: privacy/security steps must never fail quietly)."""
 
     _PATCH = "localm.plugins.coder.privacy.console"
 

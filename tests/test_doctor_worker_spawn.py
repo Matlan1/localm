@@ -1,11 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""#617 follow-up: `localm doctor` must actually verify the isolated worker
-spawn (multiprocessing.get_context("spawn")) that every GGUF model load and
-the voice/STT engine depend on - not just that a plain subprocess can run the
-native library. The reporter's own `doctor` run showed everything green while
-every model load failed with "[WinError 2]": the ABI/GPU probes use a plain
-subprocess.Popen, a different code path from the one that actually broke.
-"""
+"""#617 follow-up: `localm doctor` must actually verify the isolated worker spawn (multiprocessing.get_context('spawn')) that every GGUF model load and the voice/STT engine depend on - not just that a plain subprocess can run the native library."""
 
 from __future__ import annotations
 
@@ -16,9 +10,7 @@ _FAIL = "✗"
 
 
 def test_worker_spawn_check_passes_for_a_real_spawn(cli_runner):
-    """A REAL spawn on this (unaffected) machine must report OK - this is the
-    exact mechanism ModelRunner/voice._spawn_worker use, exercised for real,
-    not mocked."""
+    """A REAL spawn on this (unaffected) machine must report OK - this is the exact mechanism ModelRunner/voice._spawn_worker use, exercised for real, not mocked."""
     out = cli_runner.invoke(cli.doctor, []).output
     assert "background worker spawn" in out
     line = next(ln for ln in out.splitlines() if "background worker spawn" in ln)
@@ -27,9 +19,7 @@ def test_worker_spawn_check_passes_for_a_real_spawn(cli_runner):
 
 
 def test_worker_spawn_check_reports_failure_when_spawn_is_broken(monkeypatch):
-    """Simulates the #617 failure mode (the child process can never start) and
-    confirms doctor surfaces it as a FAILED check with actionable guidance,
-    rather than silently passing like the existing ABI/GPU probes did."""
+    """Simulates the #617 failure mode (the child process can never start) and confirms doctor surfaces it as a FAILED check with actionable guidance, rather than silently passing like the existing ABI/GPU probes did."""
     # localm.cli.__init__ re-exports `doctor` as the click Command itself
     # (`doctor = _doctor.doctor`), shadowing the submodule name - go through
     # importlib to get the actual module, not that Command object.

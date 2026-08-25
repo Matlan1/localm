@@ -1,13 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""FastAPI auto-docs (/docs, /redoc, /openapi.json) are served only on a loopback
-bind. On a network bind they 404 so an unauthenticated remote client cannot
-enumerate the API surface (paths + schemas). The decision keys off the CONFIGURED
-bind host (app.state.bind_host), never the request peer - portmux relays every
-connection through loopback, so the peer always looks like 127.0.0.1.
-
-(Pentest 2026-07-03 LOW-1: the docs were previously served unauthenticated on a
-network bind.)
-"""
+"""FastAPI auto-docs (/docs, /redoc, /openapi.json) are served only on a loopback bind."""
 
 import pytest
 from fastapi.testclient import TestClient

@@ -1,21 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""REAL mid-stream cancel test for the HuggingFace backend's isolated worker.
-
-No mocks: a tiny ungated causal LM (sshleifer/tiny-gpt2, the same model
-tests/test_hf_grammar_integration.py and test_hf_embed_integration.py already
-use for real-model integration tests) is loaded for real through HFBackend,
-then a live generation is cancelled mid-stream exactly the way a client
-disconnect does (gen.close()). This proves the actual regression this whole
-feature is about: the worker process must stay alive and keep serving the
-SAME os process id, not respawn and reload - see _hf_runner.py's module
-docstring for the mechanism (a StoppingCriteria-based cooperative cancel
-relayed over ctrl_q).
-
-Marked @integration so the default `pytest -m "not integration"` skips it (it
-downloads ~2.5 MB on first run). A mock here would be theater - the whole
-point is that the worker's actual OS process identity survives a real
-cancel, which no fake child/process can demonstrate.
-"""
+"""REAL mid-stream cancel test for the HuggingFace backend's isolated worker."""
 
 from __future__ import annotations
 
@@ -72,13 +56,7 @@ def hf_backend(tmp_path_factory):
 
 
 def test_midstream_close_keeps_the_same_worker_process_alive(hf_backend):
-    """Close the REAL generator chain mid-generation and prove the worker is
-    NOT killed and NOT respawned: the same OS process id must still be
-    alive, and a follow-up request must be served by it, not by a fresh
-    reload. This is the regression this feature exists to fix - before it,
-    every mid-stream disconnect force-killed the worker (HFRunner.chat_stream
-    called shutdown(grace=0) directly), so this assertion would have failed
-    with the worker dead and a new pid on the follow-up request."""
+    """Close the REAL generator chain mid-generation and prove the worker is NOT killed and NOT respawned: the same OS process id must still be alive, and a follow-up request must be served by it, not by a fresh reload."""
     be = hf_backend
     pid_before = be._runner._proc.pid
 
@@ -118,11 +96,7 @@ def test_midstream_close_keeps_the_same_worker_process_alive(hf_backend):
 
 
 def test_midstream_close_does_not_disable_a_later_generation_after_close(hf_backend):
-    """A second, independent cancel/close on the same backend must behave
-    the same way - proves the cancel path is repeatable, not a one-shot
-    fix-up that only works the first time (e.g. a stale cancel_event that
-    never gets cleared would fire immediately on the NEXT stream and cut it
-    to zero tokens)."""
+    """A second, independent cancel/close on the same backend must behave the same way - proves the cancel path is repeatable, not a one-shot fix-up that only works the first time (e.g. a stale cancel_event that never gets cleared would fire immediately on the NEXT stream and cut it to zero tokens)."""
     be = hf_backend
     pid_before = be._runner._proc.pid
 

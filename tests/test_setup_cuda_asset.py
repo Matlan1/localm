@@ -1,14 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""NEW-CUDADLL: the CUDA build matcher must not pick the cudart runtime zip.
-
-The build and the CUDA runtime share the "...bin-win-cuda-12.x..." name fragment
-(the runtime is cudart-llama-bin-win-cuda-12.4-x64.zip) and the runtime is often
-listed FIRST by the GitHub API. A plain substring match therefore resolved the
-BUILD to the runtime-only zip (CUDA DLLs, no llama.dll), so provisioning aborted
-with "the archive did not contain llama.dll" on every cuda pick. Both build-
-resolution paths (_resolve_backend_url and _resolve_cuda_pair) must exclude
-cudart from the build match.
-"""
+"""NEW-CUDADLL: the CUDA build matcher must not pick the cudart runtime zip."""
 
 import io
 import json

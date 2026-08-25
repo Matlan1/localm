@@ -1,22 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The tmp_path disk guard must actually FIRE, and must not false-positive.
-
-conftest's `_no_giant_tmp_files` exists because `truncate()` is NOT sparse on
-Windows/NTFS - it allocates the blocks for real (verified: `fsutil file
-queryValidData` on a 200 MB truncated file reports Valid Data Length = the full
-200,000,000; a sparse file reports 0). Test modules truncated fake multi-GB GGUFs
-to drive size-reading code, which allocated ~315 GB per suite run and filled the
-disk to 99.5% (#672).
-
-The point of the guard is that documenting this did NOT work: it was fixed once
-with the reason spelled out (test_vram_eviction_safety.py) and warned about again
-("NEVER truncate() to GB sizes here", test_auto_gpu_layers.py), and two other
-modules still did it - one of them commented "Sparse-ish: just truncate to size
-without writing real bytes", the exact belief already disproved. So it is enforced.
-
-A guard nobody proves can fire is worth nothing, so these drive it end to end
-through real sub-pytest runs.
-"""
+"""The tmp_path disk guard must actually FIRE, and must not false-positive."""
 
 from __future__ import annotations
 
@@ -31,14 +14,7 @@ _REAL_CONFTEST = str(Path(__file__).parent / "conftest.py").replace("\\", "/")
 
 
 def _with_real_conftest(pytester):
-    """Point the sub-run at the REAL tests/conftest.py, so this exercises the
-    shipped guard rather than a copy that could drift from it.
-
-    Loaded by PATH under a distinct module name, which is worth the length: a
-    `from conftest import *` silently skips underscore-prefixed names, so the guard
-    never arrives and the sub-run passes with nothing installed (the test then
-    proves nothing while looking green); and naming it explicitly hits a circular
-    import, because the generated sub-conftest is ITSELF `conftest.py`."""
+    """Point the sub-run at the REAL tests/conftest.py, so this exercises the shipped guard rather than a copy that could drift from it."""
     pytester.makeconftest(
         "import importlib.util as _u, sys\n"
         "_s = _u.spec_from_file_location('_localm_real_conftest', r'"
@@ -51,10 +27,7 @@ def _with_real_conftest(pytester):
 
 
 class TestGuardFires:
-    """The guard runs AFTER the test body (it can only measure what was left
-    behind), so it reports as a teardown ERROR, not a test FAILURE - the body's own
-    assertions really did pass. Either way the run is non-zero and the offender is
-    named, which is what matters."""
+    """The guard runs AFTER the test body (it can only measure what was left behind), so it reports as a teardown ERROR, not a test FAILURE - the body's own assertions really did pass."""
 
     def test_a_truncated_giant_file_is_reported(self, pytester):
         _with_real_conftest(pytester)
@@ -94,11 +67,7 @@ class TestGuardDoesNotFalsePositive:
         pytester.runpytest("-q", "-p", "no:cacheprovider").assert_outcomes(passed=1)
 
     def test_a_FAKED_giant_size_is_fine(self, pytester):
-        """THE regression that matters. tests/test_vram_eviction_safety.py
-        monkeypatches Path.stat to report 15-40 GB for a tiny file - the correct
-        way to drive a size-reading path. A guard that read Path.stat would see the
-        fake and fail exactly those tests (this happened: 13 errors). It must
-        measure REAL bytes via os.stat."""
+        """THE regression that matters. tests/test_vram_eviction_safety.py monkeypatches Path.stat to report 15-40 GB for a tiny file - the correct way to drive a size-reading path."""
         _with_real_conftest(pytester)
         pytester.makepyfile("""
             import os
@@ -151,15 +120,7 @@ class TestGuardDoesNotFalsePositive:
 
 
 class TestGuardDoesNotLoopOnAJunction:
-    """A guard that walks tmp_path must not re-introduce the B3 junction DoS.
-
-    tests/test_rag_robustness_sweep.py deliberately builds BRANCHING
-    self-referential junctions in its tmp_path. A Windows junction reports
-    is_symlink() False, so a plain os.walk descends it forever - which is why
-    localm/rag/store.py has _walk_files instead of rglob. The first draft of this
-    guard used a naive os.walk and HUNG the suite at 92% on exactly that fixture,
-    so this pins it.
-    """
+    """A guard that walks tmp_path must not re-introduce the B3 junction DoS."""
 
     @pytest.mark.skipif(sys.platform != "win32", reason="junctions are Windows-only")
     def test_a_self_referential_junction_does_not_hang_the_guard(self, pytester):
@@ -208,15 +169,10 @@ class TestGuardDoesNotLoopOnAJunction:
 
 
 class TestGuardIsDriveAgnostic:
-    """localm must work installed anywhere, including C:. The guard is about how
-    many bytes a test allocates, not where tmp_path happens to live, so it must
-    never branch on a drive letter or path prefix - otherwise it would behave
-    differently for a contributor whose temp dir is on another drive."""
+    """localm must work installed anywhere, including C:."""
 
     def _guard_code(self):
-        """The guard's executable body, docstring EXCLUDED. Parsed rather than
-        grepped: the docstring legitimately mentions drive letters while explaining
-        that it ignores them, and a raw grep flagged that prose as a violation."""
+        """The guard's executable body, docstring EXCLUDED."""
         import ast
         tree = ast.parse(Path(_REAL_CONFTEST).read_text(encoding="utf-8"))
         for node in ast.walk(tree):
@@ -237,6 +193,5 @@ class TestGuardIsDriveAgnostic:
                 "SIZE only, so it behaves identically on any install location")
 
     def test_the_guard_is_test_only_and_touches_no_product_code(self):
-        """It lives in tests/conftest.py and is a pytest fixture, so it cannot
-        affect a real install on any drive."""
+        """It lives in tests/conftest.py and is a pytest fixture, so it cannot affect a real install on any drive."""
         assert Path(_REAL_CONFTEST).parts[-2:] == ("tests", "conftest.py")

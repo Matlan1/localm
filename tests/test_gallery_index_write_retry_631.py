@@ -1,34 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""REG-631 (regression audit 2026-07-14): the gallery ownership index's atomic
-write had no retry and no temp cleanup, so on Windows an external open of the
-index file failed the whole request and orphaned a temp file.
-
-``gallery._write_index`` (called from ``stamp_owner`` on EVERY image/music/video
-generation, and from ``forget_owner`` / ``rename_owner`` on delete/move/rename)
-wrote a unique temp then called ``os.replace(tmp, p)``. If any external process
-holds ``gallery_index/<kind>.json`` open WITHOUT FILE_SHARE_DELETE at that
-instant - an antivirus mid-scan, the Windows Search Indexer, a backup agent, or
-the user's own file browser - os.replace raises PermissionError (WinError 5/32).
-With no bounded retry and no try/finally:
-
- (a) the exception propagated and 500'd the request even though the media file
-     was already written to disk, so the caller believed generation/delete had
-     failed while the new file sat there un-stamped (hence untracked, and by
-     owner_of()'s untracked default, open); and
- (b) the unique temp file was orphaned in gallery_index/, one per failure.
-
-The prior code did a plain in-place ``p.write_text(...)``, which needs only write
-access and does not require the existing handle to permit delete-sharing - so it
-SUCCEEDED in exactly the concurrent-external-open cases where os.replace now
-fails. That makes it a real Windows-only regression on the happy path.
-
-The repo already had the established fix: ``storekit.atomic_write`` (PR #566),
-the shared kernel helper with the bounded PermissionError retry, which
-rag/store.py and memory/store.py already delegate to. _write_index now uses it
-too rather than hand-rolling a third copy - the exact drift storekit exists to
-stop. The temp-cleanup half was missing from storekit itself and is fixed there,
-so every caller stops leaking.
-"""
+"""REG-631 (regression audit 2026-07-14): the gallery ownership index's atomic write had no retry and no temp cleanup, so on Windows an external open of the index file failed the whole request and orphaned a temp file."""
 
 from __future__ import annotations
 
@@ -50,15 +21,7 @@ def home(tmp_path, monkeypatch):
 
 
 def _flaky_replace(monkeypatch, fail_times: int):
-    """Make the atomic swap raise PermissionError the first *fail_times* calls,
-    standing in for an AV / Search-Indexer handle on the index file. Counts every
-    attempt so a test can prove the retry actually happened.
-
-    Patches ``os.replace``, deliberately: that is the one chokepoint BOTH spellings
-    go through (a bare ``os.replace(tmp, p)`` and ``Path.replace``, which calls
-    os.replace internally). Patching Path.replace alone would silently miss a
-    caller using the bare form and the test would prove nothing.
-    """
+    """Make the atomic swap raise PermissionError the first *fail_times* calls, standing in for an AV / Search-Indexer handle on the index file."""
     calls = {"n": 0}
     real_replace = os.replace
 
@@ -93,9 +56,7 @@ def test_write_index_rides_out_a_transient_external_lock(home, monkeypatch):
 
 
 def test_stamp_owner_survives_a_transient_lock(home, monkeypatch):
-    """End-to-end through the real caller: a generation's owner stamp must land
-    even though an AV scanner briefly held the index open. Otherwise the media
-    file is on disk but untracked - and owner_of() defaults untracked to open."""
+    """End-to-end through the real caller: a generation's owner stamp must land even though an AV scanner briefly held the index open."""
     from localm.media import gallery
     _flaky_replace(monkeypatch, fail_times=2)
 
@@ -132,8 +93,7 @@ def test_rename_owner_survives_a_transient_lock(home, monkeypatch):
 # --------------------------------------------------------------------------- #
 
 def test_a_permanent_lock_leaves_no_orphan_temp(home, monkeypatch):
-    """When the lock never clears, the write legitimately fails - but it must not
-    accumulate one orphaned temp file per failure in gallery_index/."""
+    """When the lock never clears, the write legitimately fails - but it must not accumulate one orphaned temp file per failure in gallery_index/."""
     from localm.media import gallery
     _flaky_replace(monkeypatch, fail_times=10_000)
 
@@ -145,7 +105,7 @@ def test_a_permanent_lock_leaves_no_orphan_temp(home, monkeypatch):
 
 
 def test_repeated_permanent_failures_do_not_accumulate_temps(home, monkeypatch):
-    """The audit's "one leftover per failure": prove it does not pile up."""
+    """The audit's 'one leftover per failure': prove it does not pile up."""
     from localm.media import gallery
     _flaky_replace(monkeypatch, fail_times=10_000)
 
@@ -157,8 +117,7 @@ def test_repeated_permanent_failures_do_not_accumulate_temps(home, monkeypatch):
 
 
 def test_a_permanent_lock_still_raises_not_silently_swallowed(home, monkeypatch):
-    """Rule 5: riding out a TRANSIENT lock is right; silently pretending a
-    permanently-failed write succeeded is not. It must still raise."""
+    """Rule 5: riding out a TRANSIENT lock is right; silently pretending a permanently-failed write succeeded is not."""
     from localm.media import gallery
     _flaky_replace(monkeypatch, fail_times=10_000)
     with pytest.raises(PermissionError):
@@ -185,8 +144,7 @@ def test_write_index_overwrites_cleanly(home):
 
 
 def test_a_failed_write_does_not_corrupt_the_existing_index(home, monkeypatch):
-    """The whole point of the atomic swap: a failed write must leave the previous
-    index intact and readable, never half-written."""
+    """The whole point of the atomic swap: a failed write must leave the previous index intact and readable, never half-written."""
     from localm.media import gallery
     gallery._write_index("image", {"a.png": "owner1"})
     _flaky_replace(monkeypatch, fail_times=10_000)

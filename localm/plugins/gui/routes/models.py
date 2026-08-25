@@ -1,12 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""GUI model routes: registry list/load, VRAM estimate, pull/remove/alias, and
-HuggingFace discovery.
-
-Extracted verbatim from attach_gui(); behavior unchanged. The active-model
-accessor, the model-switch callable, and the background job manager are unpacked
-from the register ``ctx`` into ``active_model`` / ``switch_model`` / ``jobs`` once
-at the top of register(), so each handler body is identical to the original.
-"""
+"""GUI model routes: registry list/load, VRAM estimate, pull/remove/alias, and HuggingFace discovery."""
 
 from __future__ import annotations
 
@@ -37,41 +30,7 @@ from localm.plugins.gui.web import (AliasRequest, ComfyPullRequest,
 
 
 def _spec_names_a_host_path(spec: str) -> bool:
-    """True when *spec* TEXTUALLY names a path on the server's filesystem rather
-    than a remote HuggingFace/URL spec. Makes no filesystem call.
-
-    `localm pull` registers an existing local path IN PLACE rather than
-    downloading it (model_manager/pull.py's is_local_path branch -> add_local
-    with store=None), so naming one through POST /api/models/pull writes a
-    caller-chosen absolute path into registry.json. That is host filesystem
-    reach and belongs behind require_fs_host, not behind MODELS_WRITE alone.
-
-    Deliberately textual and existence-INDEPENDENT, for three reasons. It cannot
-    stall: a UNC spec is classified without the stat that would block in the SMB
-    redirector for minutes (see pathsafe.is_unc_or_device_path). It cannot become
-    an existence oracle: the authorisation answer is identical whether or not the
-    file is there. And it has no TOCTOU: "may this caller name a host path" is
-    not a question whose answer may change between the check and the pull. That
-    makes it deliberately BROADER than pull.py's own is_local_path (which also
-    requires the path to exist) - a non-existent absolute path is refused here
-    even though pull.py would have gone on to treat it as a remote spec, which is
-    the safe direction to differ in.
-
-    An earlier revision ALSO probed the filesystem for a relative spec, since
-    "owner/repo" and "models/foo.gguf" are the same shape and only a stat can
-    tell them apart. That probe was removed: it made the 403-vs-200 answer depend
-    on whether the named file exists, i.e. it handed a caller WITHOUT host
-    filesystem access an existence oracle for any relative path - the very
-    capability this gate exists to withhold. Trading a narrow registration gap for
-    a general-purpose oracle is a bad trade, and it also reintroduced the stat
-    this function is built to avoid.
-
-    RESIDUAL, stated rather than papered over: a relative spec with no ".."
-    component that happens to name an existing FILE is still registered in place
-    without this gate firing. Its reach is bounded by the server's working
-    directory, it is unchanged from previous behaviour rather than something
-    introduced here, and closing it needs a filesystem answer - which is exactly
-    what cannot be spent here without rebuilding the oracle."""
+    """True when *spec* TEXTUALLY names a path on the server's filesystem rather than a remote HuggingFace/URL spec."""
     # Trimming here is deliberate and is NOT the over-match that pathsafe's
     # predicate avoids: this value is USER-TYPED (a spec pasted into the GUI
     # arrives with a trailing newline routinely), the route already trimmed it
@@ -102,9 +61,7 @@ def _spec_names_a_host_path(spec: str) -> bool:
 
 
 def _require_registered(model: str, registry: dict | None = None) -> dict:
-    """Raise 404 unless *model* is in the registry (GUI-2: the same guard was
-    repeated verbatim across five route handlers). Returns the registry, so a
-    caller that needs it afterward (model_alias) doesn't load it twice."""
+    """Raise 404 unless *model* is in the registry (GUI-2: the same guard was repeated verbatim across five route handlers)."""
     from localm.config import load_registry
     if registry is None:
         registry = load_registry()
@@ -366,44 +323,7 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.post("/api/models/scan", dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
     async def gui_scan_models(request: Request, req: ScanRequest | None = None):
-        """Scan for ComfyUI models and register what it finds. An explicit
-        `workdir` is a one-off scan of an arbitrary folder for the guided
-        Import-from-ComfyUI flow (never written back to config); with no
-        `workdir` (the old button's bodyless POST, or an explicit `{}`) it
-        scans whatever `comfy_workdir` is configured. `dry_run` previews
-        per-type counts and registers nothing, and stays synchronous (its
-        directory walk has no honest total to report progress against - see
-        scan_comfy_models's progress_cb docstring).
-
-        A REAL scan (`dry_run` false or absent) runs as a background job
-        instead, exactly like a model pull: this returns `{"job_id": ...}`
-        immediately and the registration loop reports "registering model N of
-        M" via Job.progress() as it goes, instead of the caller blocking on
-        the whole batch with zero feedback. GET /api/jobs/{id}/events streams
-        it; the final progress event before "end" carries added/skipped/method
-        (the same fields the old synchronous response returned directly).
-
-        BOTH forms require `require_fs_host` - called BEFORE either branch
-        below, so its 403 propagates as-is rather than getting reported as a
-        generic 500. Either one walks a host directory and writes the resulting
-        absolute paths into registry.json, a capability equivalent to the host
-        file/folder browser (/api/fs/dirs), so a MODELS_WRITE-only key that
-        lacks host filesystem access must not reach it.
-
-        The gate used to be `if workdir:`, which made that guarantee false for
-        the exact case the paragraph above asserts: `comfy_workdir` was then a
-        plain Widget.FOLDER settable by any config:write key, so a bodyless
-        POST scanned a caller-CHOSEN folder with no fs_access check at all.
-        comfy_workdir is admin_only now (settings_schema.py, core field and its
-        per-plugin twin), but this route's own require_fs_host below is what
-        actually enforces the guarantee - relying on comfy_workdir's write gate
-        alone would leave a MODELS_WRITE-only key free to trigger a scan of
-        whatever folder an admin previously configured, with no host-fs
-        privilege of its own. The registered rows are permanent and every
-        consumer re-stats them on each launch, so a planted UNC row is a
-        lasting event-loop stall plus outbound SMB from the server process.
-        Scanning is authorised by host filesystem reach, not by where the
-        folder name happened to come from."""
+        """Scan for ComfyUI models and register what it finds."""
         from localm.model_manager.scan import preview_comfy_models, scan_comfy_models
         import asyncio
         from functools import partial
@@ -456,12 +376,7 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.get("/api/models/shortcuts", dependencies=[Depends(require_scope(scopes.MODELS_READ))])
     async def gui_model_shortcuts():
-        """Curated `localm pull <alias>` aliases (MODEL_SHORTCUTS), for the
-        Add-a-model dialog's shortcut picker. A fixed local list, not a HuggingFace
-        query, so unlike /api/discover/search this needs no network call and works
-        under net_mode=off - the pull path already resolves an alias typed into
-        pull-spec (resolve_spec()); this just makes the alias keyspace discoverable
-        instead of requiring the user to already know it from the CLI docs."""
+        """Curated `localm pull <alias>` aliases (MODEL_SHORTCUTS), for the Add-a-model dialog's shortcut picker."""
         from localm.model_manager import MODEL_SHORTCUTS, _SHORTCUT_SIZES
         return {
             "shortcuts": [
@@ -489,10 +404,7 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.post("/api/models/unload", dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
     async def gui_unload_model(req: UnloadModelRequest):
-        """Release model(s) from GPU/CPU memory. With no `model` (or an empty
-        POST body), unloads everything - the GUI's global "Unload all"
-        button. With `model` set, unloads only that one, leaving any other
-        loaded models untouched - the GUI's per-row Unload button."""
+        """Release model(s) from GPU/CPU memory."""
         if req.model:
             _require_registered(req.model)
             return await unload_one_model(req.model)
@@ -501,17 +413,7 @@ def register(app: FastAPI, ctx) -> None:
     @app.post("/api/embedding/warmup",
               dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
     async def embedding_warmup(request: Request):
-        """Load the shared embedder NOW, from an explicit user action, instead of
-        the first real /v1/embeddings / memory-consolidate / RAG-recall call
-        silently paying the cost - measured up to two 300s timeout windows (a
-        VRAM-eviction wait plus the isolated child's spawn+native-load) on a cold
-        server, even after ``localm setup-embeddings`` (which only pre-fetches
-        the file, never warms the singleton - a restart resets it too).
-
-        Coarse PARENT-side stage events only (ADR-0004 Unit B): the isolated
-        embedder child's own load/embed IPC protocol is untouched. Uses the same
-        JobManager/SSE mechanism as model pull/remove - a 9th consumer of an
-        already-proven primitive, not a new channel."""
+        """Load the shared embedder NOW, from an explicit user action, instead of the first real /v1/embeddings / memory-consolidate / RAG-recall call silently paying the cost - measured up to two 300s timeout windows (a VRAM-eviction wait plus the isolated child's spawn+native-load) on a cold server, even aft..."""
         from localm.inference.embedder import (PEEK_TIMEOUT_S, get_embedder,
                                                last_error, loaded_dim)
         # OFF THE EVENT LOOP, and the reason is not what loaded_dim's own
@@ -557,9 +459,7 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.get("/api/vram-estimate", dependencies=[Depends(require_scope(scopes.MODELS_READ))])
     async def vram_estimate(model: str = "", n_ctx: int = 4096, n_gpu_layers: int = 99):
-        """Approximate VRAM needed to load *model* (defaults to the active one)
-        at the given context + GPU-offload, vs free/total VRAM. Powers the live
-        readout under the Settings performance sliders. Always 'approximate'."""
+        """Approximate VRAM needed to load *model* (defaults to the active one) at the given context + GPU-offload, vs free/total VRAM."""
         from localm.config import load_config, load_registry
         from localm.discover import vram_capacity
         from localm.model_meta import cached_n_layers
@@ -663,26 +563,7 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.get("/api/gpus", dependencies=[Depends(require_scope(scopes.MODELS_READ))])
     async def gui_gpus():
-        """Every GPU device visible right now, plus the currently configured
-        main GPU index and multi-GPU split indices. Powers the Settings >
-        Live tuning "Main GPU" selector and "Split across GPUs" checkboxes
-        (both hidden/disabled when only one device is detected).
-
-        ``probe_status`` tells the consumer whether ``gpus`` is a FRESH reading
-        (``ok`` - an empty list then genuinely means no GPU) or an inconclusive
-        one (``timeout``/``busy`` - the driver was wedged or contended, and
-        ``gpus`` is a frozen last-known-good or []). Without it, a timed-out
-        probe was indistinguishable from a GPU-less box, so the Settings GPU
-        controls silently vanished on a slow driver (AGENTS.md rule 5).
-
-        ``index_space`` (present only as ``"native"``) says the ``gpus``
-        indices are the ones a MODEL LOAD consumes rather than list_gpus()'s
-        torch/nvidia-smi numbering - see the vulkan branch below; the client
-        labels the numbering accordingly. Note that is llama.cpp's own device
-        list, NOT the raw ggml registry order: integrated GPUs and
-        accelerators are dropped and the rest renumbered before they get here
-        (discover._llama_visible_devices), because these numbers are written
-        straight into main_gpu_index / gpu_split_indices."""
+        """Every GPU device visible right now, plus the currently configured main GPU index and multi-GPU split indices."""
         from localm.config import load_config
         from localm.discover import GPU_PROBE_OK
         cfg = load_config()
@@ -730,11 +611,7 @@ def register(app: FastAPI, ctx) -> None:
     @app.post("/api/models/pull-token/redeem",
               dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
     async def model_pull_token_redeem(req: PullTokenRedeemRequest, request: Request):
-        """SEC-PULL-CONFIRM: redeem the single-use grant `localm gui --pull`
-        minted for its own deep link (see mint_pull_grant/init.js). Only a
-        genuine, unused, unexpired grant bound to this EXACT spec succeeds - a
-        forged `?pull=` link cannot know the secret, so it 403s here and the
-        frontend falls back to requiring an explicit human confirmation."""
+        """SEC-PULL-CONFIRM: redeem the single-use grant `localm gui --pull` minted for its own deep link (see mint_pull_grant/init.js)."""
         if not consume_pull_grant(request.app, req.spec.strip(), req.token):
             raise HTTPException(403, "Invalid or expired pull token")
         return {"ok": True}
@@ -795,25 +672,12 @@ def register(app: FastAPI, ctx) -> None:
     # call - this is purely additive.
 
     class _NullConsole:
-        """A do-nothing stand-in for rich.console.Console, so a read-only
-        pre-check (possibly polled repeatedly) never spams server-side console
-        output the way an actual generation job's progress printing would."""
+        """A do-nothing stand-in for rich.console.Console, so a read-only pre-check (possibly polled repeatedly) never spams server-side console output the way an actual generation job's progress printing would."""
         def print(self, *a, **kw):
             pass
 
     def _build_check_workflow(kind: str, overrides: MediaPreflightRequest):
-        """Load *kind*'s currently-configured workflow template and shape it
-        with the same model-relevant overrides the generate form has pending,
-        mirroring the load-template -> apply_model_overrides -> _build_*_workflow
-        steps generate_image / generate_video / generate_music do - minus
-        actually submitting a job. ``model_overrides`` (the per-slot picks from
-        the Workflow panel's model dropdowns) is applied FIRST, exactly like the
-        real generate call, so a picked-but-not-installed model is caught here
-        too - otherwise this check would silently validate the template's
-        default filenames instead of what will actually run. input_image is
-        always None: the image/video builders upload it to ComfyUI as a real
-        network call, which a read-only check must never do. Returns the shaped
-        workflow dict, or raises ValueError for an unknown *kind*."""
+        """Load *kind*'s currently-configured workflow template and shape it with the same model-relevant overrides the generate form has pending, mirroring the load-template -> apply_model_overrides -> _build_*_workflow steps generate_image / generate_video / generate_music do - minus actually submitting a jo..."""
         if kind == "image":
             from localm.image_gen.comfy import _build_image_workflow
             from localm.image_gen.comfy import apply_model_overrides, workflow_path
@@ -907,31 +771,7 @@ def register(app: FastAPI, ctx) -> None:
     @app.post("/api/models/pull-comfy-source",
               dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
     async def model_pull_comfy_source(req: ComfyPullRequest, request: Request):
-        """Download one CURATED ComfyUI model into the ComfyUI models folder.
-
-        Requires host filesystem access for the same reason /api/models/scan
-        does, and it is the same folder either way. When the managed ComfyUI
-        instance is not active - the DEFAULT state of a fresh install -
-        comfy_models_dest_dir() resolves to `<comfy_workdir>/models/<subfolder>`.
-        comfy_workdir itself is admin_only (settings_schema.py, both the core
-        field and its per-plugin twin - REC-MEDIA-CMD closed the back door where
-        only one of the two was gated), so a plain config:write key can no longer
-        CHOOSE that folder. But an ADMIN may have already configured it once, and
-        this route's own caller only needs MODELS_WRITE - so without its own
-        check, any MODELS_WRITE key could still stream a multi-gigabyte download
-        into whatever host directory an admin previously set, with no host-fs
-        privilege of its own. require_fs_host() below closes that: the CALLER
-        triggering the write must independently hold host filesystem reach, not
-        merely benefit from a destination someone else configured. The curated
-        table fixes the filename and subfolder, so this is not arbitrary-path
-        WRITE - but choosing the parent directory is still host filesystem
-        reach, and a UNC value draws the same outbound SMB authentication from
-        the server that the scan gate exists to prevent.
-
-        This route was the inconsistent survivor when scan and pull were gated:
-        same invariant, same config value, same harm, no gate. Fixing one door
-        and leaving its neighbour open is how a boundary gets believed to be
-        closed when it is not."""
+        """Download one CURATED ComfyUI model into the ComfyUI models folder."""
         from localm.media.managed_comfy import comfy_models_dest_dir
         from localm.model_manager.registry import resolve_comfy_model_source
         from localm.plugins.media_config import MEDIA_PLUGINS
@@ -1033,23 +873,12 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.post("/api/models/rename", dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
     async def model_rename(req: RenameModelRequest):
-        """Rename a registered model. Unlike alias, the OLD name stops
-        working - this MOVES the registration (plus best-effort migrates
-        config/jobs/RAG references that named it). Renaming the currently
-        ACTIVE (or merely loaded) model is allowed: the live engine is
-        re-keyed in place right after the registry move, so it keeps serving
-        under its new name instead of being orphaned under the old one.
-
-        The registry move and the re-key are one operation, not two steps a
-        route is trusted to perform in order, so both this and the /v1 sibling
-        go through the single helper that pairs them."""
+        """Rename a registered model."""
         return await _hs.rename_registered_model(req.model, req.new_name)
 
     @app.post("/api/models/type", dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
     async def model_set_type(req: SetTypeRequest):
-        """Change a registered model's type (the one-click set-type control). A
-        type='unknown' model is not auto-loaded as chat but stays runnable by name;
-        this corrects a mis-detected or bulk-imported model's type."""
+        """Change a registered model's type (the one-click set-type control)."""
         from localm.model_manager import MODEL_TYPES, set_model_type
         _require_registered(req.model)
         if req.model_type not in MODEL_TYPES:
@@ -1065,22 +894,7 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.post("/api/models/relocate", dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
     async def model_relocate(req: RelocateModelRequest, request: Request):
-        """GUI form of `localm relocate MODEL NEW_PATH`: re-point a registered
-        model's file after it was MOVED (the CLI's 'missing' row, mirrored here
-        as `missing`/`last_path` on /api/models). No route re-pointed a registry
-        entry before this - the only prior GUI recourse was remove + re-add,
-        which mints a new registration and drops aliases/source/sha256.
-
-        require_fs_host, unconditionally: unlike a pull spec (which may name a
-        remote HuggingFace repo), new_path here always names a location on the
-        SERVER's own disk, the same capability class as /api/models/scan and
-        /api/models/pull-comfy-source. Without this gate, a models:write-only
-        key (fs_access="none") could use the specific validation error below
-        (does not exist / not a GGUF / not a HF dir) as an existence-and-
-        validity oracle over the server's filesystem - exactly what
-        _spec_names_a_host_path's docstring warns a plain write scope must not
-        grant.
-        """
+        """GUI form of `localm relocate MODEL NEW_PATH`: re-point a registered model's file after it was MOVED (the CLI's 'missing' row, mirrored here as `missing`/`last_path` on /api/models)."""
         require_fs_host(request)
         _require_registered(req.model)
         from localm.model_manager.registry import relocate_model, relocate_target
@@ -1111,8 +925,7 @@ def register(app: FastAPI, ctx) -> None:
         return 422              # bad repo / no GGUF files / bad format token
 
     async def _run_discover(fn):
-        """Run *fn* off the event loop; map DiscoverError to its HTTP status
-        (GUI-3: discover_search/discover_files shared this try/except)."""
+        """Run *fn* off the event loop; map DiscoverError to its HTTP status (GUI-3: discover_search/discover_files shared this try/except)."""
         from localm.discover import DiscoverError
         loop = asyncio.get_running_loop()
         try:
@@ -1121,17 +934,7 @@ def register(app: FastAPI, ctx) -> None:
             raise HTTPException(_discover_status(e), str(e))
 
     async def _vram_total():
-        """Off-thread vram_capacity() plus its extracted 'total' bytes, both
-        of which discover_search/discover_files feed into fit_label().
-
-        The returned dict's `free` is withheld unless the reading is BOTH
-        fresh and device-global (sysstats._vram_reading_trusted, same gate
-        /api/vram-estimate and /api/stats already apply) - `total` is a static
-        hardware fact that stands even under a stale/process-scoped probe,
-        but forwarding an untrusted `free` verbatim as this route's own
-        `vram.free` would let the API contract present exactly the
-        wrong-number-as-fact this repo already fixed on the other VRAM
-        surfaces (AGENTS.md rule 5)."""
+        """Off-thread vram_capacity() plus its extracted 'total' bytes, both of which discover_search/discover_files feed into fit_label()."""
         from localm.discover import vram_capacity
         from localm.sysstats import _vram_reading_trusted
         loop = asyncio.get_running_loop()

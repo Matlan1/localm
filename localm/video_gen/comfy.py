@@ -1,24 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""
-ComfyUI Wan 2.2 short-video generation.
-
-Mirrors localm.music_gen.comfy: standalone module, reachable from the GUI,
-the CLI, or any other caller.  Uses the same ComfyUI server as image and
-music generation - the model files for the committed template (the public
-Wan 2.2 TI2V 5B stack, ComfyUI v0.3.46+) live in ComfyUI's model dirs:
-
-    models/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors
-    models/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors
-    models/vae/wan2.2_vae.safetensors
-
-Unlike ACE-Step audio, video length is NOT arbitrary: the model attends over
-all frames at once, so VRAM and time grow with the frame count and quality
-degrades well past the native ~5 s.  Wan requires 4k+1 frames; the requested
-duration is snapped to the nearest valid count (121 frames = 5 s at 24 fps).
-
-The same prompt is text-to-video by default; pass *input_image* to animate an
-existing picture (image-to-video) instead.
-"""
+"""ComfyUI Wan 2.2 short-video generation."""
 
 from __future__ import annotations
 
@@ -94,8 +75,7 @@ def workflow_path() -> Path:
 
 
 def _snap_frames(seconds: float, fps: int) -> int:
-    """Wan generates 4k+1 frames; snap the requested duration to the
-    nearest valid count (minimum 5 frames)."""
+    """Wan generates 4k+1 frames; snap the requested duration to the nearest valid count (minimum 5 frames)."""
     frames = round(seconds * fps)
     return max(5, 4 * round((frames - 1) / 4) + 1)
 
@@ -122,12 +102,7 @@ def _build_video_workflow(
     input_image: Optional[Path],
     api_url: str,
 ) -> tuple[bool, str, Optional[str]]:
-    """Shape the Wan workflow in place from the call's parameters.
-
-    Returns ``(ok, message, uploaded_name)``: ``ok=False`` with an error message
-    when the graph has no sampler / prompt / latent node localm can drive, or the
-    input image is missing / fails to upload. ``uploaded_name`` is the ComfyUI-side
-    filename of an uploaded img2video source (for later containment) or None."""
+    """Shape the Wan workflow in place from the call's parameters."""
     # Resolve the nodes we drive by ROLE (sampler by class_type, then positive /
     # negative / latent by following its graph edges) instead of hardcoded ids, so
     # a user's own exported Wan graph works without renumbering (I3).
@@ -219,19 +194,7 @@ def _write_video_sidecar(
     comfy_console_warning: Optional[str] = None,
     comfy_console_checked: bool = False,
 ) -> Optional[str]:
-    """Write the ``<output>.json`` reproducibility sidecar next to the clip.
-
-    The clip is already saved; a failed sidecar must not fail the whole
-    generation - returns a note string on failure (surfaced, not swallowed),
-    else None.
-
-    ``comfy_console_warning``/``comfy_console_checked`` mirror
-    image_gen.comfy._write_image_sidecar's fields - see
-    NEW-COMFY-SILENT-PARTIAL-APPLY there for the full rationale. In short:
-    ComfyUI can silently under-apply a mismatched checkpoint's weights and
-    still report success, and the pair exists so "checked, found nothing" is
-    never collapsed with "could not check at all" (a remote/already-running
-    ComfyUI localm did not launch)."""
+    """Write the ``<output>.json`` reproducibility sidecar next to the clip."""
     try:
         sidecar = {
             "prompt": prompt,
@@ -293,66 +256,7 @@ def generate_video(
     delete_outputs: bool = False,
     placement: Optional[dict] = None,
 ) -> tuple[bool, str]:
-    """
-    Generate a short video clip and save it to *output_path* (MP4).
-
-    Parameters
-    ----------
-    prompt
-        Scene description - subject, motion, camera, lighting.  Motion verbs
-        matter; a static description tends to produce a static clip.
-    output_path
-        Destination file (.mp4).  Parent directories are created if needed.
-    negative_prompt
-        Things to steer away from.  None keeps the template's default
-        (blur/distortion/watermark suppression).
-    seconds
-        Clip length.  Snapped to Wan's 4k+1 frame rule.  ~5 s is the native
-        sweet spot; longer single-pass clips cost VRAM and time linearly and
-        degrade in coherence.
-    fps
-        Output frame rate (default 24, the Wan 2.2 native rate).
-    width / height
-        Output resolution.  None keeps the template default (1280x704 -
-        the model's NATIVE resolution; Wan 2.2 5B was trained at 720p and
-        output collapses into washed-out smears well below it, so iterate
-        by shortening the clip, not by shrinking the frame).  Must be
-        multiples of 16.
-    steps / cfg
-        Sampler settings.  None keeps the template defaults (30 / 5.0).
-    seed
-        Noise seed for reproducible output.  Randomised if not given.
-    input_image
-        Animate this picture instead of starting from noise (image-to-video).
-        The image is uploaded to ComfyUI and fed as the latent's start frame.
-    model_overrides
-        Generic per-node model-slot overrides (see image_gen.comfy.generate_image's
-        docstring for the full explanation) - ``{node_id: {input_name: value}}``,
-        applied before any other workflow shaping.
-    api_url
-        ComfyUI base URL; defaults to the shared resolution
-        (FLUX_API_URL env var, else http://127.0.0.1:8188).
-    localm_url
-        localm server /v1 URL to unload before generation (VRAM handoff).
-    instance_token
-        This server's own attach token, forwarded to the ``localm_url``
-        unload call so it authenticates on a keyless (open-mode) server too -
-        see ``selfclient.self_request``'s docstring. Only used as a fallback
-        when no owner API key is configured.
-    max_poll_seconds
-        Timeout waiting for ComfyUI (default 60 minutes - video is slow,
-        especially without flash attention).
-    on_progress
-        Optional ``Callable[[str], None]`` for status lines.
-    write_sidecar
-        Write a ``<output>.json`` sidecar with the prompt and settings so
-        the clip can be reproduced.  Pass False in privacy mode - the
-        prompt then never touches disk.
-
-    Returns
-    -------
-    (ok, message)
-    """
+    """Generate a short video clip and save it to *output_path* (MP4)."""
     def _say(text: str) -> None:
         if on_progress:
             try:

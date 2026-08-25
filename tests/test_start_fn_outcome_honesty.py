@@ -1,25 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Board item #27's follow-up: jobs.py's start_fn decided a job's status purely
-from ``fn(job)``'s return value / whether it raised, so any exception raised by
-an in-process callback AFTER its real work already succeeded (image/music/video
-generation's VRAM handover, RAG indexing's summary report, ...) reported a
-completed operation as failed. Same bug shape as start_cli (fixed by PR #1126),
-but start_fn has no subprocess/stdout boundary to carry a sentinel frame across,
-so the mechanism is different: an explicit ``Job.mark_outcome(status)`` call a
-callback makes once its own real work is verifiably done, before any risky tail
-cleanup.
-
-``start_fn``'s worker treats a "done" mark as an override for what would
-otherwise be a blind ``except -> failed``, in ONE direction only, and NEVER as
-license to invent success from silence: absent a mark (the default, ``None``),
-or a "failed" mark, the exception path is untouched - a callback that never
-adopts this keeps today's rule exactly as it always has been.
-
-See also tests/test_image_cancel_vram.py for the concrete, originally-flagged
-regression (image/plug.py's _generate + a VRAM-reload that raises after
-success), driven through the real JobManager rather than the plain unit-level
-mechanism tests here.
-"""
+"""Board item #27's follow-up: jobs.py's start_fn decided a job's status purely from ``fn(job)``'s return value / whether it raised, so any exception raised by an in-process callback AFTER its real work already succeeded (image/music/video generation's VRAM handover, RAG indexing's summary report, ...)..."""
 
 from __future__ import annotations
 
@@ -41,10 +21,7 @@ def _wait_for_terminal(job, timeout=3.0):
 
 class TestMarkOutcomeOverridesAnExceptionAfterRealWorkSucceeded:
     def test_marked_done_survives_an_exception_after_it(self):
-        """The exact bug: real work finished (fn already called mark_outcome),
-        then tail cleanup raised. The job must still read done, and the tail
-        failure must still be visible on the stream - only the terminal STATUS
-        is corrected, not the evidence that something happened."""
+        """The exact bug: real work finished (fn already called mark_outcome), then tail cleanup raised."""
         def fn(job):
             job.result = "the-real-deliverable"
             job.mark_outcome("done")
@@ -61,8 +38,7 @@ class TestMarkOutcomeOverridesAnExceptionAfterRealWorkSucceeded:
         assert any("cleanup blew up" in t for t in lines), lines
 
     def test_marked_failed_is_not_rescued_by_mark_outcome(self):
-        """Symmetric case: a callback that explicitly records its own failure,
-        then also raises in cleanup, must not be rescued into done."""
+        """Symmetric case: a callback that explicitly records its own failure, then also raises in cleanup, must not be rescued into done."""
         def fn(job):
             job.mark_outcome("failed")
             raise RuntimeError("cleanup blew up too")
@@ -73,15 +49,10 @@ class TestMarkOutcomeOverridesAnExceptionAfterRealWorkSucceeded:
 
 
 class TestAbsenceOfTheMarkerNeverInventsSuccess:
-    """The trap the original dispatch calls out explicitly (mirrors
-    test_job_outcome_honesty.py's identically-named class for start_cli): the
-    fallback path must be byte-identical to today's behavior in EVERY
-    direction - never a new way to claim done, and not a regression into a
-    new way to claim failed for callbacks that never adopt this."""
+    """The trap the original dispatch calls out explicitly (mirrors test_job_outcome_honesty.py's identically-named class for start_cli): the fallback path must be byte-identical to today's behavior in EVERY direction - never a new way to claim done, and not a regression into a new way to claim failed for..."""
 
     def test_no_marker_and_exception_stays_failed(self):
-        """A callback that genuinely dies mid-work - mark_outcome was never
-        called, because nothing finished - must still report failed."""
+        """A callback that genuinely dies mid-work - mark_outcome was never called, because nothing finished - must still report failed."""
         def fn(job):
             raise RuntimeError("still working when this blew up")
 
@@ -92,8 +63,7 @@ class TestAbsenceOfTheMarkerNeverInventsSuccess:
         assert lines == ["job error: still working when this blew up"], lines
 
     def test_no_marker_and_clean_true_return_stays_done(self):
-        """A callback that has not adopted mark_outcome at all - the common
-        case - must be completely unaffected: a clean True still means done."""
+        """A callback that has not adopted mark_outcome at all - the common case - must be completely unaffected: a clean True still means done."""
         job = gj.JobManager().start_fn("test", lambda job: True)
         _wait_for_terminal(job)
         assert job.status == "done"
@@ -106,11 +76,7 @@ class TestAbsenceOfTheMarkerNeverInventsSuccess:
 
 class TestMarkOutcomeIsIgnoredOutsideTheExceptPath:
     def test_marked_done_then_a_clean_false_return_still_fails(self):
-        """A stale/premature mark_outcome("done") must never override an
-        explicit, CLEAN return value - the mark is consulted ONLY when an
-        exception actually escapes fn, never on a normal return. Otherwise a
-        callback could mark done early and then legitimately fail later
-        without an exception, and the marker would wrongly paper over it."""
+        """A stale/premature mark_outcome('done') must never override an explicit, CLEAN return value - the mark is consulted ONLY when an exception actually escapes fn, never on a normal return."""
         def fn(job):
             job.mark_outcome("done")
             return False   # genuinely failed afterward, no exception
@@ -121,9 +87,7 @@ class TestMarkOutcomeIsIgnoredOutsideTheExceptPath:
             "a stale done-mark must not survive a clean False return")
 
     def test_marked_failed_then_a_clean_true_return_still_succeeds(self):
-        """The symmetric case: a stale failed-mark must not survive an
-        explicit, clean True return either - the marker is inert on the try
-        branch in BOTH directions, not just the one the previous test covers."""
+        """The symmetric case: a stale failed-mark must not survive an explicit, clean True return either - the marker is inert on the try branch in BOTH directions, not just the one the previous test covers."""
         def fn(job):
             job.mark_outcome("failed")
             return True    # genuinely recovered/succeeded afterward, no exception
@@ -140,9 +104,7 @@ class TestMarkOutcomeValidation:
             gj.Job(id="x", kind="test", argv=[]).mark_outcome("bogus")
 
     def test_invalid_status_inside_fn_still_reports_failed(self):
-        """A typo'd mark_outcome call raises before self._outcome is ever set,
-        so the job correctly falls through to the unchanged failed path -
-        never a silent no-op that leaves the mistake invisible."""
+        """A typo'd mark_outcome call raises before self._outcome is ever set, so the job correctly falls through to the unchanged failed path - never a silent no-op that leaves the mistake invisible."""
         def fn(job):
             job.mark_outcome("Done")   # wrong case - not "done"
             return True                # never reached

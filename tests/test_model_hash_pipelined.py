@@ -1,18 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""`_sha256_file` reads large files through a background reader thread one
-block ahead of the hasher (see `_iter_file_blocks`). The digest is what
-verifies a downloaded model, so the properties that matter are that the
-threaded path returns a BYTE-IDENTICAL digest to the inline one, that a read
-error is re-raised in the caller's thread rather than swallowed, and that an
-abandoned consumer does not leak the reader thread.
-
-Every test here shrinks `_HASH_THREAD_MIN_BYTES` / `_HASH_BLOCK_BYTES` so the
-threaded path runs on a few KB instead of needing a 32MB fixture. Without that
-shrink these tests would silently exercise the INLINE path and assert nothing
-about the threading at all - which is the failure mode they exist to rule out,
-so `test_the_threshold_patch_actually_selects_the_threaded_path` pins that the
-shrink works before the rest lean on it.
-"""
+"""`_sha256_file` reads large files through a background reader thread one block ahead of the hasher (see `_iter_file_blocks`)."""
 
 from __future__ import annotations
 
@@ -46,9 +33,7 @@ def _write(tmp_path, name, data: bytes):
 
 
 def test_the_threshold_patch_actually_selects_the_threaded_path(tmp_path, threaded):
-    """The other tests are only about threading if the patch really routes
-    there. Pin it by observing that a reader thread exists while blocks are
-    being produced - not by trusting the constant."""
+    """The other tests are only about threading if the patch really routes there."""
     data = b"x" * 4096
     p = _write(tmp_path, "m.gguf", data)
     seen_reader = []
@@ -79,17 +64,14 @@ def test_inline_and_threaded_digests_are_identical(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("size", [0, 1, 255, 256, 257, 512, 4095, 4096])
 def test_digest_correct_across_block_boundaries(tmp_path, threaded, size):
-    """Off-by-one at a block edge is the classic chunked-read bug, so walk the
-    boundary: one under, exactly on, and one over a 256-byte block."""
+    """Off-by-one at a block edge is the classic chunked-read bug, so walk the boundary: one under, exactly on, and one over a 256-byte block."""
     data = bytes((i * 7) % 256 for i in range(size))
     p = _write(tmp_path, f"m{size}.gguf", data)
     assert mm._sha256_file(p) == hashlib.sha256(data).hexdigest()
 
 
 def test_read_error_reaches_the_caller(tmp_path, threaded, monkeypatch):
-    """A failure inside the reader thread must surface, not vanish. AGENTS.md
-    rule 5: a digest that silently returns the hash of a partial read would
-    report a model as verified when it was never fully read."""
+    """A failure inside the reader thread must surface, not vanish."""
     p = _write(tmp_path, "m.gguf", b"y" * 4096)
     real_open = open
     calls = {"n": 0}
@@ -114,10 +96,7 @@ def test_read_error_reaches_the_caller(tmp_path, threaded, monkeypatch):
 
 
 def test_abandoning_the_generator_does_not_leak_the_reader(tmp_path, threaded):
-    """A consumer that stops early (its own exception, or a progress callback
-    that raised despite its contract) leaves the reader parked on a full queue.
-    The generator's finally must drain it, or a long-running server accumulates
-    a stuck thread holding megabytes per abandoned hash."""
+    """A consumer that stops early (its own exception, or a progress callback that raised despite its contract) leaves the reader parked on a full queue."""
     p = _write(tmp_path, "m.gguf", b"z" * 65536)      # 256 blocks, queue holds 2
     before = {t.ident for t in threading.enumerate()}
 
@@ -134,18 +113,7 @@ def test_abandoning_the_generator_does_not_leak_the_reader(tmp_path, threaded):
 
 def test_a_reader_that_dies_silently_raises_instead_of_hanging(tmp_path, threaded,
                                                                monkeypatch):
-    """If the reader exits without posting eof or an exception, the consumer
-    must FAIL, not block forever.
-
-    This test exists because the failure was observed, not imagined: while
-    fires-controlling `_iter_file_blocks`, replacing the reader's handler with
-    `except BaseException: pass` made a test run hang until it was killed at two
-    minutes, printing nothing. A silent forever-hang inside the function that
-    verifies a downloaded model is strictly worse than a loud error.
-
-    Note the assertion names the EXACT exception type. `pytest.raises(Exception)`
-    would pass on a `queue.Empty` leaking out, or on almost any regression here,
-    and this test is specifically about which failure occurs."""
+    """If the reader exits without posting eof or an exception, the consumer must FAIL, not block forever."""
     p = _write(tmp_path, "m.gguf", b"v" * 4096)
 
     class _NeverRuns:
@@ -184,9 +152,7 @@ def test_progress_is_monotonic_and_ends_at_total(tmp_path, threaded):
 
 
 def test_progress_runs_on_the_callers_thread_not_the_reader(tmp_path, threaded):
-    """_hash_with_progress calls _sha256_file from a worker thread and drives a
-    rich progress bar from this callback. If the callback were invoked on the
-    reader thread instead, that contract would change silently."""
+    """_hash_with_progress calls _sha256_file from a worker thread and drives a rich progress bar from this callback."""
     p = _write(tmp_path, "m.gguf", b"w" * 4096)
     caller = threading.current_thread().ident
     threads: set[int] = set()

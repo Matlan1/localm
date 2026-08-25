@@ -1,37 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""REG-590 (regression audit 2026-07-14): recall falls silent on a paraphrase in the
-DEFAULT (no-embedder) config, so the user's own saved facts never reach the model.
-
-The [10] precision gate is lexical-OR-semantic. In a default install there is no
-embedding model (it is opt-in via ``localm setup-embeddings``), so the semantic
-branch is dead and the gate degrades to EXACT content-word intersection:
-
-    'what is my name'  vs  'User is called Sam'  ->  {} -> ineligible -> recall() == []
-
-Pre-#590 the FLOOR was arithmetically dead (user/import are recency-pinned at 1.0),
-so that fact was ALWAYS injected. #590 added the gate for a measured reason (a static
-6-fact block distracted small local models), so the fix is NOT to revert it.
-
-Crucially the degraded path is not only "no embedder": ``_vector_status`` also reports
-``no_vectors``, ``low_coverage`` (< VEC_COVERAGE carry a vector, and backfill is
-bounded at 64/pass, so a few-hundred-record store is degraded for several passes even
-WITH an embedder installed) and ``dim_mismatch``. So shipping the embedder by default
-would not close this hole.
-
-Fix: when the semantic signal is degraded, promote at most TRUST_FALLBACK_K
-user-authored (TRUSTED_SOURCES) facts that failed the lexical gate, in score order.
-user/import are already modelled as stable profile facts rather than chatter - recall
-exempts them from recency decay and prune exempts them from decay eviction - so this
-extends an existing distinction instead of inventing one.
-
-What this fix IS and IS NOT (stated precisely on purpose): it is a BOUNDED
-TRUSTED-FACT FALLBACK. It is NOT paraphrase recall. With no semantic signal there is
-no relevance signal at all, so the promotion is effectively importance-ordered and on
-a store with many user facts it can surface 2 unrelated ones and still miss the fact
-the query was about (pinned by test_fallback_is_importance_ordered_not_relevance_ordered).
-It is strictly better than the silence it replaces, and a working embedder remains the
-only real answer for relevance. Overclaiming prose is how REG-591 got mis-tagged FIXED.
-"""
+"""REG-590 (regression audit 2026-07-14): recall falls silent on a paraphrase in the DEFAULT (no-embedder) config, so the user's own saved facts never reach the model."""
 
 from __future__ import annotations
 
@@ -39,9 +7,7 @@ from localm.memory import MemoryRecord, MemoryStore
 
 
 def _topic_embed(texts):
-    """3-axis one-hot topic stub (name / drink / other) so distinct topics are
-    ORTHOGONAL: a paraphrased name query cosine-matches the name fact, while an
-    off-topic query lands on its own axis and matches nothing."""
+    """3-axis one-hot topic stub (name / drink / other) so distinct topics are ORTHOGONAL: a paraphrased name query cosine-matches the name fact, while an off-topic query lands on its own axis and matches nothing."""
     name = ("name", "called", "sam")
     drink = ("tea", "coffee", "drink")
     out = []
@@ -69,10 +35,7 @@ def test_paraphrased_query_recalls_user_fact_without_embedder(tmp_path):
 
 
 def test_other_reported_paraphrases_also_surface(tmp_path):
-    """The audit and the peer session reproduced several; none share a content word.
-    Note what is asserted: the wanted fact is AMONG the promoted set, not that it is
-    singled out - the fallback does not rank by relevance (see the limitation test
-    below), so with 2 facts and K=2 both surface."""
+    """The audit and the peer session reproduced several; none share a content word."""
     from localm.memory.store import TRUST_FALLBACK_K
     s = MemoryStore("owner", "chat", root=tmp_path)
     s.add(MemoryRecord(text="User prefers tea over coffee", source="user"))
@@ -83,15 +46,7 @@ def test_other_reported_paraphrases_also_surface(tmp_path):
 
 
 def test_offtopic_query_stays_silent_even_though_it_is_also_a_lexical_miss(tmp_path):
-    """THE discriminator test, and the reason REG-590 was hard.
-
-    'recommend a pasta recipe' vs 'User was born in 1990' is a zero-content-word-overlap
-    miss against a trusted fact - IDENTICAL in signal to REG-590's 'what is my name' vs
-    'User is called Sam'. The [10] precision gate requires the first to stay silent
-    (test_user_fact_is_gated_not_always_injected) and REG-590 requires the second to
-    recall. Only the first-person reference separates them. If the fallback ever fires
-    here, [10]'s contract is broken and small local models get an unrelated profile fact
-    on every off-topic turn."""
+    """THE discriminator test, and the reason REG-590 was hard."""
     s = MemoryStore("owner", "chat", root=tmp_path)
     s.add(MemoryRecord(text="User was born in 1990", source="user", importance=0.9))
     s.add(MemoryRecord(text="User lives in Ghent", source="user", importance=0.9))
@@ -100,8 +55,7 @@ def test_offtopic_query_stays_silent_even_though_it_is_also_a_lexical_miss(tmp_p
 
 
 def test_self_referential_variants_all_fire(tmp_path):
-    """Every REG-590 repro (mine and the peer session's) carries a first-person
-    pronoun; all are stopwords, hence invisible to the lexical gate."""
+    """Every REG-590 repro (mine and the peer session's) carries a first-person pronoun; all are stopwords, hence invisible to the lexical gate."""
     from localm.memory.store import _is_self_referential
     for q in ("what is my name", "who am i", "what do i drink", "where do i live",
               "should I use miles or kilometers", "tell me about myself"):
@@ -112,21 +66,7 @@ def test_self_referential_variants_all_fire(tmp_path):
 
 
 def test_fallback_is_importance_ordered_not_relevance_ordered(tmp_path):
-    """DOCUMENTS A KNOWN LIMITATION (raised in peer review), it does not fix it.
-
-    With the semantic branch dead there is NO relevance signal by construction:
-    ``rel`` is 0 for a zero-overlap record (that IS the bug) and ``rec`` is pinned to
-    1.0 for TRUSTED_SOURCES (the decay exemption). So every zero-overlap user fact
-    scores W_REC*1.0 + W_IMP*importance and they differ ONLY by importance: the
-    fallback promotes the most IMPORTANT trusted facts, which need not include the
-    one the query was about.
-
-    This is why this fix must be described as a bounded trusted-fact fallback and
-    NEVER as "paraphrase recall". It is strictly better than REG-590's silence (0
-    facts), and it is the most that is available with no semantic signal - the real
-    answer for relevance is a working embedder. Asserted here so the limitation is
-    pinned: if someone later makes the degraded path relevance-aware, this test fails
-    and forces them to state that deliberately."""
+    """DOCUMENTS A KNOWN LIMITATION (raised in peer review), it does not fix it."""
     from localm.memory.store import TRUST_FALLBACK_K
     s = MemoryStore("owner", "chat", root=tmp_path)
     s.add(MemoryRecord(text="User is called Sam", source="user", importance=0.5))
@@ -143,11 +83,7 @@ def test_fallback_is_importance_ordered_not_relevance_ordered(tmp_path):
 # ------------------------------------------------------- the fix stays BOUNDED ---- #
 
 def test_degraded_fallback_is_bounded_not_a_topk_revert(tmp_path):
-    """A SELF-REFERENTIAL query with many user facts must promote at most
-    TRUST_FALLBACK_K - NOT the ungated top-k that [10] removed (a naive revert would
-    return all 5). The off-topic case now promotes ZERO and is asserted separately in
-    test_offtopic_query_stays_silent_even_though_it_is_also_a_lexical_miss; this test
-    guards the BOUND on the path where the fallback actually fires."""
+    """A SELF-REFERENTIAL query with many user facts must promote at most TRUST_FALLBACK_K - NOT the ungated top-k that [10] removed (a naive revert would return all 5)."""
     # Imported inside the test on purpose: the constant does not exist pre-fix, and a
     # module-level import would make the whole file fail to COLLECT, hiding whether
     # the other tests fail for the real behavioural reason.
@@ -164,8 +100,7 @@ def test_degraded_fallback_is_bounded_not_a_topk_revert(tmp_path):
 
 
 def test_synth_memory_is_still_gated_when_degraded(tmp_path):
-    """The gate must still silence the numerous/noisy classes: only user/import are
-    promoted. A synth memory failing the lexical gate stays out."""
+    """The gate must still silence the numerous/noisy classes: only user/import are promoted."""
     s = MemoryStore("owner", "chat", root=tmp_path)
     s.add(MemoryRecord(text="Assistant observed the sky was blue", source="synth"))
     assert s.recall("what is my name", embed_fn=None) == []
@@ -174,8 +109,7 @@ def test_synth_memory_is_still_gated_when_degraded(tmp_path):
 # --------------------------------------------- the healthy semantic path is intact - #
 
 def test_strict_gate_holds_when_semantic_signal_is_usable(tmp_path):
-    """With vectors usable, the fallback must NOT fire: an off-topic query still
-    injects nothing. Guards against the fix leaking into the good path."""
+    """With vectors usable, the fallback must NOT fire: an off-topic query still injects nothing."""
     s = MemoryStore("owner", "chat", root=tmp_path)
     for t in ("User is called Sam", "User prefers tea over coffee"):
         s.add(MemoryRecord(text=t, source="user"), embed_fn=_topic_embed)
@@ -185,8 +119,7 @@ def test_strict_gate_holds_when_semantic_signal_is_usable(tmp_path):
 
 
 def test_semantic_paraphrase_still_matches_when_usable(tmp_path):
-    """Sanity: the semantic half genuinely handles the paraphrase, so the fallback is
-    only ever needed on the degraded path."""
+    """Sanity: the semantic half genuinely handles the paraphrase, so the fallback is only ever needed on the degraded path."""
     s = MemoryStore("owner", "chat", root=tmp_path)
     s.add(MemoryRecord(text="User is called Sam", source="user"), embed_fn=_topic_embed)
     out = s.recall("what is my name", embed_fn=_topic_embed)
@@ -196,8 +129,7 @@ def test_semantic_paraphrase_still_matches_when_usable(tmp_path):
 # ------------------------------------------------------- rule 5: surface, not hide - #
 
 def test_degraded_fallback_is_reported_in_diagnostics(tmp_path):
-    """The miss used to be SILENT (indistinguishable from "you have no memories").
-    The degrade reason and the fallback count must both be observable."""
+    """The miss used to be SILENT (indistinguishable from 'you have no memories')."""
     s = MemoryStore("owner", "chat", root=tmp_path)
     s.add(MemoryRecord(text="User is called Sam", source="user"))
     diag: dict = {}

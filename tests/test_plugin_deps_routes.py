@@ -1,11 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Routes + helpers for the GUI's host-side dependency install.
-
-Key security property under test: a NON-local (remote) client is refused (403)
-even with the PLUGINS_ADMIN scope - a remote client must never trigger a
-server-side pip. The happy path (local operator) starts a background task and
-streams its progress over SSE.
-"""
+"""Routes + helpers for the GUI's host-side dependency install."""
 
 import time
 
@@ -72,10 +66,7 @@ def test_events_remote_is_forbidden(app_mgr, monkeypatch):
 
 
 def test_network_bind_denies_even_from_loopback_peer(app_mgr, monkeypatch):
-    """REGRESSION: the GUI runs behind portmux, so request.client.host is always
-    127.0.0.1 (a loopback peer) even for a genuinely remote client. The gate MUST
-    key off the bind host, not the peer - a network bind is refused regardless of
-    the (loopback-looking) peer the TestClient presents."""
+    """REGRESSION: the GUI runs behind portmux, so request.client.host is always 127.0.0.1 (a loopback peer) even for a genuinely remote client."""
     app, mgr = app_mgr
     _set_bind(app, "0.0.0.0")                    # network bind; TestClient peer is loopback
     _fake_install(monkeypatch)                  # would run if the gate were wrong

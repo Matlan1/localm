@@ -25,8 +25,7 @@ def _minimal_png(width: int, height: int) -> bytes:
 
 class TestImageDimensions:
     def test_png_dimensions_read_correctly(self, tmp_path):
-        """Regression: Path.read_bytes(32) raised TypeError and silently
-        forced every img2img run to 1024x1024."""
+        """Regression: Path.read_bytes(32) raised TypeError and silently forced every img2img run to 1024x1024."""
         p = tmp_path / "img.png"
         p.write_bytes(_minimal_png(640, 480))
         assert comfy._image_dimensions(p) == (640, 480)
@@ -56,8 +55,7 @@ class TestComfyAlive:
 
 
 class TestHistoryExecutionError:
-    """I2: surface a ComfyUI node crash from /history instead of the generic
-    'no output found' that just sends the user to read the ComfyUI console."""
+    """I2: surface a ComfyUI node crash from /history instead of the generic 'no output found' that just sends the user to read the ComfyUI console."""
 
     def test_surfaces_node_crash(self):
         entry = {
@@ -140,8 +138,7 @@ class TestToolConfinement:
 
 class TestSidecarContent:
     def test_sidecar_written_next_to_output(self, tmp_path, monkeypatch):
-        """Drive generate_image fully mocked to the save step and verify
-        the sidecar JSON lands as <output>.png.json with the seed."""
+        """Drive generate_image fully mocked to the save step and verify the sidecar JSON lands as <output>.png.json with the seed."""
         import json
 
         # Force the committed example workflow so the test is independent of any
@@ -192,23 +189,10 @@ class TestSidecarContent:
 
 
 class TestRenderHeartbeat:
-    """ADR-0009 P8: imagine's render tick must reach on_progress (the job
-    stream / GUI's SSE feed), throttled every 15s, matching
-    generate_music/generate_video's ``_tick`` shape byte-for-byte - not just
-    the local Rich console spinner, which lives only inside this function's
-    own Console() and never reaches a GUI-triggered job. Before this, an
-    image job pushed via ``on_progress=lambda t: job.push(...)`` (see
-    plugins/builtin/image/plug.py) sat silent on the wire for as long as
-    max_poll_seconds, indistinguishable from a hang."""
+    """ADR-0009 P8: imagine's render tick must reach on_progress (the job stream / GUI's SSE feed), throttled every 15s, matching generate_music/generate_video's ``_tick`` shape byte-for-byte - not just the local Rich console spinner, which lives only inside this function's own Console() and never reaches..."""
 
     def _capture_tick(self, tmp_path, monkeypatch, on_progress):
-        """Drive generate_image to the poll step for real (workflow load,
-        preflight, submit) and hand back the actual ``_tick`` closure it
-        built, by intercepting comfy_poll_until_done's ``on_tick`` kwarg.
-        POLL_FINISHED is returned immediately so generate_image completes
-        without the real poll loop's timing/sleep ever running; the tick is
-        then driven directly with synthetic elapsed values, matching how the
-        real loop would call it."""
+        """Drive generate_image to the poll step for real (workflow load, preflight, submit) and hand back the actual ``_tick`` closure it built, by intercepting comfy_poll_until_done's ``on_tick`` kwarg."""
         monkeypatch.setattr(comfy, "workflow_path",
                             lambda: comfy._WORKFLOW_EXAMPLE_PATH)
         out = tmp_path / "art.png"
@@ -274,11 +258,7 @@ class TestRenderHeartbeat:
 
 
 class TestSafeLoraName:
-    """is_safe_lora_name is the ONE shared predicate every entry point that can
-    supply lora_name relies on (the HTTP image route's plug.py, this module's
-    own _build_image_workflow, and the coder agent's generate_image tool,
-    which calls generate_image directly and has no confinement of its own -
-    see TestLoraNameEngineValidation below)."""
+    """is_safe_lora_name is the ONE shared predicate every entry point that can supply lora_name relies on (the HTTP image route's plug.py, this module's own _build_image_workflow, and the coder agent's generate_image tool, which calls generate_image directly and has no confinement of its own - see TestLor..."""
 
     def test_accepts_a_plain_filename(self):
         assert comfy.is_safe_lora_name("my_style.safetensors") is True
@@ -325,15 +305,7 @@ class TestSafeLoraName:
 
 
 class TestLoraNameEngineValidation:
-    """The coder agent's generate_image tool (localm/plugins/coder/tools/media.py)
-    calls localm.image_gen.comfy.generate_image DIRECTLY - it never goes
-    through the HTTP image route's plug.py._validate_lora_name, which only
-    guards browser-originated requests. So the check must also live INSIDE
-    _build_image_workflow itself (is_safe_lora_name, asserted directly above)
-    as the backstop no caller can bypass. This drives the real generate_image
-    end to end (only urlopen is stubbed) to prove that backstop actually
-    fires - and, critically, fires BEFORE the submit-time network calls, not
-    after ComfyUI has already been asked to run the graph."""
+    """The coder agent's generate_image tool (localm/plugins/coder/tools/media.py) calls localm.image_gen.comfy.generate_image DIRECTLY - it never goes through the HTTP image route's plug.py._validate_lora_name, which only guards browser-originated requests."""
 
     def test_unsafe_lora_name_rejected_before_submit(self, tmp_path, monkeypatch):
         monkeypatch.setattr(comfy, "workflow_path",

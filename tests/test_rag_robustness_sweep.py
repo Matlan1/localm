@@ -1,24 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""RAG data-robustness hardening found by an adversarial hostile-input sweep.
-
-Seven distinct bugs, each independently reproduced before the fix:
-
-B1  _extract_docx `<w:t>` run extraction was O(n^2) backtracking (a tiny docx with
-    many unclosed <w:t> openers pinned a CPU for minutes).
-B2  _extract_tar_members called sorted(getmembers()), materialising every member of
-    a compressed tarball BEFORE the member cap applied (a .tgz of 500k empty members
-    ran ~22s, far under the size cap).
-B3  Collection._expand walked with rglob(), which follows Windows NTFS junctions
-    (is_symlink() is False for them), so a self-referential junction looped forever.
-B4  _extract_ipynb caught only json.JSONDecodeError, so deeply-nested JSON raised
-    RecursionError past the guard -> HTTP 500.
-B5  Collection._load appended chunk lines with no shape check, so a non-dict or
-    missing-"text" line crashed query()/remove_doc()/add_paths() and stats() lied.
-B6  A non-finite (NaN/inf) embedding component made _cosine return nan; the blended
-    score dropped the chunk from results with no surfaced degrade reason (rule 5).
-B7  chunk_text recorded a paragraph's pos one line too low when preceded by an odd
-    number of blank lines (the citation pointed at a blank line).
-"""
+"""RAG data-robustness hardening found by an adversarial hostile-input sweep."""
 
 import io
 import json
@@ -225,14 +206,7 @@ def test_non_dict_chunk_line_does_not_crash(tmp_path, bad_line):
 
 
 def test_malformed_chunk_line_warning_logs_once_per_process(tmp_path, caplog):
-    """_load() runs from __init__, and every /api/rag request builds a FRESH
-    Collection - so a warning with no dedup guard fires on essentially every
-    request for a collection with any corrupt lines at all. Must warn on the
-    first Collection() for this directory and stay silent on a second one for
-    the SAME directory/count, matching the sibling _note_vector_degrade
-    warn-once pattern (test_rag.py's test_malformed_vectors_json_degrades_
-    not_crashes). self.corrupt must still be set on EVERY load regardless -
-    only the duplicate LOG LINE is suppressed, not the actual state."""
+    """_load() runs from __init__, and every /api/rag request builds a FRESH Collection - so a warning with no dedup guard fires on essentially every request for a collection with any corrupt lines at all."""
     base = _seed(tmp_path)
     chunks_file = base / "kb" / "chunks.jsonl"
     with chunks_file.open("a", encoding="utf-8") as fh:
@@ -252,11 +226,7 @@ def test_malformed_chunk_line_warning_logs_once_per_process(tmp_path, caplog):
 
 
 def test_malformed_chunk_line_warning_still_fires_for_a_different_collection(tmp_path, caplog):
-    """The dedup key must include the collection directory - two DIFFERENT
-    collections each having their own corruption must both be reported, never
-    collapsed into "one warning covers every collection" (the coordinator's
-    explicit caution: a flood fix must not hide a genuinely broken SECOND
-    collection behind the first one's already-logged warning)."""
+    """The dedup key must include the collection directory - two DIFFERENT collections each having their own corruption must both be reported, never collapsed into 'one warning covers every collection' (the coordinator's explicit caution: a flood fix must not hide a genuinely broken SECOND collection behin..."""
     (tmp_path / "one").mkdir()
     (tmp_path / "two").mkdir()
     base1 = _seed(tmp_path / "one")

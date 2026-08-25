@@ -1,21 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""MoE-aware VRAM preflight (n_cpu_moe): the sibling defect to the one
-test_kv_bytes_from_gguf.py pins. _kv_bytes_per_token was made MoE-aware there;
-_check_vram / _auto_gpu_layers / _auto_ctx_max were not - all three called
-self._model_bytes() (the WHOLE file) directly and never looked at
-self.n_cpu_moe, so a model whose routed-expert weights are pinned to system
-RAM (llama.py's _apply_cpu_moe) was still charged for them in VRAM. A model
-that genuinely fits once its experts are pinned was refused outright
-(_check_vram), under-offloaded (_auto_gpu_layers), or under-budgeted for
-context (_auto_ctx_max) on arithmetic blind to a placement the user had
-explicitly configured.
-
-These tests build REAL GGUF files byte by byte (header + KV block + real
-tensor-info entries + real tensor data, offsets and file size all internally
-consistent) and drive the real parser and the real sizing path - no mock
-stands in for the code under test. Follows test_kv_bytes_from_gguf.py's own
-_gguf/_s/_shape helper conventions where they apply.
-"""
+"""MoE-aware VRAM preflight (n_cpu_moe): the sibling defect to the one test_kv_bytes_from_gguf.py pins. _kv_bytes_per_token was made MoE-aware there; _check_vram / _auto_gpu_layers / _auto_ctx_max were not - all three called self._model_bytes() (the WHOLE file) directly and never looked at self.n_cpu_m..."""
 
 import struct
 
@@ -51,19 +35,7 @@ def _tensor_info(name: str, dims, ggml_type: int, offset: int) -> bytes:
 
 def _gguf_with_tensors(path, kv, tensors, *, version=3, magic=b"GGUF",
                        alignment=32):
-    """Write a REAL, internally-consistent GGUF file: header, KV block,
-    tensor-info block, alignment padding, then real tensor DATA bytes -
-    offsets and the final file size are exactly what a real writer would
-    produce, which is exactly what gguf_moe_pinned_expert_bytes reads back.
-
-    *kv* is an ordered list of (key, type, value) - value is an int for
-    _T_UINT32, a str for _T_STRING, or a list[str] for _T_ARRAY (string
-    arrays only - the one shape this file's tests need, to simulate a large
-    tokenizer vocab sitting before the tensor-info section).
-
-    *tensors* is an ordered list of (name, dims, ggml_type, size_bytes) -
-    offsets are assigned here from cumulative size_bytes, contiguous, in
-    list order (mirrors how a real GGUF writer lays out tensor data)."""
+    """Write a REAL, internally-consistent GGUF file: header, KV block, tensor-info block, alignment padding, then real tensor DATA bytes - offsets and the final file size are exactly what a real writer would produce, which is exactly what gguf_moe_pinned_expert_bytes reads back."""
     header = [magic, struct.pack("<I", version),
               struct.pack("<QQ", len(tensors), len(kv))]
     for key, vtype, val in kv:
@@ -168,13 +140,7 @@ class TestGgufMoePinnedExpertBytes:
         assert gguf_moe_pinned_expert_bytes(f, n_pinned_layers=5) == 0
 
     def test_reaches_tensor_infos_past_a_large_kv_array(self, tmp_path):
-        """The whole reason this function streams the file instead of
-        reading a bounded prefix (like gguf_kv_bytes_per_token/
-        gguf_expert_count do): a real tokenizer vocab array sits BEFORE the
-        tensor-info section this function needs to reach, and can be several
-        MB for a 100k+-token vocabulary. Build one bigger than
-        _GGUF_META_PROBE_BYTES (4MB) and confirm the tensor-info section is
-        still read correctly on the far side of it."""
+        """The whole reason this function streams the file instead of reading a bounded prefix (like gguf_kv_bytes_per_token/ gguf_expert_count do): a real tokenizer vocab array sits BEFORE the tensor-info section this function needs to reach, and can be several MB for a 100k+-token vocabulary."""
         big_vocab = [f"tok{i:08d}" for i in range(250_000)]   # ~4.5 MB of strings
         kv = [
             ("general.architecture", _T_STRING, "testmoe"),
@@ -289,15 +255,7 @@ class TestEffectiveModelBytesForVram:
 # --------------------------------------------------------------------------- #
 
 class TestCheckVramHonoursNCpuMoe:
-    """Kept deliberately KB-scale, not the GB-scale a real MoE would be: this
-    repo's own conftest.py refuses to leave files over 100MB in tmp_path (a
-    real-bytes-on-disk guard - truncate() is not sparse on Windows/NTFS, and
-    writing GB-scale tensors here once filled a shared disk for real). The
-    arithmetic under test is pure ratios/sums, so a KB-scale model with a
-    proportionally KB-scale VRAM budget exercises the identical code paths.
-    Every constant below is hand-verified against the real formulas
-    (_kv_bytes_per_token's header shape, _check_vram's need/total compare),
-    not guessed - see the inline arithmetic notes."""
+    """Kept deliberately KB-scale, not the GB-scale a real MoE would be: this repo's own conftest.py refuses to leave files over 100MB in tmp_path (a real-bytes-on-disk guard - truncate() is not sparse on Windows/NTFS, and writing GB-scale tensors here once filled a shared disk for real)."""
 
     def _backend(self, tmp_path, tensors, *, n_cpu_moe, n_ctx=64, n_gpu_layers=99):
         f = tmp_path / "moe.gguf"
@@ -314,23 +272,7 @@ class TestCheckVramHonoursNCpuMoe:
         return b
 
     def test_refuses_without_n_cpu_moe_but_fits_with_it(self, tmp_path, capsys):
-        """The headline defect: a model whose bulk is expert weights, refused
-        because the check charged the whole file, now fits once n_cpu_moe
-        pins those exact bytes off the VRAM budget - same free VRAM, same
-        model, only the setting differs.
-
-        tensors: attn 2,000 B x2 layers, ffn_gate_exps 900,000 B x2 layers ->
-        model_bytes = 1,804,000. kv_bytes_per_token=512 (see _backend), n_ctx=64
-        -> kv_cache = 32,768. overhead = 10,000.
-          need WITHOUT n_cpu_moe (weights = whole model, gpu_layers=99):
-            1,804,000 + 32,768 + 10,000 = 1,846,768
-          total = 1,500,000 -> need > total -> hard refusal ("cannot fit").
-          need WITH n_cpu_moe=2 (both layers pinned, effective weights =
-          just the 2x2,000 B attn tensors = 4,000):
-            4,000 + 32,768 + 10,000 = 46,768
-          total (1,500,000) >= 46,768 -> no hard refusal.
-          free = 500,000 >= 46,768 -> fits cleanly, no "Low VRAM" warning either.
-        """
+        """The headline defect: a model whose bulk is expert weights, refused because the check charged the whole file, now fits once n_cpu_moe pins those exact bytes off the VRAM budget - same free VRAM, same model, only the setting differs."""
         tensors = [
             ("blk.0.attn_q.weight", [4], 0, 2_000),
             ("blk.0.ffn_gate_exps.weight", [4], 0, 900_000),
@@ -371,15 +313,7 @@ class TestAutoGpuLayersHonoursNCpuMoe:
             patch.object(GgufBackend, "_total_vram_bytes", return_value=total)
 
     def test_full_offload_fits_once_experts_are_pinned(self, tmp_path):
-        """Single layer: attn 2,000 B, ffn_gate_exps 900,000 B -> model_bytes
-        = 902,000. block_count=1, head_dim=16, head_count_kv=4 ->
-        kv_bytes_per_token = 1*4*16*4 = 256. n_ctx=64 -> kv_cache = 16,384.
-        overhead = 10,000.
-          WITHOUT n_cpu_moe: need_full = 902,000+16,384+10,000 = 928,384.
-          free=500,000 < 928,384 -> full offload does NOT fit -> partial (<99).
-          WITH n_cpu_moe=1 (the only layer pinned): effective weights = 2,000
-          (just attn). need_full_effective = 2,000+16,384+10,000 = 28,384.
-          free (500,000) >= 28,384 -> full offload FITS -> 99."""
+        """Single layer: attn 2,000 B, ffn_gate_exps 900,000 B -> model_bytes = 902,000. block_count=1, head_dim=16, head_count_kv=4 -> kv_bytes_per_token = 1*4*16*4 = 256. n_ctx=64 -> kv_cache = 16,384. overhead = 10,000."""
         tensors = [
             ("blk.0.attn_q.weight", [4], 0, 2_000),
             ("blk.0.ffn_gate_exps.weight", [4], 0, 900_000),
@@ -409,16 +343,7 @@ class TestAutoGpuLayersHonoursNCpuMoe:
 
 class TestAutoCtxMaxHonoursNCpuMoe:
     def test_larger_ceiling_once_experts_are_pinned(self, tmp_path):
-        """Same single-layer model as TestAutoGpuLayersHonoursNCpuMoe
-        (model_bytes=902,000, kv_bytes_per_token=256). free=5,000,000,
-        overhead=10,000, embedder reservation pinned to 0 for determinism.
-          budget WITHOUT n_cpu_moe = 5,000,000-902,000-10,000 = 4,088,000
-            -> auto = 4,088,000//256 = 15,968, rounded to 1024s = 15,360.
-          budget WITH n_cpu_moe=1 (effective weights=2,000) =
-            5,000,000-2,000-10,000 = 4,988,000
-            -> auto = 4,988,000//256 = 19,484, rounded to 1024s = 19,456.
-          Both clear the _AUTO_CTX_MIN(4096) floor, so the comparison is a
-          real one, not two floored answers reading as equal."""
+        """Same single-layer model as TestAutoGpuLayersHonoursNCpuMoe (model_bytes=902,000, kv_bytes_per_token=256). free=5,000,000, overhead=10,000, embedder reservation pinned to 0 for determinism. budget WITHOUT n_cpu_moe = 5,000,000-902,000-10,000 = 4,088,000 -> auto = 4,088,000//256 = 15,968, rounded to 1..."""
         tensors = [
             ("blk.0.attn_q.weight", [4], 0, 2_000),
             ("blk.0.ffn_gate_exps.weight", [4], 0, 900_000),

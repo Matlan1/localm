@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Path-aware glob scope matching: compile a gitignore/pathspec-style glob into a
-full-relative-path regex, cached per scope. Used by the Agent scope enforcement."""
+"""Path-aware glob scope matching: compile a gitignore/pathspec-style glob into a full-relative-path regex, cached per scope."""
 
 from __future__ import annotations
 
@@ -10,18 +9,7 @@ import re
 _SCOPE_RE_CACHE: dict[str, "re.Pattern[str]"] = {}
 
 def _glob_to_regex(pattern: str) -> "re.Pattern[str]":
-    """
-    Compile a path-aware glob into a regex anchored to a full relative path.
-
-    Semantics (gitignore / pathspec style), unlike plain ``fnmatch``:
-      - ``*``  matches any run of characters WITHIN one path segment - it does
-        NOT cross ``/``. So ``src/*.py`` matches ``src/a.py`` but not
-        ``src/a/b.py``.
-      - ``**`` matches across segments. ``**/`` matches any number of leading
-        directories (including none); a trailing ``**`` matches the rest.
-      - ``?``  matches a single non-``/`` character.
-      - all other characters are matched literally.
-    """
+    """Compile a path-aware glob into a regex anchored to a full relative path."""
     i, n = 0, len(pattern)
     out = ["(?s:"]
     while i < n:

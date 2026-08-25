@@ -1,13 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""
-Managed lifecycle for localm serve.
-
-localcoder can start and stop a localm inference server automatically so the
-user only needs one command:  localcoder --model gemma4-4b
-
-The server is started as a background subprocess, monitored until the port
-responds, and stopped when localcoder exits.
-"""
+"""Managed lifecycle for localm serve."""
 
 from __future__ import annotations
 
@@ -44,14 +36,7 @@ def _port_open(host: str, port: int) -> bool:
 
 
 class ManagedServer:
-    """
-    Starts `localm serve <model>` as a child process and tears it down on exit.
-
-    Use as a context manager:
-
-        with ManagedServer("gemma4-4b", port=8642) as srv:
-            backend = make_localm_backend("gemma4-4b", port=srv.port)
-    """
+    """Starts `localm serve <model>` as a child process and tears it down on exit."""
 
     def __init__(
         self,
@@ -69,11 +54,7 @@ class ManagedServer:
     # ------------------------------------------------------------------ #
 
     def start(self) -> bool:
-        """
-        Start the server if the port isn't already listening.
-
-        Returns True if the server is ready, False on timeout.
-        """
+        """Start the server if the port isn't already listening."""
         if _port_open(self.host, self.port):
             print_info(f"Port {self.port} already open - using existing server")
             return True

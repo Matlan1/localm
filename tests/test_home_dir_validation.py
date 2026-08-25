@@ -1,15 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""LOCALM_HOME pointing at a regular FILE (not a directory) is user
-misconfiguration, not a localm bug.
-
-Before this fix, ``ensure_dirs()`` let ``HOME_DIR.mkdir(exist_ok=True)`` raise a
-raw ``FileExistsError`` (WinError 183 on Windows), which the CLI's cross-cutting
-handler turned into the generic "Sorry - localm hit an unexpected error" + a
-bug-report prompt. That wastes the user's time filing a bug for something they
-can fix in one step. It must instead produce a clean, actionable message via a
-``click.ClickException`` (the documented pass-through the graceful handler never
-routes to the reporter).
-"""
+"""LOCALM_HOME pointing at a regular FILE (not a directory) is user misconfiguration, not a localm bug."""
 
 from __future__ import annotations
 
@@ -22,10 +12,7 @@ from localm import bugreport
 
 
 def _point_home_at_file(tmp_path, monkeypatch):
-    """Make config's HOME_DIR a regular file and return that path. Mirrors a user
-    who set LOCALM_HOME to a file: the env var and the frozen module globals both
-    point at it (config.py freezes HOME_DIR at import, so the env alone is not
-    enough - see conftest.cli_runner)."""
+    """Make config's HOME_DIR a regular file and return that path."""
     home_file = tmp_path / "localm_home_is_a_file"
     home_file.write_text("i am a regular file, not a directory", encoding="utf-8")
     monkeypatch.setenv("LOCALM_HOME", str(home_file))

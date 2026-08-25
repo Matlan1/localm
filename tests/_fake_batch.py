@@ -1,15 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""A REAL ctypes-backed LlamaBatch for unit tests, so the native batch-fill loop
-in LlamaCpp._create_batch runs against real memory instead of being short-
-circuited by a mock. Lets a test assert the actual layout the native decoder
-sees (token ids, per-token positions, seq ids, logits flags, n_tokens).
-
-Use it as the side_effect for a mocked ``api.llama_batch_init``:
-
-    mock_api.llama_batch_init.side_effect = fake_batch_init
-
-and inspect the filled arrays afterwards via ``batch_backing(batch)``.
-"""
+"""A REAL ctypes-backed LlamaBatch for unit tests, so the native batch-fill loop in LlamaCpp._create_batch runs against real memory instead of being short- circuited by a mock."""
 
 import ctypes
 
@@ -22,8 +12,7 @@ _BACKING: dict = {}
 
 
 def fake_batch_init(n_tokens: int, embd: int = 0, n_seq_max: int = 1) -> LlamaBatch:
-    """Allocate a LlamaBatch backed by real ctypes arrays, mirroring the native
-    llama_batch_init(n_tokens, 0, 1) allocation _create_batch fills."""
+    """Allocate a LlamaBatch backed by real ctypes arrays, mirroring the native llama_batch_init(n_tokens, 0, 1) allocation _create_batch fills."""
     cap = max(1, int(n_tokens))
     tok = (ctypes.c_int32 * cap)()
     pos = (ctypes.c_int32 * cap)()
@@ -49,8 +38,7 @@ def fake_batch_init(n_tokens: int, embd: int = 0, n_seq_max: int = 1) -> LlamaBa
 
 
 def batch_backing(batch: LlamaBatch) -> dict:
-    """Read back the arrays a filled batch points at, as plain Python lists,
-    trimmed to the batch's n_tokens."""
+    """Read back the arrays a filled batch points at, as plain Python lists, trimmed to the batch's n_tokens."""
     raw = _BACKING[ctypes.addressof(batch)]
     n = int(batch.n_tokens)
     return {

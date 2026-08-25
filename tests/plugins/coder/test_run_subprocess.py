@@ -1,9 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Tests for localm.plugins.coder.tools.base.run_subprocess - the canonical
-subprocess-execution primitive (CODER-2) shared by tools/shell.py, tools/git.py,
-and cli/goal.py. Each caller's own behavior is covered by its own test file
-(test_tools_shell.py, test_git_tools.py, test_tools_timeout_partial.py); this
-file tests run_subprocess itself, directly."""
+"""Tests for localm.plugins.coder.tools.base.run_subprocess - the canonical subprocess-execution primitive (CODER-2) shared by tools/shell.py, tools/git.py, and cli/goal.py."""
 
 import subprocess
 from unittest.mock import MagicMock, patch
@@ -71,8 +67,7 @@ class TestShellWrapMode:
             assert launched[-1] == "echo hi && echo bye"
 
     def test_shell_wrap_passes_a_quoted_argument_through_unchanged(self, tmp_path):
-        """The command text must reach the shell verbatim - re-quoting it is
-        exactly the defect this wrapping was fixed for."""
+        """The command text must reach the shell verbatim - re-quoting it is exactly the defect this wrapping was fixed for."""
         captured = {}
 
         def fake_run(argv, **kwargs):

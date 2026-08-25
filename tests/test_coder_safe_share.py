@@ -1,12 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Safe-to-share coder keys (2026-06-20). The OWNER key gets the full coder; a
-MINTED, non-owner coder-scoped key gets a RESTRICTED session - run_shell removed
-(no arbitrary host command exec / RCE) and confined to the instance project root.
-
-run_shell is cwd-independent (it runs an arbitrary command with cwd only as the
-start dir), so confining the cwd is necessary but NOT sufficient - disabling the
-tool is the real containment. These tests pin both halves.
-"""
+"""Safe-to-share coder keys (2026-06-20)."""
 
 from pathlib import Path
 

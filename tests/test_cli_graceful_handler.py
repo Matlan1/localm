@@ -1,12 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""End-to-end coverage for the cross-cutting graceful-failure handler
-(_GracefulGroup in cli.py).
-
-An unexpected crash in ANY subcommand must become a "sorry X for Y" + bug report
-(exit 1), not a raw traceback; a typed LocalmError carries its own summary/reason;
-ordinary Click usage errors and Ctrl+C pass through untouched; and a failure
-INSIDE reporting must not recurse into the hard crash we are trying to avoid.
-"""
+"""End-to-end coverage for the cross-cutting graceful-failure handler (_GracefulGroup in cli.py)."""
 
 from __future__ import annotations
 

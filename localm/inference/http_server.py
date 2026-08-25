@@ -1,16 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""
-OpenAI-compatible HTTP inference server built with FastAPI + uvicorn.
-
-Endpoints:
-  GET  /health
-  GET  /v1/models
-  POST /v1/chat/completions  (streaming + non-streaming, multimodal-capable)
-
-Start programmatically:
-    from localm.inference.http_server import serve
-    serve(engine, host="127.0.0.1", port=8642)
-"""
+"""OpenAI-compatible HTTP inference server built with FastAPI + uvicorn."""
 
 from __future__ import annotations
 
@@ -194,33 +183,7 @@ _hb_monotonic: Optional[float] = None
 
 
 def _loop_lag_seconds() -> Optional[float]:
-    """Real event-loop scheduling delay, in seconds - NOT time-since-last-
-    heartbeat-tick (see the comment above _hb_monotonic). ~0.0 on a healthy
-    loop; grows only when a heartbeat tick was itself delayed, meaning
-    something blocked the loop. This is what gets reported to a human (the
-    debug request log, /debug/stacks); the raw gap is for the watchdog's own
-    large-threshold hang detection only.
-
-    RESOLUTION LIMIT, by construction: a stall shorter than
-    _HEARTBEAT_INTERVAL_S (currently 1.0s) reads as exactly 0.0, identical to
-    a perfectly healthy loop - a 1Hz heartbeat cannot see a sub-interval
-    block. "loop_lag=0.0" therefore means "no stall LONGER than the
-    heartbeat interval was detected", not "the loop was never blocked at
-    all". A finer-grained sampler would close this gap at the cost of a
-    second background task and more wakeups purely for a diagnostic counter,
-    which is not worth it: the hang watchdog (large-threshold, above) already
-    owns detecting a real freeze; this value is for correlating a slow
-    request with a preceding stall, not for catching sub-second ones.
-
-    COLD START, before the heartbeat task's first tick (_hb_monotonic is
-    still None): returns None (ADR-0008 U6). It used to return 0.0 here -
-    the SAME reading as "healthy" - which is exactly the #955/#950 shape
-    this module fixed once already, just moved from the producer that grows
-    with wall-clock time to the producer that reports a fixed false-healthy
-    number. Every caller must render None as explicitly unavailable, never
-    silently reuse the "0.0 = no stall longer than the interval" reading for
-    a state that has no reading at all - see the debug request log and
-    /debug/stacks call sites."""
+    """Real event-loop scheduling delay, in seconds - NOT time-since-last- heartbeat-tick (see the comment above _hb_monotonic). ~0.0 on a healthy loop; grows only when a heartbeat tick was itself delayed, meaning something blocked the loop."""
     if _hb_monotonic is None:
         return None
     return max(0.0, (time.monotonic() - _hb_monotonic) - _HEARTBEAT_INTERVAL_S)
@@ -243,23 +206,7 @@ _engine_factory = _default_engine_factory
 
 
 def _model_file_size(name: str) -> Optional[int]:
-    """Best-effort on-disk size for registered model *name*, or None when not
-    resolvable (e.g. under pytest with no registry). Mirrors switch_engine's
-    own file_size computation (residency.model_footprint_bytes) for the
-    single-file-vs-directory STAT LOGIC, so the VRAM estimate written to the
-    coordination registry is consistent with the number switch_engine itself
-    used to decide whether eviction was needed - but deliberately NOT for the
-    empty-directory return value: model_footprint_bytes returns int (never
-    None) because its caller always needs a numeric eviction-admission input,
-    even a 0 one; this function feeds a registry field other instances treat
-    as "how much VRAM does this peer hold", where a 0 is read as a REAL
-    measurement (see gpu_registry.py's vram_estimate_bytes and its one
-    consumer's `isinstance(e, int) and e > 0` guard). rglob() matching no
-    files - an empty directory, or one whose real weights sit somewhere
-    rglob does not look - means the size genuinely was not measured, and
-    reporting a suspiciously-precise 0 for "unknown" is exactly the
-    collapsed-two-outcomes failure AGENTS.md rule 5 warns about, even though
-    today's one consumer happens to treat 0 the same as None already."""
+    """Best-effort on-disk size for registered model *name*, or None when not resolvable (e.g. under pytest with no registry)."""
     try:
         from pathlib import Path as _Path
         from localm.model_manager import get_model_info
@@ -281,9 +228,7 @@ def _model_file_size(name: str) -> Optional[int]:
 
 
 def _current_gpu_index() -> int:
-    """The configured main GPU device index (0 when unset/unconfigured) - see
-    ``main_gpu_index`` / ``discover.resolve_main_gpu_index``, the same
-    resolution ``vram_info()`` and the GGUF backend's own VRAM check use."""
+    """The configured main GPU device index (0 when unset/unconfigured) - see ``main_gpu_index`` / ``discover.resolve_main_gpu_index``, the same resolution ``vram_info()`` and the GGUF backend's own VRAM check use."""
     try:
         from localm.config import load_config
         from localm.discover import resolve_main_gpu_index
@@ -293,14 +238,7 @@ def _current_gpu_index() -> int:
 
 
 def _gpu_registry_sync() -> None:
-    """Best-effort: write this instance's current model/VRAM state to the
-    cross-install GPU coordination registry (called on every successful model
-    load/unload, plus a periodic heartbeat). A no-op when this instance is not
-    registered for coordination (``_gpu_coord`` unset - a plain test app or an
-    ``--isolated`` run never reaches the shared registry directory at all).
-
-    Never raises into the caller: a registry write failure must not break the
-    model load/unload it is piggybacking on (RULE 5 - logged, not silenced)."""
+    """Best-effort: write this instance's current model/VRAM state to the cross-install GPU coordination registry (called on every successful model load/unload, plus a periodic heartbeat)."""
     global _gpu_coord
     if not _gpu_coord:
         return
@@ -331,26 +269,7 @@ def _gpu_registry_sync() -> None:
 
 
 def _load_gpu_indices() -> set:
-    """Every device whose free VRAM this instance's next model load can actually
-    USE - the whole configured split when one is active, else just the main
-    device.
-
-    NOT ``{_current_gpu_index()}``: that is an IDENTITY answer ("which one device
-    is primary"), and resolve_main_gpu_index(None) returns 0 for an unconfigured
-    main_gpu_index even on a box whose split spans 0 AND 1. Weighing peers
-    against that single index while weighing VRAM against vram_capacity()'s
-    COMBINED split total contradicts itself, and dropped a sibling holding VRAM
-    on this instance's own second split device - turning a cooperative unload
-    that used to succeed into a 503 (the capacity-vs-identity distinction the
-    raw-accessor guard in scripts/check_hygiene.py exists to enforce).
-
-    Known limitation, stated rather than hidden (rule 5): a registry entry
-    advertises ONE ``gpu_index`` per instance (see _gpu_registry_sync), so a
-    SPLIT peer is represented only by its main device. A split peer whose main
-    device is outside our set is therefore still skipped even though it may hold
-    VRAM on a device we do use. Widening the entry to a device LIST is a registry
-    schema change, out of scope here; the effect is a missed cooperation
-    opportunity (the pre-existing 503), never a wrong yank."""
+    """Every device whose free VRAM this instance's next model load can actually USE - the whole configured split when one is active, else just the main device."""
     try:
         from localm.config import load_config
         from localm.discover import resolve_gpu_split
@@ -370,45 +289,7 @@ def _load_gpu_indices() -> set:
 def _attempt_cooperative_unload(*, needed_bytes: Optional[int] = None,
                                 free_bytes: Optional[int] = None,
                                 asked: Optional[set] = None) -> bool:
-    """Best-effort: ask a live sibling localm instance (found via the
-    cross-install GPU-coordination registry) to release its own VRAM, so this
-    instance does not have to give up and 503 just because ITS OWN local
-    eviction candidates are all busy. Returns True once a peer confirms it
-    freed its model.
-
-    Cooperating COSTS the sibling every model it has loaded (the peer runs its
-    own ``unload_all_models``), so this is deliberately conservative about when
-    it is worth it (REG-454):
-
-    - *asked* (a set of instance_ids, per load attempt) makes each peer
-      answerable at most ONCE. The caller re-probes VRAM and calls back on
-      success, and a peer that has already released advertises no new VRAM -
-      but its entry can keep listing a model anyway (its own post-unload
-      registry write is best-effort and may have failed, or it reloaded), and
-      ``request_cooperative_unload`` reports success for "already_unloaded"
-      too. Without this the caller's ``while True`` would keep re-asking the
-      same peer forever, holding the per-model semaphore and re-probing VRAM,
-      never progressing.
-    - *needed_bytes*/*free_bytes* gate the yank on whether it could actually
-      help: if every candidate advertises a VRAM estimate and freeing ALL of
-      them still leaves this load short (a model far bigger than the card, or
-      a third-party app such as ComfyUI holding the bulk of VRAM), the peers
-      would lose their models for nothing and this load would 503 anyway. The
-      pre-existing 503 is the honest answer; do not take the sibling down with
-      us. An unknown estimate is not proof it cannot help, so it does not veto.
-
-    Only a peer on a device THIS load can use is considered (see
-    _load_gpu_indices - the whole configured split, not one index): freeing an
-    unrelated card's VRAM cannot make this load fit.
-
-    Only runs when THIS instance itself is registered for coordination
-    (``_gpu_coord`` set - never for a plain test app or an ``--isolated`` run,
-    so tests and isolated runs never touch the shared machine-wide registry
-    directory or make an outbound loopback call). Fully advisory: ANY failure
-    (no registry dir, no live peer, request timeout/refusal) is logged and
-    returns False - the caller's pre-existing 503 remains the unchanged
-    fallback (RULE 5: a failed cooperation attempt must never become a HARDER
-    failure than today's baseline, and must never be silenced)."""
+    """Best-effort: ask a live sibling localm instance (found via the cross-install GPU-coordination registry) to release its own VRAM, so this instance does not have to give up and 503 just because ITS OWN local eviction candidates are all busy."""
     global _gpu_coord
     from localm.debuglog import logger as _dbg
     if not _gpu_coord:
@@ -465,12 +346,7 @@ def _attempt_cooperative_unload(*, needed_bytes: Optional[int] = None,
 
 
 def _gpu_placement_fields(engine) -> dict:
-    """{"gpu_layers_offloaded", "gpu_layers_total", "degraded"} for *engine*'s
-    current load, or {} when the backend cannot report placement (no load
-    yet, or a backend without a layer-count knob - see Engine.gpu_placement).
-    Merged into every switch_engine()/load-route success payload so a caller
-    can tell a full GPU load from a silent CPU fallback (AGENTS.md rule 5)
-    instead of a bare "loaded"/"already_active" that hides it."""
+    """{'gpu_layers_offloaded', 'gpu_layers_total', 'degraded'} for *engine*'s current load, or {} when the backend cannot report placement (no load yet, or a backend without a layer-count knob - see Engine.gpu_placement)."""
     placement = getattr(engine, "gpu_placement", None)
     return dict(placement) if placement else {}
 
@@ -1123,31 +999,12 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
 
 
 def _resolve_unnamed_model_name() -> str | None:
-    """The model name an unnamed (or ``"localm"``-named) request currently
-    resolves to - read-only, no loading or registry validation.
-
-    Shared by get_engine's own fallback below and by ``GET /health``, so both
-    agree on what "recoverable" means: /health must not report "no model" for
-    a state chat already knows how to fix on the next request, and it must not
-    duplicate this chain and risk the two silently drifting apart.
-    ``_last_active_model_name`` covers the gap ``_default_model_name`` alone
-    cannot: that one is write-once at startup (create_app) and never updated
-    by a model switch, so a model switched to after boot and then evicted
-    (unload_all_models keeps its Engine in _engines for lazy reload, but used
-    to lose its name) would otherwise silently resolve back to the STARTUP
-    model instead of the one actually in use."""
+    """The model name an unnamed (or ``'localm'``-named) request currently resolves to - read-only, no loading or registry validation."""
     return _active_model_name or _last_active_model_name or _default_model_name
 
 
 async def get_engine(model_name: str | None, *, load: bool = True) -> Engine:
-    """Resolve the engine for *model_name*, loading it if necessary.
-
-    With ``load=False`` the resolved engine is returned WITHOUT forcing a load -
-    for callers like /v1/embeddings whose backend may not need the model resident
-    at all (a GGUF backend embeds via the dedicated embedder; AUDIT-MED-13). The
-    caller decides whether to load. Registration/resolution (and its 404) still
-    apply.
-    """
+    """Resolve the engine for *model_name*, loading it if necessary."""
     global _engines, _engines_lru, _active_model_name, _default_model_name, _last_active_model_name, _inference_sems, _engine, _inference_sem
 
     # Back-compat: if a test or script set _engine directly, import it into the multi-model dicts
@@ -1224,37 +1081,7 @@ async def get_engine(model_name: str | None, *, load: bool = True) -> Engine:
 
 def _add_vram_fields(result: dict, *, before, released, after, before_fresh: bool,
                      before_scope=None) -> None:
-    """Add vram_freed/vram_before_bytes/vram_after_bytes to *result* when
-    measurable (unchanged from before), plus an honest flag when the reading
-    cannot be presented as current fact - rather than asserting a wrong number
-    (AGENTS.md rule 5).
-
-    ``before is None`` returns early and adds NOTHING - the benign case (a
-    CPU-only box, or the Windows registry tier, which reports total but never
-    free) where a completed probe simply has no free reading to give. That is not
-    the fault this guards, and must not be dressed up as one: no VRAM telemetry is
-    the normal, permanent state there, so saying nothing is the honest answer.
-
-    THREE independent ways this reading can be wrong, and they are not the same bug:
-
-    - NOT FRESH (``before_fresh`` false): the probe timed out or was busy, so the
-      'before' value is a stale cached one (PR #693's case; see _vram_free_reading).
-    - AFTER UNVERIFIABLE (``released is None``): wait_for_vram_release() could not
-      verify the outcome (the 'after' reading went unmeasurable), so ``vram_freed``
-      is null rather than a false "VRAM did not drop" - a claim a reading that never
-      refreshed cannot support (PR #694's case).
-    - NOT DEVICE-SCOPED (``before_scope`` is FREE_SCOPE_PROCESS): the probe was
-      perfectly fresh, but on this platform the driver reports only the CALLING
-      process's own allocations. Since every GGUF load runs in an isolated worker
-      subprocess (backends/gguf.py, #606), the model's VRAM is in another process
-      and simply absent from the number - which is why before/after came back
-      byte-identical, and vram_freed false, across a load/unload cycle that an OS
-      counter showed working perfectly. Measured, see
-      dev-notes/vram-cross-process-blindness.md.
-
-    All three are reported through the same flag because they mean the same thing to
-    a caller (do not trust this number), but the note says which, so a bug report
-    points at the right one."""
+    """Add vram_freed/vram_before_bytes/vram_after_bytes to *result* when measurable (unchanged from before), plus an honest flag when the reading cannot be presented as current fact - rather than asserting a wrong number (AGENTS.md rule 5)."""
     if before is None:
         return
     from localm.discover import FREE_SCOPE_PROCESS
@@ -1281,18 +1108,7 @@ def _add_vram_fields(result: dict, *, before, released, after, before_fresh: boo
 
 
 async def unload_all_models() -> dict:
-    """Release every currently-loaded model from GPU/CPU memory and wait until
-    VRAM is actually reclaimed (see ``localm.vram.wait_for_vram_release`` - the
-    driver-hang guard: otherwise a media model can load on top of a
-    not-yet-freed LLM and exceed total VRAM).
-
-    Extracted from the ``POST /v1/models/unload`` route so it has exactly ONE
-    implementation, reused by two callers with two different auth models: the
-    owner-scoped ``/v1/models/unload`` route (``MODELS_WRITE``), and the
-    coordination-token-gated ``POST /v1/instances/cooperate-unload`` (a
-    sibling localm instance asking THIS one to free VRAM - multi-instance GPU
-    coordination, see ``localm.gpu_registry``). Behavior is unchanged from the
-    original inline implementation."""
+    """Release every currently-loaded model from GPU/CPU memory and wait until VRAM is actually reclaimed (see ``localm.vram.wait_for_vram_release`` - the driver-hang guard: otherwise a media model can load on top of a not-yet-freed LLM and exceed total VRAM)."""
     global _active_model_name, _last_active_model_name, _engine, _inference_sem
     loop = asyncio.get_running_loop()
     from localm.vram import (_live_free_vram_bytes, _vram_free_reading,
@@ -1416,22 +1232,7 @@ async def unload_all_models() -> dict:
 
 
 async def _unload_embedder_if_matches(name: str, loop) -> Optional[dict]:
-    """If *name* is a registered model whose path matches the currently-loaded
-    shared embedder, release it and report the freed VRAM - the targeted-unload
-    counterpart to ``unload_all_models``'s embedder release above.
-
-    The embedder is a separate lifecycle from ``_engines`` (see
-    ``localm.inference.embedder``'s module docstring): ``unload_one_model``'s
-    own ``_engines.get(name)`` lookup can never find it, so without this a
-    resident embedding model registered under its own name (the common case:
-    a `localm pull`-ed GGUF selected as the embedding model) showed as
-    "loaded" on the Models page yet its per-row Unload button was a silent
-    no-op. Matched by resolved PATH, not by name/config, so it is correct
-    regardless of how ``embedding_model`` was originally resolved (an explicit
-    path, a registered name, or a known key) - what matters is which file is
-    actually resident. Returns None when *name* is not the embedder, so the
-    caller falls back to its normal "already_unloaded" outcome for a genuinely
-    untracked/never-loaded chat model."""
+    """If *name* is a registered model whose path matches the currently-loaded shared embedder, release it and report the freed VRAM - the targeted-unload counterpart to ``unload_all_models``'s embedder release above."""
     from localm.inference import embedder as _embedder_mod
     # Executor-offloaded, not a direct call: get_embedder() can hold
     # embedder._LOCK for the full duration of an IsolatedEmbedder
@@ -1510,16 +1311,7 @@ async def _unload_embedder_if_matches(name: str, loop) -> Optional[dict]:
 
 
 async def unload_one_model(name: str) -> dict:
-    """Release ONE currently-loaded model from GPU/CPU memory, leaving any
-    other loaded models untouched - the targeted counterpart to
-    ``unload_all_models()`` (same VRAM-release-wait + gpu-registry-sync
-    behavior, just scoped to a single engine). Clears the active-model
-    pointers only when *name* was the active model, so unloading a background
-    (loaded-but-not-active) model never disturbs the one actually serving
-    requests. A *name* that is registered but not currently loaded is a
-    no-op success (idempotent, matching unload_all_models()'s "nothing to do"
-    case), not an error - callers that need to reject an unknown model name
-    outright should check the registry themselves before calling this."""
+    """Release ONE currently-loaded model from GPU/CPU memory, leaving any other loaded models untouched - the targeted counterpart to ``unload_all_models()`` (same VRAM-release-wait + gpu-registry-sync behavior, just scoped to a single engine)."""
     global _active_model_name, _last_active_model_name, _engine, _inference_sem
     loop = asyncio.get_running_loop()
     from localm.vram import (_live_free_vram_bytes, _vram_free_reading,
@@ -1601,36 +1393,7 @@ def _touch_activity(name: str | None = None) -> None:
 
 
 def rekey_loaded_model(old_name: str, new_name: str) -> bool:
-    """Re-key every in-memory record of a loaded model's identity after its
-    registry entry was renamed *old_name* -> *new_name*, so a still-loaded/
-    serving engine is not orphaned under its old name.
-
-    This is load-bearing, not cosmetic: ``active_model()`` reads
-    ``_engine.display_name``, and the GUI's remove-model guard is exactly
-    ``req.model == active_model()`` - without this re-key, renaming the
-    active model would leave that guard comparing the NEW registry name
-    against the engine's stale OLD display_name, so it would never match and
-    the GUI could delete the file out from under the model still serving
-    requests.
-
-    A synchronous, in-memory-only op (dict/list mutation, no I/O, no
-    ``await``), so it is safe to call directly from an async route body: on
-    a single-threaded event loop nothing else can interleave between the pop
-    and the re-insert. Returns whether an ENGINE was re-keyed: False when
-    *old_name* had none, which is the common case, since renaming a model
-    that was never loaded in this process needs no engine bookkeeping.
-
-    The startup and last-active POINTERS are corrected either way, before
-    that early return, because they are wrong the moment the registry moves
-    regardless of what is in the engine map. Measured live, on a server
-    started with the renamed model: a stale ``_default_model_name`` puts a
-    ghost row for the old name into ``GET /v1/models`` (list_models adds the
-    startup name when the registry lacks it) and makes ``switch_engine``'s
-    registration check at ``name != _default_model_name`` accept a request
-    for a name the registry no longer has, instead of answering the honest
-    404. ``_last_active_model_name`` is the same shape one step along:
-    ``_resolve_unnamed_model_name`` falls back to it after a full eviction,
-    so an unnamed request would resolve to a name that no longer exists."""
+    """Re-key every in-memory record of a loaded model's identity after its registry entry was renamed *old_name* -> *new_name*, so a still-loaded/ serving engine is not orphaned under its old name."""
     global _active_model_name, _default_model_name, _last_active_model_name
     if _default_model_name == old_name:
         _default_model_name = new_name
@@ -1655,24 +1418,7 @@ def rekey_loaded_model(old_name: str, new_name: str) -> bool:
 
 
 async def rename_registered_model(model: str, new_name_raw: str) -> dict:
-    """Move a registry entry to a new name AND re-key the live engine, in that
-    order, in ONE process. The single entry point every rename route uses.
-
-    The re-key is not bookkeeping that can be added later by whoever remembers:
-    until it runs, the registry holds the new name while the engine map is
-    still keyed on the old one, and every name-keyed check downstream then asks
-    about a name nothing is under. Pairing the two here means a route cannot
-    perform half of it. Renaming from OUTSIDE this process cannot do the second
-    half at all, which is why ``localm rename`` asks a running server to call
-    this rather than moving the registry entry behind its back.
-
-    Raises HTTPException (404 unregistered, 409 name taken, 400 rename failed)
-    so both the /v1 and the GUI route answer identically. Returns the response
-    body: status, the old name, the sanitized new name, and the migration
-    notes, which must reach the caller rather than only the server log - a user
-    has no other way to learn that e.g. a per-project coder config still names
-    the old model.
-    """
+    """Move a registry entry to a new name AND re-key the live engine, in that order, in ONE process."""
     from localm.config import load_registry
     from localm.executor import get_plugin_executor
     from localm.model_manager import _sanitize_name, rename_model_with_notes
@@ -1708,77 +1454,14 @@ async def rename_registered_model(model: str, new_name_raw: str) -> dict:
 
 
 class ModelFileHold(NamedTuple):
-    """Why a model removal must be refused, and which loaded engine is the
-    reason.
-
-    *reason* is None when that engine is PROVEN to hold the file (both paths
-    resolved and named the same file). Otherwise it says why holding could not
-    be ruled out, and the removal is refused anyway - see
-    :func:`loaded_engine_holding_model_file` for why an unknown is a refusal.
-    The caller reports it, so it has to read as a sentence fragment after
-    "'<key>' is loaded and ".
-    """
+    """Why a model removal must be refused, and which loaded engine is the reason."""
     key: str
     reason: str | None = None
 
 
 def loaded_engine_holding_model_file(
         model: str, registry: dict | None = None) -> "ModelFileHold | None":
-    """Whether removing registry entry *model* would delete a file that a LOADED
-    engine is holding. Returns None only when that is POSITIVELY RULED OUT;
-    otherwise a :class:`ModelFileHold` naming the engine responsible.
-
-    IDENTITY BY FILE PATH, NOT BY NAME, and that is the whole point. The
-    remove route's older guards ask "is a loaded engine keyed under THIS NAME",
-    which is the same question only for as long as every renamer re-keys the
-    engine map. ``localm rename`` runs in a SEPARATE PROCESS and cannot reach
-    into this one's memory, so after a CLI rename the engine is still keyed on
-    the old name, both name-keyed guards miss, and the route goes on to spawn
-    ``localm rm`` and delete the GGUF out from under a live, serving engine.
-    That is not recoverable: the user's downloaded model file is gone.
-
-    A guard that holds only while every caller remembers to re-key is exactly
-    how that became possible, so this one asks the question the deletion itself
-    turns on. Any future caller that forgets the re-key is covered by
-    construction rather than by review.
-
-    IT FAILS CLOSED, AND THAT IS THE LOAD-BEARING PART. The question is not
-    "do these two paths compare equal" but "can I establish that nothing live
-    is using this file". Those differ on every input where the comparison
-    cannot be made at all, and the first version of this function answered
-    every one of them with "nothing holds it, go ahead and delete":
-
-    * the engine's recorded ``model_path`` is missing or empty;
-    * resolving the engine's path raises (a UNC or network path whose share is
-      momentarily unreachable, a permission error, an embedded NUL).
-
-    Both are "I could not tell", and both were reported as "no". An unknown
-    now REFUSES, naming the engine and the reason. A refused delete costs the
-    user one command; a deleted model file is gone.
-
-    A third input - THIS model's own registry path failing to resolve - is
-    handled here too, and honestly it is a smaller thing: measured against the
-    previous code, ``find_aliases_by_path`` raised on it first (it resolves the
-    path it is handed and catches only for sibling entries), so the guard blew
-    up and the route answered 500 rather than deleting anything. The collapse
-    inside ``resolve_deletion_target``, which returns None for "unresolvable"
-    exactly as for "outside the models dir" and "already gone", was therefore
-    LATENT. It is closed because a guard should answer rather than crash, and
-    because the reorder below makes it live.
-
-    The refusal is scoped rather than blanket: with nothing loaded at all,
-    nothing can be holding the file, so the answer is a certain None however
-    unresolvable the paths are. Only a box that actually has a model resident
-    can hit an uncertain refusal.
-
-    Alias-aware, mirroring remove_model: while another registered name still
-    points at the file, the removal keeps the bytes and only drops the name, so
-    there is nothing to refuse. Pass *registry* to reuse a load the caller has
-    already done.
-
-    Does filesystem I/O (Path.resolve on registry paths, which can block on a
-    UNC entry), so callers on the event loop run it in the executor.
-    """
+    """Whether removing registry entry *model* would delete a file that a LOADED engine is holding."""
     from pathlib import Path
 
     from localm.config import load_registry
@@ -1865,9 +1548,7 @@ def loaded_engine_holding_model_file(
 
 
 def _sanitize_client_context(raw) -> dict:
-    """Reduce an untrusted GUI ``client`` payload to a safe, bounded dict for a bug
-    report: only known string fields (capped) plus a capped list of console-error
-    strings. Anything else is dropped. Returns {} for non-dict / empty input."""
+    """Reduce an untrusted GUI ``client`` payload to a safe, bounded dict for a bug report: only known string fields (capped) plus a capped list of console-error strings."""
     if not isinstance(raw, dict):
         return {}
     out: dict = {}
@@ -1884,8 +1565,7 @@ def _sanitize_client_context(raw) -> dict:
 
 
 def _idle_unload_ttl() -> int:
-    """Configured idle-unload TTL in seconds (0 = disabled), read live so a
-    Settings change applies without a restart. A bad value falls back to 0."""
+    """Configured idle-unload TTL in seconds (0 = disabled), read live so a Settings change applies without a restart."""
     try:
         from localm.config import load_config
         return max(0, int(load_config().get("idle_unload_seconds", 0) or 0))
@@ -1894,14 +1574,7 @@ def _idle_unload_ttl() -> int:
 
 
 async def _idle_unload_once(ttl: int) -> bool:
-    """One idle check: unload the model if it has been idle for >= ttl seconds.
-    Returns True if it unloaded. Does NO sleeping (the loop owns cadence), so the
-    decision is unit-testable without waiting.
-
-    The unload runs UNDER the inference semaphore so it can never free the native
-    context mid-decode (that crashes the GPU driver), and the idle time is
-    re-checked inside the lock so a request that arrived while we waited for the
-    lock cancels the unload. The next inference reloads the model lazily."""
+    """One idle check: unload the model if it has been idle for >= ttl seconds."""
     global _active_model_name, _last_active_model_name, _engine, _inference_sem
     if ttl <= 0:
         return False
@@ -1998,11 +1671,7 @@ async def _idle_unload_once(ttl: int) -> bool:
 
 
 async def _idle_unload_loop() -> None:
-    """Free the model from VRAM after `idle_unload_seconds` of no inference.
-
-    Opt-in (default 0 = disabled). Runs as a lifespan background task; the actual
-    decision lives in `_idle_unload_once`. A transient error is logged (RULE 5:
-    surface, do not swallow) instead of killing the loop."""
+    """Free the model from VRAM after `idle_unload_seconds` of no inference."""
     while True:
         ttl = _idle_unload_ttl()
         if ttl <= 0:
@@ -2019,13 +1688,7 @@ async def _idle_unload_loop() -> None:
 
 
 async def _gpu_registry_heartbeat_loop() -> None:
-    """Keep this instance's cross-install GPU-coordination entry fresh
-    (~every 20s), matching the ``_idle_unload_loop`` pattern above. Only
-    started when this instance is actually registered for coordination (see
-    ``_gpu_coord`` / the lifespan startup below) - a plain test app or an
-    ``--isolated`` run never starts this loop at all. A transient failure is
-    logged, not fatal (RULE 5): the entry just ages until the next tick, and a
-    stale entry is skipped by a peer's own liveness+identity check anyway."""
+    """Keep this instance's cross-install GPU-coordination entry fresh (~every 20s), matching the ``_idle_unload_loop`` pattern above."""
     while True:
         await asyncio.sleep(20)
         try:
@@ -2040,10 +1703,7 @@ async def _gpu_registry_heartbeat_loop() -> None:
 
 
 async def _hang_heartbeat_loop() -> None:
-    """Bump _hb_monotonic every _HEARTBEAT_INTERVAL_S so the off-loop watchdog
-    thread can tell when the single event loop has stopped making progress (a
-    hang), and so _loop_lag_seconds() can report a real scheduling-delay
-    figure. The ONLY steady-state cost is one wakeup per interval."""
+    """Bump _hb_monotonic every _HEARTBEAT_INTERVAL_S so the off-loop watchdog thread can tell when the single event loop has stopped making progress (a hang), and so _loop_lag_seconds() can report a real scheduling-delay figure."""
     global _hb_monotonic
     while True:
         _hb_monotonic = time.monotonic()
@@ -2051,17 +1711,7 @@ async def _hang_heartbeat_loop() -> None:
 
 
 def _start_hang_watchdog(threshold: float, trace_path, *, poll: float = 1.0):
-    """Start a plain (NON-async) daemon thread that watches the heartbeat. When
-    the event loop has not ticked in `threshold`s it is blocked, so dump ALL
-    thread stacks to `trace_path` via faulthandler - the only way to see what a
-    fully-wedged loop is stuck in, because this thread runs OUTSIDE the loop.
-    Polls every `poll`s (tests lower it for speed). Returns (stop_event, thread)
-    for teardown; the thread OWNS its file and closes it on exit.
-
-    The trace file is opened LAZILY, only when the first stall is detected, so a
-    healthy run (the overwhelming common case, since this is on by default) never
-    creates a file at all. Never blocks: it only waits on an Event, subtracts two
-    numbers, and appends to a file."""
+    """Start a plain (NON-async) daemon thread that watches the heartbeat."""
     import faulthandler
     import traceback
 
@@ -2162,9 +1812,7 @@ _hang_surface_hooks: dict = {
 
 
 def set_hang_surface(surface, recovered) -> None:
-    """Route hang-alarm surfacing somewhere a user actually looks (the GUI
-    wires the native status window here). Must be thread-safe callables: the
-    alarm invokes them from its own daemon thread."""
+    """Route hang-alarm surfacing somewhere a user actually looks (the GUI wires the native status window here)."""
     _hang_surface_hooks["surface"] = surface
     _hang_surface_hooks["recovered"] = recovered
 
@@ -2175,21 +1823,7 @@ _hang_dump_loop = None
 
 
 def _hang_dump(reason: str) -> None:
-    """Forensic stack snapshot on a NEW hang incident, into the same
-    per-run trace file the stall watchdog uses - under the same privacy gate
-    (_diagnostics_allowed), because it writes stack frames to disk. The alarm
-    calls this once per distinct incident; detection/surfacing themselves are
-    NOT gated on this (they write nothing sensitive anywhere).
-
-    Two sections: every THREAD (faulthandler - where the 2026-08-18
-    incident's wedged executor jobs were visible), then every asyncio TASK
-    with its await stack - because a purely-async wedge (a coroutine parked
-    on an await that never completes) does not exist on any thread and is
-    invisible to faulthandler. The task section is gathered ON the loop
-    (call_soon_threadsafe) with a short wait: in the starvation class the
-    loop is healthy by definition so it returns instantly, and in the
-    frozen-loop class it times out and is skipped - the thread section
-    already shows the freeze itself."""
+    """Forensic stack snapshot on a NEW hang incident, into the same per-run trace file the stall watchdog uses - under the same privacy gate (_diagnostics_allowed), because it writes stack frames to disk."""
     if not _diagnostics_allowed():
         return
     import faulthandler
@@ -2252,16 +1886,7 @@ def _hang_dump(reason: str) -> None:
 
 
 def _hang_restart_action(app) -> None:
-    """Recovery action for the hang alarm: the same in-place re-exec restart
-    as the tray Restart button (_do_restart), hardened for a process that is
-    currently misbehaving. The graceful path (engine unloads, embedder
-    release, VRAM-release wait) is deliberately lock-free/bounded by design,
-    but "bounded" is a claim about code on a box that is provably wedged -
-    so it gets a hard window, after which the re-exec happens anyway with
-    only the steps that cannot block: the lock-free embedder-worker release
-    (an orphaned worker survives execv holding VRAM - REG-650), the crash-
-    marker disarm (so the next boot does not misreport this recovery as a
-    crash), and a log flush."""
+    """Recovery action for the hang alarm: the same in-place re-exec restart as the tray Restart button (_do_restart), hardened for a process that is currently misbehaving."""
     port = getattr(app.state, "instance_port", None)
     instance_id = getattr(app.state, "instance_id", None)
 
@@ -2300,14 +1925,7 @@ def _hang_restart_action(app) -> None:
 
 
 def _diagnostics_allowed() -> bool:
-    """Whether localm may write an AUTOMATIC diagnostic trace right now. True in
-    the log/full session modes; in privacy mode ONLY when the user opted into
-    keeping diagnostics (config ``keep_diagnostics``). Fail-safe to privacy (no
-    trace) when the mode/config cannot be resolved, matching audit.py's default.
-
-    Gates the hang watchdog and the crash-restart breadcrumbs so privacy mode's
-    "nothing written automatically" promise holds, while the toggle lets a tester
-    keep the diagnostics a bug report needs."""
+    """Whether localm may write an AUTOMATIC diagnostic trace right now."""
     try:
         from localm.config import keep_diagnostics_enabled
         if keep_diagnostics_enabled():
@@ -2345,34 +1963,7 @@ MAX_REQUEST_BODY_BYTES = 160_000_000
 
 
 class _BodyStreamCapMiddleware:
-    """Enforce MAX_REQUEST_BODY_BYTES on the actual bytes received over the
-    wire, not the client-supplied Content-Length header. ``Transfer-Encoding:
-    chunked`` sends no Content-Length at all, so a plain header check (as a
-    ``@app.middleware("http")``/BaseHTTPMiddleware handler would have to do)
-    never fires - live-verified: a chunked POST to a CORS-exempt route like
-    /v1/chat/completions was fully buffered by FastAPI's own body handling
-    (ahead of any auth dependency or pydantic validation) up to ~5.9 GB RSS
-    from one unauthenticated connection before this fix (AUD-CHUNKED). A pure
-    ASGI middleware class (not the BaseHTTPMiddleware pattern used elsewhere in
-    this file) so it wraps the raw ``receive`` callable BEFORE Starlette/
-    FastAPI's own body-buffering step ever runs; a BaseHTTPMiddleware handler
-    that itself called ``request.body()`` would just reproduce the same
-    unbounded read it is trying to bound.
-
-    Once the cap is crossed this does NOT just raise and let the exception
-    unwind through FastAPI's own body-parsing (that was tried first): FastAPI
-    wraps ANY exception from body reading into a generic 400 "error parsing
-    the body" - worse, raising from deep inside receive() surfaces to it as an
-    ``ExceptionGroup`` (from the anyio task group `BaseHTTPMiddleware` runs the
-    downstream app in), which doesn't match FastAPI's own
-    ``except HTTPException: raise`` passthrough, so the 413 never reaches the
-    client at all - only a bare TCP reset (confirmed live: uvicorn had unread
-    bytes still sitting in the socket's receive buffer when it closed, so the
-    OS sent RST instead of completing the response). Instead: tell the inner
-    app the body simply ENDED at the cap (bounding what it can ever buffer),
-    swallow whatever confused response it tries to send for that truncated
-    body, drain and discard the rest of the real stream so the OS can close
-    the connection cleanly, and send exactly one authoritative 413 ourselves."""
+    """Enforce MAX_REQUEST_BODY_BYTES on the actual bytes received over the wire, not the client-supplied Content-Length header. ``Transfer-Encoding: chunked`` sends no Content-Length at all, so a plain header check (as a ``@app.middleware('http')``/BaseHTTPMiddleware handler would have to do) never fires..."""
 
     def __init__(self, app):
         self._app = app
@@ -2482,23 +2073,7 @@ _DISCONNECT_POLL_KEY = "localm.disconnect_poll"
 
 
 class _DisconnectSignalMiddleware:
-    """Publish a working client-disconnect poll for endpoints that need one.
-
-    The four @app.middleware("http") handlers below are BaseHTTPMiddleware, which
-    runs the endpoint in a child task fed by a SYNTHETIC receive that never yields
-    http.disconnect - so request.is_disconnected() is permanently False for any
-    endpoint behind them (confirmed against a real uvicorn client abort). A
-    StreamingResponse still learns of a disconnect (Starlette acloses its body
-    generator), but a plain non-streaming coroutine does not.
-
-    This is a PURE-ASGI middleware (a BaseHTTPMiddleware here would defeat its own
-    purpose) added OUTSIDE that stack, so it keeps the raw ASGI receive - which
-    does carry http.disconnect - and stashes a Starlette-style non-blocking peek at
-    scope[_DISCONNECT_POLL_KEY]. It never wraps receive/send, so it is transparent
-    to every other route; only the non-streaming inference path polls it (see
-    _generate_full). WHY here and not fixed globally: converting the auth/origin
-    BaseHTTPMiddleware handlers to pure-ASGI is a far larger, riskier change; this
-    gives the one path that needs it a correct signal without touching them."""
+    """Publish a working client-disconnect poll for endpoints that need one."""
 
     def __init__(self, app):
         self._app = app
@@ -2540,8 +2115,7 @@ SESSION_MAX_AGE = 400 * 24 * 3600  # ~400 days (the browser cap)
 
 
 def _bearer_token(request) -> Optional[str]:
-    """Extract a presented bearer token from the raw Authorization header (used
-    by the origin/management middleware and the request-aware auth core)."""
+    """Extract a presented bearer token from the raw Authorization header (used by the origin/management middleware and the request-aware auth core)."""
     header = request.headers.get("authorization", "")
     if header[:7].lower() == "bearer ":
         return header[7:].strip() or None
@@ -2549,10 +2123,7 @@ def _bearer_token(request) -> Optional[str]:
 
 
 def _request_token(request) -> tuple[Optional[str], str]:
-    """Resolve the presented key and where it came from. The Authorization
-    header wins (programmatic clients); otherwise the HttpOnly ``localm_session``
-    cookie (the browser GUI). Returns ``(token, source)`` with *source* one of
-    ``"header"`` / ``"cookie"`` / ``"none"``."""
+    """Resolve the presented key and where it came from."""
     header = _bearer_token(request)
     if header:
         return header, "header"
@@ -2563,34 +2134,7 @@ def _request_token(request) -> tuple[Optional[str], str]:
 
 
 def _session_minted_by_owner_key(rec, token=None) -> bool:
-    """Whether *rec* was minted by the OWNER KEY itself, as opposed to a minted
-    (and therefore revocable) keystore key.
-
-    Asked POSITIVELY and answered from the owner key alone. Two ways, in cost
-    order, and both are proofs rather than inferences:
-
-    1. the ``owner_key_minted`` stamp recorded at login (``sessions.create``);
-    2. for a record written before that field existed, the recorded ``key_hash``
-       still equalling the live owner key's digest. Only the owner key's own
-       digest can match that, so a keystore key's session can never satisfy it -
-       which is why this needs no way to tell an ABSENT stamp from a False one.
-
-    On (2) the proof is written back (``remember_owner_key_minted``) while it
-    still holds: after an owner-key roll the recorded hash matches neither the new
-    owner key nor any keystore entry, so without the back-fill a pre-existing
-    owner session would start failing the re-check below and be signed out on the
-    roll - the exact behaviour the exemption exists to prevent.
-
-    Deliberately NOT derived from the scope set, and NOT from a keystore read:
-
-    - **ADMIN is not the question.** The owner may mint ADMIN-scoped KEYSTORE
-      keys, which stay revocable; treating "holds ADMIN" as "is the owner" is what
-      gave such a key an exemption it was never entitled to.
-    - **Nothing here reads the keystore**, so ``_load_keystore()``'s fail-OPEN
-      behaviour (``[]`` on OSError/ValueError) cannot promote anything, and no
-      answer is derived from a NEGATIVE such as ``not key_hash_live``. Both of
-      those shapes produced privilege escalations in the jobs plugin's equivalent
-      check (see ``builtin/jobs/plug.py``)."""
+    """Whether *rec* was minted by the OWNER KEY itself, as opposed to a minted (and therefore revocable) keystore key."""
     if rec.get("owner_key_minted") is True:
         return True
     from localm.auth import _hash_key, _legacy_owner_identity, ct_equal, get_api_key
@@ -2613,15 +2157,7 @@ def _session_minted_by_owner_key(rec, token=None) -> bool:
 
 
 def _valid_session(token):
-    """The session record behind a presented cookie *token*, or None if it does not
-    resolve to a session this server still honours.
-
-    THE single gate for reading anything off a cookie session. It exists so that
-    every consumer of a session attribute goes through the same re-validation
-    rather than each calling ``sessions.lookup()`` and re-deciding: a bare lookup
-    returns a record that this function would REJECT (a key's session whose key has
-    since been revoked or expired), so a second reader written against ``lookup``
-    would honour a session that auth already refuses everywhere else."""
+    """The session record behind a presented cookie *token*, or None if it does not resolve to a session this server still honours."""
     if not token:
         return None
     from localm import sessions
@@ -2640,25 +2176,7 @@ def _valid_session(token):
 
 
 def _session_exempt_from_key_recheck(rec, token=None) -> bool:
-    """Whether *rec* may skip the per-request keystore liveness re-check.
-
-    The exemption is for the OWNER KEY, not for ADMIN. It exists because the owner
-    key is not a keystore entry and a session is decoupled from the key VALUE, so
-    an owner-key ROLL must not log the owner out. Keying it on the SCOPE SET alone
-    handed the same exemption to any ADMIN-scoped KEYSTORE key - which is revocable
-    by design - so revoking such a key did not reliably end its cookie, and if the
-    store cleanup also failed the cookie kept working indefinitely. Removing the
-    exemption outright is not the fix either: that reintroduces the owner signing
-    themselves out, which is the whole reason it is here.
-
-    ADMIN is NECESSARY but not SUFFICIENT, and that conjunction is deliberate. It
-    is not a return to inferring the owner from the scope set - the owner proof
-    below is what actually grants the exemption. ADMIN is required ALONGSIDE it
-    because a record claiming to be owner-minted while carrying narrower scopes is
-    self-contradictory: every mint site records the owner key's own scope snapshot,
-    which is ADMIN. No mint site can produce that combination, so only a tampered
-    or corrupted store can, and requiring both means one flipped boolean is not
-    enough to buy a session that can never be revoked."""
+    """Whether *rec* may skip the per-request keystore liveness re-check."""
     if scopes.ADMIN not in set(rec.get("scopes", [])):
         return False
     if _session_minted_by_owner_key(rec, token):
@@ -2673,19 +2191,7 @@ def _session_exempt_from_key_recheck(rec, token=None) -> bool:
 
 
 def _principal_from_token(token, source):
-    """Resolve a presented credential to ``(scopes, key_hash, fs_access,
-    rag_roots)`` or None.
-
-    A ``header`` token is a raw API key -> ``auth.verify()``. A ``cookie`` token is
-    now an OPAQUE SESSION ID -> the server-side session store (``localm.sessions``),
-    which returns the scope / owning-key / fs-access / rag-roots SNAPSHOT taken at
-    login. So a cookie session stays valid across an owner-key roll (the reported
-    bug), and the durable key never has to live in the cookie. ``key_hash`` is the
-    sha256 of the key that minted the session, so ``principal_id`` over a cookie
-    matches the same key presented as a bearer (job ownership parity). ``rag_roots``
-    is that credential's per-key RAG-indexing folder allowlist (see
-    ``auth.rag_roots_for`` / ``effective_rag_roots``); empty means no per-key
-    restriction, exactly like ``fs_access``'s "none" is not the ADMIN answer."""
+    """Resolve a presented credential to ``(scopes, key_hash, fs_access, rag_roots)`` or None."""
     if not token:
         return None
     if source == "cookie":
@@ -2704,30 +2210,7 @@ def _principal_from_token(token, source):
 
 
 def caller_minted_by_owner_key(request: Request) -> bool:
-    """True when this caller's COOKIE SESSION was minted by the owner key itself.
-
-    Answers the one question a frozen ``key_hash`` cannot survive an owner-key roll
-    to answer: was the credential behind this session the owner key, or a minted
-    (and therefore revocable) keystore key? ``sessions.create`` records that as a
-    POSITIVE proof at login - a constant-time plaintext compare against
-    ``auth.get_api_key()`` - because after a roll the two are indistinguishable
-    (REG-509: the owner's own scheduled jobs silently lost shell).
-
-    Deliberately narrow, and every clause of that is load-bearing:
-
-    - **False for a BEARER caller**, who has no session. That path already answers
-      correctly by comparing the presented key's value, and ``verify()`` rejects a
-      revoked or expired key first, so there is nothing here to add.
-    - **Reads through ``_valid_session``**, so a scoped-key session whose key has
-      been revoked or has expired is rejected before its record is ever consulted.
-    - **Never consults the keystore itself**, so it cannot be flipped by a
-      transient unreadable/corrupt ``auth.json``: ``_load_keystore()`` fails OPEN
-      (returns ``[]``), and a privilege answer must never be derived from that.
-    - **Never consults the scope set.** ADMIN is grantable to a keystore key, which
-      stays revocable; only the recorded key-VALUE proof counts.
-
-    This reports an attribute of an ALREADY-AUTHENTICATED session; it is not an
-    authentication step and grants nothing on its own."""
+    """True when this caller's COOKIE SESSION was minted by the owner key itself."""
     token, source = _request_token(request)
     if source != "cookie":
         return False
@@ -2741,8 +2224,7 @@ def caller_minted_by_owner_key(request: Request) -> bool:
 
 
 def _csrf_secret(request) -> str:
-    """The per-process CSRF secret for this app, created lazily if a standalone
-    mount (a bare attach_gui in tests) never ran create_app's setup."""
+    """The per-process CSRF secret for this app, created lazily if a standalone mount (a bare attach_gui in tests) never ran create_app's setup."""
     st = request.app.state
     sec = getattr(st, "csrf_secret", None)
     if not sec:
@@ -2752,10 +2234,7 @@ def _csrf_secret(request) -> str:
 
 
 def csrf_token_for(request, sid: str) -> str:
-    """The CSRF token for a session id: a deterministic HMAC of the id under the
-    per-process secret. Derived from the session, so it is available exactly when
-    the session is (delivered to the client via GET /api/session and the shell
-    <meta>) and can never desync from it. Empty for an empty sid."""
+    """The CSRF token for a session id: a deterministic HMAC of the id under the per-process secret."""
     if not sid:
         return ""
     return hmac.new(_csrf_secret(request).encode("utf-8"),
@@ -2763,12 +2242,7 @@ def csrf_token_for(request, sid: str) -> str:
 
 
 def _csrf_ok(request) -> bool:
-    """CSRF check for a cookie-authenticated unsafe request: the ``X-CSRF-Token``
-    header must equal the token DERIVED from the session cookie (signed with the
-    per-process secret). No separate CSRF cookie exists to be cleared or to desync,
-    so a valid session always has a usable token. A cross-site page can neither read
-    the HttpOnly session cookie nor the token (SOP), and cannot set a non-simple
-    header; SameSite=Strict and the same-origin guard remain in force."""
+    """CSRF check for a cookie-authenticated unsafe request: the ``X-CSRF-Token`` header must equal the token DERIVED from the session cookie (signed with the per-process secret)."""
     from localm.auth import ct_equal
     header = request.headers.get(CSRF_HEADER, "")
     sid = (request.cookies.get(SESSION_COOKIE) or "").strip()
@@ -2780,12 +2254,7 @@ def _csrf_ok(request) -> bool:
 
 
 def _enforce_request(request: Request, scope: Optional[str]) -> None:
-    """Shared auth core (request-aware). Open/dev mode when no key is configured
-    anywhere (unless LOCALM_REQUIRE_AUTH forces fail-closed). Otherwise a valid
-    key is required - from the Authorization header OR the session cookie - and
-    *scope* (None = 'any valid key') must be granted (the owner key implies every
-    scope). Cookie-sourced auth on an unsafe method additionally requires a valid
-    CSRF token (an HMAC derived from the session)."""
+    """Shared auth core (request-aware)."""
     from localm.auth import any_key_configured, require_auth_enabled
     if not any_key_configured():
         if require_auth_enabled():
@@ -2816,18 +2285,14 @@ def _require_auth(request: Request) -> None:
 
 
 def require_scope(scope: str):
-    """FastAPI dependency factory: require a key whose scopes grant *scope*.
-    Use as ``dependencies=[Depends(require_scope(scopes.PLUGINS_ADMIN))]``."""
+    """FastAPI dependency factory: require a key whose scopes grant *scope*."""
     def dep(request: Request) -> None:
         _enforce_request(request, scope)
     return dep
 
 
 def caller_scopes(request: Request) -> Optional[set]:
-    """The scope set the presented key grants (the owner key -> {ADMIN}), or
-    None in open mode / when no valid key is presented. Routes use this to make
-    authorisation decisions that depend on *who* the caller is (e.g. only an
-    owner/ADMIN principal may mint keys carrying privileged scopes)."""
+    """The scope set the presented key grants (the owner key -> {ADMIN}), or None in open mode / when no valid key is presented."""
     from localm.auth import any_key_configured
     if not any_key_configured():
         return None
@@ -2837,12 +2302,7 @@ def caller_scopes(request: Request) -> Optional[set]:
 
 
 def principal_id(request: Request) -> Optional[str]:
-    """A stable, opaque per-key identity for the CURRENT caller, or None in open
-    mode / when no token is presented. It is the same SHA-256 the keystore stores
-    (never the plaintext key), so it identifies the key WITHOUT exposing it, and
-    is identical whether the key arrives via the Authorization header or the
-    session cookie. Used to bind a background job to the key that created it
-    (KEY-SCOPE-2), so only that key (or an admin/owner) may stream or cancel it."""
+    """A stable, opaque per-key identity for the CURRENT caller, or None in open mode / when no token is presented."""
     from localm.auth import any_key_configured
     if not any_key_configured():
         return None
@@ -2863,16 +2323,7 @@ def principal_id(request: Request) -> Optional[str]:
 
 
 def memory_principal(request: Request) -> Optional[str]:
-    """The identity used to NAMESPACE this caller's chat memory. The owner (an
-    ADMIN-scoped key or the owner session) collapses to the shared "owner"
-    namespace (returns None -> memory.principal_of maps None to "owner"), so the
-    owner's saved memories are not stranded in a per-key-hash namespace that a
-    key rotation would orphan (AUDIT-MED-14).
-
-    This is deliberately NOT principal_id: principal_id must keep returning the
-    key hash so a background job stays bound to the key that created it
-    (KEY-SCOPE-2). Only the memory principal collapses ADMIN/owner to "owner"; a
-    non-owner scoped key keeps its own hash namespace here too."""
+    """The identity used to NAMESPACE this caller's chat memory."""
     from localm import scopes
     held = caller_scopes(request)
     if held is not None and scopes.ADMIN in held:
@@ -2881,10 +2332,7 @@ def memory_principal(request: Request) -> Optional[str]:
 
 
 def job_owner_ok(request: Request, job_owner: Optional[str]) -> bool:
-    """Whether the caller may stream/cancel a job created by *job_owner*. A job
-    with NO recorded owner (created in open mode) is unrestricted; an admin/owner
-    key may reach any job; otherwise the caller's principal must match the
-    creator's. Pairs with principal_id() stamped at job creation."""
+    """Whether the caller may stream/cancel a job created by *job_owner*."""
     if job_owner is None:
         return True
     held = caller_scopes(request)
@@ -2894,23 +2342,7 @@ def job_owner_ok(request: Request, job_owner: Optional[str]) -> bool:
 
 
 def require_owner(resolve):
-    """FastAPI dependency factory: promote a per-route ownership check into a
-    Depends()-injectable gate, the same pattern require_scope already uses for
-    scope checks - so a new per-owner route cannot omit the check by
-    construction (design-audit LM-DA-020, reaffirming LM-DA-SEC-06).
-
-    *resolve* is itself an ordinary FastAPI dependency - its own path/query
-    params (e.g. ``job_id``, ``name``) are auto-injected the same as an
-    endpoint function's - that returns ``(resource, owner, not_found_detail)``:
-    *resource* is the object the route needs (or None if it does not exist),
-    *owner* is its recorded creator (None = unrestricted, see job_owner_ok),
-    and *not_found_detail* is the 404 message to raise. The SAME 404 is raised
-    whether the resource is missing or the caller does not own it - never
-    distinguished, so a foreign key cannot even confirm the resource exists
-    (KEY-SCOPE-2). On success the gate returns *resource*, so a route can
-    declare ``thing = Depends(require_owner(resolve))`` and receive it
-    directly. Use as ``dependencies=[Depends(require_owner(resolve))]`` when
-    the route does not need the resource itself."""
+    """FastAPI dependency factory: promote a per-route ownership check into a Depends()-injectable gate, the same pattern require_scope already uses for scope checks - so a new per-owner route cannot omit the check by construction (design-audit LM-DA-020, reaffirming LM-DA-SEC-06)."""
     def dep(request: Request, resolved=Depends(resolve)):
         resource, owner, not_found_detail = resolved
         if resource is None or not job_owner_ok(request, owner):
@@ -2920,15 +2352,7 @@ def require_owner(resolve):
 
 
 def effective_fs_access(request: Request) -> str:
-    """The caller's effective reach into the SERVER HOST filesystem: "host" (the
-    whole disk), "shared" (confined to owner-designated shared roots), or "none"
-    (no host FS - device upload only).
-
-    Open mode (loopback owner) and the owner/ADMIN key always resolve to "host";
-    any other valid key uses its stored fs_access level (default "none" for a
-    legacy key); no valid key -> "none". Filesystem reach is a per-credential dial
-    kept deliberately INDEPENDENT of ownership, so an owner can pair one of their
-    own devices with a lower-reach key."""
+    """The caller's effective reach into the SERVER HOST filesystem: 'host' (the whole disk), 'shared' (confined to owner-designated shared roots), or 'none' (no host FS - device upload only)."""
     from localm.auth import any_key_configured
     if not any_key_configured():
         return "host"                       # open/dev mode = loopback owner
@@ -2943,18 +2367,7 @@ def effective_fs_access(request: Request) -> str:
 
 
 def effective_rag_roots(request: Request) -> list:
-    """The caller's effective per-key RAG-indexing folder allowlist: a list of
-    folder-path strings, or ``[]`` meaning NO per-key restriction (the caller
-    falls back to the global ``rag_allowed_roots`` policy that already applies to
-    everyone - see ``rag.store.indexing_policy``/``confine_index_path``).
-
-    Exactly the same shape as ``effective_fs_access``: open mode (loopback owner)
-    and the owner/ADMIN key always resolve to ``[]`` (unrestricted - a per-key
-    allowlist exists to confine a LESSER credential, never the owner's own); any
-    other valid key uses its stored rag_roots list (default ``[]`` for a legacy
-    key or one that never had one set); no valid key -> ``[]`` (the caller is
-    then refused elsewhere in the request pipeline, same as a missing fs_access
-    check - this function only ever narrows an already-authorized caller)."""
+    """The caller's effective per-key RAG-indexing folder allowlist: a list of folder-path strings, or ``[]`` meaning NO per-key restriction (the caller falls back to the global ``rag_allowed_roots`` policy that already applies to everyone - see ``rag.store.indexing_policy``/``confine_index_path``)."""
     from localm.auth import any_key_configured
     if not any_key_configured():
         return []                           # open/dev mode = loopback owner
@@ -2969,10 +2382,7 @@ def effective_rag_roots(request: Request) -> list:
 
 
 def require_fs_host(request: Request) -> None:
-    """FastAPI dependency: require a caller with FULL host filesystem access
-    (owner / open mode / a key explicitly granted fs_access=host). Gates the host
-    file/folder browser so a merely config-reading key can no longer enumerate the
-    server's disk."""
+    """FastAPI dependency: require a caller with FULL host filesystem access (owner / open mode / a key explicitly granted fs_access=host)."""
     _enforce_request(request, None)         # a valid key (or open mode) first
     if effective_fs_access(request) != "host":
         raise HTTPException(
@@ -2983,17 +2393,7 @@ def require_fs_host(request: Request) -> None:
 # Surface mounting (H6 phase 5: on-demand GUI on a running instance).
 
 def mount_gui_surface(app) -> bool:
-    """Add the GUI surface (its /api routes + the SPA static mount) to a running
-    ``api``-mode app, in place. Idempotent: returns False if a GUI is already
-    mounted (a ``full`` instance, or a second call), True if it mounted now.
-
-    Safe at runtime because ``attach_gui`` only appends routes + a ``/`` catch-all
-    mount and sets ``app.state`` services - it adds NO middleware (Starlette reads
-    ``app.router.routes`` per request, so appended routes take effect immediately;
-    only new middleware would need a stack rebuild). The engine + inference
-    semaphore are this instance's own (it already loaded the model for /v1), so no
-    second model load happens; ``switch_model`` swaps the shared ``_engine`` under
-    ``_inference_sem`` exactly as the GUI launcher does."""
+    """Add the GUI surface (its /api routes + the SPA static mount) to a running ``api``-mode app, in place."""
     global _engine
     if getattr(app.state, "gui_mounted", False):
         return False
@@ -3069,11 +2469,7 @@ def mount_gui_surface(app) -> bool:
 
 
 def _dbg_swallow(msg: str, *, level: str = "debug") -> None:
-    """Log a swallowed best-effort failure at *level* (with the current exception's
-    traceback) without ever raising. The nested-guard pattern already used at the
-    update-watchdog site, factored out for the shutdown/restart teardown chain: a
-    swallow stays discoverable (rule 5) yet can never itself break the stop/restart
-    (the logging call is guarded too)."""
+    """Log a swallowed best-effort failure at *level* (with the current exception's traceback) without ever raising."""
     try:
         from localm.debuglog import logger as _dbg
         getattr(_dbg, level, _dbg.debug)(msg, exc_info=True)
@@ -3082,16 +2478,7 @@ def _dbg_swallow(msg: str, *, level: str = "debug") -> None:
 
 
 def _do_shutdown(*, instance_id: Optional[str] = None) -> None:
-    """SRV-4: the actual stop sequence. Unload the model FIRST so the native
-    context is freed cleanly (a hard exit while it is loaded segfaults during
-    teardown), clear the crash marker so this intentional stop is not reported as
-    a crash, then exit the process so the stop is guaranteed (Ctrl+C sometimes
-    does nothing). Separated from the route so it can be tested without exiting.
-
-    *instance_id* (app.state.instance_id, set by instances.advertise()) scopes
-    the crash-marker clear to THIS instance only - see bugreport.py's
-    per-instance-scoping note; omitting it falls back to the legacy shared
-    marker name rather than silently skipping the clear."""
+    """SRV-4: the actual stop sequence."""
     # Stop the child processes of any in-flight background job FIRST. A start_cli
     # job runs `python -m localm <cmd>` as a real child (a model pull, a runtime
     # provision, a ComfyUI setup): os._exit below bypasses atexit, the job worker
@@ -3170,9 +2557,7 @@ def _do_shutdown(*, instance_id: Optional[str] = None) -> None:
 
 def _request_shutdown(delay: float = 0.25, *,
                       instance_id: Optional[str] = None) -> None:
-    """Run _do_shutdown shortly after returning, so the 200 response flushes to
-    the client before the process exits. *instance_id* is forwarded unchanged -
-    see _do_shutdown's docstring."""
+    """Run _do_shutdown shortly after returning, so the 200 response flushes to the client before the process exits. *instance_id* is forwarded unchanged - see _do_shutdown's docstring."""
     import threading
     import time as _t
 
@@ -3184,26 +2569,7 @@ def _request_shutdown(delay: float = 0.25, *,
 
 
 def _restart_argv(port: Optional[int] = None) -> list:
-    """The command line to re-launch this server. Always ``python -m localm <args>``
-    - the canonical entry the codebase uses - so a restart works regardless of how
-    the server was originally started (a console-script .exe, ``-m``, or a script
-    path, any of which can make ``sys.argv[0]`` un-re-runnable by the interpreter).
-
-    *port* (the port this instance is ACTUALLY bound to) is appended as an explicit
-    ``-p``, so the new process comes back on the same port instead of re-running
-    pick_port() and picking a different one. Without it, an instance that was
-    auto-bumped off a busy default (started with no -p while another localm held
-    8642, so pick_port() gave it 8643) re-execs with no port token at all, calls
-    pick_port(None), finds 8642 free again now that the other instance is gone,
-    and silently moves - stranding the user's open GUI tab on a dead port, and
-    making the post-update watchdog poll the old port until it times out and
-    auto-rolls back a perfectly healthy build (REG-605).
-
-    Appending is safe against a user-supplied -p: click takes the LAST occurrence
-    of an option, and *port* is the port that value already resolved to, so the
-    two agree. Only serve/gui reach a restart, and both accept -p; a caller with
-    no known port (a bare create_app() that never advertised) passes None and gets
-    the untouched command line."""
+    """The command line to re-launch this server."""
     import sys
     argv = [sys.executable, "-m", "localm", *sys.argv[1:]]
     if port:
@@ -3214,37 +2580,7 @@ def _restart_argv(port: Optional[int] = None) -> list:
 def _do_restart(*, update_watchdog: Optional[dict] = None,
                 port: Optional[int] = None,
                 instance_id: Optional[str] = None) -> None:
-    """R18: restart this server IN PLACE. Unload the model FIRST (clean native
-    teardown, like _do_shutdown - a hard re-exec while it is loaded can segfault),
-    clear the crash marker so this intentional restart is not reported as a crash,
-    then re-exec the same command line so the server comes back on the same port.
-    os.execv replaces the process image and does not return on success. Separated
-    from the route so it can be tested without actually re-execing.
-
-    *instance_id* (app.state.instance_id, set by instances.advertise()) scopes
-    the crash-marker clear to THIS instance only - see _do_shutdown/bugreport.py's
-    per-instance-scoping note. The re-exec'd process re-advertises and gets a
-    fresh instance_id of its own, so no persistence across the restart is needed.
-
-    *port* is the port this instance is actually bound to (app.state.instance_port,
-    set by advertise()); it is pinned into the re-exec command line so "comes back
-    on the same port" is TRUE rather than merely intended - see _restart_argv.
-
-    *update_watchdog*, when given (only by the post-update restart path - see
-    routes/admin.py's /api/update/apply), is a
-    ``{host, port, scheme, expect_version}`` dict describing this instance. A
-    DETACHED health-check watchdog is spawned right before the re-exec (LM-DA-011);
-    it polls the restarted instance's own /whoami and auto-rolls back if the
-    expected version never comes up healthy within its timeout. The plain
-    "restart the server" button (/v1/server/restart) calls this with no
-    update_watchdog, so it is entirely unaffected.
-
-    NEW-CRASH-NOTICE-USELESS item C: capture free VRAM BEFORE the teardown
-    below so the wait after it (once every native free has been issued) can
-    confirm the releases actually landed before re-exec spawns a fresh worker
-    into them - see that wait's own comment further down for the full
-    rationale. Best-effort: an unmeasurable/wedged probe must not block a
-    restart the user asked for - vram_capacity() is itself deadline-bounded."""
+    """R18: restart this server IN PLACE."""
     # Stop the child processes of any in-flight background job FIRST. A start_cli
     # job runs `python -m localm <cmd>` as a real child (a model pull, a runtime
     # provision, a ComfyUI setup): os.execv below bypasses atexit, the job worker
@@ -3459,10 +2795,7 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
 def _request_restart(delay: float = 0.25, *, update_watchdog: Optional[dict] = None,
                      port: Optional[int] = None,
                      instance_id: Optional[str] = None) -> None:
-    """Run _do_restart shortly after returning, so the 200 response flushes to the
-    client before the process re-execs (mirrors _request_shutdown). *update_watchdog*,
-    *port*, and *instance_id* are forwarded to _do_restart unchanged - see its
-    docstring."""
+    """Run _do_restart shortly after returning, so the 200 response flushes to the client before the process re-execs (mirrors _request_shutdown). *update_watchdog*, *port*, and *instance_id* are forwarded to _do_restart unchanged - see its docstring."""
     import threading
     import time as _t
 
@@ -3873,11 +3206,7 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
         _ELIDED = "...[nested value elided]"
 
         def _depth_capped(v, depth: int = 0):
-            """Prune the error object BEFORE `jsonable_encoder` ever sees it.
-
-            The ORDER is the fix. Pruning afterwards cannot work, because the
-            encoder is what recurses: it would blow the stack before any depth
-            limit downstream of it got the chance to apply."""
+            """Prune the error object BEFORE `jsonable_encoder` ever sees it."""
             if depth >= _MAX_ERR_DEPTH:
                 return _ELIDED
             if isinstance(v, dict):
@@ -4196,16 +3525,7 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
     _SHELL_TOKEN_GETS = ("/debug/stacks",)
 
     def _cross_origin_refused(request) -> bool:
-        """True when this request carries an Origin header that is neither
-        same-origin nor CORS-allow-listed. Shared by the CSRF check (unsafe
-        methods) and the open-mode shell-token gate (AUD-CORSTOKEN): the default
-        CORS policy lets any http(s)://localhost:PORT / 127.0.0.1:PORT origin
-        READ a matching response, so a hostile local page can steal the shell
-        token from a plain cross-origin ``GET /`` and replay it - token
-        possession alone does not prove the caller IS the loopback GUI shell.
-        "cors_origins": "*" opts OUT of this specific check (AUD-CORSWILD), same
-        as it already did for the CSRF check; it does not waive the shell-token
-        requirement itself."""
+        """True when this request carries an Origin header that is neither same-origin nor CORS-allow-listed."""
         if _cors_wildcard:
             return False
         origin = request.headers.get("origin")
@@ -4556,8 +3876,7 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
 
 
 def _engine_finish_reason(engine) -> str:
-    """Why the last generation ended - "stop" unless the backend reported a
-    real string (mocks and minimal engines without the attribute count as stop)."""
+    """Why the last generation ended - 'stop' unless the backend reported a real string (mocks and minimal engines without the attribute count as stop)."""
     fr = getattr(engine, "last_finish_reason", "stop")
     return fr if isinstance(fr, str) else "stop"
 
@@ -4570,10 +3889,7 @@ def _ttft_ms(gen_start: float, first_token_at: Optional[float]) -> Optional[floa
 
 
 def _decode_elapsed(first_token_at: Optional[float], gen_end: float) -> Optional[float]:
-    """Wall time spent DECODING: first token -> end of generation. None if nothing
-    was generated. This deliberately EXCLUDES model load + prompt prefill (the span
-    before the first token), which is reported on its own as ttft_ms - so a cold
-    start's multi-second load is never charged against the generation rate."""
+    """Wall time spent DECODING: first token -> end of generation."""
     if first_token_at is None:
         return None
     return gen_end - first_token_at
@@ -4598,16 +3914,7 @@ _MIN_SEC_PER_TOKEN = 0.001
 
 
 def _tokens_per_sec(completion_tokens: int, decode_elapsed: Optional[float]) -> Optional[float]:
-    """Decode throughput = generated tokens over the DECODE window only (see
-    _decode_elapsed), NOT over total wall time. Folding the model-load/prefill time
-    into this rate made the first call after a load report a value ~100x too low
-    (e.g. 0.6 tok/s on a warm-64 tok/s GPU), which read as a silent CPU fallback.
-    Matches the `localm bench` convention (cli/models.py): "tok/s measures pure
-    generation after the first token". None when unmeasurable: a non-positive
-    window, fewer than two tokens (one token has no decode interval to time), or a
-    window so short it implies a physically implausible rate (see
-    _MIN_SEC_PER_TOKEN) - a burst-arrival artifact under GPU contention, not a
-    real decode speed."""
+    """Decode throughput = generated tokens over the DECODE window only (see _decode_elapsed), NOT over total wall time."""
     if (decode_elapsed is None or decode_elapsed <= 0 or completion_tokens < 2
             or decode_elapsed < completion_tokens * _MIN_SEC_PER_TOKEN):
         return None
@@ -4627,8 +3934,7 @@ def _last_user_text(messages: list) -> str:
 
 
 def _messages_prompt_text(messages: list) -> str:
-    """Flatten chat messages to plain text for prompt token counting (text parts
-    of multimodal content included; non-text parts ignored)."""
+    """Flatten chat messages to plain text for prompt token counting (text parts of multimodal content included; non-text parts ignored)."""
     return " ".join(
         m.get("content") if isinstance(m.get("content"), str)
         else " ".join(p.get("text", "") for p in (m.get("content") or [])
@@ -4657,9 +3963,7 @@ def _audit_exchange(audit, transcript, messages: list, reply: str) -> None:
 
 def _reason_sse(content: str, reasoning: str,
                 model_id: str, chunk_id: str, ts: int) -> list:
-    """SSE ``data:`` lines for a (content, reasoning) split (H4). Reasoning is
-    emitted before content (it precedes the answer); empty parts produce
-    nothing, so an ordinary content-only token yields exactly one chunk."""
+    """SSE ``data:`` lines for a (content, reasoning) split (H4)."""
     from localm.inference.protocol import ChatChunk, ChoiceDelta, StreamChoice
     out = []
     for field, value in (("reasoning_content", reasoning), ("content", content)):
@@ -4674,44 +3978,20 @@ def _reason_sse(content: str, reasoning: str,
 
 
 def _pin(engine) -> None:
-    """Mark *engine* as in-use for the current request, the instant the request
-    takes ownership of it - call this SYNCHRONOUSLY right after get_engine, with
-    no await in between, so the event loop cannot interleave an eviction before
-    the pin lands. A pinned engine (active_requests > 0) is skipped by VRAM
-    eviction, closing the window where a concurrent model load would unload an
-    engine out from under an in-flight request (AUDIT-CRIT-1)."""
+    """Mark *engine* as in-use for the current request, the instant the request takes ownership of it - call this SYNCHRONOUSLY right after get_engine, with no await in between, so the event loop cannot interleave an eviction before the pin lands."""
     if isinstance(getattr(engine, "active_requests", None), int):
         engine.active_requests += 1
 
 
 def _unpin(engine) -> None:
-    """Release the request pin taken by _pin. Balanced exactly once per request."""
+    """Release the request pin taken by _pin."""
     if isinstance(getattr(engine, "active_requests", None), int):
         engine.active_requests = max(0, engine.active_requests - 1)
 
 
 @contextmanager
 def driving_engine(engine):
-    """Pin *engine* busy and touch its activity clock for the DURATION of a
-    plugin-driven generation call (memory auto-consolidate, a scheduled job, ...).
-
-    Wrap this around the ACTUAL chat_stream/complete call, never around merely
-    resolving or inspecting the engine (checking .loaded, reading a name) - a
-    bare property read must not count as activity, or a model nobody is really
-    using again stays pinned resident forever. Plugins reach the live engine via
-    PluginManager.inference_engine, which is now resolved fresh at every use site
-    across several plugins (#959), so inspection-only reads are common; only the
-    call that actually drives the model should register as "in use".
-
-    active_requests is NOT optional here even though a timestamp is also touched:
-    _idle_unload_once checks the per-model timestamp FIRST and only consults
-    active_requests if that already looks stale, so active_requests>0 is what
-    actually prevents eviction mid-task across a multi-round loop where
-    individual rounds may pause for a while - a timestamp alone cannot, since
-    nothing re-touches it between rounds unless every round does so itself.
-    Touching the clock again on exit resets the idle countdown to "now" the
-    moment the task genuinely finishes, so the model is not instantly eligible
-    for eviction the second a long task ends."""
+    """Pin *engine* busy and touch its activity clock for the DURATION of a plugin-driven generation call (memory auto-consolidate, a scheduled job, ...)."""
     name = getattr(engine, "display_name", None)
     _touch_activity(name)
     _pin(engine)
@@ -4723,10 +4003,7 @@ def driving_engine(engine):
 
 
 async def _pin_engine(engine: Engine, gen: AsyncIterator[str]) -> AsyncIterator[str]:
-    """Release the request pin when a streaming response finishes. The pin itself
-    is TAKEN by the handler (via _pin) synchronously right after get_engine, so
-    the engine stays pinned across the pre-stream setup window too - this wrapper
-    only unpins at stream end."""
+    """Release the request pin when a streaming response finishes."""
     try:
         async for chunk in gen:
             yield chunk
@@ -5085,33 +4362,7 @@ async def _stream_sse_completion(
 
 async def _generate_full(engine, messages: list, request=None, *,
                          timing: Optional[dict] = None, **gen_kwargs) -> str:
-    """Consume a whole (non-streaming) generation in an executor while watching for
-    a client disconnect, and return the accumulated text.
-
-    ``timing``, when passed, is populated with ``first_token_at`` (a perf_counter
-    stamp of when the FIRST token arrived) so the caller can report ttft_ms and a
-    decode-window throughput even though this path does not stream to the client:
-    the handler still drives ``engine.chat_stream`` internally, so the first token
-    boundary IS observable here. Left absent by callers that do not report metrics.
-
-    A non-streaming handler is a plain coroutine, and Starlette does NOT cancel it
-    when the client disconnects (unlike a StreamingResponse, whose async generator
-    it acloses - the hook the _stream_sse fix relies on). So without a cancel path,
-    an aborted request with a large/unlimited max_tokens leaves the executor thread
-    driving engine.chat_stream() to end-of-generation while holding llama.py's
-    per-model _inference_lock, blocking the NEXT request to this model (and this
-    coroutine keeps the per-model semaphore too). This is the non-streaming twin of
-    the _stream_sse cancel path (PR #540).
-
-    We poll a disconnect signal on the loop (resolved just below - NOT plain
-    request.is_disconnected(), which the app's BaseHTTPMiddleware stack defeats)
-    and, on disconnect, set a threading.Event the worker checks each token; the
-    worker then gen.close()s the chain, cascading GeneratorExit through the backend
-    wrappers into llama.py _generate, whose `with self._inference_lock` exits and
-    frees the lock now rather than at end-of-generation. Returns the partial text
-    produced before the abort (the caller's response is discarded anyway once the
-    client is gone).
-    """
+    """Consume a whole (non-streaming) generation in an executor while watching for a client disconnect, and return the accumulated text."""
     loop = asyncio.get_running_loop()
     cancel_event = threading.Event()
 
@@ -5191,13 +4442,7 @@ async def _generate_full(engine, messages: list, request=None, *,
 
 
 def _memory_used_header(ctx) -> dict:
-    """Observability: render the memory plugin's per-turn recall (stashed in
-    ``ctx.state`` by its inlet) into a response-header dict so a client can show a
-    "used N memories" chip and the recall degrade reason. Empty when memory did
-    not run for this turn (plugin disabled, privacy mode, recall off). The value is
-    compact ASCII JSON, header-safe: ``{"n":<int>,"degrade":<reason|null>,"items":
-    [{"id","text","source","kind"}...]}`` - json.dumps(ensure_ascii=True) escapes
-    newlines and non-ASCII, so the blob is a single header-legal line."""
+    """Observability: render the memory plugin's per-turn recall (stashed in ``ctx.state`` by its inlet) into a response-header dict so a client can show a 'used N memories' chip and the recall degrade reason."""
     if ctx is None:
         return {}
     used = getattr(ctx, "state", {}).get("memory_used")
@@ -5256,16 +4501,7 @@ _BACKEND_ERROR_TYPES: tuple = tuple(t for t, _ in _BACKEND_ERROR_STATUS)
 
 
 def backend_error_status(exc: BaseException) -> Optional[int]:
-    """Status for a backend error the caller can act on, or ``None`` when this is
-    not one of them.
-
-    ``None`` is the important half: it means the exception falls through to the
-    generic handler and becomes an opaque 500, which is the CORRECT outcome for a
-    genuine bug. Deliberately NOT written as ``except ValueError`` at the call
-    sites - every class above IS a ValueError, so a broad catch would also
-    swallow an unrelated ValueError from a real defect and report it to the user
-    as their own bad input (AGENTS.md rule 5, in the direction people forget).
-    """
+    """Status for a backend error the caller can act on, or ``None`` when this is not one of them."""
     for exc_type, status in _BACKEND_ERROR_STATUS:
         if isinstance(exc, exc_type):
             return status
@@ -5273,27 +4509,7 @@ def backend_error_status(exc: BaseException) -> Optional[int]:
 
 
 def inference_error_text(exc: BaseException) -> str:
-    """The `[inference error: ...]` body a FAILED generation is rendered as, on
-    every one of the four generation paths.
-
-    ONE implementation for all four deliberately. The string was written out
-    four times, and a fact stated in four places diverges - which is exactly
-    what this unit was sent to fix on the status side, so repeating the mistake
-    on the text side would be perverse.
-
-    THE PATHS ARE SCRUBBED, and that is not decoration. A mid-generation
-    RuntimeError is not always a tidy "not enough free VRAM" sentence: the GGUF
-    loader raises `Failed to load model: <absolute path>` with a native stderr
-    tail appended, and an auto-reload inside chat_stream can surface exactly
-    that here. Handing a client the machine's directory layout is the
-    disclosure `pathscrub` exists for, and `bugreport.py` already names
-    scrub_paths as the rule for a response to a lower-privileged caller.
-
-    scrub_paths REDACTS, it does not mute (AGENTS.md rule 5): the reason, the
-    file name and the line number survive, only the leading directories are
-    replaced. A caller still learns what failed - which is the whole point of
-    the error contract - without learning where this machine keeps its files.
-    """
+    """The `[inference error: ...]` body a FAILED generation is rendered as, on every one of the four generation paths."""
     from localm.pathscrub import scrub_paths
     return f"\n[inference error: {scrub_paths(str(exc))}]"
 
@@ -5461,19 +4677,7 @@ def run_advertised(app, host: str, port: int, *, mode: str,
                     project: Optional[str] = None,
                     isolated: bool = False,
                     log_level: Optional[str] = None) -> None:
-    """Advertise *app* in the instance registry and serve it - blocks until
-    Ctrl+C.
-
-    This is the shared "advertise, then run_server" tail used by both
-    ``serve()`` below (the api-only production path, which also owns the
-    ``create_app`` call) and ``localm gui``'s CLI (``plugins/gui/cli.py``),
-    which needs the ``app`` object available earlier than this to wire its
-    own GUI-only routes/state, so it cannot delegate the ``create_app`` call
-    itself here - only this tail was actually duplicated between the two.
-
-    ``mode`` is the instance-registry surface (``"api"`` or ``"full"``).
-    ``log_level`` defaults to ``debuglog.uvicorn_log_level()`` when omitted.
-    """
+    """Advertise *app* in the instance registry and serve it - blocks until Ctrl+C."""
     from localm import instances, portmux
     from localm.config import home_dir
     if log_level is None:
@@ -5504,27 +4708,7 @@ def serve(engine: Engine, host: str = "127.0.0.1", port: int = 8642,
           project: Optional[str] = None,
           isolated: bool = False, *,
           mode: str = "api") -> None:
-    """Start the server - blocks until Ctrl+C. The real production startup
-    path: both ``localm serve`` and ``localm gui`` end up here, the latter via
-    ``run_advertised`` above (it builds ``app`` itself, to attach GUI-only
-    routes/state before advertising, then reuses the shared tail).
-
-    The caller resolves *port* up front (``config.pick_port``): the default
-    auto-bumps through localm's range, while an explicit ``--port`` is honored or
-    refused, never silently relocated. By here it is already a concrete free port
-    to bind.
-
-    When ``ssl_certfile`` / ``ssl_keyfile`` are given (built-in TLS, NET-1), the
-    server speaks HTTPS on this port; a plain-HTTP request to it then fails the
-    TLS handshake (effectively refused) rather than crossing the network in
-    cleartext.
-
-    ``mode`` is the instance-registry surface (``"api"`` or ``"full"``).
-
-    Advertises itself in the instance registry (H6 phase 3/4) so a future
-    launch can discover and attach to it; ``isolated`` keeps it invisible to
-    discovery.
-    """
+    """Start the server - blocks until Ctrl+C. The real production startup path: both ``localm serve`` and ``localm gui`` end up here, the latter via ``run_advertised`` above (it builds ``app`` itself, to attach GUI-only routes/state before advertising, then reuses the shared tail)."""
     app = create_app(engine, api_landing=True)
     # Record the bind host so routes that depend on it (open-mode seeding,
     # CA download) can reason about loopback vs network binds.

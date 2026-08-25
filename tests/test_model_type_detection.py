@@ -1,20 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Branch A: deterministic model type-detection, the 'unknown' sentinel, and the
-lone-.safetensors parent-dir scan.
-
-Each of these fails on pre-Branch-A master (it is the negative that proves the
-change is real):
-  * pull's HF classifier matches tags EXACTLY, never by substring (MED-15: a tag
-    that merely CONTAINS 'lora'/'vae' no longer misclassifies), and returns
-    'unknown' - not a silent 'llm' - when no hard signal resolves;
-  * add_local records a deterministically-detected type, and 'unknown' (not 'llm')
-    for an HF dir with no hard signal in config.json;
-  * a lone .safetensors beside a config.json + tokenizer registers the DIRECTORY as
-    an HF model; a lone .safetensors with no siblings is rejected with a PRECISE,
-    actionable reason (never the bare "Not a model");
-  * a type='unknown' model is runnable when named but is never auto-picked as the
-    default chat model; its type is mutable via set_model_type / the CLI.
-"""
+"""Branch A: deterministic model type-detection, the 'unknown' sentinel, and the lone-.safetensors parent-dir scan."""
 
 import json
 import os
@@ -31,20 +16,14 @@ from localm.model_manager.pull import _hf_pipeline_tag_to_type
 
 
 def _backdate(path, seconds=60):
-    """Set path's mtime `seconds` in the past, so sync_models_dir's R45
-    settle check (localm.model_manager.gguf._gguf_recently_written) reads it
-    as settled rather than possibly still mid-copy - these tests are about
-    type detection, not the settle window, and would otherwise flake on the
-    write-then-immediately-sync timing."""
+    """Set path's mtime `seconds` in the past, so sync_models_dir's R45 settle check (localm.model_manager.gguf._gguf_recently_written) reads it as settled rather than possibly still mid-copy - these tests are about type detection, not the settle window, and would otherwise flake on the write-then-immediat..."""
     old = time.time() - seconds
     os.utime(path, (old, old))
 
 
 @pytest.fixture
 def isolated_home(tmp_path, monkeypatch):
-    """Throwaway data dir with the config + model_manager path singletons redirected
-    (mirrors tests/test_add_local_folder_of_ggufs.isolated_home): the real add_local
-    + load_registry round-trip through registry.json under tmp_path."""
+    """Throwaway data dir with the config + model_manager path singletons redirected (mirrors tests/test_add_local_folder_of_ggufs.isolated_home): the real add_local + load_registry round-trip through registry.json under tmp_path."""
     import localm.config as cfg
     home = tmp_path / ".localm"
     (home / "models").mkdir(parents=True, exist_ok=True)
@@ -321,18 +300,7 @@ def test_cli_set_type_command(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- #
 
 def _build_gguf_bytes(architecture: str, extra_kv: "dict | None" = None) -> bytes:
-    """Construct a minimal-but-structurally-valid GGUF v3 file byte-for-byte in
-    the layout ``_gguf_metadata_probe`` (localm/model_manager/gguf.py) parses:
-    magic ``b"GGUF"`` + uint32 version + uint64 tensor_count + uint64 kv_count,
-    followed by exactly ``kv_count`` length-prefixed (key, type, value) triples.
-    Every KV here is written as GGUF_TYPE_STRING(8) - the real format's own
-    string encoding is a uint64 length prefix then the raw utf-8 bytes, used for
-    both the key and the value. ``extra_kv`` entries only need to exist for
-    ``gguf_embedding_signal``'s pooling_type check, which keys off the KEY name
-    alone, so a placeholder string value is fine. Padded with trailing zero
-    bytes (never parsed - the loop stops after ``kv_count`` entries) so the file
-    clears gguf.py's own ``_GGUF_MIN_BYTES`` floor, exactly like a real model.
-    """
+    """Construct a minimal-but-structurally-valid GGUF v3 file byte-for-byte in the layout ``_gguf_metadata_probe`` (localm/model_manager/gguf.py) parses: magic ``b'GGUF'`` + uint32 version + uint64 tensor_count + uint64 kv_count, followed by exactly ``kv_count`` length-prefixed (key, type, value) triples."""
     extra_kv = extra_kv or {}
 
     def _kv_string(key: str, value: str) -> bytes:
@@ -743,12 +711,7 @@ def test_setup_embeddings_registers_once_not_twice(isolated_home, monkeypatch):
 # measured cost (a real 6.6 GB model: ~205ms for the one read this needs).
 
 def _build_gguf_bytes_with_expert_count(architecture: str, expert_count: int) -> bytes:
-    """Like _build_gguf_bytes, but writes a REAL uint32 '<architecture>.expert_count'
-    key (GGUF type 4) instead of a placeholder string - gguf_expert_count's own
-    reader (_gguf_read_scalar) only accepts a fixed-width numeric type, so a
-    string-typed placeholder (as the base helper writes for every OTHER key)
-    would silently fail to parse and always read back as 0/unknown, hiding a
-    real bug in this exact test."""
+    """Like _build_gguf_bytes, but writes a REAL uint32 '<architecture>.expert_count' key (GGUF type 4) instead of a placeholder string - gguf_expert_count's own reader (_gguf_read_scalar) only accepts a fixed-width numeric type, so a string-typed placeholder (as the base helper writes for every OTHER key)..."""
     def _kv_string(key: str, value: str) -> bytes:
         kb = key.encode("utf-8")
         vb = value.encode("utf-8")

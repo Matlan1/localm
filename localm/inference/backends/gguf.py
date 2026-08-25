@@ -1,25 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""GGUF backend - drives our native ctypes wrapper around llama.dll through an
-isolated worker PROCESS (see llamacpp/_runner.py and llamacpp/_worker.py).
-
-The model's whole lifecycle (load, generate, tokenize, grammar-check, unload)
-runs in a disposable child process, not here: llama_load_model_from_file (and
-every later context-grow, which hits the same native call class) can
-hard-abort the WHOLE PROCESS on a native CUDA/HIP driver failure - no Python
-try/except can catch that. Isolating just the load call is not enough (a
-model must go on to serve many later requests, and context growth is just as
-abort-prone as the initial load), and isolating just a native handle back to
-this process is not possible (a ctypes.c_void_p model/context pointer is
-meaningless outside the process that created it) - so the isolation boundary
-wraps the model's entire lifecycle. A crash in the child kills only the
-child; this process reports it as a clean, catchable error and the backend
-reloads fresh on the next request, exactly like today's in-process contract.
-
-This class itself (GgufBackend) stays a thin, parent-side proxy: preflight
-VRAM sizing (VramSizingMixin, shared with the child) still runs here, before
-a child is even spawned, so a load that can never fit still fails fast
-without paying a process-spawn cost.
-"""
+"""GGUF backend - drives our native ctypes wrapper around llama.dll through an isolated worker PROCESS (see llamacpp/_runner.py and llamacpp/_worker.py)."""
 
 from __future__ import annotations
 
@@ -41,14 +21,7 @@ _count_messages_tokens_rpc_warned = False
 
 
 class GgufBackend(VramSizingMixin, BaseBackend):
-    """
-    Inference backend for GGUF model files.
-
-    Drives our own ctypes binding to llama.dll inside an isolated worker
-    process (see the module docstring) - this class never imports LlamaCpp or
-    touches a native pointer itself. If the native runtime cannot be loaded,
-    load() raises rather than degrading to a slower, lower-fidelity path.
-    """
+    """Inference backend for GGUF model files."""
 
     def __init__(
         self,
@@ -139,32 +112,22 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         self._ram_kv_hint_shown = False
 
     def set_load_cancel(self, event) -> None:
-        """Install (or clear with None) the cancel event honoured by load() via
-        llama.cpp's native load-progress callback, so a superseded switch aborts
-        the load instead of running it to completion."""
+        """Install (or clear with None) the cancel event honoured by load() via llama.cpp's native load-progress callback, so a superseded switch aborts the load instead of running it to completion."""
         self._load_cancel = event
 
     @property
     def can_be_multimodal(self) -> bool:
-        """A vision GGUF needs an mmproj; only then is it worth loading the model
-        to discover whether vision actually works (the HTTP route uses this to load
-        before deciding to reject an image)."""
+        """A vision GGUF needs an mmproj; only then is it worth loading the model to discover whether vision actually works (the HTTP route uses this to load before deciding to reject an image)."""
         return bool(self.mmproj_path)
 
     @property
     def supports_images(self) -> bool:
-        """True once loaded with a working mmproj (mtmd vision, C1).
-
-        Cached from the child's load response (self._supports_images) rather
-        than read live off a real LlamaCpp instance - that instance now lives
-        in the isolated worker process, not here."""
+        """True once loaded with a working mmproj (mtmd vision, C1)."""
         return bool(self.loaded and self._supports_images)   # property: a dead worker has no vision
 
     @property
     def supports_mtp(self) -> bool:
-        """True once loaded with active Multi-Token Prediction heads (MTP).
-
-        Cached from the child's load response (self._supports_mtp)."""
+        """True once loaded with active Multi-Token Prediction heads (MTP)."""
         return bool(self.loaded and self._supports_mtp)
 
     # ------------------------------------------------------------------ #
@@ -225,12 +188,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             ) from exc
 
     def _load_native(self) -> None:
-        """Load by spawning an isolated worker process and handing it the
-        already-resolved parameters (see the module docstring for why this
-        runs out-of-process). Preflight sizing (ctx_max/gpu_layers) stays
-        here, exactly as when the native call was made in-process - none of
-        it touches the abort-prone call, so it can safely run before a child
-        even exists."""
+        """Load by spawning an isolated worker process and handing it the already-resolved parameters (see the module docstring for why this runs out-of-process)."""
         from localm.inference.backends.llamacpp._runner import ModelRunner
         from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
@@ -480,14 +438,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
 
     @staticmethod
     def _load_timeout_seconds() -> float:
-        """Model-load timeout, from config (``gguf_load_timeout_s``) or the
-        generous built-in default. Unlike the VRAM-probe daemon's short
-        bounded wait (which has a safe "unmeasurable, skip" fallback), a
-        stalled model load has no safe default - see ModelRunner.spawn_and_load
-        for why this always raises rather than silently reporting not-loaded.
-        Configurable because a multi-GB model on a slow disk can legitimately
-        take minutes, and that varies far more by install than a fixed
-        constant could ever cover."""
+        """Model-load timeout, from config (``gguf_load_timeout_s``) or the generous built-in default."""
         from localm.inference.backends.llamacpp._runner import LOAD_TIMEOUT_DEFAULT
         from localm.config import load_config
         raw = load_config().get("gguf_load_timeout_s")
@@ -506,13 +457,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
 
     @staticmethod
     def _first_token_timeout_seconds() -> float:
-        """How long to wait for a reply's FIRST token, from config
-        (``gguf_first_token_timeout_s``) or the generous built-in default.
-        Configurable for the same reason as the load timeout above: it covers
-        prompt PREFILL, whose duration varies enormously by install (CPU vs GPU,
-        partial offload, prompt length) - far more than a fixed constant could
-        cover. See FIRST_TOKEN_TIMEOUT_DEFAULT for why this is not the per-token
-        ceiling."""
+        """How long to wait for a reply's FIRST token, from config (``gguf_first_token_timeout_s``) or the generous built-in default."""
         from localm.inference.backends.llamacpp._runner import FIRST_TOKEN_TIMEOUT_DEFAULT
         from localm.config import load_config
         raw = load_config().get("gguf_first_token_timeout_s")
@@ -576,31 +521,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
     supports_grammar: bool = True
 
     def validate_grammar(self, grammar: Optional[str], *, lazy: bool = False) -> None:
-        """Raise :class:`InvalidGrammarError` for a malformed GBNF string, up front,
-        so a bad grammar is a clean 400 rather than a native fault that would latch
-        _grammar_unsupported and silently strip grammar from later requests. No-op
-        when not loaded (no vocab to parse against) or when *grammar* is empty.
-
-        *lazy* is ACCEPTED AND IGNORED, and both halves are deliberate. Accepted
-        because the chat routes now pass it by keyword on every grammar request:
-        without it in this signature, overriding the base method would turn every
-        GGUF grammar request into a TypeError. Ignored because this backend has no
-        honest answer to give from here. ``_api.has_lazy_grammar()`` is the only
-        probe available and it cannot be called in the server parent (it raises
-        RuntimeError when no runtime is provisioned, and loads llama.dll into this
-        process when one is - see ``BaseBackend.validate_grammar`` for the
-        measurement). Answering "supported" here to look complete would be the
-        worse of the two, because a capability claim is something callers act on.
-
-        What silence here costs is now only EARLINESS. A GGUF build lacking the
-        native lazy export used to DROP the grammar at generation time behind a
-        DEBUG line and answer with unconstrained text; ``_build_sampler`` in
-        ``llamacpp/llama.py`` now RAISES :class:`GrammarUnsupportedError` there
-        instead, and ``_runner.py`` carries that type across the worker IPC as a
-        tagged envelope, so the caller gets the same clean 400 it would have got
-        from an up-front check - one request later, and never a reply that
-        silently does not match the grammar. Evidence:
-        ``dev-notes/lazy-grammar-silent-unconstrained-2026-08-12.md``."""
+        """Raise :class:`InvalidGrammarError` for a malformed GBNF string, up front, so a bad grammar is a clean 400 rather than a native fault that would latch _grammar_unsupported and silently strip grammar from later requests."""
         if grammar and self.loaded and self._runner is not None:   # property, see count_tokens
             try:
                 self._runner.check_grammar(grammar)
@@ -625,9 +546,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
     # ------------------------------------------------------------------ #
 
     def count_tokens(self, text: str) -> int:
-        """Return exact token count using the loaded model's vocabulary (an
-        RPC to the isolated worker), or the chars/4 heuristic when the worker
-        is busy streaming or the model is not loaded yet."""
+        """Return exact token count using the loaded model's vocabulary (an RPC to the isolated worker), or the chars/4 heuristic when the worker is busy streaming or the model is not loaded yet."""
         # `self.loaded`, NOT the raw `self._loaded`: the property is what knows the
         # worker is gone. _simple_request kills it on its own timeout (and the
         # cancel-drain does the same), nulling the queues while _loaded stays True -
@@ -653,9 +572,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         return max(1, len(text) // 4)
 
     def count_messages_tokens(self, messages: List[dict]) -> int:
-        """Return exact token count of the structured messages formatted with
-        the model's embedded chat template (an RPC to the isolated worker,
-        which alone holds the native model pointer the template needs)."""
+        """Return exact token count of the structured messages formatted with the model's embedded chat template (an RPC to the isolated worker, which alone holds the native model pointer the template needs)."""
         if self.loaded and self._runner is not None:   # the property - see count_tokens
             try:
                 return self._runner.count_messages_tokens(messages)

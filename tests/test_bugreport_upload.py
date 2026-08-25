@@ -1,11 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The "Send to maintainer" upload channel: the app POSTs a user-reviewed report
-to the configured proxy (a Cloudflare Worker holding the GitHub token), which
-files it as a GitHub issue. No token ships in the app.
-
-Pins: config gating, the POST shape + optional shared secret, and the honesty
-rule - a failed upload raises (never a false success), and the saved file stays.
-"""
+"""The 'Send to maintainer' upload channel: the app POSTs a user-reviewed report to the configured proxy (a Cloudflare Worker holding the GitHub token), which files it as a GitHub issue."""
 
 from __future__ import annotations
 
@@ -84,14 +78,7 @@ def test_upload_report_posts_and_returns_issue_url():
 
 
 def test_upload_report_strips_edit_disclaimer_from_body():
-    """LM-DA-PUBTEXT: build_report()'s "you can edit anything above before
-    sending" disclaimer (and the maintainer's email it names) is TRUE for a
-    human reading the saved file or a downloaded copy - it stops being true,
-    and re-publishes the email, the instant the SAME text is what actually
-    got uploaded into a PUBLIC GitHub issue. Stripping at this exact choke
-    point, the one every caller (report_failure, inference/routes/admin.py)
-    flows through, mirrors the existing title-scrub test above and covers
-    every current and future caller the same way."""
+    """LM-DA-PUBTEXT: build_report()'s 'you can edit anything above before sending' disclaimer (and the maintainer's email it names) is TRUE for a human reading the saved file or a downloaded copy - it stops being true, and re-publishes the email, the instant the SAME text is what actually got uploaded int..."""
     from localm import bugreport as br
 
     real_report = br.build_report("image gen froze", context={"operation": "run"})
@@ -118,9 +105,7 @@ def test_upload_report_strips_edit_disclaimer_from_body():
 
 
 def test_upload_report_body_without_footer_is_unaffected():
-    """A body that never carried the disclaimer (e.g. a hand-typed test body,
-    or a user who deleted the footer themselves) uploads byte-for-byte, so
-    the strip can never be mistaken for a content-mangling step."""
+    """A body that never carried the disclaimer (e.g. a hand-typed test body, or a user who deleted the footer themselves) uploads byte-for-byte, so the strip can never be mistaken for a content-mangling step."""
     seen = {}
 
     def opener(url, data, headers, timeout):
@@ -135,10 +120,7 @@ def test_upload_report_body_without_footer_is_unaffected():
 
 
 def test_upload_report_scrubs_home_path_in_title():
-    """HON-03/HON-15: the title becomes a PUBLIC GitHub issue title. Scrubbing at
-    the upload choke point means a home path (username) in ANY caller's title is
-    redacted in what is actually SENT on the wire, no matter which caller passed it
-    (report_failure passes the raw summary, the GUI route the raw first line)."""
+    """HON-03/HON-15: the title becomes a PUBLIC GitHub issue title."""
     seen = {}
 
     def opener(url, data, headers, timeout):
@@ -196,8 +178,7 @@ def test_upload_report_omits_token_header_when_none(monkeypatch):
 
 
 def test_upload_report_fills_url_from_config_when_only_token_passed(monkeypatch):
-    """An explicit token must not suppress loading the url from config (each of
-    url/token defaults from config independently)."""
+    """An explicit token must not suppress loading the url from config (each of url/token defaults from config independently)."""
     monkeypatch.setattr("localm.config.load_config", lambda: {
         "bugreport_upload_url": "https://cfg.example/file",
         "bugreport_upload_token": "cfg-tok"})
@@ -216,8 +197,7 @@ def test_upload_report_fills_url_from_config_when_only_token_passed(monkeypatch)
 # ------------------------------- CLI menu --------------------------------- #
 
 def test_cli_menu_upload_branch_calls_upload(tmp_path, monkeypatch):
-    """When an upload endpoint is configured, the CLI report menu offers "[1] Send
-    now", and picking it uploads the (edited) report rather than opening a browser."""
+    """When an upload endpoint is configured, the CLI report menu offers '[1] Send now', and picking it uploads the (edited) report rather than opening a browser."""
     monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path)
     monkeypatch.setattr(bugreport, "upload_config",
                         lambda: ("https://proxy.example", "tok"))
@@ -238,8 +218,7 @@ def test_cli_menu_upload_branch_calls_upload(tmp_path, monkeypatch):
 
 
 def test_cli_menu_no_upload_option_when_unconfigured(tmp_path, monkeypatch, capsys):
-    """Without an endpoint, the menu has no "Send now" option and "1" maps to nothing
-    (email is [2], not [1]) - so picking "1" opens no browser."""
+    """Without an endpoint, the menu has no 'Send now' option and '1' maps to nothing (email is [2], not [1]) - so picking '1' opens no browser."""
     monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path)
     monkeypatch.setattr(bugreport, "upload_config", lambda: (None, None))
     opened = []
@@ -252,9 +231,7 @@ def test_cli_menu_no_upload_option_when_unconfigured(tmp_path, monkeypatch, caps
 
 
 def test_cli_menu_channels_stable_when_upload_configured(tmp_path, monkeypatch, capsys):
-    """With upload configured, the upload option is [1] but email stays [2] and
-    the manual/self channel stays [3] - the always-present channels are not
-    renumbered. There is no GitHub-issue option to renumber around any more."""
+    """With upload configured, the upload option is [1] but email stays [2] and the manual/self channel stays [3] - the always-present channels are not renumbered."""
     monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path)
     monkeypatch.setattr(bugreport, "upload_config",
                         lambda: ("https://proxy.example", "tok"))
@@ -272,8 +249,7 @@ def test_cli_menu_channels_stable_when_upload_configured(tmp_path, monkeypatch, 
 
 
 def test_cli_menu_upload_failure_shows_hint_and_retries(tmp_path, monkeypatch, capsys):
-    """A failed send tells the user WHERE it failed (the diagnosed hint) and offers
-    to retry creating the issue; answering yes re-attempts and can succeed."""
+    """A failed send tells the user WHERE it failed (the diagnosed hint) and offers to retry creating the issue; answering yes re-attempts and can succeed."""
     monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path)
     monkeypatch.setattr(bugreport, "upload_config",
                         lambda: ("https://proxy.example", "tok"))
@@ -298,8 +274,7 @@ def test_cli_menu_upload_failure_shows_hint_and_retries(tmp_path, monkeypatch, c
 
 
 def test_cli_menu_upload_failure_decline_retry_keeps_file(tmp_path, monkeypatch, capsys):
-    """Declining the retry does not re-attempt; the saved report + email fallback
-    are pointed at (a failed send is never a false success)."""
+    """Declining the retry does not re-attempt; the saved report + email fallback are pointed at (a failed send is never a false success)."""
     monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path)
     monkeypatch.setattr(bugreport, "upload_config",
                         lambda: ("https://proxy.example", "tok"))
@@ -352,11 +327,7 @@ def test_endpoint_uploads_on_request(monkeypatch):
 
 
 def test_endpoint_upload_scrubs_home_path_end_to_end(tmp_path, monkeypatch):
-    """HON-15 (GUI upload path): drive the REAL /api/bug-report upload route end to
-    end - description -> save_user_report -> build_report -> upload_report -> the
-    network POST - and assert the actual bytes on the wire carry NO username in the
-    title OR the body. Only the socket is faked (real upload_report runs), so nothing
-    between the user's field and the wire is mocked away (tests real behaviour)."""
+    """HON-15 (GUI upload path): drive the REAL /api/bug-report upload route end to end - description -> save_user_report -> build_report -> upload_report -> the network POST - and assert the actual bytes on the wire carry NO username in the title OR the body."""
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
     monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path)

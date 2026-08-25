@@ -1,12 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Unit tests for localm.plugins.deps - the host-side pip-extra installer.
-
-Covers the resolver (extra -> requirement strings from metadata), the
-already-satisfied check, and install orchestration including the NEGATIVE paths
-required by the spec: a failing installer surfaces the real error (never reports
-success), and a pip that exits 0 but does not actually provide the package is
-still reported failed.
-"""
+"""Unit tests for localm.plugins.deps - the host-side pip-extra installer."""
 
 import subprocess
 
@@ -161,8 +154,7 @@ def test_install_success(monkeypatch):
 
 
 def test_install_pip_fails_surfaces_error(monkeypatch):
-    """NEGATIVE: a failing installer must report ok=False with the real tail,
-    never a hollow success."""
+    """NEGATIVE: a failing installer must report ok=False with the real tail, never a hollow success."""
     monkeypatch.setattr(deps, "is_satisfied", lambda r: False)
     monkeypatch.setattr(deps, "_run_pip",
                         lambda reqs, on_progress=None: (False, "ERROR: could not build wheel"))
@@ -173,8 +165,7 @@ def test_install_pip_fails_surfaces_error(monkeypatch):
 
 
 def test_install_pip_lies_still_missing(monkeypatch):
-    """NEGATIVE: installer exits 0 but the package is STILL missing afterwards
-    -> reported failed, not installed."""
+    """NEGATIVE: installer exits 0 but the package is STILL missing afterwards -> reported failed, not installed."""
     monkeypatch.setattr(deps, "is_satisfied", lambda r: False)  # never satisfied
     monkeypatch.setattr(deps, "_run_pip",
                         lambda reqs, on_progress=None: (True, "Successfully installed (not really)"))

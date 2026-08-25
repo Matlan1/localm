@@ -1,22 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Phase-2 consumers for the two Phase-1 registry APIs that had none.
-
-``Host.register_model_role`` was declared by all three media plugins and read by
-nobody, and the registry's ``model_type`` slice was never consulted by a media
-backend at all (they resolved models purely from ComfyUI's live /object_info).
-``localm/plugins/media_roles.py`` joins them, and these pin the contract.
-
-The load-bearing properties, in the order they can go wrong:
-
-* ONE node-name -> model_type inference (``comfy_client.model_type_for_node``),
-  shared with the ComfyUI folder scanner. Two copies would drift and the picker
-  would then offer a file the scan filed under a different type.
-* ONE "is this slot satisfied" rule (``comfy_client.slot_is_satisfied``), shared
-  with ``describe_missing_models``. Two rules and the picker calls a slot fine
-  that generation then refuses.
-* the "could not ask ComfyUI" / "asked, nothing there" distinction survives every
-  layer (AGENTS.md rule 5), rather than both collapsing to an empty list.
-"""
+"""Phase-2 consumers for the two Phase-1 registry APIs that had none."""
 
 from __future__ import annotations
 
@@ -70,19 +53,14 @@ class TestModelTypeForNode:
             assert comfy_client.model_type_for_node(n) in MODEL_TYPES
 
     def test_checkpoint_agrees_with_the_scanner_folder_table(self):
-        """The folder walk files models/checkpoints/* as 'diffusion-unet'. The
-        /object_info pass must agree, or one file gets two types depending on
-        whether ComfyUI happened to be up during the scan."""
+        """The folder walk files models/checkpoints/* as 'diffusion-unet'."""
         from localm.model_manager.scan import SUBFOLDER_MAPPING
         assert (comfy_client.model_type_for_node("CheckpointLoaderSimple")
                 == SUBFOLDER_MAPPING["checkpoints"])
 
 
 class TestShippedWorkflowsClassify:
-    """Bound to the REAL tracked workflow files, not a fixture: a fixture can
-    only ever contain the node types its author already thought of, and the
-    music plugin's own shipped workflow is exactly the one that classified as
-    'unknown' before this landed."""
+    """Bound to the REAL tracked workflow files, not a fixture: a fixture can only ever contain the node types its author already thought of, and the music plugin's own shipped workflow is exactly the one that classified as 'unknown' before this landed."""
 
     ROOT = Path(__file__).resolve().parents[1] / "localm"
     CASES = [
@@ -139,9 +117,7 @@ def _slots(workflow=None, info=None):
 
 class TestSlotIsSatisfied:
     def test_agrees_with_describe_missing_models_on_every_slot(self):
-        """The anti-drift check. If these two ever disagree the picker starts
-        promising a model generation will refuse - the exact reason the rule was
-        extracted instead of copied."""
+        """The anti-drift check."""
         from unittest.mock import patch
         wf = _workflow()
         with patch.object(comfy_client, "comfy_object_info", return_value=_object_info()):
@@ -193,8 +169,7 @@ IMAGE_ROLES = _roles(
 
 class TestAnnotateSlots:
     def test_none_survives_annotation(self):
-        """Unreachable ComfyUI must not become an empty list anywhere on the
-        path - that is the rule-5 distinction the whole surface rests on."""
+        """Unreachable ComfyUI must not become an empty list anywhere on the path - that is the rule-5 distinction the whole surface rests on."""
         assert media_roles.annotate_slots(None, IMAGE_ROLES) is None
 
     def test_each_slot_gets_its_model_type(self):
@@ -230,8 +205,7 @@ class TestAnnotateSlots:
         assert by_input["vae_name"] is False        # nowhere.safetensors
 
     def test_originals_are_not_mutated(self):
-        """workflow_model_slots is shared with preflight_models; a display
-        concern must never edit what generation reads."""
+        """workflow_model_slots is shared with preflight_models; a display concern must never edit what generation reads."""
         slots = _slots()
         before = json.dumps(slots, sort_keys=True)
         media_roles.annotate_slots(slots, IMAGE_ROLES)
@@ -314,19 +288,14 @@ class TestDescribeRoles:
             ["aevae", "offpiste"]
 
     def test_registry_only_names_what_comfyui_is_not_offering(self):
-        """The vae slot asks for nowhere.safetensors, which ComfyUI does not
-        have, so the registered VAEs it is not offering ARE the actionable
-        answer. ae is in the live options; my_own_vae is not."""
+        """The vae slot asks for nowhere.safetensors, which ComfyUI does not have, so the registered VAEs it is not offering ARE the actionable answer. ae is in the live options; my_own_vae is not."""
         out = {r["role_id"]: r for r in
                media_roles.describe_roles(IMAGE_ROLES, _slots(), REGISTRY)}
         assert out["image-vae"]["installed"] is False
         assert [m["name"] for m in out["image-vae"]["registry_only"]] == ["offpiste"]
 
     def test_a_slot_comfyui_serves_fine_gets_no_registry_noise(self):
-        """MEASURED on a live server: without this gate, every same-type model
-        you own was advertised under every WORKING slot too - the video page
-        told you to go install a flux UNet. True and useless, and it buried the
-        one case that is neither."""
+        """MEASURED on a live server: without this gate, every same-type model you own was advertised under every WORKING slot too - the video page told you to go install a flux UNet."""
         out = {r["role_id"]: r for r in
                media_roles.describe_roles(IMAGE_ROLES, _slots(), REGISTRY)}
         assert out["image-unet"]["installed"] is True
@@ -373,8 +342,7 @@ PICKERS = [
 
 
 def _media_app(tmp_path, monkeypatch, plugin):
-    """A real app with the plugin INSTALLED, so the roles come from the real
-    register() call rather than a fixture repeating what it hopes they are."""
+    """A real app with the plugin INSTALLED, so the roles come from the real register() call rather than a fixture repeating what it hopes they are."""
     home = tmp_path / ".localm"
     monkeypatch.setenv("LOCALM_HOME", str(home))
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
@@ -413,9 +381,7 @@ def _installed_backend(plugin: str):
 
 
 class TestDeclaredRolesCoverTheShippedWorkflow:
-    """The reason ``video-vae`` exists: joining the declared roles to the shipped
-    workflow's real slots is what showed video was under-declaring. This keeps
-    that true for all three rather than fixing it once by hand."""
+    """The reason ``video-vae`` exists: joining the declared roles to the shipped workflow's real slots is what showed video was under-declaring."""
 
     WORKFLOWS = {
         "image": "image_gen/flux_workflow.example.json",
@@ -454,13 +420,10 @@ class TestDeclaredRolesCoverTheShippedWorkflow:
 
 
 class TestDocumentedRoleContract:
-    """docs/plugins.md's "Model roles" section states these. A documented claim
-    with no runnable check is exactly the kind that quietly stops being true (it
-    sits next to the code, so readers trust it and nobody re-derives it)."""
+    """docs/plugins.md's 'Model roles' section states these."""
 
     def test_an_unknown_model_type_raises_at_registration(self):
-        """Documented as raising at register() time - the alternative is a role
-        that silently never matches anything and reads as an empty picker."""
+        """Documented as raising at register() time - the alternative is a role that silently never matches anything and reads as an empty picker."""
         from localm.plugins.contract import ModelRoleDescriptor
         from localm.plugins.engine import PluginHost, PluginSpec
         host = PluginHost(FastAPI(), object(), PluginSpec(name="demo"))
@@ -469,9 +432,7 @@ class TestDocumentedRoleContract:
                 ModelRoleDescriptor("demo-x", "X", "not-a-real-type"))
 
     def test_plugin_name_is_stamped_by_the_host_not_the_plugin(self):
-        """Documented as "filled in by the host; do not set it" - the roles
-        surface filters by it, so a plugin able to forge it could label its
-        slots as another plugin's."""
+        """Documented as 'filled in by the host; do not set it' - the roles surface filters by it, so a plugin able to forge it could label its slots as another plugin's."""
         from localm.plugins.contract import ModelRoleDescriptor
         from localm.plugins.engine import PluginHost, PluginSpec
         host = PluginHost(FastAPI(), object(), PluginSpec(name="demo"))
@@ -480,10 +441,7 @@ class TestDocumentedRoleContract:
         assert host.model_roles[0].plugin_name == "demo"
 
     def test_a_disabled_plugin_stops_reporting_its_roles(self, tmp_path, monkeypatch):
-        """Documented as "a disabled or uninstalled plugin's roles stop being
-        reported". Nothing clears host.model_roles on unmount - what makes the
-        claim true is that the engine only walks LOADED hosts, so this pins the
-        behaviour rather than the mechanism."""
+        """Documented as 'a disabled or uninstalled plugin's roles stop being reported'."""
         app = _media_app(tmp_path, monkeypatch, "image")
         manager = app.state.plugin_manager
         assert media_roles.plugin_model_roles(app, "image")
@@ -524,9 +482,7 @@ def test_route_returns_roles_and_registry_models_when_reachable(
 @pytest.mark.parametrize("plugin,route", PICKERS, ids=[p[0] for p in PICKERS])
 def test_route_still_answers_with_roles_when_comfyui_is_down(
         tmp_path, monkeypatch, plugin, route):
-    """The unreachable branch used to be a dead end: slots [] and a message. The
-    registry needs no ComfyUI, so the roles and what could fill them still come
-    back - and the honest "not running" message stays."""
+    """The unreachable branch used to be a dead end: slots [] and a message."""
     app = _media_app(tmp_path, monkeypatch, plugin)
     backend = _installed_backend(plugin)
     monkeypatch.setattr(backend, "_comfy_model_slots", lambda s: None)
@@ -546,8 +502,7 @@ def test_route_still_answers_with_roles_when_comfyui_is_down(
 @pytest.mark.parametrize("plugin,route", PICKERS, ids=[p[0] for p in PICKERS])
 def test_route_resolution_still_runs_off_the_event_loop(
         tmp_path, monkeypatch, plugin, route):
-    """REG-638 must survive this change: the /object_info fetch AND the registry
-    read now both sit behind _comfy_model_roles, so the offload has to cover it."""
+    """REG-638 must survive this change: the /object_info fetch AND the registry read now both sit behind _comfy_model_roles, so the offload has to cover it."""
     app = _media_app(tmp_path, monkeypatch, plugin)
     backend = _installed_backend(plugin)
     seen: dict = {}

@@ -1,10 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""
-Tests for "load from folder" validation: add_local must refuse the localm data
-directory and non-model paths instead of polluting the registry, and the HF-dir
-detector must require real model artifacts (not just a bare config.json, which
-the data dir also has).
-"""
+"""Tests for 'load from folder' validation: add_local must refuse the localm data directory and non-model paths instead of polluting the registry, and the HF-dir detector must require real model artifacts (not just a bare config.json, which the data dir also has)."""
 
 from pathlib import Path
 

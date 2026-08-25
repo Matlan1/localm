@@ -1,26 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""GET /api/activity: discover what a server is doing WITHOUT holding a job id.
-
-ADR-0008 U3. Every other way to reach a job needs an id the caller already has,
-and that id is handed out exactly once - in the body of the POST that started
-the job. A second browser tab, a second device, or the same tab after a reload
-therefore could not learn that a model pull was running, even though the server
-had the whole record. This route is the only one that answers "what is
-happening" without being told what to look for.
-
-Two properties get equal weight here, because getting either wrong is a defect
-this ADR exists to prevent:
-
-* A caller that never saw the id MUST find the operation (the reported bug).
-* A caller must NOT see another principal's operation on a keyed server, and
-  the same 404-style silence the events route uses applies - absence from the
-  list, never a redacted entry proving one exists.
-
-And the default configuration is open mode, where there are no owners at all,
-so the filter admits everyone. That is correct for a single-owner local server
-and is pinned below so nobody "fixes" it into a per-principal list that would
-show a user nothing on their own machine.
-"""
+"""GET /api/activity: discover what a server is doing WITHOUT holding a job id."""
 
 from __future__ import annotations
 
@@ -58,8 +37,7 @@ def app(tmp_path, monkeypatch):
 
 @pytest.fixture
 def headless_app(tmp_path, monkeypatch):
-    """A bare `localm serve`: attach_engine only, no GUI. The route must exist
-    here too, which is the whole point of the U2 relocation."""
+    """A bare `localm serve`: attach_engine only, no GUI."""
     home = tmp_path / ".localm"
     monkeypatch.setenv("LOCALM_HOME", str(home))
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
@@ -80,8 +58,7 @@ def _hdr(key):
 
 
 def _inject(app, *, owner=None, kind="pull", label=None, status="running"):
-    """Register a job directly, with a pre-queued end event so streaming it
-    returns promptly. Mirrors test_key_scope_jobs.py's helper."""
+    """Register a job directly, with a pre-queued end event so streaming it returns promptly."""
     j = Job(id=uuid.uuid4().hex[:12], kind=kind, argv=["secret", "argv"],
             owner=owner, label=label)
     j.status = status
@@ -93,7 +70,7 @@ def _inject(app, *, owner=None, kind="pull", label=None, status="running"):
 # ------------------------------------------------- the reported bug, closed
 
 def test_a_client_that_never_saw_the_id_finds_the_operation(app):
-    """THE HEADLINE. The id is never given to this caller; it still finds it."""
+    """THE HEADLINE."""
     job = _inject(app, label="Model pull owner/repo")
     with TestClient(app) as c:
         r = c.get("/api/activity")
@@ -107,8 +84,7 @@ def test_a_client_that_never_saw_the_id_finds_the_operation(app):
 
 
 def test_a_discovered_id_can_then_be_streamed(app):
-    """Discovery is only useful if it hands back something attachable: the id
-    from the listing must work on the events route."""
+    """Discovery is only useful if it hands back something attachable: the id from the listing must work on the events route."""
     _inject(app)
     with TestClient(app) as c:
         found = c.get("/api/activity").json()["operations"][0]["id"]
@@ -118,8 +94,7 @@ def test_a_discovered_id_can_then_be_streamed(app):
 
 
 def test_the_route_exists_on_a_headless_server(headless_app):
-    """U2 put the registry at kernel level; a bare `localm serve` must be able
-    to answer this too, or the CLI and MCP surfaces have nothing to read."""
+    """U2 put the registry at kernel level; a bare `localm serve` must be able to answer this too, or the CLI and MCP surfaces have nothing to read."""
     _inject(headless_app, label="Indexing docs")
     with TestClient(headless_app) as c:
         r = c.get("/api/activity")
@@ -158,9 +133,7 @@ class TestKeyedServer:
         assert [o["id"] for o in ops] == [job.id]
 
     def test_a_hidden_operation_leaves_no_trace_in_the_response(self, app):
-        """Absent, not redacted. A placeholder row would confirm that another
-        principal has something running, which is what the events route's
-        indistinguishable 404 exists to prevent."""
+        """Absent, not redacted."""
         from localm import auth
         a = auth.create_key("A", [S.MODELS_READ])["key"]
         b = auth.create_key("B", [S.MODELS_READ])["key"]
@@ -176,14 +149,7 @@ class TestKeyedServer:
 #                                                            DEFAULT
 
 def test_open_mode_shows_unowned_operations_to_any_caller(app):
-    """With no owner key and no keystore - how localm runs out of the box -
-    principal_id() returns None, so jobs are unowned and everyone sees them.
-
-    This is CORRECT for a single-owner local server, and it is pinned because
-    the opposite mistake is easy and silent: a filter that demanded a matching
-    principal would show the user an empty list on their own machine while the
-    pull they just started was running.
-    """
+    """With no owner key and no keystore - how localm runs out of the box - principal_id() returns None, so jobs are unowned and everyone sees them."""
     from localm import auth
 
     # The precondition, asserted rather than assumed: if a later change made
@@ -201,8 +167,7 @@ def test_open_mode_shows_unowned_operations_to_any_caller(app):
 # ------------------------------------------------------------ payload shape
 
 def test_pct_is_absent_until_something_reports_progress(app):
-    """R1: a pull that has not read a byte count is at an UNKNOWN percentage,
-    not at 0 percent. A client must be able to tell those apart."""
+    """R1: a pull that has not read a byte count is at an UNKNOWN percentage, not at 0 percent."""
     _inject(app)
     with TestClient(app) as c:
         op = c.get("/api/activity").json()["operations"][0]
@@ -220,11 +185,7 @@ def test_pct_appears_once_progress_is_reported(app):
 
 
 def test_the_response_never_carries_argv(app):
-    """argv holds the resolved model spec and any host path the caller passed.
-    Injected unowned, because an owned job is correctly INVISIBLE to an
-    unauthenticated open-mode caller - an earlier version of this test asserted
-    the leak against a job the filter was busy hiding, and passed for the wrong
-    reason right up until it did not."""
+    """argv holds the resolved model spec and any host path the caller passed."""
     _inject(app, owner=None)
     with TestClient(app) as c:
         body = c.get("/api/activity").text
@@ -234,9 +195,7 @@ def test_the_response_never_carries_argv(app):
 
 
 def test_the_response_never_carries_the_owner_hash(app):
-    """owner is a keystore hash and must not reach a listing. Checked on the
-    KEYED path, since that is the only configuration where a job has an owner
-    AND the caller is allowed to see it."""
+    """owner is a keystore hash and must not reach a listing."""
     from localm import auth
     key = auth.create_key("A", [S.MODELS_READ])["key"]
     digest = auth._hash_key(key)
@@ -270,10 +229,7 @@ def test_newest_first(app):
 
 
 def test_an_idle_server_reports_an_empty_list_not_an_error(app):
-    """An empty list is a real answer - "I looked, nothing is running" - and
-    must be distinguishable by the client from "I have not asked yet" and from
-    "I asked and could not reach the server". The server's part of that is
-    answering 200 with an explicit empty list rather than erroring."""
+    """An empty list is a real answer - 'I looked, nothing is running' - and must be distinguishable by the client from 'I have not asked yet' and from 'I asked and could not reach the server'."""
     with TestClient(app) as c:
         r = c.get("/api/activity")
     assert r.status_code == 200
@@ -281,14 +237,7 @@ def test_an_idle_server_reports_an_empty_list_not_an_error(app):
 
 
 def test_the_reply_carries_the_server_clock(app):
-    """A client must not compute an operation's age against its OWN clock.
-
-    created_at exists so a user can tell a six-second operation from a
-    six-hour one, so durations get rendered - and a client subtracting a
-    server epoch from its local Date.now() is wrong by however much the two
-    clocks disagree, which on a phone is not small. Shipping the reference
-    clock alongside makes the honest computation the easy one.
-    """
+    """A client must not compute an operation's age against its OWN clock."""
     job = _inject(app)
     job.created_at = time.time() - 120
     with TestClient(app) as c:

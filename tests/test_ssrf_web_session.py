@@ -1,25 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""SSRF hardening for the web/coder/chat surface (R42 focused review pass).
-
-Covers the fixes from the adversarial SSRF audit of the web plugin and the
-shared localm.netpolicy guard it delegates to:
-
-  F1  CGNAT 100.64.0.0/10 (RFC 6598) and other non-globally-routable ranges
-      were allowed by _is_blocked_ip (the old explicit is_* list missed them);
-      now refused via the `not is_global` predicate. Public hosts still pass.
-  N1  Parser-differential SSRF: a backslash / control char in the authority made
-      urllib.parse read a public host while requests/urllib3 connect to loopback
-      (defeating the guard AND the net_allow allowlist). Now refused up front.
-  6to4 The deprecated 6to4 relay anycast prefix (192.88.99.0/24, 2002::/16) is
-      is_global=True yet not an ordinary public host; now refused.
-  N3  The search backends followed redirects with no per-hop check_url; now they
-      pass allow_redirects=False and refuse any 3xx.
-  F2  Chat image_url parts fetched via a raw requests.get with no policy; now
-      routed through netpolicy.safe_fetch_bytes (check_url + per-hop redirect
-      re-validation + size cap), reachable from a baseline chat turn.
-
-These pin the behavior so a future refactor cannot silently re-open the holes.
-"""
+"""SSRF hardening for the web/coder/chat surface (R42 focused review pass)."""
 
 import base64
 import io
@@ -33,9 +13,7 @@ from localm.netpolicy import NetworkPolicyError, check_url
 
 
 class _FakeSession:
-    """Doubles netpolicy._session_for (the pinned-transport seam) so these tests
-    exercise the real check_url + redirect logic without a live socket. get/post
-    may each be a fixed response object or a responder callable (url, **kw)."""
+    """Doubles netpolicy._session_for (the pinned-transport seam) so these tests exercise the real check_url + redirect logic without a live socket. get/post may each be a fixed response object or a responder callable (url, **kw)."""
 
     def __init__(self, *, get=None, post=None):
         self._get, self._post = get, post
@@ -63,8 +41,7 @@ class _FakeSession:
 
 @pytest.fixture(autouse=True)
 def _allow_mode(monkeypatch):
-    """net_mode=allow (so check_url runs the IP/host gates, not the off bail) and
-    a default config (net_allow_private False, no allow/deny lists)."""
+    """net_mode=allow (so check_url runs the IP/host gates, not the off bail) and a default config (net_allow_private False, no allow/deny lists)."""
     monkeypatch.setenv("LOCALM_NET_MODE", "allow")
     monkeypatch.setattr("localm.config.load_config", lambda: {})
 
@@ -110,9 +87,7 @@ class TestF1NonGlobalRanges:
         "http://224.0.0.1/",               # multicast
     ])
     def test_deprecated_and_special_forms_still_blocked(self, url):
-        """The `not is_global` union must NOT regress the forms the stdlib marks
-        is_global=True but that still route internally - is_reserved/is_multicast
-        catch those. (Verifies we kept the union, not is_global alone.)"""
+        """The `not is_global` union must NOT regress the forms the stdlib marks is_global=True but that still route internally - is_reserved/is_multicast catch those. (Verifies we kept the union, not is_global alone.)."""
         with pytest.raises(NetworkPolicyError):
             check_url(url)
 
@@ -167,9 +142,7 @@ class TestN1ParserDifferential:
             check_url(url)
 
     def test_backslash_defeats_net_allow_is_blocked(self, monkeypatch):
-        """The PoC variant that also bypassed the allowlist: with net_allow set,
-        the backslash trick must STILL be refused (not validated as the allowed
-        host while connecting to loopback)."""
+        """The PoC variant that also bypassed the allowlist: with net_allow set, the backslash trick must STILL be refused (not validated as the allowed host while connecting to loopback)."""
         _cfg(monkeypatch, net_allow=["allowed.example"], net_allow_private=False)
         with pytest.raises(NetworkPolicyError, match="backslash|control"):
             check_url(r"http://127.0.0.1\@allowed.example/")

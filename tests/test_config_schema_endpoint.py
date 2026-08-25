@@ -1,15 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Tests for GET /v1/config/schema.
-
-The schema-driven settings page fetches this endpoint to learn each field's
-widget/options/min/max/help plus its CURRENT value (injected as `default`), so
-the form can render the right typed control pre-filled. The endpoint must:
-  - return the typed field list (the schema, not a flat config dump),
-  - carry the right widget + options for SELECT fields (e.g. `mode`),
-  - inject the current/default value for non-secret fields,
-  - never leak a secret field's value,
-  - require config:read once an API key is configured.
-"""
+"""Tests for GET /v1/config/schema."""
 
 import os
 from unittest.mock import patch
@@ -96,8 +86,7 @@ def test_hidden_fields_present_but_marked_hidden(client):
 
 
 def test_never_leaks_a_secret_value(client, monkeypatch):
-    """A secret field must be advertised (so the form renders a masked input)
-    but must NEVER carry a value, even if one is set in the live config."""
+    """A secret field must be advertised (so the form renders a masked input) but must NEVER carry a value, even if one is set in the live config."""
     from localm import settings_schema as ss
 
     # Inject a temporary secret field + a config value for it.

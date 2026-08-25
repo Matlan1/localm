@@ -1,21 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""A revocable key's browser session must not outlive the key it was minted from.
-
-A cookie session is re-validated against the live keystore on every request, so
-revoking or expiring the key that minted it also ends the session. One exemption
-exists, and it is load-bearing: the OWNER KEY is not a keystore entry, and a
-session is deliberately decoupled from the key VALUE, so an owner-key ROLL must
-not log the owner out.
-
-That exemption used to key on the ADMIN SCOPE. The owner can mint ADMIN-scoped
-KEYSTORE keys, which are revocable by design, so those sessions inherited an
-exemption they were never entitled to: revoking such a key did not reliably end
-its cookie, and if the store cleanup also failed the cookie kept working.
-
-It now keys on WHICH CREDENTIAL minted the session, recorded positively at login.
-Removing the exemption outright is NOT the fix and must never be the fix - that
-reintroduces the owner signing themselves out.
-"""
+"""A revocable key's browser session must not outlive the key it was minted from."""
 
 from __future__ import annotations
 
@@ -47,15 +31,13 @@ def home(tmp_path, monkeypatch):
 
 
 def _resolves(sid) -> bool:
-    """Does this session still authenticate, through the real gate every cookie
-    consumer uses (never a bare sessions.lookup, which skips the re-check)."""
+    """Does this session still authenticate, through the real gate every cookie consumer uses (never a bare sessions.lookup, which skips the re-check)."""
     from localm.inference.http_server import _principal_from_token
     return _principal_from_token(sid, "cookie") is not None
 
 
 def _admin_device_session(auth, sessions, **create_kw):
-    """An ADMIN-scoped KEYSTORE key and a session minted from it, the way a paired
-    device gets one. Revocable by design, unlike the owner key."""
+    """An ADMIN-scoped KEYSTORE key and a session minted from it, the way a paired device gets one."""
     created = auth.create_key("device", [S.ADMIN], allow_privileged=True,
                               **create_kw)
     sid = sessions.create(scopes={S.ADMIN}, key_hash=auth._hash_key(created["key"]),
@@ -68,10 +50,7 @@ def _admin_device_session(auth, sessions, **create_kw):
 # --------------------------------------------------------------------------- #
 
 def test_a_revoked_admin_device_keys_session_stops_resolving(home, monkeypatch):
-    """The reported gap. revoke_key also drops the key's sessions as cleanup, but
-    that cleanup can FAIL (it is best-effort and now warns when it does). The
-    per-request re-check is what has to hold when it does, and the ADMIN-scope
-    exemption meant it did not."""
+    """The reported gap. revoke_key also drops the key's sessions as cleanup, but that cleanup can FAIL (it is best-effort and now warns when it does)."""
     from localm import auth, sessions
     auth.set_api_key(KEY)
     created, sid = _admin_device_session(auth, sessions)
@@ -90,9 +69,7 @@ def test_a_revoked_admin_device_keys_session_stops_resolving(home, monkeypatch):
 
 
 def test_an_expired_admin_device_keys_session_stops_resolving(home):
-    """Expiry is the sharper case: unlike revoke it does NOT delete the record and
-    does NOT drop sessions, so the per-request re-check is the ONLY thing standing
-    between an expired ADMIN device key and a permanently valid cookie."""
+    """Expiry is the sharper case: unlike revoke it does NOT delete the record and does NOT drop sessions, so the per-request re-check is the ONLY thing standing between an expired ADMIN device key and a permanently valid cookie."""
     from localm import auth, sessions
     auth.set_api_key(KEY)
     _created, sid = _admin_device_session(auth, sessions,
@@ -112,8 +89,7 @@ def test_an_expired_admin_device_keys_session_stops_resolving(home):
 # --------------------------------------------------------------------------- #
 
 def test_the_owners_session_survives_a_key_roll(home):
-    """The load-bearing negative. Removing the exemption wholesale would pass
-    every test above and reintroduce the owner signing themselves out."""
+    """The load-bearing negative."""
     from localm import auth, sessions
     auth.set_api_key(KEY)
     sid = sessions.create(scopes={S.ADMIN}, key_hash=auth._hash_key(KEY),
@@ -127,12 +103,7 @@ def test_the_owners_session_survives_a_key_roll(home):
 
 
 def test_a_pre_upgrade_owner_session_survives_a_key_roll(home):
-    """The back-compat half, and the one a naive fix breaks silently.
-
-    A session minted before the stamp existed carries no proof at all. It is
-    recognised by key VALUE while the key still matches, and that recognition is
-    written back - so the roll, which destroys the value proof, finds the stamp
-    already there. Without the back-fill this session would be SIGNED OUT."""
+    """The back-compat half, and the one a naive fix breaks silently."""
     from localm import auth, sessions
     auth.set_api_key(KEY)
     sid = sessions.create(scopes={S.ADMIN}, key_hash=auth._hash_key(KEY),
@@ -154,9 +125,7 @@ def test_a_pre_upgrade_owner_session_survives_a_key_roll(home):
 
 
 def test_a_session_from_the_legacy_owner_digest_is_recognised(home):
-    """The owner key's identity moved to a salted KDF. A session minted before
-    that upgrade still records the legacy unsalted digest until relink_key_hash
-    rewrites it, and must not be signed out in the meantime."""
+    """The owner key's identity moved to a salted KDF."""
     from localm import auth, sessions
     auth.set_api_key(KEY)
     sid = sessions.create(scopes={S.ADMIN},
@@ -170,10 +139,7 @@ def test_a_session_from_the_legacy_owner_digest_is_recognised(home):
 # --------------------------------------------------------------------------- #
 
 def test_an_unreadable_keystore_cannot_grant_the_exemption(home, monkeypatch):
-    """_load_keystore() fails OPEN (returns [] on OSError/ValueError). The
-    exemption must never be derivable from that: absence is not proof of the
-    owner. The owner proof reads no keystore at all, so a corrupt store leaves a
-    device session gated, not promoted."""
+    """_load_keystore() fails OPEN (returns [] on OSError/ValueError)."""
     from localm import auth, sessions
     auth.set_api_key(KEY)
     _created, sid = _admin_device_session(auth, sessions)
@@ -186,9 +152,7 @@ def test_an_unreadable_keystore_cannot_grant_the_exemption(home, monkeypatch):
 
 
 def test_holding_admin_is_not_enough_on_its_own(home, monkeypatch):
-    """ADMIN is NECESSARY but not SUFFICIENT. This is the whole defect in one
-    assertion: a live ADMIN-scoped keystore key resolves, the same key revoked
-    does not, and nothing about the scope set changed between the two."""
+    """ADMIN is NECESSARY but not SUFFICIENT."""
     from localm import auth, sessions
     auth.set_api_key(KEY)
     created, sid = _admin_device_session(auth, sessions)
@@ -203,10 +167,7 @@ def test_holding_admin_is_not_enough_on_its_own(home, monkeypatch):
 
 def test_a_forged_stamp_on_a_narrower_session_is_not_enough_either(home,
                                                                    monkeypatch):
-    """The conjunction the other way round. No mint site can produce a record
-    claiming owner-minted while carrying narrower scopes - every mint records the
-    owner key's own ADMIN snapshot - so only a tampered store can. Requiring BOTH
-    means one flipped boolean does not buy a session that can never be revoked."""
+    """The conjunction the other way round."""
     from localm import auth, sessions
     auth.set_api_key(KEY)
     created = auth.create_key("bot", ["jobs"], allow_privileged=False)
@@ -222,9 +183,7 @@ def test_a_forged_stamp_on_a_narrower_session_is_not_enough_either(home,
 
 
 def test_the_backfill_failing_does_not_break_authentication(home, monkeypatch):
-    """The back-fill is best-effort: the request is already correct without it,
-    and the next one re-proves the same way. A store write failure must not turn
-    into an auth failure."""
+    """The back-fill is best-effort: the request is already correct without it, and the next one re-proves the same way."""
     from localm import auth, sessions
     auth.set_api_key(KEY)
     sid = sessions.create(scopes={S.ADMIN}, key_hash=auth._hash_key(KEY),
@@ -239,8 +198,7 @@ def test_the_backfill_failing_does_not_break_authentication(home, monkeypatch):
 
 
 def test_a_plain_scoped_session_is_still_gated(home, monkeypatch):
-    """Unchanged behaviour, pinned so the rework did not loosen the ordinary
-    case it was already handling correctly."""
+    """Unchanged behaviour, pinned so the rework did not loosen the ordinary case it was already handling correctly."""
     from localm import auth, sessions
     auth.set_api_key(KEY)
     created = auth.create_key("ro", [S.MODELS_READ], allow_privileged=False)

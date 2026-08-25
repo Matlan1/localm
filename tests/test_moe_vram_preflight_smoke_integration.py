@@ -1,21 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""REAL end-to-end proof of the MoE VRAM preflight fix (n_cpu_moe blindness in
-_check_vram/_auto_gpu_layers/_auto_ctx_max - see _sizing.py's
-_effective_model_bytes_for_vram and model_manager/gguf.py's
-gguf_moe_pinned_expert_bytes).
-
-No mocks for the header parsing or the load itself: downloads a small real
-Mixture-of-Experts model (granite-3.0-1b-a400m-instruct, ~784 MB Q4_K_M, 24
-layers x 32 experts) and drives GgufBackend against it. VRAM readings ARE
-mocked (_free_vram_bytes/_total_vram_bytes) to reliably simulate a tight
-budget regardless of what GPU (or lack of one) runs this test - this repo's
-own established pattern for the identical class of test, see
-test_kv_bytes_from_gguf.py's TestAutoGpuLayersUsesTheRealShape.
-
-@integration so the default `pytest -m "not integration"` skips it: it needs
-~784 MB of network on first run. Skips cleanly (does not fail) when the
-model cannot be fetched.
-"""
+"""REAL end-to-end proof of the MoE VRAM preflight fix (n_cpu_moe blindness in _check_vram/_auto_gpu_layers/_auto_ctx_max - see _sizing.py's _effective_model_bytes_for_vram and model_manager/gguf.py's gguf_moe_pinned_expert_bytes)."""
 
 from __future__ import annotations
 
@@ -41,9 +25,7 @@ def moe_model_path():
 
 @pytest.fixture(scope="module")
 def moe_facts(moe_model_path):
-    """Ground truth read directly from the real file - not asserted against
-    an assumed model shape, so this test would notice if bartowski's build
-    ever changes (fewer/more layers, a different expert-tensor naming)."""
+    """Ground truth read directly from the real file - not asserted against an assumed model shape, so this test would notice if bartowski's build ever changes (fewer/more layers, a different expert-tensor naming)."""
     import os
     from pathlib import Path
     from localm.model_manager.gguf import (
@@ -66,10 +48,7 @@ def moe_facts(moe_model_path):
 
 
 def test_real_tensor_names_match_the_pinning_pattern(moe_facts):
-    """Sanity floor for everything else in this file: if bartowski's naming
-    ever diverges from blk.<i>.ffn_(gate|down|up)_exps, every test below
-    would silently measure zero pinned bytes and this fix would look
-    verified when it is not - so pin the precondition explicitly."""
+    """Sanity floor for everything else in this file: if bartowski's naming ever diverges from blk.<i>.ffn_(gate|down|up)_exps, every test below would silently measure zero pinned bytes and this fix would look verified when it is not - so pin the precondition explicitly."""
     assert moe_facts["pinned_all"] > 0
     # The vast majority of an MoE file this size is its experts - if pinning
     # "all" layers only accounts for a sliver, something is not matching.
@@ -77,9 +56,7 @@ def test_real_tensor_names_match_the_pinning_pattern(moe_facts):
 
 
 def test_check_vram_refuses_without_n_cpu_moe_but_fits_with_it(moe_facts, capsys):
-    """The headline defect, against a REAL file: a simulated card too small
-    for the whole model, but big enough for the sliver that remains once
-    every layer's experts are pinned to system RAM."""
+    """The headline defect, against a REAL file: a simulated card too small for the whole model, but big enough for the sliver that remains once every layer's experts are pinned to system RAM."""
     from localm.inference.backends.gguf import GgufBackend
 
     model_bytes = moe_facts["model_bytes"]
@@ -118,12 +95,7 @@ def test_check_vram_refuses_without_n_cpu_moe_but_fits_with_it(moe_facts, capsys
 
 
 def test_real_load_with_n_cpu_moe_generates_coherent_text(moe_facts):
-    """End to end on whatever real GPU (if any) runs this test: the native
-    tensor_buft_overrides pinning this fix's estimate is now based on must
-    still produce a working, coherent model - proves the import refactor
-    (llama.py's _apply_cpu_moe now sources its pattern from
-    model_manager.gguf instead of a local copy) didn't break the real
-    pinning mechanism, not just the preflight arithmetic around it."""
+    """End to end on whatever real GPU (if any) runs this test: the native tensor_buft_overrides pinning this fix's estimate is now based on must still produce a working, coherent model - proves the import refactor (llama.py's _apply_cpu_moe now sources its pattern from model_manager.gguf instead of a loca..."""
     from localm.inference.backends.gguf import GgufBackend
     from localm.inference.backends.llamacpp._loader import load_lib
     try:

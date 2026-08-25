@@ -1,8 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""
-Tests for file-operation tools in localm.plugins.coder.tools:
-  tool_read_file, tool_write_file, tool_edit_file, tool_list_dir, tool_tree
-"""
+"""Tests for file-operation tools in localm.plugins.coder.tools: tool_read_file, tool_write_file, tool_edit_file, tool_list_dir, tool_tree."""
 
 import json
 
@@ -218,12 +215,7 @@ class TestEditFile:
 
 
 class TestEditFileWhitespaceTolerant:
-    """A model routinely reconstructs the `old` snippet with slightly different
-    whitespace (a wrapped line collapsed to one line, a different indent, a
-    trailing space). A byte-exact-only match rejects those legitimate edits and
-    the coder is left unable to edit the file at all. edit_file therefore falls
-    back to a whitespace-tolerant match, but ONLY when it is unique, so it can
-    never silently edit the wrong one of two candidate regions."""
+    """A model routinely reconstructs the `old` snippet with slightly different whitespace (a wrapped line collapsed to one line, a different indent, a trailing space)."""
 
     def test_collapsed_line_wrap_still_matches(self, tmp_path):
         # File has the snippet across two physical lines; the model sends it as

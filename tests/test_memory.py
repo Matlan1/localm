@@ -1,17 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""
-Tests for the localm agent-memory layer (localm/memory).
-
-Covers the DONE oracle for the library: persistence, recency+importance+relevance
-retrieval (incl. the optional embedder-agnostic vector blend), the ADD/UPDATE/
-DELETE/NO_OP consolidation loop, decay/forgetting, privacy gating (writes skipped +
-the model never called), (principal, agent, scope_key) isolation, poisoning
-resistance, and empty/edge/adversarial inputs.
-
-Stores are constructed with ``root=tmp_path`` so no test touches a developer's
-real data dir; privacy mode is driven by the LOCALM_MODE env var (which
-``effective_mode`` honours first), so no config file is needed.
-"""
+"""Tests for the localm agent-memory layer (localm/memory)."""
 
 from __future__ import annotations
 
@@ -80,8 +68,7 @@ def test_corrupt_jsonl_line_skipped(tmp_path, caplog):
 
 
 def test_non_object_json_line_skipped_with_warning(tmp_path, caplog):
-    """A line that is valid JSON but not a record object (e.g. a list) is as
-    unusable as garbage; it must be skipped WITH the warning, not crash load."""
+    """A line that is valid JSON but not a record object (e.g. a list) is as unusable as garbage; it must be skipped WITH the warning, not crash load."""
     s = _store(tmp_path)
     s.add(_rec("keep me"))
     with open(s.path, "a", encoding="utf-8") as fh:
@@ -101,8 +88,7 @@ def test_clean_load_logs_no_skip_warning(tmp_path, caplog):
 
 
 def test_save_stamps_format_version(tmp_path):
-    """LM-DA-002: every saved line carries the JSONL format version so a future
-    breaking schema change has a migration hook instead of a silent skip."""
+    """LM-DA-002: every saved line carries the JSONL format version so a future breaking schema change has a migration hook instead of a silent skip."""
     s = _store(tmp_path)
     s.add(_rec("alpha"))
     s.add(_rec("beta"))
@@ -113,8 +99,7 @@ def test_save_stamps_format_version(tmp_path):
 
 
 def test_unversioned_legacy_file_loads_and_upgrades(tmp_path):
-    """Files written before the per-line "v" tag load unchanged (backward
-    compat), and the next save stamps every line with the current version."""
+    """Files written before the per-line 'v' tag load unchanged (backward compat), and the next save stamps every line with the current version."""
     s = _store(tmp_path)
     s.path.parent.mkdir(parents=True, exist_ok=True)
     s.path.write_text(json.dumps({"id": "abc1", "text": "legacy fact"}) + "\n",
@@ -166,8 +151,7 @@ def test_recall_empty_query_or_store(tmp_path):
 
 
 def test_blend_beats_bare_topk(tmp_path):
-    """A recent + important memory outranks a stale + trivial one that a bare
-    lexical top-k would rank higher (blend != bare BM25)."""
+    """A recent + important memory outranks a stale + trivial one that a bare lexical top-k would rank higher (blend != bare BM25)."""
     s = _store(tmp_path)
     _seed_many(s, TINY_CORPUS)          # ensure relevance signal is active
     # M2: keyword-stuffed junk (high BM25) but stale + trivial + synth.
@@ -186,9 +170,7 @@ def test_blend_beats_bare_topk(tmp_path):
 
 
 def test_tiny_corpus_ranks_by_recency_importance(tmp_path):
-    """Below TINY_CORPUS, relevance is skipped; among records that CLEAR the
-    relevance gate (here both share the query's content words), recency+importance
-    decide the order."""
+    """Below TINY_CORPUS, relevance is skipped; among records that CLEAR the relevance gate (here both share the query's content words), recency+importance decide the order."""
     s = _store(tmp_path)
     old = s.add(_rec("project atlas shipped last spring", importance=0.3,
                      last_used=NOW - 20 * DAY))
@@ -200,8 +182,7 @@ def test_tiny_corpus_ranks_by_recency_importance(tmp_path):
 
 
 def test_all_zero_scores_returns_empty(tmp_path):
-    """A non-empty store of stale, unimportant, off-topic memories yields nothing
-    (raw recency decay lets everything fall below the floor)."""
+    """A non-empty store of stale, unimportant, off-topic memories yields nothing (raw recency decay lets everything fall below the floor)."""
     s = _store(tmp_path)
     for i in range(10):
         s.add(_rec(f"zzz archived note {i}", importance=0.0,
@@ -278,9 +259,7 @@ def test_vector_dim_mismatch_degrades(tmp_path):
 
 
 def _kw_embed(texts):
-    """Keyword stub where 'alpha' and 'beta' share an axis (so a 'beta' record is
-    cosine-identical to an 'alpha' query) and 'delta' is a separate axis. Lets a test
-    separate the SEMANTIC signal from the LEXICAL one."""
+    """Keyword stub where 'alpha' and 'beta' share an axis (so a 'beta' record is cosine-identical to an 'alpha' query) and 'delta' is a separate axis."""
     out = []
     for t in texts:
         lo = t.lower()
@@ -423,9 +402,7 @@ def test_consolidation_idempotent(tmp_path):
 
 
 def test_consolidation_idempotent_with_embedder(tmp_path):
-    """Idempotency holds even when an embed_fn is supplied: matching uses difflib on
-    text (not vectors), and store.replace keeps record ids stable + re-embeds
-    deterministically, so a re-run makes no new records."""
+    """Idempotency holds even when an embed_fn is supplied: matching uses difflib on text (not vectors), and store.replace keeps record ids stable + re-embeds deterministically, so a re-run makes no new records."""
     s = _store(tmp_path)
     c = _extract_stub([{"fact": "User is a data scientist", "confidence": 0.9},
                        {"fact": "User uses pandas daily", "confidence": 0.8}])
@@ -629,8 +606,7 @@ def test_a_possessive_naming_another_person_is_not_self_referential():
 
 
 def test_first_person_questions_are_still_self_referential():
-    """REG-590's contract, which the fix above must not break: the user's own
-    profile facts still have to survive a degraded semantic signal."""
+    """REG-590's contract, which the fix above must not break: the user's own profile facts still have to survive a degraded semantic signal."""
     from localm.memory.store import _is_self_referential as sr
 
     assert sr("what is my name") is True
@@ -667,13 +643,7 @@ def test_a_query_about_the_world_is_still_not_self_referential():
 # paraphrases, which is what cosine is for.
 
 def _cos_embed(query, cosines):
-    """An embed_fn where *query* sits at angle 0 and each record sits at the angle
-    whose cosine to it is the MEASURED value.
-
-    Keyed to ONE query on purpose: cos(a, b) here is the cosine of the angle
-    DIFFERENCE, so a table shared across several queries silently produces
-    similarities nobody chose. Anything unlisted is far away (0.05).
-    """
+    """An embed_fn where *query* sits at angle 0 and each record sits at the angle whose cosine to it is the MEASURED value."""
     import math
 
     def embed(texts):
@@ -719,8 +689,7 @@ def test_a_marginal_cosine_record_does_not_ride_in_behind_a_lexical_hit(tmp_path
 
 
 def test_cosine_still_carries_a_paraphrase_when_nothing_matches_lexically(tmp_path):
-    """The bar must not become 'lexical only': with NO lexical hit at all the
-    semantic gate still answers, which is REG-590's contract."""
+    """The bar must not become 'lexical only': with NO lexical hit at all the semantic gate still answers, which is REG-590's contract."""
     q = "what is my name"
     embed = _cos_embed(q, {"user is called sam": 0.6526})
     st = _store_with(tmp_path, ["User is called Sam"], embed)

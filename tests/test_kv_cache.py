@@ -1,9 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""
-Tests for persistent KV cache prefix reuse in the native llama.cpp wrapper.
-
-The native DLL is never loaded - the api module is mocked throughout.
-"""
+"""Tests for persistent KV cache prefix reuse in the native llama.cpp wrapper."""
 
 import threading
 from unittest.mock import MagicMock, patch
@@ -68,11 +64,7 @@ def _bare_llama() -> LlamaCpp:
 
 @pytest.fixture(autouse=True)
 def _neutralise_fake_pointers():
-    """
-    Null out the fake model/ctx pointers before each object is garbage
-    collected - otherwise __del__ → close() passes them to the real
-    llama_free and crashes the interpreter with an access violation.
-    """
+    """Null out the fake model/ctx pointers before each object is garbage collected - otherwise __del__ → close() passes them to the real llama_free and crashes the interpreter with an access violation."""
     yield
     for llm in _LIVE_FAKES:
         llm._model_ptr = None
@@ -196,11 +188,7 @@ class TestPrefillWithReuse:
         assert llm._cached_tokens == [1, 2, 3]
 
     def test_empty_cache_clears_stale_native_kv_before_reuse(self):
-        """U-1: an image turn (_generate_image never appends its tokens) and a
-        mid-generate decode failure empty _cached_tokens but leave the NATIVE KV
-        populated. Reusing the context must drop that residual KV first (prefix=0,
-        so seq_rm(0, 0, -1)), else the new prompt decodes onto stale KV at shifted
-        positions and the model attends to the previous turn's context."""
+        """U-1: an image turn (_generate_image never appends its tokens) and a mid-generate decode failure empty _cached_tokens but leave the NATIVE KV populated."""
         llm = _bare_llama()
         llm._cached_tokens = []                 # bookkeeping says empty...
         ctx, mock_api = self._patch_api()       # ...native KV still holds a prior turn
@@ -214,8 +202,7 @@ class TestPrefillWithReuse:
         assert llm._cached_tokens == [1, 2, 3]
 
     def test_empty_cache_seq_rm_failure_falls_back_to_clear(self):
-        """Same empty-bookkeeping case, but partial removal is unsupported: fall
-        back to a full clear so the stale native KV is still wiped."""
+        """Same empty-bookkeeping case, but partial removal is unsupported: fall back to a full clear so the stale native KV is still wiped."""
         llm = _bare_llama()
         llm._cached_tokens = []
         ctx, mock_api = self._patch_api(
@@ -284,10 +271,7 @@ class TestFreshContextPath:
         assert llm._cached_tokens == []
 
     def test_long_prompt_prefill_is_chunked(self):
-        """Regression: a fresh-context prefill larger than n_batch must be
-        split into n_batch-sized decode calls. A single oversized batch
-        aborts the process inside the native library (crash reported after
-        long chat histories forced a context rebuild)."""
+        """Regression: a fresh-context prefill larger than n_batch must be split into n_batch-sized decode calls."""
         llm = _bare_llama()
         mock_api = MagicMock()
         cp = MagicMock()
@@ -320,9 +304,7 @@ class TestFreshContextPath:
 # ---------------------------------------------------------------------------
 
 class TestRepeatPenaltySampler:
-    """Regression: repeat_penalty was accepted everywhere but never added to
-    the sampler chain, so models prone to looping repeated marker lines
-    until max_tokens."""
+    """Regression: repeat_penalty was accepted everywhere but never added to the sampler chain, so models prone to looping repeated marker lines until max_tokens."""
 
     def _mock_api(self, has_penalties=True, n_vocab=32000, needs_n_vocab=False):
         mock_api = MagicMock()
@@ -342,8 +324,7 @@ class TestRepeatPenaltySampler:
             64, 1.1, 0.0, 0.0, n_vocab=32000)
 
     def test_n_vocab_is_read_from_the_real_vocab_not_hardcoded(self):
-        """A 0 or wrong n_vocab under-allocates the native sampler's per-token
-        frequency counters, so the value has to come from the model."""
+        """A 0 or wrong n_vocab under-allocates the native sampler's per-token frequency counters, so the value has to come from the model."""
         mock_api = self._mock_api(n_vocab=151936)
         with patch("localm.inference.backends.llamacpp.llama.api", mock_api):
             _build_sampler(vocab=0xABCD, repeat_penalty=1.1)
@@ -359,8 +340,7 @@ class TestRepeatPenaltySampler:
         mock_api.llama_sampler_init_penalties.assert_not_called()
 
     def test_still_added_when_build_does_not_need_n_vocab(self):
-        """The older 4-argument builds ignore n_vocab, so a missing vocab must
-        NOT cost those users their repetition penalty."""
+        """The older 4-argument builds ignore n_vocab, so a missing vocab must NOT cost those users their repetition penalty."""
         mock_api = self._mock_api(n_vocab=0, needs_n_vocab=False)
         with patch("localm.inference.backends.llamacpp.llama.api", mock_api):
             _build_sampler(vocab=0, repeat_penalty=1.1)

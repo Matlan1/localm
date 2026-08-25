@@ -1,10 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Regression tests for the 2026-07-01 inference/coder-behavior backlog cluster.
-
-  AUD-SPLITTHINK     - split_think is linear (no O(n^2) buffer re-slice)
-  REC-CODER-GUI-PATH - the coder system prompt home-anchors the cwd (no username leak)
-  REC-CODER-CWD-LEAK - launcher.json persists a home-anchored coder_dir, not absolute
-"""
+"""Regression tests for the 2026-07-01 inference/coder-behavior backlog cluster."""
 
 import time
 from pathlib import Path

@@ -1,10 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Tests for the ACE-Step music generation module (music_gen/comfy.py).
-
-The generator had zero coverage; these mirror tests/test_video_gen.py and pin
-the workflow-injection contract, the fail-fast-before-unload behaviour, the
-instrumental default, privacy sidecar suppression, and output handling.
-"""
+"""Tests for the ACE-Step music generation module (music_gen/comfy.py)."""
 
 import json
 from unittest.mock import MagicMock, patch
@@ -14,8 +9,7 @@ from localm.music_gen import comfy
 
 
 def _fake_comfy(captured, *, outputs=None):
-    """urlopen stub playing a ComfyUI happy path: /prompt -> prompt_id,
-    /history -> one finished audio output, /view -> fake FLAC bytes."""
+    """urlopen stub playing a ComfyUI happy path: /prompt -> prompt_id, /history -> one finished audio output, /view -> fake FLAC bytes."""
     outputs = outputs if outputs is not None else {
         "8": {"audio": [
             {"filename": "track.flac", "subfolder": "", "type": "output"}
@@ -93,13 +87,7 @@ class TestGenerateMusic:
         assert sidecar["duration_seconds"] == 90.0
 
     def test_instance_token_reaches_localm_unload(self, tmp_path):
-        """The music route's instance_token (its own attach token, for
-        keyless-mode auth on the localm_url unload call) must reach
-        _localm_unload, not be silently dropped somewhere between the
-        plug.py route and comfy.py's call site - the fifth site of the
-        credential-precedence class fixed alongside cli/models.py (#1121)
-        and self_request (#1114): generate_music did not even accept an
-        instance_token parameter before this fix."""
+        """The music route's instance_token (its own attach token, for keyless-mode auth on the localm_url unload call) must reach _localm_unload, not be silently dropped somewhere between the plug.py route and comfy.py's call site - the fifth site of the credential-precedence class fixed alongside cli/models...."""
         captured = {}
         fake = _fake_comfy(captured)
         unload_spy = MagicMock(return_value=None)

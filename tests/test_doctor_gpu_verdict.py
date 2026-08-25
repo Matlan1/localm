@@ -1,23 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""doctor-1: `localm doctor` must derive the GPU verdict from what localm will
-ACTUALLY use for inference (the provisioned llama.cpp backend / a real device
-probe), NOT from nvidia-smi / rocm-smi / torch alone.
-
-The audit (explain-is-not-justify, doctor-1, HIGH) showed the old code printed a
-confident "No GPU driver found (nvidia-smi / rocm-smi) - CPU mode only" whenever
-those probes came back empty. That is a FALSE NEGATIVE for the majority of
-non-CUDA-toolkit GPU setups the project supports:
-  - Intel / other GPU via Vulkan (no smi, torch.cuda False),
-  - Apple Silicon via Metal (torch.cuda ALWAYS False on Mac),
-  - AMD-on-Windows via the bundled self-contained ROCm build (rocm-smi off PATH).
-In all three the GPU is in use while the user is told "CPU mode only".
-
-These tests drive the real click command through ``cli_runner`` and exercise the
-REAL backend-marker reader (a real .localm-backend file on disk); only the
-subprocess device probe and the ABI subprocess are stubbed so the tests are fast
-and deterministic. A separate test drives the REAL ctypes device enumeration
-against a provisioned runtime when one is present (skipped otherwise).
-"""
+"""doctor-1: `localm doctor` must derive the GPU verdict from what localm will ACTUALLY use for inference (the provisioned llama.cpp backend / a real device probe), NOT from nvidia-smi / rocm-smi / torch alone."""
 
 import importlib
 import subprocess
@@ -35,27 +17,7 @@ doctor_mod = importlib.import_module("localm.cli.doctor")
 
 @pytest.fixture(autouse=True)
 def _neutralise_native_lib_loaded():
-    """_loader.native_lib_loaded() (added by #754) is True for the rest of ANY
-    xdist worker in which a real_gguf-gated test has RUN (conftest.py's lazy
-    resource gate - or the test itself - calls load_lib() at that test's setup,
-    and _loaded_lib is deliberately never reset). Once True, doctor.py's own
-    _check_vram_torch() skips the torch attempt ENTIRELY (see its docstring -
-    the same known-doomed DLL-identity conflict), so
-    test_no_runtime_but_torch_sees_gpu_is_not_cpu_only's fake "RTX 4090" torch
-    never gets read at all - confirmed by reproduction: forcing
-    _loader._loaded_lib truthy before this test, standalone, reproduces the
-    exact "RTX 4090" missing from output failure a full-suite run hits when a
-    real_gguf-gated file (e.g. test_kv_bytes_offload.py) loads the native
-    runtime first in the same worker.
-
-    Same pattern as test_vram_preflight.py's own _neutralise_native_lib_loaded
-    (copied rather than shared via conftest.py - see that fixture's docstring
-    for why this stays an opt-in, module-scoped fixture rather than a global
-    one: tests/test_native_dll_conflict_guard.py unit-tests
-    native_lib_loaded() itself, and a global override would silently defeat
-    that test's own mock instead of guarding against the real cross-worker
-    pollution). Patches the FUNCTION, not the underlying _loaded_lib variable
-    (there is no separate cache variable here) - restored after every test."""
+    """_loader.native_lib_loaded() (added by #754) is True for the rest of ANY xdist worker in which a real_gguf-gated test has RUN (conftest.py's lazy resource gate - or the test itself - calls load_lib() at that test's setup, and _loaded_lib is deliberately never reset)."""
     from localm.inference.backends.llamacpp import _loader
     saved = _loader.native_lib_loaded
     _loader.native_lib_loaded = lambda: False
@@ -113,8 +75,7 @@ def _install_torch(monkeypatch, gpu_names):
 
 
 def _healthy_bindir(tmp_path, backend=None):
-    """A binary dir with a plausibly sized llama.dll (so lib_healthy is True) and
-    an optional .localm-backend marker written the real way (via setup_llama)."""
+    """A binary dir with a plausibly sized llama.dll (so lib_healthy is True) and an optional .localm-backend marker written the real way (via setup_llama)."""
     bindir = tmp_path / "bin"
     bindir.mkdir()
     (bindir / "llama.dll").write_bytes(b"\x00" * (2 * 1024 * 1024))  # 2 MB
@@ -125,8 +86,7 @@ def _healthy_bindir(tmp_path, backend=None):
 
 
 def _stub_probe(monkeypatch, result):
-    """Control the subprocess device probe (real ggml load needs a real GPU
-    runtime; the verdict logic under test is what consumes its result)."""
+    """Control the subprocess device probe (real ggml load needs a real GPU runtime; the verdict logic under test is what consumes its result)."""
     monkeypatch.setattr(doctor_mod, "_probe_gpu_devices", lambda: result)
 
 
@@ -153,8 +113,7 @@ def _blind_probes(monkeypatch):
 def test_gpu_backend_with_device_probe_is_not_cpu_only(
     cli_runner, tmp_path, monkeypatch, backend, gpu_dev
 ):
-    """smi + torch both blind, but the loaded runtime registers a GPU device ->
-    doctor must report the GPU and NEVER say 'CPU mode only' (the doctor-1 bug)."""
+    """smi + torch both blind, but the loaded runtime registers a GPU device -> doctor must report the GPU and NEVER say 'CPU mode only' (the doctor-1 bug)."""
     bindir = _healthy_bindir(tmp_path, backend=backend)
     monkeypatch.setattr(cli, "find_binary_dir", lambda: bindir)
     _blind_probes(monkeypatch)
@@ -172,8 +131,7 @@ def test_gpu_backend_with_device_probe_is_not_cpu_only(
 
 
 def test_only_cpu_device_is_reported_cpu_only(cli_runner, tmp_path, monkeypatch):
-    """A genuine cpu build: the runtime loads but registers ONLY a CPU device ->
-    'CPU mode only' is the correct, honest verdict here."""
+    """A genuine cpu build: the runtime loads but registers ONLY a CPU device -> 'CPU mode only' is the correct, honest verdict here."""
     bindir = _healthy_bindir(tmp_path, backend="cpu")
     monkeypatch.setattr(cli, "find_binary_dir", lambda: bindir)
     _blind_probes(monkeypatch)
@@ -191,9 +149,7 @@ def test_only_cpu_device_is_reported_cpu_only(cli_runner, tmp_path, monkeypatch)
 def test_gpu_marker_used_when_probe_has_no_device_registry(
     cli_runner, tmp_path, monkeypatch
 ):
-    """Older build: runtime loads (computes) but exposes no ggml_backend_dev_*
-    registry (empty devices). Verdict falls back to the backend NAME, which is a
-    GPU backend -> GPU-capable, not 'CPU mode only'."""
+    """Older build: runtime loads (computes) but exposes no ggml_backend_dev_* registry (empty devices)."""
     bindir = _healthy_bindir(tmp_path, backend="vulkan")
     monkeypatch.setattr(cli, "find_binary_dir", lambda: bindir)
     _blind_probes(monkeypatch)
@@ -208,8 +164,7 @@ def test_gpu_marker_used_when_probe_has_no_device_registry(
 
 
 def test_gpu_marker_used_when_probe_unavailable(cli_runner, tmp_path, monkeypatch):
-    """The probe could not run at all (None). A GPU-backend marker is still a far
-    better signal than blind smi/torch -> GPU-capable, not 'CPU mode only'."""
+    """The probe could not run at all (None)."""
     bindir = _healthy_bindir(tmp_path, backend="cuda")
     monkeypatch.setattr(cli, "find_binary_dir", lambda: bindir)
     _blind_probes(monkeypatch)
@@ -234,9 +189,7 @@ def test_cpu_marker_fallback_is_cpu_only(cli_runner, tmp_path, monkeypatch):
 
 
 def test_broken_gpu_runtime_not_claimed_as_working(cli_runner, tmp_path, monkeypatch):
-    """A GPU marker but the probe says the runtime did NOT load (loaded False):
-    doctor must NOT claim a working GPU from the marker alone - the marker is only
-    trusted when the runtime is not known-broken."""
+    """A GPU marker but the probe says the runtime did NOT load (loaded False): doctor must NOT claim a working GPU from the marker alone - the marker is only trusted when the runtime is not known-broken."""
     bindir = _healthy_bindir(tmp_path, backend="vulkan")
     monkeypatch.setattr(cli, "find_binary_dir", lambda: bindir)
     _blind_probes(monkeypatch)
@@ -250,10 +203,7 @@ def test_broken_gpu_runtime_not_claimed_as_working(cli_runner, tmp_path, monkeyp
 def test_corrupt_lib_with_gpu_marker_is_not_claimed_as_working(
     cli_runner, tmp_path, monkeypatch
 ):
-    """A truncated/corrupt llama.dll (lib_healthy False) next to a GPU marker: the
-    device probe is deliberately skipped, so the marker must NOT be trusted as a
-    working GPU - doctor just flagged the runtime as unloadable (AGENTS.md rule 5:
-    never report success for a known-broken state)."""
+    """A truncated/corrupt llama.dll (lib_healthy False) next to a GPU marker: the device probe is deliberately skipped, so the marker must NOT be trusted as a working GPU - doctor just flagged the runtime as unloadable (AGENTS.md rule 5: never report success for a known-broken state)."""
     bindir = tmp_path / "bin"
     bindir.mkdir()
     (bindir / "llama.dll").write_bytes(b"\x00")  # 1 byte -> corrupt/truncated
@@ -272,9 +222,7 @@ def test_corrupt_lib_with_gpu_marker_is_not_claimed_as_working(
 
 
 def test_accel_only_device_is_not_labelled_gpu(cli_runner, tmp_path, monkeypatch):
-    """A runtime that registers only a ggml ACCEL device (e.g. a custom BLAS/RPC
-    build) plus CPU is NOT a GPU: it must not be reported as 'GPU: ... used for
-    inference' (ACCEL is a CPU-side/remote accelerator, not a GPU)."""
+    """A runtime that registers only a ggml ACCEL device (e.g. a custom BLAS/RPC build) plus CPU is NOT a GPU: it must not be reported as 'GPU: ... used for inference' (ACCEL is a CPU-side/remote accelerator, not a GPU)."""
     bindir = _healthy_bindir(tmp_path, backend="custom")
     monkeypatch.setattr(cli, "find_binary_dir", lambda: bindir)
     _blind_probes(monkeypatch)
@@ -301,13 +249,7 @@ _PROBE_SENTINEL = "VKPROBE-SENTINEL-9271"
 
 
 def test_failed_probe_reports_the_reason_not_no_gpu(cli_runner, tmp_path, monkeypatch):
-    """The probe ran and RAISED (the shape of a driver too old for the provisioned
-    Vulkan build). That is "could not determine", not "no hardware".
-
-    Before H1 the captured error was collected by _GPU_PROBE_CODE and read by
-    nobody, so this fell through to step (3) and rendered as "No GPU detected
-    (nvidia-smi / rocm-smi / torch) - CPU mode only" plus advice to run
-    'localm setup-llama' to PROVISION a backend that is already provisioned."""
+    """The probe ran and RAISED (the shape of a driver too old for the provisioned Vulkan build)."""
     bindir = _healthy_bindir(tmp_path, backend="vulkan")
     monkeypatch.setattr(cli, "find_binary_dir", lambda: bindir)
     _blind_probes(monkeypatch)
@@ -337,10 +279,7 @@ def test_failed_probe_reports_the_reason_not_no_gpu(cli_runner, tmp_path, monkey
 def test_failed_probe_is_reported_even_when_torch_sees_a_gpu(
     cli_runner, tmp_path, monkeypatch
 ):
-    """A card torch CAN see plus a runtime that will not load is the case most
-    worth naming: the user has a GPU and localm cannot use it. Step (3) returns
-    early on smi_or_torch_gpu, so a probe-failure verdict placed after it would
-    be swallowed in exactly this scenario - hence the branch sits ABOVE it."""
+    """A card torch CAN see plus a runtime that will not load is the case most worth naming: the user has a GPU and localm cannot use it."""
     bindir = _healthy_bindir(tmp_path, backend="vulkan")
     monkeypatch.setattr(cli, "find_binary_dir", lambda: bindir)
     _no_smi(monkeypatch)
@@ -356,9 +295,7 @@ def test_failed_probe_is_reported_even_when_torch_sees_a_gpu(
 
 
 def test_probe_error_is_truncated_to_one_line(cli_runner, tmp_path, monkeypatch):
-    """A native loader error repr can carry a whole traceback. The verdict line
-    must stay readable, so only the first line is printed - a wrapped verdict is
-    a hidden one (the same reason the primary lines are kept short)."""
+    """A native loader error repr can carry a whole traceback."""
     bindir = _healthy_bindir(tmp_path, backend="vulkan")
     monkeypatch.setattr(cli, "find_binary_dir", lambda: bindir)
     _blind_probes(monkeypatch)
@@ -375,10 +312,7 @@ def test_probe_error_is_truncated_to_one_line(cli_runner, tmp_path, monkeypatch)
 
 
 def test_probe_that_cleanly_reports_no_gpu_is_unchanged(cli_runner, tmp_path, monkeypatch):
-    """The guard on the branch above: a probe that ran, did NOT raise, and simply
-    reported the runtime does not compute is a MEASURED negative, not an
-    indeterminate one. It must keep the honest CPU-only verdict rather than being
-    swept into "could not be determined" by an over-broad condition."""
+    """The guard on the branch above: a probe that ran, did NOT raise, and simply reported the runtime does not compute is a MEASURED negative, not an indeterminate one."""
     bindir = _healthy_bindir(tmp_path, backend="vulkan")
     monkeypatch.setattr(cli, "find_binary_dir", lambda: bindir)
     _blind_probes(monkeypatch)
@@ -395,9 +329,7 @@ def test_probe_that_cleanly_reports_no_gpu_is_unchanged(cli_runner, tmp_path, mo
 # --------------------------------------------------------------------------- #
 
 def test_no_runtime_no_gpu_is_hedged_cpu_only(cli_runner, monkeypatch):
-    """No runtime provisioned and smi/torch see nothing: the legacy 'CPU mode
-    only' still appears, but it is HEDGED (points at Vulkan/Metal + setup-llama)
-    rather than stated as a bare fact."""
+    """No runtime provisioned and smi/torch see nothing: the legacy 'CPU mode only' still appears, but it is HEDGED (points at Vulkan/Metal + setup-llama) rather than stated as a bare fact."""
     monkeypatch.setattr(cli, "find_binary_dir", lambda: None)
     _blind_probes(monkeypatch)
 
@@ -409,8 +341,7 @@ def test_no_runtime_no_gpu_is_hedged_cpu_only(cli_runner, monkeypatch):
 
 
 def test_no_runtime_but_torch_sees_gpu_is_not_cpu_only(cli_runner, monkeypatch):
-    """No runtime marker, but torch sees a CUDA/ROCm GPU -> positive proof, no
-    'CPU mode only' contradiction (regression guard for the pre-existing BUG-2)."""
+    """No runtime marker, but torch sees a CUDA/ROCm GPU -> positive proof, no 'CPU mode only' contradiction (regression guard for the pre-existing BUG-2)."""
     monkeypatch.setattr(cli, "find_binary_dir", lambda: None)
     _no_smi(monkeypatch)
     _install_torch(monkeypatch, ["RTX 4090"])
@@ -425,13 +356,7 @@ def test_no_runtime_but_torch_sees_gpu_is_not_cpu_only(cli_runner, monkeypatch):
 # --------------------------------------------------------------------------- #
 
 def test_compute_devices_reports_real_devices_when_provisioned():
-    """Exercise the REAL ggml device enumeration against a provisioned runtime.
-
-    hard-won-rules: a green suite that only ever runs mocks proves nothing. When
-    a runtime is actually provisioned and computes on this machine, compute_devices
-    must return a non-empty list that always includes a CPU device, and every
-    device type is a valid ggml enum value. Skipped where no runtime is present
-    (e.g. CI without setup-llama)."""
+    """Exercise the REAL ggml device enumeration against a provisioned runtime."""
     from localm.inference.backends.llamacpp import _loader
 
     try:
@@ -468,25 +393,7 @@ def test_compute_devices_reports_real_devices_when_provisioned():
 
 
 def test_only_stable_ggml_device_type_constants_are_declared():
-    """CPU and GPU are the only ggml_backend_dev_type members safe to hardcode.
-
-    MEASURED 2026-08-11 from ggml/include/ggml-backend.h at several tags:
-
-        b6000                       CPU 0, GPU 1, ACCEL 2
-        b8100 .. b9870 .. master    CPU 0, GPU 1, IGPU 2, ACCEL 3, META 4
-
-    IGPU was inserted AHEAD of ACCEL. setup_llama.py resolves the llama.cpp tag
-    dynamically and a box may hold an older runtime, so ACCEL has no single
-    correct value here - it was declared as 2, which on a current runtime means
-    INTEGRATED GPU. This guards the removal: re-adding a constant for any member
-    past GPU reintroduces a name that silently means something else on half the
-    runtimes we can ship, and it is inert until the day someone compares
-    against it.
-
-    Anything needing another member must read the header for the runtime
-    actually provisioned. discover.implicit_split_capacity ALLOWLISTS GPU for
-    exactly this reason rather than excluding iGPUs/accelerators by value.
-    """
+    """CPU and GPU are the only ggml_backend_dev_type members safe to hardcode."""
     from localm.inference.backends.llamacpp import _loader
 
     assert _loader.GGML_DEV_TYPE_CPU == 0

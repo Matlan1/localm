@@ -1,37 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""
-MCP server over stdio - exposes localm to any MCP client.
-
-Protocol: JSON-RPC 2.0, newline-delimited JSON on stdin/stdout (the MCP
-stdio transport - the mirror image of plugins/coder/mcp.py, which is the
-client side).
-
-CRITICAL INVARIANT: stdout carries ONLY protocol messages. Everything in
-this process that would normally print (model loading banners, VRAM info,
-rich progress) must go to stderr - see _redirect_consoles_to_stderr().
-
-Tools exposed (always, unless noted):
-    chat             - generate a response with a local model
-    list_models      - registered model names with type and size (read-only)
-    system_stats     - live CPU/RAM/VRAM/GPU load, for judging model/quant fit (read-only)
-    search_models    - search HuggingFace for GGUF repos (read-only)
-    list_model_files - a repo's GGUF files with quant/size/VRAM-fit (read-only)
-    pull_model       - download + register + (optionally) load a GGUF
-    setup_embeddings - install the on-device embedding model
-    remove_model     - remove a model, deleting its file if under the models dir (destructive)
-    run_doctor       - run localm doctor and return the report (read-only)
-    list_plugins     - engine plugins and their active state (read-only)
-    install_plugin / enable_plugin / disable_plugin - manage engine plugins
-    uninstall_plugin - uninstall a plugin (and its data with delete_data) (destructive)
-Conditional:
-    embed            - embedding vectors (only when the backend can embed)
-    run_coder_task   - delegate a coding task to the coder agent
-                       (coder plugin active, unless --no-coder)
-    generate_image   - local FLUX via ComfyUI (unless --no-images)
-
-read-only tools carry readOnlyHint; the two destructive tools carry
-destructiveHint, so an MCP client can confirm before a destructive call.
-"""
+"""MCP server over stdio - exposes localm to any MCP client."""
 
 from __future__ import annotations
 
@@ -58,26 +26,7 @@ def _log(msg: str) -> None:
 
 
 def _child_identity_env() -> dict:
-    """Env for a ``-m localm`` helper process so it is THE SAME localm as this
-    server: same data home, same code.
-
-    Both are otherwise re-resolved from ambient state at every process
-    boundary: the data home falls back to a contained default derived from the
-    running code's location when nothing is configured, and ``-m`` puts the
-    child's cwd first on ``sys.path``, where a ``localm/`` directory in that
-    cwd (any other checkout) silently swaps which CODE runs. run_coder_task
-    deliberately runs its child in the TASK's directory (see its cwd comment),
-    so a server whose own home came from ITS location - exactly the documented
-    "run ``localm mcp`` from a source checkout" setup - handed the coder chain
-    a DIFFERENT, empty home: a model registered moments earlier via pull_model
-    did not exist there, and the coder's auto-started server died with "Model
-    not found" (exit 1) into a console window an MCP client never sees
-    (reproduced live 2026-07-21).
-
-    LOCALM_HOME pins the data home; PYTHONSAFEPATH stops ``-m`` from putting
-    the child's cwd on ``sys.path``; the PYTHONPATH entry keeps this server's
-    own package importable regardless of cwd (PYTHONSAFEPATH only drops the
-    implicit cwd entry, explicit PYTHONPATH entries still apply)."""
+    """Env for a ``-m localm`` helper process so it is THE SAME localm as this server: same data home, same code."""
     import localm as _pkg
     from localm.config import home_dir
     env = dict(os.environ)
@@ -90,10 +39,7 @@ def _child_identity_env() -> dict:
 
 
 def _redirect_consoles_to_stderr() -> None:
-    """
-    Re-point every rich Console used during model loading at stderr.
-    A single stray print to stdout corrupts the JSON-RPC stream.
-    """
+    """Re-point every rich Console used during model loading at stderr."""
     from rich.console import Console
     err = Console(stderr=True)
     import localm.inference.engine as _engine_mod
@@ -123,22 +69,7 @@ def _redirect_consoles_to_stderr() -> None:
 # ---------------------------------------------------------------------------
 
 class EngineCache:
-    """
-    Lazy, per-model engine cache. Multi-resident, on the shared policy.
-
-    Models stay loaded ALONGSIDE each other whenever free VRAM provably allows
-    it, matching the HTTP server rather than the single-model cache this used to
-    be. Both servers ask the same module (``inference.residency``) the same two
-    questions - may this load with zero eviction, and if not who is the safe
-    victim - so the two cannot drift apart again.
-
-    The conservative half is unchanged and load-bearing: stacking needs a fresh,
-    measurable reading that clears the requirement plus headroom with no split
-    shortfall. On a box that cannot measure VRAM, on an inconclusive probe, or
-    for a model whose footprint cannot be read, this falls straight back to the
-    old single-resident behaviour (evict, wait for the free to land, then load).
-    A wrong PERMIT here is a native OOM or a driver hang, not a tidy error.
-    """
+    """Lazy, per-model engine cache."""
 
     def __init__(self, default_model: Optional[str] = None,
                  engine_factory: Optional[Callable] = None) -> None:
@@ -169,15 +100,7 @@ class EngineCache:
         return list(self._lru)
 
     def _operator_supplied(self, model_name) -> bool:
-        """True only for the model the OPERATOR named when starting this server.
-
-        ``default_model`` comes from the ``--model`` flag / the LOCALM_MODEL
-        environment variable, i.e. from the person who launched the process, so a
-        filesystem path is legitimate there and gating it would break
-        ``localm mcp --model <path>``. Every OTHER name arrives in a tool call
-        from the MCP client, which is normally an LLM that can be steered by
-        content it was asked to summarise - so a name from that source is treated
-        as hostile input and must be a registered one."""
+        """True only for the model the OPERATOR named when starting this server."""
         return bool(model_name) and model_name == self.default_model
 
     def _build_engine(self, model_name: str):
@@ -258,13 +181,7 @@ class EngineCache:
         self._lru.append(name)
 
     def _model_required_bytes(self, name: str) -> Optional[int]:
-        """
-        VRAM ``name`` is expected to occupy once loaded, or None when that
-        cannot be determined (unregistered model, unreadable path).
-
-        None is not "zero": it means the fit cannot be PROVEN, which sends the
-        caller down the single-resident path. Never let an unknown read as room.
-        """
+        """VRAM ``name`` is expected to occupy once loaded, or None when that cannot be determined (unregistered model, unreadable path)."""
         from localm.inference.residency import (
             model_footprint_bytes, required_vram_bytes)
         try:
@@ -347,13 +264,7 @@ class EngineCache:
             return True
 
     def _make_room_for(self, name: str) -> None:
-        """
-        Evict resident peers until ``name`` fits, or until none can be freed.
-
-        Returns as soon as the model may load alongside what is already there,
-        which on a measurable box with headroom is immediately and with zero
-        eviction - the whole point of the parity fix.
-        """
+        """Evict resident peers until ``name`` fits, or until none can be freed."""
         from localm.config import load_config
         from localm.inference import residency
         cfg = load_config()
@@ -459,7 +370,7 @@ class EngineCache:
                  f"{loading} anyway")
 
     def unload_all(self) -> None:
-        """Free every resident engine (shutdown). N resident means N to free."""
+        """Free every resident engine (shutdown)."""
         for name in list(self._lru):
             engine = self._engines.pop(name, None)
             self._lru.remove(name)
@@ -481,17 +392,13 @@ def _text_result(text: str, is_error: bool = False) -> dict:
 
 @contextlib.contextmanager
 def _quiet_stdout():
-    """MCP-1: redirect stdout to stderr for the duration of the block, so a
-    downstream call's stray prints never corrupt the JSON-RPC frame stream on
-    stdout. Eight tool handlers below repeated this identical guard."""
+    """MCP-1: redirect stdout to stderr for the duration of the block, so a downstream call's stray prints never corrupt the JSON-RPC frame stream on stdout."""
     with contextlib.redirect_stdout(sys.stderr):
         yield
 
 
 def _run_mgr_action(mgr, fn, *, plugin: str):
-    """MCP-2: call fn(mgr) inside the stdout-quieting guard, mapping
-    KeyError/ValueError the same way install/enable/disable/uninstall_plugin
-    all did. Returns the mapped error _text_result, or None on success."""
+    """MCP-2: call fn(mgr) inside the stdout-quieting guard, mapping KeyError/ValueError the same way install/enable/disable/uninstall_plugin all did."""
     with _quiet_stdout():
         try:
             fn(mgr)
@@ -503,10 +410,7 @@ def _run_mgr_action(mgr, fn, *, plugin: str):
 
 
 def _backend_can_embed(engines: "EngineCache") -> bool:
-    """True unless the active/default backend explicitly cannot embed.
-
-    Avoids loading the model at startup by checking the registry for GGUF suffix
-    if the engine object is not yet instantiated/cached."""
+    """True unless the active/default backend explicitly cannot embed."""
     if getattr(engines, "_factory", None) != getattr(engines, "_build_engine", None):
         try:
             # BUG-11: a custom factory can be a real engine builder (tests
@@ -550,10 +454,7 @@ def _backend_can_embed(engines: "EngineCache") -> bool:
 
 
 def _coder_available() -> bool:
-    """True when the coder plugin is installed on disk AND enabled - matches the
-    same check `localm coder` itself does before accepting a task (see
-    plugins/coder/cli/_main.py), so the tool is only advertised when a call
-    would actually work."""
+    """True when the coder plugin is installed on disk AND enabled - matches the same check `localm coder` itself does before accepting a task (see plugins/coder/cli/_main.py), so the tool is only advertised when a call would actually work."""
     try:
         from localm.plugins.engine import PluginManager
         return PluginManager(None).is_active("coder")
@@ -595,19 +496,7 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
         return _text_result(text)
 
     def server_activity(args: dict) -> dict:
-        """What any running localm server on this machine is doing.
-
-        This MCP server is a SEPARATE PROCESS from the HTTP/GUI server and
-        shares no memory with it, so the only way to answer is to find the
-        running instances on disk and ask each one over HTTP. That is why this
-        tool exists at all: a pull started from the browser is invisible here
-        otherwise, and an agent that cannot see it will happily start a second.
-
-        The states are kept apart deliberately. "No server is running" is not
-        "nothing is running" - there is nothing to ask. "Could not reach it" is
-        not "it is idle". Only a server that actually answered can report an
-        empty list, and only that case says nothing is running.
-        """
+        """What any running localm server on this machine is doing."""
         from localm import instances
         from localm.config import home_dir
         from localm.selfclient import read_activity
@@ -883,25 +772,7 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
         home = home_dir().resolve()
 
         def _confine(raw: str, label: str):
-            """Keep an MCP OUTPUT path inside the localm data dir - this tool is
-            driven by an LLM client, so an arbitrary output_path could overwrite
-            anything on disk (SEC-7).
-
-            WRITE targets only. ``input_image`` deliberately does NOT use this:
-            confining a READ to the data dir is far too wide, because the data
-            dir is the credential store (auth.key is the plaintext owner key,
-            plus auth.json, sessions.json, rag/, coder/). See below.
-
-            Delegates to ``pathsafe.confined_absolute_or_under`` (the same
-            primitive coder/tools/base.py's ``_confine`` now uses - this
-            closure and that function were two independent copies of the
-            same shape) rather than a hand-rolled resolve()+is_relative_to().
-            The UNC/device guard this closure already carried is now inside
-            the shared primitive; it additionally closes an NTFS Alternate
-            Data Stream / short-name-alias gap this closure never had.
-            Every rejection reason is folded into the SAME message (never
-            echoing the client-supplied string back - matching this
-            closure's existing convention for the plain out-of-home case)."""
+            """Keep an MCP OUTPUT path inside the localm data dir - this tool is driven by an LLM client, so an arbitrary output_path could overwrite anything on disk (SEC-7)."""
             expanded = str(Path(raw).expanduser())
             try:
                 return pathsafe.confined_absolute_or_under(home, expanded)
@@ -1489,8 +1360,7 @@ class MCPStdioServer:
         self.tools = tools
 
     def handle(self, msg: dict) -> Optional[dict]:
-        """Process one message. Returns the response dict, or None for
-        notifications (which get no reply)."""
+        """Process one message."""
         if not isinstance(msg, dict):
             # A JSON-RPC batch array, a bare scalar, or null all parse fine but
             # are not a request object - reply Invalid Request instead of

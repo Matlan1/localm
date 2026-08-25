@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""SRV-3: the bug reporter must fire for the crashes the excepthooks miss - an
-uncaught asyncio task exception, and a NATIVE/hard process death (caught on the
-next start via a crash marker)."""
+"""SRV-3: the bug reporter must fire for the crashes the excepthooks miss - an uncaught asyncio task exception, and a NATIVE/hard process death (caught on the next start via a crash marker)."""
 
 import asyncio
 import json
@@ -76,9 +74,7 @@ def test_faulthandler_enable_exception_is_logged_not_silent(tmp_path, monkeypatc
 
 
 def test_faulthandler_silently_not_enabled_is_also_logged(tmp_path, monkeypatch, caplog):
-    """enable() can return WITHOUT raising and still not actually be armed on
-    some platforms/file shapes - "no exception" is not proof of success.
-    is_enabled() is the one call that tells the truth."""
+    """enable() can return WITHOUT raising and still not actually be armed on some platforms/file shapes - 'no exception' is not proof of success. is_enabled() is the one call that tells the truth."""
     import faulthandler
 
     monkeypatch.setattr(faulthandler, "enable", lambda *a, **k: None)
@@ -93,9 +89,7 @@ def test_faulthandler_silently_not_enabled_is_also_logged(tmp_path, monkeypatch,
 
 
 def test_faulthandler_successful_attach_logs_no_warning(tmp_path, caplog):
-    """The negative case: a genuinely successful attach on this real box (no
-    mocking of faulthandler itself) must NOT spam a warning - only a real
-    attach failure should."""
+    """The negative case: a genuinely successful attach on this real box (no mocking of faulthandler itself) must NOT spam a warning - only a real attach failure should."""
     home = str(tmp_path)
     with caplog.at_level(logging.WARNING, logger="localm"):
         assert bugreport.arm_crash_guard(context={"port": 1}, home=home) is True
@@ -124,12 +118,7 @@ def _write_marker(run_dir, instance_id, pid):
 
 def test_check_skips_a_marker_whose_recorded_pid_is_genuinely_still_alive(
         tmp_path, monkeypatch):
-    """Direct reproduction of the reported bug with NO liveness mock at all:
-    arm_crash_guard() records THIS test process's own real, still-running
-    pid. The OLD code had no liveness check, so ANY marker present on the next
-    start was reported as a crash - exactly what let a second instance
-    misreport a first, healthy instance. The fix must skip a marker whose
-    pid is confirmed alive."""
+    """Direct reproduction of the reported bug with NO liveness mock at all: arm_crash_guard() records THIS test process's own real, still-running pid."""
     calls = []
     monkeypatch.setattr(bugreport, "report_failure",
                         lambda **k: calls.append(k) or str(tmp_path / "r.md"))
@@ -241,8 +230,7 @@ def test_report_one_crash_marker_deletes_the_trace_file_too(tmp_path, monkeypatc
 
 
 def test_report_one_crash_marker_survives_a_missing_trace_file(tmp_path, monkeypatch):
-    """No trace at all (window-close/OS-kill leave none) must not be treated
-    as a cleanup failure - the report still files normally."""
+    """No trace at all (window-close/OS-kill leave none) must not be treated as a cleanup failure - the report still files normally."""
     monkeypatch.setattr(instances, "pid_alive", lambda pid: False)
     home = str(tmp_path)
     run = tmp_path / "run"
@@ -261,9 +249,7 @@ def test_report_one_crash_marker_survives_a_missing_trace_file(tmp_path, monkeyp
 
 
 def test_a_live_siblings_trace_file_is_left_untouched(tmp_path, monkeypatch):
-    """A marker whose pid is genuinely still alive is skipped entirely (an
-    existing invariant) - its trace file, still in active use by that live
-    process's faulthandler, must not be touched either."""
+    """A marker whose pid is genuinely still alive is skipped entirely (an existing invariant) - its trace file, still in active use by that live process's faulthandler, must not be touched either."""
     home = str(tmp_path)
     run = tmp_path / "run"
     _write_marker(run, "inst-z", 6464)

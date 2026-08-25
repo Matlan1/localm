@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Goal mode: the coder iterates on a task until a verification command exits 0,
-with the command's exit code (not the model) as the un-gameable judge.
-"""
+"""Goal mode: the coder iterates on a task until a verification command exits 0, with the command's exit code (not the model) as the un-gameable judge."""
 
 from __future__ import annotations
 
@@ -76,13 +74,7 @@ def test_goal_loop_gives_up_honestly_at_the_cap(tmp_path, monkeypatch):
 
 def test_goal_loop_stops_at_once_when_the_check_could_not_run(tmp_path,
                                                               monkeypatch):
-    """X4 in the --until path: the command never STARTED, so no fix turn can
-    reach it. Iterating burns the whole budget asking the model to fix a
-    condition it cannot touch.
-
-    The launch fact rides on the outcome, so build a real VerifyOutcome rather
-    than a bare tuple - a bare tuple means "it ran", which is the point of the
-    companion test below."""
+    """X4 in the --until path: the command never STARTED, so no fix turn can reach it."""
     from localm.plugins.coder.verify import VerifyOutcome
     calls = []
 
@@ -101,12 +93,7 @@ def test_goal_loop_stops_at_once_when_the_check_could_not_run(tmp_path,
 
 def test_goal_loop_still_retries_a_command_not_found_that_ran(tmp_path,
                                                               monkeypatch):
-    """FIRES-CONTROL, and the correction that matters. Exit 127 from a check
-    that DID start (a shell whose script is missing, npm whose test binary is
-    missing) is fixable by the model - it has a shell and can create the script,
-    chmod +x, or install the dependency. Short-circuiting on the exit code would
-    throw the entire iteration budget away on exactly the failures goal mode
-    exists to fix."""
+    """FIRES-CONTROL, and the correction that matters."""
     monkeypatch.setattr(cli, "_run_verify",
                         lambda cmd, wd: (127, "sh: ./check.sh: not found"))
     agent = _FakeAgent()

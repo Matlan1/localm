@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""
-Tests for localm.plugins.coder.project_config
-"""
+"""Tests for localm.plugins.coder.project_config."""
 
 import pytest
 from pathlib import Path
@@ -91,17 +89,7 @@ class TestLoadProjectConfig:
         assert cfg["temperature"] == pytest.approx(0.7)
 
     def test_raises_on_invalid_toml_rather_than_reading_as_absent(self, tmp_path):
-        """A file that EXISTS but does not parse must not answer ``{}``.
-
-        This assertion used to demand ``{}``, which made the collapse a
-        specification: ``{}`` is byte-identical to "no project config here", and
-        the two keys it silently drops are SAFETY settings, not preferences.
-        ``always_confirm`` (the user's "prompt me before a shell command even
-        under --yes") empties at cli/_main.py:654-657, and ``mode = "privacy"``
-        is dropped at cli/_main.py:658-660 and audit.py:96-102, so a session the
-        user marked private falls through to the global coder_mode and a
-        transcript is written. A TOML typo is an extremely reachable input.
-        """
+        """A file that EXISTS but does not parse must not answer ``{}``."""
         cfg_dir = tmp_path / ".localcoder"
         cfg_dir.mkdir()
         (cfg_dir / "config.toml").write_text("this is NOT [valid toml [\n")
@@ -111,9 +99,7 @@ class TestLoadProjectConfig:
         assert "config.toml" in str(ei.value)
 
     def test_absent_file_is_still_an_empty_config(self, tmp_path):
-        """The control. "No project config" must keep meaning ``{}`` and must
-        not raise, or the refusal above would be unfalsifiable: a loader that
-        raised on everything would satisfy the test above."""
+        """The control. 'No project config' must keep meaning ``{}`` and must not raise, or the refusal above would be unfalsifiable: a loader that raised on everything would satisfy the test above."""
         assert load_project_config(tmp_path) == {}
 
     def test_finds_config_in_parent_dir(self, tmp_path):
@@ -125,14 +111,7 @@ class TestLoadProjectConfig:
 
 
 class TestCliRefusesAnUnreadableProjectConfig:
-    """The coder CLI must REFUSE to start rather than run with the project
-    file's settings silently dropped.
-
-    `always_confirm` is what keeps shell tools prompting under --yes, and
-    `mode = "privacy"` is what keeps a transcript off disk. Starting anyway runs
-    the session WITHOUT protections the user believes they configured, so a TOML
-    typo silently disarms them. Refusing costs one edit and is recoverable.
-    """
+    """The coder CLI must REFUSE to start rather than run with the project file's settings silently dropped."""
 
     def _corrupt(self, tmp_path):
         cfg_dir = tmp_path / ".localcoder"
@@ -171,8 +150,7 @@ class TestCliRefusesAnUnreadableProjectConfig:
 
     def test_cli_does_not_refuse_without_a_project_config(self, tmp_path,
                                                           monkeypatch):
-        """The control: an absent project config must NOT trip the refusal, or
-        the test above would pass on a CLI that refused to start at all."""
+        """The control: an absent project config must NOT trip the refusal, or the test above would pass on a CLI that refused to start at all."""
         from click.testing import CliRunner
 
         import localm.plugins.coder.cli as ccli

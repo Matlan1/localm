@@ -1,10 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""VIS-1(2): a GGUF model keeps its vision projector (mmproj) across a GUI/registry
-model switch. switch_model used to build the Engine with no mmproj, so switching
-models silently lost image support. These cover the discovery the server now uses:
-an explicit registry 'mmproj', else a sibling projector auto-detected next to the
-GGUF. (The end-to-end mtmd vision path itself is verified separately, #200.)
-"""
+"""VIS-1(2): a GGUF model keeps its vision projector (mmproj) across a GUI/registry model switch. switch_model used to build the Engine with no mmproj, so switching models silently lost image support."""
 
 import localm.model_manager as mm
 from localm.model_manager import find_sibling_mmproj, get_model_mmproj

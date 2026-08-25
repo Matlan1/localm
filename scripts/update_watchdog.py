@@ -1,33 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Post-restart health watchdog: verify a just-applied localm update actually came
-back up, and roll it back automatically if it did not (LM-DA-011).
-
-``localm/updater.py``'s ``spawn_health_watchdog()`` launches this DETACHED right
-before the server re-execs into a freshly swapped build (``_do_restart`` in
-``localm/inference/http_server.py``). By the time it runs, the file swap has
-ALREADY happened, so this script executes from the NEW (possibly broken) build's
-copy on disk - exactly the same constraint ``scripts/rollback_update.py`` was built
-to survive, and this script follows the identical philosophy: stdlib-only, ZERO
-``localm`` package imports, so a broken new build cannot break the thing meant to
-detect it.
-
-It polls the restarted instance's own unauthenticated ``GET /whoami`` (never
-``/health``, which 503s whenever no model is loaded yet and would false-positive a
-perfectly good build into a rollback) until it answers with the expected VERSION,
-or a bounded timeout elapses. On timeout it loads ``scripts/rollback_update.py`` -
-a sibling file, by file path - and calls its ``main(["--yes"], install_root=...)``
-to restore the previous build, reusing that already-tested recovery mechanics
-rather than duplicating it.
-
-It NEVER reports a rollback that did not happen as success (do-not-hide-problems):
-three distinct exit codes distinguish "came back up healthy" from "rolled back" from
-"rollback itself failed", and only the middle two ever touch the install.
-
-Run standalone for manual testing:
-    python scripts/update_watchdog.py --host 127.0.0.1 --port 8642 \\
-        --expect-version 0.2.0 --install-root .
-"""
+"""Post-restart health watchdog: verify a just-applied localm update actually came back up, and roll it back automatically if it did not (LM-DA-011)."""
 
 from __future__ import annotations
 
@@ -51,8 +24,7 @@ DEFAULT_REQUEST_TIMEOUT_S = 3.0
 
 
 def _log(log_path: Optional[Path], msg: str) -> None:
-    """Timestamped trace line to stdout and, best-effort, *log_path*. Logging must
-    never be the reason the watchdog itself fails, so a write error is swallowed."""
+    """Timestamped trace line to stdout and, best-effort, *log_path*."""
     line = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}"
     print(line)
     if log_path is None:
@@ -81,9 +53,7 @@ def _insecure_ssl_context() -> ssl.SSLContext:
 
 
 def probe_once(url: str, timeout: float) -> Optional[dict]:
-    """One GET against *url* (the instance's own /whoami). Returns the parsed JSON
-    body on a 200, else None - a refused connection, a timeout, a non-200 status, or
-    an unparseable body are all just "not healthy yet", never raised."""
+    """One GET against *url* (the instance's own /whoami)."""
     try:
         ctx = _insecure_ssl_context() if url.startswith("https://") else None
         req = urllib.request.Request(url, headers={"User-Agent": "localm-update-watchdog"})
@@ -124,11 +94,7 @@ def probe_once(url: str, timeout: float) -> Optional[dict]:
 def wait_for_healthy(url: str, expect_version: str, *, total_timeout: float,
                      poll_interval: float, request_timeout: float,
                      log_path: Optional[Path]) -> bool:
-    """Poll *url* until it answers with ``version == expect_version`` or
-    *total_timeout* elapses. A single wrong-version or unreachable response is NOT
-    a failure - the old process may still be answering briefly right after the
-    restart request, and the new one may not have bound the port yet - so this
-    keeps retrying until the deadline, only ever succeeding early."""
+    """Poll *url* until it answers with ``version == expect_version`` or *total_timeout* elapses."""
     deadline = time.monotonic() + total_timeout
     attempt = 0
     while True:
@@ -149,10 +115,7 @@ def wait_for_healthy(url: str, expect_version: str, *, total_timeout: float,
 
 
 def _load_rollback_module(install_root: Path):
-    """Load scripts/rollback_update.py BY FILE PATH (a sibling of this script),
-    mirroring how that script itself loads localm/_apply_update.py - so a broken
-    localm package cannot stop the rollback. Returns the module, or None if it
-    cannot be loaded (caller then reports manual-recovery guidance)."""
+    """Load scripts/rollback_update.py BY FILE PATH (a sibling of this script), mirroring how that script itself loads localm/_apply_update.py - so a broken localm package cannot stop the rollback."""
     path = install_root / "scripts" / "rollback_update.py"
     if not path.is_file():
         return None

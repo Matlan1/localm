@@ -1,8 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Full round trip for the ComfyUI missing-model auto-download feature:
-preflight detects a missing curated file -> resolve its HF source and ComfyUI
-destination -> download it (HF network layer mocked) -> the file lands exactly
-where ComfyUI would look for it -> re-running preflight now passes."""
+"""Full round trip for the ComfyUI missing-model auto-download feature: preflight detects a missing curated file -> resolve its HF source and ComfyUI destination -> download it (HF network layer mocked) -> the file lands exactly where ComfyUI would look for it -> re-running preflight now passes."""
 
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -111,9 +108,7 @@ def test_missing_model_detected_downloaded_and_preflight_now_passes(
 
 
 def test_managed_destination_variant_of_the_same_round_trip(home, monkeypatch):
-    """Same round trip, but with the MANAGED ComfyUI active instead of an
-    external workdir - the file must land under <LOCALM_HOME>/comfyui-models,
-    not the external path."""
+    """Same round trip, but with the MANAGED ComfyUI active instead of an external workdir - the file must land under <LOCALM_HOME>/comfyui-models, not the external path."""
     # is_managed_comfy_installed() also requires the provisioning completion
     # marker (not just main.py + venv) - see its docstring / test_managed_comfy_s1.py.
     from localm.media.managed_comfy_provision import MARKER_FILENAME

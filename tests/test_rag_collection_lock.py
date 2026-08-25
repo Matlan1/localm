@@ -1,27 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Cross-process write lock for a RAG collection.
-
-PR #795 (62013ffa) documented this gap rather than closing it:
-``store._collection_lock`` is a per-process ``threading.RLock``, so `localm rag
-add|resync` in its own OS process could interleave its read-modify-write with a
-running server's scheduled re-sync of the SAME collection and lose one update.
-Reusing ``config._cross_process_lock`` was rejected at the time because it
-reclaims any holder older than 30 s as abandoned, which would reap a LIVE
-indexing run. ``localm/rag/collection_lock.py`` closes it with a heartbeat
-instead of a wall-clock hold limit.
-
-The load-bearing tests here spawn REAL subprocesses, because a per-process lock
-passes every same-process simulation of this bug by construction - that is
-exactly how the gap survived. Each one carries its own FIRES-CONTROL in the same
-run: the identical harness, with the cross-process lock neutralised IN THE CHILD
-(test-side, never a product switch - a product "skip the lock" flag would be the
-unserialised write path this exists to forbid), must show the interleave the
-locked version prevents. A test that cannot be made to fail proves nothing.
-
-The heartbeat is the lock file's MTIME (the module docstring explains why a
-rewritten timestamp field could clobber a successor's record), so a "stale"
-holder is staged here with ``os.utime``, not by editing a field.
-"""
+"""Cross-process write lock for a RAG collection."""
 
 from __future__ import annotations
 
@@ -142,9 +120,7 @@ _RACE_DELAY = 0.5
 
 
 def _race_two_writers(tmp_path, base, docs, name, *, neuter: bool):
-    """Two separate OS processes each index a different file into *name*.
-
-    Returns the set of document basenames that survived in the collection."""
+    """Two separate OS processes each index a different file into *name*."""
     rv = tmp_path / ("rv-neuter" if neuter else "rv-locked")
     rv.mkdir()
     env = dict(os.environ)
@@ -169,8 +145,7 @@ def _race_two_writers(tmp_path, base, docs, name, *, neuter: bool):
 
 def test_two_processes_indexing_one_collection_lose_nothing(heavy_slot, tmp_path,
                                                             base, docs):
-    """The headline case: `localm rag add` in its own process racing another
-    localm process on the SAME collection. Both documents must survive."""
+    """The headline case: `localm rag add` in its own process racing another localm process on the SAME collection."""
     survived = _race_two_writers(tmp_path, base, docs, "kb", neuter=False)
     assert survived == {"alpha.txt", "beta.txt"}, (
         f"a concurrent index from a SEPARATE OS process was lost: {survived}")
@@ -178,12 +153,7 @@ def test_two_processes_indexing_one_collection_lose_nothing(heavy_slot, tmp_path
 
 def test_the_two_process_harness_does_catch_a_lost_update(heavy_slot, tmp_path,
                                                           base, docs):
-    """FIRES-CONTROL for the test above.
-
-    Same two processes, same timing, with the cross-process lock neutralised in
-    the children: one update MUST be lost. If this ever passes with both files
-    present, the test above is not evidence of anything - the harness would have
-    passed on the pre-fix code too."""
+    """FIRES-CONTROL for the test above."""
     survived = _race_two_writers(tmp_path, base, docs, "kb", neuter=True)
     assert survived != {"alpha.txt", "beta.txt"}, (
         "with the cross-process lock removed, two overlapping indexing runs "
@@ -196,8 +166,7 @@ def test_the_two_process_harness_does_catch_a_lost_update(heavy_slot, tmp_path,
 # --------------------------------------------------------------------------- #
 
 def test_a_dead_holders_stale_lock_is_reclaimed(base, capsys):
-    """A lock left behind by a crashed holder must not wedge the collection
-    forever: once its heartbeat goes stale it is reclaimed, and said out loud."""
+    """A lock left behind by a crashed holder must not wedge the collection forever: once its heartbeat goes stale it is reclaimed, and said out loud."""
     lp = lock_path_for(base / "kb")
     _hold(lp, _record(), silent_for=3600)
 
@@ -209,10 +178,7 @@ def test_a_dead_holders_stale_lock_is_reclaimed(base, capsys):
 
 
 def test_a_live_holder_with_a_fresh_heartbeat_is_never_reclaimed(base):
-    """The other direction, and the whole reason for the heartbeat: a holder
-    that has held the lock far LONGER than the staleness window but is still
-    reporting must be left alone. config._cross_process_lock's fixed 30 s rule
-    would have reaped this one - it is a normal indexing run."""
+    """The other direction, and the whole reason for the heartbeat: a holder that has held the lock far LONGER than the staleness window but is still reporting must be left alone. config._cross_process_lock's fixed 30 s rule would have reaped this one - it is a normal indexing run."""
     lp = lock_path_for(base / "kb")
     _hold(lp, _record(started=time.time() - 7200))     # held 2h, reporting now
 
@@ -227,17 +193,7 @@ def test_a_live_holder_with_a_fresh_heartbeat_is_never_reclaimed(base):
 
 def test_a_real_hold_outlasting_stale_after_survives_because_it_beats(
         heavy_slot, base, monkeypatch):
-    """The same property with the REAL heartbeat thread running, which is what
-    makes an hours-long indexing run safe: hold across several staleness
-    windows, and a waiter must still refuse rather than steal it.
-
-    Takes ``heavy_slot`` even though it spawns no subprocess. It is the only test
-    here whose correctness depends on a THREAD being scheduled promptly, which
-    makes it the biggest victim of the starvation that fixture already documents
-    ("four such tests landing on different workers at once measurably starved a
-    neighbour"). Under ``-n 2`` on a 2-vCPU runner the neighbour starving it is a
-    sibling in this very file spawning real interpreters. Serialising against
-    them removes the dominant source; the widened window below covers the rest."""
+    """The same property with the REAL heartbeat thread running, which is what makes an hours-long indexing run safe: hold across several staleness windows, and a waiter must still refuse rather than steal it."""
     # stale_after is TWELVE heartbeat intervals, the same ratio the shipped
     # defaults use (HEARTBEAT_INTERVAL 5 s, STALE_AFTER 60 s - "STALE_AFTER is
     # twelve of them" at collection_lock.py:386). It used to be six, i.e. the test
@@ -288,10 +244,7 @@ def test_a_real_hold_outlasting_stale_after_survives_because_it_beats(
 
 
 def test_a_recycled_pid_is_not_read_as_a_live_holder(base):
-    """pids are reused. A record pinning THIS pid but a start time from before
-    this process existed describes a process that is gone, whatever the number
-    says - so it is reclaimable early rather than holding the collection for the
-    full staleness window."""
+    """pids are reused."""
     lp = lock_path_for(base / "kb")
     _hold(lp, _record(pid=os.getpid(), pid_create_time=1.0,   # 1970: not us
                       machine=cl._machine_id()),
@@ -303,8 +256,7 @@ def test_a_recycled_pid_is_not_read_as_a_live_holder(base):
 
 
 def test_the_real_pid_of_a_live_process_is_read_as_alive(base):
-    """The control for the test above: the SAME pid with its REAL start time is
-    a living holder, so the identical record is not reclaimed early."""
+    """The control for the test above: the SAME pid with its REAL start time is a living holder, so the identical record is not reclaimed early."""
     lp = lock_path_for(base / "kb")
     if cl._create_time(os.getpid()) is None:
         pytest.skip("no psutil: the (pid, create_time) pin is inert by design")
@@ -319,11 +271,7 @@ def test_the_real_pid_of_a_live_process_is_read_as_alive(base):
 
 
 def test_a_pid_from_another_pid_space_is_never_judged_dead(base):
-    """A pid only means something inside one pid table. A LOCALM_HOME shared
-    across a boundary that has its own pids (a network share, or the Windows
-    side of a WSL mount, where the Linux hostname defaults to the Windows
-    machine name) would otherwise let each side look the other's pids up in its
-    own process table, find nothing, and reclaim a perfectly live holder early."""
+    """A pid only means something inside one pid table."""
     foreign = _record(pid=os.getpid(), pid_create_time=1.0,
                       machine="a-different-pid-space")
     assert cl._holder_liveness(foreign) == "unknown"
@@ -337,8 +285,7 @@ def test_a_pid_from_another_pid_space_is_never_judged_dead(base):
 
 
 def test_the_machine_id_separates_two_pid_spaces_on_one_host(monkeypatch):
-    """The id must not be the hostname alone, or WSL and Windows on one box
-    (same hostname, unrelated pid tables) would trust each other's pids."""
+    """The id must not be the hostname alone, or WSL and Windows on one box (same hostname, unrelated pid tables) would trust each other's pids."""
     monkeypatch.setattr(cl, "_machine_id_cache", None)
     monkeypatch.setattr(cl.sys, "platform", "win32")
     win = cl._machine_id()
@@ -353,10 +300,7 @@ def test_the_machine_id_separates_two_pid_spaces_on_one_host(monkeypatch):
 # --------------------------------------------------------------------------- #
 
 def test_a_corrupt_lock_record_is_held_not_free(base):
-    """A lock file we cannot parse means we do not know who holds it or whether
-    they are alive. Treating that as "free" would let a second writer in exactly
-    when the on-disk state is already suspect, so it counts as HELD - until the
-    file itself goes stale, which is what stops a corrupt file wedging it."""
+    """A lock file we cannot parse means we do not know who holds it or whether they are alive."""
     lp = lock_path_for(base / "kb")
     lp.parent.mkdir(parents=True, exist_ok=True)
     lp.write_text("{ this is not json", encoding="utf-8")
@@ -376,8 +320,7 @@ def test_a_corrupt_lock_record_is_held_not_free(base):
 
 
 def test_a_refused_write_changes_nothing_on_disk(base, docs, monkeypatch):
-    """The fail-safe contract: when the lock cannot be had, add_paths raises and
-    the collection is untouched. It must never proceed unserialised."""
+    """The fail-safe contract: when the lock cannot be had, add_paths raises and the collection is untouched."""
     monkeypatch.setattr(cl, "WAIT_TIMEOUT", 0.3)
     coll = Collection("kb", base=base)
     coll.create()
@@ -395,9 +338,7 @@ def test_a_refused_write_changes_nothing_on_disk(base, docs, monkeypatch):
 
 
 def test_every_write_entry_point_is_covered(base, docs, monkeypatch):
-    """Not just add_paths: resync, remove_doc, add_uploads, create and delete all
-    take the lock, so the CLI, the API and the scheduler are covered by
-    construction rather than by each call site remembering to."""
+    """Not just add_paths: resync, remove_doc, add_uploads, create and delete all take the lock, so the CLI, the API and the scheduler are covered by construction rather than by each call site remembering to."""
     from localm.rag import delete_collection
     monkeypatch.setattr(cl, "WAIT_TIMEOUT", 0.3)
     coll = Collection("kb", base=base)
@@ -421,10 +362,7 @@ def test_every_write_entry_point_is_covered(base, docs, monkeypatch):
 
 
 def test_creating_a_collection_takes_the_lock_too(base, monkeypatch):
-    """Creating is a write. Without the lock a `rag add` that finds no
-    collection can drop a fresh meta.json into a directory another process is
-    part-way through deleting - resurrecting a deleted collection and breaking
-    that delete's final rmdir."""
+    """Creating is a write."""
     monkeypatch.setattr(cl, "WAIT_TIMEOUT", 0.3)
     _hold(lock_path_for(base / "kb"), _record(op="a delete"))
 
@@ -434,10 +372,7 @@ def test_creating_a_collection_takes_the_lock_too(base, monkeypatch):
 
 
 def test_release_does_not_delete_a_lock_that_was_taken_over(base, capsys):
-    """If our hold is reclaimed while we are still inside it, our own release
-    must not delete the NEW holder's lock - that would let a third writer in
-    while the second believes it has exclusive access, rebuilding the race
-    through the recovery path (config.py learned this one the hard way)."""
+    """If our hold is reclaimed while we are still inside it, our own release must not delete the NEW holder's lock - that would let a third writer in while the second believes it has exclusive access, rebuilding the race through the recovery path (config.py learned this one the hard way)."""
     lp = lock_path_for(base / "kb")
     cm = collection_write_lock(lp, collection="kb", op="a test", timeout=5.0)
     cm.__enter__()
@@ -453,11 +388,7 @@ def test_release_does_not_delete_a_lock_that_was_taken_over(base, capsys):
 
 
 def test_release_does_not_delete_a_lock_it_cannot_read(base, capsys):
-    """The same fence, for the case that has no token to compare: a successor
-    that has created its lock file but not yet written its record into it (two
-    syscalls), or a transient read failure. "I cannot read it" must never be
-    taken as "it must be mine" - a lock wrongly left behind costs one staleness
-    window, a live lock wrongly deleted costs a lost update."""
+    """The same fence, for the case that has no token to compare: a successor that has created its lock file but not yet written its record into it (two syscalls), or a transient read failure. 'I cannot read it' must never be taken as 'it must be mine' - a lock wrongly left behind costs one staleness windo..."""
     lp = lock_path_for(base / "kb")
     cm = collection_write_lock(lp, collection="kb", op="a test", timeout=5.0)
     cm.__enter__()
@@ -473,9 +404,7 @@ def test_release_does_not_delete_a_lock_it_cannot_read(base, capsys):
 
 
 def test_the_lock_file_sits_beside_the_collection_not_inside_it(base):
-    """It must survive a delete of the collection directory (an inside lock
-    would be rmtree'd out from under its holder) and must never be mistaken for
-    a collection."""
+    """It must survive a delete of the collection directory (an inside lock would be rmtree'd out from under its holder) and must never be mistaken for a collection."""
     coll = Collection("kb", base=base)
     coll.create()
     with collection_write_lock(lock_path_for(base / "kb"),
@@ -486,10 +415,7 @@ def test_the_lock_file_sits_beside_the_collection_not_inside_it(base):
 
 
 def test_concurrent_threads_in_one_process_still_serialise(base, docs):
-    """The cross-process lock is taken INSIDE the per-process one, so two
-    threads of the same process queue on the in-process lock and never meet
-    their own process's lock file (which a file lock can only read as a nested
-    call, the way config's does). Both writes must land."""
+    """The cross-process lock is taken INSIDE the per-process one, so two threads of the same process queue on the in-process lock and never meet their own process's lock file (which a file lock can only read as a nested call, the way config's does)."""
     errors: list = []
 
     def _index(doc):
@@ -529,9 +455,7 @@ def _run_cli(args, home, *, wait: str = "0.5"):
 
 
 def test_cli_waits_then_refuses_naming_the_holder(heavy_slot, tmp_path, docs):
-    """`localm rag resync` against a collection another process is writing must
-    WAIT (and say so), then REFUSE with a message naming the holder and a
-    non-zero exit - never block for ever, never interleave silently."""
+    """`localm rag resync` against a collection another process is writing must WAIT (and say so), then REFUSE with a message naming the holder and a non-zero exit - never block for ever, never interleave silently."""
     home = tmp_path / "home"
     home.mkdir()
     rag = home / "rag"
@@ -561,8 +485,7 @@ def test_cli_waits_then_refuses_naming_the_holder(heavy_slot, tmp_path, docs):
 
 
 def test_cli_succeeds_once_the_holder_releases(heavy_slot, tmp_path, docs):
-    """The other half of the bounded wait: a CLI that waits out a SHORT hold
-    goes on to do its work. A lock that only ever refuses would be useless."""
+    """The other half of the bounded wait: a CLI that waits out a SHORT hold goes on to do its work."""
     home = tmp_path / "home"
     home.mkdir()
     rag = home / "rag"
@@ -597,9 +520,7 @@ def test_cli_succeeds_once_the_holder_releases(heavy_slot, tmp_path, docs):
 
 def test_a_scheduled_job_reports_the_refusal_instead_of_writing(tmp_path, docs,
                                                                 monkeypatch):
-    """The unattended surface. A scheduled re-sync that meets a hand-run write
-    must record WHY it did nothing - a job history that showed a clean run here
-    would be the "reported success after failing" rule 5 forbids."""
+    """The unattended surface."""
     from localm.plugins.builtin.jobs import runner
     rag = tmp_path / "rag"
     monkeypatch.setattr("localm.rag.store.rag_dir", lambda: rag)
@@ -623,8 +544,7 @@ def test_a_scheduled_job_reports_the_refusal_instead_of_writing(tmp_path, docs,
 
 
 def test_the_api_answers_409_rather_than_500(base):
-    """A locked collection is a conflict, not a server fault: the HTTP surface
-    must say so, with the message that names the holder."""
+    """A locked collection is a conflict, not a server fault: the HTTP surface must say so, with the message that names the holder."""
     from fastapi import HTTPException
 
     from localm.plugins.builtin.rag import plug
@@ -643,9 +563,7 @@ def test_the_api_answers_409_rather_than_500(base):
 
 
 def test_env_override_reports_a_malformed_value(monkeypatch):
-    """An operator override that cannot be read is reported, not silently
-    ignored - a typo that quietly reverts to the default is how a setting looks
-    like it worked."""
+    """An operator override that cannot be read is reported, not silently ignored - a typo that quietly reverts to the default is how a setting looks like it worked."""
     monkeypatch.setenv(cl.ENV_WAIT, "soon please")
     warned: list = []
     monkeypatch.setattr(cl._log, "warning",
@@ -670,8 +588,7 @@ def test_env_override_reports_a_malformed_value(monkeypatch):
 # is retried within the deadline - not the Win32 condition that produces it.
 
 def _permission_denied_then_real(lockpath, times):
-    """Fail the create for *lockpath* `times` times with PermissionError, then
-    behave normally. Every other path is untouched."""
+    """Fail the create for *lockpath* `times` times with PermissionError, then behave normally."""
     real = os.open
     state = {"left": times}
 
@@ -700,8 +617,7 @@ def test_transient_access_denied_on_the_lock_file_is_waited_out(tmp_path, monkey
 @pytest.mark.skipif(os.name != "nt", reason="the retry is deliberately Windows-only")
 def test_access_denied_that_never_clears_reports_a_lock_timeout_not_a_crash(
         tmp_path, monkeypatch):
-    """Bounded: it must never wait longer than the caller's timeout, and what
-    surfaces is the normal lock error, not a raw PermissionError."""
+    """Bounded: it must never wait longer than the caller's timeout, and what surfaces is the normal lock error, not a raw PermissionError."""
     rag = tmp_path / "rag"
     rag.mkdir()
     lp = lock_path_for(rag / "kb")

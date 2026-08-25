@@ -1,22 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""A session revocation that FAILED must never report success (AGENTS.md rule 5).
-
-The sibling file tests/test_key_clear_honesty.py closed this for the CREDENTIAL
-half of the same commands. The SESSION half was left fail-silent: every revocation
-helper swallowed a store-write error and returned a value indistinguishable from
-the benign "there was nothing to revoke" case (``0`` / ``False``), so all three
-callers reported a completed sign-out while every session stayed live.
-
-``localm key recover`` is the sharpest instance and the reason this is HIGH rather
-than MEDIUM: its whole stated purpose is locking a compromised owner out, and
-unlike ``key clear`` it always configures a NEW key, so a surviving ADMIN cookie is
-not inert residue - it resolves against the fresh key immediately.
-
-These drive the real functions and assert from OUTSIDE the call. The failure is
-injected at the lowest honest point - the store WRITE raising OSError, which is
-exactly what a locked or read-only file does - rather than by patching the function
-under test, so every layer above it runs for real.
-"""
+"""A session revocation that FAILED must never report success (AGENTS.md rule 5)."""
 
 from __future__ import annotations
 
@@ -39,12 +22,7 @@ def runner(cli_runner, monkeypatch):
 
 
 def _store_writes_fail(monkeypatch):
-    """Make the session store's write raise, as a locked/read-only file does.
-
-    Patches the lowest layer that actually touches the disk, NOT the revocation
-    functions under test - patching those would delete the very behaviour these
-    tests exist to measure (diff-review item 21).
-    """
+    """Make the session store's write raise, as a locked/read-only file does."""
     from localm import sessions
 
     def boom(_records):
@@ -61,14 +39,7 @@ def _mint_owner_session():
 
 
 def _flat(output: str) -> str:
-    """CLI output as one lowercase whitespace-normalised line.
-
-    rich wraps console output at the terminal width, so a sentence the user
-    plainly sees can carry a newline in the middle and a naive ``in`` check fails
-    on a string that IS displayed. Prose wraps at spaces, so collapsing runs of
-    whitespace restores it. (Do not use this to assert on a PATH - rich splits a
-    long space-free string mid-word, and collapsing would insert a space.)
-    """
+    """CLI output as one lowercase whitespace-normalised line."""
     return " ".join(output.split()).lower()
 
 
@@ -119,9 +90,7 @@ class TestRevocationReportsFailureDistinguishably:
 
     def test_none_stays_falsy_so_existing_truthiness_callers_are_unchanged(
             self, runner, monkeypatch):
-        """The signal is added WITHOUT inverting any existing check: None is
-        falsy, so `if revoked:` still means "say devices were signed out" and
-        never fires on a failure. Only an `is None` test learns the difference."""
+        """The signal is added WITHOUT inverting any existing check: None is falsy, so `if revoked:` still means 'say devices were signed out' and never fires on a failure."""
         from localm import sessions
         _mint_owner_session()
         _store_writes_fail(monkeypatch)
@@ -165,9 +134,7 @@ class TestClearRouteDoesNotClaimSuccess:
 
     def test_a_failed_session_revocation_is_not_reported_as_cleared(
             self, runner, monkeypatch):
-        """The credential half succeeds and the SESSION half fails. The route
-        used to return cleared:true here, which the GUI renders as open mode
-        while a live ADMIN cookie still has full access."""
+        """The credential half succeeds and the SESSION half fails."""
         from localm import auth
         _mint_owner_session()
         auth.set_api_key(KEY)
@@ -186,9 +153,7 @@ class TestClearRouteDoesNotClaimSuccess:
 
     def test_the_route_discloses_no_path_and_no_exception_text(
             self, runner, monkeypatch):
-        """Honest does not mean verbose. The store path carries the account name
-        (rule 2) and raw OS text is stack-trace exposure; neither may ride out on
-        an HTTP response, exactly as the credential half already guarantees."""
+        """Honest does not mean verbose."""
         from localm import auth, sessions
         _mint_owner_session()
         auth.set_api_key(KEY)
@@ -204,9 +169,7 @@ class TestClearRouteDoesNotClaimSuccess:
 
     def test_logout_reports_a_failed_server_side_revocation(self, runner,
                                                             monkeypatch):
-        """Deleting the cookie alone leaves a replayable server session - the
-        exact state server-side revocation exists to improve on. So a logout
-        whose store write failed must not read as a clean sign-out."""
+        """Deleting the cookie alone leaves a replayable server session - the exact state server-side revocation exists to improve on."""
         from localm import auth, sessions
         from localm.inference import http_server as hs
         auth.set_api_key(KEY)
@@ -272,8 +235,7 @@ class TestKeyCliDoesNotClaimSessionsWereSignedOut:
         assert "api key cleared - open mode" not in out
 
     def test_recover_does_not_claim_a_completed_recovery(self, runner, monkeypatch):
-        """The strongest instance: recovery always configures a NEW key, so a
-        surviving ADMIN cookie resolves against it immediately."""
+        """The strongest instance: recovery always configures a NEW key, so a surviving ADMIN cookie resolves against it immediately."""
         from localm import auth, sessions
         from localm.cli import main
         auth.set_api_key(KEY)
@@ -291,8 +253,7 @@ class TestKeyCliDoesNotClaimSessionsWereSignedOut:
 
     def test_recover_still_prints_the_new_key_on_a_session_failure(
             self, runner, monkeypatch):
-        """Honesty must not cost the user the key: it is shown exactly once and
-        is unrecoverable, and it IS usable. Reported, not failed."""
+        """Honesty must not cost the user the key: it is shown exactly once and is unrecoverable, and it IS usable."""
         from localm import auth
         from localm.cli import main
         auth.set_api_key(KEY)
@@ -320,13 +281,7 @@ class TestKeyCliDoesNotClaimSessionsWereSignedOut:
 # --------------------------------------------------------------------------- #
 
 def test_a_key_roll_still_leaves_sessions_alone(runner):
-    """Guard against "fixing" revocation by making everything revoke.
-
-    A key ROLL (regenerate_key) must NOT sign the browser out - that is
-    deliberate, and a scheduled job created over the surviving session depends on
-    it. Revocation must only happen when something ASKED for it (clear / recover /
-    logout). Opposite triggers, opposite intents, asserted together so a later
-    change cannot satisfy one by breaking the other."""
+    """Guard against 'fixing' revocation by making everything revoke."""
     from localm import auth, sessions
     sid = _mint_owner_session()
 

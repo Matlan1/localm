@@ -1,22 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""NEW-COMFY-SILENT-PARTIAL-APPLY: a ComfyUI node whose weights only partly
-apply (a LoRA key mismatch, missing VAE/UNet keys, ...) is not an
-execution_error - ComfyUI logs a console warning and the run still "succeeds".
-Covers the pure capture mechanism in comfy_client.py (comfy_launch_log_path /
-comfy_console_tail_start / comfy_console_warnings_since) and its wiring into
-generate_image()'s returned message + reproducibility sidecar.
-
-Also covers three defects an adversarial review found in the first version of
-this mechanism, all fixed here: (1) comfy_launch_log_path() was one path
-shared by every localm-launched ComfyUI instance, corrupting/misattributing
-across independently-configured image/video/music instances; (2) the
-liveness-only spawned_pid() guard could not tell "still the same process" from
-"died and got relaunched under the same api_url", silently reading a truncated
-or wrong-generation log; (3) comfy_console_checked was derived from whether an
-offset was captured before submission, not from whether the read after
-polling actually happened, reintroducing the exact "checked vs could not
-check" ambiguity the field exists to eliminate.
-"""
+"""NEW-COMFY-SILENT-PARTIAL-APPLY: a ComfyUI node whose weights only partly apply (a LoRA key mismatch, missing VAE/UNet keys, ...) is not an execution_error - ComfyUI logs a console warning and the run still 'succeeds'."""
 
 import json
 from unittest.mock import MagicMock, patch
@@ -54,21 +37,14 @@ URL_2 = "http://127.0.0.1:8288"  # a DIFFERENT localm-launched ComfyUI instance
 
 @pytest.fixture
 def spawned():
-    """Register a fake localm-launched ComfyUI process so spawned_pid() /
-    comfy_console_tail_start() treat it as ours, and drop the registration
-    afterwards - _spawned_procs is module-level global state shared across
-    the whole test session (see test_stopcomfy_2026_07_01.py), so a test
-    that forgets to clean up leaks into whichever test runs next. Yields the
-    url."""
+    """Register a fake localm-launched ComfyUI process so spawned_pid() / comfy_console_tail_start() treat it as ours, and drop the registration afterwards - _spawned_procs is module-level global state shared across the whole test session (see test_stopcomfy_2026_07_01.py), so a test that forgets to clean..."""
     cc._remember_spawned(URL, _FakeProc(pid=4321))
     yield URL
     cc._take_spawned(URL)
 
 
 class TestLaunchLogPathScoping:
-    """The HIGH-severity finding: one shared log path corrupts/misattributes
-    across independently self-launched ComfyUI instances (image/video/music
-    can each point at a different api_url)."""
+    """The HIGH-severity finding: one shared log path corrupts/misattributes across independently self-launched ComfyUI instances (image/video/music can each point at a different api_url)."""
 
     def test_different_urls_get_different_paths(self):
         p1 = cc.comfy_launch_log_path(URL)
@@ -133,8 +109,7 @@ class TestConsoleWarningsSince:
             "a LoRA patch key did not match the model and was skipped (x3)"]
 
     def test_ignores_content_before_the_offset(self, spawned):
-        """The exact scenario the offset exists for: a PRIOR generation's own
-        warning must not bleed into the NEXT generation's report."""
+        """The exact scenario the offset exists for: a PRIOR generation's own warning must not bleed into the NEXT generation's report."""
         log = cc.comfy_launch_log_path(spawned)
         log.parent.mkdir(parents=True, exist_ok=True)
         log.write_text("lora key not loaded: pre-existing noise\n", encoding="utf-8")
@@ -156,9 +131,7 @@ class TestConsoleWarningsSince:
         assert "some VAE weights were not found in the checkpoint (x2)" in warnings
 
     def test_pattern_must_not_straddle_two_lines(self, spawned):
-        """The LOW-severity anchoring fix: a pattern split across a line
-        break (an artifact of byte-offset slicing, not a real single-line
-        console message) must not count as a match."""
+        """The LOW-severity anchoring fix: a pattern split across a line break (an artifact of byte-offset slicing, not a real single-line console message) must not count as a match."""
         self._fresh_log(spawned)
         tail = cc.comfy_console_tail_start(spawned)
         with open(cc.comfy_launch_log_path(spawned), "a", encoding="utf-8") as f:
@@ -171,9 +144,7 @@ class TestConsoleWarningsSince:
             "a LoRA patch key did not match the model and was skipped"]
 
     def test_no_match_returns_empty_but_checked(self, spawned):
-        """The fires-control for every test above: ordinary ComfyUI startup
-        chatter must never be mistaken for a silent-partial-apply warning -
-        but the read DID happen, so checked must be True."""
+        """The fires-control for every test above: ordinary ComfyUI startup chatter must never be mistaken for a silent-partial-apply warning - but the read DID happen, so checked must be True."""
         self._fresh_log(spawned)
         tail = cc.comfy_console_tail_start(spawned)
         with open(cc.comfy_launch_log_path(spawned), "a", encoding="utf-8") as f:
@@ -182,8 +153,7 @@ class TestConsoleWarningsSince:
         assert cc.comfy_console_warnings_since(spawned, tail) == (True, [])
 
     def test_process_gone_before_check_yields_unchecked(self, spawned):
-        """If the process we were tailing was stopped and never replaced,
-        checked must be False - the window was never actually read."""
+        """If the process we were tailing was stopped and never replaced, checked must be False - the window was never actually read."""
         self._fresh_log(spawned)
         tail = cc.comfy_console_tail_start(spawned)
         with open(cc.comfy_launch_log_path(spawned), "a", encoding="utf-8") as f:
@@ -192,15 +162,7 @@ class TestConsoleWarningsSince:
         assert cc.comfy_console_warnings_since(spawned, tail) == (False, [])
 
     def test_relaunch_with_new_pid_yields_unchecked_not_a_false_clean(self, spawned):
-        """The MEDIUM-severity identity-check fix: the ORIGINAL process dies
-        and a DIFFERENT one gets launched for the SAME api_url before the
-        read happens (ensure_comfy's fresh "w" open truncates the log and
-        re-registers a new pid under the same _spawned_procs[api_url] key).
-        A liveness-only check ("is spawned_pid() not None") would wrongly
-        pass here and either silently under-report (seek past a truncated
-        file) or misattribute the new process's own output. The identity
-        check (tail.pid == the CURRENT spawned_pid) must catch it and report
-        unchecked, not a false all-clear."""
+        """The MEDIUM-severity identity-check fix: the ORIGINAL process dies and a DIFFERENT one gets launched for the SAME api_url before the read happens (ensure_comfy's fresh 'w' open truncates the log and re-registers a new pid under the same _spawned_procs[api_url] key)."""
         self._fresh_log(spawned)
         tail = cc.comfy_console_tail_start(spawned)
         assert tail.pid == 4321
@@ -214,9 +176,7 @@ class TestConsoleWarningsSince:
         cc._take_spawned(spawned)  # extra cleanup: this test re-registered mid-run
 
     def test_independent_instances_do_not_cross_contaminate(self, spawned):
-        """Companion to TestLaunchLogPathScoping: two DIFFERENT api_urls
-        (e.g. image on :8188, video on :8288) must read from - and only
-        from - their own log file."""
+        """Companion to TestLaunchLogPathScoping: two DIFFERENT api_urls (e.g. image on :8188, video on :8288) must read from - and only from - their own log file."""
         cc._remember_spawned(URL_2, _FakeProc(pid=5555))
         try:
             self._fresh_log(spawned)
@@ -240,9 +200,7 @@ class TestConsoleWarningsSince:
 
 
 class TestComfyConsoleWarningWiring:
-    """Drives generate_image() fully (same fake-urlopen pattern as
-    TestSidecarContent in test_image_gen_robustness.py) to prove the
-    capture mechanism is actually wired in, not just correct in isolation."""
+    """Drives generate_image() fully (same fake-urlopen pattern as TestSidecarContent in test_image_gen_robustness.py) to prove the capture mechanism is actually wired in, not just correct in isolation."""
 
     @staticmethod
     def _fake_urlopen(responses, log_path, extra_on_prompt=""):
@@ -302,12 +260,7 @@ class TestComfyConsoleWarningWiring:
         assert sidecar["lora_name"] == "bad.safetensors"
 
     def test_clean_run_never_warns(self, tmp_path, monkeypatch, spawned):
-        """The counterpart fires-control: a successful, compatible generation
-        must not spuriously warn or grow a sidecar field it never observed -
-        but MUST still record comfy_console_checked=True, distinguishing
-        "checked, found nothing" from the remote-ComfyUI "could not check"
-        case below. Collapsing those two into identical silence is exactly
-        the defect shape this project's rules call out."""
+        """The counterpart fires-control: a successful, compatible generation must not spuriously warn or grow a sidecar field it never observed - but MUST still record comfy_console_checked=True, distinguishing 'checked, found nothing' from the remote-ComfyUI 'could not check' case below."""
         monkeypatch.setattr(comfy, "workflow_path",
                             lambda: comfy._WORKFLOW_EXAMPLE_PATH)
         out = tmp_path / "art2.png"
@@ -339,13 +292,7 @@ class TestComfyConsoleWarningWiring:
         assert sidecar["comfy_console_checked"] is True
 
     def test_remote_comfy_never_claims_to_have_checked(self, tmp_path, monkeypatch):
-        """No _remember_spawned registration at all - the 'localm did not
-        launch this ComfyUI' case (already running, or remote/LAN per
-        sanitize_comfy_url). No warning either, same as the clean-run case -
-        but comfy_console_checked must read False here, NOT True: this run
-        never actually looked, and a reader must be able to tell the two
-        silences apart instead of reading "no warning field" as an all-clear
-        regardless of which case produced it."""
+        """No _remember_spawned registration at all - the 'localm did not launch this ComfyUI' case (already running, or remote/LAN per sanitize_comfy_url)."""
         monkeypatch.setattr(comfy, "workflow_path",
                             lambda: comfy._WORKFLOW_EXAMPLE_PATH)
         out = tmp_path / "art3.png"
@@ -386,8 +333,7 @@ class TestComfyConsoleWarningWiring:
 
 
 def _fake_music_urlopen(log_path, extra_on_prompt=""):
-    """Mirrors TestComfyConsoleWarningWiring._fake_urlopen, shaped for
-    generate_music's /history outputs (an 'audio' entry, not 'images')."""
+    """Mirrors TestComfyConsoleWarningWiring._fake_urlopen, shaped for generate_music's /history outputs (an 'audio' entry, not 'images')."""
     def fake_urlopen(req, timeout=None):
         url = req if isinstance(req, str) else req.full_url
         if "/prompt" in url:
@@ -415,11 +361,7 @@ def _fake_music_urlopen(log_path, extra_on_prompt=""):
 
 
 class TestMusicConsoleWarningWiring:
-    """generate_music() consumes the SAME shared comfy_console_tail_start /
-    comfy_console_warnings_since as generate_image() (#1033) - image/music/
-    video share the exact submit -> poll -> fetch transport. Mirrors
-    TestComfyConsoleWarningWiring above, adapted to music's inline sidecar
-    dict (no separate _write_music_sidecar function)."""
+    """generate_music() consumes the SAME shared comfy_console_tail_start / comfy_console_warnings_since as generate_image() (#1033) - image/music/ video share the exact submit -> poll -> fetch transport."""
 
     def test_warning_surfaces_in_message_and_sidecar(self, tmp_path, monkeypatch, spawned):
         out = tmp_path / "t.flac"
@@ -484,8 +426,7 @@ class TestMusicConsoleWarningWiring:
 
 
 def _fake_video_urlopen(log_path, extra_on_prompt=""):
-    """Mirrors _fake_music_urlopen, shaped for generate_video's /history
-    outputs (an 'images' entry with animated=True, per test_video_gen.py)."""
+    """Mirrors _fake_music_urlopen, shaped for generate_video's /history outputs (an 'images' entry with animated=True, per test_video_gen.py)."""
     def fake_urlopen(req, timeout=None):
         url = req if isinstance(req, str) else req.full_url
         if "/prompt" in url:
@@ -514,11 +455,7 @@ def _fake_video_urlopen(log_path, extra_on_prompt=""):
 
 
 class TestVideoConsoleWarningWiring:
-    """generate_video() consumes the same shared machinery - see
-    TestMusicConsoleWarningWiring's docstring. Also confirms video_gen's
-    submit path genuinely reaches comfy_submit_prompt/comfy_poll_until_done
-    (not just importing them), which was verified by inspection before this
-    unit and is exercised for real here."""
+    """generate_video() consumes the same shared machinery - see TestMusicConsoleWarningWiring's docstring."""
 
     def test_warning_surfaces_in_message_and_sidecar(self, tmp_path, monkeypatch, spawned):
         import os

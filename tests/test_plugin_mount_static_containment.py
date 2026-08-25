@@ -1,12 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""PluginHost.mount_static must confine the served directory to the plugin dir.
-
-A plugin's ``assets_dir`` (manifest) or an explicit ``mount_static`` call is
-untrusted for a third-party plugin: a value like ``"../secret"`` or an absolute
-path would otherwise serve any directory on disk as public static assets. This
-mirrors the containment already enforced on the rmtree path in
-``_delete_plugin_data``.
-"""
+"""PluginHost.mount_static must confine the served directory to the plugin dir."""
 
 import pytest
 from fastapi import FastAPI
@@ -45,11 +38,7 @@ def _host_for(env, pdir):
 
 
 def test_mount_static_relative_traversal_escape_raises(env, tmp_path):
-    """NEGATIVE: ``../secret`` escapes the plugin dir and must be refused.
-
-    Pre-fix this does NOT raise (it mounts the sibling), so the assertion fails
-    when the fix is git-stashed; post-fix it raises ValueError.
-    """
+    """NEGATIVE: ``../secret`` escapes the plugin dir and must be refused."""
     plugins = env / "plugins"
     pdir = _make_plugin_dir(plugins)
     secret = plugins / "secret"

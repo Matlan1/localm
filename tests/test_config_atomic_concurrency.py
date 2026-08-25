@@ -1,17 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The config/registry "atomic write" (temp file + os.replace) is atomic, but on
-Windows ``os.replace`` raises PermissionError (WinError 5) when ANOTHER handle has
-the destination open at that instant - a second localm process reading the file,
-an antivirus / indexer / backup scanner, Windows Search. The window is
-microseconds, so a bare os.replace made a config/registry SAVE crash (and a
-concurrent read spuriously fall back to .bak/defaults) whenever a reader happened
-to touch the file mid-write (AUD-WINREPLACE).
-
-Both sides now ride out the transient sharing violation with a bounded retry,
-while a PERSISTENT permission problem still surfaces (do-not-hide-problems).
-These tests inject the transient fault deterministically at the OS boundary, so
-they exercise the real _atomic_write_json / _read_json code paths on every
-platform; the real Windows race was also reproduced by hand (see the PR)."""
+"""The config/registry 'atomic write' (temp file + os.replace) is atomic, but on Windows ``os.replace`` raises PermissionError (WinError 5) when ANOTHER handle has the destination open at that instant - a second localm process reading the file, an antivirus / indexer / backup scanner, Windows Search."""
 
 import json
 import os
@@ -38,8 +26,7 @@ def home(tmp_path, monkeypatch):
 
 
 def test_atomic_write_rides_out_transient_replace_error(home, monkeypatch):
-    """A few transient PermissionErrors from os.replace must not fail the write;
-    the file ends up correct."""
+    """A few transient PermissionErrors from os.replace must not fail the write; the file ends up correct."""
     # This retry is deliberately WINDOWS-ONLY: _is_transient_permission_error returns
     # False when os.name != "nt", because a POSIX EACCES is a STABLE state the retry
     # can never clear, so retrying would just burn ~1s of time.sleep while holding
@@ -85,8 +72,7 @@ def test_atomic_write_reraises_persistent_permission_error(home, monkeypatch):
 
 
 def test_read_json_rides_out_transient_permission_error(home, monkeypatch, capsys):
-    """A transient PermissionError on read must be retried, not treated as a
-    corrupt file - the live data is returned and no scary warning is printed."""
+    """A transient PermissionError on read must be retried, not treated as a corrupt file - the live data is returned and no scary warning is printed."""
     cfg.REGISTRY_FILE.write_text(json.dumps({"m": {"path": "Z:/x.gguf"}}), encoding="utf-8")
     real_open = cfg.open if hasattr(cfg, "open") else open
     import builtins
@@ -123,15 +109,7 @@ def test_read_json_corrupt_falls_back_without_retry(home, capsys):
 
 
 def test_replace_atomic_rides_out_a_real_file_lock(home):
-    """Deterministic REAL lock (not a mock, not a timing race): hold an ACTUAL OS
-    read handle on the destination - which makes os.replace fail with WinError 5
-    on Windows - and release it from another thread partway through the retries.
-    _replace_atomic must ride out the transient lock and land the new content.
-
-    Part 1 proves the held handle really does block a bare replace on Windows, so
-    the test exercises a real sharing violation rather than a no-op. On POSIX a
-    held read handle does not block os.replace, so Part 1 is skipped and Part 2
-    just confirms the write lands without crashing."""
+    """Deterministic REAL lock (not a mock, not a timing race): hold an ACTUAL OS read handle on the destination - which makes os.replace fail with WinError 5 on Windows - and release it from another thread partway through the retries. _replace_atomic must ride out the transient lock and land the new conte..."""
     import sys as _sys
     import threading
     import time as _t

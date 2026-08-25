@@ -1,21 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""dedup_native_stderr(): collapses consecutive identical native-stderr lines
-into "line(N)" for the live terminal/GUI views, without losing anything from
-the persisted debug-log record.
-
-test_console_stream_is_captured_before_fd_redirect is a regression guard for
-a real bug caught during development: _stable_console_stream() was called
-AFTER fd 2 was redirected to the context's own pipe, so the "stable" console
-duplicate actually pointed back at that SAME pipe (confirmed empirically -
-console.fileno() equalled the pipe's own write_fd, and writes to it arrived
-back on the pipe's own read end). Every emitted grouped line looped back in
-as fresh input, got re-grouped, and re-emitted - a real generation request
-hung indefinitely because of this (only reproduces outside pytest's own fd
-capture, which substitutes a plain file for fd 2 and happens to break the
-feedback chain; a live standalone script and a direct fd probe both
-confirmed the mechanism). Asserting the call order directly is deterministic
-and fast, unlike trying to reproduce the hang itself under pytest.
-"""
+"""dedup_native_stderr(): collapses consecutive identical native-stderr lines into 'line(N)' for the live terminal/GUI views, without losing anything from the persisted debug-log record."""
 
 import logging
 import os
@@ -81,9 +65,7 @@ def test_single_line_is_not_suffixed():
 
 
 def test_two_line_cycle_is_grouped_with_count():
-    """The real native pattern this class exists for (#952/#963): two DISTINCT
-    lines alternating, never repeating immediately after themselves, so the
-    original single-line lookback never collapsed either one."""
+    """The real native pattern this class exists for (#952/#963): two DISTINCT lines alternating, never repeating immediately after themselves, so the original single-line lookback never collapsed either one."""
     before = len(debuglog.recent_activity())
     with debuglog.dedup_native_stderr():
         for _ in range(20):
@@ -95,13 +77,7 @@ def test_two_line_cycle_is_grouped_with_count():
 
 
 def test_cycle_survives_an_interleaved_changing_line():
-    """The exact production shape: a 2-line repeating cycle with a THIRD line
-    that changes every occurrence (mirrors "CUDA Graph id N reused", N
-    varies) interleaved between repeats. The changing line can never collapse
-    itself (it never matches a prior line), but it must not evict/reset the
-    two lines that ARE genuinely repeating - that was the actual bug: a
-    small pure lookback (or a naive fixed-order FIFO ring) gets displaced by
-    every one-off arrival before the repeating pair can accumulate a count."""
+    """The exact production shape: a 2-line repeating cycle with a THIRD line that changes every occurrence (mirrors 'CUDA Graph id N reused', N varies) interleaved between repeats."""
     before = len(debuglog.recent_activity())
     with debuglog.dedup_native_stderr():
         for i in range(12):
@@ -117,9 +93,7 @@ def test_cycle_survives_an_interleaved_changing_line():
 
 
 def test_more_distinct_lines_than_capacity_still_emits_everything():
-    """Bounded memory: pushing well past _MAX_PENDING distinct lines must
-    still emit every one of them (via LRU eviction), never silently drop a
-    line just because the pending set filled up."""
+    """Bounded memory: pushing well past _MAX_PENDING distinct lines must still emit every one of them (via LRU eviction), never silently drop a line just because the pending set filled up."""
     before = len(debuglog.recent_activity())
     n = debuglog._LineGrouper._MAX_PENDING * 4
     with debuglog.dedup_native_stderr():
@@ -131,8 +105,7 @@ def test_more_distinct_lines_than_capacity_still_emits_everything():
 
 
 def test_fd_2_is_restored_after_exit(capfd):
-    """After the context exits, writes to fd 2 must reach the real stream
-    again (not still be swallowed by the torn-down pipe)."""
+    """After the context exits, writes to fd 2 must reach the real stream again (not still be swallowed by the torn-down pipe)."""
     with debuglog.dedup_native_stderr():
         os.write(2, b"inside the context\n")
     os.write(2, b"after the context\n")
@@ -148,15 +121,7 @@ def test_nothing_written_is_a_clean_noop():
 
 
 def test_persisted_write_failure_warns_once_and_keeps_ring_buffer(monkeypatch, caplog):
-    """Honesty audit (finding 6): if the persisted debug-log write fails, the
-    native line is NOT silently lost - it still reaches the ring buffer, and
-    exactly ONE warning is emitted. The latch suppresses further warnings so a
-    persistently-failing fd cannot spam the log (and the warning is itself
-    drained back through this same reader). Guards all three regression modes:
-    never-warns, warns-every-time (log spam), and line-dropped-on-failure.
-
-    Pre-fix, os.write(debug_fd,...) was wrapped in contextlib.suppress(OSError)
-    with no warning, so this test's warning-count assertion fails on old code."""
+    """Honesty audit (finding 6): if the persisted debug-log write fails, the native line is NOT silently lost - it still reaches the ring buffer, and exactly ONE warning is emitted."""
     # A sentinel debug_fd that os.write always rejects. Using a fake fd number +
     # a pass-through os.write is deterministic and platform-independent: a
     # pre-closed real fd would get REUSED by the dup/pipe fds dedup_native_stderr
@@ -214,9 +179,7 @@ def _group(lines):
 
 
 def test_varying_integer_flood_collapses_to_one_counted_line():
-    """The reported symptom. A cycle LONGER than _MAX_PENDING never groups by
-    exact match no matter how the LRU is sized, because every entry is evicted
-    before it comes round."""
+    """The reported symptom."""
     cap = debuglog._LineGrouper._MAX_PENDING
     cycle = [f"CUDA Graph id {700 + 2 * i} reused" for i in range(cap * 3)]
     out = _group(cycle * 40)
@@ -226,18 +189,7 @@ def test_varying_integer_flood_collapses_to_one_counted_line():
 
 
 def test_the_flood_no_longer_evicts_the_lines_that_DO_repeat_verbatim():
-    """The second-order damage, and the thing the class was built to prevent:
-    with more varying ids in flight than slots, the genuinely-repeating pair is
-    evicted before it can accumulate a count. In the real capture
-    'warmup reset' appeared 23x ungrouped against only 4x grouped.
-
-    THE INTERLEAVING RATIO IS LOAD-BEARING - do not "simplify" this to one id
-    per pair. With a single id between them the pair is touched every third
-    line, so move_to_end keeps it most-recently-used and it is NEVER the LRU
-    victim; the test then passes with OR without the fix and proves nothing
-    (measured - the first version of this test did exactly that). The real
-    stream emits many CONSECUTIVE ids between warmup lines, which is what
-    actually evicts the pair."""
+    """The second-order damage, and the thing the class was built to prevent: with more varying ids in flight than slots, the genuinely-repeating pair is evicted before it can accumulate a count."""
     cap = debuglog._LineGrouper._MAX_PENDING
     rounds = 24
     stream = []
@@ -250,19 +202,14 @@ def test_the_flood_no_longer_evicts_the_lines_that_DO_repeat_verbatim():
 
 
 def test_a_LIST_of_distinct_messages_is_never_collapsed():
-    """Guards the fix against over-reach, which is the real risk of templating.
-    28 layer-assignment lines that each appear ONCE are a list, not a flood -
-    collapsing them would lose every layer number to save nothing. Both
-    conditions in _emit_one exist for this."""
+    """Guards the fix against over-reach, which is the real risk of templating. 28 layer-assignment lines that each appear ONCE are a list, not a flood - collapsing them would lose every layer number to save nothing."""
     lines = [f"load_tensors: layer {i} assigned to device ROCm0" for i in range(28)]
     out = _group(lines)
     assert out == lines, "a non-repeating list must pass through verbatim"
 
 
 def test_few_variants_still_group_individually_with_their_own_counts():
-    """At or below _MAX_PENDING distinct variants, exact matching already works
-    and is MORE informative than a placeholder - each id keeps its own count.
-    Templating must not destroy that."""
+    """At or below _MAX_PENDING distinct variants, exact matching already works and is MORE informative than a placeholder - each id keeps its own count."""
     out = _group([f"CUDA Graph id {i % 2} reused" for i in range(8)])
     assert out == ["CUDA Graph id 0 reused(4)", "CUDA Graph id 1 reused(4)"], out
 
@@ -273,9 +220,7 @@ def test_lines_without_digits_are_completely_unaffected():
 
 
 def test_distinct_variant_count_is_bounded_but_still_reported():
-    """The retained-variant set is capped so a never-repeating stream cannot
-    make this unbounded memory; past the cap the count is reported as 'N+'
-    rather than silently understated."""
+    """The retained-variant set is capped so a never-repeating stream cannot make this unbounded memory; past the cap the count is reported as 'N+' rather than silently understated."""
     cap = debuglog._LineGrouper._MAX_VARIANTS
     out = _group([f"thing {i} done" for i in range(cap + 50)] * 3)
     assert len(out) == 1

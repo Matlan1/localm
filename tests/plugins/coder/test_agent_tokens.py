@@ -7,13 +7,7 @@ from unittest.mock import MagicMock
 
 
 def _make_mock_llm_backend(stream_tokens=None, usage=None, model_id="test-model"):
-    """
-    Return a mock backend that:
-    - streams the given tokens on chat_stream()
-    - returns concatenation on chat()
-    - exposes last_usage; pre-populated with *usage* so _accumulate_usage()
-      works even when called without iterating chat_stream() first
-    """
+    """Return a mock backend that: - streams the given tokens on chat_stream() - returns concatenation on chat() - exposes last_usage; pre-populated with *usage* so _accumulate_usage() works even when called without iterating chat_stream() first."""
     backend = MagicMock()
     backend.model_id = model_id
     _resolved_usage = usage or {}

@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""
-Tests for localm model browser unified type support and ComfyUI model scan capabilities.
-"""
+"""Tests for localm model browser unified type support and ComfyUI model scan capabilities."""
 
 import json
 from unittest.mock import patch
@@ -15,10 +13,7 @@ from localm.model_manager.scan import (
 
 @pytest.fixture()
 def comfy_home(tmp_path, monkeypatch):
-    """Isolated LOCALM_HOME for get_comfy_workdir()/get_comfy_api_url(), which
-    call load_config() directly - config.py's HOME_DIR/CONFIG_FILE are frozen
-    at import time, so the autouse env-var isolation alone does not redirect
-    them; patch the module attrs explicitly, matching test_comfy_models_dest_dir.py."""
+    """Isolated LOCALM_HOME for get_comfy_workdir()/get_comfy_api_url(), which call load_config() directly - config.py's HOME_DIR/CONFIG_FILE are frozen at import time, so the autouse env-var isolation alone does not redirect them; patch the module attrs explicitly, matching test_comfy_models_dest_dir.py."""
     import localm.config as cfg
     h = tmp_path / ".localm"
     h.mkdir(parents=True, exist_ok=True)
@@ -31,14 +26,7 @@ def comfy_home(tmp_path, monkeypatch):
 
 
 class TestGetComfyWorkdirManagedAwareness:
-    """get_comfy_workdir()/get_comfy_api_url() used to have ZERO managed-
-    instance awareness - they resolved a per-plugin/global override the same
-    way regardless of whether localm's own ComfyUI was the actual active
-    target, so the GUI's "Scan for ComfyUI models" button could silently scan
-    the wrong folder (same bug family as
-    NEW-COMFY-TARGET-OWN-DEFEATED-BY-STALE-PERPLUGIN-FIELD, found
-    independently while auditing every comfy_workdir/comfy_api_url resolver
-    for the same class of gap)."""
+    """get_comfy_workdir()/get_comfy_api_url() used to have ZERO managed- instance awareness - they resolved a per-plugin/global override the same way regardless of whether localm's own ComfyUI was the actual active target, so the GUI's 'Scan for ComfyUI models' button could silently scan the wrong folder..."""
 
     def _install_managed(self, home_dir):
         from localm.media import managed_comfy as mc
@@ -60,9 +48,7 @@ class TestGetComfyWorkdirManagedAwareness:
         assert get_comfy_workdir() == r"D:\deliberate\video-comfy"
 
     def test_workdir_routes_to_managed_instance_ignoring_stale_plugin_value(self, comfy_home):
-        """The actual bug: managed is active AND installed, but a per-plugin
-        workdir left over from an unrelated custom install used to still win
-        because get_comfy_workdir() never checked managed routing at all."""
+        """The actual bug: managed is active AND installed, but a per-plugin workdir left over from an unrelated custom install used to still win because get_comfy_workdir() never checked managed routing at all."""
         import localm.config as cfg
         paths = self._install_managed(comfy_home)
         cfg.save_config({**cfg.load_config(), "comfy_target": "own",
@@ -85,16 +71,7 @@ class TestGetComfyWorkdirManagedAwareness:
 
 
 class TestManagedScanFindsRealModels:
-    """NEW-MODEL-SCAN-BLIND-TO-MANAGED-MODELS-DIR: get_comfy_workdir() correctly
-    reports the managed checkout root (see TestGetComfyWorkdirManagedAwareness
-    above - that value is still right for display purposes), but
-    scan_comfy_models/preview_comfy_models blindly appended "/models" to
-    whatever it returned. A managed ComfyUI's models live in the SIBLING
-    comfyui-models dir, never inside a `models` subfolder under the checkout
-    (managed_comfy_provision.py's copy step excludes "models"), so a real
-    managed install with real downloaded files always previewed/scanned as
-    empty - the "Scan for ComfyUI models" button found nothing even with a
-    running managed instance serving real generations."""
+    """NEW-MODEL-SCAN-BLIND-TO-MANAGED-MODELS-DIR: get_comfy_workdir() correctly reports the managed checkout root (see TestGetComfyWorkdirManagedAwareness above - that value is still right for display purposes), but scan_comfy_models/preview_comfy_models blindly appended '/models' to whatever it returned."""
 
     def _install_managed(self, home_dir):
         from localm.media import managed_comfy as mc
@@ -124,11 +101,7 @@ class TestManagedScanFindsRealModels:
         assert preview.already_registered == 0
 
     def test_workdir_override_of_the_managed_root_also_finds_it(self, comfy_home):
-        """The "Use localm's own ComfyUI" quick-fill in the Import-from-ComfyUI
-        modal hands back the managed checkout root as an explicit workdir
-        override (models.js fetchManagedComfyPath(), fed by managed-status's
-        `path` field) - that must resolve the same way as the no-override
-        auto-detect path above, not scan a <root>/models that never exists."""
+        """The 'Use localm's own ComfyUI' quick-fill in the Import-from-ComfyUI modal hands back the managed checkout root as an explicit workdir override (models.js fetchManagedComfyPath(), fed by managed-status's `path` field) - that must resolve the same way as the no-override auto-detect path above, not sc..."""
         import localm.config as cfg
         paths = self._install_managed(comfy_home)
         cfg.save_config({**cfg.load_config(), "comfy_target": "own"})
@@ -146,11 +119,7 @@ class TestManagedScanFindsRealModels:
     def test_explicit_workdir_for_an_unrelated_folder_still_uses_models_subfolder(
         self, comfy_home, tmp_path
     ):
-        """Guard against over-broadening the managed-root special case: an
-        ordinary external ComfyUI folder (the common case for this override -
-        picked via Browse or typed by hand) must still resolve to
-        <workdir>/models exactly as before, even while a managed instance
-        happens to be installed and active."""
+        """Guard against over-broadening the managed-root special case: an ordinary external ComfyUI folder (the common case for this override - picked via Browse or typed by hand) must still resolve to <workdir>/models exactly as before, even while a managed instance happens to be installed and active."""
         self._install_managed(comfy_home)
         import localm.config as cfg
         cfg.save_config({**cfg.load_config(), "comfy_target": "own"})
@@ -321,16 +290,7 @@ _UNET_OBJECT_INFO = {
 
 
 def test_scan_object_info_reconcile(tmp_path, temp_registry):
-    """The /object_info reconcile pass classifies a file that folder-walk cannot.
-
-    NOTE: the previous version put the file in a `checkpoints/` folder, which
-    folder-walk already maps via SUBFOLDER_MAPPING, and patched `requests.get` -
-    which this code path never calls (it fetches /object_info via urllib). So the
-    reconcile was never exercised: the test passed on folder-walk alone. Here the
-    file lives in a folder NOT in SUBFOLDER_MAPPING (folder-walk -> "unknown"), so
-    only the reconcile can produce "diffusion-unet", and we patch the ACTUAL
-    fetcher `comfy_object_info`.
-    """
+    """The /object_info reconcile pass classifies a file that folder-walk cannot."""
     _, _, registry_file = temp_registry
     comfy_dir = tmp_path / "comfy"
     generic_dir = comfy_dir / "models" / "my_custom_nodes"
@@ -348,8 +308,7 @@ def test_scan_object_info_reconcile(tmp_path, temp_registry):
 
 
 def test_scan_without_object_info_leaves_generic_file_unknown(tmp_path, temp_registry):
-    """Guard proving the reconcile is load-bearing: with /object_info unavailable,
-    the same generic-folder file stays 'unknown' (folder-walk cannot classify it)."""
+    """Guard proving the reconcile is load-bearing: with /object_info unavailable, the same generic-folder file stays 'unknown' (folder-walk cannot classify it)."""
     comfy_dir = tmp_path / "comfy"
     generic_dir = comfy_dir / "models" / "my_custom_nodes"
     generic_dir.mkdir(parents=True)
@@ -368,9 +327,7 @@ def test_scan_without_object_info_leaves_generic_file_unknown(tmp_path, temp_reg
 # --------------------------------------------------------------------------- #
 
 def _make_comfy_tree(root):
-    """A folder tree covering every SUBFOLDER_MAPPING convention plus one
-    unmapped folder, one file each - the fixture the workdir-override and
-    preview tests scan."""
+    """A folder tree covering every SUBFOLDER_MAPPING convention plus one unmapped folder, one file each - the fixture the workdir-override and preview tests scan."""
     layout = {
         "unet": "unet_model.safetensors",
         "clip": "clip_model.safetensors",
@@ -386,10 +343,7 @@ def _make_comfy_tree(root):
 
 
 def test_scan_workdir_override_never_touches_configured_comfy_workdir(tmp_path, temp_registry):
-    """A one-off scan with an explicit workdir must not even READ the configured
-    comfy_workdir - `workdir or get_comfy_workdir()` short-circuits, so patching
-    get_comfy_workdir to explode proves it is never consulted (a stronger
-    guarantee than snapshotting config values, which could pass by coincidence)."""
+    """A one-off scan with an explicit workdir must not even READ the configured comfy_workdir - `workdir or get_comfy_workdir()` short-circuits, so patching get_comfy_workdir to explode proves it is never consulted (a stronger guarantee than snapshotting config values, which could pass by coincidence)."""
     comfy_dir = tmp_path / "comfy"
     _make_comfy_tree(comfy_dir)
 
@@ -404,9 +358,7 @@ def test_scan_workdir_override_never_touches_configured_comfy_workdir(tmp_path, 
 
 
 def test_scan_workdir_override_categorizes_every_convention(tmp_path, temp_registry):
-    """An arbitrary one-off folder scans and categorizes exactly like the
-    configured-workdir path - unet/clip/vae/loras map correctly, the unmapped
-    folder lands as 'unknown'."""
+    """An arbitrary one-off folder scans and categorizes exactly like the configured-workdir path - unet/clip/vae/loras map correctly, the unmapped folder lands as 'unknown'."""
     comfy_dir = tmp_path / "comfy"
     _make_comfy_tree(comfy_dir)
 
@@ -439,9 +391,7 @@ def test_preview_comfy_models_registers_nothing(tmp_path, temp_registry):
 
 
 def test_preview_then_scan_totals_agree(tmp_path, temp_registry):
-    """The preview's total_new (sum of counts) must match what a REAL scan of the
-    same folder actually adds - a stale/mismatched preview would mislead the
-    guided-import confirm step."""
+    """The preview's total_new (sum of counts) must match what a REAL scan of the same folder actually adds - a stale/mismatched preview would mislead the guided-import confirm step."""
     comfy_dir = tmp_path / "comfy"
     _make_comfy_tree(comfy_dir)
 
@@ -454,9 +404,7 @@ def test_preview_then_scan_totals_agree(tmp_path, temp_registry):
 
 
 def test_preview_excludes_already_registered_files(tmp_path, temp_registry):
-    """A file the registry already knows about must count toward
-    already_registered, not toward the per-type counts - re-previewing the same
-    folder after a real scan should show nothing new left to import."""
+    """A file the registry already knows about must count toward already_registered, not toward the per-type counts - re-previewing the same folder after a real scan should show nothing new left to import."""
     comfy_dir = tmp_path / "comfy"
     _make_comfy_tree(comfy_dir)
 
@@ -469,9 +417,7 @@ def test_preview_excludes_already_registered_files(tmp_path, temp_registry):
 
 
 class TestScanProgressCallback:
-    """scan_comfy_models's progress_cb: the unit the GUI's job-based real scan
-    (models.py's gui_scan_models) wires to Job.progress() for a real
-    "registering model N of M" count. Unit-level, no HTTP/job machinery."""
+    """scan_comfy_models's progress_cb: the unit the GUI's job-based real scan (models.py's gui_scan_models) wires to Job.progress() for a real 'registering model N of M' count."""
 
     def test_progress_cb_called_once_per_file_with_a_fixed_total(self, tmp_path, temp_registry):
         comfy_dir = tmp_path / "comfy"
@@ -490,9 +436,7 @@ class TestScanProgressCallback:
         assert {c[2] for c in calls} == set(layout.values())
 
     def test_progress_cb_still_fires_for_an_already_registered_file(self, tmp_path, temp_registry):
-        """A file that turns out to be a skip (already registered) is still a
-        real item of work in the loop - the callback must count it too, or a
-        rescan with mostly-skips would show a bar that never reaches its total."""
+        """A file that turns out to be a skip (already registered) is still a real item of work in the loop - the callback must count it too, or a rescan with mostly-skips would show a bar that never reaches its total."""
         comfy_dir = tmp_path / "comfy"
         _make_comfy_tree(comfy_dir)
         with patch("localm.model_manager.scan.comfy_object_info", return_value=None):
@@ -507,8 +451,7 @@ class TestScanProgressCallback:
         assert [c[0] for c in calls] == [1, 2, 3, 4, 5]
 
     def test_progress_cb_default_none_changes_nothing(self, tmp_path, temp_registry):
-        """Every existing caller (the CLI has none; only the GUI route calls
-        this) omits progress_cb - confirms that path is untouched."""
+        """Every existing caller (the CLI has none; only the GUI route calls this) omits progress_cb - confirms that path is untouched."""
         comfy_dir = tmp_path / "comfy"
         _make_comfy_tree(comfy_dir)
         with patch("localm.model_manager.scan.comfy_object_info", return_value=None):
@@ -516,17 +459,13 @@ class TestScanProgressCallback:
         assert res.added == 5 and res.skipped == 0
 
     def test_preview_comfy_models_takes_no_progress_cb(self, tmp_path, temp_registry):
-        """Deliberate: preview's directory walk has no honest total to report
-        progress against (see the docstring on scan_comfy_models), so
-        preview_comfy_models's signature was left unchanged rather than
-        growing an unused parameter."""
+        """Deliberate: preview's directory walk has no honest total to report progress against (see the docstring on scan_comfy_models), so preview_comfy_models's signature was left unchanged rather than growing an unused parameter."""
         import inspect
         assert "progress_cb" not in inspect.signature(preview_comfy_models).parameters
 
 
 def test_preview_missing_models_folder_reports_reason(tmp_path, temp_registry):
-    """No models/ folder under the chosen workdir -> the same honest 'none (...)'
-    reason scan_comfy_models gives, not a silent empty result."""
+    """No models/ folder under the chosen workdir -> the same honest 'none (...)' reason scan_comfy_models gives, not a silent empty result."""
     empty_dir = tmp_path / "not-comfy"
     empty_dir.mkdir()
 

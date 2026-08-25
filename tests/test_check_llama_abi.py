@@ -1,10 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Offline tests for scripts/check_llama_abi.py (the header-diff ABI verifier).
-
-No network: the headers are embedded. Proves the verifier (a) agrees that
-localm's named fields match the current upstream layout, (b) FAILS on a
-mid-struct insertion, and (c) computes natural-alignment offsets correctly.
-"""
+"""Offline tests for scripts/check_llama_abi.py (the header-diff ABI verifier)."""
 
 from __future__ import annotations
 
@@ -137,9 +132,7 @@ _GOOD_HEADER_CTX_V2 = _GOOD_HEADER.replace(
 
 
 def test_embedded_headers_are_the_two_real_layouts():
-    """Guards the fixtures themselves: if the V2 edit above stopped producing a
-    genuinely different llama_model_params, every test below would silently
-    check V1 twice and still pass."""
+    """Guards the fixtures themselves: if the V2 edit above stopped producing a genuinely different llama_model_params, every test below would silently check V1 twice and still pass."""
     assert abichk._header_model_params_layout(_GOOD_HEADER) == "v1"
     assert abichk._header_model_params_layout(_GOOD_HEADER_V2) == "v2"
     assert abichk._header_context_params_layout(_GOOD_HEADER) == "v1"
@@ -173,18 +166,13 @@ def test_verifier_fails_on_midstruct_insertion(header, layout):
 
 
 def test_verifier_fails_when_the_wrong_model_params_layout_is_selected():
-    """The upgrade's core hazard, as the offline verifier sees it: a V2 header
-    checked against the V1 class (what a stale binding does) must FAIL, and vice
-    versa. If either direction passed, the two-layout split would be cosmetic."""
+    """The upgrade's core hazard, as the offline verifier sees it: a V2 header checked against the V1 class (what a stale binding does) must FAIL, and vice versa."""
     assert abichk._check("llama_model_params", _GOOD_HEADER_V2, "v1", "v1") > 0
     assert abichk._check("llama_model_params", _GOOD_HEADER, "v2", "v1") > 0
 
 
 def test_verifier_fails_when_the_wrong_context_params_layout_is_selected():
-    """Same hazard, the newer axis: a context_params v2 header checked against
-    the v1 class (or vice versa) must FAIL - this is the exact check that
-    would have caught the n_outputs_max_per_seq insertion before it ever
-    reached a user, had the verifier been run against a current header."""
+    """Same hazard, the newer axis: a context_params v2 header checked against the v1 class (or vice versa) must FAIL - this is the exact check that would have caught the n_outputs_max_per_seq insertion before it ever reached a user, had the verifier been run against a current header."""
     assert abichk._check("llama_context_params", _GOOD_HEADER_CTX_V2, "v1", "v1") > 0
     assert abichk._check("llama_context_params", _GOOD_HEADER, "v1", "v2") > 0
 
@@ -272,10 +260,7 @@ def _run_enum(binding, header):
 
 
 def test_enum_fixture_edits_actually_took():
-    """Guards the FAULT INJECTORS, not the code. str.replace silently no-ops on a
-    pattern that does not match, and a fault that never fired is indistinguishable
-    from a checker that correctly found nothing to report: both give a green run.
-    Every test below is worthless if these strings are equal."""
+    """Guards the FAULT INJECTORS, not the code. str.replace silently no-ops on a pattern that does not match, and a fault that never fired is indistinguishable from a checker that correctly found nothing to report: both give a green run."""
     assert _ENUM_ADDED != _ENUM_HEADER
     assert _ENUM_CHANGED != _ENUM_HEADER
     assert _ENUM_NO_AUTO != _ENUM_HEADER
@@ -288,10 +273,7 @@ def test_enum_fixture_edits_actually_took():
 
 
 def test_added_member_and_changed_value_are_distinct_outcomes():
-    """THE ORACLE. Collapsing these two into one outcome is the defect, not the
-    fix: hard-failing on an addition trains people to widen localm's accept-sets
-    to silence the gate, which destroys the misaligned-read tripwire that reads
-    them; passing a changed value through lets a number quietly change meaning."""
+    """THE ORACLE."""
     added_problems, added_notes = _run_enum(_LOAD_MODE, _ENUM_ADDED)
     changed_problems, changed_notes = _run_enum(_LOAD_MODE, _ENUM_CHANGED)
 
@@ -310,8 +292,7 @@ def test_added_member_and_changed_value_are_distinct_outcomes():
 
 
 def test_changed_value_names_both_numbers(capsys):
-    """A bare "mismatch" sends the reader to the header to work out which side
-    moved. The report has to carry both values to be actionable."""
+    """A bare 'mismatch' sends the reader to the header to work out which side moved."""
     _run_enum(_LOAD_MODE, _ENUM_CHANGED)
     out = capsys.readouterr().out
     assert "LLAMA_LOAD_MODE_MMAP" in out
@@ -319,42 +300,33 @@ def test_changed_value_names_both_numbers(capsys):
 
 
 def test_header_predating_a_bound_member_is_a_note_not_a_failure():
-    """The b10360 case, measured against the real header: localm binds AUTO = -1
-    and that pinned ref predates it. Failing here would redden the default run on
-    master over a build with nothing wrong with it."""
+    """The b10360 case, measured against the real header: localm binds AUTO = -1 and that pinned ref predates it."""
     problems, notes = _run_enum(_LOAD_MODE, _ENUM_NO_AUTO)
     assert problems == 0
     assert notes == []      # not additive either: localm binds it, upstream lacks it
 
 
 def test_enum_absent_with_its_field_absent_is_skipped():
-    """_GOOD_HEADER is pre-reorder: no llama_model_params.load_mode and no
-    llama_load_mode. That header predates the feature and is not drift."""
+    """_GOOD_HEADER is pre-reorder: no llama_model_params.load_mode and no llama_load_mode."""
     assert _run_enum(_LOAD_MODE, _GOOD_HEADER) == (0, [])
 
 
 def test_enum_absent_while_its_field_is_present_fails():
-    """The discriminator a bare absence check cannot make. _GOOD_HEADER_V2 has
-    "enum llama_load_mode load_mode;" in the struct but no enum definition, so
-    the domain is UNVERIFIED, which must not read the same as verified."""
+    """The discriminator a bare absence check cannot make. _GOOD_HEADER_V2 has 'enum llama_load_mode load_mode;' in the struct but no enum definition, so the domain is UNVERIFIED, which must not read the same as verified."""
     problems, notes = _run_enum(_LOAD_MODE, _GOOD_HEADER_V2)
     assert problems > 0
     assert notes == []
 
 
 def test_a_localm_policy_constant_is_not_reported_as_a_binding():
-    """embedder._POOLING_DEFAULT is localm's own choice of MEAN, not an upstream
-    enumerator. An earlier prefix-scanning version of the registry reported
-    "localm binds LLAMA_POOLING_TYPE_DEFAULT", which is simply false. A verifier
-    that invents a binding is worse than one with a narrower reach."""
+    """embedder._POOLING_DEFAULT is localm's own choice of MEAN, not an upstream enumerator."""
     problems, notes = _run_enum(_POOLING, _ENUM_HEADER)
     assert problems == 0
     assert notes == []
 
 
 def test_registry_names_constants_that_still_exist():
-    """If someone renames a constant in localm, the registry stops comparing it
-    and every remaining member still reads "ok" - a check that quietly shrank."""
+    """If someone renames a constant in localm, the registry stops comparing it and every remaining member still reads 'ok' - a check that quietly shrank."""
     for binding in abichk._ENUM_BINDINGS:
         bound, missing, _ = abichk._localm_enum_binding(binding)
         assert missing == [], f"{binding.c_enum}: {binding.module} lost {missing}"
@@ -362,9 +334,7 @@ def test_registry_names_constants_that_still_exist():
 
 
 def test_registry_that_forgot_a_real_member_fails():
-    """The self-audit that keeps the explicit member list from going stale: a
-    constant localm defines under the prefix, which upstream also defines as a
-    member of this enum, is a binding the registry forgot."""
+    """The self-audit that keeps the explicit member list from going stale: a constant localm defines under the prefix, which upstream also defines as a member of this enum, is a binding the registry forgot."""
     stale = _LOAD_MODE._replace(
         members=tuple(m for m in _LOAD_MODE.members if m != "MMAP"))
     problems, _ = _run_enum(stale, _ENUM_HEADER)
@@ -389,9 +359,7 @@ def test_parse_enum_members_implicit_and_explicit():
 
 
 def test_parse_enum_members_does_not_guess_after_an_unreadable_value():
-    """A non-literal value poisons every implicit member after it. Guessing one
-    would be indistinguishable from a read one and could manufacture a false ok
-    on the exact comparison this file exists to make."""
+    """A non-literal value poisons every implicit member after it."""
     members, unreadable = abichk._parse_enum_members("A = SOME_MACRO, B, C = 9")
     assert "A" in unreadable and "B" in unreadable
     assert "A" not in members and "B" not in members

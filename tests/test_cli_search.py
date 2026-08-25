@@ -1,9 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""`localm search <repo> --files` (localm/cli/models.py:search_cmd).
-
-Covers the CLI mirror of the GUI's discover_files fit-badge computation -
-zero test coverage existed for this command before (found during a
-fresh-context review of the AUDIT-GPU-SPLIT-1 fix)."""
+"""`localm search <repo> --files` (localm/cli/models.py:search_cmd)."""
 
 from unittest.mock import patch
 
@@ -28,11 +24,7 @@ def test_search_files_shows_fit_badge(cli_runner):
 
 
 def test_search_files_fit_reflects_combined_split_capacity(cli_runner):
-    """AUDIT-GPU-SPLIT-1: `localm search <repo> --files` must weigh fit
-    against discover.vram_capacity()'s COMBINED split capacity, not just
-    vram_info()'s single main-GPU number - a file too big for one GPU alone
-    but that fits split across a configured 2-GPU split must badge "fits",
-    and the caption must show the COMBINED total, not one GPU's."""
+    """AUDIT-GPU-SPLIT-1: `localm search <repo> --files` must weigh fit against discover.vram_capacity()'s COMBINED split capacity, not just vram_info()'s single main-GPU number - a file too big for one GPU alone but that fits split across a configured 2-GPU split must badge 'fits', and the caption must sh..."""
     # The CLI displays total/GiB (1024**3), so use GiB-based sizes throughout.
     # need ~= 15GiB*1.1 + 1.5e9 =~ 18 GiB: exceeds the 16 GiB main GPU alone
     # (too-big), but fits under 0.85 * the 24 GiB combined split.
@@ -59,11 +51,7 @@ def test_search_files_fit_reflects_combined_split_capacity(cli_runner):
 
 
 def test_search_files_stale_split_does_not_claim_combined(cli_runner):
-    """cli-1 accuracy: a 2-entry split that resolves to only ONE detected device
-    (a stale/typo'd index, or a GGUF-only box) makes vram_capacity() fall back to
-    the single main GPU - so the caption must say 'main GPU', NOT 'combined across
-    your 2-GPU split' (which would mislabel a one-GPU number, the very bug the
-    reword fixes). Gated on split_device_count, not the raw config length."""
+    """cli-1 accuracy: a 2-entry split that resolves to only ONE detected device (a stale/typo'd index, or a GGUF-only box) makes vram_capacity() fall back to the single main GPU - so the caption must say 'main GPU', NOT 'combined across your 2-GPU split' (which would mislabel a one-GPU number, the very bu..."""
     gib = 1024 ** 3
     files = [{"file": "model.Q4_K_M.gguf", "quant": "Q4_K_M",
              "size_bytes": 2 * gib, "n_parts": 1}]

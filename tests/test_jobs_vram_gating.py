@@ -1,15 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Tests for VRAM gating and engine reuse in scheduled jobs.
-
-The gate's *decision* (reuse the live engine, or evict it to make room for the job
-model) is what these tests pin down. The eviction MECHANISM is deliberately routed
-through the guarded server-loop helper ``_evict_shared_engine_for_media`` (which
-honors the in-flight pin and serializes with get_engine) instead of a raw
-``live.unload()`` on the worker thread - so these tests spy on that helper rather
-than on ``live.unload``. The guarded mechanism itself (pin honoured, freed via
-unload_one_model on the loop) is exercised end to end in
-``test_jobs_shared_engine_free.py``.
-"""
+"""Tests for VRAM gating and engine reuse in scheduled jobs."""
 
 import pytest
 from unittest.mock import MagicMock, patch
@@ -82,9 +72,7 @@ class TestJobsVramGating:
         assert reused is False, "a freshly loaded engine is owned by the runner"
 
     def _install_split_gpu(self, monkeypatch, gpu_split_indices):
-        """Overlay just gpu_split_indices onto the REAL (test-isolated)
-        config, same pattern used elsewhere in this fix - a stripped-down
-        fake config dict would break unrelated load_config() readers."""
+        """Overlay just gpu_split_indices onto the REAL (test-isolated) config, same pattern used elsewhere in this fix - a stripped-down fake config dict would break unrelated load_config() readers."""
         from localm.config import load_config as real_load_config
         base_cfg = real_load_config()
         monkeypatch.setattr(
@@ -96,13 +84,7 @@ class TestJobsVramGating:
     def test_split_configured_combined_capacity_avoids_unnecessary_unload(
         self, mock_engine_cls, mock_get_model_info, monkeypatch
     ):
-        """AUDIT-GPU-SPLIT-1: the VRAM gate must weigh the swap decision
-        against discover.vram_capacity()'s COMBINED split capacity, not just
-        the single main GPU - with a 2-GPU split where the single main GPU
-        alone would trigger an unload but the combined free comfortably
-        covers the media estimate, the live chat engine must NOT be evicted.
-        should_swap_for_media runs for REAL here (not mocked), so this proves
-        the actual decision, not just that the gate was reached."""
+        """AUDIT-GPU-SPLIT-1: the VRAM gate must weigh the swap decision against discover.vram_capacity()'s COMBINED split capacity, not just the single main GPU - with a 2-GPU split where the single main GPU alone would trigger an unload but the combined free comfortably covers the media estimate, the live ch..."""
         mock_get_model_info.return_value = ("/path/to/llama-3b", "llama-3b")
         new_eng = MagicMock()
         mock_engine_cls.return_value = new_eng
@@ -141,10 +123,7 @@ class TestJobsVramGating:
     def test_same_single_gpu_free_without_split_still_evicts(
         self, mock_engine_cls, mock_get_model_info, monkeypatch
     ):
-        """Guard: the SAME 10 GB free, but with NO split configured (single
-        GPU only), still correctly triggers the eviction - proves the split
-        configuration is genuinely what makes the difference above, not a
-        coincidence of the threshold math."""
+        """Guard: the SAME 10 GB free, but with NO split configured (single GPU only), still correctly triggers the eviction - proves the split configuration is genuinely what makes the difference above, not a coincidence of the threshold math."""
         mock_get_model_info.return_value = ("/path/to/llama-3b", "llama-3b")
         new_eng = MagicMock()
         mock_engine_cls.return_value = new_eng

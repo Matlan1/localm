@@ -1,18 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The mtmd_input_text ABI drift (llama.cpp #25548) and its two consequences.
-
-llama.cpp commit 4114ba18b (2026-07-12) inserted ``size_t text_len`` as the SECOND
-field of ``mtmd_input_text``. Passing the older 16-byte layout to a build that has
-it makes the callee read ``text_len`` out of the two flag bytes plus padding: with
-both flags true that is 257, so EVERY image prompt was silently truncated to 257
-bytes, dropping the media marker and failing with "number of media markers in text
-(0) does not match number of bitmaps (1)".
-
-Measured against the real bundled runtime, both directions, on
-Qwen3-VL-8B-Instruct: pre-fix struct rc=2 / post-fix struct rc=0, with the cliff
-exactly at marker offset 257. See
-dev-notes/mtmd-input-text-abi-drift-2026-08-06.md.
-"""
+"""The mtmd_input_text ABI drift (llama.cpp #25548) and its two consequences."""
 
 import ctypes
 import os
@@ -31,9 +18,7 @@ from localm.inference.backends.llamacpp import mtmd as lmtmd
 # --------------------------------------------------------------------------- #
 
 def test_v1_flag_bytes_are_read_as_text_len_257_by_a_v2_build():
-    """Pins the exact mechanism, so a future 'simplification' back to one struct
-    is caught with its consequence spelled out rather than as an opaque size
-    assertion."""
+    """Pins the exact mechanism, so a future 'simplification' back to one struct is caught with its consequence spelled out rather than as an opaque size assertion."""
     v1 = lmtmd._MtmdInputTextV1(b"x" * 1000, True, True)
     raw = ctypes.string_at(ctypes.byref(v1), ctypes.sizeof(v1))
     assert ctypes.sizeof(v1) == 16
@@ -57,12 +42,7 @@ def test_make_input_text_sets_text_len_only_on_v2():
 
 
 def test_probe_payloads_keep_add_special_false_for_a_v1_reader():
-    """The 256-byte length is load-bearing, not cosmetic.
-
-    A V1 build reads add_special from byte 8, which under the V2 struct is the low
-    byte of text_len. At 256 that reads 0 (False). If it read nonzero, a V1 build
-    would prepend BOS to the empty string it sees and return 1 token instead of 0,
-    and the discriminator would silently invert."""
+    """The 256-byte length is load-bearing, not cosmetic."""
     assert len(lmtmd._PROBE_CONTROL) == 256
     assert len(lmtmd._PROBE_EMBEDDED_NUL) == 256
     assert lmtmd._PROBE_EMBEDDED_NUL[0] == 0        # the leading NUL is the whole point
@@ -79,11 +59,7 @@ def test_probe_payloads_keep_add_special_false_for_a_v1_reader():
 # --------------------------------------------------------------------------- #
 
 class _FakeMtmd:
-    """A stand-in mtmd honouring either text_len or strlen.
-
-    Deliberately reads the caller's struct out of real memory by address, exactly
-    as the native side does, so the test exercises the actual marshalling rather
-    than a Python-level mock of it."""
+    """A stand-in mtmd honouring either text_len or strlen."""
 
     def __init__(self, honours_text_len: bool, *, tokenize_rc: int = 0,
                  tokens_per_byte: int = 1):
@@ -124,10 +100,7 @@ def test_probe_detects_a_strlen_build():
 
 
 def test_probe_is_inconclusive_when_the_control_cannot_fire():
-    """The fires-control for the instrument itself. A build where tokenize yields
-    no tokens at all must read as "cannot tell", never as "uses strlen" - the two
-    are indistinguishable from the discriminator alone, and guessing wrong
-    silently truncates every image prompt."""
+    """The fires-control for the instrument itself."""
     assert lmtmd._detect_input_text_class(_FakeMtmd(True, tokens_per_byte=0), 1) is None
     assert lmtmd._detect_input_text_class(_FakeMtmd(True, tokenize_rc=1), 1) is None
 
@@ -137,12 +110,7 @@ def test_probe_is_inconclusive_when_the_control_cannot_fire():
 # --------------------------------------------------------------------------- #
 
 def test_vision_input_error_is_not_a_runtime_error():
-    """The classification IS the fix.
-
-    GgufBackend.chat_stream catches RuntimeError from the runner and unloads the
-    model; _runner.py lets any non-InvalidGrammarError escape and kill the worker
-    process. A checked status code from a native call that returned normally must
-    be neither of those."""
+    """The classification IS the fix."""
     assert issubclass(VisionInputError, UnsupportedInputError)
     assert issubclass(VisionInputError, ValueError)
     assert not issubclass(VisionInputError, RuntimeError)
@@ -188,8 +156,7 @@ def test_eval_into_raises_vision_input_error_on_a_nonzero_tokenize_rc():
 # --------------------------------------------------------------------------- #
 
 class _ParamsRecorder:
-    """Captures the params buffer mtmd_init_from_file is handed, so the two
-    offsets this module writes can be asserted as BYTES rather than trusted."""
+    """Captures the params buffer mtmd_init_from_file is handed, so the two offsets this module writes can be asserted as BYTES rather than trusted."""
 
     def __init__(self, init_returns=0x7000):
         self.seen = []
@@ -217,9 +184,7 @@ def _bare_ctx(m):
 
 
 def test_open_asks_for_the_gpu_and_a_real_thread_count():
-    """The regression this guards: the projector was pinned to the CPU for every
-    user on every GPU, and n_threads was left at mtmd's flat default of 4, so a
-    screenshot took ten minutes with the card idle."""
+    """The regression this guards: the projector was pinned to the CPU for every user on every GPU, and n_threads was left at mtmd's flat default of 4, so a screenshot took ten minutes with the card idle."""
     rec = _ParamsRecorder()
     c = _bare_ctx(rec)
     c._open(use_gpu=True)
@@ -263,8 +228,7 @@ def test_retry_on_cpu_reopens_once_and_refuses_to_loop():
 
 
 def test_a_gpu_encode_failure_is_retryable_but_a_cpu_one_is_not():
-    """The type carries the retry decision, so the caller (which owns the KV the
-    failed evaluation dirtied) can reset and try once on the CPU."""
+    """The type carries the retry decision, so the caller (which owns the KV the failed evaluation dirtied) can reset and try once on the CPU."""
     assert issubclass(lmtmd.MtmdGpuEncodeFailed, VisionInputError)
 
     import localm.inference.backends.llamacpp._api as api
@@ -312,14 +276,7 @@ def test_a_gpu_encode_failure_is_retryable_but_a_cpu_one_is_not():
 
 
 def test_runner_dispatch_survives_an_unprocessable_image(monkeypatch):
-    """THE crash regression, sited on the dispatch loop where the defect lives.
-
-    _runner_main's chat_stream branch caught only InvalidGrammarError and let
-    everything else escape on purpose, killing the worker process. A test of
-    eval_into alone cannot see that: the collapse is in the ARRANGEMENT of except
-    clauses here, not in the raising code. So drive the real dispatch loop and
-    assert BOTH halves - it reports an error envelope, and it is still alive to
-    serve the next command."""
+    """THE crash regression, sited on the dispatch loop where the defect lives."""
     import queue
     import threading
 
@@ -384,9 +341,7 @@ def test_runner_dispatch_survives_an_unprocessable_image(monkeypatch):
 
 
 def test_parent_maps_the_tag_back_to_a_non_runtime_error():
-    """The other half: GgufBackend.chat_stream catches RuntimeError from here and
-    UNLOADS the model, so an untagged envelope would still evict a healthy model
-    from VRAM even once the worker survives."""
+    """The other half: GgufBackend.chat_stream catches RuntimeError from here and UNLOADS the model, so an untagged envelope would still evict a healthy model from VRAM even once the worker survives."""
     import queue
 
     from localm.inference.backends.llamacpp._runner import ModelRunner

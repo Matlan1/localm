@@ -1,8 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""
-Tests for Agent.context_chars() (multipart message handling) and
-Agent._patch_mode_intercept() (correct tool argument keys).
-"""
+"""Tests for Agent.context_chars() (multipart message handling) and Agent._patch_mode_intercept() (correct tool argument keys)."""
 
 from pathlib import Path
 from unittest.mock import MagicMock, patch

@@ -1,11 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""
-Tests for the MCP client (localm.plugins.coder.mcp).
-
-A real fake MCP server (a small Python script speaking newline-delimited
-JSON-RPC over stdio) is spawned as a subprocess - the full transport path
-is exercised, not mocks.
-"""
+"""Tests for the MCP client (localm.plugins.coder.mcp)."""
 
 import json
 import sys

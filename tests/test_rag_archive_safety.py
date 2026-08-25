@@ -1,22 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""RAG archive-extraction safety (Antigravity-audit HIGH-8 / MED-17 / MED-21).
-
-HIGH-8  _extract_zip/_extract_tar bound each single member (80 MB) but had NO cap
-        on the number of members or the running accumulated output - the
-        whole-archive MAX_TEXT_CHARS truncation was applied only AFTER every
-        member was decoded and joined in memory. A 30 MB zip of thousands of
-        highly-compressible members could build ~30 GB in RAM first (a
-        decompression-amplification DoS).
-
-MED-17  Compressed-tar suffixes (.tgz/.tbz/.txz) were whitelisted as extractable
-        but had no dispatch branch, so a valid tarball raised "Unsupported file
-        type". And a single gzip/bzip2/xz-compressed non-tar file was sniffed to
-        ".tar" and routed to the tar extractor, which failed.
-
-MED-21  A per-member extraction error was appended into the indexed text as
-        "[file: X - error: ...]", so failures became retrievable knowledge-base
-        content instead of being surfaced/logged (AGENTS.md rule 5).
-"""
+"""RAG archive-extraction safety (Antigravity-audit HIGH-8 / MED-17 / MED-21)."""
 
 import bz2
 import gzip
@@ -51,8 +34,7 @@ def _targz(members: dict) -> bytes:
 
 
 def test_archive_extraction_is_bounded(monkeypatch):
-    """HIGH-8: the extractor stops once the accumulated-text budget is reached,
-    instead of decoding every member into memory first."""
+    """HIGH-8: the extractor stops once the accumulated-text budget is reached, instead of decoding every member into memory first."""
     # Shrink the budget so the test stays small and fast.
     monkeypatch.setattr(extract, "MAX_TEXT_CHARS", 5_000)
 
@@ -78,16 +60,14 @@ def test_archive_extraction_is_bounded(monkeypatch):
 
 
 def test_compressed_tarball_extracts(monkeypatch):
-    """MED-17: a real .tar.gz (and .tgz) extracts its members instead of raising
-    'Unsupported file type'."""
+    """MED-17: a real .tar.gz (and .tgz) extracts its members instead of raising 'Unsupported file type'."""
     data = _targz({"a.txt": "alpha content", "b.txt": "beta content"})
     out = extract_bytes(data, "bundle.tgz")
     assert "alpha content" in out and "beta content" in out
 
 
 def test_single_gzip_file_extracts_inner_text(monkeypatch):
-    """MED-17: a single gzip-compressed non-tar file decompresses to its inner
-    content instead of being mis-routed to the tar extractor and failing."""
+    """MED-17: a single gzip-compressed non-tar file decompresses to its inner content instead of being mis-routed to the tar extractor and failing."""
     inner = b"this is a plain text file that was gzipped, not a tarball"
     gz = gzip.compress(inner)
     out = extract_bytes(gz, "notes.txt.gz")
@@ -101,23 +81,7 @@ def test_single_bzip2_file_extracts_inner_text(monkeypatch):
 
 
 def test_nested_single_stream_compression_is_bounded():
-    """A file that is a single compressed stream wrapped many times over
-    (gzip(gzip(gzip(...)))) must be REFUSED with a clean ExtractError once the
-    nesting passes the depth bound, NOT recurse unboundedly.
-
-    The single-stream fallback in _extract_tar_or_stream re-enters extract_bytes
-    on the decompressed inner bytes; with no depth bound a ~30 KB file nested
-    past Python's recursion limit raises RecursionError - which is not an
-    ExtractError and so escapes every `except ExtractError` guard in the add /
-    upload / extract routes (a decompression-amplification DoS). The depth bound
-    (MAX_EXTRACT_DEPTH) is small, so testing just past it stays fast (nesting
-    deep enough to hit the recursion limit is O(n^2) to even build, because each
-    level re-probes the whole nest as a possible tarball).
-
-    This asserts the REFUSAL (pytest.raises), which is what makes it a real
-    regression guard: without the depth bound, this shallow nesting extracts
-    silently (no error) at every level, so the test would FAIL; a stray
-    RecursionError would not match ExtractError and would fail the test too."""
+    """A file that is a single compressed stream wrapped many times over (gzip(gzip(gzip(...)))) must be REFUSED with a clean ExtractError once the nesting passes the depth bound, NOT recurse unboundedly."""
     from localm.rag.extract import ExtractError, MAX_EXTRACT_DEPTH
     depth = MAX_EXTRACT_DEPTH + 5         # past the bound; small nest keeps it fast
     for name, comp in (("bomb.gz", gzip.compress),
@@ -132,8 +96,7 @@ def test_nested_single_stream_compression_is_bounded():
 
 
 def test_single_level_compression_still_extracts_after_depth_bound():
-    """The depth bound must not break the legitimate one-level cases: a single
-    gzip/bzip2/xz-wrapped text file, and a .tar.gz, still extract."""
+    """The depth bound must not break the legitimate one-level cases: a single gzip/bzip2/xz-wrapped text file, and a .tar.gz, still extract."""
     inner = b"a normal gzipped note, one level of compression only"
     assert "one level of compression only" in extract_bytes(
         gzip.compress(inner), "note.txt.gz")
@@ -144,8 +107,7 @@ def test_single_level_compression_still_extracts_after_depth_bound():
 
 
 def test_member_error_is_not_indexed_as_content(monkeypatch):
-    """MED-21: a member that fails extraction must NOT have its error string
-    folded into the returned (indexed) text."""
+    """MED-21: a member that fails extraction must NOT have its error string folded into the returned (indexed) text."""
     # A file that sniffs as PDF (starts with %PDF-) but is not a valid PDF, so
     # _extract_pdf raises inside the member loop.
     members = {
@@ -174,20 +136,12 @@ def test_member_error_is_not_indexed_as_content(monkeypatch):
 # shared machine, so it would be the wrong instrument for the property.
 
 def _binary_bomb(count: int, size: int) -> dict:
-    """The MEASURED bomb shape, not a synthetic stand-in: highly compressible NUL
-    blocks named .bin, so sniff_format classifies them as binary and they are
-    SKIPPED - contributing nothing to the text budget while each still costs a
-    full decompression."""
+    """The MEASURED bomb shape, not a synthetic stand-in: highly compressible NUL blocks named .bin, so sniff_format classifies them as binary and they are SKIPPED - contributing nothing to the text budget while each still costs a full decompression."""
     return {f"m{i:04d}.bin": b"\x00" * size for i in range(count)}
 
 
 def _inflation_probe(monkeypatch) -> list:
-    """Record the size of every member the extractor actually decompressed.
-
-    sniff_format is called once per successfully-read member, with that member's
-    DECOMPRESSED bytes, so summing its inputs measures inflation directly. The
-    real function is still called, so routing behaviour is unchanged (patching it
-    away would delete the behaviour under test)."""
+    """Record the size of every member the extractor actually decompressed."""
     seen: list = []
     real_sniff = extract.sniff_format
 
@@ -200,9 +154,7 @@ def _inflation_probe(monkeypatch) -> list:
 
 
 def _extract_ignoring_refusal(data: bytes, name: str) -> str:
-    """Extract, treating a refusal as an empty result. An all-binary archive
-    correctly ends in "no extractable text" - that refusal was never the defect,
-    the work done to reach it was, and that is what these tests measure."""
+    """Extract, treating a refusal as an empty result."""
     try:
         return extract_bytes(data, name)
     except Exception:
@@ -231,9 +183,7 @@ def test_binary_members_cannot_inflate_past_the_whole_archive_budget(
 
 @pytest.mark.parametrize("kind, build", [("zip", _zip), ("tar.gz", _targz)])
 def test_the_budget_marks_the_result_truncated(monkeypatch, kind, build):
-    """Rule 5: hitting the budget must TELL the user the archive was cut short,
-    not silently hand back partial text. Text members here, so there is a result
-    to carry the note."""
+    """Rule 5: hitting the budget must TELL the user the archive was cut short, not silently hand back partial text."""
     monkeypatch.setattr(extract, "MAX_ARCHIVE_INFLATED_BYTES", 2_000_000)
     members = {f"f{i:03d}.txt": ("x" * 500_000) for i in range(20)}
     out = _extract_ignoring_refusal(build(members), f"big.{kind}")
@@ -242,8 +192,7 @@ def test_the_budget_marks_the_result_truncated(monkeypatch, kind, build):
 
 @pytest.mark.parametrize("kind, build", [("zip", _zip), ("tar.gz", _targz)])
 def test_an_ordinary_archive_is_untouched_by_the_budget(monkeypatch, kind, build):
-    """No overcorrection. A normal small archive extracts every member in full
-    and carries NO truncation note - the budget must be invisible in normal use."""
+    """No overcorrection."""
     seen = _inflation_probe(monkeypatch)
     members = {f"doc{i}.txt": f"hello from document {i}" for i in range(5)}
     out = _extract_ignoring_refusal(build(members), f"docs.{kind}")

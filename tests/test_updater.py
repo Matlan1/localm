@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The self-updater: configured endpoint resolution, the version check, update
-classification (reboot/deps/runtime/setup), and the build download. Apply is NOT
-exercised here (it has its own detached-helper tests)."""
+"""The self-updater: configured endpoint resolution, the version check, update classification (reboot/deps/runtime/setup), and the build download."""
 
 import base64
 import json
@@ -94,10 +92,7 @@ def test_check_comparable_true_for_a_real_tie(monkeypatch):
 
 
 def test_check_comparable_false_for_an_unrecognized_tag(monkeypatch):
-    """The honesty fix: a tag the comparator cannot order (e.g. a "stable"/
-    "nightly" release name, unreachable in practice through the proxy's own
-    APP_TAG_RE filter but defended here regardless) must be flagged, not
-    silently folded into "not newer"."""
+    """The honesty fix: a tag the comparator cannot order (e.g. a 'stable'/ 'nightly' release name, unreachable in practice through the proxy's own APP_TAG_RE filter but defended here regardless) must be flagged, not silently folded into 'not newer'."""
     monkeypatch.setattr("localm.config.load_config", lambda: {"bugreport_upload_url": "https://w"})
     monkeypatch.setattr(_version, "read_version", lambda: "0.1.4")
     res = updater.check(opener=_opener({"version": "nightly"}))
@@ -114,9 +109,7 @@ def test_check_unconfigured_raises(monkeypatch):
 # --------------------- network policy gate (SSRF-UPDATE) -------------------
 
 def _counting_opener(payload):
-    """Like _opener, but records how many times it was actually called - the
-    mechanism assertion the policy gate needs: a blocked check must not just
-    fail, it must never invoke the transport at all (no DNS, no socket)."""
+    """Like _opener, but records how many times it was actually called - the mechanism assertion the policy gate needs: a blocked check must not just fail, it must never invoke the transport at all (no DNS, no socket)."""
     calls = {"n": 0}
 
     def op(method, url, data, headers, timeout):
@@ -143,9 +136,7 @@ def test_check_blocked_when_net_mode_off_never_calls_opener(monkeypatch):
 
 
 def test_check_net_mode_off_but_exempted_still_calls_opener(monkeypatch):
-    """The admin-only toggle lets THIS channel through even with net_mode=off -
-    the opener IS invoked, and the result is a normal successful check (not the
-    blocked path)."""
+    """The admin-only toggle lets THIS channel through even with net_mode=off - the opener IS invoked, and the result is a normal successful check (not the blocked path)."""
     monkeypatch.delenv("LOCALM_NET_MODE", raising=False)
     monkeypatch.setattr("localm.config.load_config", lambda: {
         "bugreport_upload_url": "https://w", "net_mode": "off",
@@ -160,9 +151,7 @@ def test_check_net_mode_off_but_exempted_still_calls_opener(monkeypatch):
 
 @pytest.mark.parametrize("mode", ["ask", "allow"])
 def test_check_ask_and_allow_modes_are_unaffected(monkeypatch, mode):
-    """The gate only fires on the literal 'off' kill switch - this is a no-op
-    for the default 'ask' mode and for 'allow', matching model_manager/pull.py's
-    own net_mode=='off' bar (no per-call confirmation needed here)."""
+    """The gate only fires on the literal 'off' kill switch - this is a no-op for the default 'ask' mode and for 'allow', matching model_manager/pull.py's own net_mode=='off' bar (no per-call confirmation needed here)."""
     monkeypatch.delenv("LOCALM_NET_MODE", raising=False)
     monkeypatch.setattr("localm.config.load_config", lambda: {
         "bugreport_upload_url": "https://w", "net_mode": mode})
@@ -174,8 +163,7 @@ def test_check_ask_and_allow_modes_are_unaffected(monkeypatch, mode):
 
 
 def test_check_env_var_off_blocks_even_with_config_ask(monkeypatch):
-    """LOCALM_NET_MODE overrides config, matching network_mode()'s own
-    precedence - a blocked check via the env var must also never call out."""
+    """LOCALM_NET_MODE overrides config, matching network_mode()'s own precedence - a blocked check via the env var must also never call out."""
     monkeypatch.setenv("LOCALM_NET_MODE", "off")
     monkeypatch.setattr("localm.config.load_config", lambda: {
         "bugreport_upload_url": "https://w", "net_mode": "ask"})
@@ -187,9 +175,7 @@ def test_check_env_var_off_blocks_even_with_config_ask(monkeypatch):
 
 
 def test_net_policy_allows_update_check_fails_safe_on_unreadable_config(monkeypatch):
-    """An unreadable config while net_mode is off must resolve to BLOCKED, never
-    silently exempted - same fail-closed direction as
-    _prerelease_channel_enabled() and network_mode() itself (HON-2)."""
+    """An unreadable config while net_mode is off must resolve to BLOCKED, never silently exempted - same fail-closed direction as _prerelease_channel_enabled() and network_mode() itself (HON-2)."""
     monkeypatch.delenv("LOCALM_NET_MODE", raising=False)
 
     def boom():
@@ -202,9 +188,7 @@ def test_net_policy_allows_update_check_fails_safe_on_unreadable_config(monkeypa
 # ------------------------ prerelease channel -----------------------------
 
 def test_check_stable_by_default_no_channel_param(monkeypatch):
-    """Opt-in only: with the setting absent (a config saved before it existed)
-    OR explicitly False, the request must be byte-identical to before this
-    feature - no query string at all, not even an empty one."""
+    """Opt-in only: with the setting absent (a config saved before it existed) OR explicitly False, the request must be byte-identical to before this feature - no query string at all, not even an empty one."""
     monkeypatch.setattr("localm.config.load_config", lambda: {"bugreport_upload_url": "https://w"})
     monkeypatch.setattr(_version, "read_version", lambda: "0.1.0")
     op = _opener({"ok": True, "version": "v0.2.0"})
@@ -232,8 +216,7 @@ def test_prerelease_channel_enabled_reads_the_setting(monkeypatch):
 
 
 def test_prerelease_channel_enabled_fails_safe_to_stable(monkeypatch):
-    """An unreadable config must never be read as 'prereleases on' - that would
-    be the wrong fail-open direction for a setting whose whole point is opt-in."""
+    """An unreadable config must never be read as 'prereleases on' - that would be the wrong fail-open direction for a setting whose whole point is opt-in."""
     def boom():
         raise OSError("config unreadable")
     monkeypatch.setattr("localm.config.load_config", boom)
@@ -241,10 +224,7 @@ def test_prerelease_channel_enabled_fails_safe_to_stable(monkeypatch):
 
 
 def test_opting_out_after_an_rc_does_not_strand_or_downgrade(monkeypatch):
-    """The downgrade edge case from the design: a client on 0.1.4-rc2 opts back
-    out. If the stable channel's latest is still older (0.1.3), the client
-    correctly stays on the rc (not newer, no downgrade offered, no crash) - it
-    is not stranded, it simply has nothing newer to move to yet."""
+    """The downgrade edge case from the design: a client on 0.1.4-rc2 opts back out."""
     monkeypatch.setattr("localm.config.load_config", lambda: {
         "bugreport_upload_url": "https://w", "update_allow_prerelease": False})
     monkeypatch.setattr(_version, "read_version", lambda: "0.1.4-rc2")
@@ -261,13 +241,7 @@ def test_opting_out_after_an_rc_does_not_strand_or_downgrade(monkeypatch):
 # --------------- anti-rollback unaffected by the comparable() signal -------
 
 def test_refuse_downgrade_unaffected_by_the_new_comparable_signal(monkeypatch):
-    """_version.comparable() is a purely additive signal for CLI/API messaging
-    (localm/cli/maintenance.py's update_cmd) - _refuse_downgrade still calls
-    is_newer() directly and unchanged, so it must refuse exactly what it
-    refused before this fix. In particular, an unparseable *new_version*
-    (attacker-controlled input to apply(), via a compromised/MITM'd proxy
-    response) must stay REFUSED, never newly accepted because comparable()
-    would call the comparison uncertain."""
+    """_version.comparable() is a purely additive signal for CLI/API messaging (localm/cli/maintenance.py's update_cmd) - _refuse_downgrade still calls is_newer() directly and unchanged, so it must refuse exactly what it refused before this fix."""
     from localm.bugreport import LocalmError
     monkeypatch.setattr(_version, "read_version", lambda: "0.1.5")
     with pytest.raises(LocalmError):
@@ -379,8 +353,7 @@ def test_download_bad_asset_id_raises(monkeypatch):
 
 
 def test_download_refuses_non_https_endpoint(tmp_path, monkeypatch):
-    """CHK-UPDATER-INTEGRITY (transport): a code-update download over the real
-    urllib path must refuse a non-HTTPS endpoint (no cleartext code delivery)."""
+    """CHK-UPDATER-INTEGRITY (transport): a code-update download over the real urllib path must refuse a non-HTTPS endpoint (no cleartext code delivery)."""
     monkeypatch.setattr("localm.config.load_config", lambda: {
         "bugreport_upload_url": "http://insecure.example"})   # http, not https
     from localm.bugreport import LocalmError
@@ -408,9 +381,7 @@ def _pyproject_str(deps):
 
 
 def _signed_build(version, deps):
-    """A deterministic build zip (bytes) + its base64 Ed25519 signature under the
-    test key. Returns ``(download_opener, signature_b64)``; the opener writes the
-    exact bytes that were signed, so the gate verifies them."""
+    """A deterministic build zip (bytes) + its base64 Ed25519 signature under the test key."""
     import io
     import zipfile
     buf = io.BytesIO()
@@ -429,8 +400,7 @@ def _signed_build(version, deps):
 
 @pytest.fixture
 def sig_env(monkeypatch):
-    """Pin the test signing key and an OLDER running version so apply()'s signature
-    gate and anti-rollback accept the 0.2.0 fixture builds."""
+    """Pin the test signing key and an OLDER running version so apply()'s signature gate and anti-rollback accept the 0.2.0 fixture builds."""
     monkeypatch.setattr(updater, "_UPDATE_PUBKEYS", (_TEST_PUB_HEX,))
     monkeypatch.setattr(_version, "read_version", lambda: "0.1.0")
 
@@ -495,8 +465,7 @@ def test_rollback_last_restores(tmp_path, monkeypatch, sig_env):
 
 
 def test_apply_surfaces_rollback_failure(tmp_path, monkeypatch, sig_env):
-    """If the post-update step fails AND rollback also fails, apply() must say so
-    (manual recovery needed) - never report a clean rollback over a broken install."""
+    """If the post-update step fails AND rollback also fails, apply() must say so (manual recovery needed) - never report a clean rollback over a broken install."""
     monkeypatch.setattr("localm.config.load_config", lambda: {"bugreport_upload_url": "https://w"})
     monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path / "home")
     inst = _fake_install(tmp_path, deps=("click",))
@@ -522,9 +491,7 @@ def test_rollback_last_without_backup_raises(tmp_path, monkeypatch):
 
 
 def _stage_rollback(tmp_path, monkeypatch, *, manifest):
-    """Build a fake updates dir (backup + optional applied-names manifest) and an install
-    where an update replaced `existing.txt` and ADDED `brand_new/`, so a rollback must
-    restore the old file and (with a manifest) remove the added entry."""
+    """Build a fake updates dir (backup + optional applied-names manifest) and an install where an update replaced `existing.txt` and ADDED `brand_new/`, so a rollback must restore the old file and (with a manifest) remove the added entry."""
     home = tmp_path / "home"
     monkeypatch.setattr("localm.config.home_dir", lambda: home)
     updir = home / "updates"
@@ -562,10 +529,7 @@ def test_rollback_last_falls_back_to_backup_listing_without_manifest(tmp_path, m
 
 
 def test_apply_removes_stale_manifest_when_write_fails(tmp_path, monkeypatch, sig_env, caplog):
-    """A failed applied_names.json write must NOT leave the PREVIOUS update's manifest in
-    place: the updates dir persists across updates, and a stale manifest would make a later
-    rollback remove/restore the WRONG top-level set (silent install data loss reported as
-    rolled_back:True). apply() unlinks it before the swap and WARNS on the failed write."""
+    """A failed applied_names.json write must NOT leave the PREVIOUS update's manifest in place: the updates dir persists across updates, and a stale manifest would make a later rollback remove/restore the WRONG top-level set (silent install data loss reported as rolled_back:True). apply() unlinks it befor..."""
     import logging
     from pathlib import Path
     monkeypatch.setattr("localm.config.load_config", lambda: {"bugreport_upload_url": "https://w"})
@@ -598,9 +562,7 @@ def test_apply_removes_stale_manifest_when_write_fails(tmp_path, monkeypatch, si
 
 
 def test_rollback_last_warns_on_corrupt_manifest_and_falls_back(tmp_path, monkeypatch, caplog):
-    """A corrupt applied_names.json is not silently collapsed to 'absent': rollback_last
-    WARNS that brand-new entries will not be removed, then falls back to the backup dir
-    (still restoring the pre-existing names)."""
+    """A corrupt applied_names.json is not silently collapsed to 'absent': rollback_last WARNS that brand-new entries will not be removed, then falls back to the backup dir (still restoring the pre-existing names)."""
     import logging
     install = _stage_rollback(tmp_path, monkeypatch, manifest=None)
     updir = (tmp_path / "home") / "updates"
@@ -615,10 +577,7 @@ def test_rollback_last_warns_on_corrupt_manifest_and_falls_back(tmp_path, monkey
 
 
 def test_apply_early_abort_preserves_prior_manifest(tmp_path, monkeypatch, sig_env):
-    """The manifest unlink is placed AFTER download/verify/extract precisely so an EARLY
-    abort (bad signature, downgrade, corrupt zip) leaves the PREVIOUS update's still-valid
-    applied_names.json intact. Regression guard: hoisting the unlink above the verify block
-    would silently reintroduce the data loss (a later rollback on a stale name set)."""
+    """The manifest unlink is placed AFTER download/verify/extract precisely so an EARLY abort (bad signature, downgrade, corrupt zip) leaves the PREVIOUS update's still-valid applied_names.json intact."""
     monkeypatch.setattr("localm.config.load_config", lambda: {"bugreport_upload_url": "https://w"})
     home = tmp_path / "home"
     monkeypatch.setattr("localm.config.home_dir", lambda: home)
@@ -642,9 +601,7 @@ def test_apply_early_abort_preserves_prior_manifest(tmp_path, monkeypatch, sig_e
 
 
 def test_apply_warns_when_prior_manifest_unlink_fails(tmp_path, monkeypatch, sig_env, caplog):
-    """If the previous applied_names.json cannot be unlinked with a non-FileNotFound OSError
-    (e.g. a lock), apply() WARNS (never crashes); the subsequent write still overwrites it.
-    Regression guard for the unlink-failure branch of the stale-manifest fix."""
+    """If the previous applied_names.json cannot be unlinked with a non-FileNotFound OSError (e.g. a lock), apply() WARNS (never crashes); the subsequent write still overwrites it."""
     import logging
     from pathlib import Path
     monkeypatch.setattr("localm.config.load_config", lambda: {"bugreport_upload_url": "https://w"})
@@ -690,11 +647,7 @@ def _setup_apply_env(tmp_path, monkeypatch):
 
 
 def test_apply_second_concurrent_call_refused_without_download(tmp_path, monkeypatch, sig_env):
-    """A second apply() while the lock is held must be refused BEFORE it downloads
-    anything. Proven deterministically via re-entrancy (the outer call's own
-    opener attempts a second apply()) rather than relying on real thread timing -
-    the mechanism assertion is a call-count of zero on the blocked call's opener,
-    not merely that something eventually raised."""
+    """A second apply() while the lock is held must be refused BEFORE it downloads anything."""
     home, inst = _setup_apply_env(tmp_path, monkeypatch)
     op, sig = _signed_build("0.2.0", ["click"])
     from localm.bugreport import LocalmError
@@ -719,11 +672,7 @@ def test_apply_second_concurrent_call_refused_without_download(tmp_path, monkeyp
 
 def test_apply_concurrent_threads_exactly_one_proceeds_backup_has_old_content(
         tmp_path, monkeypatch, sig_env):
-    """The property that actually matters (not just 'one call raised'): drive two
-    REAL concurrent threads at the lock with a barrier, then assert on the CONTENT
-    of the backup - it must hold the PRE-update build, never a NEW one, proving
-    the losing call's backup step never ran against an already-swapped install
-    (it never ran at all)."""
+    """The property that actually matters (not just 'one call raised'): drive two REAL concurrent threads at the lock with a barrier, then assert on the CONTENT of the backup - it must hold the PRE-update build, never a NEW one, proving the losing call's backup step never ran against an already-swapped ins..."""
     import threading
     home, inst = _setup_apply_env(tmp_path, monkeypatch)
     op, sig = _signed_build("0.2.0", ["click"])
@@ -759,8 +708,7 @@ def test_apply_concurrent_threads_exactly_one_proceeds_backup_has_old_content(
 
 
 def test_apply_fresh_lock_is_not_reclaimed(tmp_path, monkeypatch, sig_env):
-    """No pid recorded (an older-format lock) -> the age-only FALLBACK path;
-    fresh age -> not stale."""
+    """No pid recorded (an older-format lock) -> the age-only FALLBACK path; fresh age -> not stale."""
     home, inst = _setup_apply_env(tmp_path, monkeypatch)
     from localm.bugreport import LocalmError
     (home / "updates" / "apply.lock").mkdir(parents=True)   # fresh - well within the stale window
@@ -773,9 +721,7 @@ def test_apply_fresh_lock_is_not_reclaimed(tmp_path, monkeypatch, sig_env):
 
 
 def test_apply_stale_lock_is_reclaimed(tmp_path, monkeypatch, sig_env):
-    """No pid recorded (an older-format lock, or a crash between mkdir and the
-    pid write) -> falls back to age. A lock older than the threshold must not
-    strand every future update forever."""
+    """No pid recorded (an older-format lock, or a crash between mkdir and the pid write) -> falls back to age."""
     import os
     import time as _time
     home, inst = _setup_apply_env(tmp_path, monkeypatch)
@@ -794,11 +740,7 @@ def test_apply_stale_lock_is_reclaimed(tmp_path, monkeypatch, sig_env):
 
 def test_apply_lock_with_dead_pid_reclaimed_immediately_regardless_of_age(
         tmp_path, monkeypatch, sig_env):
-    """Liveness, not elapsed time, is the PRIMARY staleness signal (coordinator
-    review of the first version of this fix): a lock recording a CONFIRMED-DEAD
-    pid is reclaimed right away even with the age threshold set so high it
-    would never expire on its own - proving age alone is not what decides this
-    anymore."""
+    """Liveness, not elapsed time, is the PRIMARY staleness signal (coordinator review of the first version of this fix): a lock recording a CONFIRMED-DEAD pid is reclaimed right away even with the age threshold set so high it would never expire on its own - proving age alone is not what decides this anymo..."""
     home, inst = _setup_apply_env(tmp_path, monkeypatch)
     monkeypatch.setattr(updater, "_APPLY_LOCK_STALE_S", 10 ** 9)
     op, sig = _signed_build("0.2.0", ["click"])
@@ -813,13 +755,7 @@ def test_apply_lock_with_dead_pid_reclaimed_immediately_regardless_of_age(
 
 def test_apply_lock_with_live_pid_never_reclaimed_even_past_stale_threshold(
         tmp_path, monkeypatch, sig_env):
-    """The property the age-only design got wrong: a legitimately long-running
-    apply (download() has no cap on total duration, only a per-socket-op
-    timeout, so a large build on a slow link can genuinely take a long time)
-    must not be treated as an orphan just because it has been running a
-    while. A lock recording the CURRENT process's own pid - unambiguously
-    alive - must never be reclaimed, even with the age threshold set so low
-    it would expire almost instantly on age alone."""
+    """The property the age-only design got wrong: a legitimately long-running apply (download() has no cap on total duration, only a per-socket-op timeout, so a large build on a slow link can genuinely take a long time) must not be treated as an orphan just because it has been running a while."""
     import os
     import time as _time
     home, inst = _setup_apply_env(tmp_path, monkeypatch)
@@ -864,10 +800,7 @@ def test_apply_cleans_up_run_scratch_after_success(tmp_path, monkeypatch, sig_en
 
 
 def test_apply_preserves_run_backup_when_swap_and_rollback_both_fail(tmp_path, monkeypatch, sig_env):
-    """When BOTH the swap and its own internal rollback fail, the run's backup
-    must survive on disk - the surfaced error message names its exact path as
-    where to manually recover from, so deleting it here would destroy the one
-    thing that message points a human at."""
+    """When BOTH the swap and its own internal rollback fail, the run's backup must survive on disk - the surfaced error message names its exact path as where to manually recover from, so deleting it here would destroy the one thing that message points a human at."""
     home, inst = _setup_apply_env(tmp_path, monkeypatch)
     from localm import _apply_update as au
 

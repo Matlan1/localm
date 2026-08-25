@@ -1,13 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""A bug report must carry ACTUALLY useful data - app state (loaded model,
-backend, session mode, plugins), an allowlisted config subset, dependency
-versions, the in-memory recent-activity log, and (for the GUI) browser context -
-while NEVER leaking the API key, config secrets, or chat content.
-
-This pins the "reports still contain no useful data" fix: the rich sections are
-present and correct, and the privacy boundary holds (DEBUG-level model output and
-non-allowlisted config keys stay out).
-"""
+"""A bug report must carry ACTUALLY useful data - app state (loaded model, backend, session mode, plugins), an allowlisted config subset, dependency versions, the in-memory recent-activity log, and (for the GUI) browser context - while NEVER leaking the API key, config secrets, or chat content."""
 
 from __future__ import annotations
 
@@ -22,8 +14,7 @@ from localm import bugreport, debuglog
 
 @pytest.fixture
 def fresh_ring():
-    """Install a clean ring buffer on the localm logger for one test, then
-    restore the logger's prior handlers/level/global so tests don't bleed."""
+    """Install a clean ring buffer on the localm logger for one test, then restore the logger's prior handlers/level/global so tests don't bleed."""
     logger = debuglog.logger
     saved_handlers = list(logger.handlers)
     saved_level = logger.level
@@ -128,12 +119,7 @@ def test_config_subset_allowlisted_and_scrubbed(monkeypatch):
 
 
 def test_config_subset_redacts_query_string_credential_by_name(monkeypatch):
-    """QA-FINDING-bugreport-url-query-secret-leak-2026-08-13: comfy_api_url /
-    net_search_url / coder_reviewer are user-supplied URLs that routinely carry
-    a credential as a query parameter, not only via user:pass@. The config
-    subset chain does not call _scrub_secrets (it has its own narrower chain),
-    so this is a genuinely separate path from the _scrub_secrets tests in
-    test_bugreport.py and must be verified independently."""
+    """QA-FINDING-bugreport-url-query-secret-leak-2026-08-13: comfy_api_url / net_search_url / coder_reviewer are user-supplied URLs that routinely carry a credential as a query parameter, not only via user:pass@."""
     fake = {
         "net_search_url": "https://searx.example.com/search?api_key=CANARY1",
         "comfy_api_url": "http://qauser:CANARY2@127.0.0.1:8188",
@@ -158,11 +144,7 @@ def test_build_report_does_not_leak_non_allowlisted_secret(monkeypatch):
 
 def test_build_report_end_to_end_no_canary_survives_with_credentialed_config_urls(
         monkeypatch):
-    """The report-level regression test for the QA finding: a unit test on the
-    scrub regex alone cannot prove the regex is actually REACHED from a real
-    report. Render a full report with all three affected config keys set to
-    credentialed URLs and assert no canary substring survives ANYWHERE in the
-    rendered output - not just in the isolated config-subset dict."""
+    """The report-level regression test for the QA finding: a unit test on the scrub regex alone cannot prove the regex is actually REACHED from a real report."""
     fake = {
         "net_search_url": "https://searx.example.com/search?api_key=QACANARYQUERYKEY77d1e5c2",
         "comfy_api_url": "http://qauser:QACANARYURLCRED31bf90aa@127.0.0.1:8188",
@@ -179,13 +161,7 @@ def test_build_report_end_to_end_no_canary_survives_with_credentialed_config_url
 
 
 def test_corrupt_config_flagged_unreadable_not_silently_defaulted(tmp_path, monkeypatch):
-    """A corrupt config.json must not render identically to a genuinely absent
-    one - see bugreport._config_unreadable / config.load_config_checked.
-
-    Uses REAL files on disk rather than monkeypatching load_config, unlike the
-    tests above: a lambda can never be "unreadable", which is exactly the
-    fixture shape that let a corrupt config go undetected in the first place.
-    """
+    """A corrupt config.json must not render identically to a genuinely absent one - see bugreport._config_unreadable / config.load_config_checked."""
     import localm.config as cfg
     home = tmp_path / "home"
     home.mkdir()

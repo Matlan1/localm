@@ -1,97 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Background job registry for the coder plugin.
-
-The coder's process tools were blocking-only, so it could not start a dev server
-and then talk to it, or run a long build while doing anything else. This module
-is the async half: a GENERIC job registry (``JobRegistry``) plus the concrete
-:class:`ShellJob`.
-
-Generic on purpose, because it is shared infrastructure. ``BackgroundJob`` knows
-only about a lifecycle (running -> done/killed/failed), an OPAQUE per-kind result
-payload, a kill hook, and a bounded output buffer; everything process-specific
-lives in ``ShellJob``. A background sub-agent is a second subclass with
-``kind = "agent"`` and its own payload, not a second registry: two parallel job
-systems in one plugin would be a design smell.
-
-The registry therefore offers three things a non-shell caller needs:
-
-* **Per-kind caps.** ``kind_caps`` holds a separate ceiling per job kind (shell
-  jobs and agent jobs exhaust different resources, so one shared number would be
-  wrong for both).
-* **Atomic check-and-insert.** The cap check and the spawn happen under one lock
-  acquisition, so two near-simultaneous submits can never both observe a free
-  slot and both be admitted.
-* **Drain, not just poll.** ``drain_finished()`` returns everything that finished
-  since the last drain, for a caller that absorbs completions at a turn boundary
-  rather than polling a known id.
-
-Concurrency style follows the GUI coder sessions (``sessions.py``): daemon
-threads plus a bounded buffer that drops the oldest entry when full. That
-module's ``queue.Queue`` is per-session and not reusable as a general table, so
-the pattern is reproduced here rather than lifted.
-
-Why this is NOT the builtin jobs plugin
----------------------------------------
-``localm/plugins/builtin/jobs/`` already exists and owns the word "job" in the
-user-facing product: a GUI Jobs tab, ``localm job ...``, ``/api/jobs``. This
-table is a DIFFERENT thing that happens to share a noun, and the five reasons
-are recorded here so nobody later "consolidates" the two (which would break the
-CLI case outright) or flags this module as duplicating shipped infrastructure.
-Each was checked against the source, not assumed:
-
-1. That plugin is SCHEDULE-CENTRIC. Every ``Job`` carries ``schedule_kind``
-   ("interval" | "cron") and ``store.py`` validates it against ``SCHEDULE_KINDS``.
-   A one-shot background command has no schedule; we would have to invent one.
-2. It is DURABLE USER DATA, stored under ``<data dir>/jobs/`` (``store.jobs_dir``)
-   and, per ``docs/jobs.md``, its "recorded results are saved in every session
-   mode, including privacy". An ephemeral in-session thread is not user data and
-   must not land in the user's jobs store or the Jobs tab.
-3. It is an OPTIONAL plugin (``localm plugin install jobs``; docs/jobs.md line 5).
-   A core coder capability cannot require an optional plugin to be present.
-4. Decisively: its scheduler "starts only when the plugin is loaded under a
-   running event loop" (``jobs/plug.py``), i.e. inside ``localm gui`` / ``serve``.
-   A plain ``localcoder`` REPL has no event loop, so background work routed
-   through it would SILENTLY NEVER RUN - exactly the case this module exists for.
-5. Lifetimes are opposite: theirs survive restarts, ours are in-process threads
-   scoped to one session and killed at exit.
-
-The existing integration also runs the other way (a jobs task_kind of "coder"
-runs a coder agent). This is coder -> background work, the reverse direction.
-
-Naming: nothing here is a bare "job" - ``check_shell_job`` / ``kill_shell_job``
-read as shell job control (jobs/bg/fg/kill %1), not as a schedule entry. A
-user-facing listing command should be ``/bg``, never ``/jobs``; "tasks" was
-considered and rejected because ``task`` is already the coder's own core noun
-(``localcoder [TASK]``, ``run_task``), which would be a worse ambiguity inside
-one component.
-
-Three invariants are load-bearing:
-
-1. **No pid-reuse window.** ``Popen.poll()`` is called ONLY under the job lock,
-   and this module is the single reaping call site for its children. So a
-   ``poll() is None`` observed under that lock proves the child is still
-   unreaped: on POSIX it is a live process or a zombie (either way the pid is
-   not reusable), and on Windows we still hold the process handle (which
-   reserves the pid). Killing by pid is therefore safe at that instant. psutil's
-   ``create_time`` is pinned alongside the pid as a second, independent check,
-   but correctness does not depend on it: psutil is an OPTIONAL dependency here,
-   not a core one.
-2. **Kill reaps the TREE, and says so only once it has CHECKED.** A build or dev
-   server spawns children; killing only the direct child strands them. POSIX
-   gets its own session/process group (``start_new_session``) and is killed with
-   ``killpg``; Windows uses ``taskkill /F /T``, which walks the child tree. We
-   never kill by port or by image name - only by a pid we have just proven is
-   still ours. Delivery being tree-wide is not the same as the tree being DEAD,
-   though: the direct child exiting is all ``Popen.poll()`` can ever show, and a
-   descendant that handles the signal and then hangs would satisfy it while
-   still holding its port. So the tree is pinned before the kill
-   (``_snapshot_tree``) and re-checked after (``_verify_tree_gone``), survivors
-   are killed by their pinned identity, and anything left - or an install where
-   psutil cannot tell us - is reported as a warning rather than folded into a
-   flat "killed".
-3. **Bounded memory.** A chatty process cannot grow the buffer without limit,
-   and anything dropped is COUNTED and reported (never silently discarded).
-"""
+"""Background job registry for the coder plugin."""
 
 from __future__ import annotations
 
@@ -173,13 +81,7 @@ class JobCapacityError(JobError):
 # --------------------------------------------------------------------------- #
 
 class RingBuffer:
-    """A capped FIFO of text chunks, dropping the OLDEST when full.
-
-    Stores raw chunks rather than lines so that output with no newlines (a
-    ``\\r`` progress bar, a binary-ish blob) is capped just like any other.
-    ``dropped`` counts the characters evicted, so a caller can say how much was
-    lost instead of presenting a truncated tail as if it were everything.
-    """
+    """A capped FIFO of text chunks, dropping the OLDEST when full."""
 
     def __init__(self, max_chars: int = _RING_MAX_CHARS) -> None:
         self._chunks: deque[str] = deque()
@@ -219,11 +121,7 @@ class RingBuffer:
 # --------------------------------------------------------------------------- #
 
 def _process_create_time(pid: int) -> Optional[float]:
-    """The process start timestamp, or None when psutil is unavailable.
-
-    psutil is an optional dependency (pyproject declares it only in extras), so
-    None is the normal case on a core install, not an error.
-    """
+    """The process start timestamp, or None when psutil is unavailable."""
     try:
         import psutil
         return psutil.Process(pid).create_time()
@@ -232,12 +130,7 @@ def _process_create_time(pid: int) -> Optional[float]:
 
 
 def _describe(job) -> str:
-    """Name a job for an error message, without trusting it to be well-formed.
-
-    Used on the atexit path, where the job we are describing is the one that
-    just misbehaved: reading ``.id`` / ``.label`` is a call into someone else's
-    object and must not be what turns a reported failure into a traceback.
-    """
+    """Name a job for an error message, without trusting it to be well-formed."""
     try:
         return f"{job.id} ({str(job.label)[:60]})"
     except Exception:
@@ -254,13 +147,7 @@ def _decode(raw) -> str:
 
 
 def _still_the_same_process(pid: int, create_time: Optional[float]) -> bool:
-    """Is *pid* still the process we started?
-
-    Returns True when we cannot tell (no psutil, or an unexpected probe error) -
-    the caller's lock-plus-unreaped-child argument is the primary guarantee, and
-    this check only ever adds a veto. Returns False only on positive evidence of
-    a mismatch (the pid is gone, or its start time no longer matches).
-    """
+    """Is *pid* still the process we started?"""
     if create_time is None:
         return True
     try:
@@ -282,17 +169,7 @@ def _still_the_same_process(pid: int, create_time: Optional[float]) -> bool:
 # --------------------------------------------------------------------------- #
 
 class BackgroundJob:
-    """One unit of asynchronous work tracked by :class:`JobRegistry`.
-
-    The record is deliberately kind-agnostic::
-
-        {id, kind, label, state, started_at, finished_at, result, error, warnings}
-
-    ``result`` is an OPAQUE per-kind payload (a shell job puts ``exit_code``
-    there; an agent job would put its own summary), so adding a kind never means
-    reshaping the table. Subclasses implement :meth:`_poll`, :meth:`_terminate`
-    and optionally :meth:`_result_for` / :meth:`_drain`.
-    """
+    """One unit of asynchronous work tracked by :class:`JobRegistry`."""
 
     kind = "job"
 
@@ -326,11 +203,11 @@ class BackgroundJob:
     # -- subclass hooks ---------------------------------------------------- #
 
     def _poll(self):
-        """Terminal value if finished, else None. Called ONLY under the lock."""
+        """Terminal value if finished, else None."""
         raise NotImplementedError
 
     def _terminate(self, *, force: bool) -> None:
-        """Signal the job (and its whole tree) to stop. Under ``self._lock``."""
+        """Signal the job (and its whole tree) to stop."""
         raise NotImplementedError
 
     def _result_for(self, poll_value) -> Optional[dict]:
@@ -338,26 +215,14 @@ class BackgroundJob:
         return None
 
     def _drain(self, timeout: float) -> bool:
-        """Flush any in-flight output. True when fully drained."""
+        """Flush any in-flight output."""
         return True
 
     def _snapshot_tree(self) -> None:
-        """Record the descendants alive BEFORE the kill. Under ``self._lock``.
-
-        Must run while the job is still alive: once the direct child exits and is
-        reaped, its children are re-parented and can no longer be found from its
-        pid, so a post-hoc lookup would report a clean tree it never saw.
-        Default: a kind with no process tree has nothing to record.
-        """
+        """Record the descendants alive BEFORE the kill."""
 
     def _verify_tree_gone(self) -> None:
-        """Confirm the snapshot's descendants really died. Under ``self._lock``.
-
-        Called once the direct child has exited. Appends a warning rather than
-        raising: the direct child IS dead by then, so the honest report is
-        "killed, but N descendants survived", not a blanket kill failure.
-        Default: nothing to verify.
-        """
+        """Confirm the snapshot's descendants really died."""
 
     # -- lifecycle --------------------------------------------------------- #
 
@@ -379,7 +244,7 @@ class BackgroundJob:
 
     def _finish(self, state: str, result: Optional[dict],
                 error: Optional[str] = None) -> None:
-        """Record the terminal state. Caller must hold ``self._lock``."""
+        """Record the terminal state."""
         if not self._drain(_DRAIN_GRACE):
             # Not fatal: a detached grandchild can hold the pipe open after the
             # job itself exited. Say so rather than presenting a possibly
@@ -399,7 +264,7 @@ class BackgroundJob:
         self.state = state
 
     def kill(self) -> str:
-        """Stop the job and its process tree. Returns a human-readable outcome."""
+        """Stop the job and its process tree."""
         with self._lock:
             if self.state != "running":
                 return f"already {self.state}"
@@ -467,18 +332,7 @@ class BackgroundJob:
 # --------------------------------------------------------------------------- #
 
 class ShellJob(BackgroundJob):
-    """A background OS process with its stdout/stderr drained into ring buffers.
-
-    *argv* is an already-routed launch form - the caller decides shell vs
-    argument-list mode (``tools/shell.py:_shell_argv``), so the background path
-    and the blocking ``run_shell`` path make that security decision in exactly
-    one place. Usually an argument list; a STRING is the Windows shell route's
-    raw command line, which ``CreateProcess`` receives verbatim (an argv list
-    would be re-quoted by ``list2cmdline`` in syntax cmd.exe misreads - see
-    ``tools/base.py:platform_shell``).
-
-    Its opaque result payload is ``{"exit_code": int}``.
-    """
+    """A background OS process with its stdout/stderr drained into ring buffers."""
 
     kind = "shell"
 
@@ -541,11 +395,7 @@ class ShellJob(BackgroundJob):
         return t
 
     def _read_stream(self, stream, ring: RingBuffer, name: str) -> None:
-        """Drain one pipe into *ring* until EOF.
-
-        Deliberately touches no job state except ``warnings``: it must never
-        take ``self._lock``, or a bounded join under that lock could deadlock.
-        """
+        """Drain one pipe into *ring* until EOF."""
         decoder = codecs.getincrementaldecoder("utf-8")("replace")
         try:
             while True:
@@ -663,12 +513,7 @@ class ShellJob(BackgroundJob):
         self._kill_via_handle(force=force)
 
     def _kill_children_via_psutil(self) -> None:
-        """Best-effort descendant sweep for the fallback paths.
-
-        Only reachable when the OS-level tree kill above was unavailable, and
-        only ever touches processes psutil reports as descendants of OUR pid -
-        never a port or an image name.
-        """
+        """Best-effort descendant sweep for the fallback paths."""
         try:
             import psutil
         except Exception:
@@ -694,15 +539,7 @@ class ShellJob(BackgroundJob):
     # -- tree verification (invariant 2 is about the TREE, not the handle) ---- #
 
     def _snapshot_tree(self) -> None:
-        """Pin every live descendant as ``(pid, create_time)`` before signalling.
-
-        Taken while the child is still alive on purpose: once it exits and is
-        reaped its children are re-parented (to init on POSIX, to nothing we can
-        follow on Windows), so they are unreachable from our pid afterwards. The
-        create_time pin is what makes killing a survivor safe later - it is the
-        same identity check the direct child uses, so a recycled pid can never be
-        signalled.
-        """
+        """Pin every live descendant as ``(pid, create_time)`` before signalling."""
         self._tree_snapshot = None
         self._tree_unverified_reason = None
         try:
@@ -728,12 +565,7 @@ class ShellJob(BackgroundJob):
                 f"the process tree could not be read: {type(e).__name__}")
 
     def _surviving_descendants(self) -> Optional[list]:
-        """Snapshot entries still alive under their ORIGINAL identity.
-
-        ``None`` means we could not look; ``[]`` means we looked and the tree is
-        clean. Collapsing those two would turn "unverified" into "verified good",
-        which is the exact failure this check exists to prevent.
-        """
+        """Snapshot entries still alive under their ORIGINAL identity."""
         if self._tree_snapshot is None:
             return None
         try:
@@ -807,23 +639,7 @@ class ShellJob(BackgroundJob):
 # --------------------------------------------------------------------------- #
 
 class AgentJob(BackgroundJob):
-    """A background sub-agent: the second kind, exactly as this module intended.
-
-    The child Agent is built by the CALLER on the parent's thread and handed in
-    already constructed, so a construction error (bad role, unreadable preload)
-    surfaces synchronously in the spawn tool's result instead of turning into a
-    job that immediately fails. This job only owns RUNNING it.
-
-    ``result`` payload: ``{"summary": str, "turns": int}``.
-
-    NOT PREEMPTIBLE, and we say so rather than pretending. ``Agent.run_task`` is
-    a blocking call with no cooperative cancellation anywhere in the agent
-    package (the only interruption path is a KeyboardInterrupt in the INTERACTIVE
-    loop, which a worker thread cannot raise). So ``_terminate`` cannot stop a
-    turn already in flight: it records a warning and marks intent, and the daemon
-    thread dies with the process. That is why this PR ships no ``kill_agent_job``
-    tool - offering one that cannot actually stop the work would be a facade.
-    """
+    """A background sub-agent: the second kind, exactly as this module intended."""
 
     kind = "agent"
 
@@ -859,9 +675,7 @@ class AgentJob(BackgroundJob):
         return self._child
 
     def _run(self) -> None:
-        """Body of the worker thread. Never touches parent state - the parent
-        absorbs at ITS turn boundary, so there is no cross-thread mutation of
-        the parent's _changed_files / _error_trace from here."""
+        """Body of the worker thread."""
         try:
             text = self._child.run_task(self._task)
             # run_task RETURNS its failure message rather than raising (max_turns
@@ -941,12 +755,7 @@ class AgentJob(BackgroundJob):
 # --------------------------------------------------------------------------- #
 
 class JobRegistry:
-    """Tracks background jobs, caps how many run at once per kind, reaps at exit.
-
-    Kind-agnostic by design: it holds :class:`BackgroundJob` instances, so a
-    background sub-agent registers here too and inherits the caps, the lookup,
-    the drain, and the shutdown behaviour.
-    """
+    """Tracks background jobs, caps how many run at once per kind, reaps at exit."""
 
     def __init__(self, kind_caps: Optional[dict] = None,
                  default_cap: int = _DEFAULT_CAP,
@@ -988,12 +797,7 @@ class JobRegistry:
 
     @property
     def dropped_undrained(self) -> int:
-        """Total completions evicted before any drain collected them.
-
-        The sum across kinds. Prefer ``dropped_undrained_by_kind`` when the
-        number is going in front of a person: the kinds do not mean the same
-        thing (see that attribute).
-        """
+        """Total completions evicted before any drain collected them."""
         return sum(self.dropped_undrained_by_kind.values())
 
     def cap_for(self, kind: str) -> int:
@@ -1005,18 +809,7 @@ class JobRegistry:
                     if j.state == "running" and (kind is None or j.kind == kind)]
 
     def submit(self, factory: Callable[[], BackgroundJob], kind: str) -> BackgroundJob:
-        """Create and register a job of *kind*, enforcing that kind's cap.
-
-        The cap check and the spawn happen under ONE lock acquisition, so there
-        is no TOCTOU window: two near-simultaneous submits cannot both observe a
-        free slot and both be admitted. *factory* is only called once a slot is
-        secured, so a rejected submit never spawns anything. Raises
-        :class:`JobCapacityError` when the cap is reached; anything *factory*
-        raises (a missing executable, say) propagates and nothing is registered.
-        A factory that returns the WRONG kind has already produced a live job, so
-        that job is STOPPED before the :class:`JobError` is raised - otherwise it
-        would leak somewhere nothing can reach it.
-        """
+        """Create and register a job of *kind*, enforcing that kind's cap."""
         with self._lock:
             cap = self.cap_for(kind)
             live = [j for j in self._jobs.values()
@@ -1069,12 +862,7 @@ class JobRegistry:
                     if kind is None or j.kind == kind]
 
     def list_status(self, kind: Optional[str] = None, owner=_ANY_OWNER) -> list:
-        """Every tracked job, optionally narrowed to one *kind* and/or *owner*.
-
-        *owner* defaults to the "do not filter" sentinel, so an existing caller
-        is unaffected. Pass a real owner id (or None) to get exactly that
-        owner's jobs - see BackgroundJob.owner for why a GUI caller must.
-        """
+        """Every tracked job, optionally narrowed to one *kind* and/or *owner*."""
         with self._lock:
             jobs = [j for j in self._jobs.values()
                     if (kind is None or j.kind == kind)
@@ -1082,14 +870,7 @@ class JobRegistry:
         return [j.status() for j in jobs]
 
     def dropped_for(self, owner=_ANY_OWNER) -> dict:
-        """Uncollected completions evicted from the table, per kind.
-
-        The per-owner view of ``dropped_undrained_by_kind``. Cumulative and
-        never reset, like that total: it is the standing session diagnostic, not
-        the report-once channel (that is take_dropped_undrained). Kinds with no
-        losses are omitted, so an empty dict means nothing was discarded rather
-        than nothing was looked at.
-        """
+        """Uncollected completions evicted from the table, per kind."""
         with self._lock:
             if owner is _ANY_OWNER:
                 return dict(self.dropped_undrained_by_kind)
@@ -1100,12 +881,7 @@ class JobRegistry:
             return out
 
     def drain_finished(self, kind: Optional[str] = None) -> list:
-        """Status of every job that finished since the last drain, then mark them.
-
-        For a caller that absorbs completions at a turn boundary instead of
-        polling a known id. Each finished job is returned by exactly one drain.
-        Draining does NOT remove the job, so a later poll-by-id still works.
-        """
+        """Status of every job that finished since the last drain, then mark them."""
         with self._lock:
             jobs = [j for j in self._jobs.values()
                     if j.state != "running" and not j.drained
@@ -1116,14 +892,7 @@ class JobRegistry:
         return [j.status() for j in jobs]
 
     def _prune_locked(self) -> None:
-        """Trim retained completions. Called from submit, which is the only path
-        that GROWS the table - so the table stays bounded even though a job
-        finishing does not itself prune (between submits the count can sit at
-        keep_finished plus whatever finished since, itself bounded by the caps).
-
-        Each KIND is budgeted separately, so a kind nobody drains cannot evict
-        another kind's uncollected completion (see _KEEP_FINISHED).
-        """
+        """Trim retained completions."""
         by_kind: dict[str, list] = {}
         for job in self._jobs.values():
             if job.state != "running":
@@ -1155,17 +924,7 @@ class JobRegistry:
                         self._dropped_by_owner.get(key, 0) + 1)
 
     def take_dropped_undrained(self, kind: Optional[str] = None) -> int:
-        """Uncollected completions lost since the last call, and RESET the count.
-
-        The reporting half of ``dropped_undrained``: a counter nobody reads is
-        bookkeeping, not honesty. A drain-based consumer calls this next to its
-        ``drain_finished`` and tells the user what it lost, because from the
-        consumer's side a discarded completion is indistinguishable from "nothing
-        finished". Consumed exactly once, like the drain itself, so a turn-
-        boundary caller warns per loss instead of every turn forever. The
-        cumulative ``dropped_undrained`` total is deliberately NOT reset here -
-        that one stays readable all session (``/bg`` shows it).
-        """
+        """Uncollected completions lost since the last call, and RESET the count."""
         with self._lock:
             if kind is None:
                 total = sum(self._unreported_drops.values())
@@ -1174,18 +933,7 @@ class JobRegistry:
             return self._unreported_drops.pop(kind, 0)
 
     def shutdown_all(self) -> int:
-        """Kill every running job. Returns how many were killed. Never raises.
-
-        This is the atexit hook, so it is the LAST chance to say anything: a job
-        we could not kill is a live process the coder started outliving localm -
-        precisely the orphan the hook exists to prevent, and precisely what the
-        shipped "stopped at exit rather than orphaned" claim promises does not
-        happen. ``kill()`` reports that failure by RETURN VALUE ("kill FAILED
-        - ..."), not by raising, so counting every non-raising call as a success
-        would report the orphan case as a clean shutdown. Failures are counted
-        out and printed instead (AGENTS.md rule 5: a safety step that failed must
-        never report success).
-        """
+        """Kill every running job."""
         running = self.running()
         if running:
             # Each kill can take a grace period (seconds on POSIX, longer on
@@ -1222,13 +970,7 @@ class JobRegistry:
 
     @staticmethod
     def _report_at_exit(message: str) -> None:
-        """Print a teardown message, tolerating interpreter shutdown.
-
-        Runs from atexit, where ``sys.stderr`` can already be closed or replaced
-        by None. Failing to PRINT must not become an exception escaping the hook,
-        but staying silent about an orphan is not acceptable either - so we try,
-        and give up only when the stream itself is gone.
-        """
+        """Print a teardown message, tolerating interpreter shutdown."""
         try:
             stream = sys.stderr
             if stream is None:
@@ -1246,14 +988,7 @@ _registry_lock = threading.Lock()
 
 
 def get_registry() -> JobRegistry:
-    """The process-wide job registry, created on first use.
-
-    Process-wide rather than per-session: the tools are dispatched as plain
-    functions that receive only *cwd*, with no session handle to hang a registry
-    off. That is not a trust boundary - only a full-capability (non-restricted)
-    session can reach these tools at all, and such a session already has
-    ``run_shell``, i.e. arbitrary code execution.
-    """
+    """The process-wide job registry, created on first use."""
     global _registry
     with _registry_lock:
         if _registry is None:

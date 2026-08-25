@@ -1,11 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""AUD-HIGH-17-2: once HttpEngine.chat_stream re-wraps a thinking model's
-reasoning as inline <think>...</think> (H4, localm run's default attach mode),
-cli/chat.py must not resend or log that raw scratchpad as if it were the
-visible answer. textnorm.strip_think's docstring calls this out explicitly:
-"the one helper every INTERNAL consumer of model output must run before
-storing or parsing a reply". transcript.exchange is the one exception - it
-splits the raw text itself and keeps the reasoning in a collapsed block."""
+"""AUD-HIGH-17-2: once HttpEngine.chat_stream re-wraps a thinking model's reasoning as inline <think>...</think> (H4, localm run's default attach mode), cli/chat.py must not resend or log that raw scratchpad as if it were the visible answer. textnorm.strip_think's docstring calls this out explicitly: '..."""
 
 from unittest.mock import MagicMock
 
@@ -13,10 +7,7 @@ from localm.cli.chat import _interactive
 
 
 def _engine(pieces_by_turn):
-    """A mock engine whose chat_stream yields the next pieces list on each call
-    (one entry per expected turn). `seen_messages` records a SNAPSHOT (shallow
-    copy) of the `messages` argument at each call, since `messages` is mutated
-    in place afterward - a raw call_args_list reference would show later state."""
+    """A mock engine whose chat_stream yields the next pieces list on each call (one entry per expected turn). `seen_messages` records a SNAPSHOT (shallow copy) of the `messages` argument at each call, since `messages` is mutated in place afterward - a raw call_args_list reference would show later state."""
     e = MagicMock()
     e.display_name = "test-model"
     e.count_tokens.return_value = 5

@@ -1,13 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""`localm gui` must not silently discard explicit server-config flags by attaching.
-
-Release-verification defect (2026-07-17): `localm gui --port 8794` (and --mode)
-while an instance was already running for the directory attached to the running
-server and dropped the explicit flags with no mention. These tests drive the real
-`gui` command (CliRunner), stubbing only the instance-discovery seam, and assert
-that a conflicting explicit flag is refused (with the --new way out) while a
-compatible invocation still attaches.
-"""
+"""`localm gui` must not silently discard explicit server-config flags by attaching."""
 
 import os
 
@@ -27,8 +19,7 @@ def _clean_mode_env():
 
 @pytest.fixture
 def running(monkeypatch):
-    """Pretend a full-mode localm is already serving this directory on port 8793.
-    Returns a setter for the running instance's active model (for the probe)."""
+    """Pretend a full-mode localm is already serving this directory on port 8793."""
     entry = {
         "pid": 26164, "port": 8793, "host": "127.0.0.1", "scheme": "http",
         "mode": "full", "token": "tok", "root_dir": "/proj",

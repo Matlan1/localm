@@ -1,12 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""F1 regression suite for memory-audit-2026-07-02 critical C1: thinking-model
-reasoning output must never reach any memory-forming store, and its presence
-must never silently zero a pipeline.
-
-Real-behavior tests: every test drives the actual production code path with a
-deterministic fake ``complete``/engine that emits the exact failure shapes the
-audit captured live on a thinking model (scratchpad before JSON, braces inside
-the scratchpad, all-reasoning truncated replies)."""
+"""F1 regression suite for memory-audit-2026-07-02 critical C1: thinking-model reasoning output must never reach any memory-forming store, and its presence must never silently zero a pipeline."""
 
 from __future__ import annotations
 

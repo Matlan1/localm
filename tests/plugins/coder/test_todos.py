@@ -1,13 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""B2: the model-owned task list (coder/tools/tasks.py).
-
-The load-bearing test is test_todos_survive_a_real_checkpoint_resume_cycle: it
-drives the REAL dispatch path (Agent._execute_tool, which is what injects the
-session), the REAL checkpoint file under a temp HOME, and a genuinely FRESH
-Agent for the same cwd. Both halves of the persistence wiring are pinned
-independently (the file must contain the todos; the fresh agent must read them
-back), so removing either one turns this file red.
-"""
+"""B2: the model-owned task list (coder/tools/tasks.py)."""
 
 import json
 from unittest.mock import patch
@@ -101,10 +93,7 @@ def test_todos_survive_a_real_checkpoint_resume_cycle(tmp_path, monkeypatch):
 
 
 def test_a_real_agent_turn_writes_and_resumes_the_plan(tmp_path, monkeypatch):
-    """The same round trip driven through the REAL loop: a model response is
-    parsed into a tool call, dispatched, checkpointed, and resumed - so the
-    parser, the loop, the hidden-arg injection, and the checkpoint are all
-    exercised together rather than one dispatcher call at a time."""
+    """The same round trip driven through the REAL loop: a model response is parsed into a tool call, dispatched, checkpointed, and resumed - so the parser, the loop, the hidden-arg injection, and the checkpoint are all exercised together rather than one dispatcher call at a time."""
     import localm.config as cfg
     monkeypatch.setattr(cfg, "HOME_DIR", tmp_path / "home")
     proj = tmp_path / "proj"; proj.mkdir()
@@ -146,8 +135,7 @@ def test_a_real_agent_turn_writes_and_resumes_the_plan(tmp_path, monkeypatch):
 
 
 def test_privacy_mode_writes_no_todos_to_disk(tmp_path, monkeypatch):
-    """Privacy mode's no-disk promise covers the task list too: the checkpoint
-    is a no-op there, so a fresh session finds nothing to resume."""
+    """Privacy mode's no-disk promise covers the task list too: the checkpoint is a no-op there, so a fresh session finds nothing to resume."""
     import localm.config as cfg
     monkeypatch.setattr(cfg, "HOME_DIR", tmp_path / "home")
     proj = tmp_path / "proj"; proj.mkdir()
@@ -179,8 +167,7 @@ def test_resume_of_a_pre_b2_checkpoint_is_not_a_crash(tmp_path, monkeypatch):
 
 
 def test_garbage_todos_in_a_checkpoint_are_dropped_not_trusted(tmp_path, monkeypatch):
-    """The checkpoint is plain user-writable JSON: a hand-edited or corrupted
-    todos value must normalise, not crash or land unvalidated in the store."""
+    """The checkpoint is plain user-writable JSON: a hand-edited or corrupted todos value must normalise, not crash or land unvalidated in the store."""
     import localm.config as cfg
     monkeypatch.setattr(cfg, "HOME_DIR", tmp_path / "home")
     proj = tmp_path / "proj"; proj.mkdir()
@@ -277,8 +264,7 @@ def test_prompt_documents_the_tool_with_a_worked_example():
 # --------------------------------------------------------------------------- #
 
 def test_dry_run_still_records_todos(tmp_path):
-    """dry_run skips DESTRUCTIVE tools. Bookkeeping is not a change to skip -
-    a dry run that forgot its own plan would be useless."""
+    """dry_run skips DESTRUCTIVE tools."""
     proj = tmp_path / "proj"; proj.mkdir()
     a = _agent(proj, dry_run=True)
     assert _call(a, "set_todos", items=PLAN).ok
@@ -286,8 +272,7 @@ def test_dry_run_still_records_todos(tmp_path):
 
 
 def test_unattended_session_is_not_denied_its_own_task_list(tmp_path):
-    """auto_approve=False with no confirm handler fail-closes every tool that
-    needs confirmation. The task list must not be one of them."""
+    """auto_approve=False with no confirm handler fail-closes every tool that needs confirmation."""
     proj = tmp_path / "proj"; proj.mkdir()
     a = _agent(proj, auto_approve=False)
     result = _call(a, "set_todos", items=PLAN)
@@ -296,9 +281,7 @@ def test_unattended_session_is_not_denied_its_own_task_list(tmp_path):
 
 
 def test_two_set_todos_in_one_parallel_batch_stay_intact(tmp_path):
-    """Non-destructive tools run concurrently in one ThreadPoolExecutor batch
-    (agent/loop.py). The whole-list swap under the lock means the loser is
-    overwritten, never interleaved: the store holds ONE of the two lists whole."""
+    """Non-destructive tools run concurrently in one ThreadPoolExecutor batch (agent/loop.py)."""
     proj = tmp_path / "proj"; proj.mkdir()
     a = _agent(proj)
     first  = [f"[ ] first-{i}" for i in range(12)]
@@ -314,8 +297,7 @@ def test_two_set_todos_in_one_parallel_batch_stay_intact(tmp_path):
 
 
 def test_the_gui_and_audit_see_every_task_list_write(tmp_path):
-    """Surfacing: the tool_call event carries the items (the GUI's tool card
-    renders them) and the tool_result carries the rendered list + summary."""
+    """Surfacing: the tool_call event carries the items (the GUI's tool card renders them) and the tool_result carries the rendered list + summary."""
     proj = tmp_path / "proj"; proj.mkdir()
     events = []
     a = _agent(proj, on_event=events.append)
@@ -339,8 +321,7 @@ def test_the_injected_session_arg_cannot_be_spoofed_by_the_model(tmp_path):
 
 
 def test_a_child_agent_gets_its_own_list(tmp_path):
-    """No inheritance: a sub-agent plans its own sub-task (kept deliberately
-    out of scope for B2 - it would need a merge policy on return)."""
+    """No inheritance: a sub-agent plans its own sub-task (kept deliberately out of scope for B2 - it would need a merge policy on return)."""
     proj = tmp_path / "proj"; proj.mkdir()
     parent = _agent(proj)
     _call(parent, "set_todos", items=PLAN)
@@ -460,8 +441,7 @@ def test_items_without_task_text_are_dropped(raw):
 
 
 def test_a_newline_joined_string_is_accepted_as_the_list(tmp_path):
-    """A model that ignores the array type and sends one blob still gets a
-    correct list rather than a single 'task' containing its whole plan."""
+    """A model that ignores the array type and sends one blob still gets a correct list rather than a single 'task' containing its whole plan."""
     proj = tmp_path / "proj"; proj.mkdir()
     a = _agent(proj)
     r = _call(a, "set_todos", items="[x] one\n[>] two\n[ ] three")

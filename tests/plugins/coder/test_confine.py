@@ -1,10 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""
-Tests for _confine() path traversal protection and _verify_syntax().
-
-_confine() is the security boundary for all file tools - it must reliably
-reject any path that resolves outside cwd.
-"""
+"""Tests for _confine() path traversal protection and _verify_syntax()."""
 
 import os
 import tempfile
@@ -71,14 +66,7 @@ class TestConfineRejected:
 
     def test_absolute_path_to_an_existing_file_outside_cwd(self, tmp_path,
                                                            tmp_path_factory):
-        """The refusal must not rest on the target merely being absent: a file
-        that really exists outside cwd is rejected just the same.
-
-        A disposable file the test owns, never a real OS path. _confine()
-        resolve()s whatever it is handed - it has to, or a symlink would slip
-        past - so a system target here would make the test suite itself open a
-        real system file, and at that access point a legitimate test, a command
-        gone wrong, and a live injection are indistinguishable."""
+        """The refusal must not rest on the target merely being absent: a file that really exists outside cwd is rejected just the same."""
         outside = tmp_path_factory.mktemp("outside_cwd") / "real.txt"
         outside.write_text("disposable\n", encoding="utf-8")
         with pytest.raises(PermissionError):
@@ -99,19 +87,12 @@ class TestConfineRejected:
 class TestConfineHardening:
     @pytest.mark.parametrize("raw", [r"\\192.0.2.1\share\x", "//192.0.2.1/share/x"])
     def test_unc_path_is_refused(self, tmp_path, raw):
-        """The OLD _confine had no UNC guard at all: Path(raw).is_absolute()
-        is True for a UNC path, so it reached .resolve() unconditionally -
-        the exact SMB-dial-and-hang danger reject_unsafe_path_string exists
-        to prevent, on a sink this function used to share with it."""
+        """The OLD _confine had no UNC guard at all: Path(raw).is_absolute() is True for a UNC path, so it reached .resolve() unconditionally - the exact SMB-dial-and-hang danger reject_unsafe_path_string exists to prevent, on a sink this function used to share with it."""
         with pytest.raises(PermissionError):
             _confine(tmp_path, raw)
 
     def test_unc_path_reaches_no_filesystem_call(self, tmp_path, monkeypatch):
-        """ORDER, not verdict: the hostile UNC string itself must never reach
-        .resolve() (that syscall is the SMB dial). _confine's own except
-        branch DOES call cwd.resolve() to format the error message - that is
-        the TRUSTED cwd, not attacker data, so it is excluded from the
-        assertion rather than asserting zero resolve() calls of any kind."""
+        """ORDER, not verdict: the hostile UNC string itself must never reach .resolve() (that syscall is the SMB dial). _confine's own except branch DOES call cwd.resolve() to format the error message - that is the TRUSTED cwd, not attacker data, so it is excluded from the assertion rather than asserting zero..."""
         seen = []
         real_resolve = Path.resolve
         monkeypatch.setattr(
@@ -126,18 +107,12 @@ class TestConfineHardening:
         "somefile.exe:hidden.gguf", "src/somefile.exe:hidden.gguf",
     ])
     def test_reserved_characters_are_rejected(self, tmp_path, bad):
-        """Same NTFS Alternate Data Stream class #1068 fixed for model
-        filenames - the OLD _confine had no character check, so a colon
-        stayed confined (containment held) while opening a hidden stream
-        behind an apparently-empty sibling."""
+        """Same NTFS Alternate Data Stream class #1068 fixed for model filenames - the OLD _confine had no character check, so a colon stayed confined (containment held) while opening a hidden stream behind an apparently-empty sibling."""
         with pytest.raises(PermissionError):
             _confine(tmp_path, bad)
 
     def test_alias_leaf_is_rejected(self, tmp_path, monkeypatch):
-        """An OS-level short-name alias resolving `path` to a DIFFERENT real
-        sibling stays strictly inside cwd - containment alone would not
-        catch it. Deterministic simulation, same technique as
-        test_pathsafe_confined_under.py's alias tests."""
+        """An OS-level short-name alias resolving `path` to a DIFFERENT real sibling stays strictly inside cwd - containment alone would not catch it."""
         victim = tmp_path / "LongModelNameThatIsVeryLong.py"
         victim.write_text("SECRET", encoding="utf-8")
         alias = "LONGMO~1.PY"
@@ -193,18 +168,7 @@ class TestVerifySyntaxPython:
         assert result is None
 
     def test_leaves_no_compiled_artifact_in_system_temp(self, tmp_path):
-        """_verify_syntax used to check Python syntax by writing the content to
-        a real temp .py file and compiling it with py_compile; CPython's own
-        import-cache write left a matching .pyc - this file's compiled
-        CONTENT - behind in the system temp dir's __pycache__/, and nothing
-        ever unlinked it, in every session mode (checkup 2026-08-11 item 11).
-        compile() the builtin parses to an in-memory code object and touches
-        disk nowhere, so there is nothing left to gate by mode here - this
-        proves the artifact class is gone rather than merely suppressed.
-
-        Diffed against a before/after snapshot, not "the dir is empty",
-        because this is a SHARED system temp dir other processes may also
-        write .pyc files into concurrently on this box."""
+        """_verify_syntax used to check Python syntax by writing the content to a real temp .py file and compiling it with py_compile; CPython's own import-cache write left a matching .pyc - this file's compiled CONTENT - behind in the system temp dir's __pycache__/, and nothing ever unlinked it, in every sess..."""
         pycache = Path(tempfile.gettempdir()) / "__pycache__"
         before = set(pycache.glob("*.pyc")) if pycache.is_dir() else set()
 

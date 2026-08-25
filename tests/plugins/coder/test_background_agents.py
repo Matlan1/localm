@@ -1,18 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Background sub-agents: non-blocking delegation that keeps every safety
-property the synchronous path has (work item C3).
-
-``spawn_agent`` runs its child to completion INSIDE the parent's tool call, so a
-10-turn child costs the parent all of that wall-clock time doing nothing.
-``spawn_agent_background`` returns a job id immediately and the child runs on a
-worker thread, in its OWN git worktree.
-
-Several tests here assert that something did NOT happen (no confirmation, no
-launch, no foreign hunk, no race). Every one of those is paired with a sibling
-showing the SAME detector FIRING on a case where it DOES happen - otherwise a
-detector that is broken or observing nothing passes green forever and the
-absence proves only that nobody was looking.
-"""
+"""Background sub-agents: non-blocking delegation that keeps every safety property the synchronous path has (work item C3)."""
 
 from __future__ import annotations
 
@@ -55,8 +42,7 @@ def _git(cwd, *args):
 
 @pytest.fixture
 def repo(tmp_path):
-    """A real git repo with one commit - background spawn requires one, because
-    the child needs a worktree to be isolated in."""
+    """A real git repo with one commit - background spawn requires one, because the child needs a worktree to be isolated in."""
     _git(tmp_path, "init", "-q")
     _git(tmp_path, "config", "user.email", "t@example.invalid")
     _git(tmp_path, "config", "user.name", "T")
@@ -133,8 +119,7 @@ class TestNonBlocking:
             _drain_all()
 
     def test_SIBLING_synchronous_spawn_does_NOT_return_early(self, repo):
-        """The live detector for the timing assertion above: the same clock,
-        the same child, on the synchronous path, MUST show the blocking."""
+        """The live detector for the timing assertion above: the same clock, the same child, on the synchronous path, MUST show the blocking."""
         def _slow_run_task(self, task):
             time.sleep(0.6)
             return "child done"
@@ -204,9 +189,7 @@ class TestCap:
             _drain_all()
 
     def test_SIBLING_a_slot_frees_up_once_one_finishes(self, repo):
-        """The live detector for the refusal: the same call must SUCCEED once a
-        slot is genuinely free, or the cap test would pass on a tool that always
-        refuses."""
+        """The live detector for the refusal: the same call must SUCCEED once a slot is genuinely free, or the cap test would pass on a tool that always refuses."""
         def _quick(self, task):
             return "done"
 
@@ -252,8 +235,7 @@ class TestCap:
 
 class TestAbsorptionOrdering:
     def test_worker_thread_never_touches_parent_state(self, repo):
-        """The parent's _changed_files must be untouched while the job runs and
-        until the parent itself drains at a turn boundary."""
+        """The parent's _changed_files must be untouched while the job runs and until the parent itself drains at a turn boundary."""
         done = threading.Event()
 
         def _writing_child(self, task):
@@ -285,10 +267,7 @@ class TestAbsorptionOrdering:
         assert set(parent._changed_files) == {"parent_file.txt"}
 
     def test_SIBLING_the_same_observer_DOES_see_a_worker_thread_mutation(self, repo):
-        """Live detector. If the observer above cannot notice a worker thread
-        writing to parent._changed_files, its 'no race' result is meaningless.
-        Here a deliberately misbehaving child does exactly that, and the SAME
-        assertion must fail."""
+        """Live detector."""
         done = threading.Event()
 
         def _misbehaving(self, task):
@@ -316,9 +295,7 @@ class TestAbsorptionOrdering:
 
 class TestConfirmationGate:
     def test_terminal_only_session_refuses_to_launch(self, repo):
-        """auto_approve=False with no confirm_handler is the default interactive
-        REPL. A background child cannot prompt at that terminal while the user is
-        still working, so the spawn is REFUSED - it never self-approves."""
+        """auto_approve=False with no confirm_handler is the default interactive REPL."""
         parent = _parent(repo, auto_approve=False)
         parent._interactive = True          # a terminal exists for the PARENT
         res = tool_spawn_agent_background(repo, "t", name="x",
@@ -329,9 +306,7 @@ class TestConfirmationGate:
         assert child_limit.available() == 2, "it took a slot before refusing"
 
     def test_SIBLING_a_permitted_posture_DOES_launch(self, repo):
-        """Live detector for the refusal: the same probes must observe a real
-        launch when a confirmation channel exists, or 'it did not launch' would
-        pass even with the gate deleted."""
+        """Live detector for the refusal: the same probes must observe a real launch when a confirmation channel exists, or 'it did not launch' would pass even with the gate deleted."""
         def _quick(self, task):
             return "ok"
 
@@ -345,8 +320,7 @@ class TestConfirmationGate:
             _drain_all()
 
     def test_the_background_child_never_inherits_the_terminal_prompt(self, repo):
-        """A background child must not be handed _confirm_tool: that would prompt
-        on a terminal the parent is concurrently using."""
+        """A background child must not be handed _confirm_tool: that would prompt on a terminal the parent is concurrently using."""
         captured = {}
 
         def _capture(self, task):
@@ -369,10 +343,7 @@ class TestConfirmationGate:
 
 class TestNoFabricatedDiff:
     def test_child_work_never_enters_the_parents_session_diff(self, repo):
-        """The child edits a file that ALSO exists in the parent's tree with
-        DIFFERENT content. Merging the child's key would make session_diff()
-        resolve it against the parent's cwd and fabricate a diff for a file the
-        parent never touched."""
+        """The child edits a file that ALSO exists in the parent's tree with DIFFERENT content."""
         (repo / "shared.txt").write_text("PARENT VERSION\n", encoding="utf-8")
         _git(repo, "add", "-A")
         _git(repo, "commit", "-qm", "shared")
@@ -400,8 +371,7 @@ class TestNoFabricatedDiff:
         assert (repo / "shared.txt").read_text(encoding="utf-8") == "PARENT VERSION\n"
 
     def test_the_work_is_NOT_lost_it_is_pointed_at(self, repo):
-        """The other face of the same defect: keeping the parent's diff clean must
-        not mean the child's work silently vanishes. It is recorded as a pointer."""
+        """The other face of the same defect: keeping the parent's diff clean must not mean the child's work silently vanishes."""
         def _child_edits(self, task):
             (self.cwd / "newfile.txt").write_text("child work\n", encoding="utf-8")
             return "edited"
@@ -442,8 +412,7 @@ class TestReviewerBoundary:
         assert "child_only.txt" not in parent.session_diff()
 
     def test_SIBLING_that_same_string_DOES_carry_the_parents_own_hunks(self, repo):
-        """Live detector: a session_diff() that returns "" for everything would
-        satisfy the assertion above for the wrong reason."""
+        """Live detector: a session_diff() that returns '' for everything would satisfy the assertion above for the wrong reason."""
         parent = _parent(repo)
         (repo / "seed.txt").write_text("changed by parent\n", encoding="utf-8")
         parent._record_changed_file("seed.txt", b"seed\n", "write_file")
@@ -472,9 +441,7 @@ class TestScopeInheritance:
         return captured["child"]
 
     def test_background_child_rejects_a_path_outside_the_parent_scope(self, repo):
-        """BEHAVIOUR, not the kwarg. Asserting child.scope == parent.scope only
-        proves a value was copied, not that enforcement runs on this path - it
-        would have passed on pre-#781 code for the wrong reason."""
+        """BEHAVIOUR, not the kwarg."""
         child = self._capture_child(repo, scope="src/**")
         res = child._execute_tool(
             _call("write_file", path="secrets.txt", content="x"), interactive=False)
@@ -483,8 +450,7 @@ class TestScopeInheritance:
         assert not (child.cwd / "secrets.txt").exists()
 
     def test_SIBLING_a_path_inside_the_scope_still_works(self, repo):
-        """The scope must CONFINE the child, not paralyse it - and this proves the
-        write path used above can actually create a file."""
+        """The scope must CONFINE the child, not paralyse it - and this proves the write path used above can actually create a file."""
         child = self._capture_child(repo, scope="src/**")
         (child.cwd / "src").mkdir(parents=True, exist_ok=True)
         res = child._execute_tool(
@@ -499,8 +465,7 @@ class TestScopeInheritance:
         assert "coder-child-" in str(child.cwd)
 
     def test_background_child_inherits_role_narrowing(self, repo):
-        """#786's role must reach this construction path too - a background
-        reviewer that came back full-capability is the bug roles exist to stop."""
+        """#786's role must reach this construction path too - a background reviewer that came back full-capability is the bug roles exist to stop."""
         captured = {}
 
         def _capture(self, task):
@@ -528,8 +493,7 @@ class TestScopeInheritance:
 
 class TestDisableFamily:
     def test_disabling_spawn_agent_also_disables_the_background_variant(self, repo):
-        """Otherwise a restricted session that disabled spawn_agent keeps the same
-        capability minus the wait - an RCE escape by a tool added later."""
+        """Otherwise a restricted session that disabled spawn_agent keeps the same capability minus the wait - an RCE escape by a tool added later."""
         parent = _parent(repo, disabled_tools=frozenset({"spawn_agent"}))
         assert "spawn_agent_background" in parent.disabled_tools
         assert "check_agent_job" in parent.disabled_tools
@@ -538,8 +502,7 @@ class TestDisableFamily:
         assert not res.ok
 
     def test_it_is_also_not_ADVERTISED_to_the_model(self, repo):
-        """The second boundary. A dispatch-only test passes while the prompt still
-        tells the model the tool exists."""
+        """The second boundary."""
         from localm.plugins.coder.prompts import build_system_prompt
         prompt = build_system_prompt(
             repo, "", disabled_tools=frozenset({"spawn_agent"}))
@@ -555,8 +518,7 @@ class TestDisableFamily:
             "the prompt probe cannot see the tool even when enabled")
 
     def test_disabling_run_shell_does_NOT_disable_delegation(self, repo):
-        """The two families are keyed independently - one merged family would
-        weld unrelated capabilities together."""
+        """The two families are keyed independently - one merged family would weld unrelated capabilities together."""
         parent = _parent(repo, disabled_tools=frozenset({"run_shell"}))
         assert "run_shell_background" in parent.disabled_tools
         assert "spawn_agent" not in parent.disabled_tools
@@ -584,8 +546,7 @@ class TestNoDroppedCompletions:
         assert get_registry().dropped_undrained == 0
 
     def test_SIBLING_never_draining_DOES_drop(self, repo):
-        """Live detector: the counter must be shown to move, or 'it stayed 0'
-        could just mean nothing ever increments it."""
+        """Live detector: the counter must be shown to move, or 'it stayed 0' could just mean nothing ever increments it."""
         def _quick(self, task):
             return "ok"
 
@@ -604,9 +565,7 @@ class TestNoDroppedCompletions:
 
 class TestDestructiveAsymmetry:
     def test_spawn_prompts_and_check_does_not(self, repo):
-        """Driven through the real dispatch with a REJECTING recorder, so the gate
-        is observed without anything actually starting. Asserting on
-        ToolDef.destructive would only restate the declaration."""
+        """Driven through the real dispatch with a REJECTING recorder, so the gate is observed without anything actually starting."""
         asked: list[str] = []
 
         def _recording_confirm(call, *a, **k):
@@ -636,9 +595,7 @@ class TestDestructiveAsymmetry:
 
 class TestResume:
     def test_delegated_pointers_survive_a_checkpoint_resume(self, repo):
-        """The branches are durable; without this the POINTER to them is not, and
-        a resumed session would show no footer at all - so the user would
-        reasonably conclude real committed work had been lost."""
+        """The branches are durable; without this the POINTER to them is not, and a resumed session would show no footer at all - so the user would reasonably conclude real committed work had been lost."""
         def _child_edits(self, task):
             (self.cwd / "resumed.txt").write_text("work\n", encoding="utf-8")
             return "edited"
@@ -660,10 +617,7 @@ class TestResume:
         assert [c.branch for c in fresh._delegated] == [branch]
 
     def test_privacy_mode_persists_NO_delegated_pointers(self, repo):
-        """Privacy mode promises nothing reaches disk, and the delegated pointers
-        ride in the checkpoint - so they must inherit that promise rather than
-        quietly writing a branch name out. This is also the live detector for the
-        test above: it shows the same save/load path really can produce None."""
+        """Privacy mode promises nothing reaches disk, and the delegated pointers ride in the checkpoint - so they must inherit that promise rather than quietly writing a branch name out."""
         def _child_edits(self, task):
             (self.cwd / "p.txt").write_text("x\n", encoding="utf-8")
             return "edited"
@@ -680,8 +634,7 @@ class TestResume:
         assert parent.load_checkpoint() is None
 
     def test_a_resumed_session_claims_no_running_jobs(self, repo):
-        """An in-flight job cannot survive the process, and nothing pretends it
-        does: there is no persisted job id that resolves to nothing."""
+        """An in-flight job cannot survive the process, and nothing pretends it does: there is no persisted job id that resolves to nothing."""
         parent = _parent(repo, mode=SessionMode.LOG)
         parent._messages = [{"role": "user", "content": "hi"}]
         parent.save_checkpoint()
@@ -697,8 +650,7 @@ class TestResume:
 # --------------------------------------------------------------------------- #
 
 def test_agent_kind_has_its_own_cap_and_does_not_fall_back():
-    """An unlisted kind silently gets _DEFAULT_CAP=4 - double the intended
-    ceiling, with no error at all."""
+    """An unlisted kind silently gets _DEFAULT_CAP=4 - double the intended ceiling, with no error at all."""
     from localm.plugins.coder.background import _DEFAULT_CAP, JobRegistry
     assert JobRegistry().cap_for("agent") == 2
     assert _DEFAULT_CAP != 2, "this test would pass by accident if they matched"
@@ -716,18 +668,7 @@ def test_background_agent_tools_are_registered_and_unscoped():
 # --------------------------------------------------------------------------- #
 
 class TestLateWriteCannotFlipATerminalJob:
-    """The AgentJob half of the abandoned-child invariant.
-
-    ``dispatch_parallel``'s ``_ChildOutcome`` needed a seal added for this
-    (tools/parallel.py). This path already holds the equivalent guard - ``_watch``
-    and ``kill`` both re-check ``state != "running"`` while holding the job lock
-    before calling ``_finish``, and the worker publishes ``_outcome`` under that
-    same lock - so these are REGRESSION tests pinning behaviour that is already
-    correct, not a second bug being fixed. They are here because the guard is one
-    unremarkable early-return away from being deleted, and because a background
-    sub-agent cannot be preempted: its worker genuinely does outlive the terminal
-    verdict, so the window is real on this path too.
-    """
+    """The AgentJob half of the abandoned-child invariant."""
 
     def _hung_job(self, monkeypatch, release: threading.Event):
         """A registered agent job whose child blocks until *release*."""

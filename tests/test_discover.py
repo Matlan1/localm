@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Tests for localm.discover - HF search, quant parsing, VRAM fit badges.
-All HuggingFace calls are mocked; no real network."""
+"""Tests for localm.discover - HF search, quant parsing, VRAM fit badges."""
 
 import ctypes
 import logging
@@ -43,10 +42,7 @@ def _online(monkeypatch):
 
 
 def _mock_fetch(monkeypatch, payload, seen=None):
-    """Patch netpolicy.safe_fetch_bytes (discover now routes through it for SSRF
-    pinning + redirect re-validation) to return *payload* as JSON bytes. When
-    *seen* is given, capture the request's query params (now encoded into the URL)
-    so the param-asserting tests keep working."""
+    """Patch netpolicy.safe_fetch_bytes (discover now routes through it for SSRF pinning + redirect re-validation) to return *payload* as JSON bytes."""
     import json as _json
     import urllib.parse
 
@@ -80,11 +76,7 @@ class TestQuantParsing:
         assert _quant_of(name) == quant
 
     def test_quant_of_prefers_mxfp4_over_an_earlier_base_precision_token(self):
-        """Real filename (elbelga/Huihui-Qwen3.6-35B-A3B-abliterated_MXFP4_MOE):
-        the non-expert-tensor precision is named FIRST, so plain re.search (which
-        returns the LEFTMOST match) would report 'BF16'/'F16' - the un-quantized
-        dtype of the tensors that are NOT the point - instead of the actual MoE
-        expert quantization."""
+        """Real filename (elbelga/Huihui-Qwen3.6-35B-A3B-abliterated_MXFP4_MOE): the non-expert-tensor precision is named FIRST, so plain re.search (which returns the LEFTMOST match) would report 'BF16'/'F16' - the un-quantized dtype of the tensors that are NOT the point - instead of the actual MoE expert quan..."""
         assert _quant_of(
             "Huihui-Qwen3.6-35B-A3B-abliterated-bf16_MXFP4_MOE.gguf") == "MXFP4_MOE"
         assert _quant_of(
@@ -131,8 +123,7 @@ class TestSearch:
         assert results[0]["formats"] == ["hf"]
 
     def test_both_formats_merge_dedupe_and_interleave(self, monkeypatch):
-        """gguf and hf are queried separately; a repo present in both keeps a
-        merged formats list, and the two lists are round-robin interleaved."""
+        """gguf and hf are queried separately; a repo present in both keeps a merged formats list, and the two lists are round-robin interleaved."""
         import json as _json
         import urllib.parse
 
@@ -163,10 +154,7 @@ class TestSearch:
             "org/both", "org/only-hf", "org/only-gguf"]
 
     def test_interleave_keeps_gguf_visible_when_hf_dominates(self, monkeypatch):
-        """The real-world failure the interleave fixes: HF repos routinely have
-        far higher download counts than GGUF repacks, so a plain sort-by-downloads
-        would push GGUF out of the top `limit` and a 'show GGUF' toggle could
-        return zero GGUF. Interleaving guarantees both formats stay visible."""
+        """The real-world failure the interleave fixes: HF repos routinely have far higher download counts than GGUF repacks, so a plain sort-by-downloads would push GGUF out of the top `limit` and a 'show GGUF' toggle could return zero GGUF."""
         import json as _json
         import urllib.parse
 
@@ -204,8 +192,7 @@ class TestSearch:
             hf_search("x")
 
     def test_ssrf_policy_refusal_wrapped(self, monkeypatch):
-        """A netpolicy refusal (e.g. a rebind to a private address) surfaces as a
-        DiscoverError, proving discovery now goes through the SSRF-checked path."""
+        """A netpolicy refusal (e.g. a rebind to a private address) surfaces as a DiscoverError, proving discovery now goes through the SSRF-checked path."""
         from localm.netpolicy import NetworkPolicyError
 
         def refuse(url, **kw):
@@ -298,8 +285,7 @@ class TestHfSearchSize:
         assert "size_bytes" not in results[0]   # GGUF is sized per-file, not here
 
     def test_both_format_repo_keeps_hf_size(self, monkeypatch):
-        """A repo in both formats enters via the gguf list (no size); the hf pass's
-        size estimate must still be carried onto it."""
+        """A repo in both formats enters via the gguf list (no size); the hf pass's size estimate must still be carried onto it."""
         import json as _json
         import urllib.parse
 
@@ -320,13 +306,7 @@ class TestHfSearchSize:
 
 
 class TestGgufClassifyExpand:
-    """A classified (model_types-scoped) gguf-format query needs its own
-    expand[] fields: gguf.architecture for classify_hf_metadata, and - the
-    collateral bug this regression test guards - downloads/likes/lastModified,
-    which `expand` silently drops the moment ANY field is requested (measured
-    live against the real HF API: a classified gguf query that requested only
-    pipeline_tag/library_name/tags came back with downloads and likes ABSENT,
-    not merely zero - vs. present with no expand at all)."""
+    """A classified (model_types-scoped) gguf-format query needs its own expand[] fields: gguf.architecture for classify_hf_metadata, and - the collateral bug this regression test guards - downloads/likes/lastModified, which `expand` silently drops the moment ANY field is requested (measured live against t..."""
 
     def test_classified_gguf_query_requests_stats_and_architecture_fields(self, monkeypatch):
         # Capture the raw URL (not parse_qsl's `seen` dict, which collapses
@@ -348,8 +328,7 @@ class TestGgufClassifyExpand:
         assert results[0]["updated"] == "2026-05-21T21:35:06.000Z"
 
     def test_hf_format_classify_does_not_request_gguf_expand(self, monkeypatch):
-        """The gguf expand field is meaningless for an hf/safetensors result (it
-        has no GGUF header) - only requested on the gguf format branch."""
+        """The gguf expand field is meaningless for an hf/safetensors result (it has no GGUF header) - only requested on the gguf format branch."""
         urls = _urls_capture(monkeypatch, [
             {"id": "org/hf-repo", "downloads": 1,
              "pipeline_tag": "text-generation", "library_name": "transformers",
@@ -359,10 +338,7 @@ class TestGgufClassifyExpand:
         assert "expand%5B%5D=config" in urls[0]
 
     def test_hf_format_classify_keeps_its_own_stats_and_size_expand(self, monkeypatch):
-        """Guards the if/elif split above: fmt=='hf' must still get its own
-        safetensors+downloads+likes+lastModified expand when classify is ALSO
-        on - the new `elif classify` branch (gguf-only) must never suppress the
-        pre-existing, unrelated `if fmt == 'hf'` branch."""
+        """Guards the if/elif split above: fmt=='hf' must still get its own safetensors+downloads+likes+lastModified expand when classify is ALSO on - the new `elif classify` branch (gguf-only) must never suppress the pre-existing, unrelated `if fmt == 'hf'` branch."""
         urls = _urls_capture(monkeypatch, [
             {"id": "org/hf-repo", "downloads": 1, "safetensors": {"total": 10},
              "pipeline_tag": "text-generation", "library_name": "transformers",
@@ -372,10 +348,7 @@ class TestGgufClassifyExpand:
             assert f"expand%5B%5D={field}" in urls[0], f"{field} missing from {urls[0]}"
 
     def test_end_to_end_real_repo_shape_resolves_to_llm_via_hf_search(self, monkeypatch):
-        """Integration proof (not just the pure classify_hf_metadata unit test)
-        that the wiring from HF's raw JSON shape all the way to the row's
-        detected_type badge is correct: mudler/Carnice-Qwen3.6-MoE-35B-A3B-APEX-GGUF
-        real metadata - no pipeline_tag - resolves through hf_search itself."""
+        """Integration proof (not just the pure classify_hf_metadata unit test) that the wiring from HF's raw JSON shape all the way to the row's detected_type badge is correct: mudler/Carnice-Qwen3.6-MoE-35B-A3B-APEX-GGUF real metadata - no pipeline_tag - resolves through hf_search itself."""
         _mock_fetch(monkeypatch, [{
             "id": "mudler/Carnice-Qwen3.6-MoE-35B-A3B-APEX-GGUF",
             "downloads": 100, "likes": 5,
@@ -389,9 +362,7 @@ class TestGgufClassifyExpand:
         assert results[0]["detected_type"] == "llm"
 
     def test_end_to_end_embedding_architecture_via_hf_search(self, monkeypatch):
-        """A gguf result with a verified embedding architecture and NO other
-        classifying signal resolves to 'embedding' through the full hf_search
-        path, not just the pure function."""
+        """A gguf result with a verified embedding architecture and NO other classifying signal resolves to 'embedding' through the full hf_search path, not just the pure function."""
         _mock_fetch(monkeypatch, [{
             "id": "org/bert-embed-gguf", "downloads": 3, "tags": ["gguf"],
             "gguf": {"architecture": "nomic-bert-moe", "total": 1},
@@ -400,11 +371,7 @@ class TestGgufClassifyExpand:
         assert results[0]["detected_type"] == "embedding"
 
     def test_malformed_gguf_and_config_expand_fields_degrade_not_crash(self, monkeypatch):
-        """A non-dict truthy value for the gguf/config expand field (a malformed
-        or adversarial API response - HF's documented shape is always an object
-        or absent) must degrade this row's architecture signal to None, matching
-        hf_param_bytes' isinstance guard on safetensors a few lines above - not
-        raise and take down every OTHER row in the same query with it."""
+        """A non-dict truthy value for the gguf/config expand field (a malformed or adversarial API response - HF's documented shape is always an object or absent) must degrade this row's architecture signal to None, matching hf_param_bytes' isinstance guard on safetensors a few lines above - not raise and tak..."""
         _mock_fetch(monkeypatch, [
             {"id": "org/malformed-gguf", "downloads": 1, "tags": ["gguf"],
              "gguf": "not-a-dict", "config": ["also", "not", "a", "dict"]},
@@ -418,14 +385,7 @@ class TestGgufClassifyExpand:
 
 
 class TestArchitectureMoeParamCount:
-    """architecture/moe/param_count: the display-only fields a classified search
-    result carries about WHAT the model is, layered on #990's
-    classify_hf_metadata. Real repo shapes, verified live against the HF API
-    while designing this (see dev-notes/ADR-0005): gguf.total tracks the
-    model's total parameter count (stable across quants of the same repo, not
-    a byte size), and architecture-contains-"moe" is reliable but NOT
-    exhaustive - TheBloke/Mixtral-8x7B-v0.1-GGUF (real MoE) reports
-    architecture=="llama"."""
+    """architecture/moe/param_count: the display-only fields a classified search result carries about WHAT the model is, layered on #990's classify_hf_metadata."""
 
     def test_confirmed_moe_from_architecture_string(self, monkeypatch):
         _mock_fetch(monkeypatch, [{
@@ -439,10 +399,7 @@ class TestArchitectureMoeParamCount:
         assert r["param_count"] == 30532122624
 
     def test_likely_moe_from_repo_name_when_architecture_does_not_say_so(self, monkeypatch):
-        """Live-verified counter-example (ADR-0005): this real Mixtral repo's
-        architecture reports 'llama', not 'mixtral'/anything containing 'moe' -
-        an older conversion predating the dedicated arch tag. The name-pattern
-        fallback must catch it, and must NOT claim it as confirmed."""
+        """Live-verified counter-example (ADR-0005): this real Mixtral repo's architecture reports 'llama', not 'mixtral'/anything containing 'moe' - an older conversion predating the dedicated arch tag."""
         _mock_fetch(monkeypatch, [{
             "id": "TheBloke/Mixtral-8x7B-v0.1-GGUF", "downloads": 1,
             "tags": ["gguf"],
@@ -453,8 +410,7 @@ class TestArchitectureMoeParamCount:
         assert r["moe"] == "likely"
 
     def test_no_moe_evidence_is_none_not_a_false_dense_claim(self, monkeypatch):
-        """Absence of both signals must abstain (None), never assert the model
-        is dense - same discipline classify_hf_metadata already applies to type."""
+        """Absence of both signals must abstain (None), never assert the model is dense - same discipline classify_hf_metadata already applies to type."""
         _mock_fetch(monkeypatch, [{
             "id": "meta-llama/Llama-3.1-8B-Instruct-GGUF", "downloads": 1,
             "tags": ["gguf", "conversational"],
@@ -480,9 +436,7 @@ class TestArchitectureMoeParamCount:
         assert r["param_count"] == 8_000_000_000
 
     def test_malformed_gguf_total_degrades_to_none_not_crash(self, monkeypatch):
-        """Same isinstance/positive guard as hf_param_bytes: a malformed or
-        adversarial 'total' (string, negative, bool) must degrade this row's
-        param_count to None, never raise or misreport a bool as a count."""
+        """Same isinstance/positive guard as hf_param_bytes: a malformed or adversarial 'total' (string, negative, bool) must degrade this row's param_count to None, never raise or misreport a bool as a count."""
         _mock_fetch(monkeypatch, [
             {"id": "org/string-total", "downloads": 1, "tags": ["gguf"],
              "gguf": {"architecture": "llama", "total": "not-a-number"}},
@@ -501,10 +455,7 @@ class TestArchitectureMoeParamCount:
         assert by_id["org/fine-total"]["param_count"] == 7_000_000_000
 
     def test_untyped_legacy_search_carries_none_of_the_new_fields(self, monkeypatch):
-        """model_types=None (the CLI `localm search` / MCP path) never requests
-        the gguf/config expand fields, so the new fields must be entirely
-        absent - byte-for-byte the pre-existing response shape, same contract
-        detected_type already holds."""
+        """model_types=None (the CLI `localm search` / MCP path) never requests the gguf/config expand fields, so the new fields must be entirely absent - byte-for-byte the pre-existing response shape, same contract detected_type already holds."""
         _mock_fetch(monkeypatch, [{"id": "org/repo", "downloads": 1, "tags": ["gguf"]}])
         r = hf_search("x", limit=5, formats=["gguf"])[0]
         assert "architecture" not in r
@@ -517,10 +468,7 @@ class TestArchitectureMoeParamCount:
 # ------------------------------------------------------------------ #
 
 class TestClassifyHfMetadata:
-    """Fixtures below are REAL repo metadata, captured live from the actual HF
-    API during design of this feature - not synthesized. See discover.py's
-    _HF_TYPE_FILTER_DEFAULT comment for why vae/text-encoder canonical repos
-    carry none of the signals this function looks for."""
+    """Fixtures below are REAL repo metadata, captured live from the actual HF API during design of this feature - not synthesized."""
 
     def test_llm(self):
         assert classify_hf_metadata("text-generation", "transformers",
@@ -540,11 +488,7 @@ class TestClassifyHfMetadata:
             ["diffusers", "safetensors", "text-to-image", "flux"]) == "diffusion-unet"
 
     def test_lora_precedence_over_diffusion_pipeline_tag(self):
-        """THE precedence-bug regression test. XLabs-AI/flux-RealismLora carries
-        pipeline_tag=text-to-image (inherited from its FLUX base model) AND an
-        exact 'lora' tag. The tag must win - the old pull.py implementation
-        checked the diffusion pipeline_tag FIRST and would misclassify this
-        (and every other diffusion LoRA) as diffusion-unet instead of lora."""
+        """THE precedence-bug regression test."""
         assert classify_hf_metadata(
             "text-to-image", "diffusers",
             ["diffusers", "lora", "Stable Diffusion", "image-generation",
@@ -579,8 +523,7 @@ class TestClassifyHfMetadata:
         assert classify_hf_metadata(None, None, ["clip"]) == "text-encoder"
 
     def test_substring_is_not_a_match(self):
-        """MED-15: a tag that merely CONTAINS 'lora'/'vae'/'clip' must not
-        misclassify (e.g. an 'exploration' tag)."""
+        """MED-15: a tag that merely CONTAINS 'lora'/'vae'/'clip' must not misclassify (e.g. an 'exploration' tag)."""
         assert classify_hf_metadata(None, None, ["exploration", "clipboard-app"]) == "unknown"
 
     def test_nothing_resolves_returns_unknown_not_llm(self):
@@ -595,10 +538,7 @@ class TestClassifyHfMetadata:
     # -------------------------------------------------------------- #
 
     def test_embedding_architecture_signal(self):
-        """A GGUF whose own header architecture is a verified embedding-only
-        llama.cpp architecture is 'embedding' even with zero other metadata -
-        the strongest signal this function has, since it comes from the
-        model's own file rather than a repo author's tags."""
+        """A GGUF whose own header architecture is a verified embedding-only llama.cpp architecture is 'embedding' even with zero other metadata - the strongest signal this function has, since it comes from the model's own file rather than a repo author's tags."""
         assert classify_hf_metadata(None, None, [], "bert") == "embedding"
         assert classify_hf_metadata(None, None, [], "nomic-bert-moe") == "embedding"
 
@@ -608,25 +548,16 @@ class TestClassifyHfMetadata:
         assert classify_hf_metadata(None, None, []) == "unknown"   # default arg
 
     def test_architecture_unrecognised_falls_through_not_wrong_guess(self):
-        """A causal-decoder architecture (llama/qwen35moe/deepseek2/mixtral) is
-        NOT in the embedding allowlist, and classify_hf_metadata has no positive
-        LLM-by-architecture list (too broad/unverifiable to maintain) - it must
-        fall through to the pipeline_tag/tagset checks, never guess 'llm' from
-        architecture alone."""
+        """A causal-decoder architecture (llama/qwen35moe/deepseek2/mixtral) is NOT in the embedding allowlist, and classify_hf_metadata has no positive LLM-by-architecture list (too broad/unverifiable to maintain) - it must fall through to the pipeline_tag/tagset checks, never guess 'llm' from architecture al..."""
         assert classify_hf_metadata(None, None, [], "qwen35moe") == "unknown"
 
     def test_lora_tag_wins_over_embedding_architecture(self):
-        """Precedence: the exact-tag checks run BEFORE the architecture check,
-        same reasoning as the diffusion-vs-lora precedence test above - a LoRA
-        adapter for an embedding base model is still a lora, not a full
-        embedding checkpoint."""
+        """Precedence: the exact-tag checks run BEFORE the architecture check, same reasoning as the diffusion-vs-lora precedence test above - a LoRA adapter for an embedding base model is still a lora, not a full embedding checkpoint."""
         assert classify_hf_metadata(
             None, "peft", ["peft", "lora"], "bert") == "lora"
 
     def test_llm_tagset_conversational_without_pipeline_tag(self):
-        """The exact shape of a HF-repacked GGUF-only upload: pipeline_tag is
-        entirely absent (never set on the quantizer's own repo), but the base
-        model's 'conversational' tag survives onto it."""
+        """The exact shape of a HF-repacked GGUF-only upload: pipeline_tag is entirely absent (never set on the quantizer's own repo), but the base model's 'conversational' tag survives onto it."""
         assert classify_hf_metadata(
             None, None, ["gguf", "conversational"]) == "llm"
 
@@ -639,9 +570,7 @@ class TestClassifyHfMetadata:
             None, None, ["gguf", "feature-extraction"]) == "embedding"
 
     def test_image_text_to_text_is_llm_not_diffusion(self):
-        """A vision-language chat model (e.g. a Qwen-VL GGUF) declares this
-        pipeline_tag - it is still an LLM (a chat model with image input), never
-        routed to diffusion-unet."""
+        """A vision-language chat model (e.g. a Qwen-VL GGUF) declares this pipeline_tag - it is still an LLM (a chat model with image input), never routed to diffusion-unet."""
         assert classify_hf_metadata(
             "image-text-to-text", "transformers",
             ["transformers", "gguf", "image-text-to-text"]) == "llm"
@@ -755,8 +684,7 @@ class TestClassifyHfMetadata:
 # ------------------------------------------------------------------ #
 
 def _urls_capture(monkeypatch, payload):
-    """Capture every request URL (repeated filter= keys survive, unlike a
-    parse_qsl dict) and return *payload* for each call."""
+    """Capture every request URL (repeated filter= keys survive, unlike a parse_qsl dict) and return *payload* for each call."""
     import json as _json
     urls: list[str] = []
 
@@ -768,10 +696,7 @@ def _urls_capture(monkeypatch, payload):
 
 
 class TestTypeScopedSearch:
-    """Two orthogonal, independently-selectable axes: model TYPE (via
-    model_types) and file FORMAT (gguf / hf==safetensors). Every filter value
-    below is live-verified against the real HF API. See hf_search's docstring
-    and _type_fmt_filter / _HF_TYPE_FILTER."""
+    """Two orthogonal, independently-selectable axes: model TYPE (via model_types) and file FORMAT (gguf / hf==safetensors)."""
 
     def test_embedding_hf_uses_feature_extraction_pipeline_tag(self, monkeypatch):
         seen = {}
@@ -786,9 +711,7 @@ class TestTypeScopedSearch:
         assert results[0]["detected_type"] == "embedding"
 
     def test_embedding_gguf_stays_plain_gguf_filter(self, monkeypatch):
-        """No reliable gguf+embedding combined filter exists - conservative
-        default: plain gguf format filter, query text does the narrowing, still
-        classified for a badge when metadata is present."""
+        """No reliable gguf+embedding combined filter exists - conservative default: plain gguf format filter, query text does the narrowing, still classified for a badge when metadata is present."""
         seen = {}
         _mock_fetch(monkeypatch, [
             {"id": "unsloth/bge-small-en-v1.5-GGUF", "downloads": 9,
@@ -811,9 +734,7 @@ class TestTypeScopedSearch:
         assert results[0]["detected_type"] == "diffusion-unet"
 
     def test_diffusion_gguf_adds_diffusers_filter_alongside_gguf(self, monkeypatch):
-        """Repeated filter= keys (doseq-encoded AND) - live-verified that
-        filter=diffusers&filter=gguf returns real GGUF diffusion repos. Asserted
-        via the raw URL (parse_qsl collapses repeated keys to the last one)."""
+        """Repeated filter= keys (doseq-encoded AND) - live-verified that filter=diffusers&filter=gguf returns real GGUF diffusion repos."""
         urls = _urls_capture(monkeypatch, [
             {"id": "wikeeyang/Krea2-Turbo-HD-V1", "downloads": 35,
              "pipeline_tag": "text-to-image", "tags": ["diffusers", "gguf"]}])
@@ -834,9 +755,7 @@ class TestTypeScopedSearch:
         assert results[0]["detected_type"] == "lora"   # tag wins over pipeline_tag
 
     def test_lora_gguf_uses_gguf_format_filter(self, monkeypatch):
-        """LoRA now honors the format axis (it no longer ignores it): the gguf
-        side is the plain gguf format filter (no reliable gguf-LoRA narrowing;
-        query text + the badge do the rest)."""
+        """LoRA now honors the format axis (it no longer ignores it): the gguf side is the plain gguf format filter (no reliable gguf-LoRA narrowing; query text + the badge do the rest)."""
         seen = {}
         _mock_fetch(monkeypatch, [{"id": "some/gguf-lora", "downloads": 3,
                                    "tags": ["gguf", "lora"]}], seen)
@@ -844,10 +763,7 @@ class TestTypeScopedSearch:
         assert seen["filter"] == "gguf"
 
     def test_vae_hf_uses_safetensors_format_filter(self, monkeypatch):
-        """THE crux, revised: HF has no reliable VAE *type* filter (sd-vae-ft-mse
-        carries no vae tag), but the *format* axis IS reliable - filter=safetensors
-        returns exactly the canonical diffusers VAEs (live-verified). So the vae
-        tab's hf side narrows by format, and the badge stays honestly 'unknown'."""
+        """THE crux, revised: HF has no reliable VAE *type* filter (sd-vae-ft-mse carries no vae tag), but the *format* axis IS reliable - filter=safetensors returns exactly the canonical diffusers VAEs (live-verified)."""
         seen = {}
         _mock_fetch(monkeypatch, [
             {"id": "stabilityai/sd-vae-ft-mse", "downloads": 900, "library_name": "diffusers",
@@ -895,8 +811,7 @@ class TestTypeScopedSearch:
         assert results[0]["detected_type"] == "llm"
 
     def test_singular_model_type_is_alias_for_one_element_list(self, monkeypatch):
-        """Back-compat: the route/tests still pass model_type= (singular). It is
-        exactly model_types=[that]."""
+        """Back-compat: the route/tests still pass model_type= (singular)."""
         seen = {}
         _mock_fetch(monkeypatch, [
             {"id": "BAAI/bge-m3", "downloads": 1,
@@ -906,10 +821,7 @@ class TestTypeScopedSearch:
         assert results[0]["detected_type"] == "embedding"
 
     def test_default_no_type_has_no_detected_type_key(self, monkeypatch):
-        """Back-compat guard: today's ONLY real external contract - the CLI's
-        `localm search` and the MCP search_models tool, neither of which passes
-        a type. Must be byte-for-byte what shipped before type-scoped search:
-        the hf side is filter=transformers, no classify, no detected_type."""
+        """Back-compat guard: today's ONLY real external contract - the CLI's `localm search` and the MCP search_models tool, neither of which passes a type."""
         seen = {}
         _mock_fetch(monkeypatch, [{"id": "org/g", "downloads": 1}], seen)
         results = hf_search("x", formats=["gguf"])   # no model_type/model_types
@@ -918,18 +830,14 @@ class TestTypeScopedSearch:
         assert seen["filter"] == "gguf"
 
     def test_default_no_type_hf_side_stays_transformers(self, monkeypatch):
-        """The legacy (CLI/MCP) hf side must remain filter=transformers, NOT the
-        new filter=safetensors - the byte-compat contract is unchanged."""
+        """The legacy (CLI/MCP) hf side must remain filter=transformers, NOT the new filter=safetensors - the byte-compat contract is unchanged."""
         seen = {}
         _mock_fetch(monkeypatch, [{"id": "org/hf", "downloads": 1}], seen)
         hf_search("x", formats=["hf"])
         assert seen["filter"] == "transformers"
 
     def test_all_types_selected_collapses_to_broad_format_filters(self, monkeypatch):
-        """Selecting every type is 'search everything', not a 7*fmt fan-out: the
-        widest reliable format filter (gguf / safetensors), classified. Two
-        queries, not fourteen - and safetensors (not transformers) so diffusion/
-        vae/encoders are NOT excluded from the non-gguf side."""
+        """Selecting every type is 'search everything', not a 7*fmt fan-out: the widest reliable format filter (gguf / safetensors), classified."""
         urls = _urls_capture(monkeypatch, [{"id": "org/x", "downloads": 1, "tags": ["gguf"]}])
         all_types = ["llm", "embedding", "diffusion-unet", "text-encoder",
                      "vae", "lora", "unknown"]
@@ -941,9 +849,7 @@ class TestTypeScopedSearch:
         assert "filter=transformers" not in joined    # broad hf side is safetensors
 
     def test_multi_type_dedupes_identical_resolved_queries(self, monkeypatch):
-        """vae + text-encoder both resolve to filter=safetensors on the hf side -
-        that query fires ONCE, not twice (a result's badge comes from its own
-        metadata, so the query's type is irrelevant to correctness)."""
+        """vae + text-encoder both resolve to filter=safetensors on the hf side - that query fires ONCE, not twice (a result's badge comes from its own metadata, so the query's type is irrelevant to correctness)."""
         urls = _urls_capture(monkeypatch, [{"id": "org/x", "downloads": 1,
                                             "tags": ["safetensors"]}])
         hf_search("x", limit=5, formats=["hf"], model_types=["vae", "text-encoder"])
@@ -951,8 +857,7 @@ class TestTypeScopedSearch:
         assert "filter=safetensors" in urls[0]
 
     def test_multi_type_merges_and_dedupes_by_repo_id(self, monkeypatch):
-        """llm + embedding run distinct queries; a repo surfacing in both appears
-        once, interleaved, badged from its own metadata."""
+        """llm + embedding run distinct queries; a repo surfacing in both appears once, interleaved, badged from its own metadata."""
         import json as _json
         import urllib.parse
 
@@ -1118,11 +1023,7 @@ class TestListGpus:
 
 
 class TestListGpusSafety:
-    """The safe-by-construction guarantee: list_gpus() must never block its
-    caller for longer than its deadline even when the GPU driver probe wedges,
-    while ALWAYS returning a fresh reading (no stale free-VRAM). This is the
-    regression guard for the diagnosed idle-hang root cause (a synchronous,
-    untimed torch.cuda probe on the event loop)."""
+    """The safe-by-construction guarantee: list_gpus() must never block its caller for longer than its deadline even when the GPU driver probe wedges, while ALWAYS returning a fresh reading (no stale free-VRAM)."""
 
     def test_deadline_bounds_a_wedged_probe(self, monkeypatch):
         import threading
@@ -1144,10 +1045,7 @@ class TestListGpusSafety:
         assert result == []      # no known value yet -> safe "unknown"
 
     def test_every_call_reprobes_no_stale_free(self, monkeypatch):
-        """No freshness cache: successive calls must reflect the LIVE reading,
-        never a stale one. switch_engine's eviction loop / wait_for_vram_release
-        polls free-VRAM to confirm a native free landed - a stale value there
-        would defeat the AUDIT-MED-11 over-eviction guard."""
+        """No freshness cache: successive calls must reflect the LIVE reading, never a stale one. switch_engine's eviction loop / wait_for_vram_release polls free-VRAM to confirm a native free landed - a stale value there would defeat the AUDIT-MED-11 over-eviction guard."""
         seq = [
             [{"index": 0, "name": "A", "total": 8, "free": 2}],   # tight
             [{"index": 0, "name": "A", "total": 8, "free": 7}],   # freed up
@@ -1167,10 +1065,7 @@ class TestListGpusSafety:
         assert calls["n"] == 2, "a call was served from cache instead of re-probing"
 
     def test_thread_start_failure_degrades_and_resets_guard(self, monkeypatch):
-        """If the probe thread cannot be spawned (OS thread exhaustion), the call
-        must NOT propagate a 500 and must NOT leave the in-flight guard stuck True
-        (which would freeze GPU detection for the process lifetime with no
-        self-heal). It degrades to last-known-good and re-arms for a later retry."""
+        """If the probe thread cannot be spawned (OS thread exhaustion), the call must NOT propagate a 500 and must NOT leave the in-flight guard stuck True (which would freeze GPU detection for the process lifetime with no self-heal)."""
         from localm import discover
 
         good = [{"index": 0, "name": "A", "total": 8, "free": 8}]
@@ -1212,19 +1107,7 @@ class TestListGpusSafety:
         assert fallback == good, "a wedged probe must serve the last-known-good value, not []"
 
     def test_reset_orphans_an_abandoned_probe_so_it_cannot_bleed(self, monkeypatch):
-        """An abandoned probe must not land its reading after a reset has retired it.
-
-        A probe that overruns its deadline is ABANDONED, not cancelled (a wedged
-        native call cannot be interrupted from Python), so that thread outlives the
-        reset and used to write _gpu_last_good afterwards - landing inside whatever
-        ran next. That is not hypothetical: a cold ROCm init (~6.5s, see this
-        module's own note) overruns the 4s deadline, so this box's REAL card was
-        arriving inside later tests that assert a fake or empty reading, failing
-        them intermittently (~15% of runs) with 'AMD Radeon RX 6900 XT'.
-
-        Guards the epoch fence in _reset_gpu_probe_cache. Clearing the globals
-        alone CANNOT fix this (the write happens after the clear), so a fix that
-        only re-clears would still fail this test."""
+        """An abandoned probe must not land its reading after a reset has retired it."""
         import threading
         import time
 
@@ -1254,12 +1137,7 @@ class TestListGpusSafety:
 
 
 class TestListGpusTimeoutStatus:
-    """A timed-out cold probe must be DISTINGUISHABLE from a genuine empty result
-    so a blocking caller can retry / report accurately, instead of misattributing
-    a slow driver init to 'no GPU / no torch' (AGENTS.md rule 5). Diagnosed cause:
-    the FIRST cold torch.cuda/HIP call initializes the ROCm/CUDA driver (~6.5s
-    measured) and overruns the 4s server deadline, so list_gpus() returns [] just
-    like a no-torch box - with no way, before this, to tell the two apart."""
+    """A timed-out cold probe must be DISTINGUISHABLE from a genuine empty result so a blocking caller can retry / report accurately, instead of misattributing a slow driver init to 'no GPU / no torch' (AGENTS.md rule 5)."""
 
     def test_short_deadline_times_out_to_empty_with_timeout_status(self, monkeypatch):
         import threading
@@ -1293,31 +1171,21 @@ class TestListGpusTimeoutStatus:
         assert gpus == [{"index": 0, "name": "GPU0", "total": 8, "free": 8}]
 
     def test_completed_empty_probe_is_ok_not_timeout(self, monkeypatch):
-        """A probe that COMPLETES and finds nothing is authoritative 'no GPU'
-        (status OK) - the real no-torch/no-nvidia-smi box - and must NOT be
-        conflated with a timeout."""
+        """A probe that COMPLETES and finds nothing is authoritative 'no GPU' (status OK) - the real no-torch/no-nvidia-smi box - and must NOT be conflated with a timeout."""
         monkeypatch.setattr("localm.discover._list_gpus_probe", lambda: [])
         gpus, status = list_gpus(deadline=3.0, return_status=True)
         assert gpus == []
         assert status == GPU_PROBE_OK
 
     def test_return_status_false_keeps_plain_list_contract(self, monkeypatch):
-        """The default call returns a bare list (every existing caller and the
-        ~28 test files that patch list_gpus rely on it), never a tuple."""
+        """The default call returns a bare list (every existing caller and the ~28 test files that patch list_gpus rely on it), never a tuple."""
         good = [{"index": 0, "name": "A", "total": 8, "free": 8}]
         monkeypatch.setattr("localm.discover._list_gpus_probe", lambda: list(good))
         assert list_gpus() == good
         assert list_gpus(deadline=3.0) == good
 
     def test_default_deadline_tolerates_a_cold_driver_init(self):
-        """The DEFAULT deadline must sit ABOVE a legitimate cold ROCm/CUDA driver
-        init (4.63s observed on a cold box; ~6.5s historically), with real margin.
-        The retired 4.0s default sat inside that range, so a bare list_gpus() on a
-        cold driver "timed out" into [] / last-known-good - which a bare-list
-        caller cannot tell from "no GPU at all" (the #581/#722 bug class). No
-        production caller probes on the event loop (every server call site
-        offloads via run_in_executor), so nothing needs a short default. Mutation
-        guard: putting 4.0 back turns this red."""
+        """The DEFAULT deadline must sit ABOVE a legitimate cold ROCm/CUDA driver init (4.63s observed on a cold box; ~6.5s historically), with real margin."""
         assert _GPU_PROBE_DEADLINE >= 10.0
         # The blocking-caller name must stay UNIFIED with the default: splitting
         # them again re-creates the two-tier world where every caller that does
@@ -1325,10 +1193,7 @@ class TestListGpusTimeoutStatus:
         assert _GPU_PROBE_CLI_DEADLINE == _GPU_PROBE_DEADLINE
 
     def test_default_deadline_lets_a_cold_init_length_probe_complete(self):
-        """Behavioral half of the constant guard above: a probe that takes longer
-        than the RETIRED 4.0s cap (a realistic cold driver init) must COMPLETE at
-        the default deadline and hand back its real reading - not time out into
-        the []/"no GPU" misreport. Red on the pre-fix tree (4.4s > 4.0s cap)."""
+        """Behavioral half of the constant guard above: a probe that takes longer than the RETIRED 4.0s cap (a realistic cold driver init) must COMPLETE at the default deadline and hand back its real reading - not time out into the []/'no GPU' misreport."""
         import time
         from localm import discover
 
@@ -1352,16 +1217,7 @@ class TestListGpusTimeoutStatus:
         assert gpus == good
 
     def test_vram_capacity_forwards_deadline_so_a_cold_probe_completes(self, monkeypatch):
-        """Root cause of switch_engine's skipped gate: the pre-load probe ran at the
-        4s server cap while off the event loop, so a cold driver init (measured 4.63s;
-        ~6.5s per discover.py's own comment) reliably TIMED OUT and served no reading,
-        which made the gate treat the box as unmeasurable and skip the VRAM check.
-
-        This pins the fix's mechanism end to end through the plumbing: the SAME slow
-        probe TIMES OUT at the default cap (no 'free') but COMPLETES with a real
-        reading when vram_capacity is given the generous deadline. If vram_capacity
-        stopped forwarding the deadline, the second arm would time out too and this
-        goes red."""
+        """Root cause of switch_engine's skipped gate: the pre-load probe ran at the 4s server cap while off the event loop, so a cold driver init (measured 4.63s; ~6.5s per discover.py's own comment) reliably TIMED OUT and served no reading, which made the gate treat the box as unmeasurable and skip the VRAM..."""
         from localm import discover
         import time
 
@@ -1388,22 +1244,7 @@ class TestListGpusTimeoutStatus:
             f"probe completes and the gate gets a real reading; got {cap_b}")
 
     def test_deadline_forwarded_when_split_degrades_to_single_device(self, monkeypatch):
-        """vram_capacity's docstring promises the deadline is forwarded on EVERY
-        path. The split-configured-but-degraded-to-<2-devices fallback (a device
-        vanished / was never present) dropped it and re-probed at the default 4s cap,
-        so a cold init on that specific config could still time out.
-
-        Pinned with a TRACER, not with timings, deliberately. A timing version does
-        NOT guard: this path probes TWICE (vram_capacity's own split probe, then
-        vram_info's inside the fallback), and any probe short enough to keep the test
-        fast also completes under the 4s DEFAULT cap - so dropping the forwarding
-        would leave it green. Worse, the first probe's abandoned thread holds the
-        in-flight slot, so the second returns BUSY rather than TIMEOUT and a
-        status-based assertion pins the wrong thing. The tracer asserts what actually
-        matters: BOTH probes on this path receive the caller's deadline.
-
-        Mutation: drop `deadline` from _vi() (or from _list_gpus_kw) -> the second
-        recorded deadline is no longer the caller's -> RED."""
+        """vram_capacity's docstring promises the deadline is forwarded on EVERY path."""
         from localm import discover
         seen = []
 
@@ -1437,13 +1278,7 @@ class TestListGpusTimeoutStatus:
             f"fallback dropping it is the bug this pins. got {seen}")
 
     def test_vram_capacity_forwards_wait_for_inflight(self, monkeypatch):
-        """switch_engine's gate passes wait_for_inflight=True (#701) so a load that
-        races a concurrent probe (the GUI stats heartbeat holding the slot through a
-        cold init) JOINS it for a real reading instead of taking an instant BUSY and
-        refusing spuriously. That only works if vram_capacity FORWARDS the flag to
-        list_gpus. This pins the forwarding with a tracer; the join mechanism itself
-        is #701's and tested there. Mutation: drop wait_for_inflight from _vi() /
-        _list_gpus_kw and the positive assert goes red."""
+        """switch_engine's gate passes wait_for_inflight=True (#701) so a load that races a concurrent probe (the GUI stats heartbeat holding the slot through a cold init) JOINS it for a real reading instead of taking an instant BUSY and refusing spuriously."""
         from localm import discover
         seen = {}
 
@@ -1475,12 +1310,7 @@ class TestListGpusTimeoutStatus:
 
 
 class TestListGpusInconclusiveStatus:
-    """Closes a documented gap (see _torch_gpus_isolated_once's KNOWN GAP
-    paragraph): once the isolated-torch latch has engaged AND nvidia-smi also
-    cannot answer - the realistic case is an AMD or Intel card whose torch
-    wedges - the probe used to complete with [] and status GPU_PROBE_OK,
-    indistinguishable from a genuine no-GPU box. status must now be
-    GPU_PROBE_INCONCLUSIVE instead, and ONLY in that specific combination."""
+    """Closes a documented gap (see _torch_gpus_isolated_once's KNOWN GAP paragraph): once the isolated-torch latch has engaged AND nvidia-smi also cannot answer - the realistic case is an AMD or Intel card whose torch wedges - the probe used to complete with [] and status GPU_PROBE_OK, indistinguishable f..."""
 
     def _blind_nvidia_smi(self, monkeypatch):
         import subprocess
@@ -1488,9 +1318,7 @@ class TestListGpusInconclusiveStatus:
                             MagicMock(side_effect=FileNotFoundError("no nvidia-smi")))
 
     def test_latch_engaged_and_nvidia_smi_blind_reports_inconclusive(self, monkeypatch):
-        """The scenario the gap named: torch wedges THIS round (engaging the
-        latch as a side effect) and nvidia-smi (NVIDIA-only) cannot see the
-        AMD/Intel card either."""
+        """The scenario the gap named: torch wedges THIS round (engaging the latch as a side effect) and nvidia-smi (NVIDIA-only) cannot see the AMD/Intel card either."""
         monkeypatch.setattr(discover, "_torch_gpu_probe_known_doomed", lambda: False)
         monkeypatch.setattr(discover, "_torch_is_resident", lambda: False)
         monkeypatch.setattr(discover, "_torch_gpus_isolated",
@@ -1507,10 +1335,7 @@ class TestListGpusInconclusiveStatus:
             assert discover._isolated_torch_unavailable is True   # the latch engaged
 
     def test_fires_control_genuine_no_gpu_box_stays_ok(self, monkeypatch):
-        """FIRES-CONTROL: a real, honest empty answer from torch (no latch) plus
-        a blind nvidia-smi is a GENUINE no-GPU box and must NOT be downgraded to
-        inconclusive - a change that made every empty reading inconclusive would
-        still pass the test above but must fail this one."""
+        """FIRES-CONTROL: a real, honest empty answer from torch (no latch) plus a blind nvidia-smi is a GENUINE no-GPU box and must NOT be downgraded to inconclusive - a change that made every empty reading inconclusive would still pass the test above but must fail this one."""
         monkeypatch.setattr(discover, "_torch_gpu_probe_known_doomed", lambda: False)
         monkeypatch.setattr(discover, "_torch_is_resident", lambda: False)
         monkeypatch.setattr(discover, "_torch_gpus_isolated", lambda: [])
@@ -1526,10 +1351,7 @@ class TestListGpusInconclusiveStatus:
             assert discover._isolated_torch_unavailable is False
 
     def test_preexisting_latch_with_a_conclusive_nvidia_smi_stays_ok(self, monkeypatch):
-        """The actual case the isolation was built for (sm_120): torch is ALREADY
-        latched-unavailable from an earlier probe, but nvidia-smi still finds the
-        real hardware this round. A non-empty reading is conclusive regardless of
-        the latch - it must never be downgraded just because torch sat out."""
+        """The actual case the isolation was built for (sm_120): torch is ALREADY latched-unavailable from an earlier probe, but nvidia-smi still finds the real hardware this round."""
         monkeypatch.setattr(discover, "_isolated_torch_unavailable", True)
         monkeypatch.setattr(discover, "_torch_gpu_probe_known_doomed", lambda: False)
         monkeypatch.setattr(discover, "_torch_is_resident", lambda: False)
@@ -1547,30 +1369,13 @@ class TestListGpusInconclusiveStatus:
 
 
 class TestListGpusJoinInflight:
-    """A patient off-loop caller must be able to JOIN a probe already in flight
-    (opt-in wait_for_inflight), not just get an instant BUSY.
-
-    WHY this is the real fix, and a longer deadline alone is not: on a cold box the
-    FIRST probe (typically the GUI's /api/stats heartbeat, off-loaded; historically
-    at a 4s cap) holds _gpu_probe_inflight for the entire ~4.6s cold ROCm/CUDA init. A
-    model-load probe arriving in that window hits the in-flight guard and returns
-    BUSY + last-known-good in ~0.000s WITHOUT probing - the identical short-circuit
-    a deadline-15 RETRY hits (measured 0.0000s). So switch_engine's VRAM-fit gate
-    saw free=None -> measurable=False -> loaded unchecked, EVEN with a long
-    deadline, because it never got to run its own probe. Joining the in-flight
-    probe is what actually lets the long deadline pay off in the concurrent case.
-    The mutation test below (flag OFF -> still BUSY) proves these are not
-    tautological: the join, not the deadline, is what changes the outcome."""
+    """A patient off-loop caller must be able to JOIN a probe already in flight (opt-in wait_for_inflight), not just get an instant BUSY."""
 
     _GOOD = [{"index": 0, "name": "GPU0", "total": 8, "free": 4}]
 
     @pytest.fixture(autouse=True)
     def _reset_probe_state(self):
-        """These tests deliberately leave an abandoned probe thread in flight
-        (the whole point: a caller that overran its deadline). Reset before and
-        after each so a straggler's late write to _gpu_last_good cannot bleed into
-        a sibling test - the epoch fence in _reset_gpu_probe_cache is what makes
-        that late write a no-op."""
+        """These tests deliberately leave an abandoned probe thread in flight (the whole point: a caller that overran its deadline)."""
         from localm import discover
         discover._reset_gpu_probe_cache()
         yield
@@ -1623,10 +1428,7 @@ class TestListGpusJoinInflight:
             f"landed, not waited out its 5s deadline")
 
     def test_without_opt_in_a_concurrent_caller_still_gets_busy(self, monkeypatch):
-        """MUTATION guard: the SAME concurrent scenario, but the second caller does
-        NOT opt in -> it must still short-circuit on BUSY in ~0s. This is the bug
-        the join fixes; if this ever returns OK, wait_for_inflight has been made
-        the unconditional default and the event-loop protection is gone."""
+        """MUTATION guard: the SAME concurrent scenario, but the second caller does NOT opt in -> it must still short-circuit on BUSY in ~0s."""
         import threading
         import time
 
@@ -1658,9 +1460,7 @@ class TestListGpusJoinInflight:
             f"BUSY must be instant ({elapsed:.2f}s) - it never waited on the probe")
 
     def test_joiner_on_a_permanent_wedge_times_out_at_its_own_deadline(self, monkeypatch):
-        """A join must be BOUNDED by the joiner's own deadline and must never spawn
-        a second probe: on a truly wedged driver the joiner returns TIMEOUT at its
-        deadline (not a hang, not a pile-on)."""
+        """A join must be BOUNDED by the joiner's own deadline and must never spawn a second probe: on a truly wedged driver the joiner returns TIMEOUT at its deadline (not a hang, not a pile-on)."""
         import threading
         import time
 
@@ -1692,9 +1492,7 @@ class TestListGpusJoinInflight:
             f"joiner should time out at ~0.5s, not hang or return early ({elapsed:.2f}s)")
 
     def test_wait_for_inflight_with_no_probe_running_starts_its_own(self, monkeypatch):
-        """When nothing is in flight, wait_for_inflight is a no-op: the caller just
-        runs its own probe (the headless/first-caller path), so the flag is safe to
-        pass unconditionally from an off-loop caller."""
+        """When nothing is in flight, wait_for_inflight is a no-op: the caller just runs its own probe (the headless/first-caller path), so the flag is safe to pass unconditionally from an off-loop caller."""
         import time
 
         def _slow():
@@ -1708,10 +1506,7 @@ class TestListGpusJoinInflight:
         assert gpus == self._GOOD
 
     def test_spawn_failure_wakes_a_joiner_instead_of_hanging(self, monkeypatch):
-        """If the STARTER publishes its join handles and THEN fails to spawn the
-        probe thread, a caller that joined in that window must be woken (BUSY), not
-        left waiting out its whole deadline on a probe that will never run. Guards
-        the done.set() in the spawn-failure path."""
+        """If the STARTER publishes its join handles and THEN fails to spawn the probe thread, a caller that joined in that window must be woken (BUSY), not left waiting out its whole deadline on a probe that will never run."""
         import threading
         import time
 
@@ -1769,24 +1564,7 @@ class TestListGpusJoinInflight:
 
 @pytest.fixture
 def _non_vulkan_host(monkeypatch):
-    """Pin the active native backend to NON-vulkan (REG-596).
-
-    resolve_main_gpu_index/resolve_gpu_split only cross-check a configured index
-    against the detected device list when the active backend is NOT vulkan (on
-    vulkan, list_gpus() is structurally blind to the real device list, so the
-    index is trusted instead - see _native_backend_has_vulkan). That check reads
-    the REAL provisioned runtime dir off disk, so without this pin the classes
-    below assert the drop-the-unknown-index behaviour on a host that skips it:
-    green on an unprovisioned/HIP box, RED on a vulkan-provisioned one (the
-    RECOMMENDED universal build), for the same source.
-
-    The vulkan side of the branch is covered explicitly by
-    TestVulkanBackendIndexPassthrough, and the detector itself by
-    TestNativeBackendHasVulkan, so pinning here narrows these classes to the
-    branch they mean to test rather than hiding the other one. Mirrors the
-    has_max_devices pin in TestApplyGpuSplit, which fixes the same class of
-    host-state leak.
-    """
+    """Pin the active native backend to NON-vulkan (REG-596)."""
     monkeypatch.setattr("localm.discover._native_backend_has_vulkan", lambda: False)
 
 
@@ -1982,9 +1760,7 @@ class TestResolveGpuSplit:
 
 
 def _ggml_lib_name(stem: str) -> str:
-    """A ggml backend library filename matching THIS platform's _ggml_glob(), so
-    the detector below is exercised through its real glob rather than a stubbed
-    one."""
+    """A ggml backend library filename matching THIS platform's _ggml_glob(), so the detector below is exercised through its real glob rather than a stubbed one."""
     if sys.platform == "win32":
         return f"ggml-{stem}.dll"
     if sys.platform == "darwin":
@@ -1993,16 +1769,7 @@ def _ggml_lib_name(stem: str) -> str:
 
 
 class TestVulkanBackendIndexPassthrough:
-    """REG-596: the vulkan side of the index-validation branch had NO coverage.
-
-    On the vulkan build, list_gpus() cannot enumerate the real device list at
-    all (it only sees torch.cuda / nvidia-smi), so a non-empty but
-    vulkan-incomplete list must NOT veto an explicitly configured index -
-    GPU-SPLIT-VKINDEX was confirmed live to silently drop a VALID device.
-    These pin the backend to vulkan and assert the pass-through contract, so
-    the behaviour is tested on every host instead of only on whichever runtime
-    happens to be provisioned.
-    """
+    """REG-596: the vulkan side of the index-validation branch had NO coverage."""
 
     @pytest.fixture(autouse=True)
     def _vulkan_host(self, monkeypatch):
@@ -2056,9 +1823,7 @@ class TestVulkanBackendIndexPassthrough:
 
 
 class TestNativeBackendHasVulkan:
-    """REG-596: the detector whose host-dependence made the suite host-dependent
-    had no tests of its own. It reads the real shipped library set, so pin the
-    runtime dir at a tmp_path and assert on the file set."""
+    """REG-596: the detector whose host-dependence made the suite host-dependent had no tests of its own."""
 
     @pytest.fixture
     def _runtime_dir(self, tmp_path, monkeypatch):
@@ -2192,8 +1957,7 @@ class TestApplyGpuSplit:
 
 @pytest.mark.usefixtures("_non_vulkan_host")
 class TestVramInfoRespectsConfiguredDevice:
-    """vram_info() must reflect the CONFIGURED main GPU, not always device 0,
-    once list_gpus() can see more than one device."""
+    """vram_info() must reflect the CONFIGURED main GPU, not always device 0, once list_gpus() can see more than one device."""
 
     _GPUS = [
         {"index": 0, "name": "A", "total": 24_000_000_000, "free": 20_000_000_000},
@@ -2223,11 +1987,7 @@ class TestVramInfoRespectsConfiguredDevice:
 
 @pytest.mark.usefixtures("_non_vulkan_host")
 class TestVramCapacitySplitAware:
-    """vram_capacity() must sum total/free across a CONFIGURED multi-GPU split
-    (2+ valid resolve_gpu_split() devices) instead of vram_info()'s single main-
-    GPU number - the fix for the bug where a model too big for one GPU alone
-    but that fits split across N configured devices was wrongly refused/badged
-    against just one device's capacity."""
+    """vram_capacity() must sum total/free across a CONFIGURED multi-GPU split (2+ valid resolve_gpu_split() devices) instead of vram_info()'s single main- GPU number - the fix for the bug where a model too big for one GPU alone but that fits split across N configured devices was wrongly refused/badged aga..."""
 
     _GPUS = [
         {"index": 0, "name": "A", "total": 24_000_000_000, "free": 20_000_000_000},
@@ -2271,9 +2031,7 @@ class TestVramCapacitySplitAware:
         }
 
     def test_fewer_than_two_valid_devices_falls_back_to_vram_info(self, monkeypatch):
-        """Only one of the two configured indices is currently detected -
-        resolve_gpu_split degrades this to "no split" (its own contract) - the
-        combined-capacity path must degrade the same way, not sum a single device."""
+        """Only one of the two configured indices is currently detected - resolve_gpu_split degrades this to 'no split' (its own contract) - the combined-capacity path must degrade the same way, not sum a single device."""
         monkeypatch.setattr("localm.discover.list_gpus", lambda: self._GPUS[:1])
         monkeypatch.setattr(
             "localm.config.load_config",
@@ -2282,10 +2040,7 @@ class TestVramCapacitySplitAware:
             "total": 24_000_000_000, "free": 20_000_000_000}
 
     def test_partially_measurable_free_omits_free_but_keeps_total(self, monkeypatch):
-        """vram_info()'s own contract: "free" is present only when measurable.
-        A split where one device cannot report free must not silently under-
-        count by treating the missing value as 0 - omit "free" entirely, same
-        as a single unmeasurable-free device would."""
+        """vram_info()'s own contract: 'free' is present only when measurable."""
         gpus = [
             {"index": 0, "name": "A", "total": 24_000_000_000, "free": 20_000_000_000},
             {"index": 1, "name": "B", "total": 12_000_000_000},  # no "free" key
@@ -2299,9 +2054,7 @@ class TestVramCapacitySplitAware:
         assert "free" not in result
 
     def test_unmeasurable_gpus_falls_back_to_vram_info_registry_tier(self, monkeypatch):
-        """No list_gpus() data at all (GGUF-only/non-NVIDIA install): cannot sum
-        per-device capacity, so this must defer to vram_info()'s own registry-
-        fallback tier rather than fabricate a combined number from nothing."""
+        """No list_gpus() data at all (GGUF-only/non-NVIDIA install): cannot sum per-device capacity, so this must defer to vram_info()'s own registry- fallback tier rather than fabricate a combined number from nothing."""
         monkeypatch.setattr("localm.discover.list_gpus", lambda: [])
         monkeypatch.setattr(
             "localm.config.load_config",
@@ -2322,8 +2075,7 @@ class _FakeKey:
 
 
 class _FakeWinreg:
-    """Minimal winreg stand-in modelling the display-adapter class key, so the
-    registry tier of discover.vram_info can be exercised off Windows."""
+    """Minimal winreg stand-in modelling the display-adapter class key, so the registry tier of discover.vram_info can be exercised off Windows."""
     HKEY_LOCAL_MACHINE = object()
 
     def __init__(self, adapters):
@@ -2346,12 +2098,7 @@ class _FakeWinreg:
 
 
 class TestVramInfoRegistryTierDeviceGlobalFree:
-    """discover.vram_info's Windows registry tier (reached torch-less, when
-    list_gpus() is empty) must enrich its total-only reading with a DEVICE-GLOBAL
-    free from the ADL/PDH usage source - but ONLY when the probe completed empty,
-    never on a timeout, and never when the source cannot map the adapter. This is
-    the torch-less VRAM-meter fix; on a GGUF-only install the registry is the only
-    VRAM source, so without the free the meter and fit gates see total-only."""
+    """discover.vram_info's Windows registry tier (reached torch-less, when list_gpus() is empty) must enrich its total-only reading with a DEVICE-GLOBAL free from the ADL/PDH usage source - but ONLY when the probe completed empty, never on a timeout, and never when the source cannot map the adapter."""
 
     _TOTAL = 17_163_091_968
 
@@ -2389,9 +2136,7 @@ class TestVramInfoRegistryTierDeviceGlobalFree:
         assert seen["gpus"][0]["name"] == "AMD Radeon RX 6900 XT"
 
     def test_timed_out_probe_stays_total_only(self, monkeypatch):
-        """A timeout means the box is unmeasurable and the pre-load gate skips the
-        VRAM check; surfacing an independent ADL number here would silently turn a
-        skipped gate into an enforcing one, so the enrichment must not run."""
+        """A timeout means the box is unmeasurable and the pre-load gate skips the VRAM check; surfacing an independent ADL number here would silently turn a skipped gate into an enforcing one, so the enrichment must not run."""
         seen = self._arm(monkeypatch, status=GPU_PROBE_TIMEOUT, used=3_500_000_000)
         info, st = discover.vram_info(return_status=True)
         assert st == GPU_PROBE_TIMEOUT
@@ -2404,12 +2149,7 @@ class TestVramInfoRegistryTierDeviceGlobalFree:
         assert info == {"total": self._TOTAL}
 
     def test_inconclusive_probe_stays_total_only(self, monkeypatch):
-        """An INCONCLUSIVE reading (isolated torch could not be asked and
-        nvidia-smi also found nothing) gets the same conservative treatment as
-        TIMEOUT/BUSY: gpu_usage.device_global_used_bytes' ADL/PDH mapping is
-        not proven independent of the same torch trouble, so the enrichment
-        must not run - stay total-only rather than assert a fresh certainty
-        this call did not earn."""
+        """An INCONCLUSIVE reading (isolated torch could not be asked and nvidia-smi also found nothing) gets the same conservative treatment as TIMEOUT/BUSY: gpu_usage.device_global_used_bytes' ADL/PDH mapping is not proven independent of the same torch trouble, so the enrichment must not run - stay total-onl..."""
         seen = self._arm(monkeypatch, status=GPU_PROBE_INCONCLUSIVE, used=3_500_000_000)
         info, st = discover.vram_info(return_status=True)
         assert st == GPU_PROBE_INCONCLUSIVE
@@ -2417,16 +2157,14 @@ class TestVramInfoRegistryTierDeviceGlobalFree:
         assert "gpus" not in seen, "the usage source must not be consulted when inconclusive"
 
     def test_declining_source_stays_total_only(self, monkeypatch):
-        """A non-AMD / multi-adapter box: the usage source returns {} rather than
-        guess a pairing, and the reading stays honestly total-only."""
+        """A non-AMD / multi-adapter box: the usage source returns {} rather than guess a pairing, and the reading stays honestly total-only."""
         self._arm(monkeypatch, status=GPU_PROBE_OK, used=None,
                   name="NVIDIA GeForce RTX 4090")
         info, _ = discover.vram_info(return_status=True)
         assert info == {"total": self._TOTAL}
 
     def test_no_status_requested_still_enriches(self, monkeypatch):
-        """A fit-badge caller (return_status=False, status is None) still gets the
-        free - it never gates on timeout, so the enrichment applies."""
+        """A fit-badge caller (return_status=False, status is None) still gets the free - it never gates on timeout, so the enrichment applies."""
         self._arm(monkeypatch, status=None, used=3_500_000_000)
         info = discover.vram_info()
         assert info["free"] == self._TOTAL - 3_500_000_000
@@ -2434,11 +2172,7 @@ class TestVramInfoRegistryTierDeviceGlobalFree:
 
 
 class TestVramInfoReturnStatus:
-    """vram_info(return_status=True) must propagate list_gpus()'s own probe
-    status, so a caller reporting a specific VRAM number as CURRENT FACT (not
-    just a fit ceiling) can tell a fresh reading from a timed-out/stale one -
-    the gap a release-verify pass found in /v1/models/unload's vram_before/
-    after_bytes reporting."""
+    """vram_info(return_status=True) must propagate list_gpus()'s own probe status, so a caller reporting a specific VRAM number as CURRENT FACT (not just a fit ceiling) can tell a fresh reading from a timed-out/stale one - the gap a release-verify pass found in /v1/models/unload's vram_before/ after_bytes..."""
 
     def test_default_call_keeps_plain_dict_contract(self, monkeypatch):
         monkeypatch.setattr("localm.discover._list_gpus_probe",
@@ -2475,9 +2209,7 @@ class TestVramInfoReturnStatus:
 
 
 class TestVramCapacityReturnStatus:
-    """vram_capacity(return_status=True) must propagate probe status through
-    BOTH the single-GPU short-circuit (delegates to vram_info) and the
-    multi-GPU split-summed path, not just one of them."""
+    """vram_capacity(return_status=True) must propagate probe status through BOTH the single-GPU short-circuit (delegates to vram_info) and the multi-GPU split-summed path, not just one of them."""
 
     _GPUS = [
         {"index": 0, "name": "A", "total": 24_000_000_000, "free": 20_000_000_000},
@@ -2502,10 +2234,7 @@ class TestVramCapacityReturnStatus:
         assert status == GPU_PROBE_OK
 
     def test_default_call_keeps_plain_dict_contract_regardless_of_split(self, monkeypatch):
-        """The ~28 test files that patch list_gpus()/vram_capacity() with a
-        plain no-kwarg stand-in must never see the new kwarg emitted unless
-        they opted in - this is what a release-verify-pass fix accidentally
-        broke on the first attempt (TypeError: unexpected keyword argument)."""
+        """The ~28 test files that patch list_gpus()/vram_capacity() with a plain no-kwarg stand-in must never see the new kwarg emitted unless they opted in - this is what a release-verify-pass fix accidentally broke on the first attempt (TypeError: unexpected keyword argument)."""
         monkeypatch.setattr("localm.discover.list_gpus", lambda: self._GPUS)
         monkeypatch.setattr("localm.config.load_config",
                              lambda: {"gpu_split_indices": [0, 1]})
@@ -2514,9 +2243,7 @@ class TestVramCapacityReturnStatus:
 
 @pytest.mark.usefixtures("_non_vulkan_host")
 class TestSplitDeviceCount:
-    """split_device_count(): the DETECTED split size vram_capacity() uses to decide
-    combined-vs-single, so a caption/message can name the VRAM basis honestly. Must
-    agree with vram_capacity()'s own combined/fall-back decision on the same inputs."""
+    """split_device_count(): the DETECTED split size vram_capacity() uses to decide combined-vs-single, so a caption/message can name the VRAM basis honestly."""
 
     _GPUS = [
         {"index": 0, "name": "A", "total": 24_000_000_000, "free": 20_000_000_000},
@@ -2549,11 +2276,7 @@ class TestSplitDeviceCount:
 
 
 class TestAppliedSplitDeviceCount:
-    """applied_split_device_count(): the LOADER-TRUTH count (mirrors
-    apply_gpu_split's own gate) vs split_device_count()'s DETECTED/labelling count.
-    The two AGREE on a non-vulkan box with a detected device list, and DIVERGE
-    exactly where the loader really splits but list_gpus() cannot measure it: a
-    GGUF-only box (no torch) and the vulkan build (GPU-SPLIT-VKINDEX)."""
+    """applied_split_device_count(): the LOADER-TRUTH count (mirrors apply_gpu_split's own gate) vs split_device_count()'s DETECTED/labelling count."""
 
     _GPUS = [
         {"index": 0, "name": "A", "total": 24_000_000_000, "free": 20_000_000_000},
@@ -2647,12 +2370,7 @@ class TestAppliedSplitDeviceCount:
 
 
 class TestGpuSplitShortfallVulkan:
-    """gpu_split_shortfall() honest-unknown on the vulkan build: the configured
-    split indices are in ggml-vulkan's index space, not torch's, so a per-device
-    free-VRAM check would name the WRONG card. It must SKIP the check (return the
-    'nothing to block on' sentinel []) and SURFACE the skip at INFO (discoverable
-    in a bug report), never presenting an un-run check as passed (AGENTS.md rule 5).
-    This one guard fixes both callers (the embedder AND http_server's chat path)."""
+    """gpu_split_shortfall() honest-unknown on the vulkan build: the configured split indices are in ggml-vulkan's index space, not torch's, so a per-device free-VRAM check would name the WRONG card."""
 
     # A MIXED box where the UN-guarded check WOULD flag both devices (tiny free):
     # this is what makes the mutation (revert the guard) go red instead of passing
@@ -2691,16 +2409,7 @@ class TestGpuSplitShortfallVulkan:
 
 @pytest.mark.usefixtures("_non_vulkan_host")
 class TestGpuSplitShortfall:
-    """gpu_split_shortfall(): vram_capacity()'s AGGREGATE check alone is not
-    enough for a GGUF-backend load - with PINNED gpu_split_ratios,
-    apply_gpu_split() divides a model by that static per-config ratio with no
-    live per-device capacity awareness, so an asymmetric split (e.g. another
-    already-loaded model sits on one device more than another) can pass the
-    aggregate check while one device's actual share is short. This is the
-    per-device gate that catches that case. With ratios UNSET the gate (and
-    the loader) now use the auto free-VRAM-proportional shares instead - see
-    tests/test_gpu_split_auto_ratios.py's TestShortfallAutoShares - so the
-    static-share cases here pin ratios explicitly."""
+    """gpu_split_shortfall(): vram_capacity()'s AGGREGATE check alone is not enough for a GGUF-backend load - with PINNED gpu_split_ratios, apply_gpu_split() divides a model by that static per-config ratio with no live per-device capacity awareness, so an asymmetric split (e.g. another already-loaded model..."""
 
     _GPUS = [
         {"index": 0, "name": "A", "total": 16_000_000_000, "free": 2_000_000_000},
@@ -2773,9 +2482,7 @@ class TestGpuSplitShortfall:
         assert {d["index"] for d in result} == {0, 1}
 
     def test_fewer_than_two_valid_devices_returns_empty(self, monkeypatch):
-        """Only one of the two configured indices is currently detected -
-        resolve_gpu_split degrades this to "no split" (its own contract), so
-        there is no per-device split share to check at all."""
+        """Only one of the two configured indices is currently detected - resolve_gpu_split degrades this to 'no split' (its own contract), so there is no per-device split share to check at all."""
         monkeypatch.setattr("localm.discover.list_gpus", lambda: self._GPUS[:1])
         monkeypatch.setattr(
             "localm.config.load_config",
@@ -2783,9 +2490,7 @@ class TestGpuSplitShortfall:
         assert gpu_split_shortfall(100_000_000_000) == []
 
     def test_unmeasurable_device_free_is_skipped_not_flagged(self, monkeypatch):
-        """A device with no 'free' key at all (unmeasurable for that specific
-        device) cannot be checked - it must be skipped, not treated as a
-        false 0-free shortfall."""
+        """A device with no 'free' key at all (unmeasurable for that specific device) cannot be checked - it must be skipped, not treated as a false 0-free shortfall."""
         gpus = [
             {"index": 0, "name": "A", "total": 16_000_000_000},   # no "free" key
             {"index": 1, "name": "B", "total": 16_000_000_000, "free": 14_000_000_000},
@@ -2812,18 +2517,13 @@ class TestGpuSplitShortfall:
 
     @staticmethod
     def _probe(gpus, status):
-        """A faithful list_gpus double: honours return_status like the real probe, so
-        the tolerant reader sees a status-capable callable and consumes ``status``
-        rather than defaulting a bare stub to GPU_PROBE_OK."""
+        """A faithful list_gpus double: honours return_status like the real probe, so the tolerant reader sees a status-capable callable and consumes ``status`` rather than defaulting a bare stub to GPU_PROBE_OK."""
         def fake(*a, return_status=False, **k):
             return (gpus, status) if return_status else gpus
         return fake
 
     def test_stale_timeout_probe_does_not_manufacture_a_shortfall(self, monkeypatch):
-        """THE regression. On TIMEOUT list_gpus serves a FROZEN reading; both devices
-        here read far too small for the 20 GB ask, so the OLD code (bare list_gpus +
-        always-run loop) flagged BOTH and quoted their stale free. The fix returns []
-        and, opt-in, the non-OK status - no figure it never measured reaches a user."""
+        """THE regression."""
         gpus = [{"index": 0, "name": "A", "total": 8_000_000_000, "free": 100_000_000},
                 {"index": 1, "name": "B", "total": 8_000_000_000, "free": 100_000_000}]
         cfg = {"gpu_split_indices": [0, 1], "gpu_split_ratios": [1.0, 1.0]}
@@ -2834,8 +2534,7 @@ class TestGpuSplitShortfall:
             [], GPU_PROBE_TIMEOUT)
 
     def test_busy_probe_also_admits_without_fabricating(self, monkeypatch):
-        """BUSY (a concurrent or wedged probe served the last-known-good value) is
-        inconclusive exactly like TIMEOUT: admit, no fabricated figure."""
+        """BUSY (a concurrent or wedged probe served the last-known-good value) is inconclusive exactly like TIMEOUT: admit, no fabricated figure."""
         gpus = [{"index": 0, "name": "A", "total": 8_000_000_000, "free": 100_000_000},
                 {"index": 1, "name": "B", "total": 8_000_000_000, "free": 100_000_000}]
         cfg = {"gpu_split_indices": [0, 1]}
@@ -2846,9 +2545,7 @@ class TestGpuSplitShortfall:
             [], GPU_PROBE_BUSY)
 
     def test_fresh_probe_still_reports_a_real_per_device_shortfall(self, monkeypatch):
-        """Guards against an over-abstain 'fix' (always return []): a FRESH
-        (GPU_PROBE_OK) probe that genuinely cannot cover one device's share must still
-        flag it, and every returned free is a live figure a caller may quote."""
+        """Guards against an over-abstain 'fix' (always return []): a FRESH (GPU_PROBE_OK) probe that genuinely cannot cover one device's share must still flag it, and every returned free is a live figure a caller may quote."""
         gpus = [{"index": 0, "name": "A", "total": 8_000_000_000, "free": 100_000_000},
                 {"index": 1, "name": "B", "total": 64_000_000_000, "free": 50_000_000_000}]
         cfg = {"gpu_split_indices": [0, 1], "gpu_split_ratios": [1.0, 1.0]}
@@ -2860,9 +2557,7 @@ class TestGpuSplitShortfall:
             expected, GPU_PROBE_OK)
 
     def test_fresh_all_clear_returns_empty_with_ok_status(self, monkeypatch):
-        """A fresh probe where every device covers its share: [] AND GPU_PROBE_OK, so
-        a status-aware caller can tell this 'verified clear' from a 'could not check'
-        (both return [] bare)."""
+        """A fresh probe where every device covers its share: [] AND GPU_PROBE_OK, so a status-aware caller can tell this 'verified clear' from a 'could not check' (both return [] bare)."""
         monkeypatch.setattr("localm.discover.list_gpus",
                             self._probe(self._GPUS, GPU_PROBE_OK))
         assert gpu_split_shortfall(
@@ -2870,8 +2565,7 @@ class TestGpuSplitShortfall:
             [], GPU_PROBE_OK)
 
     def test_no_split_configured_is_conclusive_ok_without_probing(self, monkeypatch):
-        """No split configured -> a conclusive ([], OK) that needs no hardware probe:
-        list_gpus must not be called at all."""
+        """No split configured -> a conclusive ([], OK) that needs no hardware probe: list_gpus must not be called at all."""
         def _boom(*a, **k):
             raise AssertionError("list_gpus must not be probed when no split configured")
         monkeypatch.setattr("localm.discover.list_gpus", _boom)
@@ -2880,9 +2574,7 @@ class TestGpuSplitShortfall:
             return_status=True) == ([], GPU_PROBE_OK)
 
     def test_deadline_is_forwarded_to_the_probe(self, monkeypatch):
-        """An off-loop caller passes a longer deadline so a cold driver init that
-        overruns the short server cap still yields a FRESH first-load reading rather
-        than timing out into the best-effort admit. The value must reach list_gpus."""
+        """An off-loop caller passes a longer deadline so a cold driver init that overruns the short server cap still yields a FRESH first-load reading rather than timing out into the best-effort admit."""
         seen = {}
 
         def fake(*a, return_status=False, deadline=None, **k):
@@ -2895,9 +2587,7 @@ class TestGpuSplitShortfall:
         assert seen["deadline"] == _GPU_PROBE_CLI_DEADLINE
 
     def test_default_deadline_is_not_forced_onto_the_probe(self, monkeypatch):
-        """No deadline given -> the kwarg must NOT be passed at all, leaving list_gpus'
-        own default cap intact. Forwarding a literal None would override that real
-        default and cap the probe at None."""
+        """No deadline given -> the kwarg must NOT be passed at all, leaving list_gpus' own default cap intact."""
         seen = {}
 
         def fake(*a, return_status=False, **k):
@@ -2916,10 +2606,7 @@ class TestGpuSplitShortfall:
     # clean 503); it was reverted. These pin that refusal so it cannot regress again.
 
     def test_blind_process_scoped_device_that_is_short_is_still_flagged(self, monkeypatch):
-        """A PROCESS-scoped (blind) device whose free is already below its share MUST
-        still be flagged. Blind OVER-states free (it misses every other process), so
-        blind-free < needed implies real-free < needed - the refusal is sound and the
-        gate must not drop it. Reverting to PR #710's omit makes this return [] -> RED."""
+        """A PROCESS-scoped (blind) device whose free is already below its share MUST still be flagged."""
         gpus = [{"index": 0, "name": "A", "total": 16_000_000_000, "free": 100_000_000,
                  "free_scope": discover.FREE_SCOPE_PROCESS},
                 {"index": 1, "name": "B", "total": 64_000_000_000, "free": 50_000_000_000,
@@ -2930,9 +2617,7 @@ class TestGpuSplitShortfall:
             {"index": 0, "needed": 10_000_000_000, "free": 100_000_000}]
 
     def test_all_blind_devices_short_are_all_flagged(self, monkeypatch):
-        """Every device PROCESS-scoped and short on a FRESH probe: all are flagged. The
-        blind tag never suppresses a refusal - each device's real free is at most its
-        blind free, so every one of them genuinely cannot cover its share."""
+        """Every device PROCESS-scoped and short on a FRESH probe: all are flagged."""
         gpus = [{"index": 0, "name": "A", "total": 16_000_000_000, "free": 100_000_000,
                  "free_scope": discover.FREE_SCOPE_PROCESS},
                 {"index": 1, "name": "B", "total": 16_000_000_000, "free": 100_000_000,
@@ -2942,11 +2627,7 @@ class TestGpuSplitShortfall:
         assert {d["index"] for d in gpu_split_shortfall(20_000_000_000, cfg)} == {0, 1}
 
     def test_blind_device_with_room_is_not_flagged(self, monkeypatch):
-        """The mirror: a blind device whose (over-stated) free covers its share is not
-        flagged. This is the PERMIT direction, where blindness genuinely bites - the
-        board may be full and this cannot see it - but that is undetectable from the
-        reading, so the per-device fit check does not pretend otherwise (a permit-side
-        caution belongs with the aggregate gate that owns eviction)."""
+        """The mirror: a blind device whose (over-stated) free covers its share is not flagged."""
         gpus = [{"index": 0, "name": "A", "total": 16_000_000_000, "free": 15_000_000_000,
                  "free_scope": discover.FREE_SCOPE_PROCESS},
                 {"index": 1, "name": "B", "total": 16_000_000_000, "free": 15_000_000_000,
@@ -2958,29 +2639,13 @@ class TestGpuSplitShortfall:
 
 @pytest.mark.usefixtures("_non_vulkan_host")
 class TestFreeScope:
-    """free_scope: whether a "free" reading counts EVERY process's VRAM, or only the
-    calling process's own allocations.
-
-    This exists because, measured on a Windows + AMD ROCm/HIP box,
-    torch.cuda.mem_get_info reports total - THIS process's own allocations and is
-    blind to every other process: with ~10.5 GB genuinely in use it reported 0.14 GB,
-    and a plain 4 GB torch tensor in a CHILD process moved it by exactly 0 while an
-    OS counter tracked it exactly. localm loads every GGUF in an isolated worker
-    SUBPROCESS, so a model's own VRAM lands squarely in that blind spot. See
-    dev-notes/vram-cross-process-blindness.md.
-
-    The device-global source is stubbed here so these stay deterministic on any host
-    (the real one is AMD/Windows-only); TestFreeScopeRealHardware covers the real
-    thing against real hardware.
-    """
+    """free_scope: whether a 'free' reading counts EVERY process's VRAM, or only the calling process's own allocations."""
 
     def _gpus(self):
         return [{"index": 0, "name": "A", "total": 16_000_000_000, "free": 15_000_000_000}]
 
     def test_windows_corrects_free_to_device_global_and_tags_device(self, monkeypatch):
-        """The whole point: a reading that counted only our own allocations is
-        replaced by one that counts the model in the worker (and the game, and
-        ComfyUI), and is labelled as such."""
+        """The whole point: a reading that counted only our own allocations is replaced by one that counts the model in the worker (and the game, and ComfyUI), and is labelled as such."""
         monkeypatch.setattr(sys, "platform", "win32")
         # Warm: this covers the CORRECTION, not the cold-budget guard
         # (TestFreeScopeColdBudget owns that). Explicit so the two cannot interfere.
@@ -2993,10 +2658,7 @@ class TestFreeScope:
         assert gpus[0]["free_scope"] == discover.FREE_SCOPE_DEVICE
 
     def test_windows_without_a_source_keeps_number_but_tags_process(self, monkeypatch):
-        """Rule 5: when nothing better can answer we do NOT silently pass a
-        known-process-local figure off as the board's - we keep it and say so, which
-        is what makes /v1/models/unload report the reading as uncertain instead of
-        asserting a wrong number as fact."""
+        """Rule 5: when nothing better can answer we do NOT silently pass a known-process-local figure off as the board's - we keep it and say so, which is what makes /v1/models/unload report the reading as uncertain instead of asserting a wrong number as fact."""
         monkeypatch.setattr(sys, "platform", "win32")
         # This test is about the uncorrected-scope FALLBACK path, not about
         # raw_reading_is_process_scoped() itself (that has its own dedicated
@@ -3014,10 +2676,7 @@ class TestFreeScope:
         assert gpus[0]["free_scope"] == discover.FREE_SCOPE_PROCESS
 
     def test_non_windows_is_untouched_and_device_scoped(self, monkeypatch):
-        """On Linux/NVIDIA the driver query is device-global BY DOCUMENTATION (CUDA
-        specifies *free as "free according to the OS" and warns another process can
-        move it), so it must not be corrected - and the Windows-only source must not
-        even be consulted."""
+        """On Linux/NVIDIA the driver query is device-global BY DOCUMENTATION (CUDA specifies *free as 'free according to the OS' and warns another process can move it), so it must not be corrected - and the Windows-only source must not even be consulted."""
         monkeypatch.setattr(sys, "platform", "linux")
 
         def _boom(gpus):
@@ -3030,8 +2689,7 @@ class TestFreeScope:
         assert gpus[0]["free_scope"] == discover.FREE_SCOPE_DEVICE
 
     def test_source_failure_is_surfaced_as_process_not_crashed(self, monkeypatch):
-        """A driver/ctypes failure in the correction must degrade to "we cannot vouch
-        for this number", never take down the caller that only wanted a probe."""
+        """A driver/ctypes failure in the correction must degrade to 'we cannot vouch for this number', never take down the caller that only wanted a probe."""
         monkeypatch.setattr(sys, "platform", "win32")
         # See test_windows_without_a_source_keeps_number_but_tags_process above:
         # stub the uncorrected-scope input directly rather than depending on
@@ -3047,8 +2705,7 @@ class TestFreeScope:
         assert gpus[0]["free_scope"] == discover.FREE_SCOPE_PROCESS
 
     def test_used_exceeding_total_clamps_to_zero_not_negative(self, monkeypatch):
-        """used and total come from different sources, so their difference can land
-        outside [0, total]; free must never go negative."""
+        """used and total come from different sources, so their difference can land outside [0, total]; free must never go negative."""
         monkeypatch.setattr(sys, "platform", "win32")
         monkeypatch.setattr("localm.gpu_usage.source_is_warm", lambda: True)
         monkeypatch.setattr("localm.gpu_usage.device_global_used_bytes",
@@ -3058,8 +2715,7 @@ class TestFreeScope:
         assert gpus[0]["free"] == 0
 
     def test_only_mapped_devices_are_corrected(self, monkeypatch):
-        """A multi-GPU box where the source can map only one device: the mapped one
-        gets truth, the unmapped one is honestly tagged rather than guessed at."""
+        """A multi-GPU box where the source can map only one device: the mapped one gets truth, the unmapped one is honestly tagged rather than guessed at."""
         monkeypatch.setattr(sys, "platform", "win32")
         # See test_windows_without_a_source_keeps_number_but_tags_process above:
         # stub the uncorrected-scope input directly rather than depending on
@@ -3081,8 +2737,7 @@ class TestFreeScope:
 
 @pytest.mark.usefixtures("_non_vulkan_host")
 class TestVramCapacityFreeScopePropagation:
-    """free_scope must travel WITH the number it describes, all the way to the caller
-    that decides whether to present it as current fact."""
+    """free_scope must travel WITH the number it describes, all the way to the caller that decides whether to present it as current fact."""
 
     _GPUS_DEVICE = [
         {"index": 0, "name": "A", "total": 24_000_000_000, "free": 20_000_000_000,
@@ -3109,18 +2764,14 @@ class TestVramCapacityFreeScopePropagation:
         assert vram_capacity()["free_scope"] == "device"
 
     def test_one_process_scoped_device_makes_the_whole_sum_process_scoped(self, monkeypatch):
-        """The sum is missing that device's other-process VRAM, so the TOTAL is not a
-        whole-board figure either - it must not be laundered into one by summing with
-        a device-scoped sibling."""
+        """The sum is missing that device's other-process VRAM, so the TOTAL is not a whole-board figure either - it must not be laundered into one by summing with a device-scoped sibling."""
         monkeypatch.setattr("localm.discover.list_gpus", lambda: self._GPUS_MIXED)
         monkeypatch.setattr("localm.config.load_config",
                             lambda: {"gpu_split_indices": [0, 1]})
         assert vram_capacity()["free_scope"] == "process"
 
     def test_untagged_devices_omit_the_key_rather_than_claim_process(self, monkeypatch):
-        """No tag means UNKNOWN. Labelling it "process" would assert a blindness we
-        never measured, and would break the plain-dict contract the ~28 test files
-        patching list_gpus() rely on."""
+        """No tag means UNKNOWN."""
         gpus = [
             {"index": 0, "name": "A", "total": 24_000_000_000, "free": 20_000_000_000},
             {"index": 1, "name": "B", "total": 12_000_000_000, "free": 10_000_000_000},
@@ -3133,14 +2784,7 @@ class TestVramCapacityFreeScopePropagation:
 
 @pytest.mark.integration
 class TestFreeScopeRealHardware:
-    """The claim that matters, against the REAL driver and REAL hardware: our
-    corrected reading tracks VRAM that ANOTHER PROCESS allocates, which the driver's
-    own query provably does not.
-
-    Marked integration (needs a real GPU + a real device-global source), so it is
-    excluded from the default run. Without it, every test above could pass while the
-    actual defect - the one a stub cannot reproduce - shipped unfixed.
-    """
+    """The claim that matters, against the REAL driver and REAL hardware: our corrected reading tracks VRAM that ANOTHER PROCESS allocates, which the driver's own query provably does not."""
 
     def test_corrected_free_tracks_another_process_where_the_driver_query_cannot(self):
         import subprocess
@@ -3208,17 +2852,7 @@ class TestFreeScopeRealHardware:
 
 @pytest.mark.usefixtures("_non_vulkan_host")
 class TestFreeScopeColdBudget:
-    """The correction runs INSIDE the deadline-bounded probe, so it spends the same
-    budget the driver call already spent.
-
-    Opening the device-global source is a driver init MEASURED at ~750ms, against a
-    ~0.02ms warm read. Measured live, that cold cost pushed cold probes from a
-    comfortable 2.9-3.5s to 3.6-4.0s against the 4.0s cap and started timing them
-    out - and a timed-out probe costs the caller its free reading ENTIRELY (list_gpus
-    serves [], vram_info falls to the registry tier, which has no "free" at all). A
-    correct number is not worth trading for NO number, so a cold source is skipped
-    when the budget is thin. These guard that trade-off in both directions.
-    """
+    """The correction runs INSIDE the deadline-bounded probe, so it spends the same budget the driver call already spent."""
 
     def _gpus(self):
         return [{"index": 0, "name": "A", "total": 16_000_000_000, "free": 15_000_000_000}]
@@ -3244,9 +2878,7 @@ class TestFreeScopeColdBudget:
         assert gpus[0]["free_scope"] == discover.FREE_SCOPE_PROCESS   # and SAID so
 
     def test_cold_source_runs_when_the_budget_is_ample(self, monkeypatch):
-        """A CLI caller passes the longer _GPU_PROBE_CLI_DEADLINE precisely so a cold
-        box can finish; the correction must take that room when it is there (this is
-        what keeps `localm doctor` honest on its single, cold probe)."""
+        """A CLI caller passes the longer _GPU_PROBE_CLI_DEADLINE precisely so a cold box can finish; the correction must take that room when it is there (this is what keeps `localm doctor` honest on its single, cold probe)."""
         monkeypatch.setattr(sys, "platform", "win32")
         monkeypatch.setattr("localm.gpu_usage.source_is_warm", lambda: False)
         monkeypatch.setattr(discover, "_probe_deadline_at",
@@ -3259,9 +2891,7 @@ class TestFreeScopeColdBudget:
         assert gpus[0]["free_scope"] == discover.FREE_SCOPE_DEVICE
 
     def test_warm_source_runs_even_on_a_thin_budget(self, monkeypatch):
-        """A warm read is ~0.02ms and cannot overrun anything, so the guard must not
-        keep skipping once the source is open - otherwise a 4s-deadline server would
-        skip on every probe forever and the fix would silently never engage."""
+        """A warm read is ~0.02ms and cannot overrun anything, so the guard must not keep skipping once the source is open - otherwise a 4s-deadline server would skip on every probe forever and the fix would silently never engage."""
         monkeypatch.setattr(sys, "platform", "win32")
         monkeypatch.setattr("localm.gpu_usage.source_is_warm", lambda: True)
         monkeypatch.setattr(discover, "_probe_deadline_at",
@@ -3274,8 +2904,7 @@ class TestFreeScopeColdBudget:
         assert gpus[0]["free_scope"] == discover.FREE_SCOPE_DEVICE
 
     def test_no_deadline_published_does_not_block_a_cold_open(self, monkeypatch):
-        """_probe_deadline_at is None outside a probe (e.g. a direct call). Unknown
-        budget must not be read as "no budget", or the correction would never run."""
+        """_probe_deadline_at is None outside a probe (e.g. a direct call)."""
         monkeypatch.setattr(sys, "platform", "win32")
         monkeypatch.setattr("localm.gpu_usage.source_is_warm", lambda: False)
         monkeypatch.setattr(discover, "_probe_deadline_at", None)
@@ -3286,8 +2915,7 @@ class TestFreeScopeColdBudget:
         assert gpus[0]["free_scope"] == discover.FREE_SCOPE_DEVICE
 
     def test_probe_publishes_its_deadline(self, monkeypatch):
-        """The guard is only as good as the budget it reads, so the probe must
-        actually publish one."""
+        """The guard is only as good as the budget it reads, so the probe must actually publish one."""
         seen = {}
 
         def _probe():
@@ -3304,24 +2932,7 @@ class TestFreeScopeColdBudget:
 
 
 def test_no_production_caller_passes_a_short_gpu_probe_deadline():
-    """Pins the premise http_server.py's free-VRAM-admission-gate comment relies
-    on (verified 2026-08-05, not assumed): a joined probe reading is only
-    PROCESS-scoped (TestFreeScopeColdBudget.test_cold_source_is_skipped_when_the_
-    budget_is_thin above) when its caller's deadline is too thin to absorb the
-    ~750ms cold device-global open. #725 (2026-07-17) retired the old 4.0s
-    _GPU_PROBE_DEADLINE default in favour of a single 15.0s value used
-    everywhere, so a "thinner" budget can now only exist if some production
-    caller explicitly passes one - if a future change adds such a caller, THIS
-    is the gap the comment describes reopening, silently, for that caller.
-
-    An AST scan of every tracked production .py file (not a grep, which would
-    also match the string inside a comment or docstring explaining this very
-    property) for every call to list_gpus/vram_info/vram_capacity/
-    _list_gpus_kw that passes an explicit `deadline=`, asserting each one
-    resolves to _GPU_PROBE_DEADLINE/_GPU_PROBE_CLI_DEADLINE (now the same
-    value) or is a plain pass-through of the caller's own `deadline` parameter
-    - never a shorter literal or an unrelated expression this scan cannot
-    account for."""
+    """Pins the premise http_server.py's free-VRAM-admission-gate comment relies on (verified 2026-08-05, not assumed): a joined probe reading is only PROCESS-scoped (TestFreeScopeColdBudget.test_cold_source_is_skipped_when_the_ budget_is_thin above) when its caller's deadline is too thin to absorb the ~75..."""
     import ast
     from pathlib import Path
 
@@ -3366,13 +2977,7 @@ def test_no_production_caller_passes_a_short_gpu_probe_deadline():
 
 
 class TestGpuUsageSourceRobustness:
-    """gpu_usage.py source-selection and warmth, post-#697 review.
-
-    These guard three defects a review found in the merged fix: a transient PDH
-    failure permanently disabling the source, source_is_warm() ignoring PDH's cold
-    cost, and the platform detector that decides whether an uncorrected reading is
-    known-blind. All are stubbed off real hardware so they run on any host.
-    """
+    """gpu_usage.py source-selection and warmth, post-#697 review."""
 
     def _reset(self, monkeypatch):
         import localm.gpu_usage as gu
@@ -3381,9 +2986,7 @@ class TestGpuUsageSourceRobustness:
         return gu
 
     def test_transient_pdh_query_failure_does_not_permanently_poison(self, monkeypatch):
-        """A momentary query hiccup must be retryable, not a process-lifetime disable
-        (rule 5 missing-vs-corrupt). Only a genuinely-permanent condition
-        (win32pdh unimportable) may set the sticky {}."""
+        """A momentary query hiccup must be retryable, not a process-lifetime disable (rule 5 missing-vs-corrupt)."""
         gu = self._reset(monkeypatch)
         import types
 
@@ -3416,17 +3019,14 @@ class TestGpuUsageSourceRobustness:
         assert gu._pdh_adapter_used() == [123]
 
     def test_win32pdh_unimportable_is_stickily_disabled(self, monkeypatch):
-        """The genuinely-permanent case still sticks: no point retrying an import
-        that will never succeed."""
+        """The genuinely-permanent case still sticks: no point retrying an import that will never succeed."""
         gu = self._reset(monkeypatch)
         monkeypatch.setitem(__import__("sys").modules, "win32pdh", None)  # import -> TypeError
         assert gu._pdh_adapter_used() == []
         assert gu._pdh_state == {}
 
     def test_source_is_warm_accounts_for_pdh_not_just_adl(self, monkeypatch):
-        """On a non-AMD box ADL is proven-unusable ({}) but PDH is the source that
-        answers; keying warmth on ADL alone would call the source warm while a cold
-        ~887ms PDH open still lies ahead of the deadline."""
+        """On a non-AMD box ADL is proven-unusable ({}) but PDH is the source that answers; keying warmth on ADL alone would call the source warm while a cold ~887ms PDH open still lies ahead of the deadline."""
         gu = self._reset(monkeypatch)
         # ADL tried and unusable, PDH not yet opened: a cold PDH open is pending, so
         # NOT warm (the bug returned True here).
@@ -3468,21 +3068,7 @@ class TestGpuUsageSourceRobustness:
 
     def test_raw_reading_is_process_scoped_imports_fresh_when_no_probe_is_inflight(
             self, monkeypatch):
-        """The common, safe case: nothing else is touching torch right now, so a
-        fresh `import torch` is fine - this must NOT be sacrificed for safety
-        against the abandoned-probe race below (a prior, overly-conservative fix
-        attempt made this ALWAYS return False when torch was not yet imported,
-        which is wrong on a machine where torch genuinely has not been imported
-        by anything else yet, e.g. very early in the process).
-
-        Uses a fake `torch` injected via a patched `__import__`, like the sibling
-        test above, rather than deleting the REAL torch from sys.modules and
-        letting a genuine re-import run: torch's ROCm SDK native library preload
-        is not safe to run a second time in the same process once it has already
-        succeeded once (observed live: WinError 127, "the specified procedure
-        could not be found", on a forced re-import) - an unrelated, pre-existing
-        native-library fragility that would make this test flaky for reasons
-        having nothing to do with the code path under test."""
+        """The common, safe case: nothing else is touching torch right now, so a fresh `import torch` is fine - this must NOT be sacrificed for safety against the abandoned-probe race below (a prior, overly-conservative fix attempt made this ALWAYS return False when torch was not yet imported, which is wrong o..."""
         import localm.gpu_usage as gu
         import localm.discover as _discover
         import sys as _sys
@@ -3531,29 +3117,7 @@ class TestGpuUsageSourceRobustness:
 
     def test_raw_reading_is_process_scoped_skips_import_while_a_probe_is_inflight(
             self, monkeypatch):
-        """Root-caused live crash: discover._list_gpus_probe's background probe
-        thread does its OWN first `import torch` and, on a probe timeout, is
-        ABANDONED while still possibly mid-import (stuck in native ROCm library
-        preload) - discover._gpu_probe_inflight stays True for exactly this
-        window (documented in _list_gpus_with_status). If
-        raw_reading_is_process_scoped() also did a fresh `import torch` from a
-        DIFFERENT thread while that flag is set, it would block on CPython's
-        per-module import lock waiting for the abandoned thread - observed live
-        to crash the whole process (Windows fatal exception,
-        STATUS_ENTRYPOINT_NOT_FOUND) rather than merely block. It must consult
-        discover._gpu_probe_inflight and skip the import entirely while it is
-        True, falling back to the conservative "unknown" default instead.
-
-        This machine's real torch build IS ROCm/HIP (verified: torch.version.hip
-        is set), so if the function fell back to a real `import torch` anyway,
-        this would wrongly return True - the test only passes if the import was
-        genuinely skipped.
-
-        The resident-HIP fallback signal is pinned False so this test keeps its
-        one subject (the inflight race guard): with no HIP runtime resident the
-        no-torch answer must stay the conservative False. The signal's own
-        truth (and the True case) is covered by TestScopeGateAnswersWithoutTorch
-        and TestNativeHipRuntimeResident."""
+        """Root-caused live crash: discover._list_gpus_probe's background probe thread does its OWN first `import torch` and, on a probe timeout, is ABANDONED while still possibly mid-import (stuck in native ROCm library preload) - discover._gpu_probe_inflight stays True for exactly this window (documented in..."""
         import localm.gpu_usage as gu
         import localm.discover as _discover
         import sys as _sys
@@ -3589,21 +3153,7 @@ class TestGpuUsageSourceRobustness:
         assert result is False
 
     def test_raw_reading_skips_fresh_import_when_known_doomed(self, monkeypatch):
-        """The SECOND live site of the known-doomed torch import (the first is
-        discover._list_gpus_probe): with the bundled HIP runtime resident and
-        torch not yet imported - e.g. the GGUF worker's sizing gate
-        (_sizing._device_global_free_bytes) or _apply_device_global_free
-        called with no torch loaded - a fresh `import torch` can only fault
-        with the same noisy STATUS_ENTRYPOINT_NOT_FOUND stderr trace and land
-        in this function's own except anyway (reproduced 2026-07-21: 5 of the
-        6 mixed-run traces came through here). It must consult
-        discover._torch_gpu_probe_known_doomed() and never start the import.
-        The detector is pinned True (its truth table has its own tests in
-        TestTorchProbeKnownDoomedSkip) and the resident-HIP fallback signal
-        pinned False, so the answer here must stay the conservative False;
-        the True side of the fallback is TestScopeGateAnswersWithoutTorch's
-        subject. Attempts are recorded, not raised on, per the sibling tests'
-        rationale."""
+        """The SECOND live site of the known-doomed torch import (the first is discover._list_gpus_probe): with the bundled HIP runtime resident and torch not yet imported - e.g. the GGUF worker's sizing gate (_sizing._device_global_free_bytes) or _apply_device_global_free called with no torch loaded - a fresh..."""
         import builtins
         import sys as _sys
 
@@ -3637,16 +3187,7 @@ class TestGpuUsageSourceRobustness:
 
 
 class TestScopeGateAnswersWithoutTorch:
-    """raw_reading_is_process_scoped() must answer from the resident-HIP-runtime
-    signal - never a blanket False - whenever torch cannot be consulted (a
-    mid-flight probe, the known-doomed DLL conflict, or torch simply not
-    installed). The torch-less case is the GGUF WORKER, the process that makes
-    the mid-generation context-grow sizing decision: the blanket False kept the
-    #706 device-global correction permanently dead there on exactly the
-    measured-blind platform (found live 2026-07-22 - the blindness belongs to
-    the HIP runtime, which torch and the bundled ggml query merely both read;
-    see gpu_usage's module docstring). A fresh `import torch` must still never
-    be started on the guarded paths."""
+    """raw_reading_is_process_scoped() must answer from the resident-HIP-runtime signal - never a blanket False - whenever torch cannot be consulted (a mid-flight probe, the known-doomed DLL conflict, or torch simply not installed)."""
 
     def _arm(self, monkeypatch, *, inflight, known_doomed, hip_resident):
         import builtins
@@ -3677,9 +3218,7 @@ class TestScopeGateAnswersWithoutTorch:
 
     def test_known_doomed_with_resident_hip_answers_true_without_import(
             self, monkeypatch, caplog):
-        """The GGUF-worker case: the doomed import is skipped AND the answer is
-        the truthful True, surfaced at debug (rule 5), not the old blanket
-        False that silently disabled the correction."""
+        """The GGUF-worker case: the doomed import is skipped AND the answer is the truthful True, surfaced at debug (rule 5), not the old blanket False that silently disabled the correction."""
         gu, attempted = self._arm(monkeypatch, inflight=False,
                                   known_doomed=True, hip_resident=True)
         with caplog.at_level(logging.DEBUG, logger="localm"):
@@ -3697,8 +3236,7 @@ class TestScopeGateAnswersWithoutTorch:
 
     def test_torch_import_failure_with_resident_hip_answers_true(
             self, monkeypatch):
-        """A GGUF-only install (no torch at all) on the HIP build: the import
-        legitimately fails, and the resident runtime still answers True."""
+        """A GGUF-only install (no torch at all) on the HIP build: the import legitimately fails, and the resident runtime still answers True."""
         gu, attempted = self._arm(monkeypatch, inflight=False,
                                   known_doomed=False, hip_resident=True)
         assert gu.raw_reading_is_process_scoped() is True
@@ -3706,17 +3244,13 @@ class TestScopeGateAnswersWithoutTorch:
 
     def test_torch_import_failure_without_resident_hip_stays_false(
             self, monkeypatch):
-        """No torch AND no resident HIP runtime (a vulkan/cpu build's worker, a
-        torch-less NVIDIA box): no measured blindness to assert - False."""
+        """No torch AND no resident HIP runtime (a vulkan/cpu build's worker, a torch-less NVIDIA box): no measured blindness to assert - False."""
         gu, attempted = self._arm(monkeypatch, inflight=False,
                                   known_doomed=False, hip_resident=False)
         assert gu.raw_reading_is_process_scoped() is False
 
     def test_torch_pci_bus_never_starts_a_doomed_import(self, monkeypatch):
-        """Opening the gate in the worker makes _torch_pci_bus the NEXT
-        potential doomed-import site (device_global_used_bytes calls it for the
-        ADL mapping): it must decline, not fault with the 0xc0000139 trace the
-        #771 skip had just eliminated."""
+        """Opening the gate in the worker makes _torch_pci_bus the NEXT potential doomed-import site (device_global_used_bytes calls it for the ADL mapping): it must decline, not fault with the 0xc0000139 trace the #771 skip had just eliminated."""
         import builtins
         import sys as _sys
 
@@ -3745,15 +3279,7 @@ class TestScopeGateAnswersWithoutTorch:
 
 
 class TestDeviceGlobalUsedTorchlessAdlMapping:
-    """device_global_used_bytes() must still map ADL's device-global figure when
-    torch cannot supply a PCI bus id (the GGUF worker), via the unambiguous
-    single-AMD-adapter + single-requested-GPU rule - and must NOT apply that
-    rule where the raw reading is not known-blind (an NVIDIA dGPU next to an
-    idle AMD iGPU would otherwise get the WRONG adapter's usage subtracted from
-    an already device-global reading). Found live 2026-07-22: with torch
-    unmappable, the PDH fallback also declined on the real box (its LUID list
-    shows TWO adapter instances there), leaving the opened gate with no source
-    at all - this rule is what makes the worker correction actually operate."""
+    """device_global_used_bytes() must still map ADL's device-global figure when torch cannot supply a PCI bus id (the GGUF worker), via the unambiguous single-AMD-adapter + single-requested-GPU rule - and must NOT apply that rule where the raw reading is not known-blind (an NVIDIA dGPU next to an idle AMD..."""
 
     def _arm(self, monkeypatch, *, by_bus, blind, gpus_n=1, name=None):
         import localm.gpu_usage as gu
@@ -3776,35 +3302,21 @@ class TestDeviceGlobalUsedTorchlessAdlMapping:
 
     def test_torchless_amd_named_gpu_maps_when_signal_is_false(
             self, monkeypatch):
-        """The torch-less authorisation path: raw_reading_is_process_scoped() is
-        legitimately False in a torch-less process where no HIP runtime is
-        resident (GGUF loads out-of-process, #606), yet the detected GPU is an
-        AMD card. The single-adapter ADL pairing must still fire, recognised by
-        the GPU name, so a torch-less build gets a real device-global figure
-        instead of nothing. This is the gate discover.vram_info's registry tier
-        relies on to recover a device-global free on a GGUF-only install (where
-        list_gpus() is empty); the meter fix itself lives in that wiring, not
-        here."""
+        """The torch-less authorisation path: raw_reading_is_process_scoped() is legitimately False in a torch-less process where no HIP runtime is resident (GGUF loads out-of-process, #606), yet the detected GPU is an AMD card."""
         gu, gpus = self._arm(monkeypatch, by_bus={45: 2_900_000_000}, blind=False,
                              name="AMD Radeon RX 6900 XT")
         assert gu.device_global_used_bytes(gpus) == {0: 2_900_000_000}
 
     def test_rule_does_not_fire_for_a_non_amd_gpu_when_not_blind(
             self, monkeypatch):
-        """The NVIDIA+iGPU safety case: an NVIDIA dGPU is the single detected GPU
-        while ADL reports the idle AMD iGPU. Neither signal authorises the
-        pairing (not measured-blind, and the detected GPU is not AMD), so report
-        nothing rather than subtract the iGPU's usage from the NVIDIA card's
-        already device-global reading."""
+        """The NVIDIA+iGPU safety case: an NVIDIA dGPU is the single detected GPU while ADL reports the idle AMD iGPU."""
         gu, gpus = self._arm(monkeypatch, by_bus={45: 2_900_000_000}, blind=False,
                              name="NVIDIA GeForce RTX 4090")
         assert gu.device_global_used_bytes(gpus) == {}
 
     def test_rule_does_not_fire_with_no_gpu_name_when_not_blind(
             self, monkeypatch):
-        """An unrecognised GPU (no name) is not paired on the name signal alone -
-        the safe default is to decline, exactly as before the name gate existed
-        when the process-scoped signal is also False."""
+        """An unrecognised GPU (no name) is not paired on the name signal alone - the safe default is to decline, exactly as before the name gate existed when the process-scoped signal is also False."""
         gu, gpus = self._arm(monkeypatch, by_bus={45: 2_900_000_000}, blind=False)
         assert gu.device_global_used_bytes(gpus) == {}
 
@@ -3819,18 +3331,13 @@ class TestDeviceGlobalUsedTorchlessAdlMapping:
         assert gu.device_global_used_bytes(gpus) == {}
 
     def test_exact_torch_bus_mapping_still_wins(self, monkeypatch):
-        """With a usable pci_bus_id the exact pairing is used, exactly as
-        before - the torch-less rule is a fallback, not a replacement."""
+        """With a usable pci_bus_id the exact pairing is used, exactly as before - the torch-less rule is a fallback, not a replacement."""
         gu, gpus = self._arm(monkeypatch, by_bus={45: 2_900_000_000}, blind=True)
         monkeypatch.setattr(gu, "_torch_pci_bus", lambda index: 45)
         assert gu.device_global_used_bytes(gpus) == {0: 2_900_000_000}
 
     def test_rule_does_not_fire_when_torch_bus_contradicts(self, monkeypatch):
-        """An ANSWERED bus that matches no ADL adapter is an affirmative
-        mismatch (or a degraded ADL view - a 2-GPU box can transiently report
-        only the wrong adapter, since per-adapter query failures are dropped):
-        the fallback is strictly for no-bus-AVAILABLE, so this must decline
-        exactly as the pre-rule code did, not pair the contradiction away."""
+        """An ANSWERED bus that matches no ADL adapter is an affirmative mismatch (or a degraded ADL view - a 2-GPU box can transiently report only the wrong adapter, since per-adapter query failures are dropped): the fallback is strictly for no-bus-AVAILABLE, so this must decline exactly as the pre-rule code..."""
         gu, gpus = self._arm(monkeypatch, by_bus={45: 2_900_000_000}, blind=True)
         monkeypatch.setattr(gu, "_torch_pci_bus", lambda index: 3)
         assert gu.device_global_used_bytes(gpus) == {}
@@ -3838,18 +3345,13 @@ class TestDeviceGlobalUsedTorchlessAdlMapping:
 
 @pytest.mark.usefixtures("_non_vulkan_host")
 class TestUncorrectedScopeIsNotAlwaysProcess:
-    """discover._apply_device_global_free must NOT tag every uncorrected Windows
-    reading FREE_SCOPE_PROCESS. That over-claim (the pre-review behaviour) put a
-    spurious 'process-blind' note + vram_reading_uncertain on NVIDIA/Windows, where
-    cudaMemGetInfo is device-global by documentation and the number is actually fine.
-    """
+    """discover._apply_device_global_free must NOT tag every uncorrected Windows reading FREE_SCOPE_PROCESS."""
 
     def _gpus(self):
         return [{"index": 0, "name": "A", "total": 16_000_000_000, "free": 15_000_000_000}]
 
     def test_windows_non_blind_uncorrected_is_device_not_process(self, monkeypatch):
-        """No source maps (empty dict), but the raw reading is NOT known-blind
-        (NVIDIA/Windows): tag DEVICE, do not fabricate a blindness."""
+        """No source maps (empty dict), but the raw reading is NOT known-blind (NVIDIA/Windows): tag DEVICE, do not fabricate a blindness."""
         monkeypatch.setattr(sys, "platform", "win32")
         monkeypatch.setattr("localm.gpu_usage.device_global_used_bytes", lambda gpus: {})
         monkeypatch.setattr("localm.gpu_usage.raw_reading_is_process_scoped", lambda: False)
@@ -3859,8 +3361,7 @@ class TestUncorrectedScopeIsNotAlwaysProcess:
         assert gpus[0]["free"] == 15_000_000_000
 
     def test_windows_blind_uncorrected_is_still_process(self, monkeypatch):
-        """The known-blind platform (AMD/Windows) still tags PROCESS when it cannot
-        correct - the honest signal must survive."""
+        """The known-blind platform (AMD/Windows) still tags PROCESS when it cannot correct - the honest signal must survive."""
         monkeypatch.setattr(sys, "platform", "win32")
         monkeypatch.setattr("localm.gpu_usage.device_global_used_bytes", lambda gpus: {})
         monkeypatch.setattr("localm.gpu_usage.raw_reading_is_process_scoped", lambda: True)
@@ -3869,8 +3370,7 @@ class TestUncorrectedScopeIsNotAlwaysProcess:
         assert gpus[0]["free_scope"] == discover.FREE_SCOPE_PROCESS
 
     def test_cold_budget_skip_uses_platform_scope_not_blanket_process(self, monkeypatch):
-        """The cold-budget skip must also honour the distinction: a cold-skipped
-        NVIDIA/Windows probe is DEVICE (its number is fine), not a spurious PROCESS."""
+        """The cold-budget skip must also honour the distinction: a cold-skipped NVIDIA/Windows probe is DEVICE (its number is fine), not a spurious PROCESS."""
         monkeypatch.setattr(sys, "platform", "win32")
         monkeypatch.setattr("localm.gpu_usage.source_is_warm", lambda: False)
         monkeypatch.setattr("localm.gpu_usage.raw_reading_is_process_scoped", lambda: False)
@@ -3889,10 +3389,7 @@ class TestUncorrectedScopeIsNotAlwaysProcess:
                     reason="patches ctypes.WinDLL, which exists only on Windows; "
                            "monkeypatch.setattr raises AttributeError elsewhere")
 class TestAdlLatchRobustness:
-    """#697/#700 follow-up: _adl_open() must distinguish a PERMANENT unusability
-    (no atiadlxx.dll -> not an AMD box) from a TRANSIENT one (driver momentarily not
-    answering ADL2_Main_Control_Create). Latching the transient case off for the
-    process lifetime is the same missing-vs-corrupt collapse the PDH path had."""
+    """#697/#700 follow-up: _adl_open() must distinguish a PERMANENT unusability (no atiadlxx.dll -> not an AMD box) from a TRANSIENT one (driver momentarily not answering ADL2_Main_Control_Create)."""
 
     def test_missing_dll_is_latched_permanently(self, monkeypatch):
         import localm.gpu_usage as gu
@@ -3938,12 +3435,7 @@ class TestAdlLatchRobustness:
 # ------------------------------------------------------------------ #
 
 class TestNativeHipRuntimeResident:
-    """discover.native_hip_runtime_resident() - the shared platform signal for
-    both the known-doomed torch-import skip and the torch-less blindness answer
-    (gpu_usage.raw_reading_is_process_scoped). True exactly on: Windows + the
-    native lib loaded in this process + the resolved runtime shipping a HIP
-    ggml backend. The glob runs REAL detection over a real directory - only
-    the DLL name is faked (same posture as TestTorchProbeKnownDoomedSkip)."""
+    """discover.native_hip_runtime_resident() - the shared platform signal for both the known-doomed torch-import skip and the torch-less blindness answer (gpu_usage.raw_reading_is_process_scoped)."""
 
     def _arm(self, monkeypatch, tmp_path, *, platform="win32",
              native_loaded=True, hip_dll=True):
@@ -3989,40 +3481,12 @@ class TestNativeHipRuntimeResident:
 
 
 class TestTorchProbeKnownDoomedSkip:
-    """_list_gpus_probe() must skip its `import torch` attempt AT THE ROOT
-    exactly when that import is known-doomed: Windows + llama.cpp's bundled
-    HIP runtime already loaded in this process + a ROCm (rocm_sdk) torch
-    installed. There the import can never succeed (the runtime's resident
-    same-named DLLs break torch's rocm_sdk preload with
-    STATUS_ENTRYPOINT_NOT_FOUND), and every attempt prints a "Windows fatal
-    exception" faulthandler trace to stderr - reproduced live 2026-07-21 by
-    running test_gpu_split_wiring.py (whose real has_max_devices() loads the
-    native lib) before this file's real-probe tests in one pytest process
-    (6 traces). See discover._torch_gpu_probe_known_doomed's docstring for
-    the root cause and the trade-off.
-
-    The skip must be exactly as narrow as the proven conflict: with ANY of
-    its narrowing conditions absent (including a torch already resident in
-    sys.modules - importing that again is a free cache hit that cannot
-    fault) the probe must still attempt torch, because
-    the nvidia-smi fallback cannot see AMD devices - a blanket
-    native_lib_loaded() skip (like _sizing's, whose fallback IS lossless)
-    would cost real enumeration on setups where torch and the native runtime
-    coexist (Linux, a CUDA torch, a Vulkan-build runtime).
-
-    Import attempts are RECORDED via a tracking __import__, never raised on:
-    the probe's own broad `except Exception` would mask a raising guard and
-    pass the test either way (same rationale as the tracking-import tests
-    above). A fake torch is served on interception so an attempted import
-    falls through the probe harmlessly - re-importing the REAL torch
-    in-process is exactly the unsafe operation under test (see the sibling
-    tests' docstrings)."""
+    """_list_gpus_probe() must skip its `import torch` attempt AT THE ROOT exactly when that import is known-doomed: Windows + llama.cpp's bundled HIP runtime already loaded in this process + a ROCm (rocm_sdk) torch installed."""
 
     def _arm(self, monkeypatch, tmp_path, *, platform="win32",
              native_loaded=True, hip_dll=True, rocm_sdk_installed=True,
              torch_resident=False):
-        """Arrange the guard's four conditions (defaults: the doomed combo)
-        and return the list that records every intercepted `import torch`."""
+        """Arrange the guard's four conditions (defaults: the doomed combo) and return the list that records every intercepted `import torch`."""
         import builtins
         import importlib.util
 
@@ -4103,10 +3567,7 @@ class TestTorchProbeKnownDoomedSkip:
         "absent", ["platform", "native", "hip", "rocm_sdk", "resident_torch"])
     def test_attempts_torch_when_any_condition_is_absent(
             self, monkeypatch, tmp_path, absent):
-        """The trade-off, pinned: the skip fires ONLY on the full proven combo.
-        Anything less (most importantly native_lib_loaded alone - the blanket
-        guard _sizing can afford but this probe cannot) keeps the torch
-        attempt, and with it the enumeration nvidia-smi cannot provide."""
+        """The trade-off, pinned: the skip fires ONLY on the full proven combo."""
         kwargs = {}
         if absent == "platform":
             kwargs["platform"] = "linux"

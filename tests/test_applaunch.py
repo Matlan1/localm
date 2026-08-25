@@ -1,12 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Phase 3 native app identity (localm/applaunch.py).
-
-Covers the pure / guarded logic that is safe to exercise on any platform: the .ico
--> RT_GROUP_ICON transform, the .desktop text, launcher path resolution, the
-restart-argv identity contract, and the best-effort guards (every entry point must
-be a no-op, never raise, off its platform). The live LocaLM.exe end-to-end
-(process name, tray, restart) is verified by hand on Windows - see
-dev-notes/native-app-identity/WORKLOG.md."""
+"""Phase 3 native app identity (localm/applaunch.py)."""
 
 import os
 import shutil
@@ -176,37 +169,11 @@ def test_make_launcher_returns_result_without_raising():
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows-only bug")
 class TestForceRebuildFromRunningLauncher:
-    """Regression test for the follow-up to #621: ``localm make-launcher
-    --force`` run FROM the already-built LocaLM.exe itself (e.g. to refresh
-    the copy after a Python upgrade) used to fail outright.
-
-    ``sys._base_executable`` is computed by CPython as ``<base_prefix>/
-    <basename of the CURRENTLY RUNNING exe>`` - so once running AS the
-    renamed LocaLM.exe copy, it resolves to ``<base_prefix>/LocaLM.exe``, a
-    file that never exists (LocaLM.exe only ever lives under
-    ``<venv>/localm-app/``). ``_base_interpreter()`` returned None and
-    ``make_windows_launcher()`` failed immediately. Fixed by falling back to
-    ``_mp_spawn.real_base_python()``, and then handling the SECOND wrinkle
-    live: once ``base`` correctly resolves to a DIFFERENT file than ``dst``,
-    copying onto ``dst`` needs the running-exe rename fallback because ``dst``
-    IS this process's own executing image (verified live: a direct
-    ``shutil.copy2`` onto it raises WinError 32, a sharing violation).
-
-    Mirrors ``TestRealRenamedLauncherEndToEnd`` in test_mp_spawn_fix.py (an
-    ACTUAL renamed-copy launcher, driven as a real subprocess) but goes one
-    step further: the fake launcher must be named exactly ``LocaLM.exe`` (so
-    ``windows_launcher_path()`` resolves to ITS OWN path) and it invokes the
-    real ``localm make-launcher --force`` CLI command on itself, not just a
-    bare interpreter round trip.
-    """
+    """Regression test for the follow-up to #621: ``localm make-launcher --force`` run FROM the already-built LocaLM.exe itself (e.g. to refresh the copy after a Python upgrade) used to fail outright."""
 
     @staticmethod
     def _build_fake_launcher(tmp_path: Path) -> Path:
-        """A fake venv (pyvenv.cfg pointing at the REAL base interpreter's own
-        directory) with a renamed copy of that base interpreter one level
-        under it, named LocaLM.exe - exactly applaunch.py's
-        ``<venv>/localm-app/LocaLM.exe`` layout, so ``windows_launcher_path()``
-        resolves to this same file when run from it."""
+        """A fake venv (pyvenv.cfg pointing at the REAL base interpreter's own directory) with a renamed copy of that base interpreter one level under it, named LocaLM.exe - exactly applaunch.py's ``<venv>/localm-app/LocaLM.exe`` layout, so ``windows_launcher_path()`` resolves to this same file when run from i..."""
         real_base = Path(getattr(sys, "_base_executable", None) or sys.executable).resolve()
         fake_venv = tmp_path / "fakevenv"
         fake_venv.mkdir()
@@ -223,13 +190,7 @@ class TestForceRebuildFromRunningLauncher:
 
     @staticmethod
     def _child_pythonpath(repo_root: Path) -> str:
-        """The fake launcher is a bare copied interpreter with no site-packages
-        of its own. Forward the worktree source (first, so it wins over any
-        other localm on sys.path) plus every entry already on THIS process's
-        sys.path (site-packages, editable-install source, ...) so the child
-        can import click/rich/pydantic/... exactly as the real LocaLM.exe
-        would - without hardcoding a venv location that only exists on one
-        machine (rule 1: no machine-specific paths)."""
+        """The fake launcher is a bare copied interpreter with no site-packages of its own."""
         entries = [str(repo_root)] + [p for p in sys.path if p]
         return os.pathsep.join(dict.fromkeys(entries))
 

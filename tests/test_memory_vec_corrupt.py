@@ -1,11 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""HON-3: a corrupt/unreadable vector sidecar (.vec.json) must degrade to lexical
-recall WITHOUT hiding the fault. Unlike an absent sidecar (a normal cold start),
-a present-but-unparseable one is an unexpected problem the operator should be able
-to see - mirroring the records-path warning in the same loader. The stored
-records themselves are never lost; only the vector cache is dropped, so recall
-falls back to BM25.
-"""
+"""HON-3: a corrupt/unreadable vector sidecar (.vec.json) must degrade to lexical recall WITHOUT hiding the fault."""
 
 from __future__ import annotations
 

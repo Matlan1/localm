@@ -1,23 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""A registry entry with NO model_type is a third state, and the API has to say so.
-
-Both model endpoints read ``entry.get("model_type", "llm")``. That default is
-LOAD-BEARING and stays: the chat-model picker asks ``/api/models?type=llm``, so a
-legacy entry from before the field existed must remain selectable for chat. What
-it is not is a recorded fact - presenting it as a Role reads as "somebody
-classified this as an LLM" when nobody did, which is the same collapse
-``_register``'s own docstring rejects for ``expert_count=0`` versus an absent key.
-
-So ``model_type_recorded: false`` rides alongside, emitted ONLY when there is
-nothing recorded. Every normal model's payload is byte-identical, and a client
-predating the field behaves exactly as before.
-
-The pairing is what matters and is why the filter assertions sit in the same
-tests as the flag ones: reporting the truth and keeping the permissive default
-are two halves of one change, and a later edit that "cleans up" the default by
-dropping it would satisfy every flag assertion here while silently removing
-untagged models from the chat picker.
-"""
+"""A registry entry with NO model_type is a third state, and the API has to say so."""
 
 from unittest.mock import patch
 
@@ -91,10 +73,7 @@ class TestModelsListRoute:
         assert rows["nulled"]["model_type_recorded"] is False
 
     def test_type_llm_filter_STILL_returns_the_untagged_entry(self, gui_app):
-        """The load-bearing half. models-sidebar.js fetches /api/models?type=llm
-        for the chat picker, so a legacy untagged model must stay in that list.
-        Dropping the route's default would satisfy every flag assertion above
-        and silently make that model unselectable for chat."""
+        """The load-bearing half. models-sidebar.js fetches /api/models?type=llm for the chat picker, so a legacy untagged model must stay in that list."""
         app, _ = gui_app
         with patch("localm.config.load_registry",
                    return_value={"typed": TYPED, "untagged": UNTAGGED, "mystery": UNKNOWN}):
@@ -127,11 +106,7 @@ class TestModelDetailRoute:
 
 @pytest.fixture
 def auth(tmp_path, monkeypatch):
-    """Throwaway data dir + clean auth environment, matching tests/test_auth.py.
-
-    config.py freezes its paths at import, so LOCALM_HOME alone does not
-    redirect load_config/save_config.
-    """
+    """Throwaway data dir + clean auth environment, matching tests/test_auth.py."""
     monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
@@ -146,10 +121,7 @@ def auth(tmp_path, monkeypatch):
 
 @pytest.fixture
 def gui_app(tmp_path, monkeypatch):
-    """The GUI router on a bare app, mirroring tests/test_gui.py's fixture of the
-    same name. Deliberately NOT create_app(): that mounts the full auth stack and
-    every request here would 403, which is a fact about the fixture rather than
-    about the route under test."""
+    """The GUI router on a bare app, mirroring tests/test_gui.py's fixture of the same name."""
     from fastapi import FastAPI
     from localm.plugins.gui.web import attach_gui
     monkeypatch.setenv("LOCALM_HOME", str(tmp_path))

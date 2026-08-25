@@ -1,26 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""CHK-MEM-XPROC: memory namespaces must serialise writers ACROSS PROCESSES.
-
-``storekit.NamespaceLockRegistry`` serialises writers inside ONE process, which
-its own docstring says. It cannot serialise `localm memory add|forget|edit|
-accept|restore` - its own OS process, its own registry - against a running
-server's consolidation pass: both ``_load()`` the same state, mutate their copy
-and ``_save()``, so one update is gone. rag hit this and built
-``collection_lock.py``; memory had the same exposure and no guard until the
-`localm memory` CLI made a second writer routine.
-
-MEASURED 2026-08-19 before the fix, two real interpreters, reproduced first try:
-`localm memory add` printed "Remembered <id>: <fact>" and exited 0 while the
-fact was ABSENT afterwards. A FALSE SUCCESS, not merely a lost update, which is
-what makes this a rule-5 defect rather than a tuning question.
-
-The load-bearing tests here spawn REAL subprocesses, because a per-process lock
-passes every same-process simulation of this bug by construction - that is
-exactly how the gap survived. The headline test carries its own FIRES-CONTROL in
-the same run: the identical harness with the cross-process lock neutralised IN
-THE CHILD (test-side, never a product switch) must show the loss the locked
-version prevents. A test that cannot be made to fail proves nothing.
-"""
+"""CHK-MEM-XPROC: memory namespaces must serialise writers ACROSS PROCESSES."""
 
 from __future__ import annotations
 
@@ -79,9 +58,7 @@ _RACE_DELAY = 1.5
 
 
 def _race_two_writers(root: Path, *, neuter: bool) -> set:
-    """Two separate OS processes each add a different fact to the SAME namespace.
-
-    Returns the set of fact texts that survived."""
+    """Two separate OS processes each add a different fact to the SAME namespace."""
     env = dict(os.environ)
     # Import the SAME localm this test runs (the worktree), not whatever is
     # installed elsewhere - the worktree-venv wrong-source trap.
@@ -103,8 +80,7 @@ def _race_two_writers(root: Path, *, neuter: bool) -> set:
 
 
 def test_two_processes_writing_one_namespace_lose_nothing(heavy_slot, tmp_path):
-    """The headline case: `localm memory add` in its own process racing the
-    server's consolidation on the SAME namespace. Both facts must survive."""
+    """The headline case: `localm memory add` in its own process racing the server's consolidation on the SAME namespace."""
     survived = _race_two_writers(tmp_path, neuter=False)
     assert survived == {"fact from the server", "fact from the CLI"}, (
         f"a concurrent memory write from a SEPARATE OS process was lost: "
@@ -112,12 +88,7 @@ def test_two_processes_writing_one_namespace_lose_nothing(heavy_slot, tmp_path):
 
 
 def test_the_two_process_harness_does_catch_a_lost_update(heavy_slot, tmp_path):
-    """FIRES-CONTROL for the test above.
-
-    Same two processes, same timing, cross-process lock neutralised in the
-    children: one write MUST be lost. If this ever passes with both facts
-    present, the test above is not evidence of anything - the harness would have
-    passed on the pre-fix code too."""
+    """FIRES-CONTROL for the test above."""
     survived = _race_two_writers(tmp_path, neuter=True)
     assert survived != {"fact from the server", "fact from the CLI"}, (
         "with the cross-process lock removed, two overlapping memory writes "
@@ -130,8 +101,7 @@ def test_the_two_process_harness_does_catch_a_lost_update(heavy_slot, tmp_path):
 # --------------------------------------------------------------------------- #
 
 def _hold_from_another_process(root: Path, seconds: float):
-    """Start a real second process holding the namespace, and wait until it
-    actually has the lock (the lock FILE existing is the proof, not a sleep)."""
+    """Start a real second process holding the namespace, and wait until it actually has the lock (the lock FILE existing is the proof, not a sleep)."""
     src = ("import sys, time\n"
            "from localm.memory import MemoryStore\n"
            "s = MemoryStore('owner', 'chat', root=sys.argv[1])\n"
@@ -150,8 +120,7 @@ def _hold_from_another_process(root: Path, seconds: float):
 def test_a_refused_write_changes_nothing_and_names_the_holder(heavy_slot,
                                                               tmp_path,
                                                               monkeypatch):
-    """Fails CLOSED. There is no path that proceeds to write without the lock,
-    because an unserialised write is the lost update this exists to prevent."""
+    """Fails CLOSED."""
     monkeypatch.setenv("LOCALM_RAG_LOCK_WAIT", "1")
     store = MemoryStore("owner", "chat", root=tmp_path)
     store.add(MemoryRecord(text="already here", source="user", importance=0.8))
@@ -176,13 +145,7 @@ def test_a_refused_write_changes_nothing_and_names_the_holder(heavy_slot,
 def test_reads_stay_available_while_another_process_holds_the_lock(heavy_slot,
                                                                    tmp_path,
                                                                    monkeypatch):
-    """Reads deliberately do NOT take the cross-process lock.
-
-    _save() writes through storekit.atomic_write (tmp + os.replace), so a reader
-    sees the old file or the new one, never a mix - the read side was already
-    safe. Putting every _load() behind the file lock would park the chat recall
-    inlet behind whatever a background consolidation is doing, which is the
-    defect REG-520 exists to prevent. This pins that reads stayed cheap."""
+    """Reads deliberately do NOT take the cross-process lock."""
     monkeypatch.setenv("LOCALM_RAG_LOCK_WAIT", "1")
     store = MemoryStore("owner", "chat", root=tmp_path)
     store.add(MemoryRecord(text="readable", source="user", importance=0.8))
@@ -205,10 +168,7 @@ def test_reads_stay_available_while_another_process_holds_the_lock(heavy_slot,
 # --------------------------------------------------------------------------- #
 
 def test_batching_under_store_lock_does_not_deadlock(tmp_path):
-    """plug._migrate_legacy and memory_put both hold store.lock() across several
-    save=False mutations. collection_write_lock turns a NESTED acquisition into an
-    error on purpose, so the outermost acquisition has to be the only one that
-    takes the file lock."""
+    """plug._migrate_legacy and memory_put both hold store.lock() across several save=False mutations. collection_write_lock turns a NESTED acquisition into an error on purpose, so the outermost acquisition has to be the only one that takes the file lock."""
     store = MemoryStore("owner", "chat", root=tmp_path)
     with store.lock():
         store._load()
@@ -232,9 +192,7 @@ def test_prune_calling_replace_does_not_deadlock(tmp_path):
 
 
 def test_the_lock_file_cannot_be_mistaken_for_a_namespace(tmp_path):
-    """backfill._namespaces globs ``*/*.jsonl``; the lock file is a sibling named
-    ``<ns>.jsonl.lock``, so it is excluded by construction rather than by a deny
-    list. If the name ever changes, the backfill would try to open it as a store."""
+    """backfill._namespaces globs ``*/*.jsonl``; the lock file is a sibling named ``<ns>.jsonl.lock``, so it is excluded by construction rather than by a deny list."""
     from localm.memory.backfill import _namespaces
     store = MemoryStore("owner", "chat", root=tmp_path)
     store.add(MemoryRecord(text="a fact", source="user", importance=0.8))
@@ -246,19 +204,7 @@ def test_the_lock_file_cannot_be_mistaken_for_a_namespace(tmp_path):
 
 def test_a_write_waiting_on_the_file_lock_does_not_block_reads_in_its_own_process(
         heavy_slot, tmp_path, monkeypatch):
-    """The lock ORDER, pinned.
-
-    MEASURED 2026-08-19, as a shipped regression: the first version of this lock
-    took the namespace RLock and then waited for the FILE lock inside it. Because
-    ``MemoryStore.__init__`` takes that same RLock to ``_load()``, every read in
-    the writing process blocked for the writer's whole budget - `GET /api/memory`
-    measured 29.6s live against a foreign holder, while `/api/stats` stayed fast,
-    so it was never the event loop.
-
-    The fix waits for the file lock OUTSIDE the RLock. This test fails on the old
-    order and passes on the new one, which is the only reason it is worth having:
-    nothing else in the suite can tell the two apart.
-    """
+    """The lock ORDER, pinned."""
     monkeypatch.setenv("LOCALM_RAG_LOCK_WAIT", "20")
     holder = _hold_from_another_process(tmp_path, 20)
     try:
@@ -280,8 +226,7 @@ def test_a_write_waiting_on_the_file_lock_does_not_block_reads_in_its_own_proces
 
 
 def _swallow(fn):
-    """Run *fn*, ignoring a lock refusal: the test above is about the READ's
-    latency, and whether the writer eventually wins the race is not its subject."""
+    """Run *fn*, ignoring a lock refusal: the test above is about the READ's latency, and whether the writer eventually wins the race is not its subject."""
     try:
         fn()
     except CollectionLockedError:
@@ -291,15 +236,7 @@ def _swallow(fn):
 def test_a_bounded_caller_stays_bounded_behind_a_blocked_writer(heavy_slot,
                                                                 tmp_path,
                                                                 monkeypatch):
-    """corrections() passes a SHORT timeout so a read path never stalls. That
-    budget has to survive a sibling thread in the same process already waiting on
-    the long one.
-
-    MEASURED 2026-08-19: with the in-process gate unbounded, a writer blocked for
-    its full budget held the gate the whole time, so this call queued behind it and
-    took ~30s despite asking for 2s - which is how `GET /api/memory` still measured
-    29.6s live AFTER the RLock ordering was fixed. The gate now shares the budget.
-    """
+    """corrections() passes a SHORT timeout so a read path never stalls."""
     monkeypatch.setenv("LOCALM_RAG_LOCK_WAIT", "25")
     holder = _hold_from_another_process(tmp_path, 25)
     writer = None

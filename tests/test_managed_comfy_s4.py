@@ -1,28 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""STAGE S4 (version-pin lifecycle + localm patch set + `localm comfy update`).
-
-Design decision 7 (dev-notes/DESIGN-localm-managed-comfyui-2026-07-08.md): localm
-pins a known-good ComfyUI commit and carries a small set of localm-owned patches on
-top of it (direct core edits, since this is localm's OWN ComfyUI). The pin advances
-only DELIBERATELY, via `localm comfy update`, which re-applies the patch set.
-
-Three oracles, each with a built-in negative case so it fails on known-bad work:
-
-  1. PATCH SET (localm/media/comfy_patches.py): apply_patches rewrites a fragile
-     comfy_api/internal/__init__.py make_locked_method_func (the bare
-     `getattr(type_obj, func).__func__`) into the plain-function-tolerant form; it is
-     GUARDED (already-tolerant / wrong-shape -> skipped), IDEMPOTENT (re-apply is a
-     byte no-op), and FAIL-SAFE (missing target skipped without error, an unparseable
-     result is never written). The patched module, imported, calls a plain-function
-     node WITHOUT the AttributeError the unpatched one raises.
-
-  2. PROVISIONING applies the patch set: after provision_fresh against a fake ComfyUI
-     that ships the fragile file, the managed core reads tolerant.
-
-  3. `localm comfy update`: moving the pin re-checks-out the managed checkout to the
-     new pin and re-applies the patch set; a mid-update failure ROLLS BACK to the
-     prior managed ComfyUI (prior commit, main.py present, patch restored, installed).
-"""
+"""STAGE S4 (version-pin lifecycle + localm patch set + `localm comfy update`)."""
 
 from __future__ import annotations
 
@@ -154,10 +131,7 @@ def _load_src_as_module(src: str, name: str, tmp_path: Path):
 # =========================================================================== #
 
 def test_apply_patches_makes_fragile_func_tolerant_and_it_works(tmp_path):
-    """The core oracle: a fragile make_locked_method_func is rewritten to the
-    plain-function-tolerant form, the result parses, and (proven for REAL by
-    importing it) the tolerant function runs a plain-function node instead of
-    raising - sync, async, and the bound-method case all still work."""
+    """The core oracle: a fragile make_locked_method_func is rewritten to the plain-function-tolerant form, the result parses, and (proven for REAL by importing it) the tolerant function runs a plain-function node instead of raising - sync, async, and the bound-method case all still work."""
     from localm.media import comfy_patches as cp
 
     # NEGATIVE: the unpatched fragile function raises on a plain-function node.
@@ -221,8 +195,7 @@ def test_apply_patches_skips_already_tolerant(tmp_path):
 
 
 def test_apply_patches_skips_unexpected_shape(tmp_path):
-    """A make_locked_method_func of a different shape is left alone (never risk
-    corrupting an unknown version)."""
+    """A make_locked_method_func of a different shape is left alone (never risk corrupting an unknown version)."""
     from localm.media import comfy_patches as cp
     root = tmp_path / "managed"
     target = _write_internal(root, _WRONGSHAPE_SRC)
@@ -234,8 +207,7 @@ def test_apply_patches_skips_unexpected_shape(tmp_path):
 
 
 def test_apply_patches_missing_target_is_absent_not_error(tmp_path):
-    """A missing/renamed target file is skipped WITHOUT error (fail-safe), and
-    nothing is created."""
+    """A missing/renamed target file is skipped WITHOUT error (fail-safe), and nothing is created."""
     from localm.media import comfy_patches as cp
     root = tmp_path / "managed"
     root.mkdir()
@@ -248,8 +220,7 @@ def test_apply_patches_missing_target_is_absent_not_error(tmp_path):
 
 
 def test_apply_patch_never_writes_unparseable_result(tmp_path):
-    """FAIL-SAFE: a patch whose transform yields text that does not parse is
-    reported failed and the file is left byte-identical (no corruption)."""
+    """FAIL-SAFE: a patch whose transform yields text that does not parse is reported failed and the file is left byte-identical (no corruption)."""
     from localm.media import comfy_patches as cp
     root = tmp_path / "managed"
     target = _write_internal(root, _BUGGY_SRC)
@@ -307,11 +278,7 @@ def _commit_all(workdir: Path, msg: str) -> str:
 
 
 def _make_fake_venv(root: Path) -> None:
-    """A placeholder venv interpreter + completion marker so
-    is_managed_comfy_installed() reads True (S4's update never rebuilds the
-    venv; it only moves the git source + patches). The marker is included
-    because #621's fix made it load-bearing - main.py + venv alone now reads
-    as "still installing", not "installed"."""
+    """A placeholder venv interpreter + completion marker so is_managed_comfy_installed() reads True (S4's update never rebuilds the venv; it only moves the git source + patches)."""
     from localm.media.managed_comfy_provision import MARKER_FILENAME
     paths = mc.managed_comfy_paths()
     paths.venv_python.parent.mkdir(parents=True, exist_ok=True)
@@ -325,9 +292,7 @@ def _make_fake_venv(root: Path) -> None:
 
 @pytest.mark.skipif(not _git_available(), reason="git not on PATH")
 def test_provision_fresh_applies_localm_patches(home, tmp_path, monkeypatch):
-    """A fresh provision against a fake ComfyUI that ships the fragile file leaves
-    the managed core PATCHED (tolerant). Negative: the fake's own source is fragile
-    until provisioning applies the patch."""
+    """A fresh provision against a fake ComfyUI that ships the fragile file leaves the managed core PATCHED (tolerant)."""
     from localm import hwdetect
     from localm.media import managed_comfy_fresh as fresh
 
@@ -364,11 +329,7 @@ def test_provision_fresh_applies_localm_patches(home, tmp_path, monkeypatch):
 # =========================================================================== #
 
 def _build_update_remote(tmp_path: Path):
-    """A fake ComfyUI 'remote' with a linear history, returning (path, shas):
-      c1: main.py + fragile core       (the 'installed' pin)
-      c2: c1 + a VERSION bump, still fragile core  (a clean advance target)
-      c3: c2 with main.py DELETED       (a broken target -> update must roll back)
-    """
+    """A fake ComfyUI 'remote' with a linear history, returning (path, shas): c1: main.py + fragile core (the 'installed' pin) c2: c1 + a VERSION bump, still fragile core (a clean advance target) c3: c2 with main.py DELETED (a broken target -> update must roll back)."""
     remote = tmp_path / "remote_comfy"
     remote.mkdir()
     (remote / "main.py").write_text("print('comfy')\n", encoding="utf-8")
@@ -384,8 +345,7 @@ def _build_update_remote(tmp_path: Path):
 
 
 def _install_managed_from(remote: Path, commit: str) -> Path:
-    """Clone *remote* into the managed dir, pin *commit*, add a fake venv, and apply
-    the real localm patch set - i.e. a managed ComfyUI installed + patched at *commit*."""
+    """Clone *remote* into the managed dir, pin *commit*, add a fake venv, and apply the real localm patch set - i.e. a managed ComfyUI installed + patched at *commit*."""
     from localm.media.comfy_patches import apply_patches
     root = mc.managed_comfy_paths().root
     _git(Path("."), "clone", "--quiet", str(remote), str(root))
@@ -398,10 +358,7 @@ def _install_managed_from(remote: Path, commit: str) -> Path:
 
 @pytest.mark.skipif(not _git_available(), reason="git not on PATH")
 def test_update_advances_pin_and_reapplies_patches(home, tmp_path):
-    """Moving the pin re-checks-out the managed checkout to the new commit and
-    re-applies the localm patch set (the freshly-checked-out fragile core is made
-    tolerant again). Negative: at the new commit the tracked file is fragile until
-    the patch re-applies."""
+    """Moving the pin re-checks-out the managed checkout to the new commit and re-applies the localm patch set (the freshly-checked-out fragile core is made tolerant again)."""
     from localm.media import managed_comfy_update as upd
 
     remote, c1, c2, _c3 = _build_update_remote(tmp_path)
@@ -421,9 +378,7 @@ def test_update_advances_pin_and_reapplies_patches(home, tmp_path):
 
 @pytest.mark.skipif(not _git_available(), reason="git not on PATH")
 def test_update_rolls_back_on_failure(home, tmp_path):
-    """A mid-update failure (the target commit leaves the tree not-installed) ROLLS
-    BACK to the prior managed ComfyUI: prior commit, main.py restored, patch
-    re-applied, reads as installed again."""
+    """A mid-update failure (the target commit leaves the tree not-installed) ROLLS BACK to the prior managed ComfyUI: prior commit, main.py restored, patch re-applied, reads as installed again."""
     from localm.media import managed_comfy_update as upd
 
     remote, c1, _c2, c3 = _build_update_remote(tmp_path)
@@ -443,13 +398,7 @@ def test_update_rolls_back_on_failure(home, tmp_path):
 
 @pytest.mark.skipif(not _git_available(), reason="git not on PATH")
 def test_update_rollback_surfaces_failed_patch_reapply(home, tmp_path, monkeypatch):
-    """MEDIUM honesty fix: when a mid-update failure triggers rollback and the git
-    source IS restored but the localm patch set cannot be re-applied on it, update must
-    NOT report a clean rollback - the failed re-apply is surfaced in the returned
-    message (rule 5: a safety step that fails never claims success). Before the fix the
-    rollback's apply_patches outcomes were discarded, so the user was told the prior
-    install was restored 'exactly as it was' while it was actually left UNPATCHED (the
-    __func__ fix gone, ACE-Step music broken)."""
+    """MEDIUM honesty fix: when a mid-update failure triggers rollback and the git source IS restored but the localm patch set cannot be re-applied on it, update must NOT report a clean rollback - the failed re-apply is surfaced in the returned message (rule 5: a safety step that fails never claims success..."""
     from localm.media import managed_comfy_update as upd
     from localm.media import comfy_patches as cp
 
@@ -487,8 +436,7 @@ def test_update_rollback_surfaces_failed_patch_reapply(home, tmp_path, monkeypat
 
 @pytest.mark.skipif(not _git_available(), reason="git not on PATH")
 def test_update_requires_git_checkout(home):
-    """A managed ComfyUI with no git history (the non-git copytree fallback) cannot
-    be pin-updated; update says so honestly instead of pretending."""
+    """A managed ComfyUI with no git history (the non-git copytree fallback) cannot be pin-updated; update says so honestly instead of pretending."""
     from localm.media import managed_comfy_update as upd
     root = mc.managed_comfy_paths().root
     root.mkdir(parents=True)
@@ -502,8 +450,7 @@ def test_update_requires_git_checkout(home):
 
 
 def test_update_requires_installed(home):
-    """update with no managed ComfyUI installed is an honest failure, not a no-op
-    that claims success."""
+    """update with no managed ComfyUI installed is an honest failure, not a no-op that claims success."""
     from localm.media import managed_comfy_update as upd
     result = upd.update_managed_comfy(reinstall_requirements=False)
     assert not result.ok
@@ -515,8 +462,7 @@ def test_update_requires_installed(home):
 # =========================================================================== #
 
 def test_cli_update_errors_when_not_installed(cli_runner):
-    """`localm comfy update` with nothing installed exits non-zero and points at
-    setup."""
+    """`localm comfy update` with nothing installed exits non-zero and points at setup."""
     from localm.cli import main
     res = cli_runner.invoke(main, ["comfy", "update"])
     assert res.exit_code != 0
@@ -524,8 +470,7 @@ def test_cli_update_errors_when_not_installed(cli_runner):
 
 
 def test_cli_update_dispatches_to_updater(cli_runner, monkeypatch):
-    """When a managed ComfyUI is installed, the command calls update_managed_comfy
-    and reports its result."""
+    """When a managed ComfyUI is installed, the command calls update_managed_comfy and reports its result."""
     from localm.cli import main
     from localm.media import managed_comfy as mcmod
     from localm.media import managed_comfy_update as upd
@@ -562,8 +507,7 @@ def _lock_dir():
 
 
 def _installed_git_checkout(home):
-    """An installed managed ComfyUI that reads as a git checkout, so update gets past
-    its read-only refusals and reaches the locked section."""
+    """An installed managed ComfyUI that reads as a git checkout, so update gets past its read-only refusals and reaches the locked section."""
     import json as _json
     from localm.media.managed_comfy_provision import MARKER_FILENAME
     paths = mc.managed_comfy_paths()
@@ -577,8 +521,7 @@ def _installed_git_checkout(home):
 
 
 def test_update_refuses_while_a_LIVE_holder_owns_the_lock(home, monkeypatch):
-    """The core guarantee. A second update must be REFUSED, not interleaved - two
-    fetch/checkout/patch sequences on one tree corrupt it."""
+    """The core guarantee."""
     import json as _json
     from localm.media import managed_comfy_update as upd
     _installed_git_checkout(home)
@@ -602,9 +545,7 @@ def test_update_refuses_while_a_LIVE_holder_owns_the_lock(home, monkeypatch):
 
 
 def test_update_reclaims_a_lock_whose_owner_is_DEAD(home, monkeypatch):
-    """A crashed update must not wedge every later one. Staleness is judged by PID
-    LIVENESS, never elapsed time - the operation is unbounded, so any fixed timeout
-    would eventually reclaim a LIVE holder's lock."""
+    """A crashed update must not wedge every later one."""
     import json as _json
     from localm.media import managed_comfy_update as upd
     _installed_git_checkout(home)
@@ -624,9 +565,7 @@ def test_update_reclaims_a_lock_whose_owner_is_DEAD(home, monkeypatch):
 
 
 def test_update_will_not_steal_a_lock_it_cannot_identify(home, monkeypatch):
-    """An unreadable owner means we cannot tell whether a live update holds it.
-    Conservative: refuse and say how to clear it by hand. Stealing here is exactly how
-    two updates end up interleaved."""
+    """An unreadable owner means we cannot tell whether a live update holds it."""
     from localm.media import managed_comfy_update as upd
     _installed_git_checkout(home)
     monkeypatch.setattr(upd, "_rev_parse_head", lambda root: "abc123")
@@ -643,8 +582,7 @@ def test_update_will_not_steal_a_lock_it_cannot_identify(home, monkeypatch):
 
 
 def test_update_releases_the_lock_on_success_and_on_failure(home, monkeypatch):
-    """A leaked lock would wedge every later update until someone deleted a folder by
-    hand, so it must be released on EVERY path - including the failure/rollback one."""
+    """A leaked lock would wedge every later update until someone deleted a folder by hand, so it must be released on EVERY path - including the failure/rollback one."""
     from localm.media import managed_comfy_update as upd
     _installed_git_checkout(home)
     monkeypatch.setattr(upd, "_rev_parse_head", lambda root: "abc123")
@@ -663,8 +601,7 @@ def test_update_releases_the_lock_on_success_and_on_failure(home, monkeypatch):
 
 
 def test_the_lock_lives_outside_the_checkout_git_force_cannot_disturb_it(home):
-    """The update's own `git checkout --force` runs inside the checkout. A lock stored
-    in there would be protecting itself from the very operation it guards."""
+    """The update's own `git checkout --force` runs inside the checkout."""
     _installed_git_checkout(home)
     root = mc.managed_comfy_paths().root
     lock = _lock_dir()

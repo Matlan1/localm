@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Model registry: selection/resolution, info + vision capabilities, aliases,
-dedup, disk sync, add-local, and removal. Depends on the gguf helpers."""
+"""Model registry: selection/resolution, info + vision capabilities, aliases, dedup, disk sync, add-local, and removal. Depends on the gguf helpers."""
 
 import localm.model_manager as _mm  # read package-patchable names at call time
 
@@ -46,74 +45,24 @@ _HF_LLM_ARCH_SUFFIXES = ("ForCausalLM", "ForConditionalGeneration", "LMHeadModel
 
 
 def is_auto_chat_eligible(entry: dict) -> bool:
-    """True when a registry *entry* may be auto-selected as the default chat model.
-
-    A type='unknown' model (its type could not be determined) is never auto-loaded
-    as chat, though it stays runnable when named explicitly (``localm run NAME``, an
-    API request naming it) and its type can be corrected with ``localm set-type``. A
-    legacy entry with no ``model_type`` key is treated as 'llm' (eligible), preserving
-    pre-Branch-A behaviour. type='embedding' is also excluded: it is loaded via a
-    dedicated embeddings-mode context (see ``inference/embedder.py``), not the causal
-    chat path, so it must never be auto-picked as the default chat model - a real risk
-    now that ``setup-embeddings`` can register one into the main registry, making an
-    embedding-only registry (a plausible first-run state) a genuine scenario.
-    """
+    """True when a registry *entry* may be auto-selected as the default chat model."""
     return isinstance(entry, dict) and entry.get("model_type", "llm") not in ("unknown", "embedding")
 
 
 def is_llm(entry: dict) -> bool:
-    """True when a registry *entry* is a text-generation (chat) LLM.
-
-    'llm' (or a legacy entry with no ``model_type`` key, treated as 'llm') is an
-    LLM; every other type - 'unknown' (unclassified) and the non-text component
-    types 'mmproj' / 'diffusion-unet' / 'text-encoder' / 'vae' / 'lora' - is NOT.
-    This is the same rule the GUI Models page uses (``isLlm`` in models.js); use it
-    wherever a UI must offer ONLY chat-launchable models, e.g. the desktop
-    launcher's model selector. Distinct from :func:`is_auto_chat_eligible`, which
-    only screens out 'unknown' (for auto-picking a default) and would still admit a
-    LoRA / VAE / other component model.
-    """
+    """True when a registry *entry* is a text-generation (chat) LLM."""
     return isinstance(entry, dict) and entry.get("model_type", "llm") == "llm"
 
 
 def models_of_type(model_type: str, registry: Optional[dict] = None) -> dict:
-    """Every registry entry whose ``model_type`` is *model_type*, as
-    ``{name: entry}``.
-
-    The registry's own type slice, as DATA - ``list_models`` renders exactly this
-    for the CLI, and the media plugins read it to answer "which UNet / text
-    encoder / VAE / LoRA does this box already have registered" for a plugin's
-    declared model roles. A legacy entry with no ``model_type`` key counts as
-    'llm', the same default every other reader of the TYPE applies in this module,
-    so the two can never disagree about one entry. (``has_recorded_model_type``
-    below deliberately does not default: it answers whether a type was ever
-    recorded, not what it is.)
-
-    *registry* lets a caller that already loaded the registry pass it in rather
-    than paying a second read; omitted, it is loaded here."""
+    """Every registry entry whose ``model_type`` is *model_type*, as ``{name: entry}``."""
     reg = _mm.load_registry() if registry is None else registry
     return {k: v for k, v in reg.items()
             if isinstance(v, dict) and v.get("model_type", "llm") == model_type}
 
 
 def has_recorded_model_type(entry: dict) -> bool:
-    """True when a registry *entry* actually CARRIES a model type.
-
-    Both predicates above default a missing ``model_type`` to 'llm' on purpose,
-    and that default is load-bearing for RUNTIME CANDIDACY: a legacy entry from
-    before the field existed must stay auto-chat-eligible and stay in the chat
-    picker's ``?type=llm`` list. Nothing here changes that.
-
-    What it is NOT is a recorded fact. Presenting the guess as a Role reads as
-    "somebody classified this as an LLM" when nobody ever did, which is the same
-    collapse ``_register``'s docstring rejects for ``expert_count=0`` versus the
-    key being absent. A DISPLAY surface asks this instead of the predicates, so
-    it can say 'not set' rather than assert a type.
-
-    An empty or non-string value counts as NOT recorded: a hand-edited or
-    cross-version entry carrying ``null`` or ``""`` has no more classified this
-    model than an absent key has.
-    """
+    """True when a registry *entry* actually CARRIES a model type."""
     if not isinstance(entry, dict):
         return False
     value = entry.get("model_type")
@@ -121,46 +70,7 @@ def has_recorded_model_type(entry: dict) -> bool:
 
 
 def _entry_path(entry, field: str = "path") -> Optional[str]:
-    """The stored file path of a registry *entry*, or None when the entry is
-    malformed (not a dict; the named *field* missing / null / not a non-empty
-    string; or that path carrying a ``..`` component).
-
-    *field* selects WHICH stored path to validate. It defaults to ``path``, the
-    model's own file. ``mmproj`` (the multimodal projector recorded beside a
-    vision GGUF) is the other one, and it is a path in exactly the same sense:
-    it is read from the same hand-editable file and handed to the same native
-    loader. It was previously read raw, so a projector entry bypassed both the
-    type check and the ``..`` rejection that this choke point exists to apply.
-
-    registry.json is normally written only by localm and is always well-formed,
-    but it is a real, user-visible file (``localm info`` names it) that can be
-    hand-edited, half-written, or left behind by an older/newer version. A single
-    JSON-valid-but-wrong-shape entry must never crash a read / list / remove /
-    dedup / sync operation and take the whole registry down with it: that is the
-    same "a damaged file must never take the app down" guarantee load_registry
-    already gives for whole-file corruption, extended from the file to the entry.
-    Callers that only need the path skip an entry when this returns None; the
-    user-facing lister marks it visibly corrupt so it can be dropped with
-    ``localm rm <name>`` instead of forcing a hand-edit of the JSON.
-
-    INVARIANT (grep ``_entry_path`` before adding a new registry consumer): EVERY
-    site that iterates ``load_registry()`` (or looks an entry up by name) and then
-    reads the entry's ``path`` / ``mmproj`` / ``source`` / ``model_type`` MUST route
-    that access through this helper (or an explicit ``isinstance(entry, dict)``
-    guard). A raw ``entry["path"]`` / ``entry.get("path")`` crashes on a non-dict
-    or null/int path. The known consumers, all guarded, are: this module (list/info/vision/
-    external/alias/dedup/sync), the MCP ``list_models``
-    (plugins/mcpserver/server.py), the GUI ``/api/models`` + ``/api/vram-estimate``
-    (plugins/gui/routes/models.py), the API ``model_detail``
-    (inference/routes/models.py), the pull dedup scan (model_manager/pull.py), and
-    the ComfyUI scan (model_manager/scan.py). There is deliberately no blanket
-    syntactic linter for this - ``["path"]`` / ``.get("source")`` occur all over
-    unrelated code (coder sessions, RAG cells, HF listings), so a scan would be
-    false-positive noise; the guard is enforced by the malformed-entry test matrix
-    (tests/test_model_dedup.py::TestMalformedRegistryResilience and
-    tests/test_registry_corruption_consumers.py), which drives every consumer with
-    the six BAD_ENTRIES shapes.
-    """
+    """The stored file path of a registry *entry*, or None when the entry is malformed (not a dict; the named *field* missing / null / not a non-empty string; or that path carrying a ``..`` component)."""
     if not isinstance(entry, dict):
         return None
     p = entry.get(field)
@@ -185,29 +95,7 @@ def _entry_path(entry, field: str = "path") -> Optional[str]:
 
 def _detect_local_model_type(path: Path, *, is_gguf: bool, is_hf: bool,
                              is_blob: bool = False) -> tuple[str, dict]:
-    """Deterministically classify a LOCAL model's type from HARD metadata only.
-    Returns ``(model_type, gguf_metadata)``.
-
-    A .gguf file or Ollama blob (the same GGUF byte format under a renamed file)
-    is first checked for a vision-projector signal in its OWN GGUF metadata
-    (``gguf_is_mmproj`` - ``general.architecture == "clip"``; see gguf.py) ->
-    'mmproj'; then an embedding/pooling signal (``gguf_embedding_signal`` -
-    architecture or a ``*.pooling_type`` key) -> 'embedding'; otherwise it is a
-    llama.cpp text model -> 'llm'. An HF directory is classified from
-    config.json: a LoRA/adapter dir -> 'lora'; an ``architectures`` class ending
-    in ForCausalLM / LMHeadModel / ForConditionalGeneration -> 'llm'; anything we
-    cannot resolve -> 'unknown' (never a silent 'llm').
-
-    *gguf_metadata* (F8-PERSIST-ARCH-AND-EXPERT-COUNT) is ``gguf_registry_metadata``'s
-    ``{"architecture", "expert_count"}`` dict for a GGUF/blob path, ``{}`` for an
-    HF dir or an undetected type (nothing GGUF-shaped to read). The mmproj/
-    embedding checks below already read this file's header once (``meta``,
-    shared via the *meta* param both accept - MEASURED: this halves the cost
-    of also wanting architecture, from three probe reads down to two); this
-    only adds ``gguf_expert_count``'s own separate, equally-bounded read on
-    top, so every caller that persists a registry entry gets architecture and
-    expert count for close to the cost it already paid for the type alone.
-    """
+    """Deterministically classify a LOCAL model's type from HARD metadata only."""
     try:
         if is_gguf or is_blob:
             meta = _gguf_metadata_probe(path)
@@ -268,8 +156,7 @@ _SHORTCUT_SIZES: dict[str, str] = {
 
 @dataclass(frozen=True)
 class ComfySource:
-    """A known-good HuggingFace download source for one exact ComfyUI workflow
-    model filename."""
+    """A known-good HuggingFace download source for one exact ComfyUI workflow model filename."""
     spec: str            # "owner/repo:filename" - fed straight to pull_model()
     model_type: str       # "diffusion-unet" | "text-encoder" | "vae" | "lora"
     comfy_subfolder: str  # ComfyUI models/<subfolder> this file belongs in
@@ -308,8 +195,7 @@ COMFY_MODEL_SOURCES: dict[str, ComfySource] = {
 
 
 def resolve_comfy_model_source(filename: str) -> Optional[ComfySource]:
-    """The curated download source for *filename*, or None when it isn't one of
-    the known-good exact-filename matches above."""
+    """The curated download source for *filename*, or None when it isn't one of the known-good exact-filename matches above."""
     return COMFY_MODEL_SOURCES.get(filename)
 
 
@@ -320,14 +206,7 @@ def resolve_spec(spec: str) -> str:
 
 
 def get_model_path(name: str, *, allow_direct_path: bool = False) -> Optional[Path]:
-    """Resolve a model name/alias/path to the model file or directory.
-
-    Returns the resolved Path, or None if not found.
-    To also get a display name hint, use get_model_info().
-
-    See get_model_info() for what ``allow_direct_path`` opts into, and why it
-    defaults to off.
-    """
+    """Resolve a model name/alias/path to the model file or directory."""
     result = get_model_info(name, allow_direct_path=allow_direct_path)
     return result[0] if result else None
 
@@ -335,30 +214,7 @@ def get_model_path(name: str, *, allow_direct_path: bool = False) -> Optional[Pa
 
 
 def unregistered_model_error(name) -> Optional[str]:
-    """None when an UNTRUSTED caller may use *name* as a model name, else a
-    ready-to-show message explaining the refusal.
-
-    This is layer 2 of the model-name gate, and it exists for the error message.
-    Layer 1 is get_model_info's ``allow_direct_path``, which is unconditional and
-    is what actually stops a path from resolving. Without layer 2 a caller naming
-    a path would get a bare "model not found", which is true but useless; with it
-    they are told the name must be registered and which names exist.
-
-    Returns None (allowed) in two non-name cases:
-
-    * an empty/None *name*, which means "use the server default" and is not a
-      name at all; and
-    * an EMPTY registry, mirroring the same convention already used by the /v1
-      registration check in http_server ("only enforce ... if the registry is not
-      empty"), so a fresh install or a test harness with no registry is not made
-      unusable. That is safe precisely BECAUSE layer 1 is unconditional: with an
-      empty registry a path still fails to resolve, so skipping this check cannot
-      re-open the direct-path hole - it only changes which message is shown.
-
-    Callers raise their own exception type from the returned string (HTTP 400 in
-    the jobs routes, ValueError in the MCP server, RuntimeError in the runner) so
-    this module stays free of any transport dependency.
-    """
+    """None when an UNTRUSTED caller may use *name* as a model name, else a ready-to-show message explaining the refusal."""
     if not name:
         return None
     reg = _mm.load_registry()
@@ -380,36 +236,7 @@ def unregistered_model_error(name) -> Optional[str]:
 
 def get_model_info(name: str, *, allow_direct_path: bool = False,
                    reg: Optional[dict] = None):
-    """Like get_model_path(), but returns (path, display_hint) or None.
-
-    display_hint is a human-readable name when the original arg was an Ollama
-    manifest path; otherwise it's None (the engine derives its own name).
-
-    ``allow_direct_path`` opts into resolving *name* as a PATH ON DISK when it is
-    not a registry entry (`localm run D:/models/foo.gguf`, an Ollama store, a
-    HuggingFace directory). That is a documented CLI feature, so it is kept - but
-    it is OFF by default, because the caller decides whether the name it holds is
-    operator-typed or came off the wire, and only the caller can know that.
-
-    Why the default is refuse (CodeQL 11-17, 48, 49, 65-71, 73-76, 108-111): the
-    fallthrough accepted any path on disk, and the jobs plugin and the MCP server
-    both reached it with an attacker-supplied name under a NON-privileged scope.
-    Every downstream sink then ran on an attacker-named path - stat, an unbounded
-    rglob, read_text of a whole directory - and for a directory, create_backend
-    picks HFBackend, which used to enable transformers' remote-code flag and so
-    imported and EXECUTED the directory's own .py. Refusing by default turns that
-    from "any caller who forgot to check" into "only a caller that opted in".
-
-    Pass True ONLY where *name* is operator-typed on the command line. The audited
-    set is localm/cli/*, the `localm gui <model>` startup resolution, and the MCP
-    server's own --model default. Anything reachable over HTTP or MCP keeps the
-    default, and enforces registry membership on top (see http_server's
-    registration check, jobs' _check_model_name, and MCPEngines.resolve_model).
-    ``reg`` lets a caller that has ALREADY loaded the registry pass its own
-    snapshot instead of forcing another file read. Same lookup either way; it
-    exists so a multi-model caller reads registry.json once and every answer it
-    gets describes ONE state of that file rather than a mix of several.
-    """
+    """Like get_model_path(), but returns (path, display_hint) or None."""
     reg = _mm.load_registry() if reg is None else reg
     if name in reg:
         epath = _entry_path(reg[name])   # None for a malformed entry -> fall through
@@ -454,14 +281,7 @@ def get_model_info(name: str, *, allow_direct_path: bool = False,
 
 
 def _pick_mmproj_candidate(model_stem: str, names: List[str]) -> Optional[str]:
-    """Disambiguate a single mmproj (vision projector) filename out of *names*
-    (already filtered to mmproj-looking GGUF filenames) for a model named
-    *model_stem*. A lone candidate wins outright; with more than one, prefer a
-    name that shares the model's leading token, and give up (None) rather than
-    guess when that still doesn't narrow it to one - never silently attach the
-    wrong projector. Shared by find_sibling_mmproj (a directory glob) and
-    pull.py's HF-repo-listing lookup (same disambiguation, a different
-    candidate source)."""
+    """Disambiguate a single mmproj (vision projector) filename out of *names* (already filtered to mmproj-looking GGUF filenames) for a model named *model_stem*."""
     if not names:
         return None
     if len(names) == 1:
@@ -472,27 +292,7 @@ def _pick_mmproj_candidate(model_stem: str, names: List[str]) -> Optional[str]:
 
 
 def find_sibling_mmproj(model_path, *, dir_cache: Optional[dict] = None) -> Optional[Path]:
-    """Auto-detect a vision projector (mmproj) GGUF sitting next to a GGUF model.
-
-    Vision GGUFs ship a separate 'mmproj' projector file in the same folder
-    (e.g. 'gemma-3-4b-it-Q8_0.gguf' + 'mmproj-gemma-3-4b-it-f16.gguf'), so picking
-    it up lets a GUI/registry load get vision without a CLI --mmproj flag (VIS-1).
-    Only a GGUF model qualifies and the model file itself is excluded. Returns the
-    single candidate, or None when there are none, or the choice is ambiguous
-    (>1 with no clear stem match) - we never silently load the wrong projector.
-
-    ``dir_cache`` is a caller-owned dict memoising the per-DIRECTORY projector
-    listing for the duration of ONE operation. A single load asks about one
-    model and does not need it; /api/models asks about every registered model,
-    and models overwhelmingly live in one folder, so without it each row globs
-    a directory whose size grows with the number of rows. MEASURED on this box,
-    all models in one folder: 0.53 ms/row at 10 models but 1.53 ms/row at 200
-    (305 ms total) - quadratic, and the listing is identical every time.
-
-    Deliberately caller-owned and NOT a module-level cache: this reads a
-    directory a user can add a projector to at any moment, and a process-lifetime
-    cache would keep saying "no vision" until restart. Scoped to one request, the
-    staleness window is the request."""
+    """Auto-detect a vision projector (mmproj) GGUF sitting next to a GGUF model."""
     p = Path(model_path)
     if p.suffix.lower() != ".gguf":
         return None
@@ -525,26 +325,7 @@ def find_sibling_mmproj(model_path, *, dir_cache: Optional[dict] = None) -> Opti
 def get_model_mmproj(name: str, *, allow_direct_path: bool = False,
                      reg: Optional[dict] = None,
                      dir_cache: Optional[dict] = None) -> Optional[str]:
-    """The mmproj (vision projector) path for a model, if one is known.
-
-    Priority: an explicit 'mmproj' recorded in the registry entry, else a sibling
-    mmproj GGUF auto-detected next to the model file. Returns an absolute path
-    string, or None when no projector is associated. This is what lets a GGUF keep
-    vision after a GUI/registry model switch (VIS-1), the same way the CLI --mmproj
-    flag does on a direct run.
-
-    ``allow_direct_path`` is threaded through to get_model_info for the same reason
-    it exists there: without it, the sibling-projector scan (CodeQL 69/70) would
-    glob a directory named by an unregistered, caller-supplied path. Those two
-    alerts share this root cause; unlike the jobs/MCP sinks they were not shown to
-    have their own remote entry point, and are fixed here by identity, not because
-    a remote chain was demonstrated for them.
-
-    ``reg`` is the same caller-supplied registry snapshot get_model_info takes,
-    and is threaded down to it so BOTH lookups here describe one state of
-    registry.json rather than two reads a moment apart. ``dir_cache`` is passed
-    straight to find_sibling_mmproj - see its docstring for why it is
-    caller-owned and per-operation."""
+    """The mmproj (vision projector) path for a model, if one is known."""
     reg = _mm.load_registry() if reg is None else reg
     entry = reg.get(name) if isinstance(reg, dict) else None
     # Through the choke point, not a raw read: the recorded projector is a stored
@@ -575,9 +356,7 @@ def get_model_mmproj(name: str, *, allow_direct_path: bool = False,
 # ------------------------------------------------------------------ #
 
 def _hf_is_vision(model_dir: Path) -> bool:
-    """True if a HuggingFace model directory looks vision-capable, judged from
-    its on-disk metadata (offline, no model load, no hardware assumption). The
-    HF backend can then accept image input for it."""
+    """True if a HuggingFace model directory looks vision-capable, judged from its on-disk metadata (offline, no model load, no hardware assumption)."""
     try:
         pre = model_dir / "preprocessor_config.json"
         if pre.is_file() and "image" in pre.read_text(
@@ -618,11 +397,7 @@ _VISION_NAME_TOKENS = frozenset({
 
 
 def _looks_like_vision_gguf_name(repo_id: str, filename: str) -> bool:
-    """Best-effort NAME-based signal that a GGUF pull spec names a
-    vision-language model - see ``_VISION_NAME_TOKENS`` for what this checks
-    and why it is name-only. Used by pull.py to decide whether a missing
-    mmproj projector is worth flagging at pull time; never used to type or
-    refuse a pull."""
+    """Best-effort NAME-based signal that a GGUF pull spec names a vision-language model - see ``_VISION_NAME_TOKENS`` for what this checks and why it is name-only."""
     ident = f"{repo_id}/{filename}".lower()
     tokens = re.split(r"[^a-z0-9]+", ident)
     if any(t in _VISION_NAME_TOKENS for t in tokens):
@@ -632,45 +407,7 @@ def _looks_like_vision_gguf_name(repo_id: str, filename: str) -> bool:
 
 def model_vision_capability(name: str, *, reg: Optional[dict] = None,
                             dir_cache: Optional[dict] = None) -> Optional[bool]:
-    """Whether ONE registered model can accept image INPUT - as a TRI-STATE.
-
-    ``True``  the loader can genuinely put an image through this model.
-    ``False`` we inspected the model's own files and it cannot.
-    ``None``  we COULD NOT INSPECT them, so we do not know.
-
-    The third state is the whole point, and it is the same discipline as
-    F8-PERSIST-ARCH-AND-EXPERT-COUNT's ``expert_count``: every answer here is
-    read from the model's files at call time, so an entry whose path sits on an
-    unmounted drive or an unreachable UNC share produces no evidence at all. The
-    positive-membership list below cannot express that - a name simply does not
-    appear, which is byte-identical to a genuine text-only model - so a caller
-    that renders "not vision" from a bare absence is making a claim about a
-    model nobody checked. Callers must render nothing for ``None``, and in
-    particular no NEGATIVE text.
-
-    Both qualifying paths are the SAME lookups the actual load path uses, not a
-    static-metadata guess: a HuggingFace-format directory with vision metadata,
-    or a chat model whose mmproj (vision projector) ``get_model_mmproj()``
-    resolves - an explicitly recorded projector, or one auto-detected sitting
-    beside the model file. A standalone mmproj or an embedding entry is not
-    itself a model to switch to, hence the model_type gate.
-
-    ORDERING IS LOAD-BEARING: a resolved projector returns True BEFORE the
-    reachability probe, because ``get_model_mmproj`` can succeed from a recorded
-    projector alone. That keeps ``vision_capable_models()``'s True set exactly
-    what it was - ``None`` only ever replaces a former, possibly-wrong False.
-
-    Does disk I/O (stat, glob, a small JSON read), so callers on an event loop
-    must run it in an executor.
-
-    ``reg`` is a registry snapshot the caller has already loaded. It is threaded
-    all the way down into get_model_mmproj/get_model_info rather than used only
-    for the top-level lookup: without that, this function would answer from the
-    caller's snapshot AND from a fresh read of registry.json in the same call,
-    which is two states of one file and, for a test that patches only one of the
-    two load_registry bindings, a result decided by the developer's real
-    registry.
-    """
+    """Whether ONE registered model can accept image INPUT - as a TRI-STATE."""
     reg = _mm.load_registry() if reg is None else reg
     info = reg.get(name) if isinstance(reg, dict) else None
     epath = _entry_path(info)   # malformed entry (a str entry's .get would
@@ -750,17 +487,7 @@ def model_vision_capability(name: str, *, reg: Optional[dict] = None,
 
 
 def vision_capable_models() -> List[str]:
-    """Registered model names that can accept image INPUT on THIS install.
-
-    A name listed here is one the loader can genuinely put an image through.
-    Used to ROUTE an image to a model already known to be vision-capable
-    instead of dead-ending, so it is deliberately POSITIVE-MEMBERSHIP ONLY:
-    absence from this list means "not known to be vision-capable" and must
-    never be read as "confirmed text-only". Use model_vision_capability() when
-    you need to tell those two apart (a GUI badge does; routing does not).
-
-    The registry is loaded ONCE and threaded into every per-name call rather
-    than re-read per model."""
+    """Registered model names that can accept image INPUT on THIS install."""
     reg = _mm.load_registry()
     if not isinstance(reg, dict):
         return []
@@ -773,11 +500,7 @@ def vision_capable_models() -> List[str]:
 
 
 def _active_model_missing_mmproj(active_model_path: str) -> Optional[tuple]:
-    """(name, repo_id) when *active_model_path* resolves to a registered LLM
-    GGUF pulled from an HF repo with no mmproj recorded yet - #957's
-    already-pulled-before-the-fix state. None when the path is not
-    registered, not a candidate, or already has one (including a resolved-
-    but-failed one, which is ``mmproj_failed``'s case, not this one)."""
+    """(name, repo_id) when *active_model_path* resolves to a registered LLM GGUF pulled from an HF repo with no mmproj recorded yet - #957's already-pulled-before-the-fix state."""
     reg = _mm.load_registry()
     try:
         names = find_aliases_by_path(Path(active_model_path), reg=reg)
@@ -796,26 +519,7 @@ def _active_model_missing_mmproj(active_model_path: str) -> Optional[tuple]:
 
 
 def persist_cli_mmproj(name: str, mmproj_path: str) -> Optional[str]:
-    """Record a CLI ``--mmproj`` override onto *name*'s registry entry, once the
-    caller has already confirmed it genuinely loaded for this run (the backend
-    reported ``supports_images=True``) - this function never checks that itself
-    and must never be called on an unconfirmed load, or a broken projector could
-    get recorded as working, making vision_capable_models() list a model whose
-    vision does not actually load: a NEW false-positive surface in the exact
-    area #1073 just fixed.
-
-    Every other mmproj-discovery path persists (pull.py's auto-attach, the
-    registry's own recorded field) - the CLI override was the one path that
-    never wired up to the same persistence, which is what this closes. Returns
-    a one-line status to print to the user, or None when there is nothing worth
-    saying (already recorded with this exact path, or the entry is not a GGUF
-    chat model this field means anything for).
-
-    Never silently overwrites a DIFFERENT already-recorded mmproj (hard-won
-    rule: never override a user's prior explicit choice without informing
-    them) - a differing recorded value returns an explanatory note instead of
-    writing, since a one-off --mmproj may be a deliberate experiment the user
-    does not want to make permanent."""
+    """Record a CLI ``--mmproj`` override onto *name*'s registry entry, once the caller has already confirmed it genuinely loaded for this run (the backend reported ``supports_images=True``) - this function never checks that itself and must never be called on an unconfirmed load, or a broken projector coul..."""
     reg = _mm.load_registry()
     entry = reg.get(name)
     if not isinstance(entry, dict):
@@ -854,26 +558,7 @@ def persist_cli_mmproj(name: str, mmproj_path: str) -> Optional[str]:
 
 def vision_input_guidance(mmproj_failed: bool = False,
                           active_model_path: Optional[str] = None) -> str:
-    """Capability-aware, install-specific message for when an image is attached
-    to a model that cannot see it. Instead of a flat dead-end, point the user at
-    a path that EXISTS on THIS install: a vision model already in their library,
-    or how to obtain one. Setup-agnostic - it inspects the registry and the
-    installed stack, never assuming a particular GPU or runtime. Begins with the
-    legacy 'cannot accept image input' phrase so existing callers stay valid.
-
-    *mmproj_failed* is True when the active GGUF model WAS given a vision projector
-    (mmproj) but it did not load (supports_images is still False). GGUF vision IS
-    implemented (the built-in mtmd path), so do NOT claim it is unimplemented: the
-    honest cause is that this particular projector failed to load - likely
-    incompatible with the model, or the mtmd vision runtime is unavailable.
-
-    *active_model_path* (the loaded backend's own resolved model path, when the
-    caller has one) is #957's third, previously-uncovered case: the ACTIVE model
-    IS a vision-capable GGUF pulled from an HF repo, but no mmproj was ever
-    recorded for it (an install predating the auto-attach fix, or interrupted
-    before sync_models_dir's backfill has run). Without this check the generic
-    "no vision model is registered yet" branch below fires for exactly this
-    user - telling them to pull a model they already have."""
+    """Capability-aware, install-specific message for when an image is attached to a model that cannot see it."""
     import importlib.util
     if mmproj_failed:
         head = ("This model cannot accept image input: a vision projector (mmproj) "
@@ -983,10 +668,7 @@ def list_models(type_filter: Optional[str] = None) -> None:
 
 
 def is_external_path(path) -> bool:
-    """True if *path* points OUTSIDE the managed models dir - an external model the
-    user referenced from elsewhere (e.g. a shared drive), vs one localm downloaded
-    into MODELS_DIR. External models can go 'missing' when their real location moves,
-    and are the case `localm relocate` re-points (REC-EXTPATH-RELOCATE)."""
+    """True if *path* points OUTSIDE the managed models dir - an external model the user referenced from elsewhere (e.g. a shared drive), vs one localm downloaded into MODELS_DIR."""
     try:
         Path(path).resolve().relative_to(_mm.MODELS_DIR.resolve())
         return False
@@ -1001,11 +683,7 @@ def model_is_external(name: str) -> bool:
 
 
 def relocate_target(new_path: str) -> "tuple[Path | None, str | None]":
-    """Validate *new_path* as a relocate destination: a real GGUF file or a
-    HuggingFace model directory. Returns (resolved Path, None) when valid, or
-    (None, reason) when not - the single source of truth `relocate_model` (CLI)
-    and the GUI's POST /api/models/relocate route both call, so the two surfaces
-    can never disagree about what counts as a valid target (REC-EXTPATH-RELOCATE)."""
+    """Validate *new_path* as a relocate destination: a real GGUF file or a HuggingFace model directory."""
     p = Path(new_path).expanduser()
     if not p.exists():
         return None, f"Path does not exist: {p}"
@@ -1019,10 +697,7 @@ def relocate_target(new_path: str) -> "tuple[Path | None, str | None]":
 
 
 def relocate_model(name: str, new_path: str) -> bool:
-    """Re-point a registered model to *new_path* - for an EXTERNAL model whose file
-    was MOVED (it shows 'missing' but is not gone, just relocated). Validates the new
-    path is a real GGUF file or HF dir, updates the registry, and clears the missing
-    flag. Returns True on success (REC-EXTPATH-RELOCATE)."""
+    """Re-point a registered model to *new_path* - for an EXTERNAL model whose file was MOVED (it shows 'missing' but is not gone, just relocated)."""
     reg = _mm.load_registry()
     if name not in reg:
         console.print(f"[red]No such registered model:[/red] {name}")
@@ -1050,10 +725,7 @@ def relocate_model(name: str, new_path: str) -> bool:
 
 
 def set_model_type(name: str, new_type: str) -> bool:
-    """Change a registered model's type (llm / mmproj / diffusion-unet / text-encoder
-    / vae / lora / unknown). Type is MUTABLE at any time: a bulk import or a forgotten
-    ``--type`` is corrected here, not frozen at registration. Returns True on success,
-    False if the model is not registered or *new_type* is not a MODEL_TYPES value."""
+    """Change a registered model's type (llm / mmproj / diffusion-unet / text-encoder / vae / lora / unknown)."""
     reg = _mm.load_registry()
     if name not in reg:
         console.print(f"[red]No such registered model:[/red] {name}")
@@ -1077,10 +749,7 @@ def set_model_type(name: str, new_type: str) -> bool:
 
 
 def _prompt_predownload_dup(dup_names: List[str], model_name: str) -> str:
-    """
-    The exact file about to be downloaded already exists locally.
-    Returns "alias", "download", or "skip". No TTY → "skip".
-    """
+    """The exact file about to be downloaded already exists locally."""
     import click
 
     names = ", ".join(f"'{n}'" for n in dup_names)
@@ -1143,12 +812,7 @@ def find_by_sha256(digest: str, reg: Optional[dict] = None) -> List[str]:
 
 
 def find_by_size(size: int, reg: Optional[dict] = None) -> List[str]:
-    """Registered names whose on-disk file is exactly *size* bytes.
-
-    A cheap (stat-only) content heuristic used by ``--fast`` imports: it skips
-    the full SHA-256 and dedups on size alone. Weaker than the hash tier (two
-    different files can share a length), which is why it is opt-in. Entries whose
-    path is missing or is a directory are skipped."""
+    """Registered names whose on-disk file is exactly *size* bytes."""
     if not size or size <= 0:
         return []
     reg = reg if reg is not None else _mm.load_registry()
@@ -1169,11 +833,7 @@ def find_by_size(size: int, reg: Optional[dict] = None) -> List[str]:
 
 
 def alias_model(existing: str, new_name: str) -> bool:
-    """
-    Register *new_name* as an additional name for *existing* (same file,
-    same source, same digest). Returns False when *existing* is unknown
-    or *new_name* is already taken.
-    """
+    """Register *new_name* as an additional name for *existing* (same file, same source, same digest)."""
     reg = _mm.load_registry()
     if existing not in reg:
         console.print(f"[red]Not found:[/red] {existing}")
@@ -1202,43 +862,13 @@ def alias_model(existing: str, new_name: str) -> bool:
 
 
 def rename_model(old_name: str, new_name: str) -> bool:
-    """
-    Rename a registered model from *old_name* to *new_name*. Thin bool-only
-    wrapper over :func:`rename_model_with_notes`, for CLI simplicity and
-    backward compatibility (a caller that also needs the migration notes -
-    e.g. the GUI route, which must show them to the user rather than let
-    them sit in the server log - should call that instead). See its
-    docstring for the full behavior.
-    """
+    """Rename a registered model from *old_name* to *new_name*."""
     renamed, _notes = rename_model_with_notes(old_name, new_name)
     return renamed
 
 
 def rename_model_with_notes(old_name: str, new_name: str) -> "tuple[bool, List[str]]":
-    """
-    Rename a registered model from *old_name* to *new_name*: MOVES the
-    registry entry to a new key (unlike alias_model, which copies - *old_name*
-    stops working here), and best-effort migrates every OTHER place inside
-    <data dir> that stores the plain name string (config.json's pinned_models
-    / embedding_model / coder_reviewer_model, scheduled jobs' `model` field,
-    RAG collection metadata). A per-project ``.localcoder/config.toml``
-    ``model`` setting lives OUTSIDE <data dir> (in the user's own project
-    repo, discoverable only relative to a `cwd` a coder session supplies) and
-    cannot be enumerated or migrated from here - always reported in the
-    returned notes, never silently dropped (AGENTS.md rule 5).
-
-    Sibling aliases - other registry entries whose file happens to be the same
-    one *old_name* pointed at - are left untouched: they are independent
-    names for that file, exactly like any alias `localm alias` creates, and
-    renaming one name must not delete or repoint the others.
-
-    Returns ``(False, [])`` when *old_name* is not registered, or *new_name*
-    (after the same sanitizing alias_model applies) is already taken by a
-    DIFFERENT entry. Renaming a name to itself (post-sanitize) is a no-op
-    success with no notes (nothing needed migrating). On a genuine rename,
-    returns ``(True, notes)`` where *notes* is what
-    :func:`_migrate_model_references` reports.
-    """
+    """Rename a registered model from *old_name* to *new_name*: MOVES the registry entry to a new key (unlike alias_model, which copies - *old_name* stops working here), and best-effort migrates every OTHER place inside <data dir> that stores the plain name string (config.json's pinned_models / embedding_m..."""
     reg = _mm.load_registry()
     if old_name not in reg:
         console.print(f"[red]Not found:[/red] {old_name}")
@@ -1283,14 +913,7 @@ def rename_model_with_notes(old_name: str, new_name: str) -> "tuple[bool, List[s
 
 
 def _migrate_model_references(old_name: str, new_name: str) -> List[str]:
-    """Best-effort: rewrite every *old_name* reference this process can reach
-    inside <data dir>, after rename_model has already moved the registry
-    entry. Never raises - the registry rename has already succeeded and must
-    not be undone because a secondary reference could not be updated; a site
-    that fails to migrate is reported as a note (AGENTS.md rule 5: surfaced,
-    not swallowed), not a crash. Returns human-readable notes: what changed,
-    and what could not be reached at all.
-    """
+    """Best-effort: rewrite every *old_name* reference this process can reach inside <data dir>, after rename_model has already moved the registry entry."""
     notes: List[str] = []
 
     try:
@@ -1357,13 +980,7 @@ def _migrate_model_references(old_name: str, new_name: str) -> List[str]:
 
 
 def _prompt_duplicate_action(existing_names: List[str], reason: str) -> str:
-    """
-    Ask the user what to do about a duplicate model.
-
-    Returns one of: "alias", "copy", "move", "register", "skip".
-    Non-interactive sessions (no TTY) default to "skip" so scripts never
-    silently create duplicate entries.
-    """
+    """Ask the user what to do about a duplicate model."""
     import click
 
     names = ", ".join(f"'{n}'" for n in existing_names)
@@ -1399,21 +1016,7 @@ def _register(
     architecture: Optional[str] = None,
     expert_count: Optional[int] = None,
 ) -> None:
-    """*mmproj*, when given, is a vision projector already verified and placed
-    on disk (pull.py's job) and is recorded on the entry so get_model_mmproj
-    finds it without depending on the directory-sibling fallback (#957).
-
-    *architecture* / *expert_count* (F8-PERSIST-ARCH-AND-EXPERT-COUNT): the
-    GGUF header's own ``general.architecture`` and ``<arch>.expert_count``,
-    read once at registration (gguf_registry_metadata) so the local model
-    list can show the same real architecture/MoE badge HuggingFace search
-    results already do, instead of only ever having a name-guess. Both use
-    ``is not None`` throughout this module, NEVER a truthiness check:
-    ``expert_count=0`` is a real, confirmed fact (a dense model's header WAS
-    read and genuinely has no experts) and must stay written and distinct
-    from an entry that was never checked at all (the key absent entirely) -
-    collapsing the two would show a real MoE model as confirmed-dense the
-    moment a caller defaults a missing field to 0."""
+    """*mmproj*, when given, is a vision projector already verified and placed on disk (pull.py's job) and is recorded on the entry so get_model_mmproj finds it without depending on the directory-sibling fallback (#957)."""
     entry = {"path": str(path.resolve()), "source": source, "model_type": model_type}
     if sha256:
         entry["sha256"] = sha256.lower()
@@ -1431,18 +1034,7 @@ def _register(
 
 
 def _sanitize_name(base: str) -> str:
-    """Reduce ``base`` to a registry-safe key.
-
-    Strips anything that could turn a registry name into a filesystem path or a
-    traversal sequence: only ``A-Za-z0-9._-`` survive, and any run of other
-    characters (path separators, ``..`` sequences, spaces) collapses to a single
-    hyphen. Leading/trailing hyphens are trimmed; an empty result falls back to
-    ``"model"``. Consecutive dots (``..`` traversal) collapse to one and
-    leading/trailing dots are trimmed, so the result is never ``.``/``..`` and
-    cannot act as a relative path. This is the single sanitizer used for both
-    auto-discovered names (sync_models_dir) and user-supplied ``-n`` names
-    (add_local).
-    """
+    """Reduce ``base`` to a registry-safe key."""
     base = re.sub(r"[^A-Za-z0-9._-]+", "-", base)
     base = re.sub(r"\.{2,}", ".", base)          # ..  ->  .  (no traversal)
     return base.strip("-.") or "model"
@@ -1487,10 +1079,7 @@ class ModelSyncResult(NamedTuple):
 
 
 def _backup_registry() -> Optional[Path]:
-    """Snapshot the registry to ``registry.json.bak`` (one-step revert).
-
-    Returns the backup path, or None if there was no registry file to copy.
-    """
+    """Snapshot the registry to ``registry.json.bak`` (one-step revert)."""
     if not REGISTRY_FILE.exists():
         return None
     backup = REGISTRY_FILE.with_name(REGISTRY_FILE.name + ".bak")
@@ -1504,24 +1093,7 @@ def _backup_registry() -> Optional[Path]:
 
 
 def sync_models_dir(prune: Optional[bool] = None) -> ModelSyncResult:
-    """Reconcile the registry with the models directory.
-
-    Scans ``MODELS_DIR`` for models that aren't registered yet - loose GGUF
-    files (split GGUFs are registered by their first part) and HuggingFace
-    directories (any subfolder containing ``config.json``) - and registers them.
-    A loose GGUF whose mtime is too fresh (may still be mid-copy) is skipped
-    for this call and picked up on a later one, once it has been quiet for a
-    bit - see ``_gguf_recently_written``.
-
-    Registry entries whose file has gone missing are, by default, **flagged**
-    (``"missing": true``) rather than deleted, so a temporarily-unavailable model
-    (moved file, unplugged drive, sync hiccup) is not silently forgotten. When a
-    flagged file reappears, the flag is cleared. Deletion happens only when
-    pruning is enabled - via ``prune=True`` or the ``autoprune_missing_models``
-    config setting - and even then only for files under ``MODELS_DIR`` (external
-    models are flagged, never deleted). Runs without prompting; safe to call on
-    every launch.
-    """
+    """Reconcile the registry with the models directory."""
     if prune is None:
         prune = bool(load_config().get("autoprune_missing_models", False))
 
@@ -1790,16 +1362,7 @@ def sync_models_dir(prune: Optional[bool] = None) -> ModelSyncResult:
 
 
 def _same_volume(a: Path, b: Path) -> bool:
-    """True when *a* and *b* live on the same volume, so a move between them is a
-    rename rather than a copy+delete. ``st_dev`` is the device id on POSIX and the
-    volume serial on Windows, which is why this beats comparing drive letters (it
-    is right for junctions, mount points and UNC paths too).
-
-    Fails SAFE: if the volume cannot be read, return False so the caller keeps its
-    full free-space check. A wrong "same volume" would skip a check that is real
-    and let a cross-volume move fill the disk; a wrong "different volume" only
-    asks for space we may not need.
-    """
+    """True when *a* and *b* live on the same volume, so a move between them is a rename rather than a copy+delete. ``st_dev`` is the device id on POSIX and the volume serial on Windows, which is why this beats comparing drive letters (it is right for junctions, mount points and UNC paths too)."""
     try:
         return os.stat(a).st_dev == os.stat(b).st_dev
     except OSError:
@@ -1807,49 +1370,14 @@ def _same_volume(a: Path, b: Path) -> bool:
 
 
 def _space_needed(sources_on: Path, action: str, total: int) -> int:
-    """Bytes that must be free in MODELS_DIR to perform *action*.
-
-    A same-volume move is an os.rename (shutil.move's fast path): it needs ~0
-    extra bytes, so demanding the whole model size falsely refused
-    `localm add --on-duplicate move` whenever free < model size - which is exactly
-    when a user picks move over copy (REG-450). A copy, or a cross-volume move
-    (copy+delete under the hood), really does need the bytes.
-    """
+    """Bytes that must be free in MODELS_DIR to perform *action*."""
     if action == "move" and _same_volume(sources_on, _mm.MODELS_DIR):
         return 0
     return total
 
 
 def _store_into_models_dir(path: Path, action: str) -> Path:
-    """Copy or move an external model (file or directory) INTO ``MODELS_DIR``, so
-    it can be registered from there and treated exactly like a pulled model
-    afterward (BRING-IN-1). ``action`` is ``"copy"`` or ``"move"``.
-
-    Handles every on-disk shape a registered model can take:
-      - a single-file GGUF
-      - a split GGUF - every ``-NNNNN-of-NNNNN.gguf`` part (split_gguf_parts),
-        not just the part *path* happens to point at
-      - a GGUF's sibling mmproj vision-projector file, if one exists next to it
-        (find_sibling_mmproj) - it MUST travel with the model, or vision
-        capability silently breaks with no error at registration time
-      - an HF-style model directory - the whole tree (shutil.copytree/move)
-
-    Refuses (raises RuntimeError, does not touch anything) when a name inside
-    MODELS_DIR is already occupied by a genuinely different file - the same
-    path-identity guard the duplicate-content prompt already applied inline.
-    Preflights free disk space before copying (a copy needs room for both the
-    original and the new copy at once); a same-name/no-op destination (already
-    in place) contributes nothing to that check. After each copy the destination
-    is re-hashed against a pre-copy digest of the source and the whole operation
-    fails loudly on any mismatch (we do not hide problems: a copy that silently
-    landed corrupted must never be registered as if it worked). A move is not
-    re-verified: on the same volume it is an atomic rename with no data ever
-    written twice, and doubling the read of a many-GB model file just to
-    reconfirm what the OS's move already guarantees is not worth the cost.
-
-    Returns the new path of the primary file/directory (the first part, for a
-    split GGUF) - the caller registers THIS path, not the original.
-    """
+    """Copy or move an external model (file or directory) INTO ``MODELS_DIR``, so it can be registered from there and treated exactly like a pulled model afterward (BRING-IN-1). ``action`` is ``'copy'`` or ``'move'``."""
     _mm.ensure_dirs()
     path = path.resolve()
     verb = "Copying" if action == "copy" else "Moving"
@@ -1933,15 +1461,7 @@ def _store_into_models_dir(path: Path, action: str) -> Path:
 
 
 def _name_collision(model_name: str, p: Path, reg: dict) -> Optional[str]:
-    """The conflicting path, if *model_name* is already registered pointing at
-    a genuinely different file than *p* - the one case a non-interactive
-    caller can never resolve (no terminal to confirm an overwrite) and must
-    refuse up front, BEFORE moving or copying anything into place
-    (NEW-STORE-MOVE-REGISTRY-DESYNC: add_local used to move the file first and
-    only discover this after, when it was too late to avoid displacing it).
-    None when there is no conflict: the name is free, or already correctly
-    points at *p* itself (same path-identity aliasing _register_with_dedup
-    uses for its own no-op case)."""
+    """The conflicting path, if *model_name* is already registered pointing at a genuinely different file than *p* - the one case a non-interactive caller can never resolve (no terminal to confirm an overwrite) and must refuse up front, BEFORE moving or copying anything into place (NEW-STORE-MOVE-REGISTRY-..."""
     if model_name not in reg:
         return None
     if model_name in find_aliases_by_path(p, reg):
@@ -1962,31 +1482,7 @@ def _register_with_dedup(
     architecture: Optional[str] = None,
     expert_count: Optional[int] = None,
 ) -> bool:
-    """
-    Register a model, detecting duplicates first.
-
-    Identity tiers: resolved path (instant), then stored sha256 when a *digest*
-    for the new file is known, then file *size* alone (the ``--fast`` heuristic,
-    used only when no digest was computed). ``on_duplicate`` is one of
-    "ask" / "alias" / "copy" / "move" / "register" / "skip" - "ask" prompts
-    interactively and degrades to "skip" without a TTY.
-
-    *mmproj*, when given, is a verified vision projector to record on the
-    entry (see ``_register``); backfilled onto an already-registered same-file
-    entry the same way a fresh ``digest`` is. *architecture* / *expert_count*
-    (F8-PERSIST-ARCH-AND-EXPERT-COUNT) backfill the same way - see ``_register``'s
-    docstring for why ``expert_count=0`` must still backfill (a confirmed fact,
-    not "nothing to write") while an entry that already HAS either key, even a
-    falsy one, is never overwritten.
-
-    Returns True when *model_name* ends up correctly registered for *p*
-    (freshly registered, aliased, deduped, or already correct) - False for
-    every path where nothing was written: a real name/content conflict
-    declined interactively, or skipped because there was no terminal to ask
-    (NEW-STORE-MOVE-REGISTRY-DESYNC). A caller that already moved or copied
-    *p* into place before calling this MUST check the result rather than
-    assume success - see add_local's callers for why.
-    """
+    """Register a model, detecting duplicates first."""
     import click
 
     reg = _mm.load_registry()
@@ -2114,43 +1610,7 @@ def _register_with_dedup(
 
 
 def is_owned_model_path(path, models_root: Optional[Path] = None) -> bool:
-    """THE definition of "this file is localm's to delete": it lives strictly
-    inside ``<data dir>/models``.
-
-    Every caller that decides whether a registered file is managed MUST route
-    through this. Today that is the deletion in :func:`remove_model`, the
-    managed/external split in :func:`sync_models_dir`, and the "PERMANENTLY
-    deletes" wording in the ``localm rm`` confirmation prompt
-    (``cli/models.py``).
-
-    Including the prompt is what stops the text a user confirms from describing
-    something the deletion will not do. It used to carry the weakest of the
-    three variants below and could DISAGREE with this gate,
-    announcing a permanent delete for a sibling like ``<data dir>/models-old``
-    that the gate then correctly declined to delete. That mismatch only ever
-    erred toward OVER-warning and could not cause an unexpected deletion, but
-    wrong text on a destructive confirmation teaches people to distrust the
-    prompt, so the two now share this one predicate by construction.
-
-    Three hand-rolled variants had drifted apart, and two of them were wrong in a
-    way that reaches ``shutil.rmtree``:
-
-    * ``path.is_relative_to(MODELS_DIR)`` is purely LEXICAL. Measured:
-      ``<models>/../models-old/x.gguf`` tests True while resolving to a file
-      OUTSIDE the models folder entirely.
-    * ``str(path).startswith(str(MODELS_DIR))`` is a raw string prefix, so the
-      sibling directory ``<data dir>/models-old`` matches ``<data dir>/models``.
-
-    Both are answered by resolving first, which is what
-    ``sync_models_dir._under_models_dir`` already did correctly. Using
-    ``.parents`` rather than an ``is_relative_to`` on the resolved path also
-    excludes the models root ITSELF, so a registry row pointing at the models
-    folder can never become an rmtree of the whole library.
-
-    *models_root* lets a caller hoist an already-resolved root out of a loop
-    (sync_models_dir walks the whole registry); it must be a RESOLVED path.
-    An unresolvable path is not one we are willing to delete under, so it is
-    reported as not owned rather than raising at the call site."""
+    """THE definition of 'this file is localm's to delete': it lives strictly inside ``<data dir>/models``."""
     root = models_root if models_root is not None else _mm.MODELS_DIR.resolve()
     try:
         return root in Path(path).resolve().parents
@@ -2166,30 +1626,7 @@ def is_owned_model_path(path, models_root: Optional[Path] = None) -> bool:
 
 
 def resolve_deletion_target(path) -> Optional[Path]:
-    """The RESOLVED file (or directory) that removing a registry entry pointing
-    at *path* would actually DELETE, or None when the removal drops the name
-    only and leaves the bytes alone.
-
-    Split out of :func:`remove_model`'s own gate below so that a caller which
-    has to decide, BEFORE the removal runs, whether a file is about to be
-    destroyed asks exactly the question the deletion will answer. The server's
-    remove-model route is such a caller: it spawns ``localm rm`` in a CHILD
-    PROCESS, so once the removal starts there is nothing left for it to
-    consult, and a guard that re-derived this predicate by hand could drift
-    away from it. Same reasoning as the ``localm rm`` confirmation prompt
-    sharing :func:`is_owned_model_path`: a check in front of a destructive
-    action must not be a second, independent opinion about what that action
-    does.
-
-    Alias-awareness is deliberately NOT part of this. Whether another
-    registered name still references the file is a registry question, answered
-    by :func:`find_aliases_by_path` before this is consulted (remove_model does
-    exactly that, and returns early).
-
-    Returns None for a path outside <data dir>/models (never ours to delete),
-    for one that is already gone, and for one that cannot be resolved at all -
-    in every case there is no deletion for a caller to guard against.
-    """
+    """The RESOLVED file (or directory) that removing a registry entry pointing at *path* would actually DELETE, or None when the removal drops the name only and leaves the bytes alone."""
     try:
         target = Path(path).resolve()
     except (OSError, ValueError):
@@ -2290,12 +1727,7 @@ _OLLAMA_BLOB_RE = re.compile(r"sha256-[0-9a-f]{64}")
 
 
 def _resolve_ollama_manifest(p: Path):
-    """
-    If p is an Ollama manifest directory, return (blob_path, suggested_name).
-    Ollama layout: <root>/manifests/<registry>/<owner>/<model>/<tag>
-                   <root>/blobs/sha256-<digest>
-    Returns None if p doesn't look like an Ollama manifest.
-    """
+    """If p is an Ollama manifest directory, return (blob_path, suggested_name)."""
     import json as _json
 
     try:
@@ -2402,26 +1834,7 @@ def _resolve_ollama_manifest(p: Path):
 
 
 def _store_loose_gguf_dir(first_parts: List[Path], store: str) -> Optional[List[Path]]:
-    """Bring every model in a directory-of-loose-ggufs import into MODELS_DIR
-    before ``_add_local_gguf_dir`` registers them (mirrors its per-file loop).
-
-    ``first_parts`` is one entry per independent model in the folder - but that
-    list also includes any mmproj vision-projector file sitting in the same
-    folder (``_gguf_first_parts`` does not filter those out, since they are
-    registered as their own model too, same as today without --store). A
-    projector is auto-attached to its model by _store_into_models_dir already
-    (find_sibling_mmproj), so if we called the helper again on the projector's
-    OWN entry we'd either re-move a file that is already gone (crash) or hit a
-    false "already exists" collision against the copy that just landed next to
-    its model (same name, different source directory). So: precompute, from the
-    ORIGINAL on-disk layout, which entries are an unambiguous sibling of some
-    OTHER entry in this same folder, and only "claim" a final path for those
-    (they ride along with their model) instead of transferring them a second time.
-
-    Returns the new first_parts list (paths now under MODELS_DIR), or None if
-    any transfer failed (name collision, disk space, or a copy that verified
-    corrupt) - the caller reports the printed error and aborts the whole import.
-    """
+    """Bring every model in a directory-of-loose-ggufs import into MODELS_DIR before ``_add_local_gguf_dir`` registers them (mirrors its per-file loop)."""
     claimed_sibling_of: dict = {}   # resolved mmproj path -> its owning model path
     for owner in first_parts:
         sib = find_sibling_mmproj(owner)
@@ -2459,14 +1872,7 @@ def _add_local_gguf_dir(
     fast: bool = False,
     model_type: str = "llm",
 ) -> bool:
-    """Register every loose .gguf model in a folder (the *first_parts* list).
-
-    Names each model after its filename stem (split GGUFs strip the
-    ``-NNNNN-of-NNNNN`` suffix), de-duplicating collisions via
-    ``_unique_registry_name``. A user-supplied ``-n`` name is only honoured for
-    a single-model folder, since it cannot apply to many. Returns True - the
-    caller has already checked *first_parts* is non-empty.
-    """
+    """Register every loose .gguf model in a folder (the *first_parts* list)."""
     use_given_name = bool(name) and len(first_parts) == 1
     for gguf in first_parts:
         split = _SPLIT_GGUF_RE.match(gguf.name)
@@ -2511,38 +1917,7 @@ def add_local(
     model_type: Optional[str] = None,
     store: Optional[str] = None,
 ) -> bool:
-    """Register a local .gguf / HF dir / Ollama blob. Returns True on a successful
-    registration or a benign no-op (alias / interactively-skipped duplicate), False
-    when the path is not a usable model OR when nothing was actually registered -
-    a real name/content conflict declined interactively, or refused because there
-    was no terminal to ask - so `localm pull <path>`/`localm add` can set their
-    exit code accurately (NEW-STORE-MOVE-REGISTRY-DESYNC: this used to always
-    return True past this point regardless of whether _register_with_dedup did
-    anything, so a refused registration still reported success).
-
-    *model_type* None (the default) means "detect it": the type is resolved
-    deterministically from hard metadata (GGUF -> llm, HF config.json architectures)
-    and falls back to the 'unknown' sentinel rather than a silent 'llm'. Pass an
-    explicit MODEL_TYPES value to force it. A lone .safetensors file is not a model on
-    its own: if it sits inside an HF model dir that directory is registered instead,
-    otherwise it is rejected with a precise, actionable reason (A3).
-
-    *store* is ``"copy"``, ``"move"``, or ``None`` (default: register in place,
-    today's behavior). When set and the path is OUTSIDE <data dir>/models, the
-    file/dir is brought into managed storage (via _store_into_models_dir) BEFORE
-    registration, so the model is treated exactly like a pulled model afterward
-    (BRING-IN-1). A failure here (name collision, no disk space, copy corrupted)
-    is a hard failure of the whole call - unlike the softer dedup-prompt copy/move
-    (where skipping just means "keep the old registration"), a requested --store
-    that silently fell back to registering the ORIGINAL external path would be a
-    hidden problem, not a benign no-op. A non-interactive name collision is now
-    refused BEFORE the move/copy happens (there is no terminal to confirm an
-    overwrite, so the outcome is already known); an interactive decline, or the
-    rarer post-move content-dedup skip, can still leave the file sitting in
-    MODELS_DIR unregistered under any requested name - reported to the caller
-    rather than claimed as success, and recoverable via `localm list` / the next
-    server start (sync_models_dir), just under an automatic name.
-    """
+    """Register a local .gguf / HF dir / Ollama blob."""
     p = Path(path_str).resolve()
     if not p.exists():
         console.print(f"[red]Not found:[/red] {path_str}")

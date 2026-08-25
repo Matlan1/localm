@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Plain-text extraction from document files. Stdlib wherever possible."""
+"""Plain-text extraction from document files."""
 
 from __future__ import annotations
 
@@ -164,13 +164,7 @@ SAFE_ENV_TEMPLATE_NAMES = {
 
 
 def is_secret_index_name(name: str) -> bool:
-    """True for a filename that a recursive index walk should skip as likely
-    secret material (extensionless keys, .env files, known credential files).
-
-    A config-doc template in SAFE_ENV_TEMPLATE_NAMES is NOT secret - it is
-    committed placeholder documentation. Checked FIRST so the .env* rule below
-    cannot swallow it; everything the allowlist does not name stays secret.
-    """
+    """True for a filename that a recursive index walk should skip as likely secret material (extensionless keys, .env files, known credential files)."""
     low = name.lower()
     if low in SAFE_ENV_TEMPLATE_NAMES:
         return False
@@ -231,12 +225,7 @@ _HTML_TAG_RE = re.compile(
 
 
 def sniff_text_format(text: str) -> Optional[str]:
-    """Best-effort STRUCTURAL format label for already-decoded text, using only
-    cheap deterministic shape over a bounded prefix - no model call, no network,
-    no stall. Returns a lowercase label when the structure is unambiguous, or
-    ``None`` when unsure so the caller can fall back (to the extension, a gated
-    LLM tie-break, or "text").
-    """
+    """Best-effort STRUCTURAL format label for already-decoded text, using only cheap deterministic shape over a bounded prefix - no model call, no network, no stall."""
     s = text.lstrip()
     if not s:
         return None
@@ -324,16 +313,7 @@ def _normalise_label(guess: str) -> str:
 
 def classify_format(text: str, filename: str = "", *,
                     classify_fn: Optional[Callable[[str], Optional[str]]] = None) -> str:
-    """Return a short, lowercase format label for an already-extracted document.
-
-    Free and deterministic first: a KNOWN extension is authoritative, then a
-    structural content sniff (:func:`sniff_text_format`). Only when BOTH are
-    inconclusive is *classify_fn* (an LLM tie-break) consulted - and only when the
-    user left ``rag_classify_unknown_files`` on. *classify_fn* must itself be a
-    no-op when no chat model is loaded (see the rag plugin's ``_make_self_classify``),
-    so an embedding-only index never stalls on a chat call. Always returns a label
-    (falling back to "text") so every chunk can carry one for filtering / display.
-    """
+    """Return a short, lowercase format label for an already-extracted document."""
     if not text.strip():
         return "text"
     suffix = Path(filename).suffix.lower()
@@ -374,10 +354,7 @@ def classify_format(text: str, filename: str = "", *,
 
 
 def sniff_format(data: bytes, filename: str) -> Optional[str]:
-    """Sniff the format of a file based on its magic bytes/content.
-    Returns the mapped extension (e.g. '.pdf', '.docx', '.html', '.ipynb', '.txt', '.zip')
-    or None if it appears to be binary and unsupported.
-    """
+    """Sniff the format of a file based on its magic bytes/content."""
     if not data:
         return ".txt"  # empty file behaves as text
 
@@ -456,18 +433,11 @@ def sniff_format(data: bytes, filename: str) -> Optional[str]:
 
 
 class ExtractError(Exception):
-    """A document could not be converted to text. The message says why and,
-    where applicable, what to install."""
+    """A document could not be converted to text."""
 
 
 def _decode_text(data: bytes) -> str:
-    """
-    Decode a plain-text file without trusting it to be UTF-8.
-
-    Windows editors routinely save "text files" as UTF-16; blindly decoding
-    those as UTF-8 yields NUL-interleaved mojibake that an LLM cannot read -
-    the attachment then looks present but carries no information.
-    """
+    """Decode a plain-text file without trusting it to be UTF-8."""
     if data.startswith((b"\xff\xfe", b"\xfe\xff")):
         return data.decode("utf-16", errors="replace")          # BOM, either endianness
     if data.startswith(b"\xef\xbb\xbf"):
@@ -489,7 +459,7 @@ def _decode_text(data: bytes) -> str:
 
 def extract_text(path: Path,
                  describe_image_fn: Optional[Callable[[bytes, str], Optional[str]]] = None) -> str:
-    """Return the plain text of *path*. Raises ExtractError on failure."""
+    """Return the plain text of *path*."""
     path = Path(path)
     if not path.is_file():
         raise ExtractError(f"Not a file: {path}")
@@ -503,13 +473,7 @@ def extract_text(path: Path,
 def extract_bytes(data: bytes, filename: str,
                   describe_image_fn: Optional[Callable[[bytes, str], Optional[str]]] = None,
                   *, _depth: int = 0) -> str:
-    """Extract plain text from in-memory file content (chat attachments) -
-    nothing is written to disk, so privacy mode stays trace-free.
-
-    ``_depth`` is an INTERNAL recursion counter: the archive/compression handlers
-    re-enter this function on contained or decompressed bytes with ``_depth + 1``,
-    and a value past ``MAX_EXTRACT_DEPTH`` is refused (a nested-container bomb).
-    Callers never pass it."""
+    """Extract plain text from in-memory file content (chat attachments) - nothing is written to disk, so privacy mode stays trace-free."""
     if _depth > MAX_EXTRACT_DEPTH:
         raise ExtractError(
             f"{filename}: nested containers/compression too deep "
@@ -583,8 +547,7 @@ def _archive_log():
 
 
 def _archive_budget() -> int:
-    """How many chars an archive extractor may accumulate before stopping. Leaves
-    room for the truncation note so it survives the outer MAX_TEXT_CHARS cap."""
+    """How many chars an archive extractor may accumulate before stopping."""
     return max(0, MAX_TEXT_CHARS - len(_ARCHIVE_TRUNCATED_NOTE) - 4)
 
 
@@ -601,10 +564,7 @@ def _join_archive(texts: list, truncated: bool) -> str:
 def _extract_zip(data: bytes, filename: str,
                  describe_image_fn: Optional[Callable[[bytes, str], Optional[str]]] = None,
                  *, _depth: int = 0) -> str:
-    """Extract and merge text from a ZIP archive, BOUNDED in total output and
-    member count so a many-member archive cannot amplify into a RAM DoS
-    (AUDIT-HIGH-8). Per-member read failures are logged, not folded into the
-    indexed text (AUDIT-MED-21)."""
+    """Extract and merge text from a ZIP archive, BOUNDED in total output and member count so a many-member archive cannot amplify into a RAM DoS (AUDIT-HIGH-8)."""
     import io
     texts: list = []
     total = 0
@@ -665,15 +625,7 @@ def _extract_zip(data: bytes, filename: str,
 def _extract_tar_or_stream(data: bytes, filename: str,
                            describe_image_fn: Optional[Callable[[bytes, str], Optional[str]]] = None,
                            *, _depth: int = 0) -> str:
-    """Extract a tar-family payload. Handles plain and compressed TARBALLS
-    (.tar/.tgz/.tbz/.txz/.tar.gz) via tarfile; when the payload is a SINGLE
-    gzip/bzip2/xz-compressed file rather than a tar, decompresses that one stream
-    and extracts its inner content (AUDIT-MED-17: previously a single .gz was
-    mis-routed here and failed, and .tgz/.tbz/.txz had no handler at all).
-
-    The single-stream branch RECURSES into extract_bytes on the decompressed
-    bytes, so it passes ``_depth + 1`` - a nested .gz.gz.gz... is bounded by
-    MAX_EXTRACT_DEPTH instead of recursing until RecursionError."""
+    """Extract a tar-family payload."""
     import tarfile
     import io
     import zlib
@@ -812,12 +764,7 @@ def _strip_compression_suffix(filename: str) -> str:
 
 
 def _read_zip_member(zf: zipfile.ZipFile, member: str, filename: str) -> str:
-    """Read one zip member as UTF-8 text with a HARD cap on the DECOMPRESSED
-    size (zip-bomb guard). The compressed upload is capped upstream, but a
-    zip's deflate ratio is ~1000x, so a 1 MB upload can decompress to
-    gigabytes; a bounded STREAM read - not trusting the header's self-reported
-    ZipInfo.file_size, which an attacker controls - is what actually prevents
-    the amplification from exhausting RAM (CWE-409)."""
+    """Read one zip member as UTF-8 text with a HARD cap on the DECOMPRESSED size (zip-bomb guard)."""
     limit = MAX_ARCHIVE_MEMBER_BYTES
     with zf.open(member) as fh:            # ZipExtFile decompresses lazily on read
         raw = fh.read(limit + 1)          # bounded: at most limit+1 decompressed bytes
@@ -830,9 +777,7 @@ def _read_zip_member(zf: zipfile.ZipFile, member: str, filename: str) -> str:
 
 
 def _extract_docx(data: bytes, filename: str) -> str:
-    """.docx is a zip; the body lives in word/document.xml. Paragraph tags
-    (<w:p>) become newlines, text runs (<w:t>) are concatenated - no
-    python-docx needed."""
+    """.docx is a zip; the body lives in word/document.xml."""
     import io
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as zf:

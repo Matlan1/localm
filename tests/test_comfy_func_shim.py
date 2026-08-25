@@ -1,21 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Oracle for the reactive, opt-in ComfyUI ``__func__`` regression shim (MEDIA-1).
-
-The shim is a localm-owned ``sitecustomize.py`` that localm puts on the PYTHONPATH
-of a ComfyUI process it SPAWNS ITSELF, to patch a ComfyUI core regression in memory
-(Comfy-Org/ComfyUI #12116). The absolute invariant: localm writes NOTHING into the
-user's ComfyUI install and only ever shims a ComfyUI it launched.
-
-Four checks, each with a built-in negative case so it fails on known-bad work:
-  1. DEFAULT no-op: a normal spawn never puts the shim dir on the child PYTHONPATH.
-  2. DETECTION: the specific ``__func__`` signature classifies as the regression; an
-     unrelated exec error does not.
-  3. SHIM: applied to a fake buggy ``comfy_api.internal`` it stops the AttributeError
-     and calls the node right for sync AND async; it no-ops on an already-tolerant or
-     differently-shaped module. A real subprocess proves the PYTHONPATH path too.
-  4. APPLY SCOPE: enabled -> ONLY the shim dir is prepended to the child PYTHONPATH
-     (a pre-existing PYTHONPATH preserved); nothing is written into the install dir.
-"""
+"""Oracle for the reactive, opt-in ComfyUI ``__func__`` regression shim (MEDIA-1)."""
 
 import importlib.util
 import os
@@ -127,8 +111,7 @@ def _import_fake(tmp_path, src, name):
 
 
 def _load_shim_module():
-    """Load the REAL shim file as a throwaway module and return it, restoring
-    sys.meta_path so the shim's deferred finder does not leak into the test session."""
+    """Load the REAL shim file as a throwaway module and return it, restoring sys.meta_path so the shim's deferred finder does not leak into the test session."""
     from localm.media.comfy_client import comfy_shim_dir
     src_path = comfy_shim_dir() / "sitecustomize.py"
     saved = list(sys.meta_path)
@@ -229,9 +212,7 @@ def _tree_snapshot(root):
 
 
 def test_shim_applies_via_pythonpath_in_a_real_subprocess(tmp_path):
-    """End-to-end at the process level: a real python with the shim dir + a fake buggy
-    ComfyUI on PYTHONPATH auto-imports the shim (sitecustomize) and patches the module,
-    while writing nothing into the fake install."""
+    """End-to-end at the process level: a real python with the shim dir + a fake buggy ComfyUI on PYTHONPATH auto-imports the shim (sitecustomize) and patches the module, while writing nothing into the fake install."""
     import subprocess
     from localm.media.comfy_client import comfy_shim_dir
 

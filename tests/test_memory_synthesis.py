@@ -1,9 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Memory consolidation: distil durable user facts from recent session logs into
-the structured chat memory store (localm/memory) via the ADD/UPDATE/DELETE/NO_OP
-loop, runnable as the jobs "memory" task. The model call is injected so the logic
-is testable without a model; privacy mode must SKIP and say so (never a silent
-success, never a model call)."""
+"""Memory consolidation: distil durable user facts from recent session logs into the structured chat memory store (localm/memory) via the ADD/UPDATE/DELETE/NO_OP loop, runnable as the jobs 'memory' task."""
 
 import json
 
@@ -32,8 +28,7 @@ def memhome(tmp_path, monkeypatch):
 
 
 def _facts_stub(*facts, decision="NO_OP", conf=0.9):
-    """A model stub: returns the given facts for the extract prompt and *decision*
-    for a consolidation decision prompt."""
+    """A model stub: returns the given facts for the extract prompt and *decision* for a consolidation decision prompt."""
     payload = json.dumps({"facts": [{"fact": t, "confidence": c} for t, c in facts]})
     dec = json.dumps({"decision": decision, "confidence": conf})
 

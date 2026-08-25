@@ -1,19 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The owner key is USER-CHOOSABLE, so its persisted digest gets a real KDF.
-
-CodeQL alert 88 (py/weak-sensitive-data-hashing) on ``auth._hash_key``. The
-premise that it only ever sees ``secrets.token_urlsafe(32)`` is false: it holds
-for named KEYSTORE keys, but ``localm key set KEY`` persists a key the user
-provides, and ``LOCALM_API_KEY`` / a hand-edited ``auth.key`` bypass
-``set_api_key`` entirely so they are not even length- or charset-checked.
-
-The harm is not that the digest authenticates (the owner key is verified by a
-PLAINTEXT constant-time compare against ``auth.key``). It is that the digest is
-PERSISTED - ``sessions.json`` ``key_hash``, ``jobs.json`` ``owner`` - where one
-fast unsalted hash is an offline brute-force oracle for the plaintext, which does
-authenticate. So these tests assert on what reaches DISK, not merely on what the
-function returns.
-"""
+"""The owner key is USER-CHOOSABLE, so its persisted digest gets a real KDF."""
 
 import hashlib
 import json
@@ -25,11 +11,7 @@ import pytest
 
 @pytest.fixture
 def auth(tmp_path, monkeypatch):
-    """localm.auth with a throwaway data dir and a clean auth environment.
-
-    Mirrors tests/test_auth.py's fixture, plus a reset of the process-level
-    derivation memo: that cache is module state and would otherwise carry a
-    derivation from one test into the next."""
+    """localm.auth with a throwaway data dir and a clean auth environment."""
     monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
@@ -99,10 +81,7 @@ def test_set_api_key_stores_a_kdf_record_not_a_bare_sha256(auth):
 
 
 def test_the_persisted_session_identity_is_not_a_bare_sha256(auth):
-    """End-to-end version of (a): what a real login writes into sessions.json.
-
-    sessions.json is one of the two files that actually holds this digest, so
-    asserting on _hash_key alone would not prove the artefact changed."""
+    """End-to-end version of (a): what a real login writes into sessions.json."""
     from localm import sessions
     key = "correct-horse"
     auth.set_api_key(key)
@@ -113,9 +92,7 @@ def test_the_persisted_session_identity_is_not_a_bare_sha256(auth):
 
 
 def test_generated_keystore_tokens_stay_on_the_cheap_path(auth):
-    """256 bits of CSPRNG output is not brute-forceable at any hash speed, so a
-    generated token keeps the fast digest - marked EXPLICITLY on the record
-    rather than inferred from the key's shape."""
+    """256 bits of CSPRNG output is not brute-forceable at any hash speed, so a generated token keeps the fast digest - marked EXPLICITLY on the record rather than inferred from the key's shape."""
     rec = auth.create_key("ci", ["chat"])
     stored = json.loads(auth.keystore_file().read_text(encoding="utf-8"))[0]
     assert stored["alg"] == "sha256"
@@ -124,8 +101,7 @@ def test_generated_keystore_tokens_stay_on_the_cheap_path(auth):
 
 
 def test_a_generated_token_never_runs_the_kdf(auth, monkeypatch):
-    """The cheap path must stay cheap: verifying a scoped key must not pay a
-    memory-hard derivation, or the hot path becomes a DoS lever."""
+    """The cheap path must stay cheap: verifying a scoped key must not pay a memory-hard derivation, or the hot path becomes a DoS lever."""
     rec = auth.create_key("ci", ["chat"])
     calls = _counting_derive(auth, monkeypatch)
     for _ in range(5):
@@ -167,8 +143,7 @@ def test_legacy_keystore_record_verifies_and_is_upgraded_in_place(auth):
 
 
 def test_an_install_that_never_reauthenticates_is_not_touched(auth):
-    """Migration is triggered by a successful verify, never by mere presence, so
-    an untouched install cannot be broken by the upgrade."""
+    """Migration is triggered by a successful verify, never by mere presence, so an untouched install cannot be broken by the upgrade."""
     token = auth.generate_key()
     legacy = [{"id": "legacy01", "name": "old", "hash": _sha256(token),
                "scopes": ["chat"], "created": 1.0, "expires": None,
@@ -180,10 +155,7 @@ def test_an_install_that_never_reauthenticates_is_not_touched(auth):
 
 
 def test_legacy_owner_sessions_are_relinked_to_the_derived_identity(auth):
-    """The owner key's identity moves from the unsalted digest to the derived
-    one. A session minted BEFORE that must follow, or a job created from that
-    cookie stops being recognised as the same principal presenting the key as a
-    bearer (the parity sessions.create promises)."""
+    """The owner key's identity moves from the unsalted digest to the derived one."""
     from localm import sessions
     key = "correct-horse"
     # A pre-upgrade world: auth.key on disk, no KDF record, a session stamped
@@ -203,9 +175,7 @@ def test_legacy_owner_sessions_are_relinked_to_the_derived_identity(auth):
 
 def test_a_job_stamped_with_the_legacy_owner_digest_stays_the_owners(auth,
                                                                     monkeypatch):
-    """jobs.json is the other store holding this digest. A scheduled job stamped
-    before the upgrade must not silently lose its owner (REG-509 by a new
-    route)."""
+    """jobs.json is the other store holding this digest."""
     from localm.plugins.builtin.jobs.runner import _shell_still_authorized
     key = "correct-horse"
     auth.set_api_key(key)
@@ -252,8 +222,7 @@ def test_kdf_runs_once_across_many_verifies(auth, monkeypatch):
 
 
 def test_kdf_runs_once_on_the_real_request_path(auth, monkeypatch):
-    """The same claim through the function the server actually calls per request,
-    rather than through _hash_key directly."""
+    """The same claim through the function the server actually calls per request, rather than through _hash_key directly."""
     from localm.inference.http_server import _principal_from_token
     from localm import scopes as S
     key = "correct-horse"
@@ -273,9 +242,7 @@ def test_kdf_runs_once_on_the_real_request_path(auth, monkeypatch):
 
 
 def test_the_derived_identity_survives_a_restart(auth):
-    """A fresh process must derive the SAME value, or every stored identity
-    (sessions, jobs) would break on restart. This is what the persisted salt is
-    for, and a per-call random salt would fail here."""
+    """A fresh process must derive the SAME value, or every stored identity (sessions, jobs) would break on restart."""
     key = "correct-horse"
     auth.set_api_key(key)
     first = auth._hash_key(key)
@@ -298,11 +265,7 @@ def test_the_derived_identity_survives_a_restart(auth):
 #  dev-notes/FIX-2026-08-12-test-set-api-key-hang-preexisting.md.
 
 def test_owner_kdf_keep_is_small_enough_to_stay_fast(auth):
-    """Pins the actual fix: the constant that bounds how many full scrypt
-    derivations a single set_api_key call can burn re-verifying stale,
-    guaranteed-not-to-match records before minting a new one. A wall-clock
-    assertion would be flaky on a busy shared box (see test-slot-policy.md);
-    this constant IS the bound, so assert it directly."""
+    """Pins the actual fix: the constant that bounds how many full scrypt derivations a single set_api_key call can burn re-verifying stale, guaranteed-not-to-match records before minting a new one."""
     assert auth._OWNER_KDF_KEEP <= 4, (
         f"_OWNER_KDF_KEEP={auth._OWNER_KDF_KEEP} lets a single set_api_key "
         "call burn that many extra full scrypt derivations against kept "
@@ -311,11 +274,7 @@ def test_owner_kdf_keep_is_small_enough_to_stay_fast(auth):
 
 
 def test_set_api_key_scan_cost_is_bounded_by_owner_kdf_keep(auth, monkeypatch):
-    """The mechanism the constant above bounds, pinned directly by COUNTING
-    scrypt calls (deterministic - no wall clock): a single set_api_key call
-    for a genuinely new key must never run the KDF more than once per KEPT
-    record plus once to mint, regardless of how many historical records the
-    install has accumulated in total."""
+    """The mechanism the constant above bounds, pinned directly by COUNTING scrypt calls (deterministic - no wall clock): a single set_api_key call for a genuinely new key must never run the KDF more than once per KEPT record plus once to mint, regardless of how many historical records the install has accu..."""
     # Saturate the kept-records list with distinct keys first, then measure
     # ONE MORE call - the worst case, where every kept record is a guaranteed
     # miss for the new key.
@@ -350,8 +309,7 @@ def test_wrong_key_fails_after_the_cache_is_warm(auth):
 
 
 def test_a_wrong_key_cannot_grow_or_poison_the_cache(auth):
-    """The memo holds derived results only, so spraying tokens neither pays the
-    KDF nor grows anything - an unbounded per-request cache would be a leak."""
+    """The memo holds derived results only, so spraying tokens neither pays the KDF nor grows anything - an unbounded per-request cache would be a leak."""
     key = "correct-horse"
     auth.set_api_key(key)
     auth._hash_key(key)
@@ -384,8 +342,7 @@ def test_the_cache_never_holds_the_plaintext(auth):
 # --------------------------------------------------------------------------- #
 
 def test_env_var_owner_key_works_end_to_end_and_is_derived(auth, monkeypatch):
-    """LOCALM_API_KEY never goes through set_api_key, so it is not length- or
-    charset-checked - it is the sharpest version of the user-chosen case."""
+    """LOCALM_API_KEY never goes through set_api_key, so it is not length- or charset-checked - it is the sharpest version of the user-chosen case."""
     from localm.inference.http_server import _principal_from_token
     from localm import scopes as S
     key = "hunter2"                        # shorter than MIN_KEY_LEN, on purpose
@@ -400,8 +357,7 @@ def test_env_var_owner_key_works_end_to_end_and_is_derived(auth, monkeypatch):
 
 
 def test_hand_written_auth_key_works_end_to_end_and_is_derived(auth):
-    """A hand-edited auth.key is the other bypass. Written with a trailing
-    newline, as an editor would leave it."""
+    """A hand-edited auth.key is the other bypass."""
     from localm.inference.http_server import _principal_from_token
     from localm import scopes as S
     key = "my-lan-box"
@@ -416,9 +372,7 @@ def test_hand_written_auth_key_works_end_to_end_and_is_derived(auth):
 
 
 def test_set_api_key_did_not_get_stricter(auth):
-    """Guard on the fix's own blast radius: choosing your own owner key is
-    documented behaviour (docs/cli.md), so this change must not have quietly
-    removed it by raising MIN_KEY_LEN or tightening the charset."""
+    """Guard on the fix's own blast radius: choosing your own owner key is documented behaviour (docs/cli.md), so this change must not have quietly removed it by raising MIN_KEY_LEN or tightening the charset."""
     assert auth.MIN_KEY_LEN == 8
     auth.set_api_key("abcd1234")           # exactly MIN_KEY_LEN, human-chosen
     assert auth.get_api_key() == "abcd1234"
@@ -450,8 +404,7 @@ def test_clearing_the_key_removes_the_derivation_records(auth):
 
 
 def test_a_corrupt_kdf_file_does_not_lock_the_owner_out(auth):
-    """The file is a derivation aid, not a credential: nothing authenticates from
-    it. Failing closed here would break a working install and buy nothing."""
+    """The file is a derivation aid, not a credential: nothing authenticates from it."""
     from localm import scopes as S
     key = "correct-horse"
     auth.set_api_key(key)
@@ -462,8 +415,7 @@ def test_a_corrupt_kdf_file_does_not_lock_the_owner_out(auth):
 
 
 def test_an_unknown_hash_alg_refuses_to_match(auth):
-    """Fail closed on a record written by a NEWER localm: guessing would let a
-    strong record be matched by a weak comparison."""
+    """Fail closed on a record written by a NEWER localm: guessing would let a strong record be matched by a weak comparison."""
     token = auth.generate_key()
     auth.keystore_file().write_text(json.dumps([{
         "id": "future01", "name": "future", "hash": _sha256(token),
@@ -531,8 +483,7 @@ def test_a_failed_session_relink_warns_and_does_not_lock_the_owner_out(
 
 
 def test_a_legacy_record_that_cannot_be_marked_still_verifies(auth, monkeypatch):
-    """The keystore marker upgrade is an annotation, not a gate: if it cannot be
-    written the key must keep working rather than start failing."""
+    """The keystore marker upgrade is an annotation, not a gate: if it cannot be written the key must keep working rather than start failing."""
     token = auth.generate_key()
     auth.keystore_file().write_text(json.dumps([{
         "id": "legacy01", "name": "old", "hash": _sha256(token),
@@ -549,8 +500,7 @@ def test_a_legacy_record_that_cannot_be_marked_still_verifies(auth, monkeypatch)
 
 def test_migration_never_silently_downgrades_to_the_weak_digest(auth,
                                                                 monkeypatch):
-    """The failure that would matter most: falling back to the bare sha256 when
-    the KDF path has trouble would restore the exact weakness this fixes."""
+    """The failure that would matter most: falling back to the bare sha256 when the KDF path has trouble would restore the exact weakness this fixes."""
     key = "correct-horse"
     auth.key_file().write_text(key + "\n", encoding="utf-8")
 
@@ -584,8 +534,7 @@ def _acl_fingerprint(path):
 
 
 def test_sessions_restrict_perms_matches_auth_restrict_perms(auth, tmp_path):
-    """Same implementation, same observable result - not merely 'both were
-    called'."""
+    """Same implementation, same observable result - not merely 'both were called'."""
     from localm import sessions
     a_file = tmp_path / "auth-side.txt"
     s_file = tmp_path / "sessions-side.txt"
@@ -597,9 +546,7 @@ def test_sessions_restrict_perms_matches_auth_restrict_perms(auth, tmp_path):
 
 
 def test_sessions_restrict_perms_is_not_posix_only(auth):
-    """The actual regression guard. A fires-control is built in: on POSIX the
-    file must really be 0600, and on Windows the ACL must really differ from an
-    untouched sibling - so this cannot pass by doing nothing."""
+    """The actual regression guard."""
     from localm import sessions
     key = "correct-horse"
     auth.set_api_key(key)
@@ -646,8 +593,7 @@ def test_sessions_restrict_perms_is_not_posix_only(auth):
 
 
 def test_the_kdf_record_file_is_restricted_too(auth):
-    """It is a new file in the data dir holding credential-derived material, so
-    it must not be the fourth file that misses the treatment."""
+    """It is a new file in the data dir holding credential-derived material, so it must not be the fourth file that misses the treatment."""
     auth.set_api_key("correct-horse")
     assert _acl_fingerprint(auth.owner_kdf_file()) == \
         _acl_fingerprint(auth.key_file())

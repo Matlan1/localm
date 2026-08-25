@@ -1,17 +1,4 @@
-"""The cold torch GPU probe must run OUT of process (issue #833).
-
-A cold ``import torch`` on Windows runs a loop of ``LoadLibraryExW`` calls, which
-holds the OS loader lock; creating a thread needs that same lock, so no thread
-anywhere in the process can start while it runs, and the asyncio event loop
-stalls. A report's watchdog dump caught the request thread and a
-``subprocess.run`` both parked at the last line of ``Thread.start()`` while the
-GPU probe was inside torch's DLL loading, for 10.9s.
-
-The regression guard that matters is structural rather than timed: after a probe
-on a process where torch was NOT already resident, torch must still not be
-resident, because the enumeration happened in a child. A wall-clock assertion
-would be flaky on a loaded runner; this one is deterministic.
-"""
+"""The cold torch GPU probe must run OUT of process (issue #833)."""
 from __future__ import annotations
 
 import json
@@ -48,8 +35,7 @@ class TestColdProbeStaysOutOfProcess:
         assert out == [{"index": 0, "name": "GPU 0", "total": 8, "free": 4}]
 
     def test_resident_torch_stays_in_process(self, monkeypatch):
-        """A resident torch is a free sys.modules cache hit that takes no loader
-        lock, so it must NOT pay a process spawn."""
+        """A resident torch is a free sys.modules cache hit that takes no loader lock, so it must NOT pay a process spawn."""
         monkeypatch.setattr(discover, "_torch_is_resident", lambda: True)
         monkeypatch.setattr(discover, "_torch_gpu_probe_known_doomed", lambda: False)
         monkeypatch.setattr(discover, "_apply_device_global_free", lambda gpus: None)
@@ -70,10 +56,7 @@ class TestColdProbeStaysOutOfProcess:
 
 
 class TestIsolatedProbeDegradesHonestly:
-    """Every failure mode must return [] so the caller falls through to
-    nvidia-smi exactly as an in-process failure used to, and must say why at
-    debug rather than leaving "no GPU" indistinguishable from "could not ask"
-    (AGENTS.md rule 5)."""
+    """Every failure mode must return [] so the caller falls through to nvidia-smi exactly as an in-process failure used to, and must say why at debug rather than leaving 'no GPU' indistinguishable from 'could not ask' (AGENTS.md rule 5)."""
 
     # caplog must name the "localm" logger, not just set a level. caplog's own
     # level lands on the ROOT logger, and discover logs through the "localm"
@@ -89,8 +72,7 @@ class TestIsolatedProbeDegradesHonestly:
         return discover._torch_gpus_isolated()
 
     def test_timeout_raises_wedged_not_a_plain_cannot_ask(self, monkeypatch, caplog):
-        """A timeout means TORCH is wedging, which must never be retried
-        in-process. It is signalled distinctly for that reason."""
+        """A timeout means TORCH is wedging, which must never be retried in-process."""
         caplog.set_level("DEBUG", logger=self._LOGGER)
         monkeypatch.setattr(subprocess, "run", MagicMock(
             side_effect=subprocess.TimeoutExpired("py", 10.0)))
@@ -120,10 +102,7 @@ class TestIsolatedProbeDegradesHonestly:
 
     def test_a_child_that_printed_nothing_is_unavailable_not_empty(
             self, monkeypatch, caplog):
-        """The child always prints one line, "[]" included on its own failure
-        path. Empty stdout therefore means it DIED before printing, which is
-        could-not-ask. Calling that "no device" would report "no GPU" on a box
-        whose GPU torch can see perfectly well."""
+        """The child always prints one line, '[]' included on its own failure path."""
         caplog.set_level("DEBUG", logger=self._LOGGER)
         out = self._run(monkeypatch,
                         return_value=MagicMock(stdout="", stderr="", returncode=-9))
@@ -131,13 +110,11 @@ class TestIsolatedProbeDegradesHonestly:
         assert "printed nothing" in caplog.text
 
     def test_a_child_that_answered_empty_IS_empty(self, monkeypatch):
-        """The other side of the same line: an explicit "[]" is a real answer
-        (torch imported, no CUDA/HIP device) and must not be read as a failure."""
+        """The other side of the same line: an explicit '[]' is a real answer (torch imported, no CUDA/HIP device) and must not be read as a failure."""
         assert self._run(monkeypatch, return_value=MagicMock(
             stdout="[]", stderr="", returncode=0)) == []
     def test_child_failure_cause_reaches_the_log(self, monkeypatch, caplog):
-        """The child prints its cause to stderr before answering []; that reason
-        must not die with the discarded stream."""
+        """The child prints its cause to stderr before answering []; that reason must not die with the discarded stream."""
         caplog.set_level("DEBUG", logger=self._LOGGER)
         out = self._run(monkeypatch, return_value=MagicMock(
             stdout="[]", stderr="torch GPU probe failed: OSError: WinError 126"))
@@ -166,9 +143,7 @@ class TestIsolatedProbeDegradesHonestly:
     )
 
     def test_long_child_stderr_keeps_the_actionable_tail(self, monkeypatch, caplog):
-        """The whole point of the message - which GPU architectures are
-        supported - must survive a realistically long path prefix, not just
-        the boilerplate ahead of it."""
+        """The whole point of the message - which GPU architectures are supported - must survive a realistically long path prefix, not just the boilerplate ahead of it."""
         caplog.set_level("DEBUG", logger=self._LOGGER)
         stderr = self._LONG_PATH_PREFIX + self._ACTIONABLE_TAIL
         assert len(stderr) > 200, "fixture must exceed the old cap to prove anything"
@@ -180,10 +155,7 @@ class TestIsolatedProbeDegradesHonestly:
 
     def test_stderr_beyond_the_cap_says_so_rather_than_cutting_silently(
             self, monkeypatch, caplog):
-        """A cap must still exist (an adversarial/huge child stream cannot be
-        logged unbounded), but a truncated diagnostic must SAY it was
-        truncated (AGENTS.md rule 5) rather than stopping mid-sentence with no
-        indication anything is missing."""
+        """A cap must still exist (an adversarial/huge child stream cannot be logged unbounded), but a truncated diagnostic must SAY it was truncated (AGENTS.md rule 5) rather than stopping mid-sentence with no indication anything is missing."""
         caplog.set_level("DEBUG", logger=self._LOGGER)
         huge = self._LONG_PATH_PREFIX + self._ACTIONABLE_TAIL * 20
         assert len(huge) > discover._CHILD_STDERR_LOG_CAP
@@ -198,9 +170,7 @@ class TestIsolatedProbeDegradesHonestly:
             stdout=json.dumps(payload), stderr="")) == payload
 
     def test_child_is_spawned_via_the_localm_interpreter_resolver(self, monkeypatch):
-        """Bare sys.executable is the BASE interpreter inside a Windows
-        multiprocessing-spawn worker, whose children cannot import localm or
-        torch at all."""
+        """Bare sys.executable is the BASE interpreter inside a Windows multiprocessing-spawn worker, whose children cannot import localm or torch at all."""
         fake = MagicMock(return_value=MagicMock(stdout="[]", stderr=""))
         monkeypatch.setattr(subprocess, "run", fake)
         monkeypatch.setattr("localm._mp_spawn.interpreter_for_localm_children",
@@ -216,10 +186,7 @@ class TestIsolatedProbeDegradesHonestly:
 
 
 class TestWedgedTorchIsNotRetriedForever:
-    """`list_gpus` re-probes on every call by design (no TTL). So a box whose
-    torch cannot answer must not pay the full timeout every single probe, or it
-    never reaches the nvidia-smi fallback inside the caller's 15s deadline - the
-    sm_120 case in the report this came from."""
+    """`list_gpus` re-probes on every call by design (no TTL)."""
 
     def setup_method(self):
         discover._reset_gpu_probe_cache()
@@ -243,8 +210,7 @@ class TestWedgedTorchIsNotRetriedForever:
             "the full timeout on every probe, forever")
 
     def test_wedged_torch_is_never_retried_in_process(self, monkeypatch):
-        """The in-process import IS the multi-minute hang. A wedged torch must
-        fall through to nvidia-smi, never back to importing here."""
+        """The in-process import IS the multi-minute hang."""
         monkeypatch.setattr(discover, "_torch_gpus_isolated",
                             MagicMock(side_effect=discover._IsolatedTorchWedged))
         monkeypatch.setattr(
@@ -255,8 +221,7 @@ class TestWedgedTorchIsNotRetriedForever:
 
     def test_broken_isolation_degrades_in_process_rather_than_losing_the_gpu(
             self, monkeypatch, caplog):
-        """Cannot-spawn tells us nothing about torch. Falling through to
-        nvidia-smi would report "no GPU" on every AMD and Intel box."""
+        """Cannot-spawn tells us nothing about torch."""
         caplog.set_level("WARNING", logger="localm")
         monkeypatch.setattr(discover, "_torch_gpus_isolated", lambda: None)
         monkeypatch.setattr(discover, "_torch_gpus_resident",
@@ -270,8 +235,7 @@ class TestWedgedTorchIsNotRetriedForever:
 
     def test_the_degrade_warning_is_emitted_once_not_per_probe(
             self, monkeypatch, caplog):
-        """The live VRAM meter drives a probe about every 2.5s. An unconditional
-        warning here would emit ~24 lines a minute for the life of the server."""
+        """The live VRAM meter drives a probe about every 2.5s."""
         caplog.set_level("WARNING", logger="localm")
         monkeypatch.setattr(discover, "_torch_gpus_isolated", lambda: None)
         monkeypatch.setattr(discover, "_torch_gpus_resident", lambda: [])
@@ -283,8 +247,7 @@ class TestWedgedTorchIsNotRetriedForever:
             f"emitted the degrade warning {len(warnings)} times across 5 probes")
 
     def test_broken_isolation_does_NOT_latch(self, monkeypatch):
-        """Latching on a cannot-spawn would disable the torch path permanently
-        on a box where torch works fine."""
+        """Latching on a cannot-spawn would disable the torch path permanently on a box where torch works fine."""
         monkeypatch.setattr(discover, "_torch_gpus_isolated", lambda: None)
         monkeypatch.setattr(discover, "_torch_gpus_resident", lambda: [])
         discover._torch_gpus_isolated_once()
@@ -292,8 +255,7 @@ class TestWedgedTorchIsNotRetriedForever:
             assert discover._isolated_torch_unavailable is False
 
     def test_a_real_empty_answer_does_NOT_latch(self, monkeypatch):
-        """[] means torch answered and sees no device. That is not a failure, and
-        latching on it would disable the torch path on a box where it works."""
+        """[] means torch answered and sees no device."""
         spawns = []
         monkeypatch.setattr(discover, "_torch_gpus_isolated",
                             lambda: spawns.append(1) or [])
@@ -314,16 +276,14 @@ class TestWedgedTorchIsNotRetriedForever:
         assert spawns == [1], "reset must re-enable the torch path"
 
     def test_the_timeout_fits_inside_the_caller_deadline(self):
-        """A ceiling ABOVE the caller's deadline means a wedged box never reaches
-        the fallback within the caller's window at all."""
+        """A ceiling ABOVE the caller's deadline means a wedged box never reaches the fallback within the caller's window at all."""
         assert (discover._ISOLATED_TORCH_PROBE_TIMEOUT + 5.0
                 <= discover._GPU_PROBE_DEADLINE), (
             "the child timeout plus nvidia-smi's own timeout=5 must fit inside "
             "_GPU_PROBE_DEADLINE")
 
 class TestChildProbeContract:
-    """The child must mirror the in-process branch field for field, so a caller
-    cannot tell which path produced a reading."""
+    """The child must mirror the in-process branch field for field, so a caller cannot tell which path produced a reading."""
 
     # A STUB torch, so the enumeration contract is covered on EVERY platform
     # rather than only where a real torch happens to be installed. CI installs
@@ -376,8 +336,7 @@ cuda = _Cuda()
         ], f"enumeration contract drifted: {devices!r}"
 
     def test_child_skips_a_device_that_cannot_report_memory(self, tmp_path):
-        """One device failing must never hide the rest - the in-process branch
-        has always had that property and the child must match it."""
+        """One device failing must never hide the rest - the in-process branch has always had that property and the child must match it."""
         stub = """
 class _Cuda:
     @staticmethod
@@ -433,9 +392,7 @@ cuda = _Cuda()
             assert len(devices) == torch.cuda.device_count()
 
     def test_child_reports_a_torch_failure_rather_than_dying_silently(self):
-        """An unimportable torch must still produce a parseable [] plus a cause
-        on stderr, never an empty stdout the parent cannot distinguish from a
-        hang."""
+        """An unimportable torch must still produce a parseable [] plus a cause on stderr, never an empty stdout the parent cannot distinguish from a hang."""
         from localm._mp_spawn import interpreter_for_localm_children
         proc = subprocess.run(
             [interpreter_for_localm_children(), "-u", "-c",

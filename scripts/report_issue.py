@@ -1,33 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Standalone bug reporter for when localm will not start.
-
-This is the fallback the ``report-issue`` entry (and the setup scripts' failure
-paths) use when the normal ``localm bug-report`` cannot run because the install is
-broken or not there yet. It depends ONLY on the Python standard library and on
-sitting inside a localm clone: it reads the bug-report proxy URL + token straight
-out of ``localm/config.py`` (no duplicated secret, picks up any rotation), collects
-a minimal, username-scrubbed diagnostic snapshot, asks for a one-line description,
-PREVIEWS the exact text alongside the destination host, and only files it - as an
-account-less GitHub issue via the proxy - after the user confirms. Only http/https
-endpoints are accepted, so an overridden proxy is visible rather than silent. A
-failed or declined send never reports success: it saves the report to a file and
-points at the maintainer email (AGENTS.md rule 5, "we do not hide problems").
-
-What it NEVER collects: environment variables (which can hold a key), config
-secrets, or chat/transcript content. Only OS / arch / Python, a few version
-markers, whether a venv exists, and the tail of the most recent log - all
-username-scrubbed before it is shown or sent.
-
-Run it directly:  python scripts/report_issue.py
-Optional flags used by the setup wiring:
-  --summary TEXT    one-line title (else you are prompted)
-  --detail  TEXT    prefilled "what happened" (e.g. the failing setup step)
-  --log     PATH    a specific log file to attach the tail of (else newest found)
-  --yes             SEND immediately, skipping the confirm prompt (the preview
-                    still prints to the console first, but does not gate the
-                    send); for scripted/automated sends
-"""
+"""Standalone bug reporter for when localm will not start."""
 
 from __future__ import annotations
 
@@ -60,13 +33,7 @@ ALLOWED_ENDPOINT_SCHEMES = ("http", "https")
 
 
 def endpoint_is_allowed(url: str | None) -> bool:
-    """True if *url* is a POST-able http(s) endpoint with a host.
-
-    Defence in depth, not a remote-attack fix: the URL's only producers are the
-    process environment and localm's own source (read_proxy), so reaching it
-    already means controlling the process or the code. It is cheap to make the
-    scheme explicit rather than trusting whatever urlopen() would dispatch on.
-    """
+    """True if *url* is a POST-able http(s) endpoint with a host."""
     if not url:
         return False
     try:
@@ -85,11 +52,7 @@ def endpoint_host(url: str) -> str:
 
 
 def read_proxy(config_path: Path | None = None) -> tuple:
-    """(url, token) for the bug-report proxy. LOCALM_BUGREPORT_URL /
-    LOCALM_BUGREPORT_TOKEN override per value (a custom proxy, or a test double);
-    otherwise the shipped constants are read as TEXT from localm/config.py so the
-    account-less GitHub-issue channel works with NO import of a possibly-broken
-    localm/venv. Returns (None, None) if nothing is configured or readable."""
+    """(url, token) for the bug-report proxy."""
     import os
     url_cfg = token_cfg = None
     if config_path is None:
@@ -167,10 +130,7 @@ _HEADER_SECRET_RE = re.compile(
 
 
 def scrub(text: str) -> str:
-    """Strip the account name from any path and any obvious credential from free
-    text before it is shown or sent. A privacy scrub must fail safe: if it cannot
-    run it must NOT pass the text through as if scrubbed, so the home-root strip
-    below ALWAYS runs (it never depends on Path.home succeeding)."""
+    """Strip the account name from any path and any obvious credential from free text before it is shown or sent."""
     if not text:
         return text
     # Replace the real home dir first (both separator forms), when resolvable.
@@ -226,8 +186,7 @@ def _venv_python() -> Path | None:
 
 
 def _newest_log(explicit: str | None = None) -> tuple:
-    """(path, scrubbed tail) of a relevant log, or (None, ''). Looks at an explicit
-    path first, else the newest *.log under the clone's home/logs. Never raises."""
+    """(path, scrubbed tail) of a relevant log, or (None, '')."""
     candidates: list[Path] = []
     if explicit:
         p = Path(explicit)
@@ -254,7 +213,7 @@ def _newest_log(explicit: str | None = None) -> tuple:
 
 
 def collect_diagnostics() -> dict:
-    """A small, safe environment snapshot. Never raises."""
+    """A small, safe environment snapshot."""
     diag: dict = {}
     try:
         diag["platform"] = platform.platform()
@@ -321,9 +280,7 @@ def build_body(summary: str, description: str, diag: dict,
 
 def post_report(url: str, token: str | None, title: str, body: str,
                 *, timeout: float = 15.0, opener=None) -> dict:
-    """POST the report to the proxy and return its JSON response (e.g.
-    {"url": "<issue url>"}). Raises RuntimeError on any non-2xx / network error so a
-    failed send is never mistaken for success. *opener* is injectable for tests."""
+    """POST the report to the proxy and return its JSON response (e.g. {'url': '<issue url>'})."""
     # Gate the scheme at the sink itself, before anything is built or opened, so
     # a caller that obtained the URL some other way cannot reach urlopen with a
     # file:// or ftp:// endpoint. read_proxy() screens it too; this is the layer
@@ -366,8 +323,7 @@ def post_report(url: str, token: str | None, title: str, body: str,
 
 
 def save_report(body: str, when: str) -> Path | None:
-    """Write the report next to the clone so the user can always retrieve it.
-    Returns the path, or None on failure. *when* is caller-supplied (test-injectable)."""
+    """Write the report next to the clone so the user can always retrieve it."""
     base = REPO_ROOT / "home" / "bug-reports"
     try:
         base.mkdir(parents=True, exist_ok=True)

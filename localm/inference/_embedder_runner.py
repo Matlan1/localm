@@ -1,36 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Subprocess isolation for the embedding-model lifecycle (load, embed, unload) -
-the same fix PR #606 gave the chat GGUF backend (see
-``backends/llamacpp/_runner.py``), applied to ``embedder.py``'s separate,
-previously-unisolated GGUF/llama.cpp load path (honesty-audit follow-up,
-2026-07-14): ``llama_load_model_from_file`` and ``llama_decode`` (called by
-every ``embed()``) can hard-``abort()`` the whole process on a native CUDA/HIP
-driver failure - no Python ``try/except`` can catch that.
-
-Lighter-weight than the chat runner on purpose: the embedder's usage pattern
-is load-once-serve-many, with no streaming and no mid-call cancellation, so
-this needs only a plain request/response protocol - closer in shape to
-``localm/voice.py``'s worker than to ``llamacpp/_runner.py``'s. Still a
-long-lived child (not one process per call, unlike ``voice.py``'s
-respawn-per-death-only model) so a small embedding model is not reloaded on
-every ``embed()``.
-
-Protocol (two ``multiprocessing.Queue``s, tagged tuples):
-
-``req_q`` (parent -> child), one command processed at a time:
-    ("load", {model_path, n_gpu_layers, n_ctx, pooling_type})
-    ("embed", texts)
-    ("shutdown", None)
-
-``resp_q`` (child -> parent):
-    ("ok", value)      - success (a {"dim": N} dict for load, a list of
-                          vectors for embed)
-    ("error", message) - a clean, expected failure (e.g. a bad model path)
-
-A native abort, or any other uncaught fault in the child's dispatch loop,
-produces NO envelope - the parent detects the dead child via
-``proc.is_alive()``/``exitcode``, exactly like ``ModelRunner``.
-"""
+"""Subprocess isolation for the embedding-model lifecycle (load, embed, unload) - the same fix PR #606 gave the chat GGUF backend (see ``backends/llamacpp/_runner.py``), applied to ``embedder.py``'s separate, previously-unisolated GGUF/llama.cpp load path (honesty-audit follow-up, 2026-07-14): ``llama_..."""
 
 from __future__ import annotations
 
@@ -84,31 +53,7 @@ _crash_trace_fh = None   # child-side: kept alive so faulthandler can write to i
 
 
 def _arm_native_crash_trace(path) -> None:
-    """Child side: point faulthandler at *path* so a death by native SIGNAL
-    leaves a trace the parent can relay into the debug log.
-
-    THIS IS THE ONLY THING THAT CAN CAPTURE THAT CLASS. A SIGILL/SIGSEGV/
-    SIGABRT inside native code (llama.dll's own load, or the torch/ROCm
-    conflict this worker's VRAM checks are known to hit - see _sizing.py)
-    never returns to Python at all, so no ``except`` clause anywhere in this
-    child can run, and the parent's "see the debug log for the native stack
-    trace" had nothing behind it.
-
-    Ported from ``llamacpp/_runner.py``, where the same gap was closed first;
-    issues 1222 / 1223 are that shape (``worker exit -4`` is SIGILL, since
-    multiprocessing reports ``-N`` for signal N) and neither field log contains
-    any trace.
-
-    Armed as early as possible - before the native library is anywhere near
-    loaded - because a fault can only be captured by a handler that was already
-    installed when it happened.
-
-    Failures are logged, never raised: losing the trace must not stop the worker
-    from doing its job. But it is NOT silenced (AGENTS.md rule 5) and
-    ``is_enabled()`` is checked rather than trusting "enable() did not raise" -
-    that exact silent-no-op is on record in bugreport.arm_crash_guard, where
-    every native-trace file on the maintainer's box came out 0 bytes with no
-    clue why."""
+    """Child side: point faulthandler at *path* so a death by native SIGNAL leaves a trace the parent can relay into the debug log."""
     global _crash_trace_fh
     if path is None:
         return
@@ -130,14 +75,7 @@ def _arm_native_crash_trace(path) -> None:
 
 
 def _runner_main(req_q, resp_q, crash_trace_path=None) -> None:
-    """Long-lived child: owns one GGUFEmbedder (one loaded model) for its
-    whole process lifetime, dispatching one request at a time.
-
-    *crash_trace_path* defaults to None because this dispatch loop is also
-    driven IN-PROCESS by the test suite (tests/test_embedder_runner_isolation
-    .py calls it directly with two positional args); an in-process caller has
-    no child to trace and must not have faulthandler repointed underneath it.
-    A real spawn always passes the parent-chosen path."""
+    """Long-lived child: owns one GGUFEmbedder (one loaded model) for its whole process lifetime, dispatching one request at a time."""
     _arm_native_crash_trace(crash_trace_path)
     from localm.debuglog import attach_child_logging, dedup_native_stderr
     attach_child_logging()   # native load-failure diagnostics land in the
@@ -322,26 +260,13 @@ class EmbedderRunner:
         return self._proc is not None and self._proc.is_alive()
 
     def _exit_reason(self) -> str:
-        """The child's exit code DECODED - "-4 (killed by signal SIGILL)" rather
-        than "-4".
-
-        Every user-facing report of a dead worker goes through this rather than
-        interpolating the raw code, mirroring ``ModelRunner._exit_reason``. The
-        decoder lives in ``_mp_spawn`` precisely so this runner reuses it
-        instead of growing a second version."""
+        """The child's exit code DECODED - '-4 (killed by signal SIGILL)' rather than '-4'."""
         from localm._mp_spawn import describe_exit_code
         proc = self._proc
         return describe_exit_code(None if proc is None else proc.exitcode)
 
     def _native_crash_trace(self) -> str:
-        """This child's captured native-fault trace, consumed and removed, or ""
-        when there is none.
-
-        Consuming rather than merely reading is deliberate: the file is a
-        one-shot record of one death, so leaving it in place would let a later
-        reader (or the next spawn of a reused runner) attribute a stale trace to
-        a fresh crash. Fully guarded - a diagnostic read must never replace the
-        real crash error with an IO error."""
+        """This child's captured native-fault trace, consumed and removed, or '' when there is none."""
         path = self._crash_trace_path
         if path is None:
             return ""
@@ -354,8 +279,7 @@ class EmbedderRunner:
         return text
 
     def _discard_native_crash_trace(self) -> None:
-        """Remove this child's trace file. Best-effort: a leftover costs one
-        small file in the logs dir, never correctness."""
+        """Remove this child's trace file."""
         path = self._crash_trace_path
         if path is None:
             return
@@ -365,14 +289,7 @@ class EmbedderRunner:
             pass
 
     def _crash_detail(self) -> str:
-        """A trailing detail for a crash message: the native trace when one was
-        captured, else a plain statement that none was.
-
-        Saying "no native stack trace was captured" OUT LOUD matters as much as
-        relaying one (AGENTS.md rule 5): before this existed, the message claimed
-        a trace was in the debug log whether or not anything had ever written
-        one, so a user following that instruction found nothing and had no way to
-        tell an empty capture from their own failure to find it."""
+        """A trailing detail for a crash message: the native trace when one was captured, else a plain statement that none was."""
         trace = self._native_crash_trace()
         if not trace:
             return " No native stack trace was captured for this fault."
@@ -408,24 +325,13 @@ class EmbedderRunner:
         self._proc.start()
 
     def spawn_and_load(self, params: dict, timeout: float = LOAD_TIMEOUT_DEFAULT) -> dict:
-        """Spawn the child and load the model. Returns ``{"dim": N}`` on
-        success. Raises RuntimeError on a genuine load failure, a child crash
-        (native abort - detected via is_alive(), never an exception this
-        process had to catch), or a timeout (the child is killed)."""
+        """Spawn the child and load the model."""
         self._spawn()
         self._req_q.put(("load", params))
         return self._wait(timeout, "load")
 
     def embed(self, texts: List[str], timeout: float = _EMBED_TIMEOUT_DEFAULT) -> List[List[float]]:
-        """Embed *texts* via the isolated worker. Raises RuntimeError on a
-        clean failure, a child crash, or a timeout - the caller (embedder.py's
-        IsolatedEmbedder) decides whether/how to recover.
-
-        NOT safe to call concurrently on one runner, by design: the protocol
-        above carries no request id, so two overlapping RPCs would be two
-        threads blocked in the same resp_q.get(), each free to receive the
-        OTHER's response. The sole caller, IsolatedEmbedder.embed(), serializes
-        on its _rpc_lock to guarantee that (REG-643)."""
+        """Embed *texts* via the isolated worker."""
         self._req_q.put(("embed", texts))
         return self._wait(timeout, "embed")
 
@@ -456,9 +362,7 @@ class EmbedderRunner:
         raise RuntimeError(f"Unexpected response from the embedding worker: {result!r}")
 
     def shutdown(self, grace: float = 5.0) -> None:
-        """Best-effort teardown: ask the worker to close cleanly, then kill it
-        if it does not exit within *grace* seconds. Safe to call more than
-        once, or when nothing is running."""
+        """Best-effort teardown: ask the worker to close cleanly, then kill it if it does not exit within *grace* seconds."""
         proc = self._proc
         if proc is None:
             return

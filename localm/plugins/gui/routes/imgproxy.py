@@ -1,36 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Remote-image proxy for the chat renderer.
-
-A model reply can link an image (`![alt](https://host/pic.png)`). The shell's CSP
-is `img-src 'self' data: blob:`, so the browser refuses to fetch it and the user
-sees a broken image. Every comparable UI renders it by letting the BROWSER fetch
-it, which hands the remote host the user's IP, User-Agent and referrer, and is the
-standard model-driven exfiltration channel.
-
-This route closes the capability gap without taking that trade: the client
-rewrites the `<img src>` to point here, and localm fetches the bytes SERVER-side
-through the same `netpolicy` path every other outbound request uses. The browser
-never contacts the remote origin.
-
-OFF BY DEFAULT (`gui_proxy_remote_images`), and the setting's help text says
-plainly what it does and does not buy: proxying decides WHO makes the request,
-not WHETHER it is made. A crafted URL still reaches the attacker's server the
-moment the reply renders. Closing that channel is a separate decision (a per-image
-affordance, or an allowlist) and is deliberately not attempted here.
-
-ONE INTERACTION WORTH KNOWING, recorded rather than left silent. The URL here
-comes straight off a query parameter, which makes this the first caller to feed
-`safe_fetch_bytes` a value the BROWSER chose rather than one the model or localm
-built. It is still bounded by exactly the same `netpolicy` decisions as every
-other outbound request, including the private-address guard - but that guard is
-what `net_allow_private` turns OFF. So an owner who has BOTH switched this on and
-separately disabled the SSRF guard (a setting whose own label reads "disables the
-SSRF guard") has a rendered reply able to make this machine fetch a private
-address. netpolicy is deliberately left as the single authority on that rather
-than second-guessing it here, because overriding a setting the owner explicitly
-chose is its own failure mode. If that combination should be refused outright,
-refuse it in ONE place - `check_url` - so every caller inherits it, not here.
-"""
+"""Remote-image proxy for the chat renderer."""
 
 from __future__ import annotations
 
@@ -50,25 +19,7 @@ from localm.inference.http_server import require_scope
 _MAX_BYTES = 10_000_000
 
 def _fetch_budget_s() -> float:
-    """Deadline for the offloaded fetch, DERIVED from netpolicy's own bounds
-    rather than written as a literal.
-
-    run_in_threadpool_bounded must never fire for a slow-but-working call, only
-    for a wedged one, so the budget has to sit above safe_fetch_bytes' real
-    worst case - and that case is not one timeout. netpolicy applies its timeout
-    separately to the connect and to each read, and follows redirects MANUALLY
-    (so every hop re-pays both), up to ``_MAX_REDIRECTS``. A literal 40.0 - the
-    first version of this - covered a single connect+read pair and would have
-    expired part-way down a legitimate three-hop CDN chain, turning a working
-    image into a 504.
-
-    Computed from the two constants so the relation cannot break silently when
-    either is retuned: the numbers live in netpolicy and the arithmetic here,
-    which is exactly the shape that goes wrong quietly.
-    ``test_the_fetch_budget_stays_above_netpolicy_s_own_worst_case`` asserts the
-    RELATION rather than the number. Falls back to the same arithmetic on
-    today's values if either private name ever disappears, rather than to an
-    unrelated guess."""
+    """Deadline for the offloaded fetch, DERIVED from netpolicy's own bounds rather than written as a literal."""
     from localm import netpolicy
     per_call = float(getattr(netpolicy, "_DEFAULT_TIMEOUT", 15))
     hops = int(getattr(netpolicy, "_MAX_REDIRECTS", 5)) + 1
@@ -91,13 +42,7 @@ def register(app: FastAPI, ctx) -> None:
     @app.get("/api/image-proxy",
              dependencies=[Depends(require_scope(scopes.CHAT))])
     async def image_proxy(url: str):
-        """Fetch a remote image server-side and return its bytes.
-
-        Refuses unless `gui_proxy_remote_images` is on. The fetch itself goes
-        through `netpolicy.safe_fetch_bytes`, so it inherits the per-hop
-        `check_url`, the DNS pin against rebind, redirect re-validation and the
-        byte cap rather than reimplementing any of them.
-        """
+        """Fetch a remote image server-side and return its bytes."""
         from localm.config import load_config
 
         if not load_config().get("gui_proxy_remote_images"):

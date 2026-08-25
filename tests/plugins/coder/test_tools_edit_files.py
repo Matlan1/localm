@@ -1,18 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""edit_files - the multi-file exact-string batch edit (WORKITEMS B3).
-
-The contract worth testing is ATOMICITY: a batch either applies completely or
-leaves every target byte-identical to how it started. Two distinct failure
-points have to hold that line:
-
-- a REJECTED edit (bad path, missing file, `old` that does not match). Caught in
-  the validate-first phase, before any write, so earlier files are never touched.
-- a FAILED WRITE partway through the batch. The already-written files must be
-  restored from the pre-batch snapshots.
-
-Both are tested against real files on disk and asserted on BYTES, not on the
-tool's own report - a tool that says "rolled back" is not evidence that it did.
-"""
+"""edit_files - the multi-file exact-string batch edit (WORKITEMS B3)."""
 
 from unittest.mock import patch
 
@@ -108,9 +95,7 @@ class TestAllOrNothing:
         assert "Rolled back" in r.output
 
     def test_a_half_written_file_is_restored_too(self, project):
-        """write_text opens with "w", so a failure PARTWAY through a write leaves
-        that file truncated. It is not in the already-written list, so it has to
-        be restored explicitly or the 'nothing was left partial' claim is false."""
+        """write_text opens with 'w', so a failure PARTWAY through a write leaves that file truncated."""
         before_b = (project / "b.py").read_bytes()
         real_write = type(project).write_text
 
@@ -144,8 +129,7 @@ class TestAllOrNothing:
             assert (project / name).read_bytes() == original, f"{name} not restored"
 
     def test_a_failed_rollback_is_reported_never_claimed_clean(self, project):
-        """RULE 5: if the restore itself fails, the tool must say so - a caller
-        told 'rolled back' while a file holds a partial edit is the worst case."""
+        """RULE 5: if the restore itself fails, the tool must say so - a caller told 'rolled back' while a file holds a partial edit is the worst case."""
         real_write_text = type(project).write_text
 
         def failing_write_text(self, *args, **kwargs):
@@ -257,8 +241,7 @@ class TestRegistration:
         assert TOOL_REGISTRY["edit_files"].destructive is True
 
     def test_native_tool_schema_declares_object_items(self):
-        """An array of {path, old, new} must not be advertised as an array of
-        strings, or a native tool-calling backend sends the wrong shape."""
+        """An array of {path, old, new} must not be advertised as an array of strings, or a native tool-calling backend sends the wrong shape."""
         from localm.plugins.coder.agent.tooldefs import _build_openai_tool_defs
         defs = {d["function"]["name"]: d for d in _build_openai_tool_defs()}
         items = defs["edit_files"]["function"]["parameters"]["properties"]["edits"]["items"]

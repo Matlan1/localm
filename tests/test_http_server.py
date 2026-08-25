@@ -11,11 +11,7 @@ from localm.inference.http_server import create_app
 
 
 def _make_mock_engine(loaded: bool = True, gpu_placement=None):
-    """Mock Engine with controllable loaded state and fake chat_stream.
-
-    gpu_placement mirrors the real Engine.gpu_placement property (None by
-    default, matching a never-loaded/HF-backend engine that cannot report
-    per-layer GPU placement - see test_load_endpoint_gpu_placement below)."""
+    """Mock Engine with controllable loaded state and fake chat_stream."""
     engine = MagicMock()
     _state = {"loaded": loaded}
 
@@ -121,12 +117,7 @@ class TestUnloadEndpoint(unittest.TestCase):
         self.assertEqual(body["vram_after_bytes"], 20 * GB)
 
     def test_unload_vram_reading_marked_uncertain_on_a_stale_probe(self):
-        """Release-verify-pass bug: /v1/models/unload reported a specific
-        vram_before/after_bytes + vram_freed as fact even when the underlying
-        GPU probe had timed out and fallen back to a stale last-known-good
-        reading (confirmed via an OS-level VRAM counter that the real
-        free/use cycle worked correctly the whole time - the endpoint's OWN
-        reporting was the only thing wrong). The response must now say so."""
+        """Release-verify-pass bug: /v1/models/unload reported a specific vram_before/after_bytes + vram_freed as fact even when the underlying GPU probe had timed out and fallen back to a stale last-known-good reading (confirmed via an OS-level VRAM counter that the real free/use cycle worked correctly the wh..."""
         # A real vram_capacity() only returns a tuple when EXPLICITLY asked
         # (return_status=True) - the bare-call polling _free() closure inside
         # wait_for_vram_release still expects (and must keep getting) a plain
@@ -150,8 +141,7 @@ class TestUnloadEndpoint(unittest.TestCase):
         self.assertIn("stale", body["vram_note"])
 
     def test_unload_vram_reading_not_flagged_on_a_fresh_probe(self):
-        """The common case: a fresh probe must NOT carry the uncertainty
-        flag - only a demonstrably stale/timed-out one should."""
+        """The common case: a fresh probe must NOT carry the uncertainty flag - only a demonstrably stale/timed-out one should."""
         from localm.discover import GPU_PROBE_OK
 
         def _capacity(*, return_status=False):
@@ -165,13 +155,7 @@ class TestUnloadEndpoint(unittest.TestCase):
         self.assertNotIn("vram_note", body)
 
     def test_unload_release_detected_via_combined_split_capacity(self):
-        """AUDIT-GPU-SPLIT-1: the C4 release-guard's before/after free-VRAM
-        delta must be measured against discover.vram_capacity() (combined
-        split capacity), not just the single main GPU - a model that frees
-        VRAM mostly on a NON-main split device must still be detected as
-        released. If only the main GPU's free were measured here, this
-        scenario would show no rise at all and incorrectly report
-        vram_freed=False despite VRAM genuinely being freed."""
+        """AUDIT-GPU-SPLIT-1: the C4 release-guard's before/after free-VRAM delta must be measured against discover.vram_capacity() (combined split capacity), not just the single main GPU - a model that frees VRAM mostly on a NON-main split device must still be detected as released."""
         from localm.config import load_config as real_load_config
         base_cfg = real_load_config()
         states = iter([

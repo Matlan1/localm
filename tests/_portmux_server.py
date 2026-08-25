@@ -1,10 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Helper subprocess for test_portmux: run a localm.portmux server with a tiny
-ASGI app. NOT a test module (underscore prefix -> pytest does not collect it).
-
-Usage: python _portmux_server.py <port> [<certfile> <keyfile>]
-       (omit cert/key, or pass "-" "-", to run a PLAIN-HTTP bind.)
-"""
+"""Helper subprocess for test_portmux: run a localm.portmux server with a tiny ASGI app."""
 import sys
 from pathlib import Path
 

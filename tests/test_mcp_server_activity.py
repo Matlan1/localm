@@ -1,19 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The MCP `server_activity` tool: what a running localm server is doing, and
-an honest answer when that cannot be determined.
-
-ADR-0008 U6. The MCP server is a SEPARATE PROCESS from the HTTP/GUI server and
-shares no memory with it, so a model pull started from a browser tab is
-completely invisible to an agent driving localm over MCP - which will then
-happily start a second one. The only way to answer is to find the running
-instances on disk and ask each over HTTP.
-
-The failure modes carry the weight here, because an agent acts on this answer.
-"No server is running" (nothing to ask), "could not reach it" (asked, no
-answer) and "the server says it is idle" (asked, answered, nothing running)
-lead to different decisions, and collapsing them would hand a confident
-"nothing is happening" to a caller that is about to start a duplicate download.
-"""
+"""The MCP `server_activity` tool: what a running localm server is doing, and an honest answer when that cannot be determined."""
 
 from __future__ import annotations
 
@@ -42,14 +28,7 @@ def _call(tools):
 
 
 def _claims_idle(out: str) -> bool:
-    """Whether the text POSITIVELY claims a server reported itself idle.
-
-    Deliberately matches the exact phrase the ok-and-empty branch emits rather
-    than the bare word "idle": the no-server message ends by explaining that it
-    is NOT the same as a server reporting idle, and a substring check cannot
-    tell a disclaimer from a claim. An earlier version of these tests used
-    `"idle" not in out` and failed on the disclaimer while the code was right.
-    """
+    """Whether the text POSITIVELY claims a server reported itself idle."""
     return "idle, nothing running" in out.lower()
 
 
@@ -78,8 +57,7 @@ def test_the_tool_is_registered_and_marked_read_only(tools):
 # ------------------------------------------- the three states an agent needs
 
 def test_no_server_running_is_not_reported_as_idle(tools, monkeypatch):
-    """Nothing to ask. An agent must not read this as "nothing is happening",
-    because a server could be started a second later and it was never asked."""
+    """Nothing to ask."""
     _patch_instances(monkeypatch, [])
     out = _call(tools)
     assert "no localm server is running" in out.lower()
@@ -115,10 +93,7 @@ def test_only_a_real_answer_reports_idle(tools, monkeypatch):
 
 
 def test_unauthorized_matches_the_other_failure_branches_register(tools, monkeypatch):
-    """#953 (grader 2): the pre-fix "needs an API key this process does not
-    have" wording read like an optional hardening tip rather than the same
-    kind of failure "could not be reached"/"could not be read" already are.
-    Match their "could not be X" register instead."""
+    """#953 (grader 2): the pre-fix 'needs an API key this process does not have' wording read like an optional hardening tip rather than the same kind of failure 'could not be reached'/'could not be read' already are."""
     _patch_instances(monkeypatch, _LIVE)
     _patch_read(monkeypatch, "unauthorized", 401)
     out = _call(tools)
@@ -129,10 +104,7 @@ def test_unauthorized_matches_the_other_failure_branches_register(tools, monkeyp
 # ------------------------------------------------------------ the good case
 
 def test_snapshot_called_with_include_token(tools, monkeypatch):
-    """#953: this tool asks each discovered instance over HTTP, so it needs
-    the attach token a genuinely open instance's middleware requires - unlike
-    `localm ps`, which must never see it. Confirms the ONE flag distinguishing
-    those two callers is actually passed."""
+    """#953: this tool asks each discovered instance over HTTP, so it needs the attach token a genuinely open instance's middleware requires - unlike `localm ps`, which must never see it."""
     from localm import instances
     captured = {}
 
@@ -145,9 +117,7 @@ def test_snapshot_called_with_include_token(tools, monkeypatch):
 
 
 def test_the_rows_token_reaches_read_activity(tools, monkeypatch):
-    """The token snapshot() now returns per-row must actually reach
-    read_activity, not just exist in the row - a real, working credential is
-    useless if the call site never reads it."""
+    """The token snapshot() now returns per-row must actually reach read_activity, not just exist in the row - a real, working credential is useless if the call site never reads it."""
     _patch_instances(monkeypatch, [
         {"scheme": "http", "port": 1234, "alive": True, "token": "row-token",
          "host": "::1"}])
@@ -182,8 +152,7 @@ def test_running_operations_are_listed(tools, monkeypatch):
 
 
 def test_no_percentage_is_invented_when_none_was_reported(tools, monkeypatch):
-    """R1: an operation that has reported no progress is at an unknown
-    percentage, not at zero."""
+    """R1: an operation that has reported no progress is at an unknown percentage, not at zero."""
     now = time.time()
     _patch_instances(monkeypatch, _LIVE)
     _patch_read(monkeypatch, "ok", {"now": now, "operations": [
@@ -193,8 +162,7 @@ def test_no_percentage_is_invented_when_none_was_reported(tools, monkeypatch):
 
 
 def test_the_elapsed_time_uses_the_server_clock(tools, monkeypatch):
-    """This process may not share the server's clock. The payload ships `now`
-    so an age is never derived from the local one."""
+    """This process may not share the server's clock."""
     server_now = time.time() - 7200
     _patch_instances(monkeypatch, _LIVE)
     _patch_read(monkeypatch, "ok", {"now": server_now, "operations": [

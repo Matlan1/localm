@@ -1,14 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""ADR-0012 hang alarm (localm/inference/_hang_alarm.py): the staged
-detect -> surface -> recover pipeline that the 2026-08-18 whole-server hang
-proved was missing.
-
-The loop-freeze tests use a REAL asyncio event loop with a real heartbeat
-task and freeze it with a genuine synchronous time.sleep() injected onto the
-loop thread - the exact mechanism ADR-0012 D4 prescribes - not a mocked gap.
-Restart/surface actions are spies: the property under test is that the alarm
-DETECTS and ACTS within its thresholds, not that os.execv works.
-"""
+"""ADR-0012 hang alarm (localm/inference/_hang_alarm.py): the staged detect -> surface -> recover pipeline that the 2026-08-18 whole-server hang proved was missing."""
 
 from __future__ import annotations
 
@@ -74,8 +65,7 @@ def _make_alarm(spy: _Spy, **overrides) -> ha.HangAlarm:
 
 
 class _RealLoop:
-    """A real asyncio loop on its own thread with a real heartbeat task,
-    mirroring http_server's _hang_heartbeat_loop + localm-server thread."""
+    """A real asyncio loop on its own thread with a real heartbeat task, mirroring http_server's _hang_heartbeat_loop + localm-server thread."""
 
     def __init__(self, interval: float = 0.05):
         self.interval = interval
@@ -106,8 +96,7 @@ class _RealLoop:
         return None if self.hb is None else time.monotonic() - self.hb
 
     def freeze(self, seconds: float):
-        """The D4-prescribed hang: a genuinely blocking synchronous sleep
-        executed ON the loop thread, exactly what a rogue handler does."""
+        """The D4-prescribed hang: a genuinely blocking synchronous sleep executed ON the loop thread, exactly what a rogue handler does."""
         self.loop.call_soon_threadsafe(time.sleep, seconds)
 
     def close(self):
@@ -159,9 +148,7 @@ def test_brief_freeze_surfaces_then_recovers_and_never_restarts():
 
 
 def test_single_stale_sample_does_not_fire():
-    """The sleep/resume race guard: one isolated over-threshold gap reading
-    (the alarm thread waking before the loop's first post-resume tick) must
-    not surface anything - action requires two consecutive bad samples."""
+    """The sleep/resume race guard: one isolated over-threshold gap reading (the alarm thread waking before the loop's first post-resume tick) must not surface anything - action requires two consecutive bad samples."""
     spy = _Spy()
     readings = iter([9.9, 0.0, 0.0, 0.0, 0.0])
     alarm = _make_alarm(
@@ -246,15 +233,7 @@ def test_probe_healthy_server_never_fires():
 # --------------------------------------------------------------------------- #
 
 def test_starvation_is_log_only_forensics_never_user_facing():
-    """Maintainer directive (2026-08-18, after two live rounds of feedback):
-    anything user-facing must have ZERO false positives, and no threshold
-    separates "requests wedged by a defect" from "legitimately slow silent
-    work" with certainty - so the starvation watch must never surface, never
-    restart, never touch the window. What it must do instead is produce the
-    forensic record the real incident lacked: name the stuck requests
-    (method + path + age), take an immediate stack snapshot, and take a
-    follow-up snapshot one window later so identical frames prove
-    "genuinely wedged" over "merely idle"."""
+    """Maintainer directive (2026-08-18, after two live rounds of feedback): anything user-facing must have ZERO false positives, and no threshold separates 'requests wedged by a defect' from 'legitimately slow silent work' with certainty - so the starvation watch must never surface, never restart, never t..."""
     state = {"snap": ((), 0.0)}
     spy = _Spy()
     alarm = _make_alarm(
@@ -395,11 +374,7 @@ def test_middleware_tracks_inflight_and_progress():
 
 @pytest.mark.parametrize("path", ["/health", "/whoami"])
 def test_middleware_excludes_instrument_endpoints_from_tracking(path):
-    """/health and /whoami are liveness/identity instruments (the alarm's own
-    probe, external monitors, cross-instance discovery polls); counting them
-    as progress would mask the exact starvation they exist to reveal - in
-    the live incident /health answered in 25ms the whole time the server
-    was unusable."""
+    """/health and /whoami are liveness/identity instruments (the alarm's own probe, external monitors, cross-instance discovery polls); counting them as progress would mask the exact starvation they exist to reveal - in the live incident /health answered in 25ms the whole time the server was unusable."""
     tracker = ha.RequestProgress()
 
     async def app(scope, receive, send):

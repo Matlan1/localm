@@ -1,10 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The tool registry: the ``ToolDef`` schema, the ``SAFE_RESTRICTED_TOOLS``
-allowlist, and the ``TOOL_REGISTRY`` mapping the agent dispatches through.
-
-``TOOL_REGISTRY`` is the single mutable registry; mcp.py / plugin_tools.py /
-skills.py add entries to it at runtime, so it must stay one shared dict object
-(re-exported by name from the package ``__init__``, never copied)."""
+"""The tool registry: the ``ToolDef`` schema, the ``SAFE_RESTRICTED_TOOLS`` allowlist, and the ``TOOL_REGISTRY`` mapping the agent dispatches through."""
 
 from __future__ import annotations
 
@@ -104,8 +99,7 @@ SAFE_RESTRICTED_TOOLS: frozenset[str] = frozenset({
 
 
 def _spawn_role_help() -> str:
-    """The spawn_agent ``role`` parameter description, built from the presets so
-    the tool schema cannot drift out of step with the roles that actually exist."""
+    """The spawn_agent ``role`` parameter description, built from the presets so the tool schema cannot drift out of step with the roles that actually exist."""
     from ..roles import role_catalogue
     return (
         "Optional role preset giving the sub-agent a focused mission and a "

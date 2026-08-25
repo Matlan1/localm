@@ -1,18 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""LM-DA-019: installing a THIRD-PARTY plugin whose (possibly default) scope
-collides with a kernel capability, a first-party plugin's scope, a privileged
-scope, or another already-installed plugin's scope must be rejected.
-
-Pre-fix, ``parse_spec`` copied a manifest's ``scope`` verbatim (defaulting to
-the plugin's own NAME when omitted - PluginSpec.__post_init__), and
-``mount_router`` gated every route the plugin registers on that raw string
-with no collision check at all. A manifest reusing "chat" (or naming itself
-"rag"/"web"/"voice", which defaults their scope to the same string as the
-already-shipped first-party plugin) silently widened what every pre-existing
-key holding that scope could reach - see
-dev-notes/checkup/DESIGN-AUDIT-2026-07-13.md finding LM-DA-019, corroborated
-independently by qa/test-plans/plugins-system.md (F4-08/F4-09, CFX-06).
-"""
+"""LM-DA-019: installing a THIRD-PARTY plugin whose (possibly default) scope collides with a kernel capability, a first-party plugin's scope, a privileged scope, or another already-installed plugin's scope must be rejected."""
 
 import pytest
 from fastapi import FastAPI

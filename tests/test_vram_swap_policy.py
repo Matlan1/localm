@@ -1,9 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Phase 1: VRAM-aware media swap policy + the C4 driver-hang guard.
-
-The decision: before a media generation, do we unload the chat LLM to free VRAM,
-or does the media model fit alongside it (big card) so we keep chat hot?
-"""
+"""Phase 1: VRAM-aware media swap policy + the C4 driver-hang guard."""
 import importlib
 import urllib.error
 from pathlib import Path
@@ -187,11 +183,7 @@ class TestDecideMediaSwap:
                                  read_free=lambda: 4 * GB) is True
 
     def test_default_read_free_is_split_aware(self, monkeypatch):
-        """AUDIT-GPU-SPLIT-1: with no read_free override (the real call sites
-        in image/music/video plug.py all omit it), the default must weigh a
-        media job against COMBINED split capacity, not just the single main
-        GPU - otherwise a split-configured machine needlessly swaps the chat
-        model out even when the split already covers the media job."""
+        """AUDIT-GPU-SPLIT-1: with no read_free override (the real call sites in image/music/video plug.py all omit it), the default must weigh a media job against COMBINED split capacity, not just the single main GPU - otherwise a split-configured machine needlessly swaps the chat model out even when the spli..."""
         from localm.config import load_config as real_load_config
         base_cfg = real_load_config()
         monkeypatch.setattr(
@@ -207,10 +199,7 @@ class TestDecideMediaSwap:
 
 
 class TestDecideEmbedderSwap:
-    """The embedder's own pre-load decision (get_embedder(), via
-    embedder._maybe_swap_for_embedder): same should_swap_for_media core as
-    decide_media_swap, generalized for a caller with no media 'settings' dict -
-    just an estimated size and the resolved model_swap_policy."""
+    """The embedder's own pre-load decision (get_embedder(), via embedder._maybe_swap_for_embedder): same should_swap_for_media core as decide_media_swap, generalized for a caller with no media 'settings' dict - just an estimated size and the resolved model_swap_policy."""
 
     def test_auto_keeps_chat_when_embedder_fits(self):
         assert decide_embedder_swap(1 * GB, policy="auto", read_free=lambda: 100 * GB) is False
@@ -237,8 +226,7 @@ class TestDecideEmbedderSwap:
 
 
 class TestBackendSwapSettings:
-    """The media backends surface swap_policy + vram_estimate_bytes (consumed by
-    decide_media_swap) and keep the legacy reload toggle working."""
+    """The media backends surface swap_policy + vram_estimate_bytes (consumed by decide_media_swap) and keep the legacy reload toggle working."""
 
     def _settings(self, name, full_config):
         mod = importlib.import_module(f"localm.plugins.builtin.{name}.backend")
@@ -273,8 +261,7 @@ class TestBackendSwapSettings:
     ("localm.video_gen.comfy", "generate_video", "a prompt"),
 ])
 class TestMediaTransportSwapGate:
-    """The shared transports honour the swap flag: unload the chat LLM only when
-    swap=True. (Mirrors the media flow: plug.py decides, the transport obeys.)"""
+    """The shared transports honour the swap flag: unload the chat LLM only when swap=True. (Mirrors the media flow: plug.py decides, the transport obeys.)."""
 
     def _arm(self, monkeypatch, mod, unload_calls):
         monkeypatch.setattr(mod, "ensure_comfy", lambda *a, **k: (True, "ok"))

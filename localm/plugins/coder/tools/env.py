@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Environment-reading tool: reads .env + the process environment with
-secret-looking values redacted."""
+"""Environment-reading tool: reads .env + the process environment with secret-looking values redacted."""
 
 from __future__ import annotations
 
@@ -25,14 +24,7 @@ def _redact_env_value(name: str, value: str) -> str:
 
 
 def tool_read_env(cwd: Path, path: str = "") -> ToolResult:
-    """
-    Read environment configuration with secrets stripped.
-
-    Without arguments, reads the project's ``.env`` file (if present) and the
-    active process environment. With ``path``, reads that env-format file
-    instead. Values of variables whose names look secret (KEY, TOKEN, SECRET,
-    PASSWORD, ...) are redacted; only their length is shown.
-    """
+    """Read environment configuration with secrets stripped."""
     lines: list[str] = []
 
     try:

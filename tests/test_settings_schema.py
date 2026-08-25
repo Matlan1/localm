@@ -19,8 +19,7 @@ def test_schema_matches_config_keys_exactly():
 
 
 def test_embedding_pooling_options_match_the_embedder():
-    """The schema spells its pooling choices out rather than importing the
-    inference stack, so pin them to the one source of truth or they drift."""
+    """The schema spells its pooling choices out rather than importing the inference stack, so pin them to the one source of truth or they drift."""
     from localm.inference.embedder import POOLING_CHOICES
 
     by_key = {f.key: f for f in ss.CORE_FIELDS}
@@ -60,12 +59,7 @@ def test_schema_json_serializable_with_defaults():
 
 
 class TestShippedDefaultAnnotation:
-    """NEW-DEFAULT-VALUE-PLACEHOLDER: `default` is the CURRENT value (base=
-    load_config() in the real server route), which after a save is the user's
-    own override - so the GUI needs a SEPARATE, always-factory value to tell
-    "still shipped default" apart from "user set it to this". `shipped_default`
-    is that value: always from DEFAULT_CONFIG, regardless of what `values` the
-    caller passed."""
+    """NEW-DEFAULT-VALUE-PLACEHOLDER: `default` is the CURRENT value (base= load_config() in the real server route), which after a save is the user's own override - so the GUI needs a SEPARATE, always-factory value to tell 'still shipped default' apart from 'user set it to this'. `shipped_default` is that..."""
 
     def test_shipped_default_matches_default_config_regardless_of_override(self):
         overridden = dict(DEFAULT_CONFIG)
@@ -94,9 +88,7 @@ class TestShippedDefaultAnnotation:
                     f"{f['key']}: a secret must never carry any default, shipped or not"
 
     def test_shipped_default_present_for_every_default_bearing_field(self):
-        """Every field that gets a `default` (i.e. every non-secret field whose
-        key is in DEFAULT_CONFIG) must also get a `shipped_default` - the GUI
-        cannot grey a field it has no factory value to compare against."""
+        """Every field that gets a `default` (i.e. every non-secret field whose key is in DEFAULT_CONFIG) must also get a `shipped_default` - the GUI cannot grey a field it has no factory value to compare against."""
         js = ss.schema_json()
         for f in js:
             if "default" in f:
@@ -105,14 +97,7 @@ class TestShippedDefaultAnnotation:
 
 
 class TestMediaPerPluginAnnotation:
-    """schema_json's media_per_plugin annotation: the GUI's Media section skips
-    group="Media" fields in the flat form and renders per-plugin-mapped globals
-    ONLY in the per-plugin boxes - so it must be able to tell, from the schema
-    alone, which Media fields those are. Before this annotation the client
-    special-cased two keys by name and every other Media field silently
-    rendered NOWHERE (comfy_launch_timeout / comfy_disable_auto_launch /
-    comfy_func_shim were GUI-invisible; 2026-07-22 settings-exposure audit).
-    MEDIA_PLUGIN_FIELDS is the single source of truth."""
+    """schema_json's media_per_plugin annotation: the GUI's Media section skips group='Media' fields in the flat form and renders per-plugin-mapped globals ONLY in the per-plugin boxes - so it must be able to tell, from the schema alone, which Media fields those are."""
 
     def test_media_fields_carry_the_annotation(self):
         js = ss.schema_json()
@@ -126,9 +111,7 @@ class TestMediaPerPluginAnnotation:
                 f"{f['key']}: media_per_plugin must mirror MEDIA_PLUGIN_FIELDS")
 
     def test_the_previously_orphaned_fields_are_not_per_plugin(self):
-        """The three fields the Media section historically dropped: global-only
-        reads (media/comfy_client.py), so they must be annotated for the
-        SHARED box, never left to the per-plugin boxes that cannot show them."""
+        """The three fields the Media section historically dropped: global-only reads (media/comfy_client.py), so they must be annotated for the SHARED box, never left to the per-plugin boxes that cannot show them."""
         js = {f["key"]: f for f in ss.schema_json()}
         for key in ("comfy_launch_timeout", "comfy_disable_auto_launch",
                     "comfy_func_shim"):
@@ -141,12 +124,7 @@ class TestMediaPerPluginAnnotation:
 
 
 class TestComfyFloatTypeGlobalKey:
-    """The per-plugin float_type field (MEDIA_PLUGIN_FIELDS) and the media
-    backends both fall back to a GLOBAL comfy_float_type key - which did not
-    exist in DEFAULT_CONFIG or the schema, so the documented fallback could
-    only ever be set by hand-editing config.json (the validated PATCH/CLI
-    paths reject unknown keys). Make the fallback real: present, typed, and
-    validated with the same options as the per-plugin field."""
+    """The per-plugin float_type field (MEDIA_PLUGIN_FIELDS) and the media backends both fall back to a GLOBAL comfy_float_type key - which did not exist in DEFAULT_CONFIG or the schema, so the documented fallback could only ever be set by hand-editing config.json (the validated PATCH/CLI paths reject unkn..."""
 
     def test_key_exists_with_a_null_default(self):
         assert "comfy_float_type" in DEFAULT_CONFIG
@@ -176,8 +154,7 @@ def test_fields_by_owner_partitions():
 
 
 def test_every_visible_field_has_a_description():
-    """The settings overhaul requires EVERY rendered field to carry a clear
-    description (HIDDEN fields are not rendered, so they are exempt)."""
+    """The settings overhaul requires EVERY rendered field to carry a clear description (HIDDEN fields are not rendered, so they are exempt)."""
     missing = [f.key for f in ss.CORE_FIELDS
                if f.widget != ss.Widget.HIDDEN and not (f.help or "").strip()]
     assert not missing, f"fields missing a description: {missing}"
@@ -189,8 +166,7 @@ def test_every_field_has_a_label():
 
 
 def test_binary_dir_schema_exposes_auto_resolved_path():
-    """Blank binary_dir must surface the auto-detected path so the GUI can show
-    it (the 'blank autodetect leaves the field empty' complaint)."""
+    """Blank binary_dir must surface the auto-detected path so the GUI can show it (the 'blank autodetect leaves the field empty' complaint)."""
     by_key = {f["key"]: f for f in ss.schema_json()}
     assert "auto" in by_key["binary_dir"], "binary_dir must carry an 'auto' value"
 
@@ -359,10 +335,7 @@ def test_admin_only_keys_lists_the_owner_only_settings():
 
 
 def test_outbound_endpoint_keys_are_owner_only():
-    """Re-pointing bugreport_upload_url redirects a LIVE channel (it ships with a
-    real default) that POSTs collected diagnostics plus whatever the user typed,
-    and update_url falls back to it. HIDDEN never gated the write - PATCH
-    /v1/config stored these verbatim - so this flag is what makes them owner-only."""
+    """Re-pointing bugreport_upload_url redirects a LIVE channel (it ships with a real default) that POSTs collected diagnostics plus whatever the user typed, and update_url falls back to it."""
     by_key = {f.key: f for f in ss.CORE_FIELDS}
     for key in OUTBOUND_OWNER_KEYS:
         assert by_key[key].admin_only is True, f"{key} must be owner-only"
@@ -416,10 +389,7 @@ def test_validate_update_keeps_finite_numbers():
 
 
 def test_to_number_rejects_non_finite_directly():
-    """Unit-level: _to_number itself is the guard, independent of field bounds.
-
-    -inf is covered here (with lo=None) because on a real field its lower bound
-    would mask it; the isfinite guard must reject it on its own."""
+    """Unit-level: _to_number itself is the guard, independent of field bounds."""
     for bad in (float("nan"), float("inf"), float("-inf")):
         with pytest.raises(ValueError):
             ss._to_number("x", bad, want_int=False, lo=None, hi=None)

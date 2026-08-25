@@ -234,8 +234,7 @@ class _FakeResponse:
 
 
 class _FakeSession:
-    """Doubles netpolicy._session_for - the pinned-transport seam - so tests
-    exercise the real fetch/redirect logic without opening a live socket."""
+    """Doubles netpolicy._session_for - the pinned-transport seam - so tests exercise the real fetch/redirect logic without opening a live socket."""
 
     def __init__(self, responder):
         self._responder = responder      # (method, url, **kw) -> response

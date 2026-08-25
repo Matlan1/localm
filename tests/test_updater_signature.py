@@ -1,12 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""CHK-UPDATER-INTEGRITY (signature half): the self-updater verifies an Ed25519
-signature over the downloaded build against a PINNED public key before extracting
-or executing it. Signing is auth-model style: with a key pinned it ENFORCES (a
-missing, unsigned, tampered, or downgraded build all refuse before any swap); with
-NO key pinned it fails OPEN (applies on the HTTPS + private-channel trust) so the
-feature is not inert out of the box. The SHIPPED default pins a key, and a guard
-below keeps it non-empty so the "empty key bricks self-update" bug cannot recur.
-"""
+"""CHK-UPDATER-INTEGRITY (signature half): the self-updater verifies an Ed25519 signature over the downloaded build against a PINNED public key before extracting or executing it."""
 
 import base64
 import io
@@ -224,8 +217,7 @@ def test_apply_refuses_downgrade_before_swap(tmp_path, monkeypatch, apply_cfg):
 # ---------------- end-to-end: the maintainer's signer -------------------
 
 def test_sign_release_script_roundtrip(tmp_path, monkeypatch):
-    """scripts/sign_release.py generates a key + signs a build, and the updater
-    verifies it against the derived public key - the whole maintainer flow."""
+    """scripts/sign_release.py generates a key + signs a build, and the updater verifies it against the derived public key - the whole maintainer flow."""
     import importlib.util
     from pathlib import Path
     script = Path(updater.__file__).resolve().parents[1] / "scripts" / "sign_release.py"

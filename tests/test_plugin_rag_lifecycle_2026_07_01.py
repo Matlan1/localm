@@ -1,10 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Regression tests for the 2026-07-01 plugin/RAG-lifecycle backlog cluster.
-
-  REC-ONFIRSTUSE      - on_first_use fires once, at first activation, persisted
-  REC-PLUGIN-REQUIRES - enable refuses an unmet dep; uninstall cascade-disables dependents
-  REC-RAG-EMBED-PARITY - `rag add --embed` embeds at index time (GUI parity)
-"""
+"""Regression tests for the 2026-07-01 plugin/RAG-lifecycle backlog cluster."""
 
 import textwrap
 

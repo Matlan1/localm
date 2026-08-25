@@ -1,8 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""A failed bug-report upload must diagnose WHERE it failed (offline/DNS, server
-unreachable, TLS, timeout, server-rejected, rate-limited) from the actual attempt
-- never by contacting a third-party host - so the user is told what went wrong and
-the report is kept for a retry or manual send."""
+"""A failed bug-report upload must diagnose WHERE it failed (offline/DNS, server unreachable, TLS, timeout, server-rejected, rate-limited) from the actual attempt - never by contacting a third-party host - so the user is told what went wrong and the report is kept for a retry or manual send."""
 
 import socket
 import ssl

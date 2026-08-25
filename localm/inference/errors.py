@@ -1,15 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Shared HTTP domain-error-to-response translation.
-
-Every HTTP-surfaced feature independently wrote "run a domain call, catch its
-known exception type(s), translate to an HTTPException with a specific status"
-(web/voice routes, GUI discover routes, memory routes, MCP plugin-management
-handlers) - the most-repeated duplication shape in the Pathfinder duplication
-audit (02-duplication-report.md, twelve findings across seven features).
-``route_errors`` is the one small decorator replacing those, and
-``format_localm_error`` is the one formatting idiom (``admin.py`` had it
-copy-pasted four times) they both need.
-"""
+"""Shared HTTP domain-error-to-response translation."""
 
 from __future__ import annotations
 
@@ -26,18 +16,7 @@ ErrorSpec = "int | Callable[[Exception], tuple[int, str]]"
 
 
 def route_errors(mapping: dict) -> Callable:
-    """Decorator for an async FastAPI route handler: catch any exception type
-    in *mapping* and raise the corresponding ``HTTPException`` instead.
-
-    ``mapping`` is a plain dict literal at the call site, e.g.
-    ``@route_errors({NetworkPolicyError: 403, Exception: lambda e: (502, f"...: {e}")})``
-    - there is no central registry to maintain. Exception types are matched via
-    ``isinstance`` in the mapping's iteration order (dict order = declaration
-    order), so put a subclass before its base class and any catch-all
-    ``Exception`` entry last. An ``HTTPException`` already raised by the
-    handler body (e.g. a 400 for bad input) always passes through untouched,
-    even under a catch-all ``Exception`` entry.
-    """
+    """Decorator for an async FastAPI route handler: catch any exception type in *mapping* and raise the corresponding ``HTTPException`` instead."""
 
     def decorator(fn):
         @functools.wraps(fn)
@@ -62,7 +41,5 @@ def route_errors(mapping: dict) -> Callable:
 
 
 def format_localm_error(e) -> str:
-    """The ``LocalmError``-to-text idiom repeated four times verbatim in
-    ``inference/routes/admin.py`` (APP-LIFECYCLE-3): trims the trailing colon
-    when *e.reason* is empty."""
+    """The ``LocalmError``-to-text idiom repeated four times verbatim in ``inference/routes/admin.py`` (APP-LIFECYCLE-3): trims the trailing colon when *e.reason* is empty."""
     return f"{e.summary}: {e.reason}".strip().strip(":").strip()

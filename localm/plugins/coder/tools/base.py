@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Shared tool primitives: the ``ToolResult`` value type, the cwd-confinement
-and output-truncation helpers every tool builds on, and the canonical
-subprocess-execution primitive (``run_subprocess``, CODER-2)."""
+"""Shared tool primitives: the ``ToolResult`` value type, the cwd-confinement and output-truncation helpers every tool builds on, and the canonical subprocess-execution primitive (``run_subprocess``, CODER-2)."""
 
 from __future__ import annotations
 
@@ -76,14 +74,7 @@ def _truncate(text: str, max_chars: int = _MAX_OUTPUT) -> tuple[str, bool]:
 
 
 def _partial_on_timeout(exc) -> str:
-    """Format any output a timed-out subprocess produced before it was killed.
-
-    ``subprocess.TimeoutExpired`` carries the stdout/stderr captured up to the
-    kill; dropping it hides exactly the diagnostics the model needs (the test
-    progress or last log line before the hang). On POSIX the attributes can be
-    bytes even in text mode (a CPython quirk), so decode defensively. Returns
-    '' when nothing was captured.
-    """
+    """Format any output a timed-out subprocess produced before it was killed."""
     parts = []
     for label, data in (("", getattr(exc, "stdout", None)),
                         ("STDERR:\n", getattr(exc, "stderr", None))):
@@ -101,32 +92,7 @@ def _partial_on_timeout(exc) -> str:
 
 
 def _confine(cwd: Path, path: str) -> Path:
-    """
-    Resolve *path* against *cwd* and verify it stays inside *cwd*.
-
-    Raises ``PermissionError`` with a clear message if the resolved path
-    escapes the working directory (path traversal attempt or accidental
-    absolute path outside the project root).
-
-    Delegates to ``pathsafe.confined_absolute_or_under`` - the shared
-    absolute-or-relative confinement primitive - instead of re-implementing
-    resolve()+is_relative_to() here. That closes two gaps this hand-rolled
-    check never had: a UNC/device *path* used to reach ``Path(path).resolve()``
-    with no guard at all (the syscall dials SMB and can hang for minutes -
-    the exact danger ``reject_unsafe_path_string`` documents, on a sink this
-    function shares with it), and an NTFS Alternate Data Stream / short-name
-    alias in *path* was accepted with no character or identity check - these
-    are a coding agent's own file-editing tools, so a hostile instruction
-    embedded in a file the agent reads could steer a subsequent tool call's
-    ``path`` argument the same way a SKILL.md's body can.
-
-    ``"."``/``""`` naming *cwd* itself is an existing, tested contract this
-    function keeps (a tool listing "the project root" is a legitimate
-    request); the shared primitive treats a self-referential result as
-    invalid (matching its delete-oriented callers, for whom "collapses to
-    the confined root" must never mean "the root itself"), so that one case
-    is handled here instead of relaxing the primitive for every caller.
-    """
+    """Resolve *path* against *cwd* and verify it stays inside *cwd*."""
     if path in (".", ""):
         return cwd.resolve()
     try:
@@ -140,16 +106,7 @@ def _confine(cwd: Path, path: str) -> Path:
 
 @dataclass
 class SubprocessResult:
-    """Outcome of one :func:`run_subprocess` call.
-
-    A completed process sets *returncode*/*stdout*/*stderr* (``ok`` is
-    ``returncode == 0``). A timeout sets *timed_out* and carries whatever the
-    process produced before the kill in *stdout*/*stderr* - possibly bytes even
-    in text mode (a CPython ``TimeoutExpired`` quirk) - pass the result straight
-    to :func:`_partial_on_timeout` to format it. A launch failure sets
-    *not_found* (missing executable) or *error* (any other exception); *ok* is
-    always False for either.
-    """
+    """Outcome of one :func:`run_subprocess` call."""
     ok: bool
     returncode: Optional[int] = None
     stdout: object = ""
@@ -160,27 +117,7 @@ class SubprocessResult:
 
 
 def platform_shell(command: str) -> Union[list, str]:
-    """The launchable form of *command* run through the platform shell.
-
-    Returns a STRING on Windows and an argument LIST on POSIX, because that is
-    what each platform needs to receive the command line UNCHANGED - and this is
-    the one definition of that, so no caller has to rediscover it.
-
-    On POSIX an argv list is handed to ``execv`` verbatim, so ``/bin/sh -c`` plus
-    the command as one element already arrives intact.
-
-    On Windows it must NOT be ``["cmd", "/C", command]``. ``subprocess`` renders
-    an argv list with :func:`subprocess.list2cmdline`, which escapes every
-    embedded quote MSVCRT-style as ``\\"`` - syntax ``cmd.exe`` does not speak.
-    So a quoted path, the normal way to pass a path containing spaces, reached
-    cmd mangled and could not be opened (measured: ``type "<dir with spaces>"``
-    returned "The filename, directory name, or volume label syntax is
-    incorrect"). Pre-compensating is not possible: list2cmdline turns EVERY
-    quote into ``\\"``, so no list element can put a bare quote on the command
-    line. A command STRING is passed to ``CreateProcess`` verbatim instead, so
-    cmd applies its own quoting rules to exactly what was written - which is
-    what routing to a shell means in the first place.
-    """
+    """The launchable form of *command* run through the platform shell."""
     if sys.platform == "win32":
         return "cmd /C " + command
     return ["/bin/sh", "-c", command]
@@ -194,24 +131,7 @@ def run_subprocess(
     shell_wrap: bool = False,
     env: Optional[dict] = None,
 ) -> SubprocessResult:
-    """
-    Run a subprocess, capturing stdout+stderr as text with a timeout.
-
-    *argv_or_cmd* is an argument list, run directly, unless *shell_wrap* is
-    true - then it must be a command STRING, routed through the platform
-    shell by :func:`platform_shell` so shell operators (pipes, redirects,
-    ``&&``) work. An already-routed caller (``tools/shell.py:_shell_argv``) may
-    also pass the string that function returns for the Windows shell route; a
-    bare string is a raw Windows command line, never a POSIX one.
-
-    On a timeout, the process's captured stdout/stderr up to the kill is
-    preserved on the result, not dropped - format it for display with
-    :func:`_partial_on_timeout`. This is the canonical subprocess-execution
-    primitive for the coder's tools/shell.py, tools/git.py, and cli/goal.py
-    (CODER-2) - previously four independent copies of this run+capture+timeout
-    sequence, with only shell.py's own callers getting partial-output-on-timeout
-    and git.py/goal.py silently dropping it.
-    """
+    """Run a subprocess, capturing stdout+stderr as text with a timeout."""
     argv = platform_shell(argv_or_cmd) if shell_wrap else argv_or_cmd
 
     try:

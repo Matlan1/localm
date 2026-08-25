@@ -1,15 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""REAL end-to-end smoke test for the in-process GGUF backend.
-
-No mocks: downloads a small real instruct model (SmolLM2-135M-Instruct, ~88 MB
-Q4) and runs it through the native llama.dll ctypes binding via GgufBackend.
-This is the test floor for the core promise - "a GGUF model loads and actually
-generates text" - which until now was proven only by hand.
-
-@integration so the default `pytest -m "not integration"` skips it: it needs the
-native runtime provisioned (localm setup-llama) and ~88 MB of network on first
-run. Skips cleanly (does not fail) when either is unavailable.
-"""
+"""REAL end-to-end smoke test for the in-process GGUF backend."""
 
 from __future__ import annotations
 
@@ -59,12 +49,7 @@ def test_gguf_loads_and_generates_real_text(gguf_backend):
 
 
 def test_gguf_load_populates_metadata_from_isolated_worker(gguf_backend):
-    """The model's whole lifecycle now runs in an isolated worker process (see
-    llamacpp/_runner.py) - this proves the metadata it reports back
-    (effective_ctx_max/effective_gpu_layers/supports_images) actually reaches
-    the parent-side GgufBackend correctly end to end, through a REAL load, not
-    just a mocked one (test_gguf_worker.py/test_vram_preflight.py already
-    cover the wiring with mocks; this is the real thing)."""
+    """The model's whole lifecycle now runs in an isolated worker process (see llamacpp/_runner.py) - this proves the metadata it reports back (effective_ctx_max/effective_gpu_layers/supports_images) actually reaches the parent-side GgufBackend correctly end to end, through a REAL load, not just a mocked o..."""
     # The fixture constructs GgufBackend directly with ctx_auto=False (the
     # constructor default) and no explicit n_ctx_max, so "no ceiling" (None)
     # is the CORRECT resolved value here - not a positive int (that only
@@ -79,11 +64,7 @@ def test_gguf_load_populates_metadata_from_isolated_worker(gguf_backend):
 
 
 def test_gguf_unload_reload_cycle_through_isolated_worker(gguf_backend):
-    """unload() must cleanly tear down the isolated worker process, and a
-    subsequent load() must spawn a fresh one and generate real text again -
-    proving the runner lifecycle (not just a single load) works end to end.
-    Leaves gguf_backend loaded afterward, matching the fixture's steady
-    state for any later test in this module."""
+    """unload() must cleanly tear down the isolated worker process, and a subsequent load() must spawn a fresh one and generate real text again - proving the runner lifecycle (not just a single load) works end to end."""
     gguf_backend.unload()
     assert not gguf_backend.loaded
     assert gguf_backend._runner is None or not gguf_backend._runner.is_alive()
@@ -98,37 +79,7 @@ def test_gguf_unload_reload_cycle_through_isolated_worker(gguf_backend):
 
 
 def test_gguf_count_messages_tokens_uses_real_tokenizer_not_heuristic(gguf_backend):
-    """#956 regression: llamacpp/_worker.py's count_messages_tokens once
-    called ``self._llm.tokenize(prompt.encode("utf-8"), add_bos=add_bos)`` -
-    but LlamaCpp.tokenize takes ``str``, not ``bytes`` (its _Tokenizer.encode
-    does ``text.encode(...)`` itself), so EVERY call raised AttributeError
-    inside the isolated worker. gguf.py's RPC wrapper caught that silently and
-    fell back to the chars/4 heuristic - permanently, on every prompt, on the
-    primary backend - and the exception log named only the TYPE
-    ("RuntimeError"), never the message, so the cause was invisible.
-
-    tests/test_gguf_worker.py's mocked unit tests never caught this: their
-    _StubLlm.tokenize(self, text, add_bos=True) ignores its `text` argument
-    entirely, so a bytes object sails through unnoticed. This test drives the
-    REAL isolated worker process end to end (a genuinely loaded tiny GGUF, not
-    a stub), so a regression of the exact bug fails here even though it would
-    still pass every mocked unit test.
-
-    THE PRECISE DISCRIMINATOR (verified live against the real degrade path,
-    not assumed from the code alone): when count_messages_tokens' own RPC
-    fails, GgufBackend.count_messages_tokens falls to
-    ``super().count_messages_tokens(messages)`` (BaseBackend) - but that base
-    method calls ``self.count_tokens(text)``, which polymorphically resolves
-    to GgufBackend's OWN count_tokens override, a SEPARATE RPC unaffected by
-    this bug (it always passed a plain str). So the degrade is NOT the naive
-    chars/4 heuristic as it might appear from gguf.py alone - it is a REAL
-    exact tokenizer count of the raw, UNTEMPLATED content, which is why a
-    weaker ``>=`` comparison against count_tokens() would not have caught
-    this bug (both sides evaluate to the exact same RPC result). The chat
-    template adds real role/turn markup (e.g. SmolLM2's
-    ``<|im_start|>user\\n...<|im_end|>\\n``) on top of the raw content, so a
-    correctly-applied template must add tokens - the comparison has to be
-    STRICT."""
+    """#956 regression: llamacpp/_worker.py's count_messages_tokens once called ``self._llm.tokenize(prompt.encode('utf-8'), add_bos=add_bos)`` - but LlamaCpp.tokenize takes ``str``, not ``bytes`` (its _Tokenizer.encode does ``text.encode(...)`` itself), so EVERY call raised AttributeError inside the isola..."""
     text = "The quick brown fox jumps over the lazy dog."
     messages = [{"role": "user", "content": text}]
 
@@ -146,11 +97,7 @@ def test_gguf_count_messages_tokens_uses_real_tokenizer_not_heuristic(gguf_backe
 
 
 def test_gguf_grammar_request_never_breaks_chat(gguf_backend):
-    """A grammar request must be SAFE on GGUF: where the native build supports
-    grammar it constrains output, and where it does not (some prebuilt llama.dll
-    builds ship a faulting grammar sampler) it soft-degrades to unconstrained
-    generation. Either way it returns real text, raises nothing, and leaves the
-    model loaded - it must never fault the session. Guards the soft-degrade fix."""
+    """A grammar request must be SAFE on GGUF: where the native build supports grammar it constrains output, and where it does not (some prebuilt llama.dll builds ship a faulting grammar sampler) it soft-degrades to unconstrained generation."""
     from localm.inference.gbnf import JSON_OBJECT
     out = "".join(gguf_backend.chat_stream(
         [{"role": "user", "content": "Give a JSON object with a key 'color'."}],

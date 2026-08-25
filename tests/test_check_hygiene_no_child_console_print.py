@@ -1,19 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""scripts/check_hygiene.py check 8: no console.print(...) reaching a module
-that executes inside an isolated child process (see that check's own block
-comment for the full "why" - a native crash there must stay a clean,
-catchable error in the parent, so a child reports facts as data and never
-prints directly).
-
-This existed only as a comment in _hf_worker.py asserting the invariant about
-a DIFFERENT file ("GgufWorker has zero console.print calls, for the identical
-reason") - true when written, and it drifted silently false once, when a
-MoE-placement fix added a direct console.print to code that runs inside the
-GGUF child. These tests pin the thing that makes the check worth having: it
-FIRES on a real violation (a check that has never been red proves nothing),
-respects the allowlist for the one confirmed parent-side exception, and does
-not false-positive on an unrelated ``.print(`` call.
-"""
+"""scripts/check_hygiene.py check 8: no console.print(...) reaching a module that executes inside an isolated child process (see that check's own block comment for the full 'why' - a native crash there must stay a clean, catchable error in the parent, so a child reports facts as data and never prints d..."""
 
 import ast
 import importlib.util
@@ -66,9 +52,7 @@ def test_console_print_in_a_child_module_is_detected(tmp_path, monkeypatch):
 
 
 def test_dotted_qualname_reports_class_and_method(tmp_path, monkeypatch):
-    """The enclosing-scope tracker must see through a class boundary, not just
-    a function boundary - the real _sizing.py case (VramSizingMixin's own
-    methods) is exactly this shape."""
+    """The enclosing-scope tracker must see through a class boundary, not just a function boundary - the real _sizing.py case (VramSizingMixin's own methods) is exactly this shape."""
     ch = _load_check_hygiene()
     _pkg(tmp_path, {
         "inference/backends/llamacpp/_sizing.py": (
@@ -112,10 +96,7 @@ def test_allowlisted_call_site_is_not_reported(tmp_path, monkeypatch):
 
 
 def test_allowlist_is_scoped_to_the_named_method_only(tmp_path, monkeypatch):
-    """Allow-listing one method in a file must not blanket-exempt the whole
-    file - a second, unrelated console.print in the SAME module still fires.
-    Precision is the entire point: the allowlist is meant to force the
-    parent/child boundary into executable form, not paper over it."""
+    """Allow-listing one method in a file must not blanket-exempt the whole file - a second, unrelated console.print in the SAME module still fires."""
     ch = _load_check_hygiene()
     _pkg(tmp_path, {
         "inference/backends/llamacpp/_sizing.py": (
@@ -144,10 +125,7 @@ def test_allowlist_is_scoped_to_the_named_method_only(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- #
 
 def test_unrelated_print_calls_are_ignored(tmp_path, monkeypatch):
-    """A bare builtin print(), a logger call, and a DIFFERENT object's own
-    .print() method (not named "console") must all be left alone - only the
-    exact ``console.print(...)`` shape this codebase's one rich Console
-    convention uses (see localm/console.py) is in scope."""
+    """A bare builtin print(), a logger call, and a DIFFERENT object's own .print() method (not named 'console') must all be left alone - only the exact ``console.print(...)`` shape this codebase's one rich Console convention uses (see localm/console.py) is in scope."""
     ch = _load_check_hygiene()
     _pkg(tmp_path, {
         "inference/backends/llamacpp/llama.py": (
@@ -170,9 +148,7 @@ def test_unrelated_print_calls_are_ignored(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- #
 
 def test_unparseable_child_module_is_reported_not_skipped(tmp_path, monkeypatch):
-    """A file this gate cannot read is one it cannot vouch for - silently
-    treating it as print-free would let a violation hide behind a syntax
-    error (AGENTS.md rule 5)."""
+    """A file this gate cannot read is one it cannot vouch for - silently treating it as print-free would let a violation hide behind a syntax error (AGENTS.md rule 5)."""
     ch = _load_check_hygiene()
     _pkg(tmp_path, {"inference/backends/llamacpp/llama.py": "def (\n"})
     monkeypatch.setattr(ch, "REPO", tmp_path)
@@ -184,9 +160,7 @@ def test_unparseable_child_module_is_reported_not_skipped(tmp_path, monkeypatch)
 
 
 def test_a_module_in_the_list_that_does_not_exist_is_skipped_quietly(tmp_path, monkeypatch):
-    """Not a localm checkout, or the module moved: this check stays quiet and
-    lets other gates (or the list itself going stale) surface that - mirrors
-    check 7's "absent localm package" contract."""
+    """Not a localm checkout, or the module moved: this check stays quiet and lets other gates (or the list itself going stale) surface that - mirrors check 7's 'absent localm package' contract."""
     ch = _load_check_hygiene()
     monkeypatch.setattr(ch, "REPO", tmp_path)
     monkeypatch.setattr(ch, "_CHILD_PROCESS_MODULES",
@@ -200,21 +174,13 @@ def test_a_module_in_the_list_that_does_not_exist_is_skipped_quietly(tmp_path, m
 # --------------------------------------------------------------------------- #
 
 def test_the_shipped_tree_has_no_unlisted_child_console_prints():
-    """The whole point: master is clean under the real, hand-verified module
-    list and the real allowlist. If this ever goes red, the fix is to stop
-    the child from printing (report the fact as return data instead) - NOT
-    to grow the allowlist, unless the new site is genuinely, verifiably
-    parent-side (see check 8's block comment for what that verification
-    looks like)."""
+    """The whole point: master is clean under the real, hand-verified module list and the real allowlist."""
     ch = _load_check_hygiene()
     assert ch._child_process_console_print_violations() == []
 
 
 def test_the_real_sizing_allowlist_entries_actually_exist_in_the_file(tmp_path):
-    """A stale allowlist entry (the method was renamed or removed) would make
-    this check silently weaker without ever going red - _check_vram etc. must
-    still be real methods of VramSizingMixin in the real file, not just
-    strings nobody re-verifies."""
+    """A stale allowlist entry (the method was renamed or removed) would make this check silently weaker without ever going red - _check_vram etc. must still be real methods of VramSizingMixin in the real file, not just strings nobody re-verifies."""
     ch = _load_check_hygiene()
     real_path = REPO_ROOT / "localm/inference/backends/llamacpp/_sizing.py"
     tree = ast.parse(real_path.read_text(encoding="utf-8"))

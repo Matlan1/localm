@@ -1,21 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Crash-containment tests for llamacpp/_runner.py's ModelRunner.
-
-llama_load_model_from_file (and every subsequent llama_init_from_model /
-llama_decode call - context growth, token-by-token generation) can hard-abort
-the whole process on a native CUDA/HIP driver failure: no Python try/except
-can catch it. localm therefore runs the entire GGUF model lifecycle in an
-isolated worker process; a crash or hang there kills only the worker, and the
-caller gets a clean, catchable error while the server itself stays up.
-
-These tests prove the containment property with REAL, uncatchable faults (a
-hard process exit, a genuine abort, and a hang) injected into the worker via
-the LOCALM_GGUF_FAULT_FOR_TEST hook - the same code path a real driver abort
-would take. The premise test shows a native fault bypasses try/except
-entirely (which is why isolation, not a try/except, is the fix). Modeled
-directly on tests/test_voice_robustness.py, which proves the identical
-property for the STT worker (localm/voice.py).
-"""
+"""Crash-containment tests for llamacpp/_runner.py's ModelRunner."""
 
 import asyncio
 import logging
@@ -118,20 +102,7 @@ class TestLoadCrashContainment:
             r.shutdown(grace=0)
 
     def test_bad_load_payload_is_a_clean_error_not_a_crash(self):
-        """The GgufWorker(**payload) constructor call now sits INSIDE the
-        "load" branch's try/except (previously only worker.load() was
-        guarded - see _runner.py), so a malformed payload - a parent/child
-        protocol bug, not a native fault - is a normal, clean error, not an
-        uncaught crash: the RuntimeError carries the real message
-        ("unexpected keyword argument"), never the "crashed (exit code ...)"
-        text the sibling crash-containment tests above assert on.
-
-        The worker process is still reaped by spawn_and_load before this
-        raises, same as every other non-"ok" load outcome (cancelled,
-        unexpected envelope) - a failed load never produces a usable model,
-        so nothing is left running to keep alive. See
-        TestLoadFailureReapsWorker below for the count-based regression
-        oracle this is a special case of."""
+        """The GgufWorker(**payload) constructor call now sits INSIDE the 'load' branch's try/except (previously only worker.load() was guarded - see _runner.py), so a malformed payload - a parent/child protocol bug, not a native fault - is a normal, clean error, not an uncaught crash: the RuntimeError carries..."""
         r = ModelRunner()
         bad_params = dict(_DUMMY_LOAD_PARAMS, this_kwarg_does_not_exist=True)
         try:
@@ -148,18 +119,7 @@ class TestLoadCrashContainment:
 
 
 class TestLoadFailureReapsWorker:
-    """The regression oracle for the worker-leak fix: engine.py's chat_stream
-    retries GgufBackend.load() on EVERY request while the model is not
-    loaded (see engine.py's auto-reload), and GgufBackend.load() spawns a
-    BRAND NEW ModelRunner every attempt (see gguf.py's _load_native). So an
-    unloadable model that keeps failing must not leave a trail of live
-    worker processes behind it - each failed spawn_and_load must reap its
-    own worker before it ever returns to the caller.
-
-    Counts real, spawned multiprocessing.Process objects via is_alive()
-    (never a mock) - a test built on a fake process cannot fail on this
-    defect at all, since a mock's is_alive()/terminate() prove nothing about
-    the real subprocess boundary this bug lives on."""
+    """The regression oracle for the worker-leak fix: engine.py's chat_stream retries GgufBackend.load() on EVERY request while the model is not loaded (see engine.py's auto-reload), and GgufBackend.load() spawns a BRAND NEW ModelRunner every attempt (see gguf.py's _load_native)."""
 
     def test_repeated_load_errors_never_leave_a_surviving_worker(self):
         bad_params = dict(_DUMMY_LOAD_PARAMS, this_kwarg_does_not_exist=True)
@@ -224,24 +184,7 @@ class TestRunnerLifecycle:
 
 class TestChatStreamCrashContainment:
     def test_dispatch_crash_during_chat_stream_is_contained(self):
-        """An uncaught exception ANYWHERE in the child's dispatch loop - not
-        just a real native abort - must crash only the child, never the
-        caller: this is the exact contract chat_stream() relies on for a
-        genuine mid-generation native fault (GgufWorker.chat_stream
-        deliberately re-raises an unrecoverable fault uncaught - see its
-        docstring), reproduced here without needing a real model or GPU by
-        sending chat_stream before any load (worker is None -> AttributeError
-        inside _runner_main's dispatch -> uncaught -> the process dies).
-
-        THE ASSERTION CHANGED, AND THE OLD ONE WAS THE BUG. It required the
-        message to say "native inference fault" - for an AttributeError, which
-        exits 1, which this module's own _runner_entry docstring identifies as
-        multiprocessing's signature for an uncaught PYTHON exception. So the test
-        was pinning a message that is false in every clause for the very fault it
-        injects (no native fault, no native trace, model unharmed) - the exact
-        wrong message tests/test_image_decode_without_pillow.py exists to
-        document. A wrong assertion is a specification, so this one was making the
-        misclassification permanent rather than catching it."""
+        """An uncaught exception ANYWHERE in the child's dispatch loop - not just a real native abort - must crash only the child, never the caller: this is the exact contract chat_stream() relies on for a genuine mid-generation native fault (GgufWorker.chat_stream deliberately re-raises an unrecoverable fault..."""
         r = ModelRunner()
         r._spawn()
         try:
@@ -259,16 +202,7 @@ class TestChatStreamCrashContainment:
 
 class TestSimpleRequestCrashContainment:
     def test_count_tokens_crash_is_contained(self):
-        """A crash while handling a simple request (not just load/chat_stream)
-        must also be contained and reported cleanly, never left hanging.
-
-        Kills the worker directly rather than using the env-var fault hook:
-        LOCALM_GGUF_FAULT_FOR_TEST is read from the CHILD's own os.environ,
-        which is a snapshot taken at spawn time - mutating the parent's
-        os.environ afterwards can never reach an already-running child. A
-        direct kill produces the identical observable effect (the process
-        vanishes before answering) that _simple_request's is_alive() check
-        must detect."""
+        """A crash while handling a simple request (not just load/chat_stream) must also be contained and reported cleanly, never left hanging."""
         r = ModelRunner()
         r._spawn()
         r._proc.kill()
@@ -282,27 +216,7 @@ class TestSimpleRequestCrashContainment:
 
 
 class TestCrashDiagnosticsReachDebugLog:
-    """The parent's crash message always says "see the debug log for the
-    native stack trace" (e.g. ModelRunner.chat_stream's "Native inference
-    fault" RuntimeError above) - but the worker only redirected native stderr
-    into that log during the narrow model-load and generation windows
-    (_quiet_stderr / _capture_stderr / dedup_native_stderr in llama.py), not
-    for its whole life. Worse: even a fault that happens INSIDE the
-    generation window is not enough, because dedup_native_stderr's fd-2
-    restore (its context manager __exit__) runs as the exception unwinds
-    THROUGH it - before the exception ever reaches multiprocessing's own
-    traceback.print_exc() in BaseProcess._bootstrap - so the one traceback
-    that would actually explain the crash was written to an already-restored
-    fd 2 (closed/NUL for a GUI-launched, console-less process). See
-    dev-notes/worker-stderr-lifetime-gap.md for the full investigation
-    (a follow-up to #932 / issue #928).
-
-    Reuses test_dispatch_crash_during_chat_stream_is_contained's exact fault
-    (chat_stream sent before any load -> worker is None -> AttributeError
-    escapes _runner_main uncaught) rather than inventing a new one: it is
-    already proven to reproduce "an exception _runner_main deliberately lets
-    escape", needs no real model/GPU, and is unaffected by the separate fix
-    to the "load" branch's constructor call (see TestLoadCrashContainment)."""
+    """The parent's crash message always says 'see the debug log for the native stack trace' (e.g. ModelRunner.chat_stream's 'Native inference fault' RuntimeError above) - but the worker only redirected native stderr into that log during the narrow model-load and generation windows (_quiet_stderr / _captur..."""
 
     def test_uncaught_dispatch_crash_is_logged_to_the_debug_log(
             self, monkeypatch, tmp_path):
@@ -345,45 +259,10 @@ class TestCrashDiagnosticsReachDebugLog:
 
 
 class TestNativeSignalCrashDiagnosticsReachDebugLog:
-    """The class above closes the gap for a crash that still has a PYTHON
-    exception (``logger.critical(exc_info=True)`` in ``_runner_entry`` catches
-    it). It cannot close the gap for the OTHER half, and ``_runner_entry``'s own
-    docstring says so: "Does NOT help a genuine native crash with no Python
-    exception at all (SIGSEGV, a raw abort with nothing printed first) - Python
-    never regains control there, so no ``except`` clause, including this one, can
-    run."
-
-    That residual half is EXACTLY the shape reported in issues 1222 / 1223:
-    ``Native inference fault (worker exit -4)``. On Linux ``multiprocessing``
-    reports ``-N`` for death by signal N, so ``-4`` is SIGILL - an illegal
-    instruction inside native code, with no Python exception anywhere. The
-    parent's message tells the user "See the debug log for the native stack
-    trace" and, before this fix, NOTHING was ever written for that class.
-
-    MEASURED (not assumed) before writing this test, because the whole test
-    depends on it:
-
-    * a real SIGILL (an mmap'd ``0f 0b``) on Linux, and ``os.abort()`` on
-      Windows, both produce a full "Fatal Python error" trace naming the Python
-      frame that entered native code - but ONLY with faulthandler armed;
-    * with it disarmed, the destination file is EMPTY on both platforms. That is
-      the negative control, so a pass here cannot come from the trace having
-      been written by something else.
-
-    ``os.abort()`` (the ``LOCALM_GGUF_FAULT_FOR_TEST=abort`` hook) is used rather
-    than a synthetic SIGILL because it is the same CLASS - the process dies from a
-    native signal with no Python exception - and it is the project's existing,
-    already-trusted way to produce that class in a REAL child process.
-    """
+    """The class above closes the gap for a crash that still has a PYTHON exception (``logger.critical(exc_info=True)`` in ``_runner_entry`` catches it)."""
 
     def _fault_during_chat_stream(self, monkeypatch):
-        """Drive a real worker to a real native abort mid-chat_stream. Returns
-        ``(message, trace_path)``.
-
-        The fault env var is set BEFORE ``_spawn()`` deliberately: the child reads
-        it from its OWN ``os.environ``, which is a snapshot taken at spawn time, so
-        setting it afterwards could never reach the running child (the same trap
-        documented on test_count_tokens_crash_is_contained above)."""
+        """Drive a real worker to a real native abort mid-chat_stream."""
         monkeypatch.setenv(runner_mod._FAULT_ENV, "abort")
 
         r = ModelRunner()
@@ -399,14 +278,7 @@ class TestNativeSignalCrashDiagnosticsReachDebugLog:
 
     def test_native_abort_is_reported_with_its_captured_trace(
             self, monkeypatch, caplog):
-        """The reported symptom, inverted: after a native-signal death the caller
-        must be told WHAT faulted, not merely that something did.
-
-        Asserts on the TRACE CONTENT rather than on the exit code or the presence
-        of the words "native inference fault" - both of those were already true
-        BEFORE this fix and are exactly what the field logs show. The trace text
-        is the only thing that distinguishes a captured fault from an
-        uncharacterised one."""
+        """The reported symptom, inverted: after a native-signal death the caller must be told WHAT faulted, not merely that something did."""
         with caplog.at_level(logging.ERROR, logger="localm"):
             message, _ = self._fault_during_chat_stream(monkeypatch)
 
@@ -428,12 +300,7 @@ class TestNativeSignalCrashDiagnosticsReachDebugLog:
         )
 
     def test_no_trace_captured_is_stated_not_implied(self, monkeypatch):
-        """When nothing was captured the message must SAY so.
-
-        The pre-fix message asserted a trace was in the debug log whether or not
-        anything had written one, which is what sent the reporter looking for a
-        trace that was never going to be there. Silence about a failed capture is
-        the rule-5 violation; an explicit "none was captured" is not."""
+        """When nothing was captured the message must SAY so."""
         monkeypatch.setenv(runner_mod._FAULT_ENV, "abort")
         r = ModelRunner()
         r._spawn()
@@ -452,14 +319,7 @@ class TestNativeSignalCrashDiagnosticsReachDebugLog:
 
     def test_native_crash_trace_file_is_consumed_not_left_behind(
             self, monkeypatch):
-        """The per-worker trace file must not survive the crash it describes: a
-        stale file would be misread as a fresh crash by the next reader.
-
-        Asserts the trace was CAPTURED as well as gone. Without that first half
-        this test passes vacuously when nothing ever wrote the file - which is
-        exactly what the fires-control caught it doing: with the arming call
-        removed, "the file does not exist" is trivially true and the test could
-        not fail on the defect it was written for."""
+        """The per-worker trace file must not survive the crash it describes: a stale file would be misread as a fresh crash by the next reader."""
         message, trace_path = self._fault_during_chat_stream(monkeypatch)
         assert trace_path is not None
         assert "Fatal Python error" in message, (
@@ -469,19 +329,7 @@ class TestNativeSignalCrashDiagnosticsReachDebugLog:
             f"the worker crash-trace file was left behind at {trace_path}")
 
     def test_healthy_worker_arms_a_trace_then_reaps_it(self):
-        """The capture costs one empty file per model load, so a clean shutdown
-        has to reap it or a long-running server slowly fills its own logs dir.
-
-        Checks the file EXISTS while the worker is alive before checking it is
-        gone afterwards - same reason as the test above: "absent at the end" is
-        satisfied just as well by never having armed at all, so on its own it
-        proves nothing about either arming or cleanup.
-
-        The existence check is POLLED, not immediate. ``_spawn()`` returns as
-        soon as ``Process.start()`` does, and a spawn-context child then has to
-        boot a fresh interpreter and run its imports before it arms anything - so
-        an immediate check races the child and fails on a perfectly healthy
-        worker (measured: it did)."""
+        """The capture costs one empty file per model load, so a clean shutdown has to reap it or a long-running server slowly fills its own logs dir."""
         r = ModelRunner()
         r._spawn()
         trace_path = r._crash_trace_path
@@ -501,17 +349,7 @@ class TestNativeSignalCrashDiagnosticsReachDebugLog:
 
 
 class TestSimpleRequestNativeSignalCrashDiagnosticsReachDebugLog:
-    """The trace-relay fix TestNativeSignalCrashDiagnosticsReachDebugLog
-    proves for chat_stream() must also hold for _simple_request() - the code
-    path count_tokens()/check_grammar() go through. Before this fix,
-    _simple_request's native-crash branch reported the exit code but never
-    called _crash_detail(), so a trace the child DID capture was never read:
-    ModelRunner.shutdown()'s own comment says a trace surviving to teardown
-    is "either already relayed or describes a death nobody is going to
-    report" and discards it unconditionally - so a fault during a token
-    count or a grammar check left the exact issue 1222/1223 symptom
-    (a bare exit code, no trace) that chat_stream's fix already closed for
-    generation."""
+    """The trace-relay fix TestNativeSignalCrashDiagnosticsReachDebugLog proves for chat_stream() must also hold for _simple_request() - the code path count_tokens()/check_grammar() go through."""
 
     def test_native_abort_during_count_tokens_is_reported_with_its_trace(
             self, monkeypatch, caplog):
@@ -556,16 +394,7 @@ class TestSimpleRequestNativeSignalCrashDiagnosticsReachDebugLog:
 class TestExecutorPoolReclaim:
     def test_hung_call_through_run_in_executor_frees_its_pool_slot(
             self, monkeypatch, tmp_path):
-        """Drive a hung GgufBackend.load() through loop.run_in_executor(pool,
-        ...) exactly as production code does, on a deliberately tiny
-        (2-worker) pool so exhaustion is observable without needing 16
-        concurrent hangs. Two assertions: (a) the call raises within its
-        bounded timeout instead of hanging forever, and (b) a SUBSEQUENT,
-        unrelated run_in_executor call on the SAME pool completes promptly
-        afterward - proof the slot was reclaimed, not merely that this
-        coroutine stopped waiting on it (the maintainer's own framing: "a
-        timeout at the call site stops waiting, not working" - this test
-        asserts the WORKING half, not just the waiting half)."""
+        """Drive a hung GgufBackend.load() through loop.run_in_executor(pool, ...) exactly as production code does, on a deliberately tiny (2-worker) pool so exhaustion is observable without needing 16 concurrent hangs."""
         monkeypatch.setenv(runner_mod._FAULT_ENV, "hang")
         # Short timeout so the test itself stays fast - the runner's own
         # bounded-wait mechanics are already proven by

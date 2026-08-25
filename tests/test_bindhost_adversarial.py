@@ -1,28 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Adversarial completeness audit for localm.bindhost.is_loopback_host.
-
-is_loopback_host() is the ENTIRE boundary between localm's open-mode
-loopback-owner shortcuts (effective_fs_access() == "host", the full
-filesystem reach, no credential consulted) and the fail-closed refusal in
-localm/cli/_core.py::_exposed_bind_warning, which is an allowlist:
-``if is_loopback_host(host): return None`` - everything else falls through to
-the unsafe branch (warn, then sys.exit(2) unless --insecure). A FALSE SAFE
-result here (True for a routable address) would silently disable that
-refusal and expose an unauthenticated, host-privileged API to the network.
-A false UNSAFE is only an availability annoyance (the CLI demands
---insecure/an API key for a bind that was actually loopback-only).
-
-Every case below was checked against the real stdlib ``ipaddress`` module AND
-a live ``socket.getaddrinfo()`` + ``socket.bind()`` (the same mechanism
-uvicorn's asyncio server ultimately uses to interpret a --host string) on
-BOTH Windows and Linux (this repo's CI platform) before being pinned here -
-not assumed. Where the two platforms disagree (e.g. bracket-wrapped IPv6
-literals, or an empty host string), the comments say so; the assertions
-below only pin behavior that was confirmed to be platform-INDEPENDENT
-(is_loopback_host's own return value never changes across platforms, since
-it does no OS calls itself - only the live cross-check test further below
-depends on what the OS resolves).
-"""
+"""Adversarial completeness audit for localm.bindhost.is_loopback_host."""
 
 from __future__ import annotations
 

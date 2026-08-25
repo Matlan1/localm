@@ -1,16 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""APP-LIFECYCLE-1 (correctness, race): cli/models.py's config_cmd() and
-inference/routes/config.py's patch_config() used to do a raw
-load_config()/mutate/save_config() sequence instead of the atomic
-update_config(mutator) helper config.py already provides for exactly this
-reason. load_config() and save_config() each take config._io_lock only for
-their OWN call, so the window between them is unlocked: a concurrent config
-write racing either call site (or racing each other) can be silently lost.
-
-Regression: both call sites now go through update_config(), which holds the
-lock across the whole read-modify-write, so a concurrent writer's change is
-never silently dropped.
-"""
+"""APP-LIFECYCLE-1 (correctness, race): cli/models.py's config_cmd() and inference/routes/config.py's patch_config() used to do a raw load_config()/mutate/save_config() sequence instead of the atomic update_config(mutator) helper config.py already provides for exactly this reason. load_config() and sav..."""
 
 import threading
 import time
@@ -39,10 +28,7 @@ def home(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- #
 
 def _bare_load_mutate_save(key, value, *, delay_before_save):
-    """Reproduces the OLD buggy pattern inline (not calling into cli/models.py
-    or routes/config.py, which are now fixed) - this is the shape being
-    proven hazardous, so the fix's rationale is verified against real
-    load_config/save_config behavior, not just asserted."""
+    """Reproduces the OLD buggy pattern inline (not calling into cli/models.py or routes/config.py, which are now fixed) - this is the shape being proven hazardous, so the fix's rationale is verified against real load_config/save_config behavior, not just asserted."""
     c = cfg.load_config()
     time.sleep(delay_before_save)   # the unlocked window (AGENTS.md rule: prove
     c[key] = value                  # the race, don't just assert the fix ran)
@@ -50,11 +36,7 @@ def _bare_load_mutate_save(key, value, *, delay_before_save):
 
 
 def test_bare_load_save_pair_can_lose_a_concurrent_update(home):
-    """Sanity check that the vulnerability this fix closes is REAL: a writer
-    using the old bare pattern, racing an update_config() writer, can drop
-    the concurrent update. If this test ever fails, the fixture/race no
-    longer reproduces the hazard and the fix's own tests below need
-    revisiting."""
+    """Sanity check that the vulnerability this fix closes is REAL: a writer using the old bare pattern, racing an update_config() writer, can drop the concurrent update."""
     cfg.save_config({"n_ctx": 4096})
 
     barrier = threading.Barrier(2)
@@ -123,30 +105,7 @@ def test_update_config_never_loses_a_concurrent_write(home):
 # --------------------------------------------------------------------------- #
 
 def _install_slow_merge(monkeypatch, delay=0.15):
-    """Widen the read-modify-write critical section via _merge_stored_config,
-    the one internal step whose LOCK STATUS actually differs between the fixed
-    and the old, buggy call-site shape:
-
-      - load_config() calls _merge_stored_config() AFTER its own `with _io_lock`
-        block has already exited (config.py:694-697) - so in the OLD bare
-        load_config()/save_config() pattern this delay lands OUTSIDE any lock,
-        in the exact unlocked read-to-write gap the bug report describes.
-      - update_config() calls _merge_stored_config() INSIDE its `with _io_lock`
-        block (config.py) - so in the FIXED call-site shape this delay widens
-        a window that IS held under the lock.
-
-    A previous version of this helper patched _atomic_write_json instead. That
-    point is inside the lock in BOTH the old and the new shape (bare
-    save_config() also takes _io_lock around its own _atomic_write_json call),
-    so delaying it only ever widened an already-locked window and could not
-    tell the two call-site shapes apart - both "pass" whether or not the call
-    site actually routes through update_config(). That made
-    test_cli_config_cmd_survives_a_concurrent_writer and
-    test_http_patch_config_survives_a_concurrent_writer pass identically on
-    pre-fix code (see PR #584 follow-up verification). Patching
-    _merge_stored_config fixes that: it is genuinely unlocked in the old shape
-    and genuinely locked in the new one, so only the correct (update_config-
-    routed) call site can survive a concurrent writer landing in that window."""
+    """Widen the read-modify-write critical section via _merge_stored_config, the one internal step whose LOCK STATUS actually differs between the fixed and the old, buggy call-site shape:."""
     real = cfg._merge_stored_config
 
     def slow(cfgd, stored):
@@ -157,9 +116,7 @@ def _install_slow_merge(monkeypatch, delay=0.15):
 
 
 def test_cli_config_cmd_survives_a_concurrent_writer(home, monkeypatch):
-    """localm config <key> <value>, racing a concurrent update_config() write
-    from another thread, must not lose either change - proving config_cmd()
-    itself now uses the atomic path."""
+    """localm config <key> <value>, racing a concurrent update_config() write from another thread, must not lose either change - proving config_cmd() itself now uses the atomic path."""
     from localm.cli.models import config_cmd
     cfg.save_config({"n_ctx": 4096})
     _install_slow_merge(monkeypatch)
@@ -187,10 +144,7 @@ def test_cli_config_cmd_survives_a_concurrent_writer(home, monkeypatch):
 
 
 def test_http_patch_config_survives_a_concurrent_writer(home, monkeypatch):
-    """The /v1/config PATCH handler, racing a concurrent update_config() write,
-    must not lose either change - proving patch_config() itself now uses the
-    atomic path (the same property set_media_config(), 20 lines below it in
-    the same file, already had)."""
+    """The /v1/config PATCH handler, racing a concurrent update_config() write, must not lose either change - proving patch_config() itself now uses the atomic path (the same property set_media_config(), 20 lines below it in the same file, already had)."""
     import asyncio
     from fastapi import FastAPI
     import localm.inference.routes.config as config_routes
@@ -243,9 +197,7 @@ def test_http_patch_config_survives_a_concurrent_writer(home, monkeypatch):
 # --------------------------------------------------------------------------- #
 
 def test_save_plugin_config_survives_a_concurrent_writer(home, monkeypatch):
-    """PluginHost.save_plugin_config() (the public plugin Host API,
-    docs/plugins.md's "write a plugin's config atomically") must not lose a
-    concurrent update_config() write during its own mutation."""
+    """PluginHost.save_plugin_config() (the public plugin Host API, docs/plugins.md's 'write a plugin's config atomically') must not lose a concurrent update_config() write during its own mutation."""
     from unittest.mock import MagicMock
 
     from localm.plugins.engine import PluginHost
@@ -280,8 +232,7 @@ def test_save_plugin_config_survives_a_concurrent_writer(home, monkeypatch):
 
 
 def test_set_auto_deps_survives_a_concurrent_writer(home, monkeypatch):
-    """localm.cli.plugins._set_auto_deps() must not lose a concurrent
-    update_config() write during its own mutation."""
+    """localm.cli.plugins._set_auto_deps() must not lose a concurrent update_config() write during its own mutation."""
     from localm.cli.plugins import _set_auto_deps
 
     cfg.save_config({"n_ctx": 4096})
@@ -311,8 +262,7 @@ def test_set_auto_deps_survives_a_concurrent_writer(home, monkeypatch):
 
 
 def test_remember_func_shim_survives_a_concurrent_writer(home, monkeypatch):
-    """localm.cli.media._remember_func_shim() must not lose a concurrent
-    update_config() write during its own mutation."""
+    """localm.cli.media._remember_func_shim() must not lose a concurrent update_config() write during its own mutation."""
     from localm.cli.media import _remember_func_shim
 
     cfg.save_config({"n_ctx": 4096})
@@ -342,10 +292,7 @@ def test_remember_func_shim_survives_a_concurrent_writer(home, monkeypatch):
 
 
 def test_mark_managed_comfy_setup_offered_survives_a_concurrent_writer(home, monkeypatch):
-    """localm.media.comfy_client.mark_managed_comfy_setup_offered() must not
-    lose a concurrent update_config() write during its own mutation (lower
-    stakes than the other three - its own docstring frames it as best-effort -
-    but it now uses the same atomic helper for consistency)."""
+    """localm.media.comfy_client.mark_managed_comfy_setup_offered() must not lose a concurrent update_config() write during its own mutation (lower stakes than the other three - its own docstring frames it as best-effort - but it now uses the same atomic helper for consistency)."""
     from localm.media.comfy_client import mark_managed_comfy_setup_offered
 
     cfg.save_config({"n_ctx": 4096})

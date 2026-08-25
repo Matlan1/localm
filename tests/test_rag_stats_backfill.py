@@ -1,19 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Collection.load_and_maybe_backfill() - the opportunistic cache-write that
-closes the gap named in rag_collections'/rag_detail's own docstrings: _load()
-never calls _save(), so a collection written once and only ever LISTED (or
-viewed) afterward stayed on the slow full-load fallback forever, not just
-once, until this method.
-
-The property that matters, adversarially, same standard as
-test_rag_peek_stats.py: a backfilled cache must be BYTE-IDENTICAL to what a
-fresh, eager Collection(name).stats() would report for the same on-disk
-state - never a value trusted because "it was probably fine a moment ago".
-And the concurrency half: the backfill must never write a cache derived from
-data it did not itself read WHILE holding the collection's write lock, and it
-must degrade to exactly today's uncached-but-correct behaviour whenever that
-lock is busy - never corrupt disk, never answer wrong.
-"""
+"""Collection.load_and_maybe_backfill() - the opportunistic cache-write that closes the gap named in rag_collections'/rag_detail's own docstrings: _load() never calls _save(), so a collection written once and only ever LISTED (or viewed) afterward stayed on the slow full-load fallback forever, not just..."""
 
 from __future__ import annotations
 
@@ -53,9 +39,7 @@ def docs(tmp_path):
 
 
 def _strip_cache(base, name):
-    """Simulate a collection saved before this cache existed (or hand-edited
-    to drop it) - the exact precondition load_and_maybe_backfill exists for.
-    Same technique as test_rag_peek_stats.py's uncached-collection test."""
+    """Simulate a collection saved before this cache existed (or hand-edited to drop it) - the exact precondition load_and_maybe_backfill exists for."""
     meta_path = base / name / "meta.json"
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
     assert _STATS_CACHE_KEY in meta, "fixture precondition: a real save must have cached it"
@@ -64,8 +48,7 @@ def _strip_cache(base, name):
 
 
 def _record(**over) -> dict:
-    """A well-formed lock record for a plausible FOREIGN, LIVE holder - same
-    shape as tests/test_rag_collection_lock.py's own helper."""
+    """A well-formed lock record for a plausible FOREIGN, LIVE holder - same shape as tests/test_rag_collection_lock.py's own helper."""
     rec = {"token": "feedface" * 4, "pid": 999_999, "pid_create_time": None,
            "machine": "another-machine-hash", "collection": "kb",
            "op": "a re-sync", "started": time.time() - 5}
@@ -74,8 +57,7 @@ def _record(**over) -> dict:
 
 
 def _hold(path, rec) -> None:
-    """Stage a foreign lock file with a FRESH heartbeat (mtime = now), so it
-    reads as currently alive, not stale/reclaimable."""
+    """Stage a foreign lock file with a FRESH heartbeat (mtime = now), so it reads as currently alive, not stale/reclaimable."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(rec), encoding="utf-8")
 
@@ -119,13 +101,7 @@ def test_backfill_writes_correct_detail_including_docs(base, docs):
 
 
 def test_backfill_of_a_malformed_collection_carries_the_bad_line_count(base, docs):
-    """NEW-RAG-INDEX-WARN-SPAM residual B, the backfill path specifically:
-    chunks_bad_lines has to reach the cache load_and_maybe_backfill writes,
-    not just the one _save() writes - a collection that is corrupt AND was
-    only ever listed (never re-saved) is exactly the case this method exists
-    for. load_and_maybe_backfill only ever rewrites meta.json's cache block,
-    never chunks.jsonl, so the count it derives must describe the file as it
-    actually is on disk, not a self-healed copy."""
+    """NEW-RAG-INDEX-WARN-SPAM residual B, the backfill path specifically: chunks_bad_lines has to reach the cache load_and_maybe_backfill writes, not just the one _save() writes - a collection that is corrupt AND was only ever listed (never re-saved) is exactly the case this method exists for. load_and_ma..."""
     coll = Collection("kb", base=base).create()
     coll.add_paths([docs], embed_fn=_embed3)
     chunks_path = base / "kb" / "chunks.jsonl"
@@ -147,10 +123,7 @@ def test_backfill_of_a_malformed_collection_carries_the_bad_line_count(base, doc
 
 
 def test_backfilled_cache_is_never_trusted_after_hand_corruption(base, docs):
-    """The negative direction from test_rag_peek_stats.py, applied specifically
-    to a backfilled cache (not a _save()-written one): once the backfill has
-    cached a state, a file changed WITHOUT going through this class must
-    still invalidate it, exactly like a normal save's cache would."""
+    """The negative direction from test_rag_peek_stats.py, applied specifically to a backfilled cache (not a _save()-written one): once the backfill has cached a state, a file changed WITHOUT going through this class must still invalidate it, exactly like a normal save's cache would."""
     coll = Collection("kb", base=base).create()
     coll.add_paths([docs], embed_fn=_embed3)
     _strip_cache(base, "kb")
@@ -170,8 +143,7 @@ def test_backfilled_cache_is_never_trusted_after_hand_corruption(base, docs):
 
 
 def test_backfilled_cache_survives_a_real_noop_save(base, docs):
-    """The positive direction: once backfilled, a real operation that changes
-    nothing must not spuriously invalidate the cache it just wrote."""
+    """The positive direction: once backfilled, a real operation that changes nothing must not spuriously invalidate the cache it just wrote."""
     coll = Collection("kb", base=base).create()
     coll.add_paths([docs], embed_fn=_embed3)
     _strip_cache(base, "kb")
@@ -186,19 +158,14 @@ def test_backfilled_cache_survives_a_real_noop_save(base, docs):
 
 
 def test_backfill_of_a_nonexistent_collection_does_not_write_a_cache(base):
-    """A name that resolves to no collection at all (deleted between the cold
-    peek and the backfill attempt, or simply never existed) must not crash
-    and must not fabricate a meta.json - the load-under-lock's own .exists()
-    check gates the write."""
+    """A name that resolves to no collection at all (deleted between the cold peek and the backfill attempt, or simply never existed) must not crash and must not fabricate a meta.json - the load-under-lock's own .exists() check gates the write."""
     coll = Collection.load_and_maybe_backfill("does-not-exist", base=base)
     assert not coll.exists()
     assert not (base / "does-not-exist").exists()
 
 
 def test_backfill_is_idempotent_across_repeated_calls(base, docs):
-    """Calling it again on an already-backfilled (or already-_save()d)
-    collection must be a harmless no-op, not a second, redundant write that
-    could itself race something."""
+    """Calling it again on an already-backfilled (or already-_save()d) collection must be a harmless no-op, not a second, redundant write that could itself race something."""
     coll = Collection("kb", base=base).create()
     coll.add_paths([docs], embed_fn=_embed3)
     first = Collection.load_and_maybe_backfill("kb", base=base).stats()
@@ -211,11 +178,7 @@ def test_backfill_is_idempotent_across_repeated_calls(base, docs):
 # --------------------------------------------------------------------------- #
 
 def test_busy_lock_falls_back_without_writing_anything(base, docs):
-    """The property #1011's own review demanded: a refused write must change
-    NOTHING on disk. A live foreign holder must make the backfill skip
-    quietly - returning a correct, fully-loaded Collection (today's exact
-    fallback), with meta.json byte-for-byte unchanged (no partial or stale
-    cache written from a read that never happened under the lock)."""
+    """The property #1011's own review demanded: a refused write must change NOTHING on disk."""
     coll = Collection("kb", base=base).create()
     coll.add_paths([docs], embed_fn=_embed3)
     eager = Collection("kb", base=base).stats()
@@ -243,12 +206,7 @@ def test_busy_lock_falls_back_without_writing_anything(base, docs):
 
 
 def test_concurrent_backfill_exactly_one_writes_the_cache(base, docs):
-    """Two threads racing load_and_maybe_backfill on the SAME cold collection:
-    the file lock (O_CREAT|O_EXCL, genuinely atomic at the OS level) must let
-    exactly one of them win the write - the other gets CollectionLockedError
-    internally and falls back - and BOTH must still return fully correct
-    stats. Whichever wins, the final on-disk fingerprint must describe
-    exactly what is actually on disk."""
+    """Two threads racing load_and_maybe_backfill on the SAME cold collection: the file lock (O_CREAT|O_EXCL, genuinely atomic at the OS level) must let exactly one of them win the write - the other gets CollectionLockedError internally and falls back - and BOTH must still return fully correct stats."""
     coll = Collection("kb", base=base).create()
     coll.add_paths([docs], embed_fn=_embed3)
     eager = Collection("kb", base=base).stats()
@@ -293,10 +251,7 @@ def test_concurrent_backfill_exactly_one_writes_the_cache(base, docs):
 
 @pytest.fixture
 def rag_route_app(tmp_path, monkeypatch):
-    """Same shape as test_rag_confinement.py's fixture of the same name:
-    minimal GUI app with the builtin rag plugin installed, Path.home == tmp_path
-    so docs placed under it are inside the whitelist. Open mode -> the caller
-    is the owner."""
+    """Same shape as test_rag_confinement.py's fixture of the same name: minimal GUI app with the builtin rag plugin installed, Path.home == tmp_path so docs placed under it are inside the whitelist."""
     from localm.plugins.engine import PluginManager
     from localm.plugins.gui.web import attach_gui
     home = tmp_path
@@ -325,21 +280,7 @@ def _rag_base(home: Path) -> Path:
 
 
 def _seed_kb_via_routes(client, home: Path) -> None:
-    """Create "kb" through the real (synchronous) POST /collections route, then
-    add real content directly through the Collection primitive at the exact
-    on-disk location that route just created.
-
-    NOT through POST .../add: under attach_gui (what rag_route_app wires up,
-    matching the GUI the list/detail routes actually serve), that route hands
-    the work to the background job manager and returns {"job_id": ...}
-    immediately - discovered live when this helper originally posted to /add
-    and the very next read back n_docs == 0, because indexing had not run yet.
-    Driving that job to completion would test the job pipeline, not what
-    these tests are actually about: whether GET .../collections and GET
-    .../collections/{name} backfill a cold collection's cache. Seeding the
-    same on-disk state directly through the primitive - proven correct by the
-    Collection-level tests above - keeps these tests scoped to the routes
-    under test."""
+    """Create 'kb' through the real (synchronous) POST /collections route, then add real content directly through the Collection primitive at the exact on-disk location that route just created."""
     r = client.post("/api/rag/collections", json={"name": "kb"})
     assert r.status_code == 200, r.text
     coll = Collection("kb", base=_rag_base(home))

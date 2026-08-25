@@ -1,8 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Scoped API key routes (auth.json): list, create, revoke.
-
-Extracted verbatim from create_app(); behavior unchanged.
-"""
+"""Scoped API key routes (auth.json): list, create, revoke."""
 
 from __future__ import annotations
 

@@ -1,8 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""S5: localm is AGPL-3.0-or-later only. The README must not advertise a separate
-commercial license (a dual-licensing offer would require a CLA from contributors
-to be sound; the maintainer chose AGPL-only instead).
-"""
+"""S5: localm is AGPL-3.0-or-later only."""
 
 from pathlib import Path
 

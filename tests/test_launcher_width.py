@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The launcher window must keep a FIXED width: a long status line or a long
-model name in the dropdown must never widen it (issues.txt)."""
+"""The launcher window must keep a FIXED width: a long status line or a long model name in the dropdown must never widen it (issues.txt)."""
 
 import importlib.machinery
 import importlib.util
@@ -40,8 +39,7 @@ def test_ellipsize_boundary():
 
 
 def test_window_width_is_fixed_against_long_content():
-    """Build the real launcher and confirm a huge status message + a huge model
-    name leave the window width unchanged. Skips when no display is available."""
+    """Build the real launcher and confirm a huge status message + a huge model name leave the window width unchanged."""
     mod = _load_launcher()
     tk = mod.tk
     try:

@@ -1,10 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""
-Tests for git helpers in localm.plugins.coder.tools
-
-Both mocked-subprocess tests (fast, no git dependency) and real git-init
-integration tests (use pytest's tmp_path fixture, require git in PATH).
-"""
+"""Tests for git helpers in localm.plugins.coder.tools."""
 
 import subprocess
 import pytest

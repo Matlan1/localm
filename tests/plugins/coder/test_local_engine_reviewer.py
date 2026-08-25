@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""CPU-resident reviewer: a different small model loaded in-process on CPU, for a
-heterogeneous review that is still fully local + private (allowed in privacy mode).
-"""
+"""CPU-resident reviewer: a different small model loaded in-process on CPU, for a heterogeneous review that is still fully local + private (allowed in privacy mode)."""
 
 from __future__ import annotations
 
@@ -56,16 +54,7 @@ def test_local_backend_loads_only_once(monkeypatch):
 
 
 def test_local_backend_supports_grammar_mirrors_the_engine(monkeypatch):
-    """NEW-CODER-NO-TOOLCALL-SILENT residual: LocalEngineBackend must not
-    compute its own guess at grammar support from the backend's TYPE (the old
-    isinstance(engine._backend, GgufBackend) check) - it defers entirely to
-    Engine.supports_grammar (engine.py), which is the honest, install-derived
-    answer from the actual backend: GgufBackend always True, HFBackend since
-    #1215 True only when xgrammar is importable. A stale isinstance check
-    would deny an HF-backed reviewer model forcing even when it can genuinely
-    honour a grammar - see the constructor's own comment for the full story.
-    Both booleans are exercised so a hardcoded-False regression (the old
-    behaviour) shows up as a mismatch on the True case."""
+    """NEW-CODER-NO-TOOLCALL-SILENT residual: LocalEngineBackend must not compute its own guess at grammar support from the backend's TYPE (the old isinstance(engine._backend, GgufBackend) check) - it defers entirely to Engine.supports_grammar (engine.py), which is the honest, install-derived answer from t..."""
     from localm.plugins.coder.backends.local_engine import LocalEngineBackend
 
     for expected in (True, False):

@@ -1,10 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Config routes: server config get/schema/patch, per-plugin media config,
-generic plugin-contributed settings (host.add_settings()), and ComfyUI status.
-
-Extracted verbatim from create_app(); behavior unchanged. Reads the live engine
-from the http_server module global and the session-scoped audit mode from ctx.
-"""
+"""Config routes: server config get/schema/patch, per-plugin media config, generic plugin-contributed settings (host.add_settings()), and ComfyUI status."""
 
 from __future__ import annotations
 
@@ -38,12 +33,7 @@ _COMFY_STOP_TIMEOUT_S = 90.0
 
 
 def _scrub_media_admin_only(cfg: dict) -> None:
-    """Remove owner-only PER-PLUGIN media values from *cfg* in place.
-
-    Driven off MEDIA_PLUGIN_FIELDS rather than a hardcoded name list, so a field
-    that gains admin_only later is scrubbed here automatically instead of quietly
-    staying readable. Mutates the per-request dict from load_config(), never disk.
-    """
+    """Remove owner-only PER-PLUGIN media values from *cfg* in place."""
     from localm.settings_schema import MEDIA_PLUGIN_FIELDS
     plugins = cfg.get("plugins")
     if not isinstance(plugins, dict):
@@ -111,14 +101,7 @@ def register(app: FastAPI, ctx) -> None:
     @app.get("/v1/config/schema",
              dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
     async def get_config_schema(request: Request):
-        """The typed settings schema (widget/label/help/group/owner/options/
-        min/max) with each non-secret field's CURRENT value injected as its
-        `default`, so the GUI can render the right control pre-filled. Secret
-        fields never carry a value (schema_json omits secret defaults).
-
-        Owner-only fields (admin_only) are omitted for a non-owner caller so the
-        GUI never renders a control they cannot use; the write is refused
-        server-side regardless (see patch_config)."""
+        """The typed settings schema (widget/label/help/group/owner/options/ min/max) with each non-secret field's CURRENT value injected as its `default`, so the GUI can render the right control pre-filled."""
         from localm.config import load_config
         from localm.settings_schema import schema_json
         held = _hs.caller_scopes(request)
@@ -127,11 +110,7 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.patch("/v1/config", dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
     async def patch_config(body: dict, request: Request):
-        """Update known config keys and persist. Unknown keys are rejected.
-
-        The read-only extras the GET handler injects (effective_mode etc.) are
-        dropped first, so a client that round-trips the whole config object is
-        not rejected for echoing back values it never edited."""
+        """Update known config keys and persist."""
         from localm.config import update_config
         from localm.settings_schema import (validate_update, admin_only_keys,
                                             engine_managed_keys)
@@ -271,15 +250,7 @@ def register(app: FastAPI, ctx) -> None:
     @app.get("/v1/media/config",
              dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
     async def get_media_config(request: Request):
-        """Per-plugin media (ComfyUI) config for image/music/video, each with its
-        editable fields and RESOLVED values (the per-plugin block value, else the
-        shared global comfy_* fallback). The GUI 'Media' section renders one
-        subsection per plugin so the three are configured independently.
-
-        REC-MEDIA-CMD: launch_cmd/api_url are admin_only (a shell command / a
-        render target), so their resolved value is OMITTED for a non-owner
-        config:read caller - mirrors the write-side owner gate below, and the
-        same admin_only_keys() treatment GET /v1/config gives the core schema."""
+        """Per-plugin media (ComfyUI) config for image/music/video, each with its editable fields and RESOLVED values (the per-plugin block value, else the shared global comfy_* fallback)."""
         from localm.config import load_config
         from localm.settings_schema import MEDIA_PLUGINS, media_schema_json
         cfg = load_config()
@@ -298,9 +269,7 @@ def register(app: FastAPI, ctx) -> None:
     @app.post("/v1/media/config/{name}",
               dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
     async def set_media_config(name: str, body: dict, request: Request):
-        """Save ONE media plugin's own config block, deep-merged so the other
-        fields and the other plugins are untouched. A blank field clears that
-        plugin's override (it falls back to the shared global default)."""
+        """Save ONE media plugin's own config block, deep-merged so the other fields and the other plugins are untouched."""
         from localm.config import load_config, update_config
         from localm.settings_schema import (MEDIA_PLUGINS, media_schema_json,
                                              validate_media_block)
@@ -375,11 +344,7 @@ def register(app: FastAPI, ctx) -> None:
     # ---------------------------------------------------------------- #
 
     def _tts_payload(request: Request) -> dict:
-        """Shared by GET and POST /v1/tts/config, so the same admin_only filter
-        (library/wasm_paths - REC-MEDIA-CMD's tts counterpart) applies to both
-        the plain read and whatever a write response echoes back: a non-owner
-        config:read/write caller must not learn the script/wasm path it is not
-        allowed to set either."""
+        """Shared by GET and POST /v1/tts/config, so the same admin_only filter (library/wasm_paths - REC-MEDIA-CMD's tts counterpart) applies to both the plain read and whatever a write response echoes back: a non-owner config:read/write caller must not learn the script/wasm path it is not allowed to set eith..."""
         from localm.config import load_config
         from localm.settings_schema import TTS_PLUGIN, tts_schema_json
         cfg = load_config()
@@ -402,20 +367,13 @@ def register(app: FastAPI, ctx) -> None:
     @app.get("/v1/tts/config",
              dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
     async def get_tts_config(request: Request):
-        """The tts plugin's editable settings with their RESOLVED values (the
-        user's override, else the shipped template default).
-
-        This is the SETTINGS surface. The plugin's own /api/tts/config is the
-        resolved runtime config the browser loads; this one carries the field
-        metadata (widget/label/help/options) the GUI renders and edits."""
+        """The tts plugin's editable settings with their RESOLVED values (the user's override, else the shipped template default)."""
         return _tts_payload(request)
 
     @app.post("/v1/tts/config",
               dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
     async def set_tts_config(body: dict, request: Request):
-        """Save the tts plugin's own config block, merged key by key so
-        unlisted keys are untouched. A blank field clears that override (back to
-        the shipped template default)."""
+        """Save the tts plugin's own config block, merged key by key so unlisted keys are untouched."""
         from localm.config import update_config
         from localm.settings_schema import (TTS_PLUGIN, tts_admin_only_fields,
                                             validate_tts_block)
@@ -466,16 +424,7 @@ def register(app: FastAPI, ctx) -> None:
     @app.get("/v1/plugins/settings",
              dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
     async def get_plugin_settings(request: Request):
-        """Settings sections any ACTIVE plugin contributed via host.add_settings(),
-        each with its RESOLVED values (the plugin's own config["plugins"][name]
-        block, else the field's own declared default) - the generic counterpart
-        to the tts/media sections above, for a plugin the core has no bespoke
-        schema for (docs/plugin-interop.md's Open WebUI Valves interop seam).
-
-        Unlike GET /v1/tts/config, there is no per-plugin "not active" flag to
-        check here: an inactive plugin simply has no entry (its fields are not
-        known anywhere while it is unloaded), so the list is naturally just the
-        currently active sections."""
+        """Settings sections any ACTIVE plugin contributed via host.add_settings(), each with its RESOLVED values (the plugin's own config['plugins'][name] block, else the field's own declared default) - the generic counterpart to the tts/media sections above, for a plugin the core has no bespoke schema for (d..."""
         from localm.config import load_config
         from localm.settings_schema import plugin_settings_schema_json
         manager = getattr(request.app.state, "plugin_manager", None)
@@ -497,16 +446,7 @@ def register(app: FastAPI, ctx) -> None:
     @app.post("/v1/plugins/{name}/settings",
               dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
     async def set_plugin_settings(name: str, body: dict, request: Request):
-        """Save one plugin's add_settings() block, merged key by key so other
-        fields (and other plugins) are untouched. A blank field clears that
-        override back to the field's own declared default, same convention as
-        POST /v1/tts/config.
-
-        404s for a plugin with no active add_settings() fields: unlike the tts
-        block (a fixed schema known ahead of time, so it can be pre-configured
-        before the plugin is enabled), a dynamically-registered field list only
-        exists while the plugin is actually loaded - there is nothing to
-        validate against otherwise."""
+        """Save one plugin's add_settings() block, merged key by key so other fields (and other plugins) are untouched."""
         from localm.config import load_config, update_config
         from localm.settings_schema import (plugin_settings_admin_only_fields,
                                             plugin_settings_schema_json,
@@ -557,12 +497,7 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.get("/v1/comfy/status", dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
     async def get_comfy_status():
-        """Alive status of ComfyUI, and whether localm launched THIS one (so the
-        GUI can show Stop/Restart only for a ComfyUI it can actually control).
-        This is the "direct status request" trigger - always a real, uncached
-        ping - and it primes the readiness cache with the fresh result, so a
-        task submitted right after does not need to re-check (see
-        comfy_client's module docstring on the readiness cache)."""
+        """Alive status of ComfyUI, and whether localm launched THIS one (so the GUI can show Stop/Restart only for a ComfyUI it can actually control)."""
         # default_api_url is the current base-URL helper (the old _comfy_api_url
         # name no longer exists after the #292 shared-comfy-client refactor, so
         # importing it raised ImportError -> 500 on EVERY call) (NEW-COMFY-STATUS-IMPORT).
@@ -587,9 +522,7 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.post("/v1/comfy/stop", dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
     async def post_comfy_stop():
-        """Stop ComfyUI (NEW-STOPCOMFY): abort the in-flight render + clear the
-        queue + free VRAM, and terminate the process localm launched (a ComfyUI the
-        user started themselves is only aborted, never killed)."""
+        """Stop ComfyUI (NEW-STOPCOMFY): abort the in-flight render + clear the queue + free VRAM, and terminate the process localm launched (a ComfyUI the user started themselves is only aborted, never killed)."""
         from localm.media.comfy_client import stop_comfy
         try:
             ok, message = await run_in_threadpool_bounded(
@@ -600,8 +533,7 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.post("/v1/comfy/restart", dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
     async def post_comfy_restart():
-        """Restart the ComfyUI localm launched (NEW-STOPCOMFY): stop it, then
-        re-launch via the configured comfy_launch_cmd/comfy_workdir."""
+        """Restart the ComfyUI localm launched (NEW-STOPCOMFY): stop it, then re-launch via the configured comfy_launch_cmd/comfy_workdir."""
         from localm.config import load_config
         from localm.media.comfy_client import comfy_launch_wait_seconds, restart_comfy
         # restart_comfy() = stop_comfy() (bounded by _COMFY_STOP_TIMEOUT_S,

@@ -22,76 +22,26 @@ def _complete_model(ctx, param, incomplete):
 
 
 def _report_preload_failure(console, exc: Exception) -> None:
-    """The background model-preload thread's failure handler: notify the console
-    AND log it. ``console.print`` alone never reaches the debug log file (it is
-    not a logging call), so a preload failure with no other symptom - the user
-    never explicitly tries to chat - left NO trace a bug report could ever
-    surface, no matter how good the log-tail digest got. Log it too, with the
-    full traceback, so it is captured like any other failure (#617 follow-up)."""
+    """The background model-preload thread's failure handler: notify the console AND log it. ``console.print`` alone never reaches the debug log file (it is not a logging call), so a preload failure with no other symptom - the user never explicitly tries to chat - left NO trace a bug report could ever surf..."""
     console.print(f"[yellow]Background model load failed: {exc}[/yellow]")
     from localm.debuglog import logger
     logger.exception("background model preload failed")
 
 
 def _mdns_addresses(host: str):
-    """Which addresses mDNS should advertise for a bind on *host*, or None to let
-    ``netname.start_advertiser`` pick this machine's LAN IPv4 as before.
-
-    A WILDCARD bind answers on every interface, so the LAN IPv4 that
-    ``start_advertiser`` finds for itself is reachable and is the right advert -
-    including for ``::``, which localm binds dual-stack (see ``netlisten``), so an
-    IPv4 client resolving ``<name>.local`` genuinely connects.
-
-    A SPECIFIC literal answers on exactly one address, and advertising any other
-    one publishes a name that does not resolve to a listening socket. So that bind
-    advertises ITSELF. This is also what makes ``<name>.local`` usable on a
-    specific IPv6 bind, where the LAN IPv4 would be pure fiction."""
+    """Which addresses mDNS should advertise for a bind on *host*, or None to let ``netname.start_advertiser`` pick this machine's LAN IPv4 as before."""
     return None if is_wildcard_host(host) else [host]
 
 
 def _should_auto_open_browser(no_browser: bool) -> bool:
-    """Whether THIS process's own startup should auto-open a browser tab.
-
-    False whenever the caller passed --no-browser, and ALSO false when this
-    process was re-exec'd by a server restart: http_server._do_restart sets
-    LOCALM_RESTART_IN_PROGRESS right before os.execv, because the tab the user
-    is already looking at shows a reconnect overlay that polls and reloads
-    itself in place once this process is back up - opening a second tab here
-    would strand that overlay instead of reusing it. The flag is CONSUMED
-    (popped), not merely read, so it can never leak into a later, genuinely
-    fresh launch that happens to inherit this process's environment."""
+    """Whether THIS process's own startup should auto-open a browser tab."""
     import os
     is_restart = os.environ.pop("LOCALM_RESTART_IN_PROGRESS", None) is not None
     return (not no_browser) and (not is_restart)
 
 
 def _tray_callbacks(app, hs):
-    """Build the (on_restart, on_stop) callables for the tray control surface
-    (appface.start_app_face).
-
-    Returns LAZY closures over *app*, not functools.partial-bound values:
-    app.state.instance_id/instance_port are set by instances.advertise()
-    inside hs.run_advertised(), which is called just below this function's
-    own call site - AFTER the tray is wired, not before. A partial would
-    freeze instance_id/port at None (their state at wire time); these
-    closures read app.state at CALL time instead - by the time a user can
-    physically click Restart/Stop, run_advertised() has long since entered
-    advertise()'s context and populated both.
-
-    Bug this fixes (verified against real code, not a guess): appface
-    invokes on_restart/on_stop with NO arguments
-    (``threading.Thread(target=self.on_restart)``, appface.py), and both
-    hs._do_restart and hs._do_shutdown are keyword-only with None defaults.
-    Wiring the bare functions directly (the previous code) meant a tray
-    Restart/Stop always called disarm_crash_guard(instance_id=None), which
-    clears the LEGACY unscoped marker (bugreport.py's per-instance-scoping
-    fallback) and leaves this instance's real server-crash.<instance_id>.marker
-    still armed - so the NEXT start reports a crash that never happened. The
-    HTTP routes (routes/admin.py's restart/stop endpoints) already pass the
-    real instance_id and get this right; only the tray path was broken.
-    _do_restart losing its port the same way meant _restart_argv omitted
-    ``-p``, so a re-exec'd server could come back on a different port -
-    stranding the tray/GUI's own open window on a dead one."""
+    """Build the (on_restart, on_stop) callables for the tray control surface (appface.start_app_face)."""
     def on_restart():
         hs._do_restart(instance_id=getattr(app.state, "instance_id", None),
                        port=getattr(app.state, "instance_port", None))
@@ -103,12 +53,7 @@ def _tray_callbacks(app, hs):
 
 
 def _gui_bind_warning(host: str):
-    """Warning text when the GUI binds past loopback without auth, or None when
-    the bind is safe. Builds on the server's check, then escalates for the GUI:
-    it also exposes the coder agent (shell + file edits). Traffic itself is
-    encrypted by built-in TLS on a network bind (NET-1); the warning is about the
-    coder agent's reach, not about cleartext.
-    """
+    """Warning text when the GUI binds past loopback without auth, or None when the bind is safe."""
     from localm.cli import _exposed_bind_warning
     base = _exposed_bind_warning(host)
     if base is None:
@@ -121,12 +66,7 @@ def _gui_bind_warning(host: str):
 
 
 def _mount_remote_gui(entry: dict) -> bool:
-    """Ask a running ``api``-mode instance to mount its GUI surface on demand
-    (H6 phase 5). POSTs to its loopback ``/v1/surfaces/gui`` with the instance's
-    own registry attach token (a local same-user secret). Returns True on
-    success, False on any failure - an older instance without the endpoint, a
-    missing token, or a network error - so the caller can fall back to just
-    opening the address."""
+    """Ask a running ``api``-mode instance to mount its GUI surface on demand (H6 phase 5)."""
     import requests
     scheme = entry.get("scheme") or "http"
     port = entry.get("port")
@@ -153,13 +93,7 @@ def _mount_remote_gui(entry: dict) -> bool:
 
 
 def _print_qr(url: str) -> None:
-    """[PoC] Print a scannable QR of *url* to the console so a phone can open
-    localm without typing the address. Experimental; 'qrcode' is a core
-    dependency, so this needs no separate install. Best-effort and fully
-    guarded: an unexpectedly missing dep (a broken/partial install) or a
-    console that cannot render block glyphs degrades to a hint and NEVER
-    breaks GUI startup. If it does not scan, your terminal's colours may be
-    inverted - try a light-background terminal."""
+    """[PoC] Print a scannable QR of *url* to the console so a phone can open localm without typing the address."""
     import io
     import sys
 
@@ -212,9 +146,7 @@ _ATTACH_CONFLICT_FLAGS = {
 
 
 def _explicit(ctx, name: str) -> bool:
-    """True when *name* came from the command line (not its default). Lets us tell
-    an explicit `--port 8794` apart from the unset default so we only object to
-    flags the user actually typed."""
+    """True when *name* came from the command line (not its default)."""
     from click.core import ParameterSource
     try:
         return ctx.get_parameter_source(name) == ParameterSource.COMMANDLINE
@@ -223,10 +155,7 @@ def _explicit(ctx, name: str) -> bool:
 
 
 def _probe_active_model(existing: dict):
-    """The running instance's active model id, or None when it cannot be read
-    (unreachable / a chat-scoped attach token that cannot GET /v1/models). Used to
-    decide whether an explicitly-named `localm gui MODEL` conflicts with what the
-    running server actually serves."""
+    """The running instance's active model id, or None when it cannot be read (unreachable / a chat-scoped attach token that cannot GET /v1/models)."""
     try:
         from localm.inference.http_engine import remote_model_status
         scheme = existing.get("scheme") or "http"
@@ -239,10 +168,7 @@ def _probe_active_model(existing: dict):
 
 
 def _attach_conflicts(ctx, existing: dict, model: str) -> list:
-    """Command-line options the user passed that an attach to *existing* cannot
-    honor - each a reason NOT to silently attach. Returns human-readable strings
-    (empty list = attaching is fine). port/host/model are value-aware so re-passing
-    what the running server already uses is NOT a conflict."""
+    """Command-line options the user passed that an attach to *existing* cannot honor - each a reason NOT to silently attach."""
     conflicts: list = []
     # port / host: conflict only if the requested value DIFFERS from the running
     # instance's - asking for the port it is already on is harmless.
@@ -345,18 +271,7 @@ def _attach_conflicts(ctx, existing: dict, model: str) -> list:
 def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, debug,
          mode, keep_diagnostics, insecure, no_tls, tls_cert, tls_key, show_qr,
          project, force_new, isolated, api_mode, mmproj, device):
-    """Open the localm web GUI - chat and the coder agent in your browser.
-
-    \b
-    MODEL is optional; defaults to the first registered model. With no model
-    registered at all (or with --no-model), the GUI still opens so you can add
-    or switch models from the Models page (or pass --pull SPEC to start a
-    download immediately):
-      localm gui
-      localm gui gemma4-4b
-      localm gui --no-model
-      localm gui --pull bartowski/Qwen2.5-7B-Instruct-GGUF:Qwen2.5-7B-Instruct-Q4_K_M.gguf
-    """
+    """Open the localm web GUI - chat and the coder agent in your browser."""
     from localm.console import console, show_url
 
     # A click into this console window must not freeze the server
@@ -778,10 +693,7 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     app = hs.create_app(engine)
 
     async def switch_model(name: str) -> dict:
-        """Swap engines, PREEMPTING any in-flight load so the latest selection
-        wins immediately instead of waiting for an abandoned model to finish
-        loading (see http_server.switch_engine). Serialised on the inference
-        semaphore so no generation is mid-flight."""
+        """Swap engines, PREEMPTING any in-flight load so the latest selection wins immediately instead of waiting for an abandoned model to finish loading (see http_server.switch_engine)."""
         return await hs.switch_engine(name, _make_engine)
 
     manager = None
@@ -937,15 +849,7 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
                   soft_wrap=True)
 
     def _open_when_ready(url: str, port: int, timeout: float = 20.0) -> None:
-        """Open the browser tab only once the server actually ACCEPTS a
-        connection, so a fresh launch never lands the user on the "Can't
-        reach the server / reconnecting" overlay because the tab beat the
-        listener (the cold-start race). Polls the loopback port; opens
-        anyway after *timeout* as a fallback. Only ever used when a native
-        window will NOT be used this run (see want_native below) - when it
-        will, the equivalent poll-then-open happens inline further down,
-        because opening the native window has to block THIS process's own
-        main thread, not a background one."""
+        """Open the browser tab only once the server actually ACCEPTS a connection, so a fresh launch never lands the user on the 'Can't reach the server / reconnecting' overlay because the tab beat the listener (the cold-start race)."""
         import socket
         import time as _time
         deadline = _time.monotonic() + timeout

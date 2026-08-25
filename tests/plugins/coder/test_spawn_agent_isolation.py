@@ -1,31 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""spawn_agent: serialised like the destructive tool it is, and confined like its
-parent.
-
-Two independent holes, both fixed in the same pass (work item A1):
-
-1. The spawn_agent ToolDef carried no ``destructive=True``, so ``_execute_tools``
-   batched consecutive spawn_agent calls into a ThreadPoolExecutor. Two spawns in
-   ONE model turn therefore ran children CONCURRENTLY in the SAME cwd, breaking
-   the invariant ``_execute_tools``' own docstring states ("destructive calls are
-   always run alone, in order, to avoid unintended interactions"). Worse, the
-   batch carries a 120s deadline whose pool is abandoned with
-   ``shutdown(wait=False)``: a timed-out child kept writing to the tree while
-   ``_absorb_child_state`` mutated the parent's state.
-
-2. The child Agent was built with the parent's auto_approve / dry_run /
-   always_confirm / confirm_handler / mode / restricted / disabled_tools, but NOT
-   its ``scope``. ``scope`` and ``restricted`` are independent request fields and
-   spawn_agent is only disabled for a RESTRICTED session, so an owner working
-   under ``--scope`` spawned a child with no path confinement at all.
-
-The concurrency tests drive the REAL ``_execute_tools`` and detect overlap with a
-``threading.Barrier``: if the two calls run in parallel both reach the barrier and
-it releases; if they run serially the first waits out its timeout and breaks it.
-``test_two_read_file_calls_DO_run_concurrently`` is the control that proves the
-detector can actually see concurrency, so a passing serialisation test means
-something.
-"""
+"""spawn_agent: serialised like the destructive tool it is, and confined like its parent."""
 
 from __future__ import annotations
 
@@ -50,8 +24,7 @@ def _call(name: str, **args) -> ToolCall:
 
 
 def _overlap_count(agent: Agent, calls: list[ToolCall], timeout: float = 0.75) -> int:
-    """Run *calls* through the real _execute_tools and return how many of them were
-    inside _execute_tool at the same moment. 0 == they were serialised."""
+    """Run *calls* through the real _execute_tools and return how many of them were inside _execute_tool at the same moment. 0 == they were serialised."""
     barrier = threading.Barrier(len(calls))
     overlapped: list[str] = []
 
@@ -88,16 +61,14 @@ class TestSpawnAgentIsSerialised:
         assert _overlap_count(agent, calls) == 0
 
     def test_two_read_file_calls_DO_run_concurrently(self, tmp_path):
-        """Control: the detector CAN see concurrency, so the assertions above are
-        evidence and not an artefact of a barrier that never releases."""
+        """Control: the detector CAN see concurrency, so the assertions above are evidence and not an artefact of a barrier that never releases."""
         agent = Agent(_StubBackend(), cwd=tmp_path)
         calls = [_call("read_file", path="a"), _call("read_file", path="b")]
         assert _overlap_count(agent, calls) == 2
 
 
 def _spawn_and_capture_child(tmp_path, **parent_kwargs) -> Agent:
-    """Spawn a real child via tool_spawn_agent, short-circuiting run_task so no LLM
-    call is needed, and return the constructed child for direct inspection."""
+    """Spawn a real child via tool_spawn_agent, short-circuiting run_task so no LLM call is needed, and return the constructed child for direct inspection."""
     parent = Agent(_StubBackend(), cwd=tmp_path, **parent_kwargs)
     captured = {}
 
@@ -117,8 +88,7 @@ class TestSpawnAgentInheritsScope:
         assert child.scope == "src/**"
 
     def test_child_rejects_a_path_outside_the_parent_scope(self, tmp_path):
-        """End to end through the child's own dispatch path, not just the kwarg:
-        a scoped parent must not be able to delegate its way out of the scope."""
+        """End to end through the child's own dispatch path, not just the kwarg: a scoped parent must not be able to delegate its way out of the scope."""
         child = _spawn_and_capture_child(tmp_path, scope="src/**")
         res = child._execute_tool(
             _call("write_file", path="secrets.txt", content="x"), interactive=False)

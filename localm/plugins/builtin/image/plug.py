@@ -1,24 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Image plugin: ComfyUI image generation + a gallery for the chat surface.
-
-Routes (mounted by the engine, auto-scoped to the ``image`` capability):
-  POST   /api/imagine                       - generate an image (background job)
-  GET    /api/imagine/history               - generated images, newest first
-  GET    /api/imagine/file/{name}           - serve a generated image
-  DELETE /api/imagine/file/{name}           - delete an image (+ sidecar)
-  POST   /api/imagine/file/{name}/move      - move an image to a folder
-  POST   /api/imagine/file/{name}/rename    - rename an image in place
-
-Generation runs as a background job streamed through the kernel's /api/jobs/*
-SSE endpoint. It no longer requires the GUI: since ADR-0008 the job registry is
-created by ``attach_engine``, so a headless ``localm serve`` can generate too.
-The one thing it still needs is this server's OWN address, for the chat/media
-VRAM handover; ``resolve_self_url`` derives that from the advertised bind
-coordinates when the GUI never published ``.self_url``, and the generate route
-503s with that specific reason if it genuinely cannot be determined. The backend
-is selected per-plugin (default ComfyUI) and reads this plugin's own config -
-see backend.py. Ships DISABLED by default.
-"""
+"""Image plugin: ComfyUI image generation + a gallery for the chat surface."""
 
 from __future__ import annotations
 
@@ -76,13 +57,7 @@ def _image_path(name: str) -> Path:
 
 
 def _validate_lora_name(raw: str) -> str:
-    """HTTP-layer wrapper over ``comfy.is_safe_lora_name`` - a 400 up front,
-    before this route's VRAM-swap/background-job dance ever starts, rather
-    than a job that fails partway through with the same message. That shared
-    predicate (not a route-local copy) is also enforced again inside
-    ``_build_image_workflow`` itself, so the coder agent's ``generate_image``
-    tool and any other caller that reaches ``comfy.generate_image`` directly -
-    bypassing this route entirely - cannot skip the check either."""
+    """HTTP-layer wrapper over ``comfy.is_safe_lora_name`` - a 400 up front, before this route's VRAM-swap/background-job dance ever starts, rather than a job that fails partway through with the same message."""
     name = raw.strip()
     if not is_safe_lora_name(name):
         raise HTTPException(400, "Invalid LoRA name")
@@ -251,12 +226,7 @@ async def imagine_delete(name: str):
 @_router.post("/api/imagine/file/{name}/move",
               dependencies=[Depends(gallery.require_owner("image"))])
 async def imagine_move(name: str, req: MoveFileRequest, request: Request):
-    """Move a generated image (and its metadata sidecar) to a folder on this
-    machine - e.g. into a project or pictures directory.
-
-    The destination is checked BEFORE the mkdir: require_owner proves artifact
-    ownership, not authority over the host filesystem, so without this a
-    media-scoped key had a create-directory-anywhere primitive."""
+    """Move a generated image (and its metadata sidecar) to a folder on this machine - e.g. into a project or pictures directory."""
     path = _image_path(name)
     dest_dir = media_paths.confined_move_dest(request, req.dest)
     try:
@@ -299,9 +269,7 @@ async def imagine_rename(name: str, req: RenameFileRequest):
 
 @_router.get("/api/imagine/history")
 async def imagine_history(request: Request):
-    """Generated images, newest first, with their sidecar metadata - filtered to
-    the caller's own (an admin/owner sees all; unowned/legacy entries stay
-    visible to everyone, matching gallery.require_owner)."""
+    """Generated images, newest first, with their sidecar metadata - filtered to the caller's own (an admin/owner sees all; unowned/legacy entries stay visible to everyone, matching gallery.require_owner)."""
     images_dir = _images_dir()
     items = []
     if images_dir.is_dir():
@@ -323,41 +291,7 @@ async def imagine_history(request: Request):
 
 @_router.get("/api/imagine/comfy-models")
 async def imagine_comfy_models(request: Request):
-    """Model-file slots the active image workflow exposes (for the Workflow
-    panel's model-picker dropdowns), plus the LoRA files ComfyUI currently has
-    installed (for the generation form's LoRA picker), resolved against the
-    live ComfyUI. Honest about unreachability (rule 5) - never a
-    silently-empty picker.
-
-    LoRAs are enumerated separately from ``slots``: a LoraLoader node is not
-    normally present in the active workflow JSON (the plugin injects one at
-    generation time only when a LoRA is requested - see comfy.py's
-    ``_build_image_workflow``), so the ``workflow_model_slots`` node walk that
-    builds ``slots`` would never surface it.
-
-    Each slot also carries the localm ``model_type`` its loader node holds, the
-    declared role it fills (``role_id``/``role_label`` from
-    ``host.register_model_role``), and ``installed`` - decided by the SAME rule
-    preflight uses to call a model missing, so the picker cannot call a slot fine
-    that generation then refuses. ``roles`` reports every declared role including
-    ones this workflow has no slot for, and ``registry_models`` lists this box's
-    own registered component models by type. Both are answered from the registry,
-    so they are returned even when ComfyUI is unreachable - "we could not ask
-    ComfyUI" is a different answer from "you have nothing" (rule 5), and the
-    panel is no longer a dead end when ComfyUI is down.
-
-    The slot/LoRA resolution is a blocking urlopen of ComfyUI's /object_info
-    (commonly several MB, 10s timeout), so it runs OFF the event loop - inline
-    it froze the whole server, and every concurrent chat stream and job SSE
-    with it, whenever ComfyUI was slow or cold (REG-638), the same way the
-    /comfy-launch route below already offloads its own slow call.
-
-    Bounded (follow-up to #1057) at a bit over comfy_object_info's own 10s
-    urlopen timeout, so this only ever fires for a call genuinely stuck
-    beyond that (a wedged native call, not ordinary slow-ComfyUI load). That
-    one budget now also covers the registry read the role join needs - a small
-    local JSON, well inside the ~10s of slack, and deliberately inside the SAME
-    offload so it cannot land back on the event loop."""
+    """Model-file slots the active image workflow exposes (for the Workflow panel's model-picker dropdowns), plus the LoRA files ComfyUI currently has installed (for the generation form's LoRA picker), resolved against the live ComfyUI."""
     from localm.config import load_config
     from localm.inference._threadpool_timeout import (
         ThreadCallTimeout, run_in_threadpool_bounded,
@@ -382,15 +316,7 @@ async def imagine_comfy_models(request: Request):
 
 @_router.post("/api/imagine/comfy-launch")
 async def imagine_comfy_launch():
-    """Start (or confirm) ComfyUI is up for the image plugin, without running a
-    generation - backs the Workflow panel's "Launch ComfyUI" button. Runs the
-    same ensure_available() path a real generation uses, off the event loop
-    since a cold ComfyUI start can take minutes.
-
-    Bounded (follow-up to #1057) at the SAME comfy_launch_timeout ensure_comfy
-    itself will honour (comfy_launch_wait_seconds), plus a buffer - not an
-    independent guess, or this could silently abort a launch that was still
-    legitimately progressing under a larger user-configured timeout."""
+    """Start (or confirm) ComfyUI is up for the image plugin, without running a generation - backs the Workflow panel's 'Launch ComfyUI' button."""
     from localm.config import load_config
     from localm.inference._threadpool_timeout import (
         ThreadCallTimeout, run_in_threadpool_bounded,

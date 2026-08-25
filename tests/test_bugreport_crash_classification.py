@@ -1,16 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""NEW-CRASH-NOTICE-USELESS (A): the crash report must classify HOW the
-previous run died from the evidence actually collected, instead of a blind
-hardcoded 3-way guess ("a native crash, an OS kill, or a force-closed
-window") that never said which, never named the model/operation in flight,
-and never pointed at the evidence.
-
-Real-world signature this targets (the 2026-07-26 incident quoted in the
-issue): the previous run's log stopped DEAD mid-word at "llama_co" during
-"llama_context: constructing llama_context", with faulthandler having
-captured no trace. That is the signature of a hard native crash during model
-load, not an unknowable "could be anything".
-"""
+"""NEW-CRASH-NOTICE-USELESS (A): the crash report must classify HOW the previous run died from the evidence actually collected, instead of a blind hardcoded 3-way guess ('a native crash, an OS kill, or a force-closed window') that never said which, never named the model/operation in flight, and never p..."""
 
 import json
 
@@ -45,10 +34,7 @@ class TestClassifyPriorDeath:
         assert "llama_context: constructing llama_context" in reason
 
     def test_truncated_line_that_is_not_a_native_op_does_not_claim_a_crash(self):
-        """A truncated tail alone proves nothing - only a truncation INSIDE a
-        recognizable native-operation line is evidence of a native crash.
-        Anything else (e.g. a cut-off HTTP access log line) must fall through
-        to the honest unknown-cause message, not a false-positive claim."""
+        """A truncated tail alone proves nothing - only a truncation INSIDE a recognizable native-operation line is evidence of a native crash."""
         summary, reason = bugreport._classify_prior_death(
             native_trace="",
             hang_trace="",
@@ -75,8 +61,7 @@ class TestClassifyPriorDeath:
         assert "OS kill" in reason and "force-closed" in reason
 
     def test_priority_order_native_trace_beats_truncation_beats_hang(self):
-        """All three signals present at once - the most direct evidence
-        (an actual captured trace) must win, not whichever check runs last."""
+        """All three signals present at once - the most direct evidence (an actual captured trace) must win, not whichever check runs last."""
         summary, _ = bugreport._classify_prior_death(
             native_trace="Fatal Python error: Segmentation fault\nthread info",
             hang_trace="some hang stack",
@@ -132,8 +117,7 @@ def _write_marker(run_dir, instance_id, pid):
 
 
 class TestEndToEndClassificationInReport:
-    """check_and_report_prior_crash must actually USE the classification, not
-    just have it available as dead code."""
+    """check_and_report_prior_crash must actually USE the classification, not just have it available as dead code."""
 
     def test_mid_native_op_cutoff_reaches_the_filed_report(self, tmp_path, monkeypatch):
         monkeypatch.setattr(instances, "pid_alive", lambda pid: False)

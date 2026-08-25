@@ -1,28 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""scripts/check_hygiene.py's PWA service-worker cache-derivation check (check 6).
-
-Formerly a bump gate: sw.js's CACHE constant was a hand-typed version string that had
-to be bumped whenever a cached asset changed, checked here by diffing the working tree
-against a baseline. That shipped stale three times undetected by human review before
-the gate existed, and the gate itself then produced a real merge conflict between any
-two concurrent GUI PRs (it went v88 -> v89 -> v90 -> v91 in one afternoon, and a
-fourth session spent two rebase rounds on that one line while its PR ran with NO CI at
-all - a conflicted PR gets no checks). See check_hygiene.py's own block comment above
-_SW_STATIC for the incident record.
-
-The fix moved the derivation out of git entirely: localm/plugins/gui/web.py's GET
-/sw.js route now computes CACHE fresh on every request from a content digest of the
-static assets being served (see tests/test_gui_sw_cache_route.py for that half). This
-file now covers what check_hygiene.py STILL enforces: SHELL precache coverage
-(unrelated to staleness - always mattered on its own) and that the CACHE placeholder
-line is still in the shape web.py's route expects to substitute into.
-
-These tests are written to survive MUTATION. Asserting `== []` on a clean tree proves
-nothing on its own - a gate hardwired to `return []` passes every such test. So every
-"clean" assertion here is paired with a positive control that must FAIL, and each
-silent-skip path (unparseable CACHE, unparseable SHELL, a moved sw.js) is asserted to
-be LOUD rather than merely absent. A gate that cannot fail is decoration.
-"""
+"""scripts/check_hygiene.py's PWA service-worker cache-derivation check (check 6)."""
 
 import importlib.util
 import os
@@ -63,7 +40,7 @@ def _git(tmp_path: Path, *args: str) -> None:
 
 
 def _init_fake_repo(tmp_path: Path) -> Path:
-    """A repo shaped like localm's static tree. Returns the static root."""
+    """A repo shaped like localm's static tree."""
     _git(tmp_path, "init", "-q")
     static = tmp_path / _STATIC
     (static / "pages").mkdir(parents=True)
@@ -83,8 +60,7 @@ def _init_fake_repo(tmp_path: Path) -> Path:
 # ---- the core contract: SHELL coverage + a parseable placeholder ----------------
 
 def test_no_change_is_clean(tmp_path, monkeypatch):
-    """Happy path: an untouched checkout passes. Paired with the positive controls
-    below, which prove this is a real [] and not a hardwired one."""
+    """Happy path: an untouched checkout passes."""
     ch = _load_check_hygiene()
     monkeypatch.setattr(ch, "REPO", tmp_path)
     _init_fake_repo(tmp_path)
@@ -92,10 +68,7 @@ def test_no_change_is_clean(tmp_path, monkeypatch):
 
 
 def test_asset_content_changing_alone_is_not_flagged(tmp_path, monkeypatch):
-    """The OLD gate would have demanded a CACHE bump here. The new mechanism computes
-    CACHE at request time in web.py (see test_gui_sw_cache_route.py) - a cached asset's
-    bytes changing is no longer this check's business at all, only SHELL coverage and
-    the placeholder shape are."""
+    """The OLD gate would have demanded a CACHE bump here."""
     ch = _load_check_hygiene()
     monkeypatch.setattr(ch, "REPO", tmp_path)
     static = _init_fake_repo(tmp_path)
@@ -107,10 +80,7 @@ def test_asset_content_changing_alone_is_not_flagged(tmp_path, monkeypatch):
 # ---- rule 5: a check that cannot run must say so, never pass silently -----------
 
 def test_unparseable_cache_constant_fails_loud(tmp_path, monkeypatch):
-    """A benign reformat (single quotes) must not silently disable this check forever -
-    and must be flagged for the RIGHT reason: web.py's route would fail to find the
-    line to substitute into, so every client would get a 500 instead of a service
-    worker. Regex-based parsers rot; the rot must be loud."""
+    """A benign reformat (single quotes) must not silently disable this check forever - and must be flagged for the RIGHT reason: web.py's route would fail to find the line to substitute into, so every client would get a 500 instead of a service worker."""
     ch = _load_check_hygiene()
     monkeypatch.setattr(ch, "REPO", tmp_path)
     static = _init_fake_repo(tmp_path)
@@ -126,8 +96,7 @@ def test_unparseable_cache_constant_fails_loud(tmp_path, monkeypatch):
 
 
 def test_unparseable_shell_array_fails_loud(tmp_path, monkeypatch):
-    """Same for SHELL: an empty parse means "I could not read it", never "nothing is
-    precached"."""
+    """Same for SHELL: an empty parse means 'I could not read it', never 'nothing is precached'."""
     ch = _load_check_hygiene()
     monkeypatch.setattr(ch, "REPO", tmp_path)
     static = _init_fake_repo(tmp_path)
@@ -147,9 +116,7 @@ def test_unparseable_shell_array_fails_loud(tmp_path, monkeypatch):
 
 
 def test_moved_sw_js_fails_loud(tmp_path, monkeypatch):
-    """If sw.js moves, the check (and web.py's route) are pointed at nothing. That
-    must be loud - the static tree still shipping assets is the tell that this is a
-    move, not a GUI-less checkout."""
+    """If sw.js moves, the check (and web.py's route) are pointed at nothing."""
     ch = _load_check_hygiene()
     monkeypatch.setattr(ch, "REPO", tmp_path)
     static = _init_fake_repo(tmp_path)
@@ -162,8 +129,7 @@ def test_moved_sw_js_fails_loud(tmp_path, monkeypatch):
 
 
 def test_absent_static_tree_is_silent(tmp_path, monkeypatch):
-    """The genuinely benign case: no GUI service worker and no assets at all means
-    there is nothing to check. Distinguishing this from the move above is the point."""
+    """The genuinely benign case: no GUI service worker and no assets at all means there is nothing to check."""
     ch = _load_check_hygiene()
     monkeypatch.setattr(ch, "REPO", tmp_path)
     _git(tmp_path, "init", "-q")
@@ -177,8 +143,7 @@ def test_absent_static_tree_is_silent(tmp_path, monkeypatch):
 # ---- SHELL coverage: the precache list must match what ships --------------------
 
 def test_shell_entry_with_no_file_behind_it_is_flagged(tmp_path, monkeypatch):
-    """install() drops a missing precache entry silently (Promise.allSettled), so a
-    typo'd SHELL path is invisible at runtime. Catch it here instead."""
+    """install() drops a missing precache entry silently (Promise.allSettled), so a typo'd SHELL path is invisible at runtime."""
     ch = _load_check_hygiene()
     monkeypatch.setattr(ch, "REPO", tmp_path)
     static = _init_fake_repo(tmp_path)
@@ -193,9 +158,7 @@ def test_shell_entry_with_no_file_behind_it_is_flagged(tmp_path, monkeypatch):
 
 
 def test_shell_module_missing_from_precache_is_flagged(tmp_path, monkeypatch):
-    """sw.js promises SHELL holds every app/* and pages/* module. A new page module
-    that nobody adds to SHELL is not precached (so the PWA cannot open it offline).
-    Enforce the promise rather than documenting it."""
+    """sw.js promises SHELL holds every app/* and pages/* module."""
     ch = _load_check_hygiene()
     monkeypatch.setattr(ch, "REPO", tmp_path)
     static = _init_fake_repo(tmp_path)
@@ -213,9 +176,7 @@ def test_shell_module_missing_from_precache_is_flagged(tmp_path, monkeypatch):
 # ---- the gate must be real against the REAL sw.js and really wired in -----------
 
 def test_real_sw_js_parses(monkeypatch):
-    """Pins the REAL sw.js's format. Without this, a reformat of the production file
-    would silently reduce this check to a no-op and NO test would notice - the
-    fixture above would keep passing forever."""
+    """Pins the REAL sw.js's format."""
     ch = _load_check_hygiene()
     sw_text = (REPO_ROOT / ch._SW_JS).read_text(encoding="utf-8")
 
@@ -229,8 +190,7 @@ def test_real_sw_js_parses(monkeypatch):
 
 
 def test_real_repo_is_clean_under_the_gate():
-    """The happy path on the real checkout: `python scripts/check_hygiene.py` must
-    still pass. Guards against the coverage checks false-positiving on production."""
+    """The happy path on the real checkout: `python scripts/check_hygiene.py` must still pass."""
     ch = _load_check_hygiene()
     sw_text = (REPO_ROOT / ch._SW_JS).read_text(encoding="utf-8")
     shell = ch._sw_shell_files(sw_text)
@@ -241,9 +201,7 @@ def test_real_repo_is_clean_under_the_gate():
 
 
 def test_gate_is_wired_into_main(tmp_path, monkeypatch, capsys):
-    """The check must actually be CALLED by main(), and its findings must make the
-    process exit non-zero. A perfect check nobody runs is decoration; nothing else
-    here would catch it being dropped from main()."""
+    """The check must actually be CALLED by main(), and its findings must make the process exit non-zero."""
     ch = _load_check_hygiene()
     monkeypatch.setattr(ch, "REPO", tmp_path)
     static = _init_fake_repo(tmp_path)

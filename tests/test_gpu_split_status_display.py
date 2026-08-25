@@ -1,17 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The applied GPU-split status display (maintainer follow-up to the auto-split
-feature #772): the split distribution actually applied to the loaded model -
-auto free-VRAM-proportional, pinned, or the equal fallback - was visible only
-in the INFO log / bug-report ring buffer. It is now recorded parent-side at
-load time (GgufBackend.applied_gpu_split), exposed on GET /api/models as
-``active_gpu_split`` for the ACTIVE model, and rendered in the sidebar's
-loaded-model status (tests-js/model-split-line.test.mjs).
-
-The recording mirrors the exact resolution the worker's apply_gpu_split will
-perform (auto override when computed, else the config ratios, else equal -
-through the same resolve_gpu_split validation), normalized to shares summing
-1.0. GGUF-backend only: the HF backend's device_map="auto" placement is
-torch-internal and not recorded (the route simply omits the key)."""
+"""The applied GPU-split status display (maintainer follow-up to the auto-split feature #772): the split distribution actually applied to the loaded model - auto free-VRAM-proportional, pinned, or the equal fallback - was visible only in the INFO log / bug-report ring buffer."""
 
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -28,8 +16,7 @@ GB = 1024 ** 3
 
 @pytest.fixture
 def gui_app():
-    """Minimal attach_gui harness, mirroring tests/test_gui.py's gui_app
-    (module-local there, so replicated rather than imported)."""
+    """Minimal attach_gui harness, mirroring tests/test_gui.py's gui_app (module-local there, so replicated rather than imported)."""
     app = FastAPI()
 
     async def switch_model(name):
@@ -108,10 +95,7 @@ class TestBackendRecordsAppliedSplit:
         assert shares == [pytest.approx(0.75), pytest.approx(0.25)]
 
     def test_equal_fallback_recorded(self, tmp_path, monkeypatch):
-        """Auto declined (unmeasurable) with no pinned ratios: the loader
-        applies the equal split, and the display must say so rather than
-        showing nothing - the user configured a split and deserves to see
-        what it actually did."""
+        """Auto declined (unmeasurable) with no pinned ratios: the loader applies the equal split, and the display must say so rather than showing nothing - the user configured a split and deserves to see what it actually did."""
         self._cfg(monkeypatch, indices=[0, 1])
         monkeypatch.setattr(discover, "resolve_auto_split_ratios",
                             lambda *a, **k: None)
@@ -130,9 +114,7 @@ class TestBackendRecordsAppliedSplit:
         assert b.applied_gpu_split is None
 
     def test_degraded_split_records_none(self, tmp_path, monkeypatch):
-        """A split that resolve_gpu_split collapses (stale index, single
-        survivor) applies NO split at load - recording one would display a
-        distribution that does not exist."""
+        """A split that resolve_gpu_split collapses (stale index, single survivor) applies NO split at load - recording one would display a distribution that does not exist."""
         self._cfg(monkeypatch, indices=[0, 5])
         monkeypatch.setattr(discover, "resolve_auto_split_ratios",
                             lambda *a, **k: None)
@@ -142,10 +124,7 @@ class TestBackendRecordsAppliedSplit:
 
 
 class TestModelsRouteExposesActiveSplit:
-    """GET /api/models carries active_gpu_split for the ACTIVE model's engine
-    (absent when there is no split, no backend recording, or no active
-    model) - the sidebar's 30s model refresh is the natural carrier, no new
-    endpoint or poll."""
+    """GET /api/models carries active_gpu_split for the ACTIVE model's engine (absent when there is no split, no backend recording, or no active model) - the sidebar's 30s model refresh is the natural carrier, no new endpoint or poll."""
 
     def _client(self, gui_app, monkeypatch, split):
         import localm.inference.http_server as hs

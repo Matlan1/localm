@@ -1,19 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""BUG-2: a large GGUF that fills VRAM must keep generating, not crash.
-
-A model whose weights nearly fill the card was loaded with its KV cache in VRAM,
-leaving no room for the first decode's compute buffers; on the Vulkan backend that
-faults with a native C++ crash (0xe06d7363) instead of spilling to RAM (as ROCm
-does). Root cause: a file-size KV heuristic under-counted the real KV cache ~2.6x,
-so the load "fit" per the estimate yet overflowed VRAM for real.
-
-These tests cover the fix, WITHOUT the native DLL (the api module / metadata are
-mocked): the architecture-accurate per-token KV size, the load-time offload_kqv
-decision (keep KV in system RAM when it will not fit alongside compute), that the
-placement is sticky across a grow, and that the grow check now reasons with the
-accurate size. The real-runtime symbol export + real generation are covered by the
-@integration tests at the bottom and by the on-hardware Vulkan run.
-"""
+"""BUG-2: a large GGUF that fills VRAM must keep generating, not crash."""
 
 from __future__ import annotations
 
@@ -84,10 +70,7 @@ def _bare_model(n_layers=32, model_ptr=111) -> LlamaCpp:
 
 def _fake_api(*, has=True, n_embd=4096, n_head=32, n_head_kv=8,
               has_hybrid=True, hybrid=False, recurrent=False):
-    """A UNIFORM stack by default. hybrid/recurrent must be set explicitly, and
-    must never be left to MagicMock's auto-attribute: a bare MagicMock returns a
-    truthy Mock for llama_model_is_hybrid(), which would make every test here
-    silently exercise the hybrid refusal path instead of the formula."""
+    """A UNIFORM stack by default. hybrid/recurrent must be set explicitly, and must never be left to MagicMock's auto-attribute: a bare MagicMock returns a truthy Mock for llama_model_is_hybrid(), which would make every test here silently exercise the hybrid refusal path instead of the formula."""
     m = MagicMock()
     m.has_kv_head_api.return_value = has
     m.has_hybrid_api.return_value = has_hybrid
@@ -149,10 +132,7 @@ class TestReadKvBytesPerToken:
 # --------------------------------------------------------------------------- #
 
 class TestForceVulkanDedicatedVram:
-    """On a Windows Vulkan build, load_lib sets GGML_VK_DISABLE_HOST_VISIBLE_VIDMEM
-    so ggml-vulkan keeps model weights in DEDICATED VRAM - WDDM otherwise backs the
-    host-visible allocation with shared system RAM (~13x slower). Respect an explicit
-    user value; do nothing on non-Windows or a non-Vulkan build."""
+    """On a Windows Vulkan build, load_lib sets GGML_VK_DISABLE_HOST_VISIBLE_VIDMEM so ggml-vulkan keeps model weights in DEDICATED VRAM - WDDM otherwise backs the host-visible allocation with shared system RAM (~13x slower)."""
 
     def _run(self, tmp_path, monkeypatch, *, platform, files, preset=None):
         from localm.inference.backends.llamacpp import _loader
@@ -180,18 +160,7 @@ class TestForceVulkanDedicatedVram:
     @pytest.mark.parametrize("preset", ["0", "false", "FALSE", "off", "no", "", " 0 "])
     def test_optout_unsets_the_var_because_ggml_switches_on_presence(
             self, tmp_path, monkeypatch, preset):
-        """An opt-out must reach GGML, not merely survive in os.environ.
-
-        This assertion used to be `== "0"`, which is a true statement about
-        Python and disconnected from the effect. ggml reads
-        `getenv(...) != nullptr`, so "0" disables host-visible vidmem exactly as
-        "1" does - the UMA/iGPU user this opt-out exists for got the OPPOSITE of
-        what they asked for, and the old test could never have failed on it
-        because it stopped at the Python boundary.
-
-        ABSENCE is therefore the property, and it is the only value of this
-        variable that ggml reads as "off".
-        """
+        """An opt-out must reach GGML, not merely survive in os.environ."""
         assert self._run(tmp_path, monkeypatch, platform="win32",
                          files=["llama.dll", "ggml-vulkan.dll"],
                          preset=preset) is None
@@ -199,9 +168,7 @@ class TestForceVulkanDedicatedVram:
     @pytest.mark.parametrize("preset", ["1", "2", "yes", "true"])
     def test_an_explicit_non_falsey_value_is_left_exactly_as_set(
             self, tmp_path, monkeypatch, preset):
-        """The fix must not become "always unset when the user set anything".
-        A user who set the var to enable the guard keeps their own value
-        verbatim - we neither overwrite it with "1" nor remove it."""
+        """The fix must not become 'always unset when the user set anything'."""
         assert self._run(tmp_path, monkeypatch, platform="win32",
                          files=["llama.dll", "ggml-vulkan.dll"],
                          preset=preset) == preset
@@ -235,10 +202,7 @@ def _gguf_backend(tmp_path, size_bytes, n_ctx=4096, n_gpu_layers=99):
 
 
 class TestGrowCheckUsesAccurateKv:
-    """The accurate per-token KV (LlamaCpp.kv_bytes_per_token) must OVERRIDE the
-    file-size heuristic in _check_context_fit, so a KV cache that really would
-    overflow VRAM is placed in system RAM (False) even when the under-counting
-    heuristic would have called it a fit (True)."""
+    """The accurate per-token KV (LlamaCpp.kv_bytes_per_token) must OVERRIDE the file-size heuristic in _check_context_fit, so a KV cache that really would overflow VRAM is placed in system RAM (False) even when the under-counting heuristic would have called it a fit (True)."""
 
     def test_accurate_kv_flips_a_heuristic_fit_to_ram(self, tmp_path):
         # 9 GB model -> heuristic per_token 90_000; delta(4096->8192)=~369 MB.
@@ -266,12 +230,7 @@ class TestGrowCheckUsesAccurateKv:
 
 
 class TestRamResidentKvChargesFullTarget:
-    """Once a prior grow placed the KV cache in SYSTEM RAM (offload_kqv=False), the
-    GPU holds no KV, so free VRAM reads large. The delta-only charge then wrongly
-    says a further grow 'fits VRAM', offload_kqv flips back to True, and the FULL
-    target KV overflows VRAM -> llama_init_from_model NULLs -> _prefill_fresh_context
-    raises and truncates a reply that was generating fine (defeats #554). When the
-    resident KV is already in RAM, the FULL target must be charged, not the delta."""
+    """Once a prior grow placed the KV cache in SYSTEM RAM (offload_kqv=False), the GPU holds no KV, so free VRAM reads large."""
 
     def test_ram_resident_kv_charges_full_target_stays_ram(self, tmp_path):
         b = _gguf_backend(tmp_path, size_bytes=2_000_000_000, n_ctx=4096)
@@ -305,11 +264,7 @@ class TestRamResidentKvChargesFullTarget:
 
 
 class TestRamOffloadHintFiresOnce:
-    """The RAM-offload notice is documented (and #554's commit) as a 'one-time
-    hint', so a conversation that keeps growing past free VRAM must explain the
-    slowdown ONCE, not spam the debug log on every grow. A card-filling model with
-    the default grow step overflows on EVERY grow, so without a guard the warning
-    repeats indefinitely."""
+    """The RAM-offload notice is documented (and #554's commit) as a 'one-time hint', so a conversation that keeps growing past free VRAM must explain the slowdown ONCE, not spam the debug log on every grow."""
 
     def test_hint_fires_once_across_repeated_ram_grows(self, tmp_path, caplog):
         import logging
@@ -347,9 +302,7 @@ class TestRamOffloadHintFiresOnce:
 # --------------------------------------------------------------------------- #
 
 class TestGpuMemory:
-    """loader.gpu_memory() reads free VRAM from the ACTIVE ggml backend
-    (ggml_backend_dev_memory) - the runtime that allocates the model - so the
-    offload decision works without torch and matches the backend's own budget."""
+    """loader.gpu_memory() reads free VRAM from the ACTIVE ggml backend (ggml_backend_dev_memory) - the runtime that allocates the model - so the offload decision works without torch and matches the backend's own budget."""
 
     def test_none_when_lib_not_loaded(self, monkeypatch):
         from localm.inference.backends.llamacpp import _loader
@@ -378,15 +331,7 @@ class TestGpuMemory:
 
 
 class TestFreeVramBytesPrefersBackend:
-    """_free_vram_bytes()'s source-of-truth for the KV-placement decision this
-    file covers (BUG-2): torch.cuda is now ALWAYS preferred when it can answer,
-    and the direct native loader.gpu_memory() call is never made from here at
-    all (only its crash-safe, subprocess-isolated wrapper gpu_memory_isolated()
-    is used, as a fallback, when torch cannot answer) - see
-    tests/test_vram_preflight.py::TestFreeVramBytesUsesIsolatedNativeFallback
-    for the full behavior + the native-abort root cause this order is built
-    around. Updated from the original "prefers the native backend over torch"
-    expectation, which that fix intentionally reversed."""
+    """_free_vram_bytes()'s source-of-truth for the KV-placement decision this file covers (BUG-2): torch.cuda is now ALWAYS preferred when it can answer, and the direct native loader.gpu_memory() call is never made from here at all (only its crash-safe, subprocess-isolated wrapper gpu_memory_isolated() is..."""
 
     def test_prefers_torch_over_isolated_fallback(self, monkeypatch):
         from localm.inference.backends.llamacpp import _loader
@@ -428,10 +373,7 @@ class TestFreeVramBytesPrefersBackend:
 @pytest.mark.integration
 @pytest.mark.real_gguf
 def test_real_runtime_exports_kv_head_api():
-    """The bundled llama runtime (any provisioned backend: cpu/vulkan/amd-rocm)
-    must export llama_model_n_head + llama_model_n_head_kv, or the accurate KV
-    size silently falls back to the under-counting heuristic and the Vulkan crash
-    returns. Skips cleanly when the native runtime is not provisioned."""
+    """The bundled llama runtime (any provisioned backend: cpu/vulkan/amd-rocm) must export llama_model_n_head + llama_model_n_head_kv, or the accurate KV size silently falls back to the under-counting heuristic and the Vulkan crash returns."""
     try:
         from localm.inference.backends.llamacpp._loader import load_lib
         load_lib()
@@ -443,9 +385,7 @@ def test_real_runtime_exports_kv_head_api():
 @pytest.mark.integration
 @pytest.mark.real_gguf
 def test_real_runtime_gpu_memory_query(monkeypatch):
-    """On a GPU build, loader.gpu_memory() must return a plausible (free, total)
-    from the backend itself - the free-VRAM signal the offload decision relies on,
-    with no torch involved. Skips on a CPU-only build (no GPU device)."""
+    """On a GPU build, loader.gpu_memory() must return a plausible (free, total) from the backend itself - the free-VRAM signal the offload decision relies on, with no torch involved."""
     from localm.inference.backends.llamacpp import _loader
     try:
         _loader.load_lib()

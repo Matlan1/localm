@@ -1,15 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Refreshing stale installed builtin-plugin copies on upgrade.
-
-Enabling a first-party plugin copies it from the bundled store into the data
-dir. Before this, the copy was never refreshed: after a localm upgrade the
-installed copy kept SHADOWING the newer store source, so the user silently ran
-stale plugin code (including missing bug/security fixes). These tests cover the
-content-hash + provenance-marker refresh: a stale copy is re-synced, user config
-survives, an externally-installed plugin is never clobbered, and an up-to-date
-copy is left alone. They also pin the sys.modules submodule purge that lets a
-reload pick up freshly written code.
-"""
+"""Refreshing stale installed builtin-plugin copies on upgrade."""
 
 import textwrap
 
@@ -32,10 +22,7 @@ def env(tmp_path, monkeypatch):
 
 
 def _valued_plugin(root, name, value, *, with_backend=True):
-    """A minimal plugin whose GET /api/<name>/val returns *value*. When
-    *with_backend* the value comes from a sibling ``backend.py`` imported as
-    ``from . import backend`` - exercising the submodule import path that the
-    real image plugin uses (and that the original stale-shadow bug rode in on)."""
+    """A minimal plugin whose GET /api/<name>/val returns *value*."""
     pdir = root / name
     pdir.mkdir(parents=True, exist_ok=True)
     (pdir / "plugin.toml").write_text(
@@ -90,9 +77,7 @@ def _enable(name):
 # --------------------------------------------------------------------------- #
 
 def test_stale_builtin_refreshed_on_load(env):
-    """load_enabled re-copies an installed builtin whose store source changed,
-    and the LIVE route then serves the fresh code. Negative-testable: without
-    the refresh the stale v1 copy loads and /val returns 1."""
+    """load_enabled re-copies an installed builtin whose store source changed, and the LIVE route then serves the fresh code."""
     from localm.plugins.engine import (
         PluginManager, _dir_content_hash, _read_marker)
     store, inst = env / "store", env / "installed"
@@ -115,8 +100,7 @@ def test_stale_builtin_refreshed_on_load(env):
 
 
 def test_refresh_preserves_user_config(env):
-    """Per-plugin user config lives in config.json (NOT the plugin dir), so a
-    dir re-copy must leave it intact."""
+    """Per-plugin user config lives in config.json (NOT the plugin dir), so a dir re-copy must leave it intact."""
     from localm.config import load_config, save_config
     from localm.plugins.engine import PluginManager
     store, inst = env / "store", env / "installed"
@@ -152,9 +136,7 @@ def test_third_party_install_never_refreshed(env):
 
 
 def test_external_marker_blocks_refresh_even_for_store_name(env):
-    """Even when a store plugin of the SAME name exists, an installed copy that
-    declares external provenance is left untouched (defends a user who shadowed a
-    builtin name with their own plugin)."""
+    """Even when a store plugin of the SAME name exists, an installed copy that declares external provenance is left untouched (defends a user who shadowed a builtin name with their own plugin)."""
     from localm.plugins.engine import (
         PluginManager, _dir_content_hash, _write_marker)
     store, inst = env / "store", env / "installed"
@@ -186,8 +168,7 @@ def test_uptodate_builtin_not_recopied(env):
 
 
 def test_legacy_identical_copy_adopts_marker_without_recopy(env):
-    """A pre-feature install (no marker) that already matches the store adopts
-    the provenance marker WITHOUT a re-copy."""
+    """A pre-feature install (no marker) that already matches the store adopts the provenance marker WITHOUT a re-copy."""
     from localm.plugins.engine import PluginManager, _read_marker
     store, inst = env / "store", env / "installed"
     _valued_plugin(store, "leg1", 5)
@@ -205,10 +186,7 @@ def test_legacy_identical_copy_adopts_marker_without_recopy(env):
 # --------------------------------------------------------------------------- #
 
 def test_unload_purges_submodules_from_sys_modules(env):
-    """_unload must drop the WHOLE plugin namespace - the top-level module AND
-    its submodules (e.g. '<uniq>.backend'). The old code popped only the
-    top-level name, leaving a stale '.backend' cached that shadowed a later load
-    - the exact leak behind the original image-plugin failure."""
+    """_unload must drop the WHOLE plugin namespace - the top-level module AND its submodules (e.g. '<uniq>.backend')."""
     import sys
     from localm.plugins.engine import PluginManager
     store, inst = env / "store", env / "installed"
@@ -223,10 +201,7 @@ def test_unload_purges_submodules_from_sys_modules(env):
 
 
 def test_runtime_refresh_reloads_fresh_code(env):
-    """End-to-end runtime refresh: a newer store version is detected, the live
-    plugin is re-copied AND reloaded, and the route serves the new code. This
-    passes only because both the on-disk re-copy and the sys.modules submodule
-    purge work together (a stale cached '.backend' would otherwise shadow it)."""
+    """End-to-end runtime refresh: a newer store version is detected, the live plugin is re-copied AND reloaded, and the route serves the new code."""
     from localm.plugins.engine import PluginManager
     store, inst = env / "store", env / "installed"
     _valued_plugin(store, "rel2", 1)
@@ -249,8 +224,7 @@ def test_runtime_refresh_reloads_fresh_code(env):
 # --------------------------------------------------------------------------- #
 
 def test_refresh_endpoint_over_real_builtins(env, monkeypatch):
-    """The /api/plugins/{name}/refresh management route: a just-installed plugin
-    reports up-to-date; an unknown name 404s."""
+    """The /api/plugins/{name}/refresh management route: a just-installed plugin reports up-to-date; an unknown name 404s."""
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     from localm.plugins.engine import attach_engine
     app = FastAPI()

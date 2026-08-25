@@ -24,28 +24,17 @@ _DEVICE = r"\\.\PhysicalDrive0"
 
 
 def _is_unc_or_device(s: str) -> bool:
-    """Kept identical to pathsafe.is_unc_or_device_path's forbidden-prefix
-    check: judged by Windows rules on every host, not gated on os.name - the
-    client-supplied strings these guards cover (pull_model's `repo`,
-    run_coder_task's `cwd`, generate_image's `output_path`) are refused
-    unconditionally, unlike the local-path (`reject_unsafe_path_string`)
-    policy which only checks `//` on Windows."""
+    """Kept identical to pathsafe.is_unc_or_device_path's forbidden-prefix check: judged by Windows rules on every host, not gated on os.name - the client-supplied strings these guards cover (pull_model's `repo`, run_coder_task's `cwd`, generate_image's `output_path`) are refused unconditionally, unlike th..."""
     return s[:2] in ("\\\\", "//", "\\/", "/\\")
 
 
 def _unc_calls(seen) -> list:
-    """Filter, don't assert `seen == []`: an unrelated legitimate fs call on
-    an ordinary path (made elsewhere during setup or the handler's own logic)
-    must not fail a test whose claim is only about the malicious string."""
+    """Filter, don't assert `seen == []`: an unrelated legitimate fs call on an ordinary path (made elsewhere during setup or the handler's own logic) must not fail a test whose claim is only about the malicious string."""
     return [s for s in seen if _is_unc_or_device(s)]
 
 
 def _install_fs_spy(monkeypatch, method_name):
-    """Record every path string that reaches Path.<method_name>(), and
-    hard-fail the call when the string is UNC/device syntax. Same discipline
-    as test_admin_fs_routes.py's fs_spy: assert on the absence of the syscall,
-    not merely on the returned message, since the defect is the syscall (an
-    SMB dial that auto-authenticates), not the response body."""
+    """Record every path string that reaches Path.<method_name>(), and hard-fail the call when the string is UNC/device syntax."""
     seen: list = []
     real = getattr(Path, method_name)
 
@@ -141,15 +130,7 @@ def _sized(gb=4):
 
 
 def _no_vram_wait():
-    """
-    Neutralize the eviction path's before/after VRAM reading.
-
-    _vram_free_reading() calls discover.vram_capacity() too, so a test that
-    scripts the ADMIT probe (an iterator, or a raising side_effect) would
-    otherwise have that same double consumed/hit by the unload wait as well.
-    before=None makes wait_for_vram_release a documented no-op. The unload
-    wait's own honesty rules have dedicated tests above.
-    """
+    """Neutralize the eviction path's before/after VRAM reading."""
     return patch("localm.vram._vram_free_reading",
                  return_value=(None, False, None))
 
@@ -213,20 +194,14 @@ class TestProtocol:
 
 
 class TestToolAnnotations:
-    """MCP tool annotations (audit finding C). Confirmation for destructive
-    tools belongs at the CLIENT, so the server must DECLARE intent via the
-    standard MCP annotations (destructiveHint / readOnlyHint) in tools/list.
-    Without this, an MCP client has no signal that remove_model / uninstall_plugin
-    delete files."""
+    """MCP tool annotations (audit finding C)."""
 
     def _annotations_by_name(self, server):
         return {t["name"]: t.get("annotations")
                 for t in _req(server, "tools/list")["result"]["tools"]}
 
     def test_destructive_tools_declare_destructive_hint(self):
-        """The primary oracle: the two file-deleting tools carry
-        annotations.destructiveHint == true with a human-readable title. Fails
-        on pre-fix master, where tools/list emits no annotations at all."""
+        """The primary oracle: the two file-deleting tools carry annotations.destructiveHint == true with a human-readable title."""
         server, _ = _server()
         ann = self._annotations_by_name(server)
         for name in ("remove_model", "uninstall_plugin"):
@@ -243,16 +218,14 @@ class TestToolAnnotations:
             assert ann[name]["readOnlyHint"] is True, f"{name} not readOnlyHint"
 
     def test_destructive_tools_are_not_marked_read_only(self):
-        """Negative guard: a destructive tool must never also claim readOnlyHint
-        (readOnlyHint true would tell the client destructiveHint is meaningless)."""
+        """Negative guard: a destructive tool must never also claim readOnlyHint (readOnlyHint true would tell the client destructiveHint is meaningless)."""
         server, _ = _server()
         ann = self._annotations_by_name(server)
         for name in ("remove_model", "uninstall_plugin"):
             assert ann[name].get("readOnlyHint") is not True
 
     def test_plain_tools_have_no_annotations_key_leaked(self):
-        """A tool with no annotations (e.g. chat) must not carry an empty/None
-        annotations field - the key is present only when there is a hint."""
+        """A tool with no annotations (e.g. chat) must not carry an empty/None annotations field - the key is present only when there is a hint."""
         server, _ = _server()
         entries = {t["name"]: t for t in _req(server, "tools/list")["result"]["tools"]}
         assert "annotations" not in entries["chat"]
@@ -341,9 +314,7 @@ class TestEngineCache:
         first.unload.assert_called_once()
 
     def test_model_switch_waits_for_vram_release(self):
-        """A model switch must poll for the previous model's VRAM to actually
-        free before loading the next one (TDR-hang guard, shared with the
-        /v1/models/unload endpoint's own use of wait_for_vram_release)."""
+        """A model switch must poll for the previous model's VRAM to actually free before loading the next one (TDR-hang guard, shared with the /v1/models/unload endpoint's own use of wait_for_vram_release)."""
         cache = EngineCache("m", engine_factory=_stub_engine_factory)
         cache.get("a")
         with patch("localm.discover.vram_info", return_value={"free": 1_000_000_000}), \
@@ -354,8 +325,7 @@ class TestEngineCache:
         assert mock_wait.call_args.kwargs["before_bytes"] == 1_000_000_000
 
     def test_vram_unmeasurable_does_not_block_switch(self):
-        """When VRAM cannot be read at all (no GPU/torch), the wait is a no-op -
-        matches wait_for_vram_release's own before_bytes=None contract."""
+        """When VRAM cannot be read at all (no GPU/torch), the wait is a no-op - matches wait_for_vram_release's own before_bytes=None contract."""
         cache = EngineCache("m", engine_factory=_stub_engine_factory)
         cache.get("a")
         with patch("localm.discover.vram_info", return_value={}):
@@ -363,11 +333,7 @@ class TestEngineCache:
         assert second is not None
 
     def test_switch_release_detected_via_combined_split_capacity(self):
-        """AUDIT-GPU-SPLIT-1: the switch's before/after free-VRAM delta must be
-        measured against discover.vram_capacity() (combined split capacity),
-        not just the single main GPU - a model that frees VRAM mostly on a
-        NON-main split device must still be detected as released within the
-        real (not mocked) wait_for_vram_release poll."""
+        """AUDIT-GPU-SPLIT-1: the switch's before/after free-VRAM delta must be measured against discover.vram_capacity() (combined split capacity), not just the single main GPU - a model that frees VRAM mostly on a NON-main split device must still be detected as released within the real (not mocked) wait_for_..."""
         from localm.config import load_config as real_load_config
         base_cfg = real_load_config()
         GB = 1024 ** 3
@@ -401,11 +367,7 @@ class TestEngineCache:
             f"10GB) alone never would: {logged}")
 
     def test_process_scoped_no_rise_logs_could_not_confirm_not_did_not_rise(self):
-        """#697 follow-up: on a Windows/AMD process-scoped reading, the model-switch
-        VRAM check must NOT log the false 'did not rise'. The reading is blind to the
-        previous model's VRAM (it lives in an isolated worker), so a no-rise there
-        proves nothing - the same rule-5 defect the /v1/models/unload paths were
-        fixed for, which this path had left unwired (it dropped the scope)."""
+        """#697 follow-up: on a Windows/AMD process-scoped reading, the model-switch VRAM check must NOT log the false 'did not rise'."""
         from localm.config import load_config as real_load_config
         from localm.discover import GPU_PROBE_OK
         GB = 1024 ** 3
@@ -433,8 +395,7 @@ class TestEngineCache:
             f"logged a false 'did not rise' on a blind process-scoped reading: {logged}")
 
     def test_shutdown_unloads_every_resident_engine(self):
-        """N resident means N to free: unloading only the most recent one would
-        leave the rest holding VRAM past process exit."""
+        """N resident means N to free: unloading only the most recent one would leave the rest holding VRAM past process exit."""
         cache = _resident_cache()
         with _fits(), _sized():
             a, b = cache.get("a"), cache.get("b")
@@ -446,8 +407,7 @@ class TestEngineCache:
         assert cache._engine is None
 
     def test_shutdown_reports_a_failed_unload_instead_of_swallowing_it(self):
-        """A native free that failed is exactly what leaves VRAM pinned after
-        exit; silence there makes it unexplainable (AGENTS.md rule 5)."""
+        """A native free that failed is exactly what leaves VRAM pinned after exit; silence there makes it unexplainable (AGENTS.md rule 5)."""
         cache = _resident_cache()
         with _fits(), _sized():
             a = cache.get("a")
@@ -473,14 +433,7 @@ class TestEngineCache:
 
 
 class TestEngineCacheMultiResidency:
-    """
-    Parity with the HTTP server: a second model that provably fits loads
-    ALONGSIDE the first instead of evicting it (C1 of the 2026-07-22 ledger).
-
-    The MCP cache used to be single-resident by construction, so these are the
-    tests that would have failed before the change - see
-    test_both_models_stay_resident_when_they_fit, which is the whole point.
-    """
+    """Parity with the HTTP server: a second model that provably fits loads ALONGSIDE the first instead of evicting it (C1 of the 2026-07-22 ledger)."""
 
     def test_both_models_stay_resident_when_they_fit(self):
         """THE parity case: measurable, sufficient free VRAM -> zero eviction."""
@@ -571,8 +524,7 @@ class TestEngineCacheMultiResidency:
         b.unload.assert_called_once()
 
     def test_unmeasurable_vram_falls_back_to_single_resident(self):
-        """A box that cannot report free VRAM must behave exactly as before:
-        never stack on an unknown, best-effort single-resident."""
+        """A box that cannot report free VRAM must behave exactly as before: never stack on an unknown, best-effort single-resident."""
         cache = _resident_cache()
         with _unmeasurable(), _sized(), _cfg():
             a = cache.get("a")
@@ -581,8 +533,7 @@ class TestEngineCacheMultiResidency:
         assert cache.resident == ["b"]
 
     def test_inconclusive_probe_falls_back_to_single_resident(self):
-        """A stale/timed-out reading that happens to look huge must not admit a
-        stacked load - that is the direction that OOMs the driver."""
+        """A stale/timed-out reading that happens to look huge must not admit a stacked load - that is the direction that OOMs the driver."""
         cache = _resident_cache()
         with _probe_inconclusive(free_gb=100), _sized(gb=1), _cfg():
             a = cache.get("a")
@@ -591,8 +542,7 @@ class TestEngineCacheMultiResidency:
         assert cache.resident == ["b"]
 
     def test_unknown_footprint_falls_back_to_single_resident(self):
-        """An unregistered/unreadable model cannot be proven to fit, so it gets
-        the card to itself rather than being assumed free."""
+        """An unregistered/unreadable model cannot be proven to fit, so it gets the card to itself rather than being assumed free."""
         cache = _resident_cache()
         with _fits(free_gb=100), _cfg(), \
              patch.object(EngineCache, "_model_required_bytes",
@@ -602,12 +552,7 @@ class TestEngineCacheMultiResidency:
         a.unload.assert_called_once()
 
     def test_resident_but_unloaded_engine_still_goes_through_the_vram_gate(self):
-        """A constructed-but-unloaded engine holds NO VRAM, so the free-VRAM
-        probe cannot see it. Handing it straight back would let the caller's
-        chat_stream() load it on top of whatever else is resident with no gate
-        at all - a permit-direction hole. pull_model reaches exactly this state:
-        it calls get() and nothing else. http_server's fast path carries the
-        same `.loaded` check for the same reason."""
+        """A constructed-but-unloaded engine holds NO VRAM, so the free-VRAM probe cannot see it."""
         def unloaded_factory(name):
             e = _stub_engine_factory(name)
             e.loaded = False
@@ -627,8 +572,7 @@ class TestEngineCacheMultiResidency:
             f"an unloaded resident engine skipped the VRAM gate: probed={probed}")
 
     def test_loaded_resident_engine_skips_the_gate(self):
-        """Guard on the test above: a genuinely loaded model must still be the
-        cheap fast path, with no probe at all."""
+        """Guard on the test above: a genuinely loaded model must still be the cheap fast path, with no probe at all."""
         cache = _resident_cache()
         with _fits(), _sized(), _cfg():
             cache.get("a")
@@ -705,9 +649,7 @@ class TestResidencyKnobs:
         assert set(cache.resident) == {"a", "b", "c"}
 
     def test_unevictable_load_says_the_policy_was_missed(self):
-        """When pins leave nothing evictable the load still proceeds (a stdio
-        tool call has no useful 'try later'), but it must SAY the cap was
-        missed rather than pretend it held."""
+        """When pins leave nothing evictable the load still proceeds (a stdio tool call has no useful 'try later'), but it must SAY the cap was missed rather than pretend it held."""
         cache = _resident_cache()
         knobs = dict(max_resident_models=1, pinned_models=["a"])
         logged = []
@@ -784,8 +726,7 @@ class TestStdioLoop:
 
 class TestClientServerIntegration:
     def test_own_client_can_drive_own_server(self, tmp_path):
-        """localcoder's MCP client talks to localm's MCP server in-process
-        logic via subprocess - the two halves must interoperate."""
+        """localcoder's MCP client talks to localm's MCP server in-process logic via subprocess - the two halves must interoperate."""
         import sys
         import textwrap
         bridge = tmp_path / "bridge.py"
@@ -823,8 +764,7 @@ class TestClientServerIntegration:
 
 
 class TestMcpCliGate:
-    """The MCP server became an optional plugin (Phase 3): `localm mcp` refuses to
-    serve unless the mcp plugin is enabled, but --print-config always works."""
+    """The MCP server became an optional plugin (Phase 3): `localm mcp` refuses to serve unless the mcp plugin is enabled, but --print-config always works."""
 
     @pytest.fixture
     def cfg_env(self, tmp_path, monkeypatch):
@@ -886,12 +826,7 @@ class TestMcpCliGate:
         assert state["mcp"]["scope"] == "mcp"
 
     def test_print_config_uses_os_correct_path(self, cfg_env, monkeypatch):
-        """FAC-14: the Claude Desktop path must match the OS, not hardcode %APPDATA%.
-
-        Drives all three OS branches by patching sys.platform (cli.py reads it at
-        call time), so the test proves the fix regardless of the host platform -
-        the previous version only asserted the host's own branch, which on
-        Windows matched the pre-fix hardcoded %APPDATA% too (a weak guard)."""
+        """FAC-14: the Claude Desktop path must match the OS, not hardcode %APPDATA%."""
         import sys
         from click.testing import CliRunner
         from localm.plugins.mcpserver.cli import main
@@ -966,13 +901,7 @@ class TestGenerateImageSafety:
     @pytest.mark.parametrize("bad", [_UNC, _UNC_FWD, _DEVICE])
     def test_output_path_unc_rejected_without_touching_the_filesystem(
             self, monkeypatch, bad):
-        """Found during the sweep for pull_model's UNC fix: _confine() called
-        p.resolve() before checking home-dir containment. A UNC output_path is
-        ABSOLUTE on Windows, so it skipped the `home / p` join and resolved
-        the raw client string directly - same SMB-dial defect as pull_model's
-        `repo`, a different sink. check_input_image (input_image's own
-        confinement, in media/paths.py) already carried this guard; _confine
-        was the sibling that missed it."""
+        """Found during the sweep for pull_model's UNC fix: _confine() called p.resolve() before checking home-dir containment."""
         seen = _install_fs_spy(monkeypatch, "resolve")
         server, _ = _server()
         with patch("localm.image_gen.comfy.generate_image") as mock_gen:
@@ -986,10 +915,7 @@ class TestGenerateImageSafety:
         "somefile.exe:hidden.gguf", "sub/somefile.exe:hidden.gguf",
     ])
     def test_output_path_reserved_characters_are_rejected(self, bad):
-        """Same NTFS Alternate Data Stream class #1068 fixed for model
-        filenames - the OLD _confine closure had no character check at all,
-        so a colon stayed confined (containment held) while opening a
-        hidden stream behind an apparently-empty sibling."""
+        """Same NTFS Alternate Data Stream class #1068 fixed for model filenames - the OLD _confine closure had no character check at all, so a colon stayed confined (containment held) while opening a hidden stream behind an apparently-empty sibling."""
         server, _ = _server()
         with patch("localm.image_gen.comfy.generate_image") as mock_gen:
             r = self._call(server, {"prompt": "x", "output_path": bad})
@@ -998,10 +924,7 @@ class TestGenerateImageSafety:
 
     def test_output_path_alias_does_not_write_through_a_different_file(
             self, monkeypatch):
-        """An OS-level short-name alias resolving output_path to a DIFFERENT,
-        real sibling already sitting in the data dir stays strictly inside
-        it - containment alone would not catch it. Deterministic simulation,
-        same technique as test_pathsafe_confined_under.py's alias tests."""
+        """An OS-level short-name alias resolving output_path to a DIFFERENT, real sibling already sitting in the data dir stays strictly inside it - containment alone would not catch it."""
         from localm.config import home_dir
         server, _ = _server()
         home = home_dir()
@@ -1027,15 +950,7 @@ class TestGenerateImageSafety:
     @pytest.mark.parametrize("secret_name",
                              ["auth.key", "auth.json", "sessions.json"])
     def test_input_image_cannot_name_the_credential_store(self, secret_name):
-        """An MCP client is usually an LLM steerable by injected content, and
-        input_image is READ and then UPLOADED to ComfyUI - which
-        sanitize_comfy_url permits to be a LAN or public host over plaintext
-        http. Confining that read to the data dir was far too wide: the data dir
-        IS the credential store. auth.key is the plaintext owner key.
-
-        Named by file rather than "some path outside", because inside-the-data-
-        dir is precisely the case the old confinement allowed. A test that only
-        proves an outside path is refused passes on the unfixed code."""
+        """An MCP client is usually an LLM steerable by injected content, and input_image is READ and then UPLOADED to ComfyUI - which sanitize_comfy_url permits to be a LAN or public host over plaintext http."""
         from localm.config import home_dir
         server, _ = _server()
         home = home_dir()
@@ -1057,9 +972,7 @@ class TestGenerateImageSafety:
         assert str(home) not in body, body
 
     def test_input_image_from_the_uploads_inbox_is_accepted(self):
-        """The legitimate flow must survive: a file in the upload inbox still
-        reaches generate_image. Without this the test above passes just as well
-        against a policy that refuses everything."""
+        """The legitimate flow must survive: a file in the upload inbox still reaches generate_image."""
         from localm.config import home_dir
         server, _ = _server()
         home = home_dir()
@@ -1089,9 +1002,7 @@ class TestGenerateImageSafety:
         assert mock_gen.call_args.kwargs.get("write_sidecar") is expected_write_sidecar
 
     def test_privacy_mode_deletes_comfy_output_copy(self, monkeypatch):
-        """Privacy mode must also delete ComfyUI's own on-disk output copy
-        (it embeds the full prompt/workflow as PNG metadata) - not just
-        suppress the sidecar. See CONSOLIDATED-FINDINGS item 2."""
+        """Privacy mode must also delete ComfyUI's own on-disk output copy (it embeds the full prompt/workflow as PNG metadata) - not just suppress the sidecar."""
         monkeypatch.setenv("LOCALM_MODE", "privacy")
         server, _ = _server()
         with patch("localm.image_gen.comfy.generate_image",
@@ -1123,12 +1034,7 @@ class TestGenerateImageSafety:
 
 
 class TestChatEmbedStdoutSafety:
-    """BUG-11: chat/embed/pull_model's own engines.get() call (a fresh model
-    load, e.g. the first turn of a new MCP session) must not leak native
-    load-time diagnostics onto the JSON-RPC stdout stream either - the same
-    bug class TestGenerateImageSafety covers above, missed here because the
-    risky call is engines.get() itself rather than a separately-patchable
-    module function."""
+    """BUG-11: chat/embed/pull_model's own engines.get() call (a fresh model load, e.g. the first turn of a new MCP session) must not leak native load-time diagnostics onto the JSON-RPC stdout stream either - the same bug class TestGenerateImageSafety covers above, missed here because the risky call is eng..."""
 
     def _noisy_engines(self, default_model="stub-model"):
         def noisy_factory(model_name):
@@ -1157,8 +1063,7 @@ class TestChatEmbedStdoutSafety:
         assert "NATIVE_LOAD_NOISE_ON_STDOUT" in captured.err
 
     def test_pull_model_post_download_load_keeps_stdout_clean(self, capsys):
-        """The download step was already guarded; the load-after-pull step
-        (engines.get(name), after registering) was not."""
+        """The download step was already guarded; the load-after-pull step (engines.get(name), after registering) was not."""
         engines = self._noisy_engines()
         server = MCPStdioServer(build_tools(engines, enable_images=True))
         with patch("localm.model_manager.pull.pull_model", return_value=True):
@@ -1172,9 +1077,7 @@ class TestChatEmbedStdoutSafety:
 
 
 class TestModelDiscoveryTools:
-    """system_stats / search_models / list_model_files / pull_model - always
-    advertised (no plugin gate, unlike run_coder_task) since they only need
-    core localm functionality."""
+    """system_stats / search_models / list_model_files / pull_model - always advertised (no plugin gate, unlike run_coder_task) since they only need core localm functionality."""
 
     def _call(self, server, name, args):
         return server.handle({
@@ -1190,11 +1093,7 @@ class TestModelDiscoveryTools:
         assert json.loads(r["result"]["content"][0]["text"]) == stats
 
     def test_system_stats_waits_for_the_first_vram_reading(self):
-        """The MCP tool is a ONE-SHOT call, unlike the GUI's repeating ~2.5s
-        poll - it never gets a second chance to see a VRAM reading that lands
-        after it already returned, so it must ask sysstats.system_stats to
-        wait for the first reading (wait_first_vram=True) rather than
-        silently omitting VRAM on a cold first call."""
+        """The MCP tool is a ONE-SHOT call, unlike the GUI's repeating ~2.5s poll - it never gets a second chance to see a VRAM reading that lands after it already returned, so it must ask sysstats.system_stats to wait for the first reading (wait_first_vram=True) rather than silently omitting VRAM on a cold fi..."""
         server, _ = _server()
         mock_stats = MagicMock(return_value={"cpu": {"percent": 1.0}})
         with patch("localm.sysstats.system_stats", mock_stats):
@@ -1237,10 +1136,7 @@ class TestModelDiscoveryTools:
         mock_fit.assert_called_once_with(4_000_000_000, 8_000_000_000)
 
     def test_list_model_files_fit_reflects_combined_split_capacity(self):
-        """AUDIT-GPU-SPLIT-1: the MCP list_model_files tool must weigh fit
-        against discover.vram_capacity()'s COMBINED split capacity, not just
-        vram_info()'s single main-GPU number - a file too big for one GPU
-        alone but that fits split across a configured 2-GPU split must fit."""
+        """AUDIT-GPU-SPLIT-1: the MCP list_model_files tool must weigh fit against discover.vram_capacity()'s COMBINED split capacity, not just vram_info()'s single main-GPU number - a file too big for one GPU alone but that fits split across a configured 2-GPU split must fit."""
         server, _ = _server()
         # need ~= 15e9*1.1 + 1.5e9 = 18e9: exceeds the 16 GB main GPU alone,
         # but fits under 0.85 * the 24 GB combined split.
@@ -1291,9 +1187,7 @@ class TestModelDiscoveryTools:
 
     def test_pull_model_existing_local_path_still_reports_the_add_message(
             self, exists_spy, tmp_path):
-        """Control: an ordinary EXISTING local path is not UNC/device syntax,
-        so the fix must not over-reject it - it still falls through to
-        Path.exists() and the pre-existing 'run localm add' message."""
+        """Control: an ordinary EXISTING local path is not UNC/device syntax, so the fix must not over-reject it - it still falls through to Path.exists() and the pre-existing 'run localm add' message."""
         server, _ = _server()
         r = self._call(server, "pull_model", {"repo": str(tmp_path), "name": "m"})
         assert r["result"]["isError"] is True
@@ -1302,9 +1196,7 @@ class TestModelDiscoveryTools:
 
     def test_pull_model_nonexistent_local_path_falls_through_to_pull(
             self, exists_spy, tmp_path):
-        """Control: an ordinary NON-existent local path is not UNC/device
-        syntax either, so it still falls through past the local-add check to
-        the normal pull mechanics."""
+        """Control: an ordinary NON-existent local path is not UNC/device syntax either, so it still falls through past the local-add check to the normal pull mechanics."""
         server, _ = _server()
         missing = str(tmp_path / "does-not-exist")
         with patch("localm.model_manager.pull.pull_model", return_value=True) as mock_pull:
@@ -1366,10 +1258,7 @@ class TestModelDiscoveryTools:
         assert "no GPU memory" in r["result"]["content"][0]["text"]
 
     def test_pull_model_load_step_failure_is_distinguished_from_pull_failure(self):
-        """Distinct from the case above: there get() itself raises. Here
-        get() succeeds (construction + cache registration), and the actual
-        .load() call - the step this fix added, previously never invoked by
-        pull_model at all - is what fails."""
+        """Distinct from the case above: there get() itself raises."""
         def failing_load_factory(name):
             engine = _stub_engine_factory(name)
             engine.load.side_effect = RuntimeError("no GPU memory")
@@ -1386,9 +1275,7 @@ class TestModelDiscoveryTools:
 
 
 class TestRunCoderTask:
-    """run_coder_task shells out to `localm coder --output-format json` and is
-    only advertised when the coder plugin is installed+enabled (mirrors the
-    embed tool's capability-gated advertisement)."""
+    """run_coder_task shells out to `localm coder --output-format json` and is only advertised when the coder plugin is installed+enabled (mirrors the embed tool's capability-gated advertisement)."""
 
     @pytest.fixture
     def coder_active(self):
@@ -1437,9 +1324,7 @@ class TestRunCoderTask:
     @pytest.mark.parametrize("bad", [_UNC, _UNC_FWD, _DEVICE])
     def test_unc_and_device_cwd_rejected_without_touching_the_filesystem(
             self, coder_active, monkeypatch, bad):
-        """Found during the sweep for pull_model's UNC fix: cwd_path.is_dir()
-        ran on the client-supplied cwd with no lexical check at all - the same
-        SMB-dial defect, a different sink (is_dir() instead of exists())."""
+        """Found during the sweep for pull_model's UNC fix: cwd_path.is_dir() ran on the client-supplied cwd with no lexical check at all - the same SMB-dial defect, a different sink (is_dir() instead of exists())."""
         seen = _install_fs_spy(monkeypatch, "is_dir")
         server, _ = _server()
         r = self._call(server, {"task": "x", "cwd": bad})
@@ -1474,19 +1359,7 @@ class TestRunCoderTask:
         assert mock_run.call_args.kwargs["cwd"] == str(tmp_path)
 
     def test_subprocess_env_pins_the_servers_home_and_code(self, coder_active, tmp_path):
-        """The coder chain re-resolves BOTH the localm data home and (via
-        `-m`'s cwd-first sys.path) the localm PACKAGE from ambient state at
-        every process boundary - and this handler deliberately runs the child
-        in the TASK's directory (the cwd assertion above). A server whose own
-        home came from ITS cwd (the contained-default fallback - exactly the
-        documented `localm mcp` source-checkout offload setup) therefore
-        handed the chain a DIFFERENT, empty home: a model registered via
-        pull_model did not exist there, and the coder's auto-started server
-        died with 'Model not found' (exit 1) into an invisible console
-        (reproduced live 2026-07-21). The handler must pin ITS OWN resolved
-        identity into the child env: LOCALM_HOME (same data home), and
-        PYTHONSAFEPATH + a PYTHONPATH entry for its own package root (same
-        code, regardless of what a task directory happens to contain)."""
+        """The coder chain re-resolves BOTH the localm data home and (via `-m`'s cwd-first sys.path) the localm PACKAGE from ambient state at every process boundary - and this handler deliberately runs the child in the TASK's directory (the cwd assertion above)."""
         import os
         from pathlib import Path
         import localm as _pkg
@@ -1526,11 +1399,7 @@ class TestRunCoderTask:
         assert "--yes" in cmd
 
     def test_console_messages_before_json_are_ignored(self, coder_active, tmp_path):
-        """Regression guard: a live run against a real model produced exactly
-        this shape - console.print() messages (e.g. attaching to a running
-        server) print to stdout BEFORE the final --output-format json dump.
-        Parsing must find the JSON, not mistake the console text or the bare
-        closing brace for the payload."""
+        """Regression guard: a live run against a real model produced exactly this shape - console.print() messages (e.g. attaching to a running server) print to stdout BEFORE the final --output-format json dump."""
         server, _ = _server()
         payload = {"success": True, "response": "created hello.txt", "turns": 2,
                    "total_tokens": 123}
@@ -1546,12 +1415,7 @@ class TestRunCoderTask:
         assert "created hello.txt" in r["result"]["content"][0]["text"]
 
     def test_console_messages_after_json_are_ignored(self, coder_active, tmp_path):
-        """The mirror of the before-json guard above, found live 2026-07-22
-        driving the REAL chain end to end: with the coder session in
-        `--mode full`, "Session transcript saved -> <path>" prints AFTER the
-        --output-format json dump, and parsing "from the last lone '{' to the
-        end of stdout" choked on that trailing text - reporting a fully
-        successful task (success: true in the payload) as an error."""
+        """The mirror of the before-json guard above, found live 2026-07-22 driving the REAL chain end to end: with the coder session in `--mode full`, 'Session transcript saved -> <path>' prints AFTER the --output-format json dump, and parsing 'from the last lone '{' to the end of stdout' choked on that trail..."""
         server, _ = _server()
         payload = {"success": True, "response": "IDENTITY-FIX-OK", "turns": 1,
                    "total_tokens": 1988}
@@ -1596,11 +1460,7 @@ class TestRunCoderTask:
 
 
 class TestMcpCliWiring:
-    """Regression guard: `localm mcp` must resolve to the real plugin command
-    (plugins/mcpserver/cli.py), not a broken hand-rolled duplicate. A duplicate
-    in localm/cli/maintenance.py once shadowed it and made `localm mcp` crash
-    with an ImportError before it could even print its 'not enabled' message.
-    """
+    """Regression guard: `localm mcp` must resolve to the real plugin command (plugins/mcpserver/cli.py), not a broken hand-rolled duplicate."""
 
     def test_mcp_command_is_the_plugin_command(self):
         from localm.cli import main
@@ -1625,12 +1485,7 @@ class TestMcpCliWiring:
 
 class TestNewToolCalls:
     def test_setup_embeddings(self):
-        """The happy path now needs a REAL model identity: over MCP the `model`
-        argument must be a known embedding key or an already-registered name, not
-        a free-form path, because the client driving it is normally a model acting
-        on text it read. "fake-model" was fine when the tool accepted anything;
-        it is now refused, so use a known key to exercise the same success path.
-        The refusal itself is covered in tests/test_config_admin_gating.py."""
+        """The happy path now needs a REAL model identity: over MCP the `model` argument must be a known embedding key or an already-registered name, not a free-form path, because the client driving it is normally a model acting on text it read. 'fake-model' was fine when the tool accepted anything; it is now..."""
         server, _ = _server()
         with patch("localm.inference.embedder.resolve_embedding_model_path", return_value="fake-path") as mock_resolve:
             resp = _req(server, "tools/call",
@@ -1660,10 +1515,7 @@ class TestNewToolCalls:
         mock_run.assert_called_once()
 
     def test_run_doctor_env_pins_the_servers_home_and_code(self):
-        """Same identity pinning as run_coder_task's own env test: a doctor
-        child that re-resolves home/code from ambient state reports on the
-        WRONG install whenever this server's home came from its cwd (the
-        source-checkout `localm mcp` setup)."""
+        """Same identity pinning as run_coder_task's own env test: a doctor child that re-resolves home/code from ambient state reports on the WRONG install whenever this server's home came from its cwd (the source-checkout `localm mcp` setup)."""
         import os
         from pathlib import Path
         import localm as _pkg

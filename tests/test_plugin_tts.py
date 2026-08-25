@@ -1,10 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The client-asset hook (Surface.client_entry + Host.mount_static) and the
-real `tts` plugin: static serving, /api/tts/config resolution, and the
-no-server-traces property.
-
-Open-mode (no API key) so the mounted, auto-scoped routes are reachable.
-"""
+"""The client-asset hook (Surface.client_entry + Host.mount_static) and the real `tts` plugin: static serving, /api/tts/config resolution, and the no-server-traces property."""
 
 import textwrap
 
@@ -47,9 +42,7 @@ def _make_client_plugin(root, name):
 
 
 def _make_autoclient_plugin(root, name):
-    """A client_entry plugin that declares assets_dir but whose register() does
-    NOT call mount_static - the engine must auto-mount the assets so the client
-    module is still served (otherwise a future plugin like this silently 404s)."""
+    """A client_entry plugin that declares assets_dir but whose register() does NOT call mount_static - the engine must auto-mount the assets so the client module is still served (otherwise a future plugin like this silently 404s)."""
     pdir = root / name
     (pdir / "static").mkdir(parents=True, exist_ok=True)
     (pdir / "plugin.toml").write_text(
@@ -89,8 +82,7 @@ def test_api_state_exposes_client_entry_and_assets_base(env):
 
 
 def test_mount_static_serves_module_then_unmounts(env, tmp_path):
-    """An active plugin's client module is served at /plugins/<name>/, coexists
-    with the SPA "/" catch-all, and 404s once the plugin is disabled."""
+    """An active plugin's client module is served at /plugins/<name>/, coexists with the SPA '/' catch-all, and 404s once the plugin is disabled."""
     from localm.plugins.engine import PluginManager
     plugins = env / "plugins"
     _make_client_plugin(plugins, "widget")
@@ -116,10 +108,7 @@ def test_mount_static_serves_module_then_unmounts(env, tmp_path):
 
 
 def test_engine_auto_mounts_surface_assets(env, tmp_path):
-    """A client_entry plugin that declares assets_dir but never calls
-    mount_static is still served: the engine auto-mounts the surface's assets
-    after register(), so the SPA's import() of the client module never 404s.
-    The auto-mount unmounts cleanly on disable, like an explicit mount."""
+    """A client_entry plugin that declares assets_dir but never calls mount_static is still served: the engine auto-mounts the surface's assets after register(), so the SPA's import() of the client module never 404s."""
     from localm.plugins.engine import PluginManager
     plugins = env / "plugins"
     _make_autoclient_plugin(plugins, "autowidget")
@@ -145,9 +134,7 @@ def test_engine_auto_mounts_surface_assets(env, tmp_path):
 
 
 def test_explicit_mount_static_does_not_double_mount(env):
-    """mount_static is idempotent on its prefix: a plugin that mounts its assets
-    explicitly AND gets the engine's auto-mount ends up with exactly one mount
-    for /plugins/<name> (the explicit call wins; auto-mount short-circuits)."""
+    """mount_static is idempotent on its prefix: a plugin that mounts its assets explicitly AND gets the engine's auto-mount ends up with exactly one mount for /plugins/<name> (the explicit call wins; auto-mount short-circuits)."""
     from starlette.routing import Mount
 
     from localm.plugins.engine import PluginManager
@@ -177,8 +164,7 @@ def test_mount_static_missing_dir_raises(env):
 # ------------------------------ the tts plugin ---------------------------- #
 
 def test_tts_plugin_serves_client_and_config(env):
-    """The real builtin tts plugin: client module served, config = template
-    defaults, and the user override under plugins.tts wins."""
+    """The real builtin tts plugin: client module served, config = template defaults, and the user override under plugins.tts wins."""
     from localm.config import load_config, save_config
     from localm.plugins.engine import attach_engine
     app = FastAPI()
@@ -208,8 +194,7 @@ def test_tts_plugin_serves_client_and_config(env):
 
 
 def test_tts_plugin_writes_no_traces(env):
-    """The tts plugin renders in the browser: it declares no data dir and its
-    routes are read-only, so privacy mode stays trace-free with no gating."""
+    """The tts plugin renders in the browser: it declares no data dir and its routes are read-only, so privacy mode stays trace-free with no gating."""
     from localm.plugins.engine import parse_spec
     from pathlib import Path
     import localm.plugins.engine as eng

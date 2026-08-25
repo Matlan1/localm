@@ -1,27 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Static ESM-integrity guards for the GUI - the class of bug the JS suite CANNOT
-catch.
-
-The GUI ships as native ES modules, but the jsdom JS harness (tests-js/harness.mjs)
-STRIPS import/export and runs every module in one shared classic-script realm. That
-merged realm hides three whole classes of "the page will not load in a real
-browser" bug because the real module GRAPH is never linked or evaluated:
-
-  1. an ``import { X } from "./m.js"`` where m.js does not actually export ``X`` -
-     a hard module-graph load failure in the browser (blank page), but ``X`` just
-     resolves to ``undefined`` in the merged realm and the suite passes;
-  2. a top-level ``JSON.parse(localStorage.getItem(k) || "[]")`` - throws
-     SyntaxError on a CORRUPT (not merely absent) value, and because it runs during
-     module evaluation of a widely-imported module it aborts the whole graph and
-     blanks the app. Must go through helpers.readStoredJSON, which branches
-     missing-vs-corrupt and surfaces corruption instead of crashing boot.
-
-(The third, reassigning a read-only import binding, is guarded by
-test_gui_no_import_reassignment.py.)
-
-These are static checks because the harness structurally cannot be. They are the
-regression guards for the two "blank page" bugs that shipped GREEN.
-"""
+"""Static ESM-integrity guards for the GUI - the class of bug the JS suite CANNOT catch."""
 
 import re
 from pathlib import Path
@@ -124,8 +102,7 @@ def _exports_name(mods, mod_path, name, seen=None):
 
 
 def test_every_named_import_resolves_to_a_real_export():
-    """A missing/misnamed export is a browser module-graph load failure (blank
-    page) that the merged-realm JS suite cannot see."""
+    """A missing/misnamed export is a browser module-graph load failure (blank page) that the merged-realm JS suite cannot see."""
     mods = {p.resolve(): _parse_module(p) for p in _gui_modules()}
     broken = []
     for path, info in mods.items():
@@ -142,8 +119,7 @@ def test_every_named_import_resolves_to_a_real_export():
 
 
 def test_no_unguarded_json_parse_of_localstorage():
-    """A raw JSON.parse(localStorage...) throws on a CORRUPT value; at module top
-    level that blanks the whole app. Reads must go through helpers.readStoredJSON."""
+    """A raw JSON.parse(localStorage...) throws on a CORRUPT value; at module top level that blanks the whole app."""
     offenders = []
     for js in _gui_modules():
         src = _strip_comments(js.read_text(encoding="utf-8"))

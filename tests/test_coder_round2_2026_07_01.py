@@ -1,10 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Regression tests for the 2026-07-01 round-2 inference/coder cluster.
-
-  REC-CODER-MODE-TOML  - effective_mode('coder', cwd) honors .localcoder/config.toml
-  REC-CODER-FAMILY     - detect_model_family matches substrings / resolved repo ids
-  REC-CODER-LOOPBREAK  - the coder aborts on repeated identical (scaffold) responses
-"""
+"""Regression tests for the 2026-07-01 round-2 inference/coder cluster."""
 
 from unittest.mock import patch
 

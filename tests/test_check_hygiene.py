@@ -1,10 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""scripts/check_hygiene.py must scan .html for machine-absolute paths.
-
-The absolute-path heuristic (check 3) was gated on _CODE_EXTS, which omitted
-.html, so a drive-letter placeholder in index.html slipped through. These tests
-pin that .html is scanned and that the shipped index.html is clean.
-"""
+"""scripts/check_hygiene.py must scan .html for machine-absolute paths."""
 
 import importlib.util
 from pathlib import Path
@@ -24,11 +19,7 @@ def _load_check_hygiene():
 
 
 def test_html_drive_letter_is_detected(tmp_path, monkeypatch):
-    """NEGATIVE: a drive-letter path in an .html must be flagged.
-
-    Pre-fix .html is not in _CODE_EXTS so _scan returns no absolute-path
-    problem and this fails; post-fix it is flagged.
-    """
+    """NEGATIVE: a drive-letter path in an .html must be flagged."""
     ch = _load_check_hygiene()
     monkeypatch.setattr(ch, "REPO", tmp_path)
     p = tmp_path / "page.html"
@@ -46,8 +37,7 @@ def test_html_neutral_placeholder_is_clean(tmp_path, monkeypatch):
 
 
 def test_shipped_index_html_has_no_machine_paths():
-    """Regression guard: the real GUI index.html must stay free of drive-letter
-    placeholders now that .html is in scope."""
+    """Regression guard: the real GUI index.html must stay free of drive-letter placeholders now that .html is in scope."""
     ch = _load_check_hygiene()
     index = REPO_ROOT / "localm" / "plugins" / "gui" / "static" / "index.html"
     problems = [x for x in ch._scan(index) if "absolute/machine path" in x]
@@ -67,11 +57,7 @@ def test_html_is_in_code_exts():
 # these extensions. These tests pin that .js/.mjs/.yaml/.yml are scanned too.
 
 def test_js_absolute_path_is_detected(tmp_path, monkeypatch):
-    """NEGATIVE: a drive-letter path in a .js file must be flagged.
-
-    Pre-fix .js is not in _CODE_EXTS so _scan returns no absolute-path
-    problem and this fails; post-fix it is flagged.
-    """
+    """NEGATIVE: a drive-letter path in a .js file must be flagged."""
     ch = _load_check_hygiene()
     monkeypatch.setattr(ch, "REPO", tmp_path)
     p = tmp_path / "app.js"
@@ -81,8 +67,7 @@ def test_js_absolute_path_is_detected(tmp_path, monkeypatch):
 
 
 def test_mjs_absolute_path_is_detected(tmp_path, monkeypatch):
-    """Same coverage for the .mjs extension (used by the frontend test/tooling
-    scripts and playwright.config.mjs)."""
+    """Same coverage for the .mjs extension (used by the frontend test/tooling scripts and playwright.config.mjs)."""
     ch = _load_check_hygiene()
     monkeypatch.setattr(ch, "REPO", tmp_path)
     p = tmp_path / "config.mjs"
@@ -116,11 +101,7 @@ def test_js_and_yaml_are_in_code_exts():
 
 
 def test_frontend_test_suite_fixtures_stay_exempt(tmp_path, monkeypatch):
-    """The Python is_test heuristic (tests/, test_*.py) doesn't match the
-    frontend suites' own conventions (tests-js/*.test.mjs, tests-e2e/*.spec.mjs),
-    which legitimately use synthetic absolute paths as mock fixtures - these
-    must stay exempt now that .mjs is in scope, the same way tests/test_*.py
-    already is."""
+    """The Python is_test heuristic (tests/, test_*.py) doesn't match the frontend suites' own conventions (tests-js/*.test.mjs, tests-e2e/*.spec.mjs), which legitimately use synthetic absolute paths as mock fixtures - these must stay exempt now that .mjs is in scope, the same way tests/test_*.py already i..."""
     ch = _load_check_hygiene()
     monkeypatch.setattr(ch, "REPO", tmp_path)
     for rel in ("tests-js/upload.test.mjs", "tests-e2e/boot-and-click.spec.mjs"):
@@ -132,8 +113,7 @@ def test_frontend_test_suite_fixtures_stay_exempt(tmp_path, monkeypatch):
 
 
 def test_shipped_frontend_js_has_no_machine_paths():
-    """Regression guard: the real GUI/CLI JS files must stay free of drive-letter
-    or /home//Users absolute paths now that .js/.mjs are in scope."""
+    """Regression guard: the real GUI/CLI JS files must stay free of drive-letter or /home//Users absolute paths now that .js/.mjs are in scope."""
     ch = _load_check_hygiene()
     tracked = ch._tracked_files()
     problems = []
@@ -149,9 +129,7 @@ def test_shipped_frontend_js_has_no_machine_paths():
 # would (correctly) flag when it scans the tracked tree.
 
 def test_finegrained_github_pat_is_detected(tmp_path, monkeypatch):
-    """NEGATIVE: a modern fine-grained GitHub PAT (github_pat_11...) must be
-    flagged as a disclosure. The old check only knew the classic ghp_ prefix,
-    so a committed fine-grained PAT would have slipped through."""
+    """NEGATIVE: a modern fine-grained GitHub PAT (github_pat_11...) must be flagged as a disclosure."""
     ch = _load_check_hygiene()
     monkeypatch.setattr(ch, "REPO", tmp_path)
     token = "github" + "_pat_" + "11" + "A" * 60
@@ -173,9 +151,7 @@ def test_classic_github_pat_still_detected(tmp_path, monkeypatch):
 
 
 def test_github_pat_mention_without_token_is_clean(tmp_path, monkeypatch):
-    """The bare 'github_pat_...' placeholder used in docs (no real token body)
-    must NOT be flagged: the pattern requires 20+ token chars after the
-    prefix, so a mention like 'starts with github_pat_...' stays clean."""
+    """The bare 'github_pat_...' placeholder used in docs (no real token body) must NOT be flagged: the pattern requires 20+ token chars after the prefix, so a mention like 'starts with github_pat_...' stays clean."""
     ch = _load_check_hygiene()
     monkeypatch.setattr(ch, "REPO", tmp_path)
     p = tmp_path / "doc.md"
@@ -217,8 +193,7 @@ def test_changelog_removed_lines_no_change_is_clean():
 
 
 def test_changelog_removed_lines_add_section_on_top_is_clean():
-    """Adding a brand-new version section on top (the normal release) removes
-    nothing: every prior entry line is still present. MUST NOT false-positive."""
+    """Adding a brand-new version section on top (the normal release) removes nothing: every prior entry line is still present."""
     ch = _load_check_hygiene()
     new = _BASE_CHANGELOG.replace(
         "## [Unreleased]\n\n### Added\n- work in progress\n",
@@ -253,9 +228,7 @@ _DRAFT_AND_SHIPPED_CHANGELOG = (
 
 
 def test_a_never_published_version_section_is_not_frozen():
-    """0.1.5rc1 was tagged but its GitHub release stayed a DRAFT, so nobody could have
-    downloaded it and there is no public history to protect. Removing its section is a
-    correction, not a history rewrite."""
+    """0.1.5rc1 was tagged but its GitHub release stayed a DRAFT, so nobody could have downloaded it and there is no public history to protect."""
     ch = _load_check_hygiene()
     new = _DRAFT_AND_SHIPPED_CHANGELOG.replace(
         "## [0.1.5rc1] - 2026-08-07\n\n### Added\n"
@@ -264,10 +237,7 @@ def test_a_never_published_version_section_is_not_frozen():
 
 
 def test_the_never_published_carve_out_does_not_unfreeze_a_real_release():
-    """THE GUARD-RAIL, and the reason the carve-out is safe to have at all. A carve-out
-    on a history-protection gate is only as good as the proof that it is narrow: deleting
-    from a genuinely published section must still be flagged, in the same file where the
-    draft section is being removed."""
+    """THE GUARD-RAIL, and the reason the carve-out is safe to have at all."""
     ch = _load_check_hygiene()
     new = _DRAFT_AND_SHIPPED_CHANGELOG.replace("- a thing that really shipped\n", "")
     removed = ch._changelog_removed_lines(_DRAFT_AND_SHIPPED_CHANGELOG, new)
@@ -275,9 +245,7 @@ def test_the_never_published_carve_out_does_not_unfreeze_a_real_release():
 
 
 def test_the_never_published_list_holds_only_provably_unpublished_versions():
-    """Keeps the list from quietly growing. Every entry has to be a release that was
-    never promoted out of draft; adding a shipped version here would silently unfreeze
-    the public record this gate exists to protect."""
+    """Keeps the list from quietly growing."""
     ch = _load_check_hygiene()
     assert ch._NEVER_PUBLISHED_VERSIONS == frozenset({"0.1.5rc1"})
     for shipped in ("0.1.0", "0.1.4", "0.1.5rc2", "0.1.5rc3"):
@@ -285,8 +253,7 @@ def test_the_never_published_list_holds_only_provably_unpublished_versions():
 
 
 def test_changelog_rewriting_unreleased_is_allowed():
-    """The in-progress [Unreleased] draft is freely rewritable until it is cut into a
-    version: rewording or dropping an [Unreleased] line is NOT a history rewrite."""
+    """The in-progress [Unreleased] draft is freely rewritable until it is cut into a version: rewording or dropping an [Unreleased] line is NOT a history rewrite."""
     ch = _load_check_hygiene()
     new = _BASE_CHANGELOG.replace(
         "### Added\n- work in progress\n\n## [0.1.0]",
@@ -295,8 +262,7 @@ def test_changelog_rewriting_unreleased_is_allowed():
 
 
 def test_changelog_rewriting_a_published_entry_fails():
-    """A PUBLISHED (versioned) entry is frozen: rewriting its wording is a history
-    rewrite and is flagged, even though nothing is deleted outright."""
+    """A PUBLISHED (versioned) entry is frozen: rewriting its wording is a history rewrite and is flagged, even though nothing is deleted outright."""
     ch = _load_check_hygiene()
     new = _BASE_CHANGELOG.replace("- the GUI\n", "- the GUI (reworded)\n")
     removed = ch._changelog_removed_lines(_BASE_CHANGELOG, new)
@@ -304,10 +270,7 @@ def test_changelog_rewriting_a_published_entry_fails():
 
 
 def test_changelog_redating_a_published_version_header_fails():
-    """NEGATIVE (the confirmed gap): the guard skipped every '## ' line when building
-    the protected set, including the version header ITSELF, so silently changing a
-    published release's ship date in place went undetected. The header carries real
-    shipped-record content (version + date), same as any body entry."""
+    """NEGATIVE (the confirmed gap): the guard skipped every '## ' line when building the protected set, including the version header ITSELF, so silently changing a published release's ship date in place went undetected."""
     ch = _load_check_hygiene()
     new = _BASE_CHANGELOG.replace(
         "## [0.1.0] - 2026-07-04", "## [0.1.0] - 2026-07-09")
@@ -316,8 +279,7 @@ def test_changelog_redating_a_published_version_header_fails():
 
 
 def test_changelog_renumbering_a_published_version_header_fails():
-    """Same gap, the other direction: silently renumbering a shipped version (e.g.
-    passing off 0.1.0 as 0.1.1) must be caught too."""
+    """Same gap, the other direction: silently renumbering a shipped version (e.g. passing off 0.1.0 as 0.1.1) must be caught too."""
     ch = _load_check_hygiene()
     new = _BASE_CHANGELOG.replace(
         "## [0.1.0] - 2026-07-04", "## [0.1.1] - 2026-07-04")
@@ -326,19 +288,7 @@ def test_changelog_renumbering_a_published_version_header_fails():
 
 
 def test_git_helper_decodes_output_as_utf8_not_locale_default(monkeypatch):
-    """REGRESSION: _git() must decode git's output as UTF-8, not the platform
-    locale default.
-
-    The changelog append-only guard reads the baseline via `git show
-    <ref>:CHANGELOG.md` (through _git) and the working tree via
-    read_text(encoding="utf-8"). With a bare text=True, Python decodes the
-    subprocess output with locale.getpreferredencoding() - cp1252 on Windows -
-    so a UTF-8 line carrying an emoji or an accented character comes back as
-    mojibake and no longer equals the UTF-8 working-tree line, falsely flagging
-    an unchanged PUBLISHED entry as a rewrite. Pinning encoding="utf-8" is what
-    makes the two reads match on every platform; assert it here so the kwarg is
-    never silently dropped (a behavioral test would only bite on a cp1252 box,
-    not on CI Linux)."""
+    """REGRESSION: _git() must decode git's output as UTF-8, not the platform locale default."""
     ch = _load_check_hygiene()
     captured = {}
 
@@ -357,12 +307,7 @@ def test_git_helper_decodes_output_as_utf8_not_locale_default(monkeypatch):
 
 
 def test_changelog_renaming_a_published_subsection_header_fails():
-    """NEGATIVE (a second confirmed gap, same mechanism): '### Added' etc. inside an
-    already-published section was never in the protected set (the 'stripped.
-    startswith(\"#\")' catch-all excluded it unconditionally), so flipping it to
-    '### Removed' - misrepresenting what a published release shipped, while leaving
-    the bullet text unchanged - went undetected. Reproduces the reviewer's exact
-    repro: pre-fix this returned []."""
+    """NEGATIVE (a second confirmed gap, same mechanism): '### Added' etc. inside an already-published section was never in the protected set (the 'stripped. startswith('#')' catch-all excluded it unconditionally), so flipping it to '### Removed' - misrepresenting what a published release shipped, while le..."""
     ch = _load_check_hygiene()
     new = _BASE_CHANGELOG.replace("### Added\n- inference and CLI\n- the GUI",
                                   "### Removed\n- inference and CLI\n- the GUI")
@@ -371,8 +316,7 @@ def test_changelog_renaming_a_published_subsection_header_fails():
 
 
 def test_changelog_deleting_a_published_subsection_header_fails():
-    """Same gap, the other reviewer-confirmed attack: deleting '### Added' entirely
-    (orphaning its bullets directly under the version header) must also be caught."""
+    """Same gap, the other reviewer-confirmed attack: deleting '### Added' entirely (orphaning its bullets directly under the version header) must also be caught."""
     ch = _load_check_hygiene()
     new = _BASE_CHANGELOG.replace("### Added\n- inference and CLI\n- the GUI",
                                   "- inference and CLI\n- the GUI")
@@ -381,8 +325,7 @@ def test_changelog_deleting_a_published_subsection_header_fails():
 
 
 def test_changelog_unreleased_subsection_headers_stay_freely_editable():
-    """A subsection header under '## [Unreleased]' (not yet published) must NOT
-    become protected - only ones inside an already-published version section."""
+    """A subsection header under '## [Unreleased]' (not yet published) must NOT become protected - only ones inside an already-published version section."""
     ch = _load_check_hygiene()
     new = _BASE_CHANGELOG.replace(
         "## [Unreleased]\n\n### Added\n- work in progress\n",
@@ -392,8 +335,7 @@ def test_changelog_unreleased_subsection_headers_stay_freely_editable():
 
 
 def test_changelog_unreleased_header_stays_freely_editable():
-    """The '## [Unreleased]' header must NOT become protected - only VERSIONED
-    headers (a leading digit inside the brackets) are frozen."""
+    """The '## [Unreleased]' header must NOT become protected - only VERSIONED headers (a leading digit inside the brackets) are frozen."""
     ch = _load_check_hygiene()
     new = _BASE_CHANGELOG.replace("## [Unreleased]", "## [Unreleased draft]")
     removed = ch._changelog_removed_lines(_BASE_CHANGELOG, new)
@@ -401,9 +343,7 @@ def test_changelog_unreleased_header_stays_freely_editable():
 
 
 def test_changelog_removed_lines_release_rename_is_clean():
-    """Cutting a release renames the `## [Unreleased]` header, adds a version
-    header, and rewrites the compare link + adds a new tag link. Only headers and
-    link-reference lines change; no content entry is removed -> clean."""
+    """Cutting a release renames the `## [Unreleased]` header, adds a version header, and rewrites the compare link + adds a new tag link."""
     ch = _load_check_hygiene()
     new = (_BASE_CHANGELOG
            .replace("## [Unreleased]\n\n### Added\n- work in progress\n",
@@ -416,8 +356,7 @@ def test_changelog_removed_lines_release_rename_is_clean():
 
 
 def _init_changelog_repo(tmp_path, text):
-    """A throwaway git repo with CHANGELOG.md committed, so the git-wired guard has
-    a real HEAD baseline to diff the working tree against."""
+    """A throwaway git repo with CHANGELOG.md committed, so the git-wired guard has a real HEAD baseline to diff the working tree against."""
     env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid"}
     import os
@@ -430,8 +369,7 @@ def _init_changelog_repo(tmp_path, text):
 
 
 def test_changelog_append_only_guard_flags_a_committed_baseline_deletion(tmp_path, monkeypatch):
-    """The git-wired entrypoint: with CHANGELOG committed, deleting a shipped entry
-    line in the working tree is flagged; no-change and add-on-top pass."""
+    """The git-wired entrypoint: with CHANGELOG committed, deleting a shipped entry line in the working tree is flagged; no-change and add-on-top pass."""
     ch = _load_check_hygiene()
     monkeypatch.setattr(ch, "REPO", tmp_path)
     _init_changelog_repo(tmp_path, _BASE_CHANGELOG)
@@ -454,9 +392,7 @@ def test_changelog_append_only_guard_flags_a_committed_baseline_deletion(tmp_pat
 
 
 def test_changelog_append_only_guard_flags_a_published_header_rewrite(tmp_path, monkeypatch):
-    """The git-wired entrypoint (the actual CI/pre-commit-hook gate) must catch a
-    header-only rewrite of a published section too - reproduces the confirmed gap end
-    to end, not just at the pure _changelog_removed_lines layer."""
+    """The git-wired entrypoint (the actual CI/pre-commit-hook gate) must catch a header-only rewrite of a published section too - reproduces the confirmed gap end to end, not just at the pure _changelog_removed_lines layer."""
     ch = _load_check_hygiene()
     monkeypatch.setattr(ch, "REPO", tmp_path)
     _init_changelog_repo(tmp_path, _BASE_CHANGELOG)
@@ -470,11 +406,7 @@ def test_changelog_append_only_guard_flags_a_published_header_rewrite(tmp_path, 
 
 
 def test_changelog_append_only_guard_catches_a_committed_deletion_in_ci(tmp_path, monkeypatch):
-    """CI / clean-checkout path: even after the deletion is COMMITTED (working ==
-    HEAD, so a plain working-vs-HEAD diff would see nothing), a shipped entry
-    dropped relative to origin/master is still caught via the merge-base baseline.
-    An add-on-top commit on the same clean tree must still pass (no false-positive
-    on a new release landing on the branch)."""
+    """CI / clean-checkout path: even after the deletion is COMMITTED (working == HEAD, so a plain working-vs-HEAD diff would see nothing), a shipped entry dropped relative to origin/master is still caught via the merge-base baseline."""
     import os
     ch = _load_check_hygiene()
     monkeypatch.setattr(ch, "REPO", tmp_path)
@@ -514,8 +446,7 @@ def test_changelog_append_only_guard_catches_a_committed_deletion_in_ci(tmp_path
 
 
 def test_changelog_append_only_guard_passes_without_a_git_baseline(tmp_path, monkeypatch):
-    """A brand-new (never-committed) CHANGELOG has no baseline to diff against, so
-    the guard passes rather than crashing or blocking the first commit."""
+    """A brand-new (never-committed) CHANGELOG has no baseline to diff against, so the guard passes rather than crashing or blocking the first commit."""
     ch = _load_check_hygiene()
     monkeypatch.setattr(ch, "REPO", tmp_path)
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
@@ -525,18 +456,7 @@ def test_changelog_append_only_guard_passes_without_a_git_baseline(tmp_path, mon
 
 def test_changelog_append_only_no_false_positive_on_non_ascii_under_cp1252(
         tmp_path, monkeypatch):
-    """A shipped entry with NON-ASCII content (an emoji, an accented word) must
-    not be reported as removed just because the process locale is not UTF-8.
-
-    Regression for the Windows false positive: ``_git`` compares
-    ``git show <ref>:CHANGELOG.md`` against the working file read as UTF-8. git
-    emits UTF-8, but ``subprocess(text=True)`` alone decodes with the locale
-    codepage - cp1252 on Windows - turning every non-ASCII shipped line into
-    mojibake that no longer matched its own UTF-8 working copy, so the guard
-    flagged a byte-identical CHANGELOG. Forcing a cp1252 locale reproduces it on
-    ANY platform (Linux CI decodes UTF-8 by default and never saw it); the fix
-    is ``_git`` decoding explicitly as UTF-8, which this monkeypatch cannot
-    perturb."""
+    """A shipped entry with NON-ASCII content (an emoji, an accented word) must not be reported as removed just because the process locale is not UTF-8."""
     import locale
     ch = _load_check_hygiene()
     monkeypatch.setattr(ch, "REPO", tmp_path)
@@ -558,8 +478,7 @@ def test_changelog_append_only_no_false_positive_on_non_ascii_under_cp1252(
 
 
 def test_real_changelog_is_append_only_against_head():
-    """The real repo CHANGELOG must itself satisfy the guard (this PR only adds a
-    header note on top, removing nothing)."""
+    """The real repo CHANGELOG must itself satisfy the guard (this PR only adds a header note on top, removing nothing)."""
     ch = _load_check_hygiene()
     assert ch._changelog_append_only() == []
 
@@ -586,8 +505,7 @@ def _tag(tmp_path, name):
 
 
 def test_pending_unreleased_section_may_be_recut(tmp_path, monkeypatch):
-    """VERSION names 0.1.0 and no v0.1.0 tag exists -> that section is the pending
-    release, still a draft: re-dating it and rewriting its entries is allowed."""
+    """VERSION names 0.1.0 and no v0.1.0 tag exists -> that section is the pending release, still a draft: re-dating it and rewriting its entries is allowed."""
     ch = _load_check_hygiene()
     monkeypatch.setattr(ch, "REPO", tmp_path)
     _init_versioned_repo(tmp_path, "0.1.0")
@@ -601,8 +519,7 @@ def test_pending_unreleased_section_may_be_recut(tmp_path, monkeypatch):
 
 
 def test_pending_section_refreezes_once_tagged(tmp_path, monkeypatch):
-    """The SAME edit is a history rewrite once v0.1.0 exists: the tag is what makes a
-    section real history, so the guard must bite again the moment it appears."""
+    """The SAME edit is a history rewrite once v0.1.0 exists: the tag is what makes a section real history, so the guard must bite again the moment it appears."""
     ch = _load_check_hygiene()
     monkeypatch.setattr(ch, "REPO", tmp_path)
     _init_versioned_repo(tmp_path, "0.1.0")
@@ -617,9 +534,7 @@ def test_pending_section_refreezes_once_tagged(tmp_path, monkeypatch):
 
 
 def test_older_section_stays_frozen_even_with_no_tags(tmp_path, monkeypatch):
-    """The safety property that makes the tag lookup safe: a section whose version is
-    NOT the current VERSION is frozen unconditionally, so a clone with no tags at all
-    (a --no-tags / shallow clone) can still never rewrite real history."""
+    """The safety property that makes the tag lookup safe: a section whose version is NOT the current VERSION is frozen unconditionally, so a clone with no tags at all (a --no-tags / shallow clone) can still never rewrite real history."""
     ch = _load_check_hygiene()
     monkeypatch.setattr(ch, "REPO", tmp_path)
     _init_versioned_repo(tmp_path, "0.2.0")     # 0.1.0 is NOT the pending release
@@ -632,8 +547,7 @@ def test_older_section_stays_frozen_even_with_no_tags(tmp_path, monkeypatch):
 
 
 def test_missing_version_file_freezes_everything(tmp_path, monkeypatch):
-    """Fail SAFE: with no VERSION file the guard cannot identify a pending release, so
-    it protects every version section rather than guessing."""
+    """Fail SAFE: with no VERSION file the guard cannot identify a pending release, so it protects every version section rather than guessing."""
     ch = _load_check_hygiene()
     monkeypatch.setattr(ch, "REPO", tmp_path)
     _init_changelog_repo(tmp_path, _BASE_CHANGELOG)     # no VERSION file written
@@ -664,8 +578,7 @@ def _guarded_wrapper_text(ch):
 
 
 def test_direct_call_outside_allowlist_is_flagged(tmp_path, monkeypatch):
-    """NEGATIVE: a plain `from localm.discover import vram_info` + a direct
-    call, in a file NOT in the guard's allowed set, must be flagged."""
+    """NEGATIVE: a plain `from localm.discover import vram_info` + a direct call, in a file NOT in the guard's allowed set, must be flagged."""
     ch = _load_check_hygiene()
     monkeypatch.setattr(ch, "REPO", tmp_path)
     p = tmp_path / "some_module.py"
@@ -681,11 +594,7 @@ def test_direct_call_outside_allowlist_is_flagged(tmp_path, monkeypatch):
 
 
 def test_import_alias_bypass_is_flagged(tmp_path, monkeypatch):
-    """NEGATIVE (the confirmed gap): `from localm.discover import vram_info as
-    vi` followed by `vi()` must ALSO be flagged - a fresh-context review
-    demonstrated this alias genuinely evaded the first version of this check
-    (which matched only the literal name `vram_info`, missing that an
-    ast.ImportFrom alias rebinds it locally)."""
+    """NEGATIVE (the confirmed gap): `from localm.discover import vram_info as vi` followed by `vi()` must ALSO be flagged - a fresh-context review demonstrated this alias genuinely evaded the first version of this check (which matched only the literal name `vram_info`, missing that an ast.ImportFrom alias..."""
     ch = _load_check_hygiene()
     monkeypatch.setattr(ch, "REPO", tmp_path)
     p = tmp_path / "some_module.py"
@@ -701,9 +610,7 @@ def test_import_alias_bypass_is_flagged(tmp_path, monkeypatch):
 
 
 def test_module_attribute_call_is_flagged_regardless_of_module_alias(tmp_path, monkeypatch):
-    """`import localm.discover as disc; disc.vram_info()` must be flagged too -
-    ast.Attribute.attr is still the literal accessor name no matter what the
-    MODULE is aliased to, so this path never needed the alias-tracking fix."""
+    """`import localm.discover as disc; disc.vram_info()` must be flagged too - ast.Attribute.attr is still the literal accessor name no matter what the MODULE is aliased to, so this path never needed the alias-tracking fix."""
     ch = _load_check_hygiene()
     monkeypatch.setattr(ch, "REPO", tmp_path)
     p = tmp_path / "some_module.py"
@@ -718,8 +625,7 @@ def test_module_attribute_call_is_flagged_regardless_of_module_alias(tmp_path, m
 
 
 def test_call_inside_an_allowed_file_is_not_flagged(tmp_path, monkeypatch):
-    """A file listed in the guard's allowed set (a documented single-resource
-    exception) must NOT be flagged, direct call or alias alike."""
+    """A file listed in the guard's allowed set (a documented single-resource exception) must NOT be flagged, direct call or alias alike."""
     ch = _load_check_hygiene()
     monkeypatch.setattr(ch, "REPO", tmp_path)
     allowed_rel = next(iter(ch._RAW_ACCESSOR_GUARDS[_GUARD_NAME]["allowed"]))
@@ -734,8 +640,7 @@ def test_call_inside_an_allowed_file_is_not_flagged(tmp_path, monkeypatch):
 
 
 def test_call_inside_tests_directory_is_not_flagged(tmp_path, monkeypatch):
-    """tests/ is exempt everywhere: a test legitimately calls/mocks the raw
-    accessor directly to test IT, not just its consumers."""
+    """tests/ is exempt everywhere: a test legitimately calls/mocks the raw accessor directly to test IT, not just its consumers."""
     ch = _load_check_hygiene()
     monkeypatch.setattr(ch, "REPO", tmp_path)
     p = tmp_path / "tests" / "test_something.py"
@@ -749,9 +654,7 @@ def test_call_inside_tests_directory_is_not_flagged(tmp_path, monkeypatch):
 
 
 def test_docstring_or_comment_mention_is_not_flagged(tmp_path, monkeypatch):
-    """A prose mention of 'vram_info()' in a docstring/comment (not an actual
-    call) must NOT be flagged - this is an AST-based check, not text matching,
-    specifically so it never false-positives on documentation."""
+    """A prose mention of 'vram_info()' in a docstring/comment (not an actual call) must NOT be flagged - this is an AST-based check, not text matching, specifically so it never false-positives on documentation."""
     ch = _load_check_hygiene()
     monkeypatch.setattr(ch, "REPO", tmp_path)
     p = tmp_path / "some_module.py"
@@ -765,8 +668,7 @@ def test_docstring_or_comment_mention_is_not_flagged(tmp_path, monkeypatch):
 
 
 def test_real_tree_has_no_raw_accessor_violations():
-    """Regression guard: the real, shipped tree must itself satisfy this check
-    (every consumer either uses vram_capacity() or is in the allowed set)."""
+    """Regression guard: the real, shipped tree must itself satisfy this check (every consumer either uses vram_capacity() or is in the allowed set)."""
     ch = _load_check_hygiene()
     tracked = ch._tracked_files()
     assert ch._raw_accessor_violations(tracked) == []
@@ -778,9 +680,7 @@ def test_real_tree_has_no_raw_accessor_violations():
 # read as "clean" (AGENTS.md rule 5). It now appends a problem instead.
 
 def test_unparseable_py_is_flagged_not_silently_skipped(tmp_path, monkeypatch):
-    """NEGATIVE: a .py with a syntax error the guard cannot ast.parse must be reported
-    as unchecked, not skipped - a guard that 'passes' a file it never scanned is the
-    exact silent pass rule 5 forbids."""
+    """NEGATIVE: a .py with a syntax error the guard cannot ast.parse must be reported as unchecked, not skipped - a guard that 'passes' a file it never scanned is the exact silent pass rule 5 forbids."""
     ch = _load_check_hygiene()
     monkeypatch.setattr(ch, "REPO", tmp_path)
     p = tmp_path / "broken.py"
@@ -792,8 +692,7 @@ def test_unparseable_py_is_flagged_not_silently_skipped(tmp_path, monkeypatch):
 
 
 def test_valid_py_with_no_raw_call_still_clean(tmp_path, monkeypatch):
-    """Positive control for FIX #5: a parseable .py with no raw-accessor call stays
-    clean - the new report path fires ONLY on a genuinely unparseable file."""
+    """Positive control for FIX #5: a parseable .py with no raw-accessor call stays clean - the new report path fires ONLY on a genuinely unparseable file."""
     ch = _load_check_hygiene()
     monkeypatch.setattr(ch, "REPO", tmp_path)
     p = tmp_path / "fine.py"
@@ -808,17 +707,14 @@ def test_valid_py_with_no_raw_call_still_clean(tmp_path, monkeypatch):
 # clean without scanning anything is exactly the silent pass rule 5 forbids.
 
 def test_hygiene_main_fails_when_nothing_scanned(monkeypatch):
-    """NEGATIVE: with no tracked files enumerable (simulated git failure), main() must
-    return non-zero and NOT report success."""
+    """NEGATIVE: with no tracked files enumerable (simulated git failure), main() must return non-zero and NOT report success."""
     ch = _load_check_hygiene()
     monkeypatch.setattr(ch, "_tracked_files", lambda: [])
     assert ch.main([]) == 1
 
 
 def test_hygiene_main_passes_when_files_are_scanned(tmp_path, monkeypatch):
-    """Positive control for FIX #3: with a real (clean) file to scan and the other
-    sub-gates stubbed clean, main() returns 0 - the new guard fires ONLY on the
-    scanned-nothing case, it does not break the happy path."""
+    """Positive control for FIX #3: with a real (clean) file to scan and the other sub-gates stubbed clean, main() returns 0 - the new guard fires ONLY on the scanned-nothing case, it does not break the happy path."""
     ch = _load_check_hygiene()
     clean = tmp_path / "ok.py"
     clean.write_text("x = 1\n", encoding="utf-8")
@@ -838,9 +734,7 @@ def test_hygiene_main_passes_when_files_are_scanned(tmp_path, monkeypatch):
 # release-manifest-gate-wiring.md). These pin the wiring so that regresses loudly.
 
 def test_release_manifest_gate_failures_fail_the_build(monkeypatch):
-    """A real classification problem from _release_manifest_gate() must surface
-    as a hygiene FAILURE (exit 1), not be silently dropped - this is the exact
-    wiring gap that let 13 stale manifest entries go unnoticed."""
+    """A real classification problem from _release_manifest_gate() must surface as a hygiene FAILURE (exit 1), not be silently dropped - this is the exact wiring gap that let 13 stale manifest entries go unnoticed."""
     ch = _load_check_hygiene()
     monkeypatch.setattr(ch, "_tracked_files", lambda: [Path("ok.py")])
     monkeypatch.setattr(ch, "_scan", lambda f: [])
@@ -856,10 +750,7 @@ def test_release_manifest_gate_failures_fail_the_build(monkeypatch):
 
 
 def test_release_manifest_gate_warns_but_passes_by_default_and_strict_escalates(monkeypatch, capsys):
-    """A WARNING from _release_manifest_gate() (the expected shape when
-    check_manifest.py is absent, e.g. on CI/most external clones) does not fail
-    the default run, but DOES escalate under --strict - same contract as the
-    other warn-only checks (4b)."""
+    """A WARNING from _release_manifest_gate() (the expected shape when check_manifest.py is absent, e.g. on CI/most external clones) does not fail the default run, but DOES escalate under --strict - same contract as the other warn-only checks (4b)."""
     ch = _load_check_hygiene()
     monkeypatch.setattr(ch, "_tracked_files", lambda: [Path("ok.py")])
     monkeypatch.setattr(ch, "_scan", lambda f: [])
@@ -886,11 +777,7 @@ def test_release_manifest_gate_warns_but_passes_by_default_and_strict_escalates(
 
 
 def test_release_manifest_gate_reports_a_warning_when_check_manifest_not_importable(monkeypatch):
-    """Real (non-stubbed) behavior of _release_manifest_gate() itself: when
-    scripts/check_manifest.py cannot be imported - the normal state on CI and
-    most external clones, since it is gitignored per AGENTS.md rule 6 - this must
-    return a warning, never silently return (([], [])) as if there were nothing
-    to report."""
+    """Real (non-stubbed) behavior of _release_manifest_gate() itself: when scripts/check_manifest.py cannot be imported - the normal state on CI and most external clones, since it is gitignored per AGENTS.md rule 6 - this must return a warning, never silently return (([], [])) as if there were nothing to..."""
     ch = _load_check_hygiene()
     monkeypatch.setitem(ch.sys.modules, "check_manifest", None)   # forces ImportError
     failures, warnings = ch._release_manifest_gate()
@@ -905,18 +792,7 @@ def test_release_manifest_gate_reports_a_warning_when_check_manifest_not_importa
 
 def test_release_manifest_gate_does_not_claim_absent_when_the_checker_is_broken(
         monkeypatch):
-    """A PRESENT but unimportable checker must not be reported as absent.
-
-    A bare `except ImportError` folded both states into one message that reads
-    "scripts/check_manifest.py is not present in this checkout" - a FALSE reason for
-    a real failure, about a file sitting right there. The two states need opposite
-    responses: absent is the expected, benign, gitignored case, while present-and-
-    broken means the gate CANNOT RUN on the one machine that actually has the
-    checker, so the manifest classification is unchecked and nobody is told.
-
-    A plain ImportError (not ModuleNotFoundError) is the realistic shape here: a
-    broken internal import inside an otherwise-present check_manifest.py.
-    """
+    """A PRESENT but unimportable checker must not be reported as absent."""
     import importlib.abc
 
     ch = _load_check_hygiene()
@@ -942,10 +818,7 @@ def test_release_manifest_gate_does_not_claim_absent_when_the_checker_is_broken(
 
 
 def test_release_manifest_gate_runs_the_real_checker_when_importable():
-    """Real (non-stubbed) behavior when scripts/check_manifest.py IS importable
-    (true in this dev checkout): _release_manifest_gate() must actually call
-    check_manifest.check_manifest(), not just claim to - this is the exact
-    wiring the docstring described but the old code never performed."""
+    """Real (non-stubbed) behavior when scripts/check_manifest.py IS importable (true in this dev checkout): _release_manifest_gate() must actually call check_manifest.check_manifest(), not just claim to - this is the exact wiring the docstring described but the old code never performed."""
     ch = _load_check_hygiene()
     scripts_dir = str(REPO_ROOT / "scripts")
     if scripts_dir not in ch.sys.path:
@@ -995,9 +868,7 @@ _DRAFT_BASE = (
 
 
 def test_unreleased_lines_collects_draft_content_only():
-    """The draft extractor takes bullets AND their wrapped continuation lines
-    from [Unreleased], and nothing else: no headers (## / ###), no blank lines,
-    no link-reference definitions, no intro text, no published-section lines."""
+    """The draft extractor takes bullets AND their wrapped continuation lines from [Unreleased], and nothing else: no headers (## / ###), no blank lines, no link-reference definitions, no intro text, no published-section lines."""
     ch = _load_check_hygiene()
     got = ch._changelog_unreleased_lines(_DRAFT_BASE)
     assert got == [
@@ -1009,13 +880,7 @@ def test_unreleased_lines_collects_draft_content_only():
 
 
 def test_unreleased_lines_keys_on_whole_lines_not_a_bold_title_regex():
-    """A first cut of the manual version of this check keyed bullets on a
-    single-line bold title (``^- \\*\\*[^*]*\\*\\*``) and was BLIND to bullets
-    whose bold title wraps across lines, so it reported CLEAN on a real drop.
-    Measured against the live CHANGELOG when this was written: 14 of 36
-    [Unreleased] bullets had a title that does not close on the first line. Pin
-    that the extractor takes whole lines: a wrapped-title bullet's first line is
-    collected like any other."""
+    """A first cut of the manual version of this check keyed bullets on a single-line bold title (``^- \\*\\*[^*]*\\*\\*``) and was BLIND to bullets whose bold title wraps across lines, so it reported CLEAN on a real drop."""
     ch = _load_check_hygiene()
     text = ("## [Unreleased]\n\n### Added\n"
             "- **A title that does not close its bold marker on the first\n"
@@ -1027,9 +892,7 @@ def test_unreleased_lines_keys_on_whole_lines_not_a_bold_title_regex():
 
 
 def test_unreleased_drop_of_a_wrapped_title_bullet_is_reported():
-    """The same blind spot, at the detector level: dropping a bullet whose bold
-    title spans two lines must be reported (both of its lines), not silently
-    passed."""
+    """The same blind spot, at the detector level: dropping a bullet whose bold title spans two lines must be reported (both of its lines), not silently passed."""
     ch = _load_check_hygiene()
     old = ("## [Unreleased]\n\n### Added\n"
            "- **A wrapped title that closes\n  on the second line** with a body.\n"
@@ -1042,9 +905,7 @@ def test_unreleased_drop_of_a_wrapped_title_bullet_is_reported():
 
 
 def test_unreleased_drop_of_sibling_bullet_is_reported():
-    """NEGATIVE (the incident): a baseline draft bullet missing from the working
-    copy is reported, carrying the exact lost line so it can be restored
-    verbatim."""
+    """NEGATIVE (the incident): a baseline draft bullet missing from the working copy is reported, carrying the exact lost line so it can be restored verbatim."""
     ch = _load_check_hygiene()
     new = _DRAFT_BASE.replace("- sibling bullet a rebase must not eat\n", "")
     dropped = ch._changelog_dropped_unreleased_lines(_DRAFT_BASE, new)
@@ -1061,12 +922,7 @@ def test_unreleased_drop_own_added_bullet_is_clean():
 
 
 def test_unreleased_drop_reworded_bullet_warns_by_design():
-    """Rewording a draft line in place IS reported - a DOCUMENTED accepted cost,
-    not a bug. Exact-line matching is deliberate: a similarity heuristic that
-    suppressed near-matches could suppress exactly the incident case (a
-    sibling's bullet eaten while similar sibling bullets remain). For a
-    warn-only check a false positive costs one glance at the warning; a false
-    negative defeats the whole backstop."""
+    """Rewording a draft line in place IS reported - a DOCUMENTED accepted cost, not a bug."""
     ch = _load_check_hygiene()
     new = _DRAFT_BASE.replace("- my own draft bullet\n",
                               "- my own draft bullet, reworded\n")
@@ -1075,9 +931,7 @@ def test_unreleased_drop_reworded_bullet_warns_by_design():
 
 
 def test_unreleased_drop_release_cut_move_is_clean():
-    """Cutting a release MOVES the draft bullets under a new version header. The
-    comparison is against the whole working file, not just its [Unreleased]
-    section, precisely so a cut does not read as a mass drop."""
+    """Cutting a release MOVES the draft bullets under a new version header."""
     ch = _load_check_hygiene()
     draft_block = (
         "- my own draft bullet\n"
@@ -1091,8 +945,7 @@ def test_unreleased_drop_release_cut_move_is_clean():
 
 
 def test_unreleased_drop_continuation_line_loss_is_reported():
-    """A wrapped bullet's continuation line is draft content too: a rebase that
-    eats just the wrapped half must be reported, same as a whole bullet."""
+    """A wrapped bullet's continuation line is draft content too: a rebase that eats just the wrapped half must be reported, same as a whole bullet."""
     ch = _load_check_hygiene()
     new = _DRAFT_BASE.replace("  carries the rest of the sentence\n", "")
     dropped = ch._changelog_dropped_unreleased_lines(_DRAFT_BASE, new)
@@ -1100,10 +953,7 @@ def test_unreleased_drop_continuation_line_loss_is_reported():
 
 
 def test_unreleased_drop_subsection_header_removal_is_clean():
-    """'### Added' inside the draft is scaffolding the draft may freely
-    reorganize (e.g. merging two subsections); only content lines are watched.
-    Warning on scaffolding would be noise that trains people to ignore the one
-    warning that matters."""
+    """'### Added' inside the draft is scaffolding the draft may freely reorganize (e.g. merging two subsections); only content lines are watched."""
     ch = _load_check_hygiene()
     new = _DRAFT_BASE.replace("### Added\n- my own draft bullet\n",
                               "- my own draft bullet\n")
@@ -1119,14 +969,7 @@ def test_unreleased_drop_no_draft_section_is_clean():
 
 
 def test_unreleased_drop_clamps_to_the_draft_count():
-    """The lost-count is clamped to how many copies the DRAFT actually held, so a
-    line duplicated across the draft AND a published section reports one loss, not
-    two, when both copies go.
-
-    Pins the `min(...)` in _changelog_dropped_unreleased_lines - without it the
-    unclamped subtraction reports the line twice, over-claiming a draft loss that
-    never happened. This was the single surviving mutant in a 16-mutation pass over
-    the new tests, i.e. the one piece of this logic nothing else covers."""
+    """The lost-count is clamped to how many copies the DRAFT actually held, so a line duplicated across the draft AND a published section reports one loss, not two, when both copies go."""
     ch = _load_check_hygiene()
     old = _DRAFT_BASE.replace("- my own draft bullet\n", "- inference and CLI\n")
     new = old.replace("- inference and CLI\n", "")          # BOTH copies removed
@@ -1135,10 +978,7 @@ def test_unreleased_drop_clamps_to_the_draft_count():
 
 
 def test_unreleased_drop_published_duplicate_does_not_mask():
-    """A draft line whose text ALSO appears in a published section must still be
-    reported when the DRAFT copy is deleted: occurrences are counted across the
-    whole file on both sides, so the surviving published copy cannot satisfy
-    the draft copy's count."""
+    """A draft line whose text ALSO appears in a published section must still be reported when the DRAFT copy is deleted: occurrences are counted across the whole file on both sides, so the surviving published copy cannot satisfy the draft copy's count."""
     ch = _load_check_hygiene()
     old = _DRAFT_BASE.replace("- my own draft bullet\n",
                               "- inference and CLI\n")   # duplicates 0.1.0's bullet
@@ -1148,10 +988,7 @@ def test_unreleased_drop_published_duplicate_does_not_mask():
 
 
 def test_unreleased_drop_guard_warns_end_to_end(tmp_path, monkeypatch):
-    """The git-wired entrypoint: with the baseline committed, dropping a sibling
-    draft bullet in the working tree yields ONE warning naming the lost line,
-    while the hard append-only gate stays silent (the draft is exempt from it,
-    which is exactly why this warning exists)."""
+    """The git-wired entrypoint: with the baseline committed, dropping a sibling draft bullet in the working tree yields ONE warning naming the lost line, while the hard append-only gate stays silent (the draft is exempt from it, which is exactly why this warning exists)."""
     ch = _load_check_hygiene()
     monkeypatch.setattr(ch, "REPO", tmp_path)
     _init_changelog_repo(tmp_path, _DRAFT_BASE)
@@ -1169,9 +1006,7 @@ def test_unreleased_drop_guard_warns_end_to_end(tmp_path, monkeypatch):
 
 
 def test_unreleased_new_duplicate_bullet_is_reported():
-    """NEGATIVE (the remedy going wrong): a bullet hand-restored when it was
-    never actually lost now appears twice. Reported with its working-copy count
-    so the fix is unambiguous (delete the extra copy, not both)."""
+    """NEGATIVE (the remedy going wrong): a bullet hand-restored when it was never actually lost now appears twice."""
     ch = _load_check_hygiene()
     new = _DRAFT_BASE.replace(
         "- my own draft bullet\n",
@@ -1181,9 +1016,7 @@ def test_unreleased_new_duplicate_bullet_is_reported():
 
 
 def test_unreleased_duplicate_already_in_the_baseline_is_not_reported():
-    """A duplicate that already exists at the baseline is master's defect, not
-    this branch's: warning about it on every run of every session is how a
-    warning gets trained into background noise."""
+    """A duplicate that already exists at the baseline is master's defect, not this branch's: warning about it on every run of every session is how a warning gets trained into background noise."""
     ch = _load_check_hygiene()
     old = _DRAFT_BASE.replace("- my own draft bullet\n",
                               "- my own draft bullet\n- my own draft bullet\n")
@@ -1191,8 +1024,7 @@ def test_unreleased_duplicate_already_in_the_baseline_is_not_reported():
 
 
 def test_unreleased_duplicate_growing_past_the_baseline_is_reported():
-    """...but a duplicate that gets WORSE on this branch (two copies at the
-    baseline, three now) is this branch's doing and is reported."""
+    """...but a duplicate that gets WORSE on this branch (two copies at the baseline, three now) is this branch's doing and is reported."""
     ch = _load_check_hygiene()
     old = _DRAFT_BASE.replace("- my own draft bullet\n",
                               "- my own draft bullet\n- my own draft bullet\n")
@@ -1204,9 +1036,7 @@ def test_unreleased_duplicate_growing_past_the_baseline_is_reported():
 
 
 def test_unreleased_duplicate_ignores_continuation_lines():
-    """Only top-level bullets are counted: two DIFFERENT bullets can legitimately
-    wrap to the same trailing words, so an identical continuation line is not a
-    duplicate. Two byte-identical bullet lines are a mistake every time."""
+    """Only top-level bullets are counted: two DIFFERENT bullets can legitimately wrap to the same trailing words, so an identical continuation line is not a duplicate."""
     ch = _load_check_hygiene()
     new = _DRAFT_BASE.replace(
         "  carries the rest of the sentence\n",
@@ -1217,8 +1047,7 @@ def test_unreleased_duplicate_ignores_continuation_lines():
 
 
 def test_unreleased_duplicate_outside_the_draft_is_ignored():
-    """A published section is the append-only gate's business, not this one's:
-    the duplicate check looks only inside [Unreleased]."""
+    """A published section is the append-only gate's business, not this one's: the duplicate check looks only inside [Unreleased]."""
     ch = _load_check_hygiene()
     new = _DRAFT_BASE.replace("- inference and CLI\n",
                               "- inference and CLI\n- inference and CLI\n")
@@ -1226,10 +1055,7 @@ def test_unreleased_duplicate_outside_the_draft_is_ignored():
 
 
 def test_unreleased_duplicate_guard_warns_end_to_end(tmp_path, monkeypatch):
-    """The git-wired duplicate entrypoint on a real throwaway repo: quiet on the
-    committed baseline, one warning naming the doubled bullet after the bad
-    restore, and the DROP check stays quiet (nothing was lost) so the two
-    conditions are reported independently."""
+    """The git-wired duplicate entrypoint on a real throwaway repo: quiet on the committed baseline, one warning naming the doubled bullet after the bad restore, and the DROP check stays quiet (nothing was lost) so the two conditions are reported independently."""
     ch = _load_check_hygiene()
     monkeypatch.setattr(ch, "REPO", tmp_path)
     _init_changelog_repo(tmp_path, _DRAFT_BASE)
@@ -1248,8 +1074,7 @@ def test_unreleased_duplicate_guard_warns_end_to_end(tmp_path, monkeypatch):
 
 
 def test_hygiene_main_warns_on_a_new_duplicate(tmp_path, monkeypatch, capsys):
-    """main() surfaces the duplicate condition too (warn by default, escalated by
-    --strict) - a second detector wired into the same warning channel."""
+    """main() surfaces the duplicate condition too (warn by default, escalated by --strict) - a second detector wired into the same warning channel."""
     ch = _load_check_hygiene()
     monkeypatch.setattr(ch, "REPO", tmp_path)
     monkeypatch.setattr(ch, "_never_tracked_violations", lambda: [])
@@ -1286,10 +1111,7 @@ def test_unreleased_drop_guard_passes_without_a_git_baseline(tmp_path, monkeypat
 
 
 def test_hygiene_main_warns_but_passes_on_a_draft_drop(tmp_path, monkeypatch, capsys):
-    """main() end to end on a real throwaway repo: a dropped draft bullet prints
-    a WARNING and still exits 0 by default; --strict and LOCALM_HYGIENE_STRICT=1
-    each escalate the same run to a failure; strict with nothing dropped stays 0
-    (the knob escalates warnings, it does not invent them)."""
+    """main() end to end on a real throwaway repo: a dropped draft bullet prints a WARNING and still exits 0 by default; --strict and LOCALM_HYGIENE_STRICT=1 each escalate the same run to a failure; strict with nothing dropped stays 0 (the knob escalates warnings, it does not invent them)."""
     ch = _load_check_hygiene()
     monkeypatch.setattr(ch, "REPO", tmp_path)
     monkeypatch.setattr(ch, "_never_tracked_violations", lambda: [])
@@ -1328,13 +1150,7 @@ def test_hygiene_main_warns_but_passes_on_a_draft_drop(tmp_path, monkeypatch, ca
 
 
 def test_baseline_ref_is_pinned_once_per_run(monkeypatch, tmp_path):
-    """The baseline sha must be resolved ONCE per process, not re-resolved by each
-    check. origin/master is a MOVING ref (worktrees share one ref store, so a
-    sibling's fetch or a landing merge can advance it mid-run), and the three
-    callers - the append-only gate, the [Unreleased] warn-only checks, and the
-    service-worker cache-bump gate - would otherwise compare against DIFFERENT
-    baselines within one run. The manual version of this check reported a phantom
-    missing bullet exactly that way. Asserted by counting git invocations."""
+    """The baseline sha must be resolved ONCE per process, not re-resolved by each check. origin/master is a MOVING ref (worktrees share one ref store, so a sibling's fetch or a landing merge can advance it mid-run), and the three callers - the append-only gate, the [Unreleased] warn-only checks, and the s..."""
     ch = _load_check_hygiene()
     monkeypatch.setattr(ch, "REPO", tmp_path)
     ch._BASELINE_REF_CACHE.clear()
@@ -1357,9 +1173,7 @@ def test_baseline_ref_is_pinned_once_per_run(monkeypatch, tmp_path):
 
 
 def test_baseline_ref_cache_is_keyed_on_repo(monkeypatch, tmp_path):
-    """Pinning must not leak ACROSS trees: repointing REPO (what every test here
-    does, and what a caller embedding this module could do) resolves afresh rather
-    than reusing another repo's sha."""
+    """Pinning must not leak ACROSS trees: repointing REPO (what every test here does, and what a caller embedding this module could do) resolves afresh rather than reusing another repo's sha."""
     ch = _load_check_hygiene()
     ch._BASELINE_REF_CACHE.clear()
     shas = iter(["a" * 40, "b" * 40])
@@ -1394,8 +1208,7 @@ def test_added_unreleased_bullets_lists_only_new_ones():
 
 
 def test_added_unreleased_bullets_counts_an_extra_copy_as_added():
-    """A second copy of an existing bullet is an addition too (and is separately
-    reported as a duplicate) - so the count cannot be gamed by duplicating."""
+    """A second copy of an existing bullet is an addition too (and is separately reported as a duplicate) - so the count cannot be gamed by duplicating."""
     ch = _load_check_hygiene()
     new = _DRAFT_BASE.replace("- my own draft bullet\n",
                               "- my own draft bullet\n- my own draft bullet\n")
@@ -1404,8 +1217,7 @@ def test_added_unreleased_bullets_counts_an_extra_copy_as_added():
 
 
 def test_added_unreleased_bullets_ignores_continuations_and_published():
-    """Neither a new CONTINUATION line in the draft nor a new bullet in a PUBLISHED
-    section counts as an added draft bullet: only top-level [Unreleased] bullets do."""
+    """Neither a new CONTINUATION line in the draft nor a new bullet in a PUBLISHED section counts as an added draft bullet: only top-level [Unreleased] bullets do."""
     ch = _load_check_hygiene()
     new = (_DRAFT_BASE
            .replace("- inference and CLI\n",
@@ -1417,10 +1229,7 @@ def test_added_unreleased_bullets_ignores_continuations_and_published():
 
 def test_added_note_is_report_only_and_rides_along_with_a_warning(
         tmp_path, monkeypatch, capsys):
-    """The added-bullet report is CONTEXT, never its own warning: a run that only
-    ADDS bullets stays completely quiet (this gate is a pre-commit hook), but once
-    a real warning fires the note rides along so the reader can tell which bullets
-    are theirs."""
+    """The added-bullet report is CONTEXT, never its own warning: a run that only ADDS bullets stays completely quiet (this gate is a pre-commit hook), but once a real warning fires the note rides along so the reader can tell which bullets are theirs."""
     ch = _load_check_hygiene()
     monkeypatch.setattr(ch, "REPO", tmp_path)
     monkeypatch.setattr(ch, "_never_tracked_violations", lambda: [])
@@ -1460,12 +1269,7 @@ def test_added_note_is_report_only_and_rides_along_with_a_warning(
 
 def test_added_note_does_not_inflate_the_strict_failure_count(
         tmp_path, monkeypatch, capsys):
-    """Under --strict the report-only note must be FOLDED INTO the warning it
-    accompanies, not counted as a hygiene issue of its own.
-
-    Appending it as a separate entry printed it inside the FAILED list and reported
-    '2 hygiene issue(s)' for a single real warning - inflating the tally with a line
-    that is, by design, never a failure."""
+    """Under --strict the report-only note must be FOLDED INTO the warning it accompanies, not counted as a hygiene issue of its own."""
     ch = _load_check_hygiene()
     monkeypatch.setattr(ch, "REPO", tmp_path)
     monkeypatch.setattr(ch, "_never_tracked_violations", lambda: [])
@@ -1492,9 +1296,7 @@ def test_added_note_does_not_inflate_the_strict_failure_count(
 
 
 def test_strict_env_knob_off_values(monkeypatch):
-    """The env knob's off-set is explicit: empty/0/false/no/off (any case, any
-    surrounding whitespace) stay warn-only. Anything ELSE means strict, so a
-    typo fails toward MORE checking rather than silently disabling the gate."""
+    """The env knob's off-set is explicit: empty/0/false/no/off (any case, any surrounding whitespace) stay warn-only."""
     ch = _load_check_hygiene()
     for off in ("", "0", "false", "FALSE", "no", "off", "OFF", "  off  "):
         monkeypatch.setenv("LOCALM_HYGIENE_STRICT", off)
@@ -1507,29 +1309,14 @@ def test_strict_env_knob_off_values(monkeypatch):
 
 
 def test_real_changelog_unreleased_checks_run_on_the_real_tree():
-    """Smoke: both detectors run against the REAL repo without crashing.
-    Deliberately NOT asserting emptiness: a branch that legitimately rewords an
-    [Unreleased] line would then fail the SUITE, turning the designed warn-only
-    behavior back into a hard failure through the back door."""
+    """Smoke: both detectors run against the REAL repo without crashing."""
     ch = _load_check_hygiene()
     assert isinstance(ch._changelog_unreleased_drops(), list)
     assert isinstance(ch._changelog_unreleased_duplicates(), list)
 
 
 def test_real_changelog_has_no_duplicate_unreleased_bullets():
-    """The real [Unreleased] section must have no duplicate bullets AT ALL (not
-    just none newly introduced).
-
-    Deliberately the OPPOSITE choice from the test directly above, which refuses to
-    assert emptiness. The distinction is whether the thing asserted is ever
-    legitimate: rewording a draft line is normal work, so suite-enforcing "no
-    drops" would turn an intentional warn-only signal into a hard failure for
-    ordinary PRs. A byte-identical duplicate bullet is never intentional, and the
-    fix is deleting one line, so enforcing it costs an honest branch nothing. The
-    cost this DOES carry, stated so it is a choice and not an accident: if master
-    ever lands a duplicate, unrelated PRs go red until someone removes it - which
-    is the intended forcing function, since a duplicated release note is a defect
-    in the published record."""
+    """The real [Unreleased] section must have no duplicate bullets AT ALL (not just none newly introduced)."""
     ch = _load_check_hygiene()
     from collections import Counter
     text = (ch.REPO / ch._CHANGELOG).read_text(encoding="utf-8")
@@ -1539,13 +1326,7 @@ def test_real_changelog_has_no_duplicate_unreleased_bullets():
 
 
 def test_baseline_ref_is_the_merge_base_not_the_moving_tip(monkeypatch):
-    """The baseline MUST be the merge-base with origin/master, never the
-    origin/master ref itself. Worktrees share one ref store, so a sibling
-    session's fetch advances the tip under you; a tip-relative comparison then
-    reports every bullet merged after your branch point as a line YOU dropped -
-    the false positive whose "restore what you did not author" remedy created
-    the duplicates the check above now watches for. Asserted at the git-command
-    level so the choice cannot be silently swapped."""
+    """The baseline MUST be the merge-base with origin/master, never the origin/master ref itself."""
     ch = _load_check_hygiene()
     calls = []
 

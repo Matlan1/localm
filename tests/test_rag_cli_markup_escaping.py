@@ -1,26 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""A document path, filename, or chunk excerpt shown by the `rag` CLI must
-survive verbatim - Rich's ``Console.print()`` parses ``[...]`` in ANY
-interpolated string as markup, not just inside a command's own literal
-``[style]`` tags. Reproduced directly against this venv's rich:
-
-    Console().print('report[draft].txt')       -> prints "report.txt"
-    Console().print('notes[bold red].md')       -> prints "notes.md"
-
-The bracketed span is either dropped outright or consumed as a (bogus)
-style directive, in both cases silently. `rag docs`, `rag query`,
-`rag resync`, and `rag add`'s failure report can all show a user a path
-that differs from the real one on disk - which matters most exactly when
-that path is meant to be copied back in as an argument (`rag rm-doc`).
-
-Every case here indexes/removes/queries a REAL document under a name that
-exercises the bug, the same convention test_rag_cli_docs_rmdoc.py uses,
-rather than mocking the display layer. The one exception
-(TestLockMessageEscaping) forces a real CollectionLockedError the same way
-test_rag_cli_docs_rmdoc.py's own lock test does, since a lock message's
-content (who holds it) is not something a test can produce by writing an
-ordinary file to disk.
-"""
+"""A document path, filename, or chunk excerpt shown by the `rag` CLI must survive verbatim - Rich's ``Console.print()`` parses ``[...]`` in ANY interpolated string as markup, not just inside a command's own literal ``[style]`` tags."""
 
 from __future__ import annotations
 
@@ -35,9 +14,7 @@ BRACKET_STYLE_NAME = "notes[bold red].md"
 
 @pytest.fixture(autouse=True)
 def env(tmp_path, monkeypatch):
-    """Own copy rather than importing the one in
-    test_rag_reg589_repair_noninteractive.py, which is module-private (same
-    reasoning as test_rag_cli_docs_rmdoc.py's identical fixture)."""
+    """Own copy rather than importing the one in test_rag_reg589_repair_noninteractive.py, which is module-private (same reasoning as test_rag_cli_docs_rmdoc.py's identical fixture)."""
     monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     # rich.console.Console() reads COLUMNS at construction time; without it, a
@@ -144,10 +121,7 @@ class TestRagQueryMarkupEscaping:
             f"a query hit's source path must survive verbatim: {r.output!r}")
 
     def test_excerpt_content_survives_verbatim(self, runner, ragcli, tmp_path):
-        """The indexed CHUNK TEXT is shown too (not just the source path), and
-        real document content routinely contains '[...]' on its own - a
-        markdown link, a citation, a code snippet - so this is arguably the
-        most common real-world trigger, not just the filename."""
+        """The indexed CHUNK TEXT is shown too (not just the source path), and real document content routinely contains '[...]' on its own - a markdown link, a citation, a code snippet - so this is arguably the most common real-world trigger, not just the filename."""
         d = tmp_path / "docs"
         d.mkdir()
         (d / "notes.txt").write_text(
@@ -187,19 +161,7 @@ class TestRagResyncMarkupEscaping:
 class TestRagAddFailureMarkupEscaping:
     def test_failed_path_report_shows_bracketed_path_verbatim(
             self, runner, ragcli, tmp_path):
-        """A file with an unindexable suffix (.bin: binary/media/model
-        weights) is a REAL, naturally-occurring add_paths() failure -
-        _report_add_paths_result (localm/cli/errors.py) prints its path and
-        error message the same unescaped way rag.py's own sites did.
-
-        Passed as an EXPLICIT file path, not a folder to recurse: a folder
-        walk drops .bin via BLACKLISTED_SUFFIXES in Collection._expand()
-        before add_paths ever sees it (0 added/updated/skipped/failed -
-        confirmed empirically), while an explicitly-named file bypasses that
-        filter (_expand's `if p.is_file(): out.append(...)` branch, "the
-        local CLI ... still honours an explicit pick") and reaches the
-        UNINDEXABLE_SUFFIXES check inside _add_paths_locked instead, which is
-        what actually populates result["failed"]."""
+        """A file with an unindexable suffix (.bin: binary/media/model weights) is a REAL, naturally-occurring add_paths() failure - _report_add_paths_result (localm/cli/errors.py) prints its path and error message the same unescaped way rag.py's own sites did."""
         d = tmp_path / "docs"
         d.mkdir()
         bad_name = "firmware[legacy].bin"
@@ -215,13 +177,7 @@ class TestRagAddFailureMarkupEscaping:
 class TestLockMessageEscaping:
     def test_collection_locked_message_survives_verbatim(
             self, runner, ragcli, tmp_path, monkeypatch):
-        """_refuse_if_locked's `except CollectionLockedError as e` wraps *e*
-        into the SAME unescaped f-string shape as every other site in this
-        file. Forcing the real exception (as
-        test_rag_cli_docs_rmdoc.py::test_a_locked_collection_is_reported_not_left_to_escape
-        does for its own purpose) proves the fix at this exact call site
-        without needing to fabricate a real cross-process lock holder whose
-        recorded identity happens to contain brackets."""
+        """_refuse_if_locked's `except CollectionLockedError as e` wraps *e* into the SAME unescaped f-string shape as every other site in this file."""
         d = tmp_path / "docs"
         d.mkdir()
         (d / "plain.txt").write_text("plain content", encoding="utf-8")

@@ -1,26 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""``last_run_ok`` is PER-RUN; the session-wide failure lesson survives it.
-
-THE BUG. ``Agent._last_run_ok`` started True and was only ever set False - by
-max_turns, either circuit breaker, or a stop. ``_loop`` re-armed
-``_stop_requested`` and ``_user_stopped`` at the start of every run but not this
-flag, so it was one-way for the life of the session. In a multi-turn session
-(the REPL, or the GUI, which reports it per turn as the final event's ``"ok"``)
-one failed turn labelled every LATER turn a failure too, however clean it was.
-The user watched healthy turns come back marked failed.
-
-THE FIX re-arms it in ``_loop``, which narrows its meaning from "any run this
-session failed" to "the last run failed" - matching its name, its docstring, and
-both consumers (the GUI's per-turn badge, the CLI's exit code).
-
-THE COMPLICATION. ``session.py``'s close-time episodic reflection read the same
-flag to answer a DIFFERENT question: did anything fail this session, i.e. is
-there a failure lesson worth a 1024-token reflection (REG-594). Narrowing the
-flag would have silently narrowed that to "did the LAST run fail", losing the
-lesson from any session that failed and then recovered. ``_had_any_failure`` is
-the session-level record ``_loop`` now keeps for it, so both questions have an
-answer and neither borrows the other's.
-"""
+"""``last_run_ok`` is PER-RUN; the session-wide failure lesson survives it."""
 
 from __future__ import annotations
 
@@ -50,11 +29,7 @@ def home(tmp_path, monkeypatch):
 
 
 class _Scripted:
-    """One canned response per chat() call, repeating the last.
-
-    The close-time reflection is a chat() call too; it is the only one made with
-    max_tokens=1024, so it is answered separately (and counted) instead of eating
-    a scripted turn response."""
+    """One canned response per chat() call, repeating the last."""
 
     model_id = "test-model"
     native_tools = False
@@ -102,8 +77,7 @@ def _agent(tmp_path, responses, **kw):
 # --------------------------------------------------------------------------- #
 
 def test_clean_run_after_a_failed_run_reports_ok(home, tmp_path):
-    """THE REGRESSION, at the Agent level. Two real runs: the first trips the
-    circuit breaker, the second answers cleanly. The second must report ok."""
+    """THE REGRESSION, at the Agent level."""
     agent = _agent(tmp_path, _BREAKER_RUN + ["All clean now."])
 
     first = agent.run_task("read the missing file")
@@ -118,8 +92,7 @@ def test_clean_run_after_a_failed_run_reports_ok(home, tmp_path):
 
 
 def test_gui_final_event_reports_the_clean_turn_as_ok(tmp_path):
-    """THE USER-VISIBLE SYMPTOM, through the real GUI session path: the done
-    event's "ok" comes straight from agent.last_run_ok, once per turn."""
+    """THE USER-VISIBLE SYMPTOM, through the real GUI session path: the done event's 'ok' comes straight from agent.last_run_ok, once per turn."""
     from localm.plugins.coder.sessions import CoderSession
 
     session = CoderSession(
@@ -142,8 +115,7 @@ def test_gui_final_event_reports_the_clean_turn_as_ok(tmp_path):
 
 
 def test_a_stopped_run_does_not_poison_the_next_one(home, tmp_path):
-    """The same one-way-flag defect via the stop path rather than a breaker: a
-    user stop clears _last_run_ok too, and the next turn must still report ok."""
+    """The same one-way-flag defect via the stop path rather than a breaker: a user stop clears _last_run_ok too, and the next turn must still report ok."""
     agent = _agent(tmp_path, ["partial answer", "All clean now."])
     original_chat = agent.backend.chat
 
@@ -167,9 +139,7 @@ def test_a_stopped_run_does_not_poison_the_next_one(home, tmp_path):
 # --------------------------------------------------------------------------- #
 
 def test_session_that_failed_then_recovered_still_reflects_at_close(home, tmp_path):
-    """REG-594's feature must survive the narrowing: the failed first run is
-    still a lesson at close, even though the session ended on a clean run and
-    wrote no files. Reading only the (now per-run) _last_run_ok would drop it."""
+    """REG-594's feature must survive the narrowing: the failed first run is still a lesson at close, even though the session ended on a clean run and wrote no files."""
     agent = _agent(tmp_path, _BREAKER_RUN + ["All clean now."])
     agent._episode_task = "read the missing file"
 
@@ -189,8 +159,7 @@ def test_session_that_failed_then_recovered_still_reflects_at_close(home, tmp_pa
 
 
 def test_all_clean_session_reflects_nothing(home, tmp_path):
-    """The other half: the new session-level flag must not arm itself on a
-    healthy session, or every quit would pay for a model reflection."""
+    """The other half: the new session-level flag must not arm itself on a healthy session, or every quit would pay for a model reflection."""
     agent = _agent(tmp_path, ["All clean now."])
     agent._episode_task = "say something"
 
@@ -204,8 +173,7 @@ def test_all_clean_session_reflects_nothing(home, tmp_path):
 
 
 def test_failed_only_session_still_reports_incomplete(home, tmp_path):
-    """Unchanged behaviour for the single-run failure: still not ok, still
-    reflects, still recorded as an incomplete session."""
+    """Unchanged behaviour for the single-run failure: still not ok, still reflects, still recorded as an incomplete session."""
     agent = _agent(tmp_path, _BREAKER_RUN)
     agent._episode_task = "read the missing file"
 
@@ -218,9 +186,7 @@ def test_failed_only_session_still_reports_incomplete(home, tmp_path):
 
 
 def test_reset_clears_the_session_failure_marker(home, tmp_path):
-    """/clear drops the history and error trace a lesson would be built from, so
-    it drops the marker too rather than leaving a reflection armed for a run
-    whose context is gone."""
+    """/clear drops the history and error trace a lesson would be built from, so it drops the marker too rather than leaving a reflection armed for a run whose context is gone."""
     agent = _agent(tmp_path, _BREAKER_RUN)
     agent._episode_task = "read the missing file"
     agent.run_task("read the missing file")
@@ -239,7 +205,7 @@ def test_reset_clears_the_session_failure_marker(home, tmp_path):
 # --------------------------------------------------------------------------- #
 
 def _drain_final(session, timeout: float = 15.0) -> dict:
-    """Return the session's next "final" event, or fail the test."""
+    """Return the session's next 'final' event, or fail the test."""
     seen: list = []
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -254,11 +220,7 @@ def _drain_final(session, timeout: float = 15.0) -> dict:
 
 
 def _wait_idle(session, timeout: float = 15.0) -> None:
-    """Wait for the worker thread to release the session.
-
-    ``busy`` is cleared in the run thread's ``finally``, just AFTER the final
-    event is pushed, so a send issued the instant that event arrives would race
-    and be taken as a mid-task steering note instead of a new turn."""
+    """Wait for the worker thread to release the session."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if not session.busy:

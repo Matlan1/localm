@@ -1,19 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Job persistence: the Job dataclass and the JobStore.
-
-Job definitions live in ``<data dir>/jobs/jobs.json`` (a single JSON file,
-written atomically via a temp file + os.replace). Each job's run results live in
-``<data dir>/jobs/results/<job_id>/<iso-ts>.json`` (one file per run, holding the
-prompt, output, status, and timing).
-
-Results are EXPLICIT user data, like generated images: they are saved in every
-privacy mode (the user asked for this job to run and keep its output). What a
-job RUN writes as a session trace (audit JSONL, transcripts) still honours
-``effective_mode`` - that is the runner's concern, not the store's.
-
-Every path the store touches is resolved and confined under the jobs dir, so a
-crafted job id (``../../etc``) can never escape it.
-"""
+"""Job persistence: the Job dataclass and the JobStore."""
 
 from __future__ import annotations
 
@@ -78,20 +64,7 @@ _REDACTED_OWNER = "redacted-on-quarantine"
 
 
 def _redact_owner_digests(raw: str) -> str:
-    """Strip owner key digests out of a corrupt jobs.json before it is copied
-    aside, keeping everything the copy exists to preserve.
-
-    The copy's whole purpose is that a corrupt store does not silently lose the
-    user's scheduled jobs, so only the ACCESS-CONTROL field goes: schedule,
-    prompt, model, cwd and name are left exactly as they were. Scrubbing more
-    would protect the artefact by destroying the recovery data it exists to be.
-
-    Reports at warning when a digest-shaped value survives - a partially
-    corrupt file can hold one in a position this does not match, and a
-    redaction that silently half-happened must not look like one that fully
-    did (rule 5). The outer quarantine WARNING ("backed up to ... your
-    scheduled jobs are preserved") says nothing about a residual credential,
-    so this has to be operator-visible on its own, not buried at debug."""
+    """Strip owner key digests out of a corrupt jobs.json before it is copied aside, keeping everything the copy exists to preserve."""
     if not raw:
         return raw
     out, n = _OWNER_DIGEST_RE.subn(rf'\1"{_REDACTED_OWNER}"', raw)
@@ -107,16 +80,7 @@ def _redact_owner_digests(raw: str) -> str:
 
 @dataclass
 class Job:
-    """A scheduled recurring task definition.
-
-    schedule_kind == "interval": ``schedule`` is the period in SECONDS (int).
-    schedule_kind == "cron":     ``schedule`` is a 5-field cron string
-                                 ("minute hour dom month dow").
-    task_kind == "chat":  run ``prompt`` against the inference engine.
-    task_kind == "coder": run a coder agent for ``prompt`` in ``cwd``.
-    task_kind == "rag":   re-sync the RAG ``collection`` against the folders it
-                          was indexed from (no prompt, no chat model).
-    """
+    """A scheduled recurring task definition."""
 
     name: str
     schedule_kind: str = "interval"
@@ -167,8 +131,7 @@ class Job:
         self.validate()
 
     def validate(self) -> None:
-        """Raise ValueError on a malformed job def (called at construction and
-        on update so a bad def never reaches disk or the scheduler)."""
+        """Raise ValueError on a malformed job def (called at construction and on update so a bad def never reaches disk or the scheduler)."""
         if not str(self.name).strip():
             raise ValueError("job name is required")
         if self.task_kind not in TASK_KINDS:
@@ -218,14 +181,7 @@ class Job:
 
 
 def cwd_unc_error(cwd) -> Optional[str]:
-    """None when *cwd* is safe to use as a coder job's working directory, else
-    a ready-to-show refusal message.
-
-    Mirrors model_manager.unregistered_model_error's shape: ONE function that
-    owns the wording, called identically by every writer (plug.py's POST/PUT,
-    cli.py's job_add) and by the runner's authoritative run-time re-check
-    (runner.py's _run_coder), so a future wording change has exactly one place
-    to happen rather than three copies that can drift apart."""
+    """None when *cwd* is safe to use as a coder job's working directory, else a ready-to-show refusal message."""
     if cwd and is_unc_or_device_path(str(cwd)):
         return "cwd must be a local directory path, not a UNC or device path."
     return None
@@ -236,20 +192,13 @@ def cwd_unc_error(cwd) -> Optional[str]:
 # --------------------------------------------------------------------------- #
 
 def jobs_dir() -> Path:
-    """The jobs data dir (``<data dir>/jobs``), resolved at call time so a test
-    that monkeypatches the home dir is honoured."""
+    """The jobs data dir (``<data dir>/jobs``), resolved at call time so a test that monkeypatches the home dir is honoured."""
     from localm.config import home_dir
     return (home_dir() / "jobs").resolve()
 
 
 class JobStore:
-    """Persist job definitions and run results under the jobs data dir.
-
-    All filesystem access is confined under :func:`jobs_dir` (resolve +
-    is_relative_to), so neither a job id nor a result timestamp can be used to
-    write or read outside it. The definitions file is written atomically (temp +
-    os.replace) so a crash mid-write cannot corrupt jobs.json.
-    """
+    """Persist job definitions and run results under the jobs data dir."""
 
     def __init__(self, root: Optional[Path] = None) -> None:
         self._root = (Path(root).resolve() if root is not None else jobs_dir())
@@ -269,9 +218,7 @@ class JobStore:
         return rp
 
     def _result_dir(self, job_id: str) -> Path:
-        """Results dir for *job_id*, confined to one path segment under
-        results/. A crafted id (``..`` / separators) is sanitised first, then
-        the resolved path is re-checked against the root."""
+        """Results dir for *job_id*, confined to one path segment under results/."""
         safe = _ID_RE.sub("_", str(job_id)).strip("._") or "job"
         d = self._confine(self._results_root / safe)
         if d.parent != self._results_root.resolve():
@@ -321,12 +268,7 @@ class JobStore:
         return out
 
     def _quarantine_corrupt(self, raw, err) -> None:
-        """Copy a corrupt defs file aside before anything overwrites it, and
-        warn (rule 5: a data-loss risk must be visible, never silent).
-
-        The copy is redacted and the older copies pruned - see
-        ``_redact_owner_digests`` and ``_prune_quarantine`` for why each is
-        needed and why neither replaces the other (issue #859)."""
+        """Copy a corrupt defs file aside before anything overwrites it, and warn (rule 5: a data-loss risk must be visible, never silent)."""
         from localm.debuglog import logger
         try:
             stamp = int(time.time())
@@ -357,20 +299,7 @@ class JobStore:
                            "next write", e)
 
     def _prune_quarantine(self) -> None:
-        """Keep only the newest ``_QUARANTINE_KEEP`` corrupt-copies.
-
-        Redaction only reaches copies written from now on. Copies already on
-        disk from before it keep their digests forever, because nothing ever
-        deleted these - that durability, not the permissions, is what made a
-        legacy digest able to outlive the alert-88 migration. A cap bounds them
-        without needing to understand what is inside, so it stays correct for
-        any future credential-shaped field rather than going stale the next time
-        the digest scheme changes.
-
-        Best-effort by design: failing to delete an old backup must never break
-        the recovery path that just successfully wrote a new one. Reported at
-        debug rather than silently, so a directory that never prunes is
-        discoverable."""
+        """Keep only the newest ``_QUARANTINE_KEEP`` corrupt-copies."""
         from localm.debuglog import logger
         try:
             backups = sorted(
@@ -431,8 +360,7 @@ class JobStore:
         return job
 
     def update(self, job_id: str, **changes) -> Job:
-        """Apply *changes* to an existing job and persist. Re-validates the
-        result. Raises KeyError if the job does not exist."""
+        """Apply *changes* to an existing job and persist."""
         with _STORE_LOCK:
             jobs = self._read_all()
             job = jobs.get(job_id)
@@ -447,7 +375,7 @@ class JobStore:
         return job
 
     def remove(self, job_id: str) -> bool:
-        """Delete a job def and its results dir. Returns True if it existed."""
+        """Delete a job def and its results dir."""
         with _STORE_LOCK:
             jobs = self._read_all()
             if job_id not in jobs:
@@ -466,10 +394,7 @@ class JobStore:
 
     # ---- results -----------------------------------------------------------
     def record_result(self, job_id: str, result: dict) -> str:
-        """Persist one run *result* for *job_id* and return its result id (the
-        iso-ts file stem). Also stamps the job's last_run / last_status /
-        last_result_id. Results are saved in every privacy mode (explicit user
-        data). A timestamp collision is disambiguated with a counter suffix."""
+        """Persist one run *result* for *job_id* and return its result id (the iso-ts file stem)."""
         d = self._result_dir(job_id)
         d.mkdir(parents=True, exist_ok=True)
         stamp = _iso_stamp(result.get("finished") or result.get("started")
@@ -510,14 +435,7 @@ class JobStore:
 
     def list_results(self, job_id: str, *, limit: Optional[int] = None,
                      offset: int = 0) -> list:
-        """Run results for *job_id*, newest first. Each entry is the stored
-        record dict (prompt + output + status + timing).
-
-        With *limit* / *offset*, only that page of files is READ into memory (the
-        page is selected before reading, not sliced after loading everything), so
-        a job with a huge result history does not OOM the caller
-        (CHK-JOBS-RESULTS-PAGE). limit=None keeps the full-list behaviour for
-        internal/CLI callers."""
+        """Run results for *job_id*, newest first."""
         try:
             d = self._result_dir(job_id)
         except ValueError:

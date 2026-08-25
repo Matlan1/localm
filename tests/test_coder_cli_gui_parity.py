@@ -1,21 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""O5: the six coder options that used to exist only on the CLI now have a web
-form, per the standing rule that anything available in the CLI must be available
-in SOME form in GUI mode.
-
-  --estimate       POST /api/coder/sessions/{id}/estimate
-  --patch-mode     patch_mode on create + GET .../patch and .../patch/download
-  --native-tools   native_tools on create, with the EFFECTIVE value reported
-  --output-format  GET .../result (the CLI's json payload, no SSE needed)
-  --episodes       GET /api/coder/episodes?cwd=
-  --until          unified onto the existing verify oracle; its retry cap
-                   (the CLI's --goal-max-iters) is now settable as
-                   verify_max_retries
-
-The two properties these tests exist to pin, because both fail SILENTLY:
-reading a patch must not consume it, and an option the server cannot honour
-must be reported as not applied rather than echoed back as if it were.
-"""
+"""O5: the six coder options that used to exist only on the CLI now have a web form, per the standing rule that anything available in the CLI must be available in SOME form in GUI mode."""
 
 import inspect
 from pathlib import Path
@@ -36,8 +20,7 @@ _DEVICE = "\\\\.\\PhysicalDrive0"
 # --------------------------------------------------------------------------- #
 
 class _StubBackend:
-    """Enough backend for a session. ``chat`` returns a canned plan so the
-    estimate route can be driven without a model."""
+    """Enough backend for a session. ``chat`` returns a canned plan so the estimate route can be driven without a model."""
     model_id = "stub-model"
     native_tools = False
     supports_native_tools = True
@@ -88,8 +71,7 @@ def _owner(tmp_path, monkeypatch):
 
 
 def _stub_session_backend(app, sid):
-    """Swap the session's real HTTPBackend (which would dial 127.0.0.1:9) for a
-    stub, so an estimate can be driven without a model or a server."""
+    """Swap the session's real HTTPBackend (which would dial 127.0.0.1:9) for a stub, so an estimate can be driven without a model or a server."""
     sess = app.state.coder_sessions.get(sid)
     stub = _StubBackend()
     sess.agent.backend = stub
@@ -101,10 +83,7 @@ def _stub_session_backend(app, sid):
 # --------------------------------------------------------------------------- #
 
 def test_estimate_plans_without_touching_the_conversation(tmp_path, monkeypatch):
-    """One planning turn, zero execution, and the session is left exactly as it
-    was: an estimate is a question ABOUT a task, not a turn OF one. In the CLI
-    the process exits straight afterwards so a polluted history costs nothing;
-    a GUI session lives on and would carry it into every later turn."""
+    """One planning turn, zero execution, and the session is left exactly as it was: an estimate is a question ABOUT a task, not a turn OF one."""
     app, proj, owner = _owner(tmp_path, monkeypatch)
     with TestClient(app) as client:
         sid = client.post("/api/coder/sessions", headers=owner,
@@ -169,10 +148,7 @@ def test_estimate_refuses_an_empty_task_and_a_busy_session(tmp_path, monkeypatch
 
 
 def test_estimate_claims_the_session_and_releases_it(tmp_path, monkeypatch):
-    """An estimate is a SECOND trigger for a backend that had exactly one. It
-    takes `busy` under the session's own lock for the duration - so a task
-    cannot start underneath it and clobber the token numbers it is about to
-    read - and gives it back afterwards, including when the model call raises."""
+    """An estimate is a SECOND trigger for a backend that had exactly one."""
     app, proj, owner = _owner(tmp_path, monkeypatch)
     with TestClient(app) as client:
         sid = client.post("/api/coder/sessions", headers=owner,
@@ -201,10 +177,7 @@ def test_estimate_claims_the_session_and_releases_it(tmp_path, monkeypatch):
 
 
 def test_a_message_typed_during_an_estimate_is_not_stranded(tmp_path, monkeypatch):
-    """While the estimate holds `busy`, send_message QUEUES rather than starts,
-    and the only code that ever re-runs a queued message is the task thread's
-    own finally - which never runs here. Without the drain the message would sit
-    unsent until the user typed again, with nothing on screen saying so."""
+    """While the estimate holds `busy`, send_message QUEUES rather than starts, and the only code that ever re-runs a queued message is the task thread's own finally - which never runs here."""
     app, proj, owner = _owner(tmp_path, monkeypatch)
     with TestClient(app) as client:
         sid = client.post("/api/coder/sessions", headers=owner,
@@ -250,10 +223,7 @@ def test_patch_mode_is_wired_from_the_request_to_the_agent(tmp_path, monkeypatch
 
 
 def test_reading_the_patch_does_not_consume_it(tmp_path, monkeypatch):
-    """The defect this pins is silent: ``flush_patch()`` CLEARS the buffer, so a
-    read built on it looks perfect the first time and returns an empty patch to
-    every reader after - a reloaded tab, a retry, the download after the
-    preview. Assert on the SECOND read, and on the buffer itself."""
+    """The defect this pins is silent: ``flush_patch()`` CLEARS the buffer, so a read built on it looks perfect the first time and returns an empty patch to every reader after - a reloaded tab, a retry, the download after the preview."""
     app, proj, owner = _owner(tmp_path, monkeypatch)
     with TestClient(app) as client:
         created = client.post("/api/coder/sessions", headers=owner,
@@ -289,9 +259,7 @@ def test_reading_the_patch_does_not_consume_it(tmp_path, monkeypatch):
 
 def test_patch_routes_refuse_a_session_that_is_not_in_patch_mode(tmp_path,
                                                                 monkeypatch):
-    """An empty diff from a normal session would mean "everything was written to
-    disk", the opposite of what this endpoint reports - so it must not answer 200
-    with an empty body."""
+    """An empty diff from a normal session would mean 'everything was written to disk', the opposite of what this endpoint reports - so it must not answer 200 with an empty body."""
     app, proj, owner = _owner(tmp_path, monkeypatch)
     with TestClient(app) as client:
         sid = client.post("/api/coder/sessions", headers=owner,
@@ -318,10 +286,7 @@ def test_patch_download_404s_when_nothing_was_captured(tmp_path, monkeypatch):
 
 def test_native_tools_is_reported_as_not_applied_against_localms_own_server(
         tmp_path, monkeypatch):
-    """localm's /v1/chat/completions declares no tools/tool_choice, so the
-    fields are dropped and the run proceeds exactly as if the option had never
-    been passed. Nothing breaks - which is why silence was the problem. The
-    response must say it did not take effect."""
+    """localm's /v1/chat/completions declares no tools/tool_choice, so the fields are dropped and the run proceeds exactly as if the option had never been passed."""
     app, proj, owner = _owner(tmp_path, monkeypatch)
     with TestClient(app) as client:
         r = client.post("/api/coder/sessions", headers=owner,
@@ -351,10 +316,7 @@ def test_not_asking_for_native_tools_produces_no_note(tmp_path, monkeypatch):
 
 
 def test_localm_chat_request_really_has_no_tools_field():
-    """The measured premise the whole native_tools decision rests on. If localm
-    ever DOES implement the tools API, this test fails and the "not applied"
-    note above becomes a lie that needs removing - which is exactly the reminder
-    a future reader needs."""
+    """The measured premise the whole native_tools decision rests on."""
     from localm.inference.protocol import ChatRequest
     req = ChatRequest(model="m", messages=[{"role": "user", "content": "hi"}],
                       tools=[{"type": "function"}], tool_choice="auto")
@@ -363,8 +325,7 @@ def test_localm_chat_request_really_has_no_tools_field():
 
 
 def test_supports_native_tools_is_true_for_a_real_openai_style_endpoint():
-    """The capability answer must not be a blanket False, or the warning would
-    fire for the very backends the option exists for."""
+    """The capability answer must not be a blanket False, or the warning would fire for the very backends the option exists for."""
     from localm.plugins.coder.backends.http import HTTPBackend
     remote = HTTPBackend("https://api.openai.com/v1", "gpt-4o",
                          api_key="k", native_tools=True)
@@ -402,8 +363,7 @@ def test_result_route_carries_the_clis_json_payload(tmp_path, monkeypatch):
 
 
 def test_a_finished_task_latches_its_result(tmp_path, monkeypatch):
-    """The result is recorded from the SAME payload the final event carries, so
-    a polling client and an SSE client cannot disagree."""
+    """The result is recorded from the SAME payload the final event carries, so a polling client and an SSE client cannot disagree."""
     app, proj, owner = _owner(tmp_path, monkeypatch)
     with TestClient(app) as client:
         sid = client.post("/api/coder/sessions", headers=owner,
@@ -481,16 +441,7 @@ def test_episodes_is_owner_only_and_validates_cwd(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("bad", [_UNC, _UNC_FWD, _DEVICE])
 def test_episodes_refuses_unc_and_device_cwd(tmp_path, monkeypatch, bad):
-    """Same unconditional lexical refusal every other cwd-taking coder route
-    carries: a UNC string reaching the filesystem is the SMB dial (and the
-    net-NTLMv2 leak), which happens before any status code is chosen.
-
-    The spy covers ``resolve`` AND ``is_dir``, not merely whichever one this
-    route calls today. A spy pointed at a single method goes structurally DEAD
-    the moment the code reaches for the other one - and a dead fault injector is
-    indistinguishable from a guard that correctly found nothing to refuse, since
-    both produce a clean green. This test was written against ``is_dir`` and the
-    route stopped calling it in the same change."""
+    """Same unconditional lexical refusal every other cwd-taking coder route carries: a UNC string reaching the filesystem is the SMB dial (and the net-NTLMv2 leak), which happens before any status code is chosen."""
     real = {"resolve": Path.resolve, "is_dir": Path.is_dir}
 
     def make_spy(name):
@@ -516,9 +467,7 @@ def test_episodes_refuses_unc_and_device_cwd(tmp_path, monkeypatch, bad):
 # --------------------------------------------------------------------------- #
 
 def test_verify_max_retries_is_settable_from_the_web(tmp_path, monkeypatch):
-    """--goal-max-iters had no web equivalent at all: the GUI got the Agent's
-    hardcoded default and no way to change it. Bounded 1..50, matching the CLI's
-    own IntRange, so a request cannot pin the shared engine on an endless loop."""
+    """--goal-max-iters had no web equivalent at all: the GUI got the Agent's hardcoded default and no way to change it."""
     app, proj, owner = _owner(tmp_path, monkeypatch)
     with TestClient(app) as client:
         r = client.post("/api/coder/sessions", headers=owner,
@@ -549,10 +498,7 @@ def test_verify_max_retries_is_bounded(tmp_path, monkeypatch, bad):
 
 
 def test_the_web_oracle_is_the_same_one_until_uses():
-    """The reason --until is unified rather than rebuilt: the agent's pre-done
-    gate runs verify.py's own primitives, so a web session and ``--until`` judge
-    a task by the same exit code and feed back the same anti-gaming text. If
-    this ever diverges, "unify" stops being the right answer."""
+    """The reason --until is unified rather than rebuilt: the agent's pre-done gate runs verify.py's own primitives, so a web session and ``--until`` judge a task by the same exit code and feed back the same anti-gaming text."""
     from localm.plugins.coder import verify as v
     from localm.plugins.coder.cli import goal as g
     assert g._run_verify is v.run_verify

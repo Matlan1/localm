@@ -1,25 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""REAL proof that a HuggingFace CHAT model never silently self-embeds.
-
-No mocks: a tiny ungated causal LM (sshleifer/tiny-gpt2) is loaded for real
-through ``HFBackend``, and we assert that the backend reports ``can_embed`` False
-and that ``Engine.embed`` routes to the dedicated on-device embedder instead of
-mean-pooling the chat model's own hidden states.
-
-A stub backend cannot prove this: the whole defect was that a REAL transformers
-causal LM answers ``hasattr(model, "encode")`` False (so hf.embed()'s only
-"is this a real embedder" check missed it) while ``can_generate()`` answers True.
-Only a real checkpoint exercises that distinction.
-
-Why it matters (measured 2026-07-15 through localm's own IsolatedEmbedder,
-CPU-only): a chat decoder's mean-pooled vectors look healthy but cannot separate
-related from unrelated text - Qwen2.5-0.5B's max UNRELATED cosine (0.7523)
-EXCEEDS its min RELATED cosine (0.7518), versus bge-small's +0.29 margin. Those
-vectors reached /v1/embeddings and RAG.
-
-Marked @integration so the default `pytest -m "not integration"` skips it (it
-downloads ~2.5 MB on first run and needs torch + transformers).
-"""
+"""REAL proof that a HuggingFace CHAT model never silently self-embeds."""
 
 from __future__ import annotations
 
@@ -59,17 +39,7 @@ def hf_encoder_backend():
 
 
 def test_declared_arch_suffixes_match_transformers_own_generation_mixin():
-    """Pin _GENERATIVE_ARCH_SUFFIXES against transformers' OWN answer.
-
-    can_embed classifies a checkpoint by the NAME of its declared architecture,
-    because resolving the class would import transformers (and torch, which cannot
-    be imported alongside the bundled llama.dll - see _declared_generative). That
-    naming convention is an assumption about transformers, so it gets checked
-    against the real classes HERE, where importing transformers is legitimate:
-    GenerationMixin is transformers' own definition of "this generates". If
-    upstream renames a task head, this fails loudly instead of letting a model be
-    silently misrouted.
-    """
+    """Pin _GENERATIVE_ARCH_SUFFIXES against transformers' OWN answer."""
     pytest.importorskip("torch", exc_type=ImportError)
     pytest.importorskip("transformers", exc_type=ImportError)
     import transformers as tr
@@ -99,22 +69,7 @@ def test_declared_arch_suffixes_match_transformers_own_generation_mixin():
 
 
 def test_real_bert_encoder_is_still_embedding_capable(hf_encoder_backend):
-    """A REAL encoder embedding model must NOT be misrouted to the dedicated
-    embedder: it embeds well itself, and refusing it would regress a working path.
-
-    This is the case a mocked model cannot express. HFWorker.load() tries
-    AutoModelForCausalLM before AutoModel, and transformers registers bert as a
-    causal LM, so this pure encoder loads as BertLMHeadModel and answers
-    can_generate() True. Asserting on the real object is what proves can_embed
-    reads the DECLARED architecture instead.
-
-    The real loaded model object now lives in HFBackend's isolated child
-    process, not directly accessible from here - so this loads a second,
-    RAW HFWorker in-process (the identical loading code HFBackend's own child
-    runs) purely to inspect ._model directly for the ground-truth assertions,
-    while hf_encoder_backend (the actual HFBackend proxy fixture) proves the
-    SAME facts hold through the real, isolated production path below.
-    """
+    """A REAL encoder embedding model must NOT be misrouted to the dedicated embedder: it embeds well itself, and refusing it would regress a working path."""
     from localm.inference.backends._hf_worker import HFWorker
 
     worker = HFWorker(hf_encoder_backend.model_path, device="cpu")
@@ -175,12 +130,7 @@ def hf_chat_backend():
 
 
 def test_real_causal_lm_reports_it_cannot_embed(hf_chat_backend):
-    """The real checkpoint is a generative decoder, so can_embed is False.
-
-    Same raw-HFWorker-load pattern as test_real_bert_encoder_is_still_
-    embedding_capable above, for the same reason: the real model object lives
-    in hf_chat_backend's isolated child process, not directly accessible here.
-    """
+    """The real checkpoint is a generative decoder, so can_embed is False."""
     from localm.inference.backends._hf_worker import HFWorker
 
     worker = HFWorker(hf_chat_backend.model_path, device="cpu")
@@ -201,8 +151,7 @@ def test_real_causal_lm_reports_it_cannot_embed(hf_chat_backend):
 
 
 def test_unloaded_hf_backend_reports_unknown_as_capable():
-    """Unloaded, capability is unknown -> True, so routes/chat.py still loads a
-    genuine HF embedding model rather than skipping it. Engine.embed re-checks."""
+    """Unloaded, capability is unknown -> True, so routes/chat.py still loads a genuine HF embedding model rather than skipping it."""
     from localm.inference.backends.hf import HFBackend
 
     assert HFBackend("does-not-need-to-exist").can_embed is True
@@ -210,8 +159,7 @@ def test_unloaded_hf_backend_reports_unknown_as_capable():
 
 def test_engine_embed_does_not_self_embed_a_real_chat_model(hf_chat_backend,
                                                             monkeypatch):
-    """End to end: a REAL loaded chat model + Engine.embed -> the dedicated
-    embedder is used and the chat model's own mean-pooled vectors never escape."""
+    """End to end: a REAL loaded chat model + Engine.embed -> the dedicated embedder is used and the chat model's own mean-pooled vectors never escape."""
     import localm.inference.engine as eng_mod
     from localm.inference import embedder as emb
 
@@ -232,9 +180,7 @@ def test_engine_embed_does_not_self_embed_a_real_chat_model(hf_chat_backend,
 
 def test_engine_embed_real_chat_model_without_embedder_raises(hf_chat_backend,
                                                               monkeypatch):
-    """No embedding model installed -> the actionable error, NOT chat vectors.
-    RAG catches this and degrades to lexical-only BM25 with a warning, which beats
-    blending unusable vectors into its 50/50 lexical+vector score."""
+    """No embedding model installed -> the actionable error, NOT chat vectors."""
     import localm.inference.engine as eng_mod
     from localm.inference import embedder as emb
 

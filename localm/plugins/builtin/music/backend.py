@@ -1,32 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""ComfyUI (ACE-Step) backend for the music plugin.
-
-Mirrors the image plugin's backend: a thin wrapper over the shared Comfy HTTP
-plumbing fed with THIS plugin's per-plugin config (resolved through
-``media_config``, honouring the "use config from" share-config selector). The
-generic transport stays shared; only the config binding lives here, so a future
-non-ComfyUI music backend is just another module selected by ``backend`` name.
-
-Legacy global keys (comfy_launch_cmd / comfy_workdir / comfy_output_dir /
-reload_llm_after_imagine) seed the defaults until the user saves per-plugin
-values, so existing setups keep working with no migration step. api_url /
-launch_cmd / workdir specifically - both the legacy global key AND this
-plugin's own per-plugin comfy_blk override - are suppressed entirely while
-the managed ComfyUI instance is active (comfy_target == "own" and installed;
-see managed_comfy.managed_comfy_active). A per-plugin value set before the
-user ever touched comfy_target, or before switching it back to "own", reads
-identically to a deliberate override and used to silently defeat managed
-routing (NEW-COMFY-TARGET-OWN-DEFEATED-BY-STALE-PERPLUGIN-FIELD). Only
-comfy_target == "user" lets any of these three fields win - "own" means own.
-
-Per-plugin output containment (FAC-3): the shared ``generate_music`` has no
-``comfy_output_dir`` parameter, so the only way to feed it this plugin's own
-output dir is the ``COMFY_OUTPUT_DIR`` env var that ``comfy._comfy_output_root``
-resolves from. The backend therefore publishes the per-plugin value on that env
-var for the duration of the generation (restoring whatever was there before), so
-ComfyUI's on-disk copy AND any uploaded source actually get deleted rather than
-the knob being silently ignored.
-"""
+"""ComfyUI (ACE-Step) backend for the music plugin."""
 
 from __future__ import annotations
 
@@ -45,11 +18,7 @@ from localm.vram import media_estimate_bytes, resolve_swap_policy
 
 @contextlib.contextmanager
 def _comfy_output_dir_env(output_dir: Optional[str]):
-    """Publish the per-plugin ComfyUI output dir on ``COMFY_OUTPUT_DIR`` for the
-    duration of the block, restoring the prior value afterwards.
-
-    A no-op when no per-plugin output dir is configured, so a value inherited
-    from the environment or global config keeps working untouched."""
+    """Publish the per-plugin ComfyUI output dir on ``COMFY_OUTPUT_DIR`` for the duration of the block, restoring the prior value afterwards."""
     if not output_dir:
         yield
         return
@@ -128,9 +97,7 @@ def _comfy_free_vram(s: dict) -> bool:
 
 
 def _comfy_model_slots(s: dict) -> Optional[list]:
-    """Every model-file slot in the ACTIVE music workflow, resolved against the
-    currently-reachable ComfyUI. None when ComfyUI is not reachable (the caller
-    shows a clear message instead of a silently-empty picker)."""
+    """Every model-file slot in the ACTIVE music workflow, resolved against the currently-reachable ComfyUI."""
     import json
     try:
         workflow = json.loads(_music_gen.comfy.workflow_path().read_text(encoding="utf-8"))
@@ -140,18 +107,7 @@ def _comfy_model_slots(s: dict) -> Optional[list]:
 
 
 def _comfy_model_roles(s: dict, roles: list) -> dict:
-    """This plugin's model-picker payload: the live ComfyUI slots joined to the
-    localm registry's ``model_type`` slice and to the roles the plugin declared
-    through ``host.register_model_role``.
-
-    The backend owns this seam (rather than the route) because resolving which
-    models exist IS backend work: a future non-ComfyUI backend for this media
-    type implements this one function and the route, the GUI and the role
-    contract are unchanged.
-
-    One ComfyUI round trip and one registry read per call - both blocking, so the
-    caller runs it off the event loop exactly as it already does for
-    ``_comfy_model_slots``."""
+    """This plugin's model-picker payload: the live ComfyUI slots joined to the localm registry's ``model_type`` slice and to the roles the plugin declared through ``host.register_model_role``."""
     from localm.plugins import media_roles
     return media_roles.resolve_model_roles(_comfy_model_slots(s), roles)
 

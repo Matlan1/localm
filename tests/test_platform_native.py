@@ -1,9 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Cross-platform native-binary detection / loader logic.
-
-These run on any host by monkeypatching sys.platform, so the Linux and macOS
-code paths are exercised from the Windows CI too.
-"""
+"""Cross-platform native-binary detection / loader logic."""
 
 import os
 import sys
@@ -78,13 +74,7 @@ def test_setup_llama_is_wanted_windows(monkeypatch, tmp_path):
     "ggml-rpc-server.exe", "llama.exe",
 ])
 def test_setup_llama_never_ships_an_executable(monkeypatch, tmp_path, name):
-    """localm loads the runtime in-process via ctypes and never shells out to a
-    bundled binary, so the upstream archives' ~49 command-line tools were dead
-    weight in every Windows install (3.2 MB, including an RPC server daemon).
-
-    The deciding evidence is the platform asymmetry asserted below: darwin and
-    Linux have ALWAYS matched libraries only, so those installs never carried a
-    single bundled executable and demonstrably work. Windows was the outlier."""
+    """localm loads the runtime in-process via ctypes and never shells out to a bundled binary, so the upstream archives' ~49 command-line tools were dead weight in every Windows install (3.2 MB, including an RPC server daemon)."""
     monkeypatch.setattr(sys, "platform", "win32")
     assert not setup_llama_mod()._is_wanted(tmp_path / name)
 
@@ -98,10 +88,7 @@ def setup_llama_mod():
     ("linux", "llama-cli"), ("darwin", "llama-cli"), ("win32", "llama-cli.exe"),
 ])
 def test_no_platform_ships_executables(monkeypatch, tmp_path, plat, exe):
-    """The invariant itself, stated once for all three platforms: whatever the
-    naming convention, an EXECUTABLE is never copied into the runtime. Linux and
-    darwin already satisfied this by construction; this pins it so a future
-    'just add .exe back' cannot pass unnoticed."""
+    """The invariant itself, stated once for all three platforms: whatever the naming convention, an EXECUTABLE is never copied into the runtime."""
     monkeypatch.setattr(sys, "platform", plat)
     assert not setup_llama_mod()._is_wanted(tmp_path / exe)
 
@@ -124,18 +111,7 @@ def test_find_binary_dir_none_when_lib_absent(monkeypatch, tmp_path):
 
 
 def test_add_to_search_path_covers_pypi_fetched_cuda_runtime_libs(monkeypatch, tmp_path):
-    """Pins why Linux CUDA (dev-notes/ADR-0010) needed no NEW loader code:
-    _add_to_search_path adds the runtime binary DIRECTORY to LD_LIBRARY_PATH
-    unconditionally, for every backend - it has no per-file/per-backend logic
-    at all, so setup-llama's PyPI-fetched libcudart.so/libcublas.so/
-    libnccl.so (which land in that exact directory - see
-    test_linux_cuda_runtime_provisioning.py) are already covered by the SAME
-    mechanism ROCm and every other backend already relies on. This does not
-    prove the files are individually findable via dlopen (that needs a real
-    Linux+CUDA box) - it pins the one thing verifiable here: the directory
-    they were fetched into is unconditionally added to the search path,
-    matching this module's own documented design (see _loader.py's module
-    docstring)."""
+    """Pins why Linux CUDA (dev-notes/ADR-0010) needed no NEW loader code: _add_to_search_path adds the runtime binary DIRECTORY to LD_LIBRARY_PATH unconditionally, for every backend - it has no per-file/per-backend logic at all, so setup-llama's PyPI-fetched libcudart.so/libcublas.so/ libnccl.so (which la..."""
     from localm.inference.backends.llamacpp import _loader
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.delenv("LD_LIBRARY_PATH", raising=False)

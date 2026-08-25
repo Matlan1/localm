@@ -19,8 +19,7 @@ def _scrub(pieces):
 
 
 class TestUtf8PieceReassembly:
-    """R46: a multibyte character whose UTF-8 bytes straddle two tokens must be
-    reassembled, not decoded into U+FFFD replacement characters mid-word."""
+    """R46: a multibyte character whose UTF-8 bytes straddle two tokens must be reassembled, not decoded into U+FFFD replacement characters mid-word."""
 
     def test_two_byte_char_split_across_tokens(self):
         # 'cafe<acute>' -> b'caf\xc3\xa9'; the e-acute is split between tokens.
@@ -163,8 +162,7 @@ class TestDebugLog:
         assert "simulated native crash" in path.read_text(encoding="utf-8")
 
     def test_debug_mode_scrubs_output_and_logs_raw(self, tmp_path, monkeypatch):
-        """_decode_stream always scrubs; debug mode logs the raw text in log/full
-        mode, but NEVER in privacy mode (chat content is not persisted there)."""
+        """_decode_stream always scrubs; debug mode logs the raw text in log/full mode, but NEVER in privacy mode (chat content is not persisted there)."""
         import logging as _logging
         from localm.inference.backends.llamacpp.llama import LlamaCpp
         from unittest.mock import MagicMock

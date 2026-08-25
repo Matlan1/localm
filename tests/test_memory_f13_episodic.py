@@ -1,13 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""F13 regression suite (memory-audit 2026-07-02 cluster [14]): chat-side episodic
-capture.
-
-Pre-fix, synthesize_memory summarised the CONCATENATION of every recent session
-into at most ONE episodic record (no per-session capture, no cursor), so N sessions
-collapsed into <=1 episode and the same sessions were re-summarised every run. Now
-each NEW session file (past a persisted watermark) becomes its own episode, tagged
-with its source session, and a processed session is never re-summarised.
-"""
+"""F13 regression suite (memory-audit 2026-07-02 cluster [14]): chat-side episodic capture."""
 
 from __future__ import annotations
 

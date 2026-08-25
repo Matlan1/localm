@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Tests for localm.plugins.coder.diffutil - the shared diff-computation helper
-(CODER-1) that replaced three independent implementations in agent/execution.py
-and sessions.py."""
+"""Tests for localm.plugins.coder.diffutil - the shared diff-computation helper (CODER-1) that replaced three independent implementations in agent/execution.py and sessions.py."""
 
 from localm.plugins.coder.diffutil import (
     compute_tool_diff, read_old_content, resolve_new_content,
@@ -78,13 +76,7 @@ class TestComputeToolDiff:
 
 
 class TestUnreadableOldContentIsNotANewFile:
-    """A file that EXISTS but cannot be READ must not look like a new file.
-
-    `print_diff_preview`'s contract reads "" as "the file doesn't exist yet", so
-    collapsing the two makes an overwrite of a real file render as a pure
-    addition with nothing deleted - at the exact moment the user is asked to
-    approve the write.
-    """
+    """A file that EXISTS but cannot be READ must not look like a new file."""
 
     def test_new_file_is_an_honest_empty(self, tmp_path):
         from localm.plugins.coder.diffutil import read_old_content_checked
@@ -120,8 +112,7 @@ class TestUnreadableOldContentIsNotANewFile:
         assert content == ""
 
     def test_readable_file_reports_readable(self, tmp_path):
-        """The control: a normal file must stay readable, or the flag would be
-        useless (always False would satisfy the test above)."""
+        """The control: a normal file must stay readable, or the flag would be useless (always False would satisfy the test above)."""
         from localm.plugins.coder.diffutil import read_old_content_checked
         (tmp_path / "ok.py").write_text("x = 1\n", encoding="utf-8")
         content, readable = read_old_content_checked(tmp_path, "ok.py")

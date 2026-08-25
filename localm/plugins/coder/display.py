@@ -1,9 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""
-Rich-based terminal display for localcoder.
-
-Keeps all formatting in one place so the Agent class stays clean.
-"""
+"""Rich-based terminal display for localcoder."""
 
 from __future__ import annotations
 
@@ -96,7 +92,7 @@ def print_assistant_label(name: str = "Agent") -> None:
 
 
 def print_assistant_response(text: str, name: str = "Agent") -> None:
-    """Render the final response text.  Uses Markdown if it looks like Markdown."""
+    """Render the final response text."""
     text = text.strip()
     if not text:
         return
@@ -119,9 +115,7 @@ def print_streaming_token(token: str) -> None:
 
 
 def print_reasoning_token(token: str) -> None:
-    """Stream a thinking model's reasoning dimmed, so it reads as an aside next
-    to the visible answer rather than being indistinguishable from it (H4,
-    AUD-HIGH-17-3) - mirrors the chat REPL's ``_ThinkPrinter`` styling."""
+    """Stream a thinking model's reasoning dimmed, so it reads as an aside next to the visible answer rather than being indistinguishable from it (H4, AUD-HIGH-17-3) - mirrors the chat REPL's ``_ThinkPrinter`` styling."""
     console.print(token, end="", style="dim", highlight=False)
 
 
@@ -194,20 +188,7 @@ def print_diff_preview(
     path_label: str = "",
     max_lines: int = 200,
 ) -> None:
-    """
-    Print a coloured unified diff between *old_text* and *new_text*.
-
-    Parameters
-    ----------
-    old_text:
-        Current file content (empty string if the file doesn't exist yet).
-    new_text:
-        Proposed new content.
-    path_label:
-        Shown in the diff header (e.g. "src/main.py").
-    max_lines:
-        Truncate the displayed diff at this many lines.
-    """
+    """Print a coloured unified diff between *old_text* and *new_text*."""
     from_label = f"a/{path_label}" if path_label else "a/current"
     to_label   = f"b/{path_label}" if path_label else "b/proposed"
 

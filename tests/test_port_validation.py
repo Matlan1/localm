@@ -1,8 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Out-of-range / non-integer ports must be rejected CLEANLY at the CLI, not
-crash deep in the socket layer (pick_port -> connect_ex: "port must be
-0-65535"). Regression for 4 captured test-station bug reports.
-"""
+"""Out-of-range / non-integer ports must be rejected CLEANLY at the CLI, not crash deep in the socket layer (pick_port -> connect_ex: 'port must be 0-65535')."""
 
 import pytest
 from click.testing import CliRunner

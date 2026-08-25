@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The live-read version signal (localm/_version) the self-updater compares against
-the latest release tag. Editable installs do not refresh dist-info on a code swap,
-so the running version MUST come from the VERSION file at runtime, not metadata."""
+"""The live-read version signal (localm/_version) the self-updater compares against the latest release tag."""
 
 from localm import _version
 
@@ -50,9 +48,7 @@ def test_is_newer_edge_cases():
 
 
 def test_is_newer_prerelease_truth_table():
-    """The full truth table this fix is built from - drive is_newer() directly
-    rather than asserting on the parser's internals, so a future refactor of
-    _parse/_prerelease_suffix is free as long as this table still holds."""
+    """The full truth table this fix is built from - drive is_newer() directly rather than asserting on the parser's internals, so a future refactor of _parse/_prerelease_suffix is free as long as this table still holds."""
     # A stable release always outranks a prerelease of the SAME numeric version -
     # the filed bug: upgrading FROM an rc TO the matching final release.
     assert _version.is_newer("0.1.4", "0.1.4-rc1") is True
@@ -74,11 +70,7 @@ def test_is_newer_prerelease_truth_table():
 
 
 def test_is_newer_prerelease_never_more_permissive_than_before():
-    """Anti-rollback load-bearing property (updater._refuse_downgrade calls
-    is_newer directly): the prerelease tie-break must only ADD resolution to
-    cases that previously tied at False, never flip an already-correct numeric
-    verdict. A malformed/adversarial version must still never be treated as
-    newer than a well-formed one it is not actually ahead of."""
+    """Anti-rollback load-bearing property (updater._refuse_downgrade calls is_newer directly): the prerelease tie-break must only ADD resolution to cases that previously tied at False, never flip an already-correct numeric verdict."""
     assert _version.is_newer("0.1.3", "0.1.4") is False          # plain older candidate
     assert _version.is_newer("0.1.3-rc1", "0.1.4") is False      # older AND a prerelease
     assert _version.is_newer("not-a-version", "0.1.3") is False  # malformed candidate
@@ -153,14 +145,7 @@ def test_is_newer_pinned_to_shipped_tag_shape():
 
 
 def test_shipping_version_is_offered_as_an_update_to_every_earlier_tag():
-    """The version in VERSION must compare NEWER than every published tag before
-    it, or `localm update` silently never offers this release to the users
-    already on one of them. `_refuse_downgrade` is gated on the same call, so a
-    break here is quiet in both directions.
-
-    Reads VERSION rather than hard-coding a pair: a hard-coded one stops
-    describing the release the moment someone bumps VERSION without touching
-    this file, which is exactly when the check is load-bearing."""
+    """The version in VERSION must compare NEWER than every published tag before it, or `localm update` silently never offers this release to the users already on one of them. `_refuse_downgrade` is gated on the same call, so a break here is quiet in both directions."""
     shipping = _version.read_version()
     for earlier in ("0.1.0", "0.1.1", "0.1.2", "0.1.3", "0.1.4",
                     "0.1.5rc1", "0.1.5rc2"):

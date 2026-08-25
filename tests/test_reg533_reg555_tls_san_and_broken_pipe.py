@@ -1,26 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Regression audit 2026-07-14: two over-broad matches that read a REAL thing as
-a benign one.
-
-REG-533 [LOW] localm/tls.py:136 - _VPN_ADAPTER_NAME_MARKERS matched by UNANCHORED
-substring, so a real NIC whose name merely CONTAINS "tun"/"tap"/"ppp" was read as
-a VPN tunnel. _primary_lan_ip() then discards its address and san_targets() leaves
-it out of the leaf certificate, so a device reaching that machine on its real
-address gets a TLS SAN mismatch that used to validate.
-
-REG-555 [MEDIUM] localm/cli/_core.py:142 - `except OSError` treated ANY errno
-EINVAL as a closed pipe: sys.stdout.close() then SystemExit(0). Windows raises
-EINVAL for a broad set of GENUINE I/O misuse, so a command that hard-failed
-exited 0, printed nothing and filed no report - telling the user, and every
-script checking the exit code, that it SUCCEEDED. A direct AGENTS.md rule-5
-violation (reports success on a real failure, hides real bugs).
-
-The EINVAL split rests on a MEASURED fact, not an assumption: on this Windows box
-a real early pipe close surfaces as OSError errno=22 with isinstance(e,
-BrokenPipeError) FALSE - so "only treat a true BrokenPipeError as a pipe" would
-break every `localm ... | head`. os.fstat's S_ISFIFO is what actually separates
-the two at the handler.
-"""
+"""Regression audit 2026-07-14: two over-broad matches that read a REAL thing as a benign one."""
 
 import errno
 import os
@@ -57,11 +36,7 @@ class _Addr:
     "Intel(R) Ethernet Connection I219-V",
 ])
 def test_real_adapter_is_not_classified_as_a_vpn(name):
-    """THE REGRESSION. An unanchored substring match reads "tun" out of
-    "Fortune", "tap" out of "Datapath", and "ppp" out of "ppp0" (a real PPPoE WAN
-    link, frequently the default route and the machine's only real address).
-
-    Each false positive silently drops that adapter's IP from the TLS cert SAN."""
+    """THE REGRESSION."""
     assert tls._is_vpn_adapter_name(name) is False, (
         f"{name!r} is a real adapter, but its name was read as a VPN tunnel - "
         "its IP gets dropped from the certificate SAN")
@@ -80,16 +55,13 @@ def test_real_adapter_is_not_classified_as_a_vpn(name):
     "My Corporate VPN",
 ])
 def test_real_vpn_adapter_is_still_classified_as_a_vpn(name):
-    """NEGATIVE CASE, the important one: narrowing the match must not blind the
-    detection it exists for. Every genuine tunnel adapter shape must still match,
-    on both POSIX device names and Windows friendly names."""
+    """NEGATIVE CASE, the important one: narrowing the match must not blind the detection it exists for."""
     assert tls._is_vpn_adapter_name(name) is True, (
         f"{name!r} is a VPN/tunnel adapter and must still be excluded")
 
 
 def test_vpn_adapter_ips_only_collects_the_vpn(monkeypatch):
-    """End to end through the real _vpn_adapter_ips: a box that dials PPPoE AND
-    runs a VPN must yield only the VPN's address."""
+    """End to end through the real _vpn_adapter_ips: a box that dials PPPoE AND runs a VPN must yield only the VPN's address."""
     psutil = pytest.importorskip("psutil")
     monkeypatch.setattr(psutil, "net_if_addrs", lambda: {
         "ppp0": [_Addr("203.0.113.9")],              # real PPPoE WAN
@@ -100,13 +72,7 @@ def test_vpn_adapter_ips_only_collects_the_vpn(monkeypatch):
 
 
 def test_pppoe_address_survives_into_the_cert_san(monkeypatch):
-    """The consequence the finding turns on, end to end through the REAL
-    san_targets -> _primary_lan_ip -> _vpn_adapter_ips chain (nothing in that
-    chain is stubbed - only the OS-level probes it reads): a Linux box that dials
-    PPPoE has ppp0 as its default route, so the outbound probe reports ppp0's
-    address as the primary LAN IP. That address must be certified, or the admin
-    reaching https://<that-ip>:port over the port-forward hits a TLS SAN mismatch
-    that used to validate."""
+    """The consequence the finding turns on, end to end through the REAL san_targets -> _primary_lan_ip -> _vpn_adapter_ips chain (nothing in that chain is stubbed - only the OS-level probes it reads): a Linux box that dials PPPoE has ppp0 as its default route, so the outbound probe reports ppp0's address..."""
     psutil = pytest.importorskip("psutil")
     monkeypatch.setattr(psutil, "net_if_addrs", lambda: {
         "ppp0": [_Addr("203.0.113.9")],
@@ -128,8 +94,7 @@ def test_pppoe_address_survives_into_the_cert_san(monkeypatch):
 
 
 def test_vpn_tunnel_address_is_still_kept_out_of_the_san(monkeypatch):
-    """NEGATIVE CASE: a genuine VPN tunnel address must still be excluded from
-    _primary_lan_ip (it is reachable only through the tunnel, not on the LAN)."""
+    """NEGATIVE CASE: a genuine VPN tunnel address must still be excluded from _primary_lan_ip (it is reachable only through the tunnel, not on the LAN)."""
     monkeypatch.setattr(tls, "_vpn_adapter_ips", lambda: {"10.66.0.7"})
 
     class _FakeSock:
@@ -172,11 +137,7 @@ def _group(exc):
     (OSError(errno.EINVAL, "The parameter is incorrect"), "a Windows native call"),
 ])
 def test_genuine_einval_is_reported_not_silently_swallowed(cli, exc, label):
-    """THE REGRESSION. stdout here is NOT a pipe (no downstream consumer exists),
-    so an EINVAL cannot be a pipe close - it is a real failure. It must exit
-    non-zero and file a report, not exit 0 in silence claiming success.
-
-    Pre-fix every one of these exited 0 with reported == []."""
+    """THE REGRESSION. stdout here is NOT a pipe (no downstream consumer exists), so an EINVAL cannot be a pipe close - it is a real failure."""
     res = CliRunner().invoke(_group(exc), ["boom"])
     assert res.exit_code == 1, (
         f"{label} exited {res.exit_code} - a real failure reported SUCCESS")
@@ -184,15 +145,7 @@ def test_genuine_einval_is_reported_not_silently_swallowed(cli, exc, label):
 
 
 def test_a_real_broken_pipe_is_still_silent(cli):
-    """NEGATIVE CASE, the important one: an actual early pipe close
-    (`localm ... | head`) must still exit 0 with no report and no traceback
-    cascade - reporting would write to the same dead stdout and re-crash.
-
-    Uses a REAL os.pipe() as stdout so the code's own S_ISFIFO check sees a
-    genuine pipe, rather than mocking the check being tested. Driven through
-    click's own main() rather than CliRunner, because CliRunner REPLACES
-    sys.stdout with a StringIO for the duration of invoke() - which would hide
-    the very pipe this test exists to present."""
+    """NEGATIVE CASE, the important one: an actual early pipe close (`localm ... | head`) must still exit 0 with no report and no traceback cascade - reporting would write to the same dead stdout and re-crash."""
     r, w = os.pipe()
     pipe_stdout = os.fdopen(w, "w")
     g = _group(OSError(errno.EINVAL, "closed pipe"))
@@ -216,8 +169,7 @@ def test_a_real_broken_pipe_is_still_silent(cli):
 
 
 def test_broken_pipe_error_is_still_silent_whatever_stdout_is(cli):
-    """NEGATIVE CASE: a true BrokenPipeError is unambiguous and needs no stdout
-    inspection at all - it stays silent even when stdout is not a pipe."""
+    """NEGATIVE CASE: a true BrokenPipeError is unambiguous and needs no stdout inspection at all - it stays silent even when stdout is not a pipe."""
     res = CliRunner().invoke(
         _group(BrokenPipeError(errno.EPIPE, "broken pipe")), ["boom"])
     assert res.exit_code == 0
@@ -225,9 +177,7 @@ def test_broken_pipe_error_is_still_silent_whatever_stdout_is(cli):
 
 
 def test_epipe_oserror_is_still_silent(cli):
-    """NEGATIVE CASE: EPIPE means exactly "broken pipe" and needs no
-    qualification. (Python maps OSError(EPIPE) to BrokenPipeError anyway - this
-    pins that behaviour rather than assuming it.)"""
+    """NEGATIVE CASE: EPIPE means exactly 'broken pipe' and needs no qualification. (Python maps OSError(EPIPE) to BrokenPipeError anyway - this pins that behaviour rather than assuming it.)."""
     e = OSError(errno.EPIPE, "broken pipe")
     assert isinstance(e, BrokenPipeError), "OSError(EPIPE) must map to BrokenPipeError"
     res = CliRunner().invoke(_group(e), ["boom"])
@@ -244,9 +194,7 @@ def test_other_oserrors_are_still_reported(cli):
 
 
 def test_stdout_is_a_pipe_is_false_for_a_replaced_stdout(monkeypatch):
-    """The discriminator itself: a stdout with no real fileno (a wrapped or
-    captured stream) is not a confirmable pipe, so an EINVAL under it is treated
-    as a real error and reported - failing toward surfacing, never swallowing."""
+    """The discriminator itself: a stdout with no real fileno (a wrapped or captured stream) is not a confirmable pipe, so an EINVAL under it is treated as a real error and reported - failing toward surfacing, never swallowing."""
     import io
 
     from localm.cli._core import _stdout_is_a_pipe

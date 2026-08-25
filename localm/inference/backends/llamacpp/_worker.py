@@ -1,22 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""``GgufWorker`` - owns the real native model. Runs ONLY inside the isolated
-child process spawned by ``_runner.py``; never imported/constructed in the
-main server process.
-
-Why this class exists (see ``_runner.py``'s module docstring for the full
-account): ``llama_load_model_from_file`` and every subsequent
-``llama_init_from_model``/``llama_decode`` call (context growth,
-token-by-token generation) can hard-abort the whole process on a native
-CUDA/HIP driver failure - no Python ``try/except`` can catch it. Isolating
-just the model handle is not possible (a ``ctypes.c_void_p`` is meaningless
-outside the process that created it) and isolating just the load is not
-sufficient (context growth hits the same abort-prone call class) - so the
-model's WHOLE lifecycle runs here, inside a disposable child, and a native
-abort only ever kills this process, never the server.
-
-Everything here is moved close to verbatim from what used to be
-``GgufBackend``'s native-call-touching methods - the isolation boundary is
-new, the logic is not."""
+"""``GgufWorker`` - owns the real native model."""
 
 from __future__ import annotations
 
@@ -26,17 +9,7 @@ from ._sizing import VramSizingMixin
 
 
 class GgufWorker(VramSizingMixin):
-    """The real, native-call-owning half of the GGUF backend.
-
-    Constructed with the load parameters already FULLY RESOLVED by the parent
-    (``GgufBackend``) - ``n_gpu_layers``/``n_ctx_max`` are concrete ints, not
-    "auto"/None sentinels - so preflight sizing (parent) and the actual load
-    (here) can never disagree, and this class never needs to re-derive them
-    or touch ``torch``/the VRAM-probe daemon during load itself (only
-    ``_check_context_fit``, inherited from ``VramSizingMixin``, calls
-    ``_free_vram_bytes()`` - and only later, mid-generation, when the
-    context genuinely needs to grow).
-    """
+    """The real, native-call-owning half of the GGUF backend."""
 
     def __init__(
         self,
@@ -89,36 +62,11 @@ class GgufWorker(VramSizingMixin):
 
     @property
     def chatml_fallback_reason(self) -> Optional[str]:
-        """Non-None once this model's own embedded chat template could not be
-        used (see llama.py's _apply_model_template). Sticky for the life of
-        the loaded model, so unlike grammar_unsupported_this_call this is a
-        passthrough to the LlamaCpp instance's own record rather than a
-        per-call flag - the underlying template never changes between calls.
-        Read by the runner's dispatch loop for the "done" envelope."""
+        """Non-None once this model's own embedded chat template could not be used (see llama.py's _apply_model_template)."""
         return self._llm.chat_template_fallback_reason if self._llm is not None else None
 
     def load(self) -> dict:
-        """Construct the real native model. Returns a metadata dict on success:
-        ``{"n_layers", "kv_bytes_per_token", "supports_images",
-        "weight_placement", "moe_skip_reason"}``.
-        ``weight_placement`` is llama.cpp's own per-backend load report (VRAM vs
-        system RAM), the only ground truth for whether ``n_cpu_moe`` actually
-        moved anything - this worker is the only process that can see it (the
-        native call that produces it runs here). ``[]`` means "not reported"
-        (verbose mode, or a parse miss), never "0 bytes everywhere".
-        ``moe_skip_reason`` is a key into ``llama.MOE_SKIP_MESSAGES`` (or
-        None) naming why ``n_cpu_moe`` did not apply - carried out here
-        rather than printed by ``_apply_cpu_moe`` itself, because THIS
-        process is the isolated child: only the parent (GgufBackend) may
-        render a user-facing message, per isolated-child-must-not-console-
-        print.
-
-        Raises :class:`~localm.inference.backends.base.ModelLoadCancelled` if
-        ``cancel_event`` was set during the load (native progress-callback
-        abort), or any other exception on a genuine load failure. A native
-        ABORT is not, and must not be, caught here - it kills this whole
-        process, which is exactly the isolation this class exists inside; the
-        parent detects the dead child and reports it (see ``_runner.py``)."""
+        """Construct the real native model."""
         from localm.inference.backends.llamacpp._loader import load_lib
         from localm.inference.backends.llamacpp.llama import _capture_stdio
         from localm.debuglog import suppress_console_mirror
@@ -200,12 +148,7 @@ class GgufWorker(VramSizingMixin):
         return len(self._llm.tokenize(text, add_bos=False))
 
     def count_messages_tokens(self, messages: List[dict]) -> int:
-        """Exact token count of the structured messages formatted with the
-        model's embedded chat template. Raises on failure (unlike the old
-        in-process method's own try/except) - the parent's RPC wrapper is
-        what falls back to the chars/4 heuristic, exactly mirroring the old
-        try/except's effect but at the process boundary instead of around
-        the native call directly."""
+        """Exact token count of the structured messages formatted with the model's embedded chat template."""
         from .llama import _apply_model_template
         text_messages = []
         for m in messages:
@@ -227,8 +170,7 @@ class GgufWorker(VramSizingMixin):
         return len(self._llm.tokenize(prompt, add_bos=add_bos))
 
     def check_grammar(self, grammar: str) -> None:
-        """Raises InvalidGrammarError for a malformed GBNF string - see
-        LlamaCpp.check_grammar. No-op for an empty grammar."""
+        """Raises InvalidGrammarError for a malformed GBNF string - see LlamaCpp.check_grammar."""
         if grammar:
             self._llm.check_grammar(grammar)
 
@@ -250,23 +192,7 @@ class GgufWorker(VramSizingMixin):
         grammar_triggers: Optional[list] = None,
         seed: Optional[int] = None,
     ):
-        """Yield text tokens one at a time. The caller (the runner's dispatch
-        loop) already filtered out an image the model cannot see and already
-        nulled ``grammar`` if the parent's persistent latch says this model
-        does not support it - this method only handles a fault seen for the
-        FIRST time on this exact call.
-
-        On a grammar-sampler fault (a genuinely recoverable native OSError,
-        not a process abort) where nothing has been yielded yet, retries once
-        unconstrained and sets ``grammar_unsupported_this_call`` so the caller
-        can report it upward. Any OTHER fault is NOT caught here: it
-        propagates out of this generator, uncaught, all the way out of the
-        runner's dispatch loop - deliberately allowed to crash this process
-        (see the module docstring / ``_runner.py``: a native fault leaves the
-        loaded model in an unknown state, so continuing to serve from a
-        possibly-corrupted context is the wrong call; the parent detects the
-        dead child exactly as it would a hard native abort, and reports the
-        same "native inference fault, reload on next request" contract)."""
+        """Yield text tokens one at a time."""
 
         def _make_kwargs(g: Optional[str]) -> dict:
             kw: dict = dict(

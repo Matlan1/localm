@@ -1,11 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Cancelling an image generation must still restore VRAM.
-
-Regression: Stop unloaded the chat model (to free VRAM for the image model) but,
-because the chat-model reload ran only on success, a cancel left the chat model
-unloaded AND ComfyUI's model resident - the reported "fails unloading the image
-model, loading chat". The reload must run on the cancel path too.
-"""
+"""Cancelling an image generation must still restore VRAM."""
 
 import asyncio
 import time
@@ -115,15 +109,7 @@ def _wait_for_terminal(job, timeout=3.0):
 
 
 def test_generate_reports_done_when_reload_raises_after_success(monkeypatch):
-    """The concrete, originally-flagged bug (board item #27's follow-up,
-    dev-notes/FIX-2026-08-05-start-fn-outcome-honesty.md): a successful
-    generation whose VRAM handover then raises (e.g. a non-comfy backend's
-    free_vram()) must still land on job.status == "done", not "failed".
-
-    Drives the REAL JobManager.start_fn (unlike the fake-job tests above), so
-    the interaction between _generate's mark_outcome call and jobs.py's own
-    except handler is exercised for real, not just _generate's return value in
-    isolation."""
+    """The concrete, originally-flagged bug (board item #27's follow-up, dev-notes/FIX-2026-08-05-start-fn-outcome-honesty.md): a successful generation whose VRAM handover then raises (e.g. a non-comfy backend's free_vram()) must still land on job.status == 'done', not 'failed'."""
     s = {"reload_after": True, "warning": "", "api_url": "http://127.0.0.1:8188"}
     monkeypatch.setattr(plug._backend, "settings", lambda cfg: s)
     monkeypatch.setattr(plug._backend, "ensure_available",

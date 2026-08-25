@@ -1,27 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""setup.sh's localm-entry-point install/retry block, and localm.sh's own
-diagnosis of the same failure mode.
-
-Regression for a filed residual: setup.sh:342-360 retries the `uv pip install`
-once if `.venv/bin/localm` did not land (a real, reproduced WSL2/DrvFs quirk
-where uv reports success but drops exactly one file), then warns loudly and
-CONTINUES if it is still missing afterwards - by design, since the rest of
-setup does not depend on this entry point. But the retry call itself was a
-bare command under `set -euo pipefail`, the one unguarded command in that
-block: a retry that ERRORS (not just "ran but didn't create the file") kills
-setup right there, so the loud "STILL missing" warning a few lines below never
-prints - contradicting the block's own comment.
-
-No test covered any of the three already-verified-live branches (present /
-recovered-by-retry / still-missing-after-retry), let alone the retry-errors
-case this file adds coverage for. Extracts and runs ONLY the install/retry
-block (not the whole script) against a stub `uv`, in the extract-a-source-
-slice style of tests/test_setup_gpu_detect.py.
-
-Also covers localm.sh's own misdiagnosis of this exact failure mode: it used
-to report "No .venv found" even when the venv was fine and only the console
-script was missing.
-"""
+"""setup.sh's localm-entry-point install/retry block, and localm.sh's own diagnosis of the same failure mode."""
 
 from __future__ import annotations
 
@@ -169,13 +147,7 @@ def test_retry_itself_erroring_still_reaches_the_still_missing_warning(tmp_path)
 
 
 def test_retry_install_is_guarded_in_source():
-    """Static backstop that holds even without bash on PATH: the retry
-    install must not be a bare command under `set -euo pipefail`.
-
-    setup.sh builds EXTRAS from a variable (coder,voice,monitor, optionally
-    plus desktop) rather than a hardcoded literal, so the source text always
-    reads `-e ".[${EXTRAS}]"` at both call sites, never the resolved value.
-    """
+    """Static backstop that holds even without bash on PATH: the retry install must not be a bare command under `set -euo pipefail`."""
     block = _install_block()
     needle = 'uv pip install -p .venv -e ".[${EXTRAS}]"'
     first = block.index(needle)

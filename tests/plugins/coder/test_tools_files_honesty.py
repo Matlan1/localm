@@ -1,13 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Honesty and edge-case guards in the coder file tools (2026-07-02 sweep).
-
-Three confirmed findings from the fresh-eyes non-security audit:
-- search_replace: a write failure mid-loop left earlier files modified on disk
-  while the error read as if nothing changed.
-- edit_file: an empty `old` silently prepended `new` ('' is "in" every string)
-  and reported a bogus occurrence count.
-- read_file: offset/limit on an empty file produced a backwards range label
-  ("1-0 of 1") because splitlines() disagrees with _line_count about empty."""
+"""Honesty and edge-case guards in the coder file tools (2026-07-02 sweep)."""
 
 from unittest.mock import patch
 
@@ -19,14 +11,7 @@ from localm.plugins.coder.tools import (
 
 
 def _norm(raw: bytes) -> str:
-    """Universal-newline-normalise raw bytes for a platform-portable
-    comparison. The fixtures below write via Path.write_text(), which
-    translates \\n -> the platform line separator on write (\\r\\n on
-    Windows, unchanged on Linux) - so the RAW bytes ToolResult.changes
-    reports (deliberately unnormalised, matching execution.py's own
-    snapshot convention) differ by platform even though the file's logical
-    content does not. Normalise before comparing so the assertion holds on
-    both, the same way CI's own two platforms would each see it."""
+    """Universal-newline-normalise raw bytes for a platform-portable comparison."""
     return raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
 
 

@@ -1,11 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The launcher's model selector must list ONLY LLM (chat) models.
-
-A non-LLM registry entry (an embedding / text-encoder / LoRA / VAE / diffusion
-component, or an unclassified 'unknown') is not something you launch as the chat
-model, so it must never appear in the launcher dropdown. Regression for
-"non-LLM models show up in launcher model selector".
-"""
+"""The launcher's model selector must list ONLY LLM (chat) models."""
 
 import importlib.machinery
 import importlib.util

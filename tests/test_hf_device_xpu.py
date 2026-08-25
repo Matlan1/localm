@@ -1,8 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""HF backend device routing: an Intel Arc/Xe GPU (torch.xpu) must be used instead of
-silently falling back to CPU, WITHOUT regressing the cuda/cpu paths. _auto_device takes
-torch as an argument so the routing is testable without any real GPU (GPU EXECUTION still
-needs a real Arc box - out of scope here)."""
+"""HF backend device routing: an Intel Arc/Xe GPU (torch.xpu) must be used instead of silently falling back to CPU, WITHOUT regressing the cuda/cpu paths. _auto_device takes torch as an argument so the routing is testable without any real GPU (GPU EXECUTION still needs a real Arc box - out of scope her..."""
 
 import pytest
 

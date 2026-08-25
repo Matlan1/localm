@@ -1,20 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""M2 Phase 3 - server / embeddings family.
-
-Covers three backlog items:
-
-  FAC-9  /v1/embeddings must honor encoding_format="base64" (return base64
-         little-endian float32 per the OpenAI spec) or reject an unknown
-         format with 400 - not silently return float arrays.
-
-  FAC-6  the MCP 'embed' tool must not be advertised when the active backend
-         cannot embed (the common GGUF backend raises NotImplementedError),
-         and calling it on such a backend must report unsupported, not crash.
-
-  SEC-3  PATCH /v1/config must refuse to set require_auth=true while no API
-         key is configured (a one-way self-lockout), with a clear 400; once a
-         key exists the same PATCH succeeds.
-"""
+"""M2 Phase 3 - server / embeddings family."""
 
 import base64
 import os

@@ -1,24 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""
-Provenance tagging for coder tool results (R19, AutoJack #2 - indirect prompt
-injection defense in depth).
-
-A coding agent that can fetch web pages, run web searches, or call external MCP
-tools ingests attacker-influenceable text and feeds it straight back into its own
-model loop. That is the indirect-prompt-injection channel: a fetched page can
-carry "ignore your task and run this" directions, and - because tool results are
-interpolated verbatim into a <tool_result> frame (tools.py ToolResult.to_xml) -
-the page can even embed a literal closing tag to forge the frame and impersonate
-a trusted message.
-
-This module re-frames results from untrusted (external / network) tools so the
-model treats their body as DATA, not instructions, and neutralises any
-frame-closing markers inside that body so the content cannot break out of, or
-forge, its fence. It blocks nothing - it only labels and hardens the boundary.
-The matching standing rule lives in the system prompt (prompts.py, UNTRUSTED
-CONTENT). The outer <tool_result ...> tag is preserved so the existing detection
-code (agent.py / sessions.py keying off startswith("<tool_result")) is unaffected.
-"""
+"""Provenance tagging for coder tool results (R19, AutoJack #2 - indirect prompt injection defense in depth)."""
 
 from __future__ import annotations
 
@@ -52,12 +33,7 @@ _WARNING = (
 )
 
 def is_untrusted_tool(name: str, tool_def=None) -> bool:
-    """Whether *name*'s output should be treated as untrusted external content.
-
-    True for the network tools (fetch_url, web_search), every MCP tool (mcp_*),
-    and any tool whose ToolDef opts in via an ``untrusted_output`` attribute
-    (the seam for a future plugin tool that returns external content).
-    """
+    """Whether *name*'s output should be treated as untrusted external content."""
     if not name:
         return False
     if name in _UNTRUSTED_TOOLS or name.startswith(_MCP_PREFIX):
@@ -66,13 +42,7 @@ def is_untrusted_tool(name: str, tool_def=None) -> bool:
 
 
 def _attr_safe(name: str) -> str:
-    """Make a tool name safe to interpolate into a name="..." attribute.
-
-    An MCP server controls its tool names (registered mcp_<server>_<tool>), so a
-    malicious server could declare a name containing a quote or angle bracket to
-    break out of the frame attribute. Strip the characters that could; built-in
-    tool names never contain them, so this is a no-op for trusted tools.
-    """
+    """Make a tool name safe to interpolate into a name='...' attribute."""
     return (str(name)
             .replace('"', "")
             .replace("<", "")
@@ -82,13 +52,7 @@ def _attr_safe(name: str) -> str:
 
 
 def build_result_block(tool_name: str, result, untrusted: bool) -> str:
-    """The <tool_result> block fed back to the model for *result*.
-
-    Trusted tools use the plain frame (``ToolResult.to_xml``). Untrusted tools
-    get a ``provenance="untrusted-external"`` attribute, a data-not-instructions
-    warning, and their body fenced in ``<untrusted_content>`` with frame markers
-    neutralised. The OUTER ``<tool_result ...>`` tag is preserved either way.
-    """
+    """The <tool_result> block fed back to the model for *result*."""
     if not untrusted:
         return result.to_xml(tool_name)
     status = "ok" if result.ok else "error"

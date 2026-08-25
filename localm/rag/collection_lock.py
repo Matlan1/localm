@@ -1,66 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Cross-process write lock for a single RAG collection.
-
-``store._collection_lock`` serialises writers inside ONE process. It cannot
-serialise `localm rag add|resync|repair|rm` (its own OS process, its own lock
-registry) against a running server's scheduled re-sync of the same collection:
-both ``_load()`` the same state, mutate their copy and ``_save()``, so one
-update is silently lost and interleaved meta/chunks/vectors can surface later
-as a degraded index. This module closes that, per collection, across processes.
-
-Why not ``config._cross_process_lock``: it reclaims ANY holder older than 30 s
-as abandoned. That is right for a config read-modify-write (milliseconds) and
-fatal here, where indexing a folder legitimately runs for minutes or hours - a
-waiter would reap a LIVE holder and both would write. So a hold here has NO
-wall-clock limit at all. The holder instead proves it is alive with a
-HEARTBEAT, and staleness is keyed on the age of that heartbeat
-(``STALE_AFTER``), not on how long the lock has been held.
-
-THE HEARTBEAT IS THE LOCK FILE'S MTIME, refreshed with ``os.utime``. It is
-deliberately not a timestamp field rewritten inside the record, because
-rewriting the record means replacing the file, and a replace cannot be made
-conditional: a holder whose write stalls past the staleness window (an
-unresponsive network share, a long antivirus hold) would land its now-stale
-record ON TOP of the record of whichever process legitimately reclaimed the
-lock meanwhile - destroying the successor's identity and letting a third writer
-in behind it. ``os.utime`` only ever moves a timestamp, so the worst a stalled
-holder can do is make a live successor's lock look a few seconds fresher than
-it is, which is harmless because that successor IS alive. The record itself is
-written exactly once, at acquisition, and never rewritten.
-
-The lock file is ``<data dir>/rag/<name>.lock``, a SIBLING of the collection
-directory rather than a file inside it: ``delete_collection``'s rmtree would
-destroy an inside lock while it was held, and a stray file in the collection
-directory reads as collection data. Collection names are ``[A-Za-z0-9_-]{1,64}``
-(``check_collection_name``), so ``<name>.lock`` can never collide with a
-collection directory, and ``collection_names()`` only lists directories that
-hold a meta.json, so the lock file is never mistaken for a collection.
-
-Identity is the per-acquisition ``token`` (uuid4), never the pid: pids are
-reused across process lifetimes, so a leaked lock file can carry the very pid
-the OS later hands to a new localm process (REG-586, learned in config.py).
-The record ALSO pins ``(pid, pid_create_time)``, which is what makes a pid
-usable as evidence at all: same pid + different create time means the number
-was recycled and the real holder is gone. That pin is only consulted when the
-record was written by a process that shares this one's pid space
-(``machine``), because a LOCALM_HOME on a network share - or on the Windows
-side of a WSL mount - can hold a pid from an entirely different pid table,
-where a local lookup would be worse than useless. It needs psutil, which is an
-EXTRA here, not a core dependency; without it the pin is inert and staleness
-falls back to heartbeat age alone, which is the primary rule anyway. Nothing
-depends on the accelerator being available.
-
-Failure is never silent and never optimistic:
-
-  * A lock that cannot be acquired raises ``CollectionLockedError``. There is no
-    path that proceeds to write without holding it.
-  * A lock file whose record is corrupt or unreadable is treated as HELD (until
-    its mtime goes stale), never as free.
-  * Release removes the file only on a POSITIVE token match. "I cannot read it"
-    is never taken as "it must be mine".
-  * A reclaim is printed, and so is the case where this process's own hold was
-    reclaimed while it was still running.
-"""
+"""Cross-process write lock for a single RAG collection."""
 
 from __future__ import annotations
 
@@ -110,8 +49,7 @@ ENV_STALE = "LOCALM_RAG_LOCK_STALE"
 
 
 class CollectionLockedError(RuntimeError):
-    """Another writer holds this collection's write lock and did not release it
-    within the wait budget. Nothing was written."""
+    """Another writer holds this collection's write lock and did not release it within the wait budget."""
 
     def __init__(self, name: str, holder: Optional[dict], waited: float,
                  last_alive: Optional[float] = None,
@@ -142,27 +80,17 @@ class CollectionLockedError(RuntimeError):
 
 
 def wait_budget() -> float:
-    """The current wait-before-refusing budget, honouring the env override.
-
-    Public so a caller that has to bound its OWN waiting (delete_collection
-    bounds the in-process half too) uses the same number the file lock does,
-    rather than inventing a second one that could drift from the docs."""
+    """The current wait-before-refusing budget, honouring the env override."""
     return _env_float(ENV_WAIT, WAIT_TIMEOUT)
 
 
 def lock_path_for(collection_dir: Path) -> Path:
-    """The lock file for the collection stored at *collection_dir* (a sibling
-    ``<name>.lock``, see the module docstring)."""
+    """The lock file for the collection stored at *collection_dir* (a sibling ``<name>.lock``, see the module docstring)."""
     return collection_dir.with_name(collection_dir.name + ".lock")
 
 
 def describe_holder(rec: Optional[dict], last_alive: Optional[float] = None) -> str:
-    """A human sentence naming who holds a lock, from its record.
-
-    Deliberately says only what the record honestly knows: the pid, what it is
-    doing, how long it has held the lock and when it last proved it was alive.
-    No hostname or command line (this file lives in the user's data directory
-    and can end up quoted in a bug report)."""
+    """A human sentence naming who holds a lock, from its record."""
     if not isinstance(rec, dict):
         return ("another localm process (its lock record is unreadable, so it "
                 "cannot say which)")
@@ -188,11 +116,7 @@ def _duration(seconds: float) -> str:
 
 
 def _env_float(name: str, default: float) -> float:
-    """An operator override, or *default* if it is unset or not a usable number.
-
-    A malformed value is reported rather than silently ignored: someone who set
-    it meant something by it, and a typo that quietly reverts to the default is
-    exactly the kind of "it looked like it worked" this codebase does not ship."""
+    """An operator override, or *default* if it is unset or not a usable number."""
     raw = (os.environ.get(name) or "").strip()
     if not raw:
         return default
@@ -211,19 +135,7 @@ _machine_id_cache: Optional[str] = None
 
 
 def _machine_id() -> str:
-    """An opaque, stable id for THIS PID SPACE.
-
-    Not just the host: a pid only means something within one pid table, and a
-    hostname does not identify one. WSL2 defaults its hostname to the Windows
-    machine name, and a LOCALM_HOME shared across that boundary (a /mnt/c path)
-    would otherwise let each side look the other's pids up in its own process
-    table, find nothing, and declare a perfectly live holder dead. So the
-    platform and, where the kernel exposes it, the pid namespace go into the id
-    as well.
-
-    Hashed rather than stored plainly: the node name is a personal identifier
-    and this record is written into the user's data directory (AGENTS.md rule
-    2). Only ever compared for equality, so the hash is as good as the name."""
+    """An opaque, stable id for THIS PID SPACE."""
     global _machine_id_cache
     if _machine_id_cache is None:
         parts = [sys.platform]
@@ -249,9 +161,7 @@ def _machine_id() -> str:
 
 
 def _create_time(pid: int) -> Optional[float]:
-    """Process start time for *pid*, or None when it cannot be determined
-    (psutil absent - it is an extra, not a core dependency - or the process is
-    already gone)."""
+    """Process start time for *pid*, or None when it cannot be determined (psutil absent - it is an extra, not a core dependency - or the process is already gone)."""
     try:
         import psutil
     except Exception:
@@ -263,11 +173,7 @@ def _create_time(pid: int) -> Optional[float]:
 
 
 def _holder_liveness(rec: dict) -> str:
-    """``"dead"``, ``"alive"`` or ``"unknown"`` for the process in *rec*.
-
-    Only ever used to reclaim a crashed holder EARLIER than the heartbeat rule
-    would. It never keeps a stale lock alive, so "unknown" (no psutil, another
-    pid space, nothing pinned) costs nothing but a slower recovery."""
+    """``'dead'``, ``'alive'`` or ``'unknown'`` for the process in *rec*."""
     if rec.get("machine") != _machine_id():
         return "unknown"          # another pid space: its pids say nothing here
     pid = rec.get("pid")
@@ -295,16 +201,7 @@ def _holder_liveness(rec: dict) -> str:
 
 
 def _read_record(lockpath: Path):
-    """``(record_or_None, mtime_or_None)`` for the lock file.
-
-    ``(None, mtime)`` means the file EXISTS but its record could not be read: a
-    hand-edit, a truncated file, an ACL that permits stat but not read, or the
-    brief moment between another process creating the file and writing its
-    record into it. That is treated as held until the file itself goes stale -
-    never as free, which would let a second writer in exactly when the on-disk
-    state is already suspect. The stat is taken SEPARATELY, and first, so an
-    unreadable file still gets a staleness clock instead of being unjudgeable
-    and therefore held for ever."""
+    """``(record_or_None, mtime_or_None)`` for the lock file."""
     try:
         mtime = lockpath.stat().st_mtime
     except OSError:
@@ -321,11 +218,7 @@ def _read_record(lockpath: Path):
 
 
 def _is_stale(rec: Optional[dict], mtime: Optional[float], stale_after: float) -> bool:
-    """Whether the holder stopped proving it was alive.
-
-    The clock is the lock file's mtime, which the holder refreshes (see the
-    module docstring), so a corrupt record is judged by exactly the same rule as
-    a readable one."""
+    """Whether the holder stopped proving it was alive."""
     if mtime is None:
         return False              # the file vanished; the caller re-tries the create
     # A holder whose clock runs ahead of ours yields a negative age. Clamp to 0
@@ -339,11 +232,7 @@ def _is_stale(rec: Optional[dict], mtime: Optional[float], stale_after: float) -
 
 
 class _Heartbeat(threading.Thread):
-    """Keeps the holder's lock file looking alive until the lock is released.
-
-    A daemon thread, so it can never keep a process alive; and it only ever
-    touches the lock file's timestamp, so it cannot interfere with the indexing
-    run it is vouching for, nor overwrite anybody's record."""
+    """Keeps the holder's lock file looking alive until the lock is released."""
 
     def __init__(self, lockpath: Path, record: dict, interval: float):
         super().__init__(name=f"rag-lock-{record.get('op', 'write')}", daemon=True)
@@ -361,7 +250,7 @@ class _Heartbeat(threading.Thread):
                 return
 
     def _beat(self) -> bool:
-        """One refresh. False when we no longer hold the lock and must stop."""
+        """One refresh."""
         if self._stopping.is_set():
             # Released while we were sleeping. Touching the file now could
             # refresh a lock the releasing thread is about to remove.
@@ -413,15 +302,7 @@ class _Heartbeat(threading.Thread):
 
 
 def _note(message: str) -> None:
-    """Surface an unusual lock event through BOTH channels, always.
-
-    stderr is for whoever is watching a terminal; the log is the durable record.
-    Neither alone is enough, and the log must not be conditional: every localm
-    entry point installs the always-on ring buffer (debuglog.install_ring_buffer,
-    called from cli/_core.py), which is what a bug report dumps, and a run
-    launched without a console has no usable stderr at all - precisely the
-    unattended case where a reclaim or a mid-write takeover most needs to leave
-    a trace (AGENTS.md rule 5)."""
+    """Surface an unusual lock event through BOTH channels, always."""
     print(f"[localm] note: {message}", file=sys.stderr)
     _log.warning("rag lock: %s", message)
 
@@ -432,17 +313,7 @@ def collection_write_lock(lockpath: Path, *, collection: str, op: str,
                           stale_after: Optional[float] = None,
                           on_wait: Optional[Callable[[str], None]] = None,
                           kind: str = "Collection"):
-    """Hold the cross-process write lock for a collection, or refuse.
-
-    Raises ``CollectionLockedError`` if another process still holds it after
-    *timeout* seconds. It never returns without the lock: there is no
-    "carry on unprotected" path, because an unserialised write is precisely the
-    lost update this exists to prevent.
-
-    *on_wait* is called with a progress line if the wait actually lasts (see
-    WAIT_NOTICE_AFTER), so a CLI can say why it is sitting there instead of
-    looking hung. Callers pass their existing progress channel.
-    """
+    """Hold the cross-process write lock for a collection, or refuse."""
     timeout = _env_float(ENV_WAIT, WAIT_TIMEOUT) if timeout is None else timeout
     stale_after = (_env_float(ENV_STALE, STALE_AFTER)
                    if stale_after is None else stale_after)
@@ -582,17 +453,7 @@ def collection_write_lock(lockpath: Path, *, collection: str, op: str,
 
 def _reclaim(lockpath: Path, rec: Optional[dict], mtime: Optional[float],
              stale_after: float) -> bool:
-    """Remove a lock whose holder stopped proving it was alive. True when the
-    file is gone afterwards and the caller may retry its create.
-
-    Re-reads the file and re-applies the SAME staleness test before unlinking,
-    so a lock that was released and freshly re-taken between our judgement and
-    this call is left alone - including the case where neither record could be
-    read, where a token comparison would be meaningless but the refreshed mtime
-    still says the new holder is alive. The residual window (a lock created
-    between this re-check and the unlink below) cannot be closed with plain
-    files; the fencing token stops it from cascading, since the wrongly-removed
-    holder's own release will not then delete a third party's lock."""
+    """Remove a lock whose holder stopped proving it was alive."""
     current, current_mtime = _read_record(lockpath)
     if current_mtime is None:
         return True               # already gone: the acquire loop can proceed

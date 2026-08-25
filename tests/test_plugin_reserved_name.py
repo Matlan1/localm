@@ -1,15 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""B14: installing a THIRD-PARTY plugin whose name shadows a built-in command
-must be rejected.
-
-The legacy CLI loader (loader.parse_manifest) rejected reserved names, but the
-engine loader - the one the live server uses - did not, so a third-party plugin
-named like "run"/"serve"/"coder" could be installed from an arbitrary directory
-and shadow a catalog/core command. Built-in plugins legitimately carry these
-names and install via the trusted store path (install()), so the guard is only
-on the arbitrary-source install paths (install_external / set_installed_from_dir),
-not on parse_spec itself.
-"""
+"""B14: installing a THIRD-PARTY plugin whose name shadows a built-in command must be rejected."""
 
 import pytest
 from fastapi import FastAPI

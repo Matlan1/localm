@@ -1,20 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Standalone rollback: restore the PREVIOUS localm build after a bad update, even
-when the updated build is too broken to run ``localm update --rollback`` itself.
-
-``localm update`` keeps the pre-update version under ``<data-home>/updates/backup``
-and records the full swap set in ``<data-home>/updates/applied_names.json``. This
-script restores that backup into the install using NOTHING but the standard library
-and the tiny, stdlib-only ``localm._apply_update`` primitives, which it loads BY FILE
-PATH so a broken ``localm`` package cannot stop the rollback. Run it via
-``rollback.bat`` / ``rollback.sh`` in the install root, or
-``python scripts/rollback_update.py``.
-
-It NEVER reports success it did not achieve (do-not-hide-problems): if there is no
-backup, the restore helper cannot load, or a restore step fails, it says so, keeps the
-backup intact, and exits non-zero, pointing at the backup dir for a manual copy.
-"""
+"""Standalone rollback: restore the PREVIOUS localm build after a bad update, even when the updated build is too broken to run ``localm update --rollback`` itself."""
 
 from __future__ import annotations
 
@@ -31,9 +17,7 @@ INSTALL_ROOT = Path(__file__).resolve().parent.parent
 
 
 def _detect_home(install_root: Path) -> Path:
-    """The localm data dir, resolved WITHOUT importing localm.config (which may live in
-    the broken build). Mirrors config._detect_home: LOCALM_HOME, else a portable
-    ``localm-home.cfg`` / ``./home`` in the install, else the contained ``./home``."""
+    """The localm data dir, resolved WITHOUT importing localm.config (which may live in the broken build)."""
     env = os.environ.get("LOCALM_HOME", "").strip()
     if env:
         return Path(env).expanduser()
@@ -53,9 +37,7 @@ def _detect_home(install_root: Path) -> Path:
 
 
 def _load_apply_update(install_root: Path):
-    """Load ``localm/_apply_update.py`` BY FILE PATH (bypassing the ``localm`` package
-    __init__), so the rollback works even if the rest of localm is broken. Returns the
-    module, or None when it cannot be loaded (the caller then prints manual guidance)."""
+    """Load ``localm/_apply_update.py`` BY FILE PATH (bypassing the ``localm`` package __init__), so the rollback works even if the rest of localm is broken."""
     path = install_root / "localm" / "_apply_update.py"
     if not path.is_file():
         return None
@@ -69,9 +51,7 @@ def _load_apply_update(install_root: Path):
 
 
 def _read_names(updates_dir: Path, backup_dir: Path) -> list:
-    """The full set of top-level entries to unwind: the recorded swap manifest (which
-    includes brand-new entries the update ADDED, absent from the backup), else the
-    backup-dir listing for an older backup written before the manifest existed."""
+    """The full set of top-level entries to unwind: the recorded swap manifest (which includes brand-new entries the update ADDED, absent from the backup), else the backup-dir listing for an older backup written before the manifest existed."""
     manifest = updates_dir / "applied_names.json"
     if manifest.is_file():
         try:

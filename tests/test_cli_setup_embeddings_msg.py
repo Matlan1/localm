@@ -1,13 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""cli-2: `localm setup-embeddings` must not claim existing RAG collections "will
-now use semantic search" - they stay lexical (BM25) until re-embedded. Memory uses
-it now; the message must state the capability and name the RAG re-embed step.
-
-The re-embed step itself was `rag add ... --embed` (re-reads the original source
-files) until `rag reembed <name>` existed (works from stored chunk text alone, no
-source files needed) - the message now points at the latter, the actual fix for
-the common case where a source file has moved, been deleted, or arrived only as
-an upload."""
+"""cli-2: `localm setup-embeddings` must not claim existing RAG collections 'will now use semantic search' - they stay lexical (BM25) until re-embedded."""
 
 from click.testing import CliRunner
 
@@ -62,8 +54,7 @@ def _stub_install(monkeypatch, tmp_path, name="new-model.gguf"):
 
 
 def _make_affected_collection():
-    """A collection with real vectors under this test's isolated rag_dir(),
-    recorded as built with 'old-model' - the thing a switch would invalidate."""
+    """A collection with real vectors under this test's isolated rag_dir(), recorded as built with 'old-model' - the thing a switch would invalidate."""
     from localm.rag.store import Collection, rag_dir
     c = Collection("docs", base=rag_dir()).create()
     c._chunks = [{"source": "doc0.txt", "pos": 0, "text": "alpha"}]

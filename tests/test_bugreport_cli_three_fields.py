@@ -1,11 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""#958: ``localm bug-report`` used to take a single ``-m`` and ship it (or the
-``<!-- Please describe... -->`` placeholder) through report_failure with no
-"what happened"/"what expected" fields and no log-attach option at all - a
-DIFFERENT producer with a different, weaker template than the GUI/API path
-(save_user_report). Now it shares the SAME three-field template and the same
-report_title/offer_to_send machinery, so a fix to one producer is a fix to
-both."""
+"""#958: ``localm bug-report`` used to take a single ``-m`` and ship it (or the ``<!-- Please describe... -->`` placeholder) through report_failure with no 'what happened'/'what expected' fields and no log-attach option at all - a DIFFERENT producer with a different, weaker template than the GUI/API pa..."""
 
 import glob
 import os
@@ -35,8 +29,7 @@ def test_three_flags_produce_the_same_three_distinct_sections_as_the_gui(cli_run
 
 
 def test_message_only_renders_not_stated_not_a_duplicate(cli_runner):
-    """#958's own artifact, reproduced through the CLI producer specifically:
-    -m alone used to echo into the title AND the "What happened" body."""
+    """#958's own artifact, reproduced through the CLI producer specifically: -m alone used to echo into the title AND the 'What happened' body."""
     from localm.cli import main
     result = cli_runner.invoke(main, [
         "bug-report", "-m", "the image generator crashed when I clicked twice",
@@ -98,14 +91,7 @@ def test_log_attach_defaults_true_without_the_flag(cli_runner, monkeypatch):
 
 
 def test_interactive_no_flags_prompts_for_all_three_fields(cli_runner, monkeypatch):
-    """A real terminal (isatty True) with no flags gets the same three
-    questions the GUI form asks, not a bare one-line prompt.
-
-    CliRunner.invoke() REPLACES sys.stdin with a fresh
-    click.testing._NamedTextIOWrapper for the duration of the call, so
-    patching the object captured before invoke() (the usual monkeypatch
-    shape) never reaches the code under test - the CLASS must be patched
-    instead, since that is what the freshly-constructed instance inherits."""
+    """A real terminal (isatty True) with no flags gets the same three questions the GUI form asks, not a bare one-line prompt."""
     from click.testing import _NamedTextIOWrapper
     from localm.cli import main
     monkeypatch.setattr(_NamedTextIOWrapper, "isatty", lambda self: True)
@@ -125,8 +111,7 @@ def test_interactive_no_flags_prompts_for_all_three_fields(cli_runner, monkeypat
 
 
 def test_interactive_flags_skip_only_their_own_prompt(cli_runner, monkeypatch):
-    """A flag already answering a question means that question is not asked
-    again - only the remaining, un-answered ones are."""
+    """A flag already answering a question means that question is not asked again - only the remaining, un-answered ones are."""
     from click.testing import _NamedTextIOWrapper
     from localm.cli import main
     monkeypatch.setattr(_NamedTextIOWrapper, "isatty", lambda self: True)

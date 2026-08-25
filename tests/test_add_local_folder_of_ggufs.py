@@ -1,12 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""H2: `localm add <dir>` / `localm pull <dir>` over a folder of loose GGUFs must
-register each model instead of rejecting the directory as "Not a model".
-
-Pre-fix, add_local() only accepted a single .gguf file, an HF dir, or an Ollama
-blob; a directory holding several loose *.gguf files fell through to the generic
-"Not a model" rejection and registered nothing. These tests pin the new branch:
-walk *.gguf (non-recursive), register split GGUFs by their first part only.
-"""
+"""H2: `localm add <dir>` / `localm pull <dir>` over a folder of loose GGUFs must register each model instead of rejecting the directory as 'Not a model'."""
 
 import pytest
 
@@ -31,8 +24,7 @@ def isolated_home(tmp_path, monkeypatch):
 
 
 def _gguf(d, name):
-    """Write a .gguf with content unique to its name so two files never collide
-    on the sha256 content-dedup path (the CI trap from #117)."""
+    """Write a .gguf with content unique to its name so two files never collide on the sha256 content-dedup path (the CI trap from #117)."""
     p = d / name
     p.write_bytes(b"GGUF\x00\x00\x00\x00" + name.encode())
     return p

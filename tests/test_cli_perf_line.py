@@ -1,12 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The CLI REPL perf readout (`localm run` / chat): tok/s is the DECODE rate, never
-the load-folded rate. Regression lock for the "0.6 tok/s cold on a 64 tok/s GPU"
-bug, where the first call after a model load charged the load seconds against the
-generation throughput and looked like a silent CPU fallback.
-
-_perf_line is a pure function of (n_tokens, t0, first_at, end), so these assert the
-exact reported string without touching real timing.
-"""
+"""The CLI REPL perf readout (`localm run` / chat): tok/s is the DECODE rate, never the load-folded rate."""
 
 from __future__ import annotations
 

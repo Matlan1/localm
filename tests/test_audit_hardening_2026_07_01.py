@@ -1,20 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Regression tests for the 2026-07-01 issue-backlog audit-hardening batch.
-
-Each test pins a concrete defect from issues/issues.txt that was verified open
-against master 4f2869e and fixed in the same pass:
-
-  AUD-DOCXBOMB   - .docx zip-bomb decompression DoS
-  AUD-DOCXREDOS  - quadratic paragraph regex on malformed docx XML
-  AUD-IPYNB500   - malformed .ipynb shapes -> unhandled 500
-  AUD-CHUNKLOOP  - chunk_text(chunk_chars<=0) infinite loop
-  AUD-SCRUBHOME  - bug-report home scrub misses forward-slash / case variants
-  AUD-CLIENTSCRUB- bug-report client/log fields not token/cred scrubbed
-  AUD-CFGFALLBACK- config._read_json crashes instead of falling back
-  AUD-CORSWILD   - cors_origins:"*" disabled the open-mode shell-token gate
-  AUD-CLICKVER   - doctor read click.__version__ (DeprecationWarning) first
-  NEW-COMFY-STATUS-IMPORT - GET /v1/comfy/status 500'd on a stale import
-"""
+"""Regression tests for the 2026-07-01 issue-backlog audit-hardening batch."""
 
 import json
 import sys

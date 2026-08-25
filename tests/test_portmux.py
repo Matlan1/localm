@@ -1,10 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Issue 8: a TLS bind must catch a plain-http request on the same port with an
-https redirect (not a bare connection reset), while still serving HTTPS normally.
-
-Spins up localm.portmux in a real subprocess (so the asyncio demux + internal
-uvicorn run exactly as in production) and checks both schemes on the one port.
-"""
+"""Issue 8: a TLS bind must catch a plain-http request on the same port with an https redirect (not a bare connection reset), while still serving HTTPS normally."""
 import http.client
 import socket
 import ssl
@@ -64,9 +59,7 @@ def tls_server(tmp_path):
 
 @pytest.fixture
 def plain_server():
-    """A PLAIN-HTTP portmux bind (no cert) - the loopback default. R45: it must
-    front uvicorn with the first-byte peek so a TLS-on-the-HTTP-port connection is
-    handled at the socket layer instead of flooding uvicorn's HTTP parser."""
+    """A PLAIN-HTTP portmux bind (no cert) - the loopback default."""
     port = _free_port()
     proc = subprocess.Popen(
         [sys.executable, str(WORKER), str(port)],
@@ -84,8 +77,7 @@ def plain_server():
 
 
 def test_plain_http_request_is_served(plain_server):
-    """A normal HTTP request on the plain bind is relayed to the internal uvicorn
-    and answered (the peek layer is transparent to real HTTP)."""
+    """A normal HTTP request on the plain bind is relayed to the internal uvicorn and answered (the peek layer is transparent to real HTTP)."""
     port = plain_server
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=15)
     conn.request("GET", "/")
@@ -97,11 +89,7 @@ def test_plain_http_request_is_served(plain_server):
 
 
 def test_tls_on_plain_port_is_handled_and_server_survives(plain_server):
-    """R45 root cause: a client that opens TLS/HTTPS on the plain-HTTP port (a
-    browser with HSTS / HTTPS-First) must be handled at the socket layer, NOT fed
-    into uvicorn's HTTP parser. The handshake fails cleanly (the port speaks HTTP)
-    and - crucially - a normal request right after still works, proving the server
-    neither crashed nor wedged and there was no 'Invalid HTTP request' to log."""
+    """R45 root cause: a client that opens TLS/HTTPS on the plain-HTTP port (a browser with HSTS / HTTPS-First) must be handled at the socket layer, NOT fed into uvicorn's HTTP parser."""
     port = plain_server
     raw = socket.create_connection(("127.0.0.1", port), timeout=15)
     ctx = ssl.create_default_context()

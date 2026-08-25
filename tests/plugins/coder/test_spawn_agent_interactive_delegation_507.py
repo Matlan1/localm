@@ -1,30 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""REG-507 (regression audit 2026-07-14): a spawn_agent child could no longer do
-ANY destructive work in the default interactive REPL.
-
-The 2026-07-09 checkup fix (#11) correctly stopped a child from BYPASSING the
-parent's confirmation posture: it stopped hardcoding the child's
-``auto_approve=True`` and instead inherited ``auto_approve`` / ``dry_run`` /
-``always_confirm`` / ``confirm_handler`` from the parent. But it over-corrected.
-
-In the default interactive REPL (``localm coder`` without ``--yes``) the CLI
-builds the parent with ``auto_approve=False`` and ``confirm_handler=None`` - the
-terminal REPL confirms via ``_confirm_tool``, not a handler. The child inherited
-``auto_approve=False`` AND ``confirm_handler=None``, and always runs
-``run_task`` -> ``_loop(interactive=False)``. So in execution.py the child hit
-``needs_confirm=True`` with no handler and ``interactive=False``, took the
-fail-closed branch, and DENIED every write/shell/git - even though the user was
-sitting right there and the parent's own tools prompt fine on that same terminal.
-
-The intent of "inherit the parent's confirmation posture" was to ASK, not to
-block. So the child now inherits the parent's ACTUAL confirmation CHANNEL: the
-GUI handler when there is one, and otherwise the parent's terminal prompt when
-the parent is genuinely running an interactive loop.
-
-The security fix must survive intact, which is what the negatives here pin: a
-parent that is NOT interactive and has no handler (a scheduled/unattended run)
-must still fail closed, and a child must never self-approve.
-"""
+"""REG-507 (regression audit 2026-07-14): a spawn_agent child could no longer do ANY destructive work in the default interactive REPL."""
 
 from unittest.mock import patch
 
@@ -49,13 +24,7 @@ def _write_call(rel="child_output.txt"):
 
 
 def _terminal_answer(answer, asked=None):
-    """Patch the parent's REAL terminal prompt for a write_file confirmation.
-
-    _confirm_tool routes write_file/edit_file through print_diff_preview +
-    confirm_diff (a diff preview, not a bare y/N), so a test that only patched
-    `confirm` would let the real prompt block on stdin. Non-write tools use
-    `confirm`, patched separately where that matters.
-    """
+    """Patch the parent's REAL terminal prompt for a write_file confirmation."""
     def _confirm_diff(label):
         if asked is not None:
             asked.append(label)
@@ -68,9 +37,7 @@ def _terminal_answer(answer, asked=None):
 
 
 def _terminal_must_not_be_used(why):
-    """Assert NOTHING reaches the terminal prompt. Guards BOTH channels -
-    confirm_diff (write/edit) and confirm (everything else) - so a leak through
-    either one fails loudly instead of blocking on real stdin."""
+    """Assert NOTHING reaches the terminal prompt."""
     def _boom(*a, **kw):
         pytest.fail(why)
     return patch.multiple(
@@ -80,13 +47,7 @@ def _terminal_must_not_be_used(why):
 
 
 def _spawn_and_capture_child(tmp_path, parent_kwargs, *, interactive_parent=False):
-    """Spawn a real child via tool_spawn_agent, short-circuiting run_task so no
-    LLM call is needed, and return the constructed child Agent.
-
-    *interactive_parent* marks the parent as running an interactive REPL loop the
-    way ``_loop(interactive=True)`` does, which is the state the CLI parent is
-    actually in when the model calls spawn_agent.
-    """
+    """Spawn a real child via tool_spawn_agent, short-circuiting run_task so no LLM call is needed, and return the constructed child Agent."""
     parent = Agent(_StubBackend(), cwd=tmp_path, **parent_kwargs)
     if interactive_parent:
         parent._interactive = True
@@ -108,8 +69,7 @@ def _spawn_and_capture_child(tmp_path, parent_kwargs, *, interactive_parent=Fals
 
 class TestInteractiveDelegation:
     def test_child_asks_the_terminal_and_executes_when_approved(self, tmp_path):
-        """The reported break: `localm coder` without --yes, model delegates via
-        spawn_agent, user approves at the terminal -> the work actually happens."""
+        """The reported break: `localm coder` without --yes, model delegates via spawn_agent, user approves at the terminal -> the work actually happens."""
         asked = []
         child = _spawn_and_capture_child(
             tmp_path, {"auto_approve": False}, interactive_parent=True)
@@ -121,8 +81,7 @@ class TestInteractiveDelegation:
         assert asked, "the child must ASK the user at the terminal, not hard-deny"
 
     def test_child_terminal_prompt_denies_when_user_says_no(self, tmp_path):
-        """The other half of ASK: a 'no' at the terminal rejects the tool - and
-        it must read as a user rejection, not as a fail-closed 'no channel'."""
+        """The other half of ASK: a 'no' at the terminal rejects the tool - and it must read as a user rejection, not as a fail-closed 'no channel'."""
         child = _spawn_and_capture_child(
             tmp_path, {"auto_approve": False}, interactive_parent=True)
         with _terminal_answer(False):
@@ -133,8 +92,7 @@ class TestInteractiveDelegation:
         assert not (tmp_path / "child_output.txt").exists()
 
     def test_child_shell_is_asked_not_denied_in_interactive_repl(self, tmp_path):
-        """run_shell is the tool the finding names: delegated shell work must be
-        approvable, not hard-denied."""
+        """run_shell is the tool the finding names: delegated shell work must be approvable, not hard-denied."""
         call = ToolCall(name="run_shell", args={"command": "echo hi"},
                         raw="", start=0, end=0)
         child = _spawn_and_capture_child(
@@ -148,9 +106,7 @@ class TestInteractiveDelegation:
         assert "requires confirmation" not in res.output.lower()
 
     def test_diff_preview_resolves_against_the_shared_cwd(self, tmp_path):
-        """The parent's _confirm_tool renders the write_file diff against
-        `self.cwd`. Parent and child share one cwd (spawn_agent passes the
-        parent's), so the preview must show the child's real target file."""
+        """The parent's _confirm_tool renders the write_file diff against `self.cwd`."""
         (tmp_path / "child_output.txt").write_text("before")
         child = _spawn_and_capture_child(
             tmp_path, {"auto_approve": False}, interactive_parent=True)
@@ -174,9 +130,7 @@ class TestInteractiveDelegation:
 
 class TestConfirmationPostureStillEnforced:
     def test_unattended_parent_without_a_channel_still_fails_closed(self, tmp_path):
-        """A parent that requires confirmation but is NOT interactive and has no
-        handler (a scheduled/unattended run) has no way to ask. The child must
-        still DENY - never self-approve. This is the original security fix."""
+        """A parent that requires confirmation but is NOT interactive and has no handler (a scheduled/unattended run) has no way to ask."""
         child = _spawn_and_capture_child(tmp_path, {"auto_approve": False})
         res = child._execute_tool(_write_call(), interactive=False)
         assert not res.ok
@@ -184,8 +138,7 @@ class TestConfirmationPostureStillEnforced:
         assert not (tmp_path / "child_output.txt").exists()
 
     def test_gui_confirm_handler_still_wins_over_the_terminal(self, tmp_path):
-        """A GUI/web parent passes confirm_handler; that must remain the channel
-        (routing to the browser), never the server's terminal."""
+        """A GUI/web parent passes confirm_handler; that must remain the channel (routing to the browser), never the server's terminal."""
         seen = []
 
         def deny(call):
@@ -210,8 +163,7 @@ class TestConfirmationPostureStillEnforced:
         assert not (tmp_path / "child_output.txt").exists()
 
     def test_child_still_inherits_always_confirm_and_asks(self, tmp_path):
-        """always_confirm on an auto_approve parent must still force a prompt;
-        with an interactive parent that prompt is now answerable."""
+        """always_confirm on an auto_approve parent must still force a prompt; with an interactive parent that prompt is now answerable."""
         child = _spawn_and_capture_child(
             tmp_path, {"auto_approve": True, "always_confirm": {"write_file"}},
             interactive_parent=True)
@@ -230,9 +182,7 @@ class TestConfirmationPostureStillEnforced:
         assert (tmp_path / "child_output.txt").exists()
 
     def test_restricted_parent_child_cannot_reach_shell_at_all(self, tmp_path):
-        """Belt-and-suspenders: the confirmation channel must not become a way to
-        approve a tool a restricted session may never run. disabled_tools is the
-        hard gate and it runs BEFORE any confirmation."""
+        """Belt-and-suspenders: the confirmation channel must not become a way to approve a tool a restricted session may never run. disabled_tools is the hard gate and it runs BEFORE any confirmation."""
         call = ToolCall(name="run_shell", args={"command": "echo hi"},
                         raw="", start=0, end=0)
         child = _spawn_and_capture_child(
@@ -248,8 +198,7 @@ class TestConfirmationPostureStillEnforced:
 # --------------------------------------------------------------------------- #
 
 def test_loop_records_the_interactive_flag_on_the_agent(tmp_path):
-    """_interactive must be set by the real loop (that is what makes the CLI
-    parent's terminal reachable), and default False on a fresh Agent."""
+    """_interactive must be set by the real loop (that is what makes the CLI parent's terminal reachable), and default False on a fresh Agent."""
     agent = Agent(_StubBackend(), cwd=tmp_path)
     assert agent._interactive is False
 

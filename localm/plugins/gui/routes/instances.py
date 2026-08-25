@@ -1,41 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""GUI form of `localm ps` / `localm stop <id>` (PARITY-AUDIT-CLI-GUI-2026-08-19.md,
-CLI-only gap #7). No route read or acted on another running instance before this -
-the GUI's existing shutdown/restart buttons always act on `app.state.instance_id`
-(this process), so a GUI-only user could not discover a second localm running in
-another project directory, see its port, or stop it.
-
-  GET  /api/instances              - every registered instance, this one included
-                                      (`self: true` on it), read-only.
-  POST /api/instances/{id}/stop    - stop ONE OTHER instance by id or id prefix.
-
-WHY THE STOP ROUTE IS ADMIN-ONLY, not CONFIG_WRITE like the sibling
-/v1/server/shutdown|restart (localm/inference/routes/admin.py): those two stay
-within the CALLING instance's own blast radius by construction - a
-CONFIG_WRITE key is scoped to changing THIS server's own state, and self-stop is
-exactly that. Stopping a DIFFERENT instance reaches outside that boundary into a
-process that may be serving an unrelated project or user, which is a strictly
-bigger grant. Nothing in the tree documented a security posture for this before
-(checked: instances.snapshot/kill_pid have exactly two callers anywhere, the CLI
-and one internal read-only MCP tool - grep instances.py's own callers to
-re-verify if this ever needs re-litigating).
-
-The CLI's own cross-instance `stop` gets away with less ceremony only because
-its trust boundary is stronger than any HTTP scope: it reads the target's
-registry entry (0600, owner-only) and, on a declined/unreachable graceful
-shutdown, sends a raw OS kill signal - which requires being the same OS user.
-Gating this route on scopes.ADMIN (the owner) is the closest HTTP-scope
-equivalent of "same local user" - open mode (no key configured anywhere) still
-passes through unchanged, same as every other owner-gated route in this
-codebase (see CHK-UPDATE-ROLLBACK in inference/routes/admin.py for the
-identical reasoning applied to a same-instance-but-still-owner-only action).
-
-Both routes are plain `def`, not `async def`: listing probes each entry over
-loopback HTTP (default_probe, up to ~0.7s per entry) and stopping polls PID
-liveness with blocking sleeps - Starlette threadpools a sync handler, so
-neither blocks the event loop, matching the established idiom at
-localm/plugins/gui/routes/admin.py's export_logs.
-"""
+"""GUI form of `localm ps` / `localm stop <id>` (PARITY-AUDIT-CLI-GUI-2026-08-19.md, CLI-only gap #7)."""
 
 from __future__ import annotations
 
@@ -58,10 +22,7 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.get("/api/instances", dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
     def instances_list_ep():
-        """Every registered localm instance on this machine - the GUI form of
-        `localm ps`. Read-only; reaps dead entries first (snapshot()'s default),
-        same as the CLI. The instance serving THIS request carries `self: true`
-        so a caller can tell it apart from one it might actually need to stop."""
+        """Every registered localm instance on this machine - the GUI form of `localm ps`."""
         from localm import instances
         from localm.bindhost import url_host
         from localm.config import home_dir
@@ -85,14 +46,7 @@ def register(app: FastAPI, ctx) -> None:
     @app.post("/api/instances/{instance_id}/stop",
               dependencies=[Depends(require_scope(scopes.ADMIN))])
     def instance_stop_ep(instance_id: str):
-        """Stop ONE running instance (matched by id or id prefix, same as
-        `localm stop <id>`). Mirrors cli/models.py's stop_cmd for a single
-        target: a graceful `POST /v1/server/shutdown` using the target's own
-        attach token (selfclient.self_request, the same hoisted helper the
-        CLI/MCP already share), falling back to instances.kill_pid - a direct
-        OS terminate/kill - if the target declines, is unreachable, or does
-        not confirm within the timeout. No --all equivalent: a GUI row acts on
-        one instance at a time."""
+        """Stop ONE running instance (matched by id or id prefix, same as `localm stop <id>`)."""
         import time
 
         import requests

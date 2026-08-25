@@ -1,22 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Video plugin: ComfyUI Wan short-video generation + a library for the chat surface.
-
-Routes (mounted by the engine, auto-scoped to the ``video`` capability):
-  POST   /api/video                       - generate a clip (background job)
-  GET    /api/video/history               - generated clips, newest first
-  GET    /api/video/file/{name}           - serve a generated clip
-  DELETE /api/video/file/{name}           - delete a clip (+ sidecar)
-  POST   /api/video/file/{name}/move      - move a clip to a folder
-
-Generation runs as a background job streamed through the kernel's /api/jobs/*
-SSE endpoint. It no longer requires the GUI: since ADR-0008 the job registry is
-created by ``attach_engine``, so a headless ``localm serve`` can generate too.
-It still needs this server's own address for the chat/media VRAM handover (see
-``resolve_self_url``), and 503s with that specific reason if it cannot be
-determined. The backend is selected per-plugin (default
-ComfyUI Wan) and reads this plugin's own config (see backend.py). Ships DISABLED
-by default.
-"""
+"""Video plugin: ComfyUI Wan short-video generation + a library for the chat surface."""
 
 from __future__ import annotations
 
@@ -230,10 +213,7 @@ async def video_delete(name: str):
 @_router.post("/api/video/file/{name}/move",
               dependencies=[Depends(gallery.require_owner("video"))])
 async def video_move(name: str, req: MoveFileRequest, request: Request):
-    """Move a generated clip (and its sidecar) to a folder on this machine.
-
-    The destination is checked BEFORE the mkdir: require_owner proves artifact
-    ownership, not authority over the host filesystem."""
+    """Move a generated clip (and its sidecar) to a folder on this machine."""
     path = _video_path(name)
     dest_dir = media_paths.confined_move_dest(request, req.dest)
     try:
@@ -256,12 +236,7 @@ async def video_move(name: str, req: MoveFileRequest, request: Request):
 @_router.post("/api/video/file/{name}/rename",
               dependencies=[Depends(gallery.require_owner("video"))])
 async def video_rename(name: str, req: RenameFileRequest):
-    """Rename a generated clip (and its metadata sidecar) in place.
-
-    Mirrors the image plugin's rename: confined_name re-confines the CALLER's
-    string to the gallery dir, so a traversal or absolute path is rejected
-    rather than escaping it - require_owner proves ownership of the source
-    artifact, never authority over the destination path."""
+    """Rename a generated clip (and its metadata sidecar) in place."""
     path = _video_path(name)
     new_name = req.new_name.strip()
     if not new_name:
@@ -281,9 +256,7 @@ async def video_rename(name: str, req: RenameFileRequest):
 
 @_router.get("/api/video/history")
 async def video_history(request: Request):
-    """Generated clips, newest first, with their sidecar metadata - filtered to
-    the caller's own (an admin/owner sees all; unowned/legacy entries stay
-    visible to everyone, matching gallery.require_owner)."""
+    """Generated clips, newest first, with their sidecar metadata - filtered to the caller's own (an admin/owner sees all; unowned/legacy entries stay visible to everyone, matching gallery.require_owner)."""
     video_dir = _video_dir()
     items = []
     if video_dir.is_dir():
@@ -308,28 +281,7 @@ async def video_history(request: Request):
 
 @_router.get("/api/video/comfy-models")
 async def video_comfy_models(request: Request):
-    """Model-file slots the active video workflow exposes (for the Workflow
-    panel's model-picker dropdowns), resolved against the live ComfyUI. Honest
-    about unreachability (rule 5) - never a silently-empty picker.
-
-    Each slot also carries the localm ``model_type`` its loader node holds, the
-    declared role it fills (``role_id``/``role_label`` from
-    ``host.register_model_role``), and ``installed`` - decided by the SAME rule
-    preflight uses to call a model missing, so the picker cannot call a slot fine
-    that generation then refuses. ``roles`` reports every declared role including
-    ones this workflow has no slot for, and ``registry_models`` lists this box's
-    own registered component models by type. Both are answered from the registry,
-    so they are returned even when ComfyUI is unreachable - "we could not ask
-    ComfyUI" is a different answer from "you have nothing" (rule 5), and the
-    panel is no longer a dead end when ComfyUI is down.
-
-    Resolution is a blocking urlopen of ComfyUI's multi-MB /object_info (10s
-    timeout), so it runs OFF the event loop: inline it stalled every concurrent
-    request server-wide while ComfyUI was slow (REG-638).
-
-    Bounded (follow-up to #1057) at a bit over comfy_object_info's own 10s
-    urlopen timeout, which now also covers the registry read the role join
-    needs - see the image plugin's identical route for the full rationale."""
+    """Model-file slots the active video workflow exposes (for the Workflow panel's model-picker dropdowns), resolved against the live ComfyUI."""
     from localm.config import load_config
     from localm.inference._threadpool_timeout import (
         ThreadCallTimeout, run_in_threadpool_bounded,
@@ -353,12 +305,7 @@ async def video_comfy_models(request: Request):
 
 @_router.post("/api/video/comfy-launch")
 async def video_comfy_launch():
-    """Start (or confirm) ComfyUI is up for the video plugin, without running a
-    generation - backs the Workflow panel's "Launch ComfyUI" button.
-
-    Bounded (follow-up to #1057) at the SAME comfy_launch_timeout ensure_comfy
-    itself will honour, plus a buffer - see the image plugin's identical
-    route for the full rationale."""
+    """Start (or confirm) ComfyUI is up for the video plugin, without running a generation - backs the Workflow panel's 'Launch ComfyUI' button."""
     from localm.config import load_config
     from localm.inference._threadpool_timeout import (
         ThreadCallTimeout, run_in_threadpool_bounded,

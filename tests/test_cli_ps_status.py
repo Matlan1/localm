@@ -1,8 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""B4: `localm ps` (running per-directory instances) and `localm status` (the
-server serving this directory), built on the instance discovery registry.
-Also `localm stop`: id/prefix/--all target resolution, the graceful
-/v1/server/shutdown HTTP path, and the direct-kill fallback."""
+"""B4: `localm ps` (running per-directory instances) and `localm status` (the server serving this directory), built on the instance discovery registry."""
 
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -37,10 +34,7 @@ def test_snapshot_empty(tmp_path):
 
 
 def test_snapshot_include_token_keeps_it(tmp_path):
-    """#953: an INTERNAL caller (the MCP server_activity tool) needs the attach
-    token to authenticate its own request to a genuinely open instance - the
-    opt-in companion to the strip-by-default case above. Never used for
-    anything a human reads."""
+    """#953: an INTERNAL caller (the MCP server_activity tool) needs the attach token to authenticate its own request to a genuinely open instance - the opt-in companion to the strip-by-default case above."""
     _register(tmp_path, port=8642, root=str(tmp_path / "a"), iid="aaaa1111")
     rows = instances.snapshot(tmp_path, reap=False, include_token=True)
     assert len(rows) == 1
@@ -85,9 +79,7 @@ def test_status_found(monkeypatch):
 
 
 def test_status_passes_the_registry_token_to_activity(monkeypatch):
-    """#953: `localm status` must thread the instance's own attach token
-    through to read_activity, or a genuinely open server has no way to prove
-    this is a local process and 403s the activity read."""
+    """#953: `localm status` must thread the instance's own attach token through to read_activity, or a genuinely open server has no way to prove this is a local process and 403s the activity read."""
     monkeypatch.setattr(instances, "find_attachable", lambda *a, **k: {
         "scheme": "http", "host": "127.0.0.1", "port": 8642, "mode": "full",
         "pid": 4321, "version": "0.1.0", "token": "the-attach-token"})

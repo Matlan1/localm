@@ -1,35 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""
-Agent Skills support for the coder (an importer for the SKILL.md format).
-
-Discovers folders containing a ``SKILL.md`` (YAML frontmatter with ``name`` and
-``description``, optional ``allowed-tools``) under the user's GLOBAL skills dir
-(``<data dir>/skills/``) and the PROJECT dir (``<cwd>/.localcoder/skills/``), and
-exposes two read-only agent tools, the same way MCP and plugin tools are added:
-
-  list_skills()             - names + descriptions of available skills          (L1)
-  use_skill(name)           - the skill's instruction body + its folder path     (L2)
-  use_skill(name, file=...)  - the content of a bundled file inside the skill     (L3)
-
-This is "progressive disclosure" via tools, with no system-prompt hook: the model
-sees the two tools in the normal tool docs, lists skills, loads one's body, then
-follows it using the agent's EXISTING tools (read_file / run_shell), reaching the
-skill's bundled files through ``use_skill(name, file=...)``.
-
-Security: a SKILL.md body is UNTRUSTED content. These two tools only READ files,
-so they are not destructive; any action a skill's instructions prescribe still
-goes through the agent's normal capability scope + destructive confirmation. A
-skill can therefore instruct, but not directly act, without the user's consent.
-
-``allowed-tools`` is HARD-ENFORCED, not merely surfaced: loading a skill's body
-arms a dispatch-time restriction on the agent (``Agent._activate_skill``, checked
-in ``Agent._execute_tool``) so a skill declaring ``read_file`` cannot reach
-``run_shell`` or ``write_file``. The restriction only ever NARROWS - it intersects
-with whatever the session already forbids and with any skill already active - and
-is retired by the user's NEXT request, never by anything the model can call. See
-``Agent._activate_skill`` for why a model-reachable release would defeat the whole
-gate given that a SKILL.md body is untrusted.
-"""
+"""Agent Skills support for the coder (an importer for the SKILL.md format)."""
 
 from __future__ import annotations
 
@@ -68,7 +38,7 @@ class Skill:
 
 
 def _skill_roots(cwd: Path) -> List[Path]:
-    """Global (data dir) first, then project. Project skills win on a name clash."""
+    """Global (data dir) first, then project."""
     roots: List[Path] = []
     try:
         from localm.config import home_dir
@@ -86,12 +56,7 @@ def _split_list(v: str) -> list:
 
 
 def _parse_frontmatter(text: str) -> Tuple[dict, str]:
-    """Split a SKILL.md into (metadata, body).
-
-    Minimal YAML-frontmatter parser for the flat ``key: value`` block skills use
-    (name / description / allowed-tools). Avoids a real YAML dependency so localm
-    stays self-contained; an unrecognized or absent block yields ({}, full text).
-    """
+    """Split a SKILL.md into (metadata, body)."""
     if not text.startswith("---"):
         return {}, text
     m = re.match(r"^---[ \t]*\r?\n(.*?)\r?\n---[ \t]*\r?\n?(.*)$", text, re.DOTALL)
@@ -109,9 +74,7 @@ def _parse_frontmatter(text: str) -> Tuple[dict, str]:
 
 
 def discover_skills(cwd: Path) -> List[Skill]:
-    """Every valid ``SKILL.md`` folder under the skill roots, sorted by name.
-    Project skills override global ones on a name clash. Best-effort: unreadable
-    or invalid entries are skipped, never raised."""
+    """Every valid ``SKILL.md`` folder under the skill roots, sorted by name."""
     found: dict[str, Skill] = {}
     for root in _skill_roots(cwd):
         if not root.is_dir():
@@ -144,17 +107,7 @@ def discover_skills(cwd: Path) -> List[Skill]:
 
 
 def _confine_skill_file(skill: Skill, rel: str) -> Path:
-    """Resolve *rel* within the skill folder, refusing traversal outside it.
-
-    A SKILL.md is documented as UNTRUSTED content (module docstring), so a
-    hostile skill's own instructions could steer the model into requesting an
-    unexpected `file=`. Delegates to pathsafe.confined_under - the shared
-    nested-path confinement primitive - instead of re-implementing
-    resolve()+is_relative_to() here: that closes an NTFS Alternate Data
-    Stream / short-name-alias gap this function never had (a hand-rolled
-    check duplicated the escape logic but not the character/alias hardening
-    #1068 and later fixes added), at the cost of translating ValueError to
-    the PermissionError this module's own caller already expects."""
+    """Resolve *rel* within the skill folder, refusing traversal outside it."""
     try:
         return pathsafe.confined_under(skill.path, rel)
     except ValueError as e:
@@ -177,17 +130,7 @@ def tool_list_skills(cwd: Path, **_) -> ToolResult:
 
 def tool_use_skill(cwd: Path, name: Optional[str] = None,
                    file: Optional[str] = None, _session=None, **_) -> ToolResult:
-    """Load a skill's instruction body, or read one of its bundled files.
-
-    ``_session`` is the running Agent, injected by the dispatcher (the same
-    hidden-argument mechanism the task-list tools use, ``_SKILL_STATE_TOOLS`` in
-    agent/constants.py). Loading the BODY arms the skill's ``allowed-tools``
-    restriction on that session; a ``file=`` read does not. The body is the act
-    that puts untrusted instructions into context, so that is what the gate keys
-    on - and it keeps a bundled-file read from silently arming a skill whose
-    instructions the model never loaded. Called without a session (directly, as
-    the unit tests do) it simply reads, exactly as before.
-    """
+    """Load a skill's instruction body, or read one of its bundled files."""
     if not name:
         return ToolResult.error("use_skill requires a skill 'name'")
     skills = {s.name: s for s in discover_skills(cwd)}
@@ -250,13 +193,7 @@ def tool_use_skill(cwd: Path, name: Optional[str] = None,
 
 
 def register_skill_tools(cwd: Path) -> Tuple[List[str], List[str]]:
-    """Register ``list_skills`` + ``use_skill`` IF any skills are discoverable.
-
-    Mirrors register_mcp_tools / register_plugin_tools: returns
-    ``(registered_names, warnings)`` and never raises. Both tools are read-only
-    (not destructive). When no skills exist, nothing is registered, so the
-    feature has zero footprint until the user adds a skill folder.
-    """
+    """Register ``list_skills`` + ``use_skill`` IF any skills are discoverable."""
     warnings: List[str] = []
     try:
         skills = discover_skills(cwd)

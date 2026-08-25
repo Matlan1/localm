@@ -1,10 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""
-Memory-plugin wiring: the server-side inlet injection and the /api/memory
-routes (view / add / edit / delete), including privacy gating and best-effort
-isolation (a broken recall must never break a chat turn). Memory is its own
-plugin now (localm/plugins/builtin/memory); privacy mode disables it entirely.
-"""
+"""Memory-plugin wiring: the server-side inlet injection and the /api/memory routes (view / add / edit / delete), including privacy gating and best-effort isolation (a broken recall must never break a chat turn)."""
 
 from __future__ import annotations
 
@@ -93,10 +88,7 @@ def test_inlet_best_effort_never_raises(home, monkeypatch):
 
 
 def test_privacy_mode_disables_memory_entirely(home, monkeypatch):
-    """Privacy mode = memory FULLY off: migration is skipped (a write), AND the
-    inlet recalls nothing - no past fact reaches the model, not even the legacy
-    file or an existing structured record. Stronger than the old 'no new traces,
-    recall still allowed' contract (the maintainer's explicit requirement)."""
+    """Privacy mode = memory FULLY off: migration is skipped (a write), AND the inlet recalls nothing - no past fact reaches the model, not even the legacy file or an existing structured record."""
     monkeypatch.setenv("LOCALM_MODE", "privacy")
     (home / "chat-memory.md").write_text("- user likes strong coffee\n",
                                          encoding="utf-8")
@@ -120,9 +112,7 @@ def test_privacy_mode_disables_memory_entirely(home, monkeypatch):
 
 
 def test_privacy_recall_opt_in_reads_but_never_writes(home, monkeypatch):
-    """With the privacy-recall opt-in on for chat, the inlet RECALLS existing memory
-    in privacy mode (read-only) - but writes nothing: no reinforcement (uses stays
-    0), no migration marker."""
+    """With the privacy-recall opt-in on for chat, the inlet RECALLS existing memory in privacy mode (read-only) - but writes nothing: no reinforcement (uses stays 0), no migration marker."""
     monkeypatch.setenv("LOCALM_MODE", "privacy")
     monkeypatch.setattr("localm.config.load_config", lambda: {
         "memory_enabled": True,
@@ -369,9 +359,7 @@ def test_end_to_end_memory_inlet_via_real_pipeline(tmp_path, monkeypatch):
 
 
 def test_chat_works_with_memory_plugin_disabled(tmp_path, monkeypatch):
-    """Degradation: with the memory plugin off (the default), /api/memory 404s and
-    a chat turn still completes with NO memory injection - chat never hard-depends
-    on memory."""
+    """Degradation: with the memory plugin off (the default), /api/memory 404s and a chat turn still completes with NO memory injection - chat never hard-depends on memory."""
     monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
     monkeypatch.setenv("LOCALM_MODE", "log")
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
@@ -402,9 +390,7 @@ def test_chat_works_with_memory_plugin_disabled(tmp_path, monkeypatch):
 
 
 def test_disabling_memory_plugin_removes_hooks_and_routes(tmp_path, monkeypatch):
-    """Enabling then disabling the memory plugin unmounts its routes (404) and
-    strips its chat hooks, so a subsequent turn does not recall - the toggle is a
-    real off switch, not just a config flag."""
+    """Enabling then disabling the memory plugin unmounts its routes (404) and strips its chat hooks, so a subsequent turn does not recall - the toggle is a real off switch, not just a config flag."""
     monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
     monkeypatch.setenv("LOCALM_MODE", "log")
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)

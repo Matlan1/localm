@@ -1,11 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""A bare `localm serve` (api mode) should not 404 at /.
-
-create_app builds the inference app with no root route, so GET / returned 404
-in api mode (the GUI's own "/" handler is only added when the GUI surface is
-attached, which `serve` never does). With api_landing=True the root redirects
-to the auto-generated /docs.
-"""
+"""A bare `localm serve` (api mode) should not 404 at /."""
 
 import unittest
 

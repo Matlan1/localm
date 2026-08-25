@@ -1,9 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""F3 regression suite (memory-audit 2026-07-02): a consolidation UPDATE must
-re-embed the record's NEW text. Pre-fix, run_consolidation mutated the text in
-place and store.replace re-embedded only vectorless ids, so the updated record
-kept the OLD text's vector forever and semantic recall pointed at the
-contradicted content."""
+"""F3 regression suite (memory-audit 2026-07-02): a consolidation UPDATE must re-embed the record's NEW text."""
 
 from __future__ import annotations
 
@@ -75,8 +71,7 @@ def test_invalidate_vectors_drops_only_given_ids(tmp_path):
 
 
 def test_update_without_embedder_keeps_store_consistent(tmp_path, allow_writes):
-    """No embedder configured: the UPDATE applies and the stale vector is gone
-    (no vector at all beats a wrong one; recall then scores it lexically)."""
+    """No embedder configured: the UPDATE applies and the stale vector is gone (no vector at all beats a wrong one; recall then scores it lexically)."""
     store = MemoryStore("owner", "chat", root=tmp_path)
     rec = store.add(MemoryRecord(text="User prefers Vim for editing code",
                                  source="synth"),

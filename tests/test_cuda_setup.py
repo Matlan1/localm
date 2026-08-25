@@ -1,15 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""CUDA preflight, self-assembly, and the load-test + graceful fallback for
-``localm setup-llama``.
-
-CUDA is the visible "peak NVIDIA performance" option, so picking it has to land
-or fall back cleanly. These tests pin, with no network and no real GPU:
-  * the nvidia-smi banner is parsed into a driver / CUDA-capability report;
-  * the CUDA build + matching cudart bundle are resolved from a release listing;
-  * the dialogue picks the right action per preflight state;
-  * a chosen backend that does not load falls back vulkan -> cpu;
-  * an explicit --sha256 pin is NEVER bypassed by the fallback.
-"""
+"""CUDA preflight, self-assembly, and the load-test + graceful fallback for ``localm setup-llama``."""
 
 from __future__ import annotations
 
@@ -170,9 +160,7 @@ def test_latest_tag_falls_back_on_network_error(monkeypatch):
 
 
 def test_release_assets_does_not_scrape_body_when_assets_empty(monkeypatch):
-    """The body-scrape fallback removed here was the actual 404 source: a
-    release with assets=[] must yield an honest empty list, not simulated
-    entries built from not-yet-live body links."""
+    """The body-scrape fallback removed here was the actual 404 source: a release with assets=[] must yield an honest empty list, not simulated entries built from not-yet-live body links."""
     payload = {
         "assets": [],
         "body": "[Windows x64 (CUDA 12)](https://github.com/ggml-org/llama.cpp/"
@@ -310,9 +298,7 @@ def test_dialogue_det_with_only_nvidia_vendor_falls_back_to_generic(monkeypatch)
 
 
 def test_warn_off_profile_returns_detection_for_reuse(monkeypatch):
-    """The caller (main()) needs this SAME detection for the CUDA dialogue,
-    so a second, potentially-inconsistent hwdetect.detect() call is never
-    needed (or skipped) downstream."""
+    """The caller (main()) needs this SAME detection for the CUDA dialogue, so a second, potentially-inconsistent hwdetect.detect() call is never needed (or skipped) downstream."""
     _fake_vendors(monkeypatch, ["amd"])
     det = sl._warn_off_profile("cuda")
     assert det is not None
@@ -328,11 +314,7 @@ def test_warn_off_profile_returns_none_for_non_vendor_specific_backend(monkeypat
 
 
 def test_main_threads_detection_from_warn_off_profile_into_cuda_dialogue(monkeypatch, tmp_path):
-    """End-to-end wiring check: `setup-llama --backend cuda` on a machine
-    hwdetect identifies as AMD must reach the vendor-aware three-way dialogue
-    (not the old generic one) using the SAME detection _warn_off_profile
-    already computed - proving main() actually threads det through, not just
-    that _cuda_setup_dialogue behaves correctly in isolation."""
+    """End-to-end wiring check: `setup-llama --backend cuda` on a machine hwdetect identifies as AMD must reach the vendor-aware three-way dialogue (not the old generic one) using the SAME detection _warn_off_profile already computed - proving main() actually threads det through, not just that _cuda_setup_..."""
     from localm import hwdetect
     monkeypatch.setattr(sl.sys, "platform", "win32")
     monkeypatch.setattr(hwdetect, "detect", lambda: hwdetect.Detection(vendors=["amd"]))
@@ -366,16 +348,7 @@ def test_main_threads_detection_from_warn_off_profile_into_cuda_dialogue(monkeyp
 
 
 def test_main_threads_cuda_line_detection_on_linux(monkeypatch, tmp_path):
-    """The bug this pins: nvidia_preflight()/_cuda_setup_dialogue() used to be
-    reached only on win32, so a real Blackwell (or any cuda-13-line) GPU on
-    Linux silently got the cuda-12 line - a build with no kernels for that
-    architecture - and no with_cudart, skipping the PyPI cudart runtime fetch
-    too. The runtime still LOADS (it is a valid cuda-12 binary, so the ABI
-    check passes) but registers zero usable GPU devices - found live,
-    2026-08-11, on a real 3x-Blackwell Linux box ('GPU: none in the loaded
-    runtime (cuda)'). _resolve_backend_asset/_fetch_cuda_runtime_libs already
-    handle cuda-13 correctly on Linux (test_linux_cuda_runtime_provisioning.py)
-    - what was missing is main() ever detecting and passing it through."""
+    """The bug this pins: nvidia_preflight()/_cuda_setup_dialogue() used to be reached only on win32, so a real Blackwell (or any cuda-13-line) GPU on Linux silently got the cuda-12 line - a build with no kernels for that architecture - and no with_cudart, skipping the PyPI cudart runtime fetch too."""
     monkeypatch.setattr(sl.sys, "platform", "linux")
     # A real Blackwell compute capability - NvidiaInfo.cuda_line resolves this
     # to "cuda-13", the exact case that silently regressed to "cuda-12".
@@ -444,9 +417,7 @@ def test_flush_stdin_noop_on_non_tty(monkeypatch):
 
 
 def test_flush_stdin_drains_pending_tty_bytes_on_windows(monkeypatch):
-    """Windows path: a stray buffered Enter (or any keystroke) sitting in the
-    console input queue from BEFORE the prompt appeared must be discarded, not
-    silently consumed as the answer to the next click.confirm()."""
+    """Windows path: a stray buffered Enter (or any keystroke) sitting in the console input queue from BEFORE the prompt appeared must be discarded, not silently consumed as the answer to the next click.confirm()."""
     monkeypatch.setattr(sl.sys, "platform", "win32")
     monkeypatch.setattr(sl.sys.stdin, "isatty", lambda: True, raising=False)
     calls = {"kbhit": [True, True, False], "getch": 0}
@@ -494,8 +465,7 @@ def test_warn_off_profile(monkeypatch, capsys, vendors, backend, expect_warning)
 # --------------------------- load-test + fallback ------------------------- #
 
 def _stub_provision(monkeypatch):
-    """_provision_backend writes the expected lib name into target; wheel install
-    is a no-op. Lets us drive the fallback purely via _native_loads_ok."""
+    """_provision_backend writes the expected lib name into target; wheel install is a no-op."""
     lib = sl._lib_name()
 
     def fake_provision(backend, target, sha256, with_cudart, cuda_line=sl._CUDA_LINE, tag=None):
@@ -535,14 +505,7 @@ def test_nothing_loads_raises_reportable_error(monkeypatch, tmp_path):
 
 
 def test_nothing_loads_reports_every_attempt_not_just_the_last(monkeypatch, tmp_path):
-    """The final report is the ONLY thing that survives into the saved bug
-    report / the "Sorry - X because Y" console line (report_failure renders
-    summary+reason only; the per-attempt console.print calls made along the
-    way are not threaded into that context). So it must name EVERY backend
-    tried and ITS OWN cause, chosen backend included - not just whichever one
-    happened to be tried last. A fixture that returns the same detail string
-    for every call cannot tell "only the last" from "all of them" apart -
-    each call here returns a DISTINCT string so collapsing to one is provable."""
+    """The final report is the ONLY thing that survives into the saved bug report / the 'Sorry - X because Y' console line (report_failure renders summary+reason only; the per-attempt console.print calls made along the way are not threaded into that context)."""
     _stub_provision(monkeypatch)
     seq = iter([(False, "cuda: driver too old"),
                 (False, "vulkan: no ICD loader found"),
@@ -562,8 +525,7 @@ def test_nothing_loads_reports_every_attempt_not_just_the_last(monkeypatch, tmp_
 
 
 def test_pinned_sha256_never_falls_back(monkeypatch, tmp_path):
-    """A --sha256 pin means 'exactly this artifact' - a validation failure must
-    stop, not silently swap to an unpinned vulkan build."""
+    """A --sha256 pin means 'exactly this artifact' - a validation failure must stop, not silently swap to an unpinned vulkan build."""
     def boom(*a, **k):
         raise sl.ArtifactError("sha mismatch")
     monkeypatch.setattr(sl, "_provision_backend", boom)
@@ -576,8 +538,7 @@ def test_pinned_sha256_never_falls_back(monkeypatch, tmp_path):
 
 
 def test_selfcontained_provisioned_but_unloadable_is_reportable(monkeypatch, tmp_path):
-    """vulkan/cpu are the universal fallbacks; if one provisions but will not
-    load, that is an unexpected fault - raise (report-worthy), not exit-0."""
+    """vulkan/cpu are the universal fallbacks; if one provisions but will not load, that is an unexpected fault - raise (report-worthy), not exit-0."""
     _stub_provision(monkeypatch)
     monkeypatch.setattr(sl, "_native_loads_ok", lambda: (False, "broken binary"))
     from localm.bugreport import LocalmError
@@ -611,8 +572,7 @@ def test_fallback_offer_declined_exits_nonzero(monkeypatch, tmp_path):
 
 
 def test_fallback_noninteractive_warns_and_falls_back(monkeypatch, tmp_path, capsys):
-    """assume_yes: no prompt, falls back, but warns loudly (never silent) and
-    names how to retry the chosen backend with --force."""
+    """assume_yes: no prompt, falls back, but warns loudly (never silent) and names how to retry the chosen backend with --force."""
     _stub_provision(monkeypatch)
     seq = iter([(False, "cuda failed"), (True, "")])
     monkeypatch.setattr(sl, "_native_loads_ok", lambda: next(seq))
@@ -656,14 +616,7 @@ def test_clear_target_missing_dir_does_not_raise(tmp_path):
 
 
 def test_clear_target_preserves_git_sentinels(tmp_path):
-    """runtime/localm_llama_runtime/lib/ is a real directory in the git
-    checkout, tracked only via its .gitignore ("*" / "!.gitkeep" /
-    "!.gitignore") that keeps setup-llama's downloaded native binaries out of
-    version control. _clear_target used to delete EVERY file in the target
-    dir with no exclusion, so every `setup-llama` run against a git checkout
-    deleted both tracked sentinel files from the working tree - emptying the
-    .gitignore and leaving a later `git add -A` free to stage hundreds of MB
-    of DLLs into git."""
+    """runtime/localm_llama_runtime/lib/ is a real directory in the git checkout, tracked only via its .gitignore ('*' / '!.gitkeep' / '!.gitignore') that keeps setup-llama's downloaded native binaries out of version control. _clear_target used to delete EVERY file in the target dir with no exclusion, so e..."""
     gitignore = tmp_path / ".gitignore"
     gitkeep = tmp_path / ".gitkeep"
     gitignore.write_text("*\n!.gitkeep\n!.gitignore\n", encoding="utf-8")
@@ -698,9 +651,7 @@ def test_provision_backend_cuda_fetches_build_and_cudart(monkeypatch, tmp_path):
 
 
 def test_provision_backend_cuda_passes_selected_line(monkeypatch, tmp_path):
-    """The GPU-architecture-selected line must reach _resolve_cuda_pair, not
-    just the module default - proves the plumbing from cuda_line through to
-    the actual asset lookup, not merely that the default path still works."""
+    """The GPU-architecture-selected line must reach _resolve_cuda_pair, not just the module default - proves the plumbing from cuda_line through to the actual asset lookup, not merely that the default path still works."""
     monkeypatch.setattr(sl.sys, "platform", "win32")
     monkeypatch.setattr(sl, "_latest_tag", lambda: "b9999")
     build = {"name": "llama-cuda-13.3.zip", "browser_download_url": "https://b13", "size": 1}

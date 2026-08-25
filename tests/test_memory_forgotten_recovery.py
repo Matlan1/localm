@@ -1,10 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""LM-DA-024 regression: `_archive_forgotten()` has always written evicted/
-superseded records to a recoverable `.forgotten.jsonl` sidecar, but nothing read
-that sidecar back - recovery was filesystem-only. This covers the read-back half:
-`MemoryStore.forgotten()` / `restore_forgotten()` and the
-GET/POST /api/memory/forgotten[...] routes built on them.
-"""
+"""LM-DA-024 regression: `_archive_forgotten()` has always written evicted/ superseded records to a recoverable `.forgotten.jsonl` sidecar, but nothing read that sidecar back - recovery was filesystem-only."""
 
 from __future__ import annotations
 
@@ -28,9 +23,7 @@ def _allow_writes(monkeypatch):
 
 
 def _evict_via_prune(tmp_path, principal="owner"):
-    """Seed a store with enough user facts that prune's size cap evicts one,
-    producing a real `.forgotten.jsonl` entry via the normal path (not a
-    hand-crafted sidecar)."""
+    """Seed a store with enough user facts that prune's size cap evicts one, producing a real `.forgotten.jsonl` entry via the normal path (not a hand-crafted sidecar)."""
     s = MemoryStore(principal, "chat", root=tmp_path)
     for i in range(20):
         s.add(MemoryRecord(text=f"user fact {i}", source="user", importance=0.8,
@@ -91,8 +84,7 @@ def test_restore_unknown_id_returns_none(tmp_path):
 
 
 def test_restore_scoped_to_own_namespace(tmp_path):
-    """Two different principals share the same root; a record forgotten in
-    namespace A must not be visible or restorable from namespace B."""
+    """Two different principals share the same root; a record forgotten in namespace A must not be visible or restorable from namespace B."""
     a = _evict_via_prune(tmp_path, principal="alice")
     forgotten_id = a.forgotten()[0]["id"]
 
@@ -111,11 +103,7 @@ def test_restore_scoped_to_own_namespace(tmp_path):
 # --------------------------------------------------------------------- #
 
 def _accept_update(s, old_text, new_text):
-    """Propose+accept an UPDATE correction on the live record whose text is
-    *old_text* (the real path resolve_correction takes: archive the pre-change
-    snapshot under the SAME id, then mutate the live record in place - the record
-    never actually leaves the live store, unlike a prune eviction). Adds the
-    record first if it does not exist yet."""
+    """Propose+accept an UPDATE correction on the live record whose text is *old_text* (the real path resolve_correction takes: archive the pre-change snapshot under the SAME id, then mutate the live record in place - the record never actually leaves the live store, unlike a prune eviction)."""
     target = next((r for r in s.all() if r.text == old_text), None)
     if target is None:
         target = s.add(MemoryRecord(text=old_text, source="user"))
@@ -129,11 +117,7 @@ def _accept_update(s, old_text, new_text):
 
 
 def test_restore_reverts_a_superseded_update_correction_in_place(tmp_path):
-    """The core LM-DA-024 bug: an id-collision-only guard made this path
-    permanently unrestorable, even though GET /api/memory/forgotten kept
-    listing it - resolve_correction's accept branch archives the OLD text
-    under the SAME id it then keeps live under the NEW text, so the id never
-    frees up and `self.get(mem_id) is not None` was always true."""
+    """The core LM-DA-024 bug: an id-collision-only guard made this path permanently unrestorable, even though GET /api/memory/forgotten kept listing it - resolve_correction's accept branch archives the OLD text under the SAME id it then keeps live under the NEW text, so the id never frees up and `self.get..."""
     s = MemoryStore("owner", "chat", root=tmp_path)
     rid = _accept_update(s, "User lives in Berlin", "User moved to Munich")
 
@@ -155,10 +139,7 @@ def test_restore_reverts_a_superseded_update_correction_in_place(tmp_path):
 
 
 def test_restore_steps_back_through_repeated_supersessions(tmp_path):
-    """A record forgotten more than once under the same id (two accepted
-    corrections in a row) restores the MOST RECENT snapshot first, then the
-    one before it - stepping back through history, not restoring an
-    arbitrary/ambiguous entry."""
+    """A record forgotten more than once under the same id (two accepted corrections in a row) restores the MOST RECENT snapshot first, then the one before it - stepping back through history, not restoring an arbitrary/ambiguous entry."""
     s = MemoryStore("owner", "chat", root=tmp_path)
     rid = _accept_update(s, "User lives in Berlin", "User moved to Munich")
     rid2 = _accept_update(s, "User moved to Munich", "User moved to Ghent")
@@ -182,9 +163,7 @@ def test_restore_steps_back_through_repeated_supersessions(tmp_path):
 
 
 def test_restore_recomputes_vector_with_embed_fn(tmp_path):
-    """Analogous to resolve_correction's own accept path (which re-embeds the
-    new text), a restored/reverted record must regain a semantic vector, not
-    silently keep serving a stale or absent one."""
+    """Analogous to resolve_correction's own accept path (which re-embeds the new text), a restored/reverted record must regain a semantic vector, not silently keep serving a stale or absent one."""
     calls = []
 
     def fake_embed(texts):
@@ -279,8 +258,7 @@ def test_route_restore_blocked_in_privacy_mode(memhome, monkeypatch):
 
 
 def test_route_lists_forgotten_in_privacy_mode(memhome, monkeypatch):
-    """Listing is read-only (no new trace), so it stays available in privacy
-    mode even though restoring (a write) is blocked."""
+    """Listing is read-only (no new trace), so it stays available in privacy mode even though restoring (a write) is blocked."""
     _evict_via_prune(memhome / "memory")
     monkeypatch.setattr(plug, "_persist_enabled", lambda: False)
     data = asyncio.run(plug.memory_forgotten(None))

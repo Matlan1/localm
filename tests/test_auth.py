@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Tests for the shared API-key auth (localm/auth.py) and its enforcement in
-the HTTP server's _require_auth dependency."""
+"""Tests for the shared API-key auth (localm/auth.py) and its enforcement in the HTTP server's _require_auth dependency."""
 
 import logging
 
@@ -9,8 +8,7 @@ from fastapi import HTTPException
 
 
 def _req(token=None, method="GET"):
-    """Minimal Starlette Request carrying an optional Bearer token, for unit-
-    calling the request-aware auth dependencies (S2: header-or-cookie auth)."""
+    """Minimal Starlette Request carrying an optional Bearer token, for unit- calling the request-aware auth dependencies (S2: header-or-cookie auth)."""
     from starlette.requests import Request
     headers = [(b"authorization", f"Bearer {token}".encode())] if token else []
     return Request({"type": "http", "method": method, "headers": headers,
@@ -243,10 +241,7 @@ def test_owner_key_is_admin(auth, monkeypatch):
 
 
 def test_ct_equal_is_total_and_correct(auth):
-    """ct_equal is the house idiom for every secret compare, so its contract is
-    'never raises, whatever the caller sends'. The vulnerable shape is a non-ASCII
-    operand against an ASCII secret (a token_urlsafe or a hexdigest): compare_digest
-    raises if EITHER side is non-ASCII, so the ASCII side does not protect it."""
+    """ct_equal is the house idiom for every secret compare, so its contract is 'never raises, whatever the caller sends'."""
     token = "aGVsbG8-d29ybGQ_1234"          # the shape secrets.token_urlsafe emits
     # Correct matches (the negative case: a blanket False would pass everything else).
     assert auth.ct_equal(token, token) is True
@@ -265,10 +260,7 @@ def test_ct_equal_is_total_and_correct(auth):
 
 
 def test_non_ascii_presented_token_rejects_and_never_raises(auth, monkeypatch):
-    """hmac.compare_digest() raises TypeError on a non-ASCII str, and it raises if
-    EITHER operand is non-ASCII - so an ASCII owner key does NOT protect the compare.
-    A bearer token reaches verify() as a latin-1 decoded header, so any caller could
-    turn a clean 401 into an unhandled 500 by sending a non-ASCII token."""
+    """hmac.compare_digest() raises TypeError on a non-ASCII str, and it raises if EITHER operand is non-ASCII - so an ASCII owner key does NOT protect the compare."""
     from localm import scopes as S
     monkeypatch.setenv("LOCALM_API_KEY", "asciiownerkey1234")
     # Negative cases: rejection and acceptance must both still work on ASCII, or
@@ -281,9 +273,7 @@ def test_non_ascii_presented_token_rejects_and_never_raises(auth, monkeypatch):
 
 
 def test_non_ascii_owner_key_verifies_and_rejects_wrong(auth, monkeypatch):
-    """A non-ASCII owner key (from the env var, or an auth.key written before
-    set_api_key refused them) must still authenticate its owner and cleanly reject
-    a wrong key. Before the fix BOTH answered 500, locking the owner out."""
+    """A non-ASCII owner key (from the env var, or an auth.key written before set_api_key refused them) must still authenticate its owner and cleanly reject a wrong key."""
     from localm import scopes as S
     monkeypatch.setenv("LOCALM_API_KEY", "pässwort-owner-key")
     assert auth.verify("pässwort-owner-key") == {S.ADMIN}
@@ -293,18 +283,13 @@ def test_non_ascii_owner_key_verifies_and_rejects_wrong(auth, monkeypatch):
 
 
 def test_lone_surrogate_token_rejects_and_never_raises(auth, monkeypatch):
-    """os.environ can carry lone surrogates on Windows (surrogatepass decoding), and
-    a plain .encode("utf-8") raises UnicodeEncodeError on one - which would swap the
-    non-ASCII crash for a surrogate crash. The compare must be total."""
+    """os.environ can carry lone surrogates on Windows (surrogatepass decoding), and a plain .encode('utf-8') raises UnicodeEncodeError on one - which would swap the non-ASCII crash for a surrogate crash."""
     monkeypatch.setenv("LOCALM_API_KEY", "asciiownerkey1234")
     assert auth.verify("key\ud800bad") is None
 
 
 def test_set_api_key_refuses_characters_a_header_cannot_carry(auth):
-    """A key rides in an HTTP Authorization header, so it is restricted to the
-    generator's own alphabet at set time. Non-ASCII is the sharp case (clients send
-    UTF-8, RFC 7230 obs-text decodes latin-1 -> mojibake -> the owner's own key is
-    refused); spaces and control characters break the header outright."""
+    """A key rides in an HTTP Authorization header, so it is restricted to the generator's own alphabet at set time."""
     for bad in ("pässwort-key", "key with spaces", "key\r\ninjected",
                 "key!punctuation", "key\ud800surrogate"):
         with pytest.raises(ValueError, match="letters, numbers"):
@@ -319,24 +304,7 @@ def test_set_api_key_refuses_characters_a_header_cannot_carry(auth):
 
 
 def test_set_api_key_accepts_every_generated_key(auth):
-    """~49% of generate_key() outputs contain an underscore and ~48% a dash, so a
-    charset that allowed only "-" would reject about half of them. regenerate_key()
-    feeds generate_key() straight into set_api_key(), so a mismatch here would make
-    `localm key generate` fail at random.
-
-    A direct check on the charset itself removes any reliance on chance for
-    THAT specific property. The loop below stays real (real set_api_key/
-    get_api_key round trips, not mocked - see hard-won-rules.md), which is
-    what actually exercises the length/charset guards end to end; its count
-    is a statistical-confidence choice, not a correctness requirement: each
-    generated key independently has a ~49%/~48% chance of containing '_'/'-',
-    so 30 samples already puts the odds of missing either character below
-    1e-9 (0.51**30). It intentionally does NOT go anywhere near 200: each
-    call pays a real memory-hard KDF derivation via the owner-KDF path (see
-    _OWNER_KDF_KEEP in auth.py), so 200 fresh keys in a loop cost several
-    minutes on a loaded box, not because anything hangs but because that is
-    what 200 real derivations cost - see
-    dev-notes/FIX-2026-08-12-test-set-api-key-hang-preexisting.md."""
+    """~49% of generate_key() outputs contain an underscore and ~48% a dash, so a charset that allowed only '-' would reject about half of them. regenerate_key() feeds generate_key() straight into set_api_key(), so a mismatch here would make `localm key generate` fail at random."""
     assert auth._KEY_CHARSET.match("-")
     assert auth._KEY_CHARSET.match("_")
     for _ in range(30):
@@ -346,11 +314,7 @@ def test_set_api_key_accepts_every_generated_key(auth):
 
 
 def test_non_ascii_bearer_token_gets_401_not_500(auth, monkeypatch):
-    """End-to-end shape of the bug: an UNAUTHENTICATED caller sending a non-ASCII
-    bearer token to a protected route must get a clean 401, never an unhandled 500.
-    raise_server_exceptions=False so a server-side raise surfaces as a real 500
-    response instead of propagating out of the client call (the house default of
-    True would re-raise the TypeError and never yield a status to assert on)."""
+    """End-to-end shape of the bug: an UNAUTHENTICATED caller sending a non-ASCII bearer token to a protected route must get a clean 401, never an unhandled 500. raise_server_exceptions=False so a server-side raise surfaces as a real 500 response instead of propagating out of the client call (the house def..."""
     from fastapi.testclient import TestClient
     from localm.inference.http_server import create_app
 
@@ -408,16 +372,7 @@ def test_owner_key_grants_every_scope(auth, monkeypatch):
 
 
 def test_require_owner_dependency_rejects_non_owner(auth, monkeypatch):
-    """require_owner() (design-audit LM-DA-020, reaffirming LM-DA-SEC-06):
-    job_owner_ok's per-route ownership check is now Depends()-injectable, the
-    same pattern require_scope already uses, so a new per-owner route cannot
-    omit it by construction. Exercises a route wired via
-    Depends(require_owner(...)) through a real TestClient request - mirroring
-    the existing job_owner_ok route-level coverage in
-    test_jobs_owner_binding.py / test_media_gallery_ownership.py - rather than
-    unit-calling the dependency directly, since require_owner's gate composes
-    with a nested path-param-reading resolve() dependency that only a real
-    request can drive end to end."""
+    """require_owner() (design-audit LM-DA-020, reaffirming LM-DA-SEC-06): job_owner_ok's per-route ownership check is now Depends()-injectable, the same pattern require_scope already uses, so a new per-owner route cannot omit it by construction."""
     from fastapi import Depends, FastAPI
     from fastapi.testclient import TestClient
     from localm import scopes as S
@@ -473,9 +428,7 @@ def test_create_key_allows_privileged_for_owner(auth):
 
 
 def test_keys_endpoint_blocks_privilege_self_escalation(auth, monkeypatch):
-    """POST /v1/keys: a non-owner key holding only keys:admin can mint ordinary
-    keys but is refused (403) when it tries to grant itself privileged scopes;
-    the owner key can."""
+    """POST /v1/keys: a non-owner key holding only keys:admin can mint ordinary keys but is refused (403) when it tries to grant itself privileged scopes; the owner key can."""
     from fastapi.testclient import TestClient
     from localm import scopes as S
     from localm.inference.http_server import create_app
@@ -502,12 +455,7 @@ def test_keys_endpoint_blocks_privilege_self_escalation(auth, monkeypatch):
 
 
 def test_keys_endpoint_wires_fs_access_owner_only(auth, monkeypatch):
-    """POST /v1/keys forwards fs_access from the request body into create_key()
-    (it used to be dropped silently: every key got fs_access='none' regardless
-    of what the body asked for). Granting host reach follows the same owner-
-    only gate as a privileged scope: a non-owner keys:admin caller is refused
-    (403) and nothing is persisted, while the owner key succeeds and the minted
-    key actually carries fs_access='host'."""
+    """POST /v1/keys forwards fs_access from the request body into create_key() (it used to be dropped silently: every key got fs_access='none' regardless of what the body asked for)."""
     from fastapi.testclient import TestClient
     from localm import scopes as S
     from localm.inference.http_server import create_app
@@ -543,15 +491,7 @@ def test_keys_endpoint_wires_fs_access_owner_only(auth, monkeypatch):
 
 
 def test_keys_endpoint_wires_rag_roots_owner_only(auth, monkeypatch):
-    """POST /v1/keys forwards rag_roots from the request body into create_key()
-    (it used to be dropped silently: every GUI/API-minted key was RAG-unconfined
-    regardless of what the body asked for, while GET /v1/keys already returned
-    the field for display). A key-scoped rag_roots list REPLACES the whitelist
-    rather than narrowing it (rag/store.py's confine_index_path), so it can point
-    a new key at a folder outside the caller's own reach - granting one follows
-    the same owner-only gate as fs_access=host: a non-owner keys:admin caller is
-    refused (403) and nothing is persisted, while the owner key succeeds and the
-    minted key actually carries the roots."""
+    """POST /v1/keys forwards rag_roots from the request body into create_key() (it used to be dropped silently: every GUI/API-minted key was RAG-unconfined regardless of what the body asked for, while GET /v1/keys already returned the field for display)."""
     from fastapi.testclient import TestClient
     from localm import scopes as S
     from localm.inference.http_server import create_app
@@ -594,8 +534,7 @@ def test_keys_endpoint_wires_rag_roots_owner_only(auth, monkeypatch):
 
 
 def test_keys_endpoint_expires_in_is_server_clock(auth, monkeypatch):
-    """POST /v1/keys with expires_in (relative seconds) sets the deadline from the
-    SERVER clock (not the client's), verify() honours it, and a bad expires_in 400s."""
+    """POST /v1/keys with expires_in (relative seconds) sets the deadline from the SERVER clock (not the client's), verify() honours it, and a bad expires_in 400s."""
     import time
 
     from fastapi.testclient import TestClient
@@ -624,8 +563,7 @@ def test_keys_endpoint_expires_in_is_server_clock(auth, monkeypatch):
 
 
 def test_keys_endpoint_returns_owner_flag_and_presets(auth, monkeypatch):
-    """GET /v1/keys carries is_owner (so the GUI hides owner-only scopes from a mere
-    keys:admin device) and key_presets (so presets show even without config:read)."""
+    """GET /v1/keys carries is_owner (so the GUI hides owner-only scopes from a mere keys:admin device) and key_presets (so presets show even without config:read)."""
     from fastapi.testclient import TestClient
 
     from localm import scopes as S
@@ -647,8 +585,7 @@ def test_keys_endpoint_returns_owner_flag_and_presets(auth, monkeypatch):
 
 
 def test_model_read_routes_require_models_read_scope(auth, monkeypatch):
-    """SECURITY.md promises every /v1 route is auth-gated when a key is set.
-    /v1/models and /v1/models/{id} must require models:read; /health stays open."""
+    """SECURITY.md promises every /v1 route is auth-gated when a key is set. /v1/models and /v1/models/{id} must require models:read; /health stays open."""
     from fastapi.testclient import TestClient
     from localm import scopes as S
     from localm.inference.http_server import create_app
@@ -696,10 +633,7 @@ def test_model_detail_does_not_leak_absolute_path(auth, monkeypatch):
 
 
 def test_first_key_from_loopback_gui_seeds_owner_session(auth):
-    """S3 lockout guard: minting the FIRST key from the loopback GUI in open mode
-    must NOT lock the owner out. It seeds a persistent owner key and sets the
-    session cookies, so the browser stays authenticated (as owner) and a
-    follow-up request via the cookie - now that auth is on - is authorized."""
+    """S3 lockout guard: minting the FIRST key from the loopback GUI in open mode must NOT lock the owner out."""
     from fastapi.testclient import TestClient
     from localm import scopes as S
     from localm.inference.http_server import SESSION_COOKIE, create_app
@@ -727,9 +661,7 @@ def test_first_key_from_loopback_gui_seeds_owner_session(auth):
 
 
 def test_second_key_does_not_reseed_owner_or_session(auth, monkeypatch):
-    """The S3 guard fires ONLY on the open->protected transition: with a key
-    already configured, creating another key seeds no owner key and sets no
-    session cookie (was_open is False)."""
+    """The S3 guard fires ONLY on the open->protected transition: with a key already configured, creating another key seeds no owner key and sets no session cookie (was_open is False)."""
     from fastapi.testclient import TestClient
     from localm import scopes as S
     from localm.inference.http_server import create_app

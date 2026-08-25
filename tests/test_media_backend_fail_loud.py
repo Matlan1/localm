@@ -1,9 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Media backend fail-loud (rec#155): a configured media `backend` name that
-cannot be loaded must surface a warning instead of silently falling back to
-ComfyUI (AGENTS rule 5, "we do not hide problems"). The fallback itself is kept
-(a typo must not hard-crash a generate); only the silence is removed.
-"""
+"""Media backend fail-loud (rec#155): a configured media `backend` name that cannot be loaded must surface a warning instead of silently falling back to ComfyUI (AGENTS rule 5, 'we do not hide problems')."""
 
 import importlib
 
@@ -64,8 +60,7 @@ def test_settings_no_backend_warning_for_default(plugin):
 
 
 def test_settings_combines_share_config_and_backend_warnings():
-    """A share-config warning and an unknown-backend warning must both survive -
-    neither silently drops the other."""
+    """A share-config warning and an unknown-backend warning must both survive - neither silently drops the other."""
     backend = importlib.import_module("localm.plugins.builtin.image.backend")
     cfg = {"plugins": {"image": {"backend": "nope", "use_config_from": "music"}}}
     s = backend.settings(cfg)

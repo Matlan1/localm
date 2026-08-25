@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The keep_diagnostics privacy toggle: when on, the server also enables the debug
-log at startup (even in privacy mode, without --debug) so a bug report has
-request/operation context. When off (the default), privacy mode writes nothing."""
+"""The keep_diagnostics privacy toggle: when on, the server also enables the debug log at startup (even in privacy mode, without --debug) so a bug report has request/operation context."""
 
 from pathlib import Path
 

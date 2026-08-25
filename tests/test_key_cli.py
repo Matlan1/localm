@@ -1,9 +1,4 @@
-"""H10: the `localm key` CLI group (advertised in auth.py but previously missing).
-
-show / generate / set / clear / list / create / rm over the owner key and the
-scoped named-key store. Secrets are masked by default and shown in full only
-once at creation; privileged scopes can never be self-minted.
-"""
+"""H10: the `localm key` CLI group (advertised in auth.py but previously missing)."""
 
 import re
 
@@ -65,11 +60,7 @@ class TestOwnerKey:
         assert secret not in r.output               # set echoes a masked preview
 
     def test_set_refuses_non_ascii_key_and_states_allowed_chars(self, runner):
-        """A non-ASCII key cannot ride in an HTTP Authorization header (clients
-        send UTF-8, RFC 7230 obs-text decodes latin-1), so `key set` refuses it and
-        says which characters ARE allowed. It must read as a clean user error:
-        letting set_api_key's ValueError escape routes it to the crash handler,
-        which asks the user to file their own typo as a localm bug."""
+        """A non-ASCII key cannot ride in an HTTP Authorization header (clients send UTF-8, RFC 7230 obs-text decodes latin-1), so `key set` refuses it and says which characters ARE allowed."""
         r = runner.invoke(main, ["key", "set", "pässwort-key"])
         assert r.exit_code == 1
         assert "letters, numbers" in r.output        # states what IS allowed
@@ -79,8 +70,7 @@ class TestOwnerKey:
         assert "bug" not in r.output.lower()
 
     def test_set_accepts_a_generated_key_verbatim(self, runner):
-        """`key generate` emits dashes AND underscores, so `key set` must accept
-        both - a charset allowing only "-" would reject ~half the generated keys."""
+        """`key generate` emits dashes AND underscores, so `key set` must accept both - a charset allowing only '-' would reject ~half the generated keys."""
         r = runner.invoke(main, ["key", "set", "Gen_key-With_Both-123456"])
         assert r.exit_code == 0
         assert auth.get_api_key() == "Gen_key-With_Both-123456"
@@ -112,15 +102,7 @@ class TestOwnerKey:
 # --------------------------------------------------------------------------- #
 
 class TestOwnerSessionRevocation:
-    """`key recover` / `key clear` must sign out live browser sessions.
-
-    Owner (ADMIN) browser sessions are decoupled from the key value and are
-    exempt from the per-request keystore recheck, so they SURVIVE an owner-key roll
-    by design - correct for the GUI's own roll, but the CLI recovery path exists to
-    lock a compromised owner OUT, so a captured owner cookie must not outlive it.
-    Both commands mirror /api/auth/key/clear and call sessions.revoke_all(); scoped
-    DEVICE keys in the keystore stay untouched (only browser SESSIONS are dropped).
-    """
+    """`key recover` / `key clear` must sign out live browser sessions."""
 
     _KEY = "owner-key-for-revoke-test-abcdef"
 

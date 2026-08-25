@@ -1,20 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""`localm comfy workflow list|add|use|rm` - the CLI verbs for per-plugin
-ComfyUI workflow management (image/music/video).
-
-Before this, `save_workflow`/`list_workflows`/`select_workflow`/
-`delete_workflow` (localm.media_workflows) were reachable only through the
-GUI's HTTP routes; the CLI could point a plugin at an already-uploaded
-workflow via the generic `localm plugin config <media> workflow <name>` (it
-already calls select_workflow(), see settings_schema.apply_local_plugin_config),
-but had no way to SEE what is uploaded, upload something new, or delete
-anything - a terminal-only user runs `localm image`/`music`/`video` against a
-workflow they have no command to inspect, change, or clear.
-
-These functions are framework-free (no server needed), so the commands here
-call them directly, the same way `localm config`/`localm plugin config` work
-locally against config.json.
-"""
+"""`localm comfy workflow list|add|use|rm` - the CLI verbs for per-plugin ComfyUI workflow management (image/music/video)."""
 
 from __future__ import annotations
 
@@ -119,14 +104,7 @@ def test_add_rejects_a_missing_source_file(cli_runner, tmp_path):
 
 
 def test_add_with_a_traversal_name_is_a_clean_error_not_a_crash(cli_runner, tmp_path):
-    """Regression for the leaky abstraction in media_workflows._confined():
-    confined_name() (its underlying path-safety check) raises
-    fastapi.HTTPException by design - documented in pathsafe.py as being for
-    HTTP call sites only. Before _confined() normalized that to ValueError, a
-    bad --name here escaped every `except ValueError` in this file uncaught -
-    fires-controlled by reverting the normalization: result.output came back
-    EMPTY (nothing had a chance to print) with a raw HTTPException object in
-    result.exception, never click's own "Error: ..." formatting."""
+    """Regression for the leaky abstraction in media_workflows._confined(): confined_name() (its underlying path-safety check) raises fastapi.HTTPException by design - documented in pathsafe.py as being for HTTP call sites only."""
     f = _write_workflow_file(tmp_path)
     result = cli_runner.invoke(
         comfy_cli.workflow_add, ["image", str(f), "--name", "../escape.json"])
@@ -222,10 +200,7 @@ def test_rm_explicit_no_at_the_prompt_aborts_without_deleting(cli_runner, tmp_pa
 
 
 def test_rm_with_no_stdin_aborts_without_deleting(cli_runner, tmp_path):
-    """No special non-interactive branch here (unlike REG-589's `rag repair`):
-    refusing to delete without an explicit yes IS the safe default for a
-    destructive `rm`, matching `rag rm` / `comfy remove` (both also use
-    click.confirm(..., abort=True) with no non-interactive override)."""
+    """No special non-interactive branch here (unlike REG-589's `rag repair`): refusing to delete without an explicit yes IS the safe default for a destructive `rm`, matching `rag rm` / `comfy remove` (both also use click.confirm(..., abort=True) with no non-interactive override)."""
     from localm import media_workflows as mw
 
     f = _write_workflow_file(tmp_path)

@@ -1,23 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""O5 (parity board): the `localm memory` command group.
-
-The memory plugin shipped no `cli` manifest key, so installing it added ZERO CLI
-commands and every memory operation was GUI-only - while `localm job add --memory`
-could already schedule the consolidation that CREATES corrections the terminal then
-had no way to read, accept, reject or undo.
-
-The properties these tests exist to pin are the ones that fail SILENTLY:
-
-  - the CLI and the routes must resolve the SAME namespace, or the CLI shows an
-    empty list and the user concludes localm has learned nothing about them;
-  - `MemoryRecord.__post_init__` silently COERCES an unknown kind to "semantic" and
-    an unknown source to "synth", so a CLI inventing its own values files the user's
-    own assertion as machine-synthesised at a lower weight, with no error anywhere;
-  - `delete()` does not archive, so promising a restore would be a promise `restore`
-    cannot keep;
-  - `clear()` does not touch the forgotten sidecar, so reporting the memory cleared
-    without taking it would leave remembered text on disk under a false claim.
-"""
+"""O5 (parity board): the `localm memory` command group."""
 
 from pathlib import Path
 
@@ -56,13 +38,7 @@ def _cli_store():
 # --------------------------------------------------------------------------- #
 
 def test_cli_and_routes_resolve_the_same_store(home):
-    """Pinned against the ROUTE's own helper, not against a constant.
-
-    A CLI that opened a different agent, scope_key or root would pass every other
-    test in this file while showing the user an empty memory. Asserting both
-    against a hardcoded path would not catch it either - only comparing the two
-    live resolutions does.
-    """
+    """Pinned against the ROUTE's own helper, not against a constant."""
     from localm.plugins.builtin.memory.cli import _store as cli_store
     from localm.plugins.builtin.memory.plug import _chat_store as route_store
     assert cli_store().path == route_store().path
@@ -88,15 +64,7 @@ def test_a_fact_written_by_the_route_is_visible_to_the_cli(home):
 # --------------------------------------------------------------------------- #
 
 def test_add_produces_the_same_record_the_append_route_does(home):
-    """kind semantic, source user, importance 0.8 - matching
-    `POST /api/memory/append` exactly.
-
-    Both wrong values are SILENTLY corrected by `MemoryRecord.__post_init__`
-    (an invalid kind becomes "semantic", an invalid source becomes "synth"), so a
-    mismatch here produces no error at all - it just files the user's own
-    assertion as machine-synthesised, at a lower weight, where prune's user-fact
-    eviction reporting stops seeing it.
-    """
+    """kind semantic, source user, importance 0.8 - matching `POST /api/memory/append` exactly."""
     _run("add", "the user drinks tea")
     rec = _cli_store().all()[0]
     assert rec.text == "the user drinks tea"
@@ -121,8 +89,7 @@ def test_add_refuses_an_empty_fact(home):
 
 
 def test_add_refuses_past_the_cap_like_the_route_does(home, monkeypatch):
-    """Refuse rather than accept a fact the next prune would silently evict -
-    the same guard the append route applies."""
+    """Refuse rather than accept a fact the next prune would silently evict - the same guard the append route applies."""
     import localm.memory.store as _st
     monkeypatch.setattr(_st, "N_MAX", 2)
     _run("add", "one")
@@ -138,8 +105,7 @@ def test_add_refuses_past_the_cap_like_the_route_does(home, monkeypatch):
 # --------------------------------------------------------------------------- #
 
 def test_forget_deletes_and_does_not_claim_it_is_recoverable(home):
-    """MEASURED: `delete()` never writes the forgotten sidecar. Telling the user
-    otherwise would be a promise `restore` cannot keep."""
+    """MEASURED: `delete()` never writes the forgotten sidecar."""
     _run("add", "the user drinks tea")
     mem_id = _cli_store().all()[0].id
     out = _run("forget", mem_id, "--yes").output
@@ -152,10 +118,7 @@ def test_forget_deletes_and_does_not_claim_it_is_recoverable(home):
 
 
 def test_forget_refuses_an_unknown_id_without_touching_anything(home):
-    """Guarded twice on purpose - the get() lookup and delete()'s own False - so
-    a fires-control that removes only one correctly stays green. Both the exit
-    code and the surviving record are asserted, because the status alone would
-    not show that the OTHER fact was left alone."""
+    """Guarded twice on purpose - the get() lookup and delete()'s own False - so a fires-control that removes only one correctly stays green."""
     _run("add", "keep me")
     res = _run("forget", "nope", "--yes", expect_ok=False)
     assert res.exit_code == 1
@@ -203,10 +166,7 @@ def test_restore_refuses_an_id_that_was_never_archived(home):
 # --------------------------------------------------------------------------- #
 
 def test_clear_takes_the_archive_too_so_the_claim_is_true(home):
-    """MEASURED before this was written: a plain `clear()` leaves every archived
-    record readable in the `.forgotten.jsonl` sidecar. Reporting the memory
-    cleared while the text is still on disk is a privacy claim that is not true,
-    which is the same line the coder's episode store already draws."""
+    """MEASURED before this was written: a plain `clear()` leaves every archived record readable in the `.forgotten.jsonl` sidecar."""
     for i in range(3):
         _run("add", f"secret fact {i}")
     store = _cli_store()
@@ -230,7 +190,7 @@ def test_clear_on_an_empty_store_says_so_rather_than_claiming_an_erase(home):
 
 
 def test_clear_reports_a_partial_erase_as_a_failure(home, monkeypatch):
-    """The one command with no undo, so "erased" has to be a MEASURED claim."""
+    """The one command with no undo, so 'erased' has to be a MEASURED claim."""
     _run("add", "stubborn")
     import localm.memory.store as _st
     monkeypatch.setattr(_st.MemoryStore, "clear",
@@ -281,11 +241,7 @@ def test_a_rejected_correction_leaves_the_memory_alone(home):
 
 
 def test_an_unresolvable_correction_does_not_assert_it_does_not_exist(home):
-    """`resolve_correction` returns None for TWO reasons - unknown id, and an
-    unreadable corrections file, which it treats as non-destructive and warns
-    about. `corrections()` returns [] for that second case too, so neither can
-    disambiguate. Asserting "no such correction" would be a clean negative for a
-    step that may simply have failed."""
+    """`resolve_correction` returns None for TWO reasons - unknown id, and an unreadable corrections file, which it treats as non-destructive and warns about. `corrections()` returns [] for that second case too, so neither can disambiguate."""
     res = _run("accept", "nosuchid", expect_ok=False)
     assert res.exit_code == 1
     low = res.output.lower()

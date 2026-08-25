@@ -1,49 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Groundedness ("evidence-following") probe for the two paths that put
-retrieved text into a model's context: RAG retrieval and memory recall.
-
-THE COVERAGE GAP THIS CLOSES. tests/ has 35 RAG files and 30-odd memory files.
-They cover ingest, chunking, embeddings, dimension switches, corruption, repair,
-provenance, confinement, recall precision and namespaces. Not one of them asks
-whether the model's ANSWER actually USED the retrieved text, as opposed to
-answering from its own parametric knowledge and merely looking correct because
-retrieval happened to agree with what it already knew. Retrieval returning the
-right chunk and the answer being grounded in that chunk are different
-properties, and only the first was measured.
-
-THE METHOD. Index (or remember) an INVENTED fact that no model can know from
-pretraining, ask about it, then INVERT the stored fact and ask again. A grounded
-answer flips with the evidence. An ungrounded one does not. The invented-fact
-framing is load-bearing: with a real-world fact a correct answer is ambiguous
-between "read the chunk" and "already knew it", and the test proves nothing.
-
-WHERE IT COMES FROM, AND THE SCOPE CORRECTION. The construction is
-Evidence-Following Accuracy from "Do Modules Stay in Their Lane? Role Drift in
-Compound LLM Systems" (Cao et al., arXiv 2607.21627). Their RAG reader scored
-0.54 on it while its headline accuracy climbed. THEIR result comes from a
-pipeline undergoing reinforcement-learning fine-tuning, which is what INDUCES
-the drift they measure. localm does not train models; its models are frozen and
-cannot drift. So this file does NOT measure role drift and must not be described
-as if it did. What it measures is the STATIC question: does THIS model, at THIS
-prompt, with THESE chunks, actually use them. That was unmeasured, and it is the
-thing that regresses when prompt shape, chunk ordering or framing changes.
-
-WHY A REAL MODEL. The property under test IS model behaviour, so a mock cannot
-test it: a mocked model proves only that the harness passes strings around.
-Marked @integration + @real_gguf, the same precedent as
-test_memory_longitudinal_harness.py, so the default `pytest -m "not integration"`
-run is unaffected and conftest.py skips (never fails) when the native runtime is
-absent. Run it with:
-    pytest -m real_gguf tests/test_groundedness_evidence_following.py -v
-
-THE PROBE PROVES ITSELF, EVERY RUN. Each direction has a paired ABLATION test
-that asks the identical question with the evidence REMOVED and asserts neither
-invented token appears. That pairing is what keeps the probe honest, rather than
-a one-off check by hand: if grounding breaks so the model stops reading chunks,
-the follow tests go red; if the probe ever goes vacuous (the fact leaking into
-the question, say), the ablation tests go red because the answer would then be
-right without any evidence. A probe that cannot fail is worse than no probe.
-"""
+"""Groundedness ('evidence-following') probe for the two paths that put retrieved text into a model's context: RAG retrieval and memory recall."""
 
 from __future__ import annotations
 
@@ -120,10 +76,7 @@ def native_runtime():
 
 @pytest.fixture(scope="module")
 def chat_backend(native_runtime):
-    """CPU-only, matching test_memory_longitudinal_harness.py: this file tests
-    whether the model READS supplied context, not GPU inference, and a 0.5B model
-    is fast enough on CPU for a handful of short prompts. CPU-only also keeps the
-    probe off the box's single shared GPU entirely."""
+    """CPU-only, matching test_memory_longitudinal_harness.py: this file tests whether the model READS supplied context, not GPU inference, and a 0.5B model is fast enough on CPU for a handful of short prompts."""
     from huggingface_hub import hf_hub_download
     try:
         path = hf_hub_download(repo_id=_CHAT_REPO, filename=_CHAT_FILE)
@@ -150,15 +103,7 @@ _UNGROUNDED_SYSTEM = (
 
 
 def _ask(backend, context: str) -> str:
-    """One deterministic turn with *context* as the system message, or with no
-    context at all when *context* is empty (the ablation arm).
-
-    localm has NO automatic RAG-into-chat inlet: retrieval is an API whose hits
-    reach a model as a coder TOOL RESULT (plugins/coder/tools/rag.py), an HTTP
-    response, or CLI output. So the RAG half of this file supplies the prompt a
-    consumer would build, around REAL retrieved text. The memory half needs no
-    such scaffolding: recall genuinely does inject server-side, and those tests
-    drive the real inlet and read back what it produced."""
+    """One deterministic turn with *context* as the system message, or with no context at all when *context* is empty (the ablation arm)."""
     system = (_GROUNDED_PREFIX + context) if context else _UNGROUNDED_SYSTEM
     return "".join(backend.chat_stream(
         [{"role": "system", "content": system},
@@ -168,9 +113,7 @@ def _ask(backend, context: str) -> str:
 
 def _index_and_retrieve(tmp_path, body: str, name: str,
                         require_hits: bool = True) -> str:
-    """REAL ingest and REAL retrieval, then the REAL neutralise() the coder tool
-    applies before untrusted chunk text reaches a model. Returns the retrieved
-    text framed as the consumer would frame it."""
+    """REAL ingest and REAL retrieval, then the REAL neutralise() the coder tool applies before untrusted chunk text reaches a model."""
     from localm.rag.store import Collection
     from localm.textguard import neutralise
 
@@ -187,8 +130,7 @@ def _index_and_retrieve(tmp_path, body: str, name: str,
 
 
 def _memory_context(home, monkeypatch, codename: str) -> str:
-    """Drive the REAL recall inlet (plug._memory_inlet) and return the system
-    message it produced, so the probe reads what the product actually injects."""
+    """Drive the REAL recall inlet (plug._memory_inlet) and return the system message it produced, so the probe reads what the product actually injects."""
     home.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(plug, "_home", lambda: home)
     monkeypatch.setenv("LOCALM_MODE", "log")
@@ -238,10 +180,7 @@ def test_rag_answer_follows_the_indexed_chunk(tmp_path, chat_backend):
 
 def test_rag_ablation_answer_is_ungrounded_without_the_retrieved_chunk(
         chat_backend):
-    """THE FIRES-CONTROL, kept permanently. Identical question, evidence
-    REMOVED. Neither invented codename can appear: they are unguessable, so if
-    one does, the fact reached the model some other way and the follow test
-    above is vacuous."""
+    """THE FIRES-CONTROL, kept permanently."""
     answer = _ask(chat_backend, "").upper()
     assert _ORIGINAL not in answer and _INVERTED not in answer, \
         (f"an invented codename appeared with NO evidence supplied, so the "
@@ -250,22 +189,7 @@ def test_rag_ablation_answer_is_ungrounded_without_the_retrieved_chunk(
 
 def test_rag_irrelevant_passages_do_not_manufacture_the_invented_fact(
         tmp_path, chat_backend):
-    """Retrieved passages that do not bear on the question must not produce the
-    invented fact.
-
-    READ THE SCORING DIRECTION BEFORE CHANGING THIS ASSERTION. On irrelevant
-    passages the paper found the WORSE, unanchored model scored HIGHER, because
-    it guessed from parametric memory and guessing sometimes lands. So here a
-    confident, specific answer is the FAILING direction and an abstention is the
-    PASSING one. Do not "fix" this by asserting the model answers.
-
-    The assertion is deliberately the ABSENCE of the invented tokens, not the
-    presence of a refusal. Measured on the pinned 0.5B model: given irrelevant
-    context it still emitted a fabricated version string rather than declining,
-    despite an explicit instruction to say it does not know. That is a small
-    model's instruction-following limit, NOT a localm defect (localm does not
-    build this prompt), so asserting "the model declines" would encode a flaky
-    expectation about the model instead of a property of the system."""
+    """Retrieved passages that do not bear on the question must not produce the invented fact."""
     # The easy half, and it needs no model: a wholly off-topic document shares no
     # scoreable term with the question, so retrieval hands the consumer NOTHING
     # rather than a low-scoring irrelevant chunk. Measured, not assumed.
@@ -294,8 +218,7 @@ def test_rag_irrelevant_passages_do_not_manufacture_the_invented_fact(
 
 def test_memory_recall_answer_follows_the_injected_memory(
         tmp_path, monkeypatch, chat_backend):
-    """Same property one path over: recall injects server-side into the system
-    message every chat turn, so an answer that ignores it is the same failure."""
+    """Same property one path over: recall injects server-side into the system message every chat turn, so an answer that ignores it is the same failure."""
     original_ctx = _memory_context(tmp_path / "mem_a", monkeypatch, _ORIGINAL)
     answer = _ask(chat_backend, original_ctx).upper()
     assert _ORIGINAL in answer, \
@@ -312,8 +235,7 @@ def test_memory_recall_answer_follows_the_injected_memory(
 
 def test_memory_ablation_answer_is_ungrounded_without_the_injected_memory(
         chat_backend):
-    """The memory path's own permanent fires-control, for the reason given on
-    the RAG one."""
+    """The memory path's own permanent fires-control, for the reason given on the RAG one."""
     answer = _ask(chat_backend, "").upper()
     assert _ORIGINAL not in answer and _INVERTED not in answer, \
         (f"an invented codename appeared with no memory injected, so the "

@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Session lifecycle: history reset, system-prompt (re)build, cwd/reindex/memory
-refresh, history save, and session close (audit close + episodic reflection +
-the Markdown transcript). Mixed into Agent."""
+"""Session lifecycle: history reset, system-prompt (re)build, cwd/reindex/memory refresh, history save, and session close (audit close + episodic reflection + the Markdown transcript)."""
 
 from __future__ import annotations
 
@@ -72,14 +70,7 @@ class _SessionMixin:
         self._session_title = ""
 
     def _rebuild_system_prompt(self) -> None:
-        """Single source of truth for (re)building the system prompt.
-
-        Every build and rebuild site goes through here so the kwargs cannot drift -
-        notably the COMBINED external tool docs (mcp + plugin + skill) and the
-        provenance flag. A prior bug rebuilt with only ``_mcp_docs``, so plugin
-        tools and agent skills silently vanished from the prompt after a reindex /
-        memory reload / per-write map refresh, and the model "forgot" they existed.
-        """
+        """Single source of truth for (re)building the system prompt."""
         self._system_prompt = build_system_prompt(
             self.cwd,
             agent_name=self.name,
@@ -96,11 +87,7 @@ class _SessionMixin:
         )
 
     def _role_brief(self) -> str:
-        """The role section for a spawned sub-agent; empty for a main agent.
-
-        Built from the CURRENT disabled_tools so the advertised tool line tracks
-        the narrowing that was actually applied, rather than the preset's ideal.
-        """
+        """The role section for a spawned sub-agent; empty for a main agent."""
         preset = getattr(self, "_role_preset", None)
         if preset is None:
             return ""
@@ -113,23 +100,7 @@ class _SessionMixin:
         )
 
     def set_cwd(self, cwd: Path) -> None:
-        """Point this session at another project directory (the REPL's /cd, and
-        the GUI's cwd route).
-
-        THE CHECKPOINT MOVES WITH THE SESSION. A checkpoint is filed under
-        ``<digest(cwd)>/<checkpoint_id>.json``, so changing the cwd changes
-        where the NEXT save lands. Leaving the old file behind would give one
-        conversation two resumable entries - and the abandoned one is frozen
-        forever at the moment of the cd while describing work that has since
-        moved elsewhere, so "continue last session" in the old project would
-        offer a phantom that can never catch up. Migrating keeps exactly one
-        copy, where the session actually is.
-
-        Best-effort, deliberately: the cwd change itself has already been
-        decided by the caller and must not fail because a stale file could not
-        be moved. A failure is logged rather than swallowed, and it is not
-        silent data loss - the old checkpoint simply stays where it was.
-        """
+        """Point this session at another project directory (the REPL's /cd, and the GUI's cwd route)."""
         self._migrate_checkpoint(self.cwd, cwd)
         load_memory = _agent.load_memory  # live: honour a patched agent.load_memory
         load_custom_instructions = _agent.load_custom_instructions
@@ -146,14 +117,7 @@ class _SessionMixin:
         self._warn_injected_file_limits()
 
     def _migrate_checkpoint(self, old_cwd: Path, new_cwd: Path) -> None:
-        """Move this session's own checkpoint file from *old_cwd*'s project
-        directory to *new_cwd*'s. See set_cwd for why.
-
-        Only ever touches THIS agent's own file (keyed on ``_checkpoint_id``),
-        never the whole project directory - a sibling session's checkpoint in
-        the same project is none of this session's business, exactly as
-        clear_checkpoint is careful not to reach one.
-        """
+        """Move this session's own checkpoint file from *old_cwd*'s project directory to *new_cwd*'s."""
         from .checkpoint import _checkpoint_path_for
         try:
             if Path(old_cwd).resolve() == Path(new_cwd).resolve():
@@ -179,19 +143,7 @@ class _SessionMixin:
         return self._project_map.file_count()
 
     def _warn_injected_file_limits(self) -> None:
-        """Tell the user when project memory or user instructions did NOT go into
-        the system prompt whole (over the injection budget, or unreadable).
-
-        Both surfaces, because they have different channels: ``print_warning``
-        reaches the CLI (which registers no event sink, so ``_emit`` is a no-op
-        there), and an ``info`` event reaches the GUI (which renders ``info`` and
-        would drop an unknown ``warning`` type). Capping without this would be a
-        silent truncation, which AGENTS.md rule 5 forbids.
-
-        Called from every site that (re)loads those files, so the user hears about
-        it right when they cause it - at session start, on /remember and /forget,
-        and on a cwd change - rather than never.
-        """
+        """Tell the user when project memory or user instructions did NOT go into the system prompt whole (over the injection budget, or unreadable)."""
         print_warning = _agent.print_warning  # live: honour a patched print_warning
         for text in (_agent.memory_warning(self.cwd),
                      _agent.custom_instructions_warning(self.cwd,
@@ -229,16 +181,7 @@ class _SessionMixin:
         )
 
     def close(self) -> Path | None:
-        """
-        Finalise the session.
-
-        - Closes the audit log (``log`` and ``full`` modes).
-        - Writes a Markdown transcript to ``.localcoder/sessions/`` in
-          ``full`` mode.
-
-        Returns the path of the Markdown file, or None.
-        Called automatically by the CLI's ``finally`` block.
-        """
+        """Finalise the session."""
         self._maybe_store_episode()
         self._audit.close()
         if self.mode == SessionMode.FULL:
@@ -246,19 +189,7 @@ class _SessionMixin:
         return None
 
     def _maybe_store_episode(self) -> None:
-        """Distil this finished session into one episodic-memory record.
-
-        Gated on the privacy contract: skipped in privacy mode and for restricted
-        sessions, so no trace is written that the mode forbids. Fires when the
-        session changed files (via the write-tool tracker, OR via run_shell detected
-        against a git baseline), or when it FAILED (incomplete, or repeated tool /
-        command errors) even with no file change - failure lessons are the most
-        valuable and were systematically absent before (audit cluster 11). A clean
-        read-only / no-op session still adds nothing. GUI/web sessions (event sink,
-        still-running server) run the reflection in a background thread so the model
-        call never blocks the close path / event loop; CLI runs reflect synchronously
-        because the process is about to exit and a daemon thread might not finish.
-        """
+        """Distil this finished session into one episodic-memory record."""
         if not self._episodic or self._episode_store is None:
             return
         if self.mode == SessionMode.PRIVACY or self.restricted:
@@ -319,14 +250,7 @@ class _SessionMixin:
 
     def _reflect_into_episode(self, changed: list, diff_override=None,
                               deadline: "float | None" = None) -> None:
-        """Build and store one episode for this session (best-effort).
-
-        *diff_override* supplies the work-log diff when the changes were detected
-        outside the write-tool tracker (e.g. run_shell writes via git); None means
-        use the tracker's cumulative session_diff(). *deadline* bounds the model
-        call itself (seconds); None means unbounded, which is correct for the
-        GUI/web path - it already runs this off a daemon thread with nobody
-        waiting on it (REG-594's caller, the CLI, always passes one)."""
+        """Build and store one episode for this session (best-effort)."""
         print_warning = _agent.print_warning  # live: honour a patched agent.print_warning
         try:
             import time as _time
@@ -401,15 +325,7 @@ class _SessionMixin:
             print_warning("episodic memory: reflection skipped (%s)" % e)
 
     def _write_session_markdown(self) -> Path:
-        """
-        Write a human-readable Markdown transcript of the session to
-        ``.localcoder/sessions/<YYYY-MM-DD_HHMMSS>.md`` inside the project
-        working directory.
-
-        Tool-result messages (which are large XML blobs) are skipped.
-        Tool calls embedded in assistant messages are extracted and listed
-        as bullet points.
-        """
+        """Write a human-readable Markdown transcript of the session to ``.localcoder/sessions/<YYYY-MM-DD_HHMMSS>.md`` inside the project working directory."""
         import time as _time
 
         ts_label = _time.strftime("%Y-%m-%d_%H%M%S")

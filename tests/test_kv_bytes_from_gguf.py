@@ -1,17 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Pre-load KV sizing from the GGUF header (gguf_kv_bytes_per_token) and its use
-by VramSizingMixin._kv_bytes_per_token / _auto_gpu_layers.
-
-The defect these pin: the per-token KV cost used to be derived from the model's
-FILE SIZE (_bytes_per_token), but KV cost is a function of the ATTENTION shape
-only. That is wrong in both directions - it over-charges a sparse MoE, whose file
-is inflated by expert weights that cost no KV at all, and under-charges a wide-KV
-dense model. The MoE direction silently UNDER-offloads (weight budget shrinks, so
-_auto_gpu_layers picks fewer layers) and nothing warns.
-
-These tests build REAL GGUF headers byte by byte and drive the real parser and the
-real sizing path - no mock stands in for the code under test.
-"""
+"""Pre-load KV sizing from the GGUF header (gguf_kv_bytes_per_token) and its use by VramSizingMixin._kv_bytes_per_token / _auto_gpu_layers."""
 
 import struct
 
@@ -38,15 +26,7 @@ def _s(text: str) -> bytes:
 
 
 def _gguf(path, kv, *, version=3, magic=b"GGUF", tensors=()):
-    """Write a REAL minimal GGUF header: magic, version, tensor/kv counts, then
-    the KV block. *kv* is an ordered list of (key, type, value); value is an int
-    for _T_UINT32, a float for _T_FLOAT32, a str for _T_STRING, and for _T_ARRAY
-    either a list (written as uint32) or a (element_type, list) pair.
-
-    The pair form exists because REAL GGUF writers emit the per-layer
-    head_count_kv array as INT32 (type 5) - measured on real Granite 4 H and LFM2
-    headers. A helper that could only emit uint32 would make every element-type
-    bug invisible to every test here."""
+    """Write a REAL minimal GGUF header: magic, version, tensor/kv counts, then the KV block. *kv* is an ordered list of (key, type, value); value is an int for _T_UINT32, a float for _T_FLOAT32, a str for _T_STRING, and for _T_ARRAY either a list (written as uint32) or a (element_type, list) pair."""
     out = [magic, struct.pack("<I", version),
            struct.pack("<QQ", len(tensors), len(kv))]
     for key, vtype, val in kv:
@@ -80,9 +60,7 @@ def _gguf(path, kv, *, version=3, magic=b"GGUF", tensors=()):
 
 
 def _hybrid_tensors(n_layers, attending):
-    """Tensor names for a hybrid stack: EVERY layer carries attn_norm (which is
-    why a bare "attn" match would count them all), only *attending* layers carry
-    attn_k/attn_v. Copied from the real Qwen3-Next / Granite 4 H / LFM2 files."""
+    """Tensor names for a hybrid stack: EVERY layer carries attn_norm (which is why a bare 'attn' match would count them all), only *attending* layers carry attn_k/attn_v."""
     names = []
     for i in range(n_layers):
         names.append(f"blk.{i}.attn_norm.weight")
@@ -208,9 +186,7 @@ class TestGgufKvBytesPerToken:
 class TestSparseMoeIsNotOverCharged:
     def test_same_attention_shape_costs_the_same_kv_whatever_the_file_size(
             self, tmp_path):
-        """A sparse MoE and a dense model with the SAME attention shape have the
-        SAME KV cost per token. The file-size heuristic says otherwise, and that
-        difference is the bug."""
+        """A sparse MoE and a dense model with the SAME attention shape have the SAME KV cost per token."""
         moe = _gguf(tmp_path / "moe.gguf", _shape("qwen3moe", 48, 2048, 16, 4))
         dense = _gguf(tmp_path / "dense.gguf", _shape("qwen3", 48, 2048, 16, 4))
         assert gguf_kv_bytes_per_token(moe) == gguf_kv_bytes_per_token(dense)
@@ -226,9 +202,7 @@ class TestSparseMoeIsNotOverCharged:
 
 
 class TestAutoGpuLayersUsesTheRealShape:
-    """End-to-end: the over-charged KV shrank the weight budget, so _auto_gpu_layers
-    offloaded FEWER layers than would actually fit. This is the negative case - it
-    fails against the file-size-only code."""
+    """End-to-end: the over-charged KV shrank the weight budget, so _auto_gpu_layers offloaded FEWER layers than would actually fit."""
 
     @staticmethod
     def _vram(free, total):
@@ -307,12 +281,7 @@ class TestAutoGpuLayersUsesTheRealShape:
 # --------------------------------------------------------------------------- #
 
 class TestEstimateVramUsesTheRealShape:
-    """sysstats.estimate_vram powers /api/vram-estimate (the Settings performance
-    sliders' live readout). It used to derive bytes-per-token from model_bytes
-    directly - byte-identical to the heuristic #865 replaced everywhere else,
-    just left behind in a module #865 never touched. It cannot read a GGUF
-    header itself (it only ever sees a byte count), so the caller reads the
-    header and passes the result in via kv_bytes_per_token."""
+    """sysstats.estimate_vram powers /api/vram-estimate (the Settings performance sliders' live readout)."""
 
     def test_sparse_moe_lands_on_the_attention_shape_not_the_heuristic(
             self, tmp_path):
@@ -364,14 +333,7 @@ class TestEstimateVramUsesTheRealShape:
         assert est["kv_cache"] > 0
 
     def test_moe_pinned_bytes_reduces_the_weights_estimate(self, tmp_path):
-        """AUDIT-KV-SYSSTATS, the sequel: _sizing.py's VramSizingMixin.
-        _effective_model_bytes_for_vram discounts a Mixture-of-Experts load's
-        weight footprint by whatever n_cpu_moe pins to system RAM - this GUI
-        estimate must apply the SAME discount, or the live readout keeps
-        showing the whole file as VRAM-needed even after the load itself
-        would succeed. moe_pinned_bytes=0 (the default) must be a no-op -
-        every existing caller/test that never passes it keeps today's
-        answer."""
+        """AUDIT-KV-SYSSTATS, the sequel: _sizing.py's VramSizingMixin. _effective_model_bytes_for_vram discounts a Mixture-of-Experts load's weight footprint by whatever n_cpu_moe pins to system RAM - this GUI estimate must apply the SAME discount, or the live readout keeps showing the whole file as VRAM-need..."""
         from localm.sysstats import estimate_vram
         model_bytes = 800 * 1024 * 1024   # 800 MB file, matches the real MoE test scale
         pinned = 700 * 1024 * 1024        # 700 MB of it pinned to system RAM
@@ -409,16 +371,12 @@ class TestEstimateVramUsesTheRealShape:
 # --------------------------------------------------------------------------- #
 
 def _granite_layers():
-    """The real Granite 4.0 H Tiny pattern: 40 layers, attention at 5/15/25/35
-    with 4 KV heads, mamba (no KV cache) everywhere else. Read off the actual
-    published header, and corroborated by that model's config.json layer_types."""
+    """The real Granite 4.0 H Tiny pattern: 40 layers, attention at 5/15/25/35 with 4 KV heads, mamba (no KV cache) everywhere else."""
     return [4 if i in (5, 15, 25, 35) else 0 for i in range(40)]
 
 
 def _lfm2_layers():
-    """The real LFM2-1.2B pattern: 16 layers, 8 KV heads at exactly the indices
-    that model's config.json lists in full_attn_idxs, short convolution (no KV
-    cache) everywhere else."""
+    """The real LFM2-1.2B pattern: 16 layers, 8 KV heads at exactly the indices that model's config.json lists in full_attn_idxs, short convolution (no KV cache) everywhere else."""
     return [8 if i in (2, 5, 8, 10, 12, 14) else 0 for i in range(16)]
 
 
@@ -527,13 +485,7 @@ class TestHybridPerLayerKvHeads:
 
 
 class TestHybridStatedAsAScalarWithoutTensorInfo:
-    """Qwen3-Next states ONE head_count_kv for a stack whose layers differ, and
-    its METADATA records nothing about which layers attend (verified against the
-    real file: 44 keys, no full_attention_interval, no layer_types, no array).
-
-    These fixtures carry no tensor list, which is the case where nothing in the
-    file can answer, so the probe declines. When the tensor list IS present it
-    answers exactly - see TestScalarHybridResolvedFromTensorNames."""
+    """Qwen3-Next states ONE head_count_kv for a stack whose layers differ, and its METADATA records nothing about which layers attend (verified against the real file: 44 keys, no full_attention_interval, no layer_types, no array)."""
 
     @staticmethod
     def _qwen3next(tmp_path, extra=()):
@@ -584,14 +536,7 @@ class TestHybridStatedAsAScalarWithoutTensorInfo:
 
 
 class TestScalarHybridResolvedFromTensorNames:
-    """A hybrid that states ONE head_count_kv does not record which layers attend
-    anywhere in its metadata. The TENSOR NAMES do, exactly and with no
-    architecture table: an attending layer carries attn_k/attn_v weights, a
-    linear-attention / SSM / short-convolution layer does not.
-
-    The industry default here is to broadcast the single head count across every
-    layer (Ollama's fs/ggml does exactly that), which over-charges Qwen3-Next by
-    4x. Reading the tensor list gets the exact figure instead."""
+    """A hybrid that states ONE head_count_kv does not record which layers attend anywhere in its metadata."""
 
     QWEN3NEXT_ATTENDING = frozenset(range(3, 48, 4))    # 12 of 48, from the file
 
@@ -702,11 +647,7 @@ _REAL_HEADERS = [
 @pytest.mark.parametrize("name,repo_path,expected,why",
                          _REAL_HEADERS, ids=[h[0] for h in _REAL_HEADERS])
 def test_real_published_header(tmp_path, name, repo_path, expected, why):
-    """Range-fetch a real GGUF's leading bytes, far enough in to carry both the
-    metadata block and the tensor list - the tensor list is what resolves a
-    hybrid that states a single head count, and it sits after the tokenizer
-    vocab (measured 5.71 MiB into the Qwen3-Next file). In production localm has
-    the whole file on disk, so this prefix stands in for that."""
+    """Range-fetch a real GGUF's leading bytes, far enough in to carry both the metadata block and the tensor list - the tensor list is what resolves a hybrid that states a single head count, and it sits after the tokenizer vocab (measured 5.71 MiB into the Qwen3-Next file)."""
     import urllib.request
     from localm.http_ssl import verified_urlopen
 

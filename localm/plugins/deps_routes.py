@@ -1,16 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Host-side plugin dependency-install routes (pip extras).
-
-Split out of engine.attach_engine into its own module with top-level fastapi
-imports, keeping engine.py fastapi-free at import time (it imports fastapi
-lazily).
-
-Security: a remote client must NEVER trigger a server-side pip. Both endpoints
-fail closed with 403 whenever the server is on a NETWORK bind - decided from the
-bind host, not the request peer, because portmux relays every connection through
-an internal loopback socket (see deps_task.host_pip_allowed). This is on top of
-the PLUGINS_ADMIN scope already required.
-"""
+"""Host-side plugin dependency-install routes (pip extras)."""
 
 from __future__ import annotations
 

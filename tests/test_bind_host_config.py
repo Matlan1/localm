@@ -1,17 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The GUI-settable bind: config 'bind_host' + the TLS trio (F1 parity gap).
-
-Settings > Server > Bind address lets a browser-only user bind the server past
-loopback (the phone/Companion feature) without a terminal. The security
-property under test throughout: a CONFIG-driven network bind is fail-closed
-WITHOUT being able to kill the server - no strong API key means the server
-IGNORES the configured bind and stays on loopback (loudly, with the reason
-surfaced via app.state.bind_fallback), it never exits and never serves the
-network unauthenticated. Only the CLI's --insecure flag, which deliberately
-has NO config form, can override the key requirement, so an unauthenticated
-network bind always requires a terminal. Explicit -H keeps its historical
-fail-hard behavior (exit 2).
-"""
+"""The GUI-settable bind: config 'bind_host' + the TLS trio (F1 parity gap)."""
 
 import ssl
 
@@ -31,11 +19,7 @@ STALE_IP = "198.51.100.23"
 
 @pytest.fixture
 def cfg_home(tmp_path, monkeypatch):
-    """Throwaway LOCALM_HOME that load_config/save_config actually read.
-
-    config.py freezes HOME_DIR/CONFIG_FILE/REGISTRY_FILE at import, so the
-    autouse LOCALM_HOME env fixture alone does not redirect them (same reason
-    conftest's cli_runner fixture patches these four)."""
+    """Throwaway LOCALM_HOME that load_config/save_config actually read."""
     import localm.config as cfg
     home = tmp_path / ".localm"
     home.mkdir(parents=True, exist_ok=True)
@@ -108,13 +92,7 @@ class TestValidateUpdate:
         ("fe80::1", "fe80::1"),
     ])
     def test_bind_host_accepts_ipv6_literals(self, val, stored):
-        """Write-time acceptance of IPv6, the LAST half of the IPv6 unit.
-
-        This is the half that could brick a terminal-less user if it landed
-        without the serving half, so it is pinned here rather than left to the
-        predicate's own test: a regression that broke the port probe or the
-        listening socket while leaving this validator open would put the
-        Settings field back to accepting a value the server dies on."""
+        """Write-time acceptance of IPv6, the LAST half of the IPv6 unit."""
         assert ss.validate_update({"bind_host": val})["bind_host"] == stored
 
     def test_tls_paths_must_exist(self, tmp_path):
@@ -136,9 +114,7 @@ class TestValidateUpdate:
             assert by_key[key].applies == ss.Applies.RESTART
 
     def test_no_config_form_of_insecure_exists(self):
-        """The unauthenticated-network override must stay terminal-only: no
-        config key may exist whose name suggests it. Guards the decision, not
-        just the current spelling."""
+        """The unauthenticated-network override must stay terminal-only: no config key may exist whose name suggests it."""
         from localm.config import DEFAULT_CONFIG
         suspects = [k for k in DEFAULT_CONFIG if "insecure" in k.lower()]
         assert suspects == []
@@ -191,9 +167,7 @@ class TestBindPreflight:
 # ------------------------------------------------------------------ #
 
 def _mint_pair(home_cfg, tmp_path):
-    """A REAL loadable cert/key pair (localm's own CA machinery), copied to
-    distinctive paths so a test can tell 'returned the config pair' apart from
-    'returned the built-in pair'."""
+    """A REAL loadable cert/key pair (localm's own CA machinery), copied to distinctive paths so a test can tell 'returned the config pair' apart from 'returned the built-in pair'."""
     from localm import tls
     from localm.config import home_dir
     cert, key = tls.ensure_cert(home_dir())
@@ -265,19 +239,12 @@ class TestResolveTlsConfig:
 # ------------------------------------------------------------------ #
 
 class _Sentinel(RuntimeError):
-    """Raised by the pick_port double: everything under test (host resolution,
-    the auth guard, TLS) runs BEFORE pick_port, so reaching this proves the
-    guard let startup continue - without ever starting a real server."""
+    """Raised by the pick_port double: everything under test (host resolution, the auth guard, TLS) runs BEFORE pick_port, so reaching this proves the guard let startup continue - without ever starting a real server."""
 
 
 @pytest.fixture
 def gui_probe(cfg_home, monkeypatch):
-    """Drive the real `localm gui` main() up to (not including) the port pick.
-
-    Returns (invoke, calls): calls["pick_port_host"] records the host the
-    server would have picked its port for, calls["cert_hosts"] the SAN list a
-    built-in-TLS provision was asked for (absent = TLS never provisioned).
-    ensure_cert is doubled so no real crypto runs."""
+    """Drive the real `localm gui` main() up to (not including) the port pick."""
     calls = {}
 
     def fake_pick_port(requested=None, host="127.0.0.1"):
@@ -302,9 +269,7 @@ def gui_probe(cfg_home, monkeypatch):
 class TestConfigBindGuard:
     def test_config_bind_without_key_falls_back_to_loopback_alive(
             self, cfg_home, gui_probe):
-        """THE fail-closed property: config says network, no key exists ->
-        the server neither exits nor binds the network; it continues starting
-        on loopback with the refusal printed."""
+        """THE fail-closed property: config says network, no key exists -> the server neither exits nor binds the network; it continues starting on loopback with the refusal printed."""
         invoke, calls = gui_probe
         _set(cfg_home, bind_host="0.0.0.0")
         r = invoke(["--no-model", "--no-browser"])
@@ -328,8 +293,7 @@ class TestConfigBindGuard:
         assert "Refusing to start" not in r.output
 
     def test_explicit_H_without_key_still_exits_2(self, cfg_home, gui_probe):
-        """The CLI's historical fail-hard contract is unchanged: an operator
-        typing -H past loopback with no key gets exit 2, not a fallback."""
+        """The CLI's historical fail-hard contract is unchanged: an operator typing -H past loopback with no key gets exit 2, not a fallback."""
         invoke, calls = gui_probe
         r = invoke(["--no-model", "--no-browser", "-H", "0.0.0.0"])
         assert r.exit_code == 2
@@ -349,12 +313,7 @@ class TestConfigBindGuard:
 
     def test_stale_config_ip_falls_back_to_loopback_alive(
             self, cfg_home, gui_probe, monkeypatch):
-        """A config address that is well-formed but no longer assigned (DHCP
-        moved the machine) must not kill the server at the socket bind - the
-        stale address is refused by a REAL preflight bind probe (nothing
-        mocked at that layer; STALE_IP is genuinely unassigned) and startup
-        continues on loopback. Found by review: without the preflight this
-        died with exit 3 inside uvicorn, past every syntax check."""
+        """A config address that is well-formed but no longer assigned (DHCP moved the machine) must not kill the server at the socket bind - the stale address is refused by a REAL preflight bind probe (nothing mocked at that layer; STALE_IP is genuinely unassigned) and startup continues on loopback."""
         invoke, calls = gui_probe
         _set(cfg_home, bind_host=STALE_IP)
         monkeypatch.setenv("LOCALM_API_KEY", "a-strong-secret-123")
@@ -369,9 +328,7 @@ class TestConfigBindGuard:
 
     def test_builtin_tls_failure_on_config_bind_falls_back_to_loopback(
             self, cfg_home, gui_probe, monkeypatch):
-        """A broken crypto stack must not kill a config-driven bind (no
-        terminal to see the exit) and must not serve the network in cleartext:
-        the only remaining option is loopback, taken loudly."""
+        """A broken crypto stack must not kill a config-driven bind (no terminal to see the exit) and must not serve the network in cleartext: the only remaining option is loopback, taken loudly."""
         invoke, calls = gui_probe
         _set(cfg_home, bind_host="0.0.0.0")
         monkeypatch.setenv("LOCALM_API_KEY", "a-strong-secret-123")

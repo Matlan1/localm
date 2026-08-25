@@ -16,40 +16,33 @@ from localm.debuglog import logger
 HF_API = "https://huggingface.co"
 _TIMEOUT = 20
 
-# HuggingFace library-tag filter for each discoverable model format. GGUF repos
-# carry the "gguf" tag; transformers-native (safetensors / pytorch) repos carry
-# the "transformers" library tag, which is exactly the set localm's HF backend
-# loads. Both are real HF /api/models filter values, so classification comes from
-# WHICH query a repo answered, not from parsing per-result tag fields the list
-# response may omit.
+# HuggingFace library-tag filter per discoverable model format. GGUF repos carry
+# the "gguf" tag; transformers-native repos carry the "transformers" library tag.
+# Both are real HF /api/models filter values, so classification comes from which
+# query a repo answered rather than from parsing per-result tag fields.
 _FORMAT_FILTER = {"gguf": "gguf", "hf": "transformers"}
 
-# Type-scoped search narrows on TWO orthogonal, independently-selectable axes -
+# Type-scoped search narrows on two orthogonal, independently-selectable axes:
 # model TYPE (llm/embedding/diffusion/lora/vae/text-encoder/unknown) and file
-# FORMAT (gguf vs safetensors). Both are surfaced as explicit checkboxes in the
-# GUI (a type is never inferred silently from the active tab). Every filter value
-# below is LIVE-VERIFIED against the real HF /api/models API (not assumed): the
-# list endpoint accepts expand[]=pipeline_tag,library_name,tags directly (no
-# per-repo fetch to classify a result), and both `pipeline_tag=` and repeated
-# `filter=` (ANDed) work as query params.
+# FORMAT (gguf vs safetensors). Both are explicit GUI checkboxes; a type is never
+# inferred from the active tab. The list endpoint accepts
+# expand[]=pipeline_tag,library_name,tags directly, and both `pipeline_tag=` and
+# repeated `filter=` (ANDed) work as query params.
 #
-# The "hf" (non-gguf / safetensors) side of the format axis narrows PER TYPE
-# where HF exposes a reliable signal:
+# The non-gguf side of the format axis narrows PER TYPE where HF exposes a
+# reliable signal:
 _HF_TYPE_FILTER = {
     "llm": {"filter": "transformers"},
     "embedding": {"pipeline_tag": "feature-extraction"},
     "diffusion-unet": {"pipeline_tag": "text-to-image"},
     "lora": {"filter": "peft"},
 }
-# vae / text-encoder / unknown carry NO reliable type signal on HF - the single
-# most-used real-world repo for each has none at all (stabilityai/sd-vae-ft-mse
-# has no "vae" tag or pipeline_tag; comfyanonymous/flux_text_encoders has no tag
-# beyond a license marker). A hard TYPE filter would systematically exclude
-# exactly the repos users search for. But the FORMAT axis is still reliable for
-# them: filter=safetensors returns the canonical diffusers VAEs/encoders, and
-# filter=gguf the GGUF ones (both verified live). So these types narrow by format
-# only; their type comes from the result badge (classify_hf_metadata) and, at
-# pull time, from the checkbox the user searched under.
+# vae, text-encoder and unknown carry no reliable TYPE signal on HF, so a hard
+# type filter would exclude exactly the repos users search for. The FORMAT axis
+# is still reliable for them: filter=safetensors returns the canonical diffusers
+# VAEs and encoders, filter=gguf the GGUF ones. These types therefore narrow by
+# format only; their type comes from the result badge and, at pull time, from the
+# checkbox the user searched under.
 _HF_TYPE_FILTER_DEFAULT = {"filter": "safetensors"}
 _ALL_SEARCHABLE_TYPES = frozenset(
     {"llm", "embedding", "diffusion-unet", "lora", "vae", "text-encoder", "unknown"})
@@ -64,12 +57,10 @@ _ANY_TYPE = "__any__"
 from localm.vram import VRAM_OVERHEAD_BYTES as _OVERHEAD_BYTES
 from localm.vram import VRAM_WEIGHT_FACTOR as _WEIGHT_FACTOR
 
-# Single-sourced from model_manager.gguf, the same verified llama.cpp
-# encoder/embedding architecture allowlist gguf_embedding_signal() uses on a
-# freshly-downloaded file's own header - so a search-time badge and a
-# post-download registration never disagree about the SAME architecture value.
-# No cycle: gguf.py (and the model_manager package it lives in) never imports
-# discover, only the reverse (verified live before wiring this in).
+# Single-sourced from model_manager.gguf, the same llama.cpp encoder/embedding
+# architecture allowlist gguf_embedding_signal() uses on a downloaded file's own
+# header, so a search-time badge and a post-download registration cannot disagree
+# about the same architecture value. No cycle: gguf.py never imports discover.
 from localm.model_manager.gguf import _GGUF_EMBEDDING_ARCHITECTURES
 
 # Quantization label inside a GGUF filename, e.g. Q4_K_M, Q8_0, IQ4_XS,
@@ -113,12 +104,10 @@ def _get(url: str, params: Optional[dict] = None) -> object:
         raise DiscoverError(f"HuggingFace request failed: {e}")
 
 
-# Tag-set fallback for LLM / embedding-ness, consulted alongside pipeline_tag
-# (never instead of it): a HF-repacked GGUF-only upload routinely carries no
-# pipeline_tag at all (that field belongs to the ORIGINAL checkpoint's model
-# card, which a pure-GGUF quantizer repo often never fills in) while still
-# carrying the base model's standard HF tags. Exact tokens only, same
-# substring-safety rule as the tag checks above.
+# Tag-set fallback for LLM and embedding-ness, consulted alongside pipeline_tag
+# rather than instead of it: a HF-repacked GGUF-only upload often carries no
+# pipeline_tag while still carrying the base model's standard HF tags. Exact
+# tokens only.
 _LLM_TAGS = frozenset({"conversational", "text-generation", "text2text-generation"})
 _EMBEDDING_TAGS = frozenset({"feature-extraction", "sentence-similarity"})
 
@@ -180,16 +169,12 @@ def hf_param_bytes(safetensors: Optional[dict]) -> Optional[int]:
     return total * 2
 
 
-# Name-based MoE fallback for when the header signal (architecture containing
-# "moe") is absent or - per the Mixtral counter-example below - the header lies
-# by omission: TheBloke/Mixtral-8x7B-v0.1-GGUF (a real MoE model, live-verified)
-# reports gguf.architecture == "llama", an older GGUF conversion predating
-# llama.cpp's dedicated mixtral arch tag. Matches the two common MoE naming
-# conventions: "8x7B"/"8x22B" style (Mixtral) and "A3B"/"A22B" active-param
-# style (Qwen3's MoE line), plus a bare "moe" token. Inherently incomplete (a
-# DeepSeek-style repo carries neither convention in its name) - that is why
-# this is only ever the FALLBACK behind the header signal, and why callers must
-# label a match from this pattern as inferred, never as confirmed.
+# Name-based MoE fallback for when the header signal (an architecture containing
+# "moe") is absent or wrong - an older GGUF conversion of a real MoE model can
+# report architecture "llama". Matches the two common MoE naming conventions:
+# "8x7B"/"8x22B" style and "A3B"/"A22B" active-param style, plus a bare "moe"
+# token. Incomplete by nature, so it is only ever the fallback behind the header
+# signal, and callers must label a match from it as inferred.
 _MOE_NAME_RE = re.compile(r"(?i)\bmoe\b|\b\d+x\d+b\b|\ba\d+b\b")
 
 
@@ -237,14 +222,11 @@ def _rows_from_items(data: object, limit: int, *, fmt: Optional[str],
             # safetensors metadata (the row then shows "size unknown").
             row["size_bytes"] = hf_param_bytes(item.get("safetensors"))
         if classify:
-            # gguf.architecture (gguf-format results) wins when present - the
-            # model's own header; config.model_type (hf-format results, when
-            # HF has a config.json) is the fallback so both format branches
-            # get an architecture-based classification attempt. isinstance-
-            # guarded like hf_param_bytes' safetensors check above: a
-            # malformed/adversarial API response returning a truthy non-dict
-            # for either expand field must degrade this ONE row's signal to
-            # None, not crash the whole hf_search() call for every row.
+            # gguf.architecture wins when present, being the model's own header;
+            # config.model_type is the fallback so both format branches get an
+            # architecture-based classification attempt. isinstance-guarded, so a
+            # malformed response degrades this one row's signal to None rather
+            # than crashing the whole hf_search() call.
             gguf_meta = item.get("gguf")
             config_meta = item.get("config")
             architecture = (
@@ -291,12 +273,10 @@ def _run_query(query: str, limit: int, fmt: str, model_type: Optional[str],
         # re-request downloads/likes/lastModified alongside it.
         expand += ["safetensors", "downloads", "likes", "lastModified"]
     elif classify:
-        # gguf never requests safetensors, so without this the stats vanish
-        # too: `expand` is restrictive (drops every default field once ANY
-        # field is requested), and classify below always requests at least
-        # pipeline_tag - measured live: a classified gguf query that requested
-        # only pipeline_tag/library_name/tags silently dropped downloads AND
-        # likes from every row (both default-present with no expand at all).
+        # gguf never requests safetensors, and `expand` is restrictive: once any
+        # field is requested the defaults are dropped, and classify below always
+        # requests at least pipeline_tag. Without this, downloads and likes
+        # disappear from every row.
         expand += ["downloads", "likes", "lastModified"]
     if classify:
         expand += ["pipeline_tag", "library_name", "tags", "config"]
@@ -390,10 +370,9 @@ def hf_search(query: str = "", limit: int = 20, formats: Sequence[str] = ("gguf"
         per_query.append(lst)
 
     # Round-robin interleave by per-query rank, then trim to `limit`. A plain
-    # merge-then-sort-by-downloads would let the highest-download query (HF repos
-    # routinely dwarf GGUF repacks) crowd the others out of the top `limit`
-    # entirely, so a "show GGUF" toggle could return zero GGUF. Interleaving keeps
-    # every enabled query visible while still leading each with its most popular.
+    # merge-then-sort-by-downloads would let the highest-download query crowd the
+    # others out of the top `limit` entirely, so a "show GGUF" toggle could return
+    # zero GGUF results.
     out: list[dict] = []
     rank = 0
     while len(out) < limit and any(rank < len(lst) for lst in per_query):
@@ -475,48 +454,30 @@ def _quant_of(name: str) -> str:
 
 
 # ---- GPU probe safety: a hardware probe must never block its caller -------- #
-# _list_gpus_probe() calls the GPU driver: torch.cuda.mem_get_info (which, on a
-# torch ROCm build, calls into HIP) has NO timeout, and nvidia-smi is a
-# subprocess. A busy or wedged driver call would block the CALLER for as long as
-# the driver takes. The public list_gpus() below makes the probe safe by
-# construction: it runs on a helper thread with a hard DEADLINE; if it overruns,
-# the caller gets the last-known-good reading (or []) and moves on. A wedged
-# NATIVE call cannot be interrupted from Python, so that one helper thread is
-# abandoned; the in-flight guard means at most ONE such thread ever exists, and
-# the overrun is surfaced at debug level (AGENTS.md rule 5), never silently
-# eaten.
+# _list_gpus_probe() calls the GPU driver: torch.cuda.mem_get_info has no timeout
+# and nvidia-smi is a subprocess, so a wedged driver call would block the caller
+# for as long as the driver takes. list_gpus() runs the probe on a helper thread
+# with a hard deadline; on overrun the caller gets the last-known-good reading
+# (or []) and moves on. A wedged native call cannot be interrupted from Python,
+# so that helper thread is abandoned; the in-flight guard means at most one such
+# thread exists, and the overrun is surfaced at debug level.
 #
-# WHAT THE DEADLINE IS FOR (and what it is NOT for). PR #541 diagnosed GUI
-# routes running this probe inline on the server's single asyncio loop, which
-# froze the whole WebUI while a probe was busy - and fixed that by OFFLOADING
-# every server call site to an executor. As of that PR no production caller
-# probes ON THE EVENT LOOP (re-verified 2026-07-17: the GUI routes all
-# run_in_executor, and the GPU-registry heartbeat's probe - it DOES probe, via
-# resolve_main_gpu_index -> list_gpus every ~20s when main_gpu_index >= 1 - is
-# likewise executor-offloaded, see http_server's heartbeat loop), so the
-# deadline does NOT protect the loop; it only bounds how long one worker
-# thread (or a blocking CLI call) waits on a wedged driver before degrading.
+# The deadline bounds how long one worker thread or a blocking CLI call waits on
+# a wedged driver before degrading. It does not protect the event loop: no
+# production caller probes on it.
 #
-# That is why the default is COLD-INIT-TOLERANT. The first torch.cuda / HIP
-# call of a process initializes the ROCm/CUDA driver: measured 2.6-3.1s on a
-# warm system, 4.63s observed on a genuinely cold driver, ~6.5s historically.
-# The original 4.0s default sat INSIDE that range, so a legitimate cold init
-# "timed out" - and a timeout is served as [] / a frozen last-known-good, which
-# a bare-list caller cannot tell apart from "no GPU at all". That one thin
-# margin manufactured a whole bug class ("no torch / no GPU" misreports #581,
-# a silently skipped pre-load VRAM gate #722). The deadline must sit ABOVE any
-# legitimate cold init; 15.0 is the value blocking callers have used since
-# #581. The cost on a truly wedged driver is one worker thread parked for 15s
-# ONCE - the in-flight guard hands every concurrent caller an instant BUSY,
-# and after the overrun the last-known-good path takes over - so nothing
-# user-facing ever freezes for it.
+# The default is COLD-INIT-TOLERANT. The first torch.cuda or HIP call of a
+# process initializes the driver, which takes seconds; a deadline inside that
+# range turns a legitimate cold init into a timeout, and a timeout is served as
+# [] or a frozen last-known-good, which a bare-list caller cannot tell apart from
+# "no GPU at all". The deadline must therefore sit above any legitimate cold
+# init. The cost on a wedged driver is one worker thread parked once; every
+# concurrent caller gets an instant BUSY.
 #
-# NOTE - deliberately NO freshness/TTL cache: every call re-probes. A TTL cache
-# would hand a STALE "free" reading to callers that need a live one, most
-# critically switch_engine's eviction loop, whose wait_for_vram_release polls
-# free-VRAM to confirm a native free has landed before re-checking (AUDIT-MED-11);
-# a stale value there would defeat that guard and over-evict. The last-known-good
-# value is kept ONLY as the wedge fallback, never to short-circuit a live probe.
+# There is deliberately NO freshness/TTL cache: every call re-probes. A stale
+# "free" reading would defeat switch_engine's eviction loop, which polls free
+# VRAM to confirm a native free has landed. The last-known-good value is the
+# wedge fallback only, never a short-circuit for a live probe.
 _GPU_PROBE_DEADLINE = 15.0    # seconds a probe may block its caller; must exceed
                               # a legitimate COLD driver init (see above)
 # Historical alias, kept for the call sites and tests that opt into it by name
@@ -533,14 +494,11 @@ _GPU_PROBE_CLI_DEADLINE = _GPU_PROBE_DEADLINE
 GPU_PROBE_OK = "ok"            # a fresh probe completed - an empty list means genuinely none
 GPU_PROBE_TIMEOUT = "timeout"  # probe exceeded the deadline (cold driver init / wedge); INCONCLUSIVE
 GPU_PROBE_BUSY = "busy"        # another probe is inflight, or the probe thread could not start
-# The probe completed WITHIN its deadline (unlike TIMEOUT) but no source could
+# The probe completed within its deadline, unlike TIMEOUT, but no source could
 # conclusively rule out a GPU: the isolated torch enumeration could not be asked
-# this round (latched-unavailable, or wedged on this attempt - see
-# _torch_gpus_isolated_once) and nvidia-smi, the only other source, also found
-# nothing - which proves nothing on an AMD/Intel box nvidia-smi cannot see at
-# all. An empty list under this status is INCONCLUSIVE, same as TIMEOUT, and
-# for the same reason a caller must not retry-with-a-longer-deadline expecting
-# it to help: nvidia-smi's answer will not change no matter how long you wait.
+# this round, and nvidia-smi, the only other source, also found nothing - which
+# proves nothing on an AMD or Intel box it cannot see. An empty list under this
+# status is inconclusive, and retrying with a longer deadline cannot help.
 GPU_PROBE_INCONCLUSIVE = "inconclusive"
 
 _gpu_probe_lock = threading.Lock()

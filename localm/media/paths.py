@@ -1,30 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Filesystem policy for the caller-supplied paths the media plugins accept.
-
-Two of them reach the filesystem from the image/music/video routes, and both
-were reachable by a NON-privileged, media-scoped key:
-
-* ``input_image`` (img2img / image-to-video) is READ and then UPLOADED to
-  ComfyUI. ``sanitize_comfy_url`` deliberately permits a LAN or public
-  ``api_url`` over plaintext http, so this is a read-AND-TRANSMIT primitive, not
-  a local read. It used to be confined to the whole data dir - which is
-  localm's credential store (auth.key, auth.json, sessions.json, rag/, coder/,
-  bug-reports/) - so the confinement did not remove the arbitrary-file primitive
-  its own docstring named, it merely retargeted it at localm's own secrets.
-  ``allowed_input_roots`` narrows it to the places a source image legitimately
-  comes from.
-
-* the ``/move`` ``dest`` was taken verbatim from the request body into
-  ``mkdir(parents=True)`` + ``shutil.move``, gated only on ARTIFACT ownership
-  (true for the scoped key that generated the file, and for any caller when the
-  artifact has no recorded owner). ``confined_move_dest`` gates the
-  outside-the-data-dir case on host filesystem access instead.
-
-Both policies live here rather than being copy-pasted per plugin: the
-input_image confinement was already duplicated verbatim in image/ and video/,
-and the move handler three times over, which is how one reading of one copy can
-declare a family of routes safe.
-"""
+"""Filesystem policy for the caller-supplied paths the media plugins accept."""
 
 from __future__ import annotations
 
@@ -117,72 +92,21 @@ is_unc_or_device_path = _pathsafe.is_unc_or_device_path
 
 
 def allowed_input_roots() -> list[Path]:
-    """Roots an ``input_image`` may live under.
-
-    Deliberately NOT the data dir: that holds auth.key (the plaintext owner key)
-    and the rest of localm's credential store, and these routes are mounted
-    under the non-privileged ``image`` / ``video`` scopes. The allowed set is the
-    upload inbox plus the generated-media galleries, which is what the GUI's two
-    real flows produce: a file uploaded on the Settings page, and the gallery's
-    "use as input" button (it fills the field with a gui_images path).
-
-    The install directory is NOT a root either, source checkout or not. Earlier
-    versions allowed the repo root "for a reference image kept in the checkout",
-    guarded on pyproject.toml. That guard never worked (pyproject.toml is
-    release-include - release-manifest.toml, the updater's verify_zip requires
-    it - so an installed copy has one too), and more importantly the allowance
-    is wrong even when it works: README documents `git clone` as the install
-    path, so on the PRIMARY topology it admitted the entire tree, including the
-    gitignored `issues/` and `qa/` directories that hold bug-report screenshots
-    and test-instance data. That is the same read-and-transmit primitive this
-    module exists to remove, aimed at a different directory. A reference image
-    belongs in <home>/uploads; copying one there is a single command.
-
-    The roots are NOT created here - a policy check must not have the side
-    effect of making a directory. A root that does not exist simply matches
-    nothing.
-    """
+    """Roots an ``input_image`` may live under."""
     home = _resolved_home()
     return list(_home_input_roots(home)) if home is not None else []
 
 
 class InputImageRefused(ValueError):
-    """An ``input_image`` was refused by the policy below.
-
-    A ValueError rather than an HTTPException because the policy is NOT
-    HTTP-specific: the MCP server reaches the same ComfyUI upload over stdio
-    JSON-RPC, where raising fastapi's exception would escape the tool-call
-    handler instead of becoming an error reply. ``confined_input_image`` is the
-    thin HTTP wrapper; ``check_input_image`` is the policy. Same split
-    ``pathsafe`` already draws between ``confined_name`` (raises HTTPException)
-    and ``confined_under`` (raises ValueError)."""
+    """An ``input_image`` was refused by the policy below."""
 
 
 class InputImageUnavailable(InputImageRefused):
-    """The policy could not be EVALUATED - the data dir would not resolve.
-
-    Distinct from an ordinary refusal so a FAULT is never reported as a routine
-    policy decision (AGENTS rule 5). Subclasses InputImageRefused so a caller
-    that only wants "did this pass" still fails closed by catching the base."""
+    """The policy could not be EVALUATED - the data dir would not resolve."""
 
 
 def check_input_image(raw: str) -> Path:
-    """Resolve and confine an ``input_image`` to an allowed root, or raise.
-
-    The transport-independent policy. Raises InputImageRefused when the path
-    escapes every allowed root or does not point at an existing file, and
-    InputImageUnavailable when the data dir cannot be resolved at all. Symlinks
-    are resolved first, so a link inside an allowed root that targets outside it
-    is still rejected.
-
-    Messages name the allowed LOCATIONS but never an absolute path: the data dir
-    contains the OS username, and every caller of this is reachable by a
-    principal that is not the owner.
-
-    An unresolvable data dir FAILS CLOSED. Because the allowed roots are exactly
-    four subdirectories OF the data dir, "no data dir" really does mean "nothing
-    is permitted" - there is no wider root left to fall back to.
-    """
+    """Resolve and confine an ``input_image`` to an allowed root, or raise."""
     home = _resolved_home()
     if home is None:
         raise InputImageUnavailable(
@@ -213,11 +137,7 @@ def check_input_image(raw: str) -> Path:
 
 
 def confined_input_image(raw: str) -> Path:
-    """``check_input_image`` for an HTTP route: the same policy, as an
-    HTTPException.
-
-    A 500 for InputImageUnavailable and a 400 for everything else, so a fault
-    the operator must fix is not returned as a caller mistake."""
+    """``check_input_image`` for an HTTP route: the same policy, as an HTTPException."""
     try:
         return check_input_image(raw)
     except InputImageUnavailable as e:
@@ -227,22 +147,7 @@ def confined_input_image(raw: str) -> Path:
 
 
 def confined_move_dest(request: Request, raw: str) -> Path:
-    """Resolve a ``/move`` destination directory and check the caller may write
-    there. Returns the resolved path WITHOUT creating it (the caller does the
-    mkdir, once this has passed).
-
-    A principal with host filesystem access - the owner/ADMIN key, open mode, or
-    a key the owner explicitly granted ``fs_access=host`` - keeps "any folder on
-    this machine". That is the documented feature, and the folder picker that
-    supplies ``dest`` in the GUI flow (``/api/fs/dirs``) is itself gated on the
-    same dial, so this route simply stops being the weaker door.
-
-    Every other principal is confined to the data dir. This SUPPLEMENTS
-    ``gallery.require_owner`` rather than replacing it: that dependency proves
-    ARTIFACT ownership, which is a different question from authority over the
-    host filesystem, and it passes for ANY caller when the artifact has no
-    recorded owner (open mode, legacy or hand-placed files).
-    """
+    """Resolve a ``/move`` destination directory and check the caller may write there."""
     from localm.config import home_dir
     from localm.inference.http_server import effective_fs_access
     # The credential check FIRST, because it costs no syscall, then the

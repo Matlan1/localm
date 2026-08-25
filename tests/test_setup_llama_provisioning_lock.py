@@ -1,16 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""_provisioning_lock: cross-process single-flight around setup-llama's own
-provisioning steps (diff-review-discipline.md item 26 - the identical hazard
-that bit managed_comfy_update.py, now reachable here too because the GUI's
-standalone runtime-update button is a SECOND trigger onto the same directory
-that a `localm update` re-provision or a user's own `setup-llama` invocation
-can already be mutating).
-
-Cross-process atomicity is the actual claim, so the load-bearing test spawns a
-REAL second interpreter rather than mocking pid_alive - a unit test that only
-monkeypatches the liveness check cannot demonstrate that mkdir is atomic
-across two processes, only that the Python-level logic branches correctly.
-"""
+"""_provisioning_lock: cross-process single-flight around setup-llama's own provisioning steps (diff-review-discipline.md item 26 - the identical hazard that bit managed_comfy_update.py, now reachable here too because the GUI's standalone runtime-update button is a SECOND trigger onto the same director..."""
 
 from __future__ import annotations
 
@@ -54,9 +43,7 @@ def test_lock_round_trips_cleanly(tmp_path):
 
 
 def test_lock_released_even_when_the_body_raises(tmp_path):
-    """finally releases the lock on ANY exit, not only a clean one - a leaked
-    lock from an ordinary exception would wedge every later provision until
-    someone deletes a folder by hand."""
+    """finally releases the lock on ANY exit, not only a clean one - a leaked lock from an ordinary exception would wedge every later provision until someone deletes a folder by hand."""
     target = tmp_path / "rt"
     target.mkdir()
     with pytest.raises(ValueError):
@@ -66,9 +53,7 @@ def test_lock_released_even_when_the_body_raises(tmp_path):
 
 
 def test_lock_released_even_on_sys_exit(tmp_path):
-    """main()'s body calls sys.exit() liberally (RuntimeInUseError, a bad
-    archive, ...). SystemExit must not leak the lock either, or a legitimate
-    refusal inside the locked section would wedge the NEXT run."""
+    """main()'s body calls sys.exit() liberally (RuntimeInUseError, a bad archive, ...)."""
     target = tmp_path / "rt"
     target.mkdir()
     with pytest.raises(SystemExit):
@@ -78,9 +63,7 @@ def test_lock_released_even_on_sys_exit(tmp_path):
 
 
 def test_busy_lock_with_a_live_holder_refuses_fast_and_names_the_pid(tmp_path):
-    """A lock recording THIS test process's own pid (verifiably alive) must
-    refuse rather than block or steal - and the refusal names the pid so a
-    stuck user knows what to look at."""
+    """A lock recording THIS test process's own pid (verifiably alive) must refuse rather than block or steal - and the refusal names the pid so a stuck user knows what to look at."""
     target = tmp_path / "rt"
     target.mkdir()
     lock = sl._provision_lock_path(target)
@@ -96,9 +79,7 @@ def test_busy_lock_with_a_live_holder_refuses_fast_and_names_the_pid(tmp_path):
 
 
 def test_busy_lock_with_unreadable_owner_refuses_without_stealing(tmp_path):
-    """No pid recorded at all (an older-format lock, or a crash in the mkdir-
-    then-write-owner window) must NOT be treated as free - stealing here is
-    exactly how two provisions end up interleaved."""
+    """No pid recorded at all (an older-format lock, or a crash in the mkdir- then-write-owner window) must NOT be treated as free - stealing here is exactly how two provisions end up interleaved."""
     target = tmp_path / "rt"
     target.mkdir()
     lock = sl._provision_lock_path(target)
@@ -111,9 +92,7 @@ def test_busy_lock_with_unreadable_owner_refuses_without_stealing(tmp_path):
 
 
 def test_stale_lock_from_a_dead_pid_is_reclaimed(tmp_path, monkeypatch):
-    """A lock naming a pid that is PROVABLY gone is self-healing: the next
-    caller reclaims it and proceeds, rather than being wedged forever by a
-    process that crashed without releasing."""
+    """A lock naming a pid that is PROVABLY gone is self-healing: the next caller reclaims it and proceeds, rather than being wedged forever by a process that crashed without releasing."""
     target = tmp_path / "rt"
     target.mkdir()
     lock = sl._provision_lock_path(target)
@@ -140,11 +119,7 @@ def test_provisioning_busy_error_exits_non_zero_and_says_why(capsys):
 # --------------------------------------------------------------------------- #
 
 def test_lock_actually_serializes_across_two_real_processes(tmp_path):
-    """The load-bearing test. A first, real subprocess takes the lock and
-    holds it briefly; a second, concurrent attempt in THIS process must be
-    refused immediately (not after waiting out the hold) - proving mkdir's
-    atomicity is doing the work, not merely the Python-level branch logic a
-    same-process mock would exercise."""
+    """The load-bearing test."""
     target = tmp_path / "rt"
     target.mkdir()
     marker = tmp_path / "holding.marker"

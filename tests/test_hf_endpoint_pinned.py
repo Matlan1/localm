@@ -1,16 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""S7: HF_ENDPOINT/HF_HUB_ENDPOINT are ambient env vars localm never exposes as
-a setting anywhere (no settings_schema.py key, no CLI flag, no docs). Every
-huggingface_hub call site in pull.py and embedder.py now pins
-endpoint="https://huggingface.co" explicitly, so a stray HF_ENDPOINT or
-HF_HUB_ENDPOINT left over in the user's shell can never silently redirect a
-model pull to a different host.
-
-One test per call site, each asserting the ACTUAL kwarg the real
-huggingface_hub function/constructor received - not merely that the call
-happened. A spy that only counted calls would pass identically whether the
-endpoint kwarg is pinned or left to the env var.
-"""
+"""S7: HF_ENDPOINT/HF_HUB_ENDPOINT are ambient env vars localm never exposes as a setting anywhere (no settings_schema.py key, no CLI flag, no docs)."""
 
 from pathlib import Path
 from types import SimpleNamespace
@@ -55,8 +44,7 @@ def fake_registry(tmp_path, monkeypatch):
 
 
 class TestHfApiConstructorEndpointPinned:
-    """HfApi() is constructed fresh at each call site - endpoint must be
-    pinned on the constructor every time, not just on some calls."""
+    """HfApi() is constructed fresh at each call site - endpoint must be pinned on the constructor every time, not just on some calls."""
 
     def test_hf_file_sha256_pins_endpoint(self, monkeypatch):
         seen = {}
@@ -117,9 +105,7 @@ class TestHfApiConstructorEndpointPinned:
 
 
 class TestHfHubDownloadEndpointPinned:
-    """hf_hub_download() is called at four distinct sites in pull.py, plus
-    embedder.py's own known-embedding-model fetch - endpoint must be pinned
-    on every one."""
+    """hf_hub_download() is called at four distinct sites in pull.py, plus embedder.py's own known-embedding-model fetch - endpoint must be pinned on every one."""
 
     def test_mmproj_autofetch_pins_endpoint(self, monkeypatch, tmp_path):
         """_maybe_fetch_repo_mmproj's own-repo projector download."""
@@ -165,12 +151,7 @@ class TestHfHubDownloadEndpointPinned:
 
     def test_gguf_parts_loop_pins_endpoint_on_download_and_url(
             self, fake_registry, monkeypatch):
-        """_pull_gguf_file's main download loop - covers BOTH hf_hub_download
-        (the transfer itself) and hf_hub_url (the disk-space preflight HEAD
-        target), which sit side by side in the same function. Leaving either
-        one keyed to the ambient env var while the other is pinned would let
-        the preflight check a DIFFERENT host than the one actually fetched
-        from."""
+        """_pull_gguf_file's main download loop - covers BOTH hf_hub_download (the transfer itself) and hf_hub_url (the disk-space preflight HEAD target), which sit side by side in the same function."""
         store, models_dir = fake_registry
         monkeypatch.setattr(mm, "_hf_file_sha256", lambda repo, fn: None)
         download_seen = {}
@@ -197,8 +178,7 @@ class TestHfHubDownloadEndpointPinned:
         assert url_seen.get("endpoint") == _HF_ENDPOINT
 
     def test_embedder_known_model_download_pins_endpoint(self, monkeypatch, tmp_path):
-        """embedder.py's _download_known - the automatic on-demand fetch of a
-        known small embedding GGUF (bge-small etc)."""
+        """embedder.py's _download_known - the automatic on-demand fetch of a known small embedding GGUF (bge-small etc)."""
         seen = {}
 
         def _fake_download(repo, filename, local_dir, **kw):
@@ -221,9 +201,7 @@ class TestHfHubDownloadEndpointPinned:
 
 
 class TestEndpointConstantIsTheRealHfHost:
-    """Guard the literal itself: a typo'd or blank endpoint would still pass
-    every spy assertion above as long as it's SOME string every call site
-    agrees on. Pin the value, not just its uniformity."""
+    """Guard the literal itself: a typo'd or blank endpoint would still pass every spy assertion above as long as it's SOME string every call site agrees on."""
 
     def test_pull_module_constant_is_the_real_hf_host(self):
         from localm.model_manager import pull as pull_mod

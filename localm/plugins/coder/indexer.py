@@ -1,32 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""
-Project map / codebase index.
-
-Scans the working directory at agent startup and produces a compact,
-human+LLM-readable summary of the codebase.  This is injected into the
-agent's context so it knows what files exist and what they contain -
-without having to ``list_dir`` or ``read_file`` every turn.
-
-The map includes:
-  - A file tree (git-ignored paths skipped)
-  - Per-file: path, language, line count
-  - Per-source-file: top-level symbol names (functions, classes, exports)
-
-The whole thing is kept under ~3 000 characters so it doesn't dominate
-context.  When the agent writes/edits a file, the map is refreshed for
-that file only (cheap incremental update).
-
-run_shell can write anything a `command` string cannot resolve to a `path`
-arg ahead of time, so it cannot get the same eager per-file refresh - see
-mark_dirty(). Instead it flags the whole map dirty, and the next read
-(to_context_string / file_count) reconciles it against the filesystem with a
-bounded stat-diff (see _rescan_if_dirty): every currently-tracked file is
-stat()-ed for a moved mtime/size, and - unless build() already left files
-uncounted on a repo bigger than max_files (files_capped) - every directory
-that already has a tracked file is listdir()-ed once for names not yet
-tracked there. No git, no subprocess, no full re-walk - and no cost at all
-when nothing is dirty.
-"""
+"""Project map / codebase index."""
 
 from __future__ import annotations
 
@@ -115,11 +88,7 @@ _MAX_CACHE_AGE_S = 7 * 24 * 3600
 
 
 def _lang_for_ext(ext: str) -> str:
-    """Map a lowercased suffix to its language tag, or "text" / "unknown".
-
-    Shared by build(), refresh_file() and _rescan_if_dirty() so the three
-    per-file passes can never drift out of sync with each other.
-    """
+    """Map a lowercased suffix to its language tag, or 'text' / 'unknown'."""
     return _SYMBOL_LANGS.get(ext) or ("text" if ext in _TEXT_EXTS else "unknown")
 
 
@@ -294,33 +263,7 @@ class ProjectMap:
               deadline_s: float | None = _BUILD_DEADLINE_S,
               on_progress=None,
               cache_path: Path | None = None) -> "ProjectMap":
-        """Scan *root* and summarise up to *max_files* files.
-
-        Walks with ``os.walk`` and PRUNES uninteresting directories in place
-        (hidden, ``_SKIP_DIRS``, gitignored) so it never descends into
-        ``node_modules`` / ``.git`` or - the bug this fixes (CODER-1) - a huge
-        root like ``C:\\``. Candidates are collected with bounded headroom and
-        ONLY that bounded subset is sorted, so a giant tree cannot make startup
-        hang on a full materialise-and-sort. A wall-clock *deadline_s* (None to
-        disable) caps even a pathological walk; *on_progress*, if given, is
-        called with the running candidate count. Either limit sets
-        ``truncated`` so the map (and the model) shows the index is partial.
-
-        When *cache_path* is given, this is ALSO the entry point for the
-        cross-session cache (MEASURED 13-25x faster than a full walk - see
-        load_cached_and_reconcile's docstring): a usable cache is reconciled
-        and returned directly, skipping the walk below entirely, and either
-        way (cache hit or full walk) the result is saved back to *cache_path*
-        before returning, ready for the next call to reconcile from. This is
-        folded into build() itself - rather than persistence.py calling
-        load_cached_and_reconcile() and build() as two separate ProjectMap
-        classmethods - so build() stays the ONE call production code makes
-        into ProjectMap. A second, differently-named classmethod call site
-        would need every existing ``patch("...ProjectMap")`` test in the repo
-        (368 of them, measured) to also configure it, or a MagicMock's default
-        truthy auto-return silently short-circuits the very ``build()`` mock
-        those tests already set up.
-        """
+        """Scan *root* and summarise up to *max_files* files."""
         if cache_path is not None:
             cached = cls.load_cached_and_reconcile(root, cache_path)
             if cached is not None:
@@ -432,12 +375,7 @@ class ProjectMap:
     #  uncommitted edit a git-HEAD check would miss, and costs about the same.
 
     def to_cache_dict(self) -> dict:
-        """Serialisable snapshot for save_cache(). ``root`` is recorded (and
-        checked on load) as a cheap belt-and-suspenders guard against a
-        project-digest collision handing this map to the wrong project - see
-        checkpoint.py's _project_digest, whose 16-hex-char sha256 truncation
-        makes an actual collision astronomically unlikely, but the check
-        costs one string compare either way."""
+        """Serialisable snapshot for save_cache(). ``root`` is recorded (and checked on load) as a cheap belt-and-suspenders guard against a project-digest collision handing this map to the wrong project - see checkpoint.py's _project_digest, whose 16-hex-char sha256 truncation makes an actual collision astron..."""
         return {
             "version": 1,
             "root": str(self.root),
@@ -453,10 +391,7 @@ class ProjectMap:
 
     @classmethod
     def _from_cache_dict(cls, root: Path, data: dict) -> Optional["ProjectMap"]:
-        """Reconstruct a ProjectMap from to_cache_dict()'s shape, or None for
-        anything that does not look right - a corrupt/foreign/future-version
-        cache file must fall back to a full build(), never raise and never be
-        silently trusted (AGENTS rule 5)."""
+        """Reconstruct a ProjectMap from to_cache_dict()'s shape, or None for anything that does not look right - a corrupt/foreign/future-version cache file must fall back to a full build(), never raise and never be silently trusted (AGENTS rule 5)."""
         if not isinstance(data, dict) or data.get("version") != 1:
             return None
         if data.get("root") != str(root):
@@ -478,13 +413,7 @@ class ProjectMap:
     def load_cached_and_reconcile(cls, root: Path, cache_path: Path,
                                   max_age_s: float = _MAX_CACHE_AGE_S,
                                   ) -> Optional["ProjectMap"]:
-        """Load a map cached by save_cache() and bring it up to date against
-        the CURRENT filesystem via the existing _rescan_if_dirty() machinery -
-        NOT a raw cache hit. Returns None (never raises) when there is no
-        usable cache to reconcile: absent, unreadable, wrong shape/version,
-        for a different root, or older than *max_age_s* (see that constant's
-        docstring for why a capped project needs this backstop). The caller's
-        job on None is the same as if caching did not exist: call build()."""
+        """Load a map cached by save_cache() and bring it up to date against the CURRENT filesystem via the existing _rescan_if_dirty() machinery - NOT a raw cache hit."""
         try:
             raw = json.loads(cache_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -506,15 +435,7 @@ class ProjectMap:
         return pm
 
     def save_cache(self, cache_path: Path) -> None:
-        """Best-effort persist for the NEXT session's load_cached_and_reconcile()
-        call. Never raises: a caching failure must not break indexing for the
-        session that hit it (AGENTS rule 5 - and the cost of losing a cache
-        write is one slow session-start next time, not lost data). Written
-        atomically (tmp file + os.replace) so a crash or a second concurrent
-        coder session in the same project (see checkpoint.py's #1051 note -
-        the project-map cache is shared across every session in a project,
-        unlike per-session checkpoints) can never leave a torn/corrupt file
-        for the next reader."""
+        """Best-effort persist for the NEXT session's load_cached_and_reconcile() call."""
         try:
             cache_path.parent.mkdir(parents=True, exist_ok=True)
             tmp_path = cache_path.with_suffix(cache_path.suffix + ".tmp")
@@ -530,10 +451,7 @@ class ProjectMap:
     # ------------------------------------------------------------------
 
     def refresh_file(self, abs_path: Path) -> None:
-        """Re-index one file after a write or edit (or, via _rescan_if_dirty,
-        a run_shell command). Also the removal path: a path that no longer
-        exists is dropped from the map and nothing is re-added; a path not
-        previously tracked is simply added (the filter below is a no-op)."""
+        """Re-index one file after a write or edit (or, via _rescan_if_dirty, a run_shell command)."""
         try:
             rel  = abs_path.relative_to(self.root)
         except ValueError:
@@ -568,46 +486,11 @@ class ProjectMap:
     # ------------------------------------------------------------------
 
     def mark_dirty(self) -> None:
-        """Flag that files may have changed outside the write/edit tools.
-
-        run_shell can write anything - unlike write_file/edit_file it has no
-        `path`-shaped arg a caller can resolve ahead of time - so instead of a
-        per-file refresh_file() call, the whole map is marked dirty. Cheap: one
-        bool, no stat, no subprocess. The actual reconciliation is deferred to
-        the next read (see _rescan_if_dirty), so however many run_shell calls
-        happen before that next read, they cost one rescan, not one each.
-        """
+        """Flag that files may have changed outside the write/edit tools."""
         self.dirty = True
 
     def _rescan_if_dirty(self) -> None:
-        """Reconcile the map against the filesystem if mark_dirty() was called
-        since the last read. Two bounded passes, no subprocess and no full
-        re-walk of the tree:
-
-          1. Stat every currently-tracked file. refresh_file() whatever is
-             gone (deleted) or whose mtime/size moved (edited) - a changed
-             stat is treated as "moved" without re-reading the content first,
-             since reading it IS the refresh. Always runs, regardless of
-             files_capped: a tracked file's own stat is meaningful either way.
-          2. listdir() every directory that has at least one tracked file, for
-             names not already tracked there (created) - exact, unlike a
-             coarser dir-mtime heuristic. SKIPPED when files_capped is True:
-             on a repo bigger than max_files, a known directory can hold many
-             files that were never candidates at all (measured live: 79 of
-             them on this repo's own tree, a 45ms surprise), and listdir
-             cannot tell those apart from one a shell command genuinely just
-             created - so treating every one as "new" would silently grow the
-             map past max_files, a little more with every dirty read. A file
-             inside a brand-new directory (no previously-tracked file at all)
-             is not discovered this way either, capped or not; only a full
-             reindex() picks up either case. Documented, not hidden - the same
-             trade-off _MAX_FILE_COUNT / the build deadline already make
-             elsewhere in this class.
-
-        Runs once per dirty period regardless of how many files actually
-        changed: bounded by O(tracked files [+ tracked dirs, when pass 2
-        runs]), never O(whole tree).
-        """
+        """Reconcile the map against the filesystem if mark_dirty() was called since the last read."""
         if not self.dirty:
             return
         self.dirty = False
@@ -662,10 +545,7 @@ class ProjectMap:
     # ------------------------------------------------------------------
 
     def to_context_string(self) -> str:
-        """
-        Produce the block injected into the agent's system prompt.
-        Capped at _MAX_MAP_CHARS to avoid dominating context.
-        """
+        """Produce the block injected into the agent's system prompt."""
         self._rescan_if_dirty()
         # HOME-ANCHORED, for the same reason as the prompt's identity line: this
         # block lands in the SAME system prompt, so printing the raw root here

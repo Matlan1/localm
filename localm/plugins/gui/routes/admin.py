@@ -1,11 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""GUI local-admin routes: log export, the ComfyUI launcher writer, the native
-app launcher builder, and the directory picker (browse, create folder, rename).
-
-Extracted verbatim from attach_gui(); behavior unchanged. These are local
-filesystem operations gated on CONFIG_READ / CONFIG_WRITE; none need the shared
-``ctx``.
-"""
+"""GUI local-admin routes: log export, the ComfyUI launcher writer, the native app launcher builder, and the directory picker (browse, create folder, rename)."""
 
 from __future__ import annotations
 
@@ -41,20 +35,12 @@ _POSIX_FS_ROOT = "/"
 
 
 def _norm_path_str(s: str) -> str:
-    """Lexically normalize a path string for comparison. PURE STRING WORK - no
-    filesystem access - so it is safe to run on unsanitized caller input before
-    any syscall. normpath collapses separators, "." and lexical ".."; normcase
-    lowercases and maps "/" to "\\" on Windows."""
+    """Lexically normalize a path string for comparison."""
     return os.path.normcase(os.path.normpath(s))
 
 
 def _network_drives_allowed() -> bool:
-    """Whether a mapped network drive (``Z:\\...``) may be treated as an
-    ordinary local folder by the host-filesystem routes below - see
-    config.py's ``allow_network_drives`` comment for the full rationale.
-    Read fresh (one cheap config load) rather than cached, matching every
-    other route in this file that reads config per-request, so a change
-    takes effect on the next call with no restart."""
+    """Whether a mapped network drive (``Z:\\...``) may be treated as an ordinary local folder by the host-filesystem routes below - see config.py's ``allow_network_drives`` comment for the full rationale."""
     from localm.config import load_config
     return bool(load_config().get("allow_network_drives", True))
 
@@ -65,22 +51,7 @@ def register(app: FastAPI, ctx) -> None:
               dependencies=[Depends(require_scope(scopes.CONFIG_WRITE)),
                             Depends(require_fs_host)])
     def export_logs(req: LogExportRequest):
-        """R30: copy every log of this running instance into a user-chosen folder
-        (picked via the GUI's /api/fs/dirs browser). Writes a timestamped
-        subfolder so repeated exports never clobber each other. Logs live under
-        <home>/logs; a few (e.g. comfy-launch.log) sit in the home root, so we
-        sweep both. Returns the counts and the destination path.
-
-        Plain `def`, NOT `async def`: this stats a caller-supplied directory and
-        then runs a whole shutil.copy2 loop, all blocking. Starlette threadpools
-        a sync handler; an async one would hold the event loop for the length of
-        the copy.
-
-        require_fs_host as well as CONFIG_WRITE: `dest` is an arbitrary host
-        directory that this route mkdir(parents=True)s and writes into, and the
-        is_dir check before it makes the 400-vs-200 split a directory-existence
-        oracle for the whole disk. It is the same dial the /api/fs/dirs picker
-        that SUPPLIES `dest` already requires, so the two now agree."""
+        """R30: copy every log of this running instance into a user-chosen folder (picked via the GUI's /api/fs/dirs browser)."""
         import shutil
         import time as _time
         from localm.config import home_dir
@@ -248,30 +219,7 @@ def register(app: FastAPI, ctx) -> None:
     @app.post("/api/app/rebuild-launcher",
               dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
     def rebuild_launcher(force: bool = False):
-        """The GUI form of `localm make-launcher` (localm/cli/maintenance.py).
-        Until now this was CLI-only, and its one real use - refreshing the
-        copied interpreter after a Python upgrade, via --force - is precisely
-        the moment the server (and therefore only the GUI) is running. `force`
-        mirrors the CLI flag exactly. make_launcher() already returns a
-        structured LauncherResult and never raises, so this is a thin
-        passthrough.
-
-        Plain `def`, NOT `async def`: make_launcher() copies the interpreter
-        (+ DLLs) and spawns a self-check subprocess, all blocking - same
-        reasoning as export_logs/create_comfy_launcher above. Starlette
-        threadpools a sync handler instead of stalling the event loop.
-
-        _launcher_build_lock: make_launcher() had exactly ONE caller before
-        this route (a human at a terminal, who cannot double-click a CLI
-        invocation mid-run) and no locking of its own
-        (diff-review-discipline.md item 26). A GUI button CAN be
-        double-clicked, and --force's fast path overwrites the launcher exe
-        + DLLs with no coordination of its own - two overlapping copies to the
-        same destination file is a real race the idempotent force=False path
-        never had. This only serializes IN-PROCESS (concurrent GUI requests);
-        it cannot see a concurrent terminal `localm make-launcher`, which is
-        the same residual risk that already existed (two terminals could
-        already race each other)."""
+        """The GUI form of `localm make-launcher` (localm/cli/maintenance.py)."""
         if not _launcher_build_lock.acquire(blocking=False):
             raise HTTPException(409, "A launcher rebuild is already in progress.")
         try:
@@ -290,35 +238,7 @@ def register(app: FastAPI, ctx) -> None:
     @app.get("/api/fs/dirs", dependencies=[Depends(require_fs_host)])
     def fs_dirs(path: str = "", include_files: bool = False,
                 meta: bool = False, include_hidden: bool = False):
-        """Directory listing for the GUI file/folder picker.
-
-        Requires HOST filesystem access (owner / open mode / a key granted
-        fs_access=host) - a merely config-reading key cannot enumerate the disk.
-
-        An empty path lists drive roots on Windows (filesystem root
-        elsewhere). Only names (and, with ``meta=true``, each child's size +
-        modification time) leave the server - never file contents.
-
-        ``include_files=true`` lists files too (folder-only pickers leave it
-        off). ``meta=true`` additionally returns an ``entries`` list of
-        ``{name, is_dir, size, mtime}`` so the picker can show sizes and dates;
-        the flat ``dirs``/``files`` arrays stay for older callers. A listing over
-        ``_FS_LIST_CAP`` entries is truncated with ``truncated: true``.
-
-        ``include_hidden=false`` (default) skips dot-prefixed entries, same as
-        a plain ``ls``. Dot-DIRECTORIES are where several tools this app's own
-        users interoperate with keep their data (``~/.ollama``, ``~/.lmstudio``,
-        ``~/.cache/huggingface``), so the GUI picker always passes
-        ``include_hidden=true`` and offers its own "Show hidden" toggle
-        client-side (issue #1220) rather than making that data unreachable by
-        browsing. The server-side default stays off for any other caller.
-
-        Plain `def`, NOT `async def`: is_dir/resolve/iterdir/stat all block, and
-        blocking inside an async handler stalls the event loop for every other
-        request. Starlette threadpools a sync handler instead. The path itself
-        stays UNCONSTRAINED (browsing the host disk is the entire point of the
-        picker); only the UNC/device form is refused, before any syscall.
-        """
+        """Directory listing for the GUI file/folder picker."""
         # BEFORE Path()/is_dir(): a UNC path here dials SMB from the event loop.
         # No require_absolute - the picker legitimately accepts "~/..." (expanded
         # below) and relative input.
@@ -410,15 +330,7 @@ def register(app: FastAPI, ctx) -> None:
               dependencies=[Depends(require_scope(scopes.CONFIG_WRITE)),
                             Depends(require_fs_host)])
     def fs_mkdir(req: FsMkdirRequest):
-        """Create a new folder inside a directory the picker is currently
-        browsing. Same gating as the other host-filesystem WRITE routes in this
-        file (export_logs, create_comfy_launcher): CONFIG_WRITE (a state change)
-        plus require_fs_host (the parent, like fs_dirs' own `path`, is an
-        arbitrary caller-chosen host location, not one already on an allowlist).
-
-        Plain `def`, NOT `async def`: is_dir/resolve/mkdir all block, same
-        reasoning as fs_dirs above.
-        """
+        """Create a new folder inside a directory the picker is currently browsing."""
         parent_raw = (req.path or "").strip()
         name = (req.name or "").strip()
         if not parent_raw:
@@ -460,23 +372,7 @@ def register(app: FastAPI, ctx) -> None:
               dependencies=[Depends(require_scope(scopes.CONFIG_WRITE)),
                             Depends(require_fs_host)])
     def fs_rename(req: FsRenameRequest):
-        """Rename a file or folder in place (same parent directory only - this
-        is not a move). Same gating as fs_mkdir above.
-
-        NEVER overwrites an existing target. This has to be checked EXPLICITLY
-        rather than left to Path.rename()'s own error handling: on POSIX,
-        os.rename() SILENTLY REPLACES an existing FILE target (that is
-        rename(2)'s documented behavior) while on Windows it raises
-        FileExistsError - so relying on the exception alone would make this
-        route safe on Windows and silently destructive on Linux/macOS. The
-        pre-check closes the ordinary case; a concurrent racer landing a file
-        at the new name between the check and the rename() call below is the
-        same narrow, accepted window create_comfy_launcher's own
-        check-then-write already has for this key's trust level (full host
-        filesystem access).
-
-        Plain `def`, NOT `async def`: same reasoning as fs_dirs/fs_mkdir above.
-        """
+        """Rename a file or folder in place (same parent directory only - this is not a move)."""
         target_raw = (req.path or "").strip()
         new_name = (req.new_name or "").strip()
         if not target_raw:
@@ -514,22 +410,7 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.get("/api/fs/places", dependencies=[Depends(require_fs_host)])
     def fs_places():
-        """Quick-access locations for the picker's Places rail: the user's home
-        and its standard subfolders (only the ones that exist), plus drive roots
-        on Windows (the filesystem root elsewhere). Requires HOST filesystem
-        access, same as /api/fs/dirs.
-
-        Every path is derived from ``Path.home()`` - never hardcoded - so a
-        relocated profile still resolves, and a subfolder that is absent (a
-        localized profile, a machine with no Downloads) is simply omitted rather
-        than guessed.
-
-        Plain `def` for the same reason as fs_dirs: probing A-Z drive roots calls
-        is_dir() on each, and a mapped-but-disconnected network drive blocks. No
-        caller input reaches it, so there is nothing to REJECT here - but a
-        disallowed network drive is still omitted from the listing, same as
-        fs_dirs' own empty-path root listing.
-        """
+        """Quick-access locations for the picker's Places rail: the user's home and its standard subfolders (only the ones that exist), plus drive roots on Windows (the filesystem root elsewhere)."""
         places = []
         try:
             home = Path.home()

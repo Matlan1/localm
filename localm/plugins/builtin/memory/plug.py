@@ -1,32 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Memory plugin: durable chat memory (extracted from the chat plugin).
-
-A small structured store of durable facts about the user (localm/memory), recalled
-by recency + importance + relevance and injected server-side into the system
-message by the inlet hook, plus unattended background consolidation that grows the
-store after a turn. Owns:
-
-  GET/PUT/POST/PATCH/DELETE /api/memory[...]   - the memory manager surface
-  POST /api/memory/consolidate                 - manual "distil now" trigger
-  GET /api/memory/forgotten                    - list archived/forgotten records
-  POST /api/memory/forgotten/{id}/restore       - recover one back into the store
-
-This is an OPT-IN plugin (off by default): install + enable it to turn memory on.
-Disabling it removes the recall + consolidation hooks and 404s the routes, so chat
-runs fine without it - the only effect of "memory off" is no recall and no growth.
-
-Privacy: memory is FULLY OFF in privacy mode - no recall AND no writes. This is a
-stronger contract than the rest of the app ("no new traces"): in privacy mode the
-inlet injects nothing at all, so past-session facts never reach the model. Every
-write (add/edit/delete/consolidation/migration) is gated too. The two knobs
-`memory_enabled` (recall) and `memory_auto_consolidate` (auto-grow) are the finer
-controls beneath the plugin's own enable/disable master switch.
-
-Chat memory is OWNER-scoped in v1: the kernel chat pipeline carries no principal
-and localm is single-user, so all chat turns share the "owner" namespace (matching
-the old global chat-memory.md). The memory library supports full (principal, agent,
-scope_key) isolation, exercised by the coder and the library tests.
-"""
+"""Memory plugin: durable chat memory (extracted from the chat plugin)."""
 
 from __future__ import annotations
 
@@ -57,8 +30,7 @@ _HOST = None
 
 
 def _live_engine():
-    """The inference engine, resolved LIVE via the stashed host on every call - see
-    _HOST above. None when no plugin host is wired, or no engine is currently live."""
+    """The inference engine, resolved LIVE via the stashed host on every call - see _HOST above."""
     return _HOST.engine() if _HOST is not None else None
 
 
@@ -72,18 +44,7 @@ def _chat_store(principal: str | None = None):
 
 
 def _ctx_principal(ctx) -> str | None:
-    """The memory-namespace principal for a chat-pipeline ctx, mirroring
-    memory_principal() on the request-based paths: an ADMIN-scoped (owner) caller
-    collapses to the shared "owner" namespace (None -> principal_of maps to
-    "owner"); a non-owner scoped key keeps its own key-hash namespace.
-
-    REG-464/AUDIT-MED-14: every WRITE path (memory_get/put/append/patch/delete +
-    memory_consolidate) and the auto-consolidate OUTLET already collapse
-    ADMIN->owner, so the recall INLET MUST resolve the SAME namespace here. Reading
-    the raw ctx.principal (the key hash) instead means, in protected mode, the
-    owner writes into "owner" but recall reads the per-key-hash namespace and
-    injects NONE of the owner's own saved memories. Tolerates a missing/None ctx
-    (a pipeline-less test call): getattr defaults keep it owner-scoped."""
+    """The memory-namespace principal for a chat-pipeline ctx, mirroring memory_principal() on the request-based paths: an ADMIN-scoped (owner) caller collapses to the shared 'owner' namespace (None -> principal_of maps to 'owner'); a non-owner scoped key keeps its own key-hash namespace."""
     from localm import scopes as _scopes
     if _scopes.ADMIN in (getattr(ctx, "scopes", ()) or ()):
         return None
@@ -91,23 +52,18 @@ def _ctx_principal(ctx) -> str | None:
 
 
 def _request_principal(request: Request | None) -> str | None:
-    """MEMORY-1: the principal-resolution half of the request/store snippet
-    every /api/memory* route repeated."""
+    """MEMORY-1: the principal-resolution half of the request/store snippet every /api/memory* route repeated."""
     from localm.inference.http_server import memory_principal
     return memory_principal(request) if request is not None else None
 
 
 def _request_store(request: Request | None):
-    """MEMORY-1: the principal-resolution + store-open snippet every mutating
-    /api/memory* route repeated verbatim."""
+    """MEMORY-1: the principal-resolution + store-open snippet every mutating /api/memory* route repeated verbatim."""
     return _chat_store(_request_principal(request))
 
 
 def _require_writable() -> None:
-    """MEMORY-2: the '_persist_enabled() guard -> 403' shape every mutating
-    /api/memory* route repeated, with wording that had drifted between call
-    sites - this deliberately picks memory_put's more helpful wording for all
-    five (an intentional behavior change, not an oversight)."""
+    """MEMORY-2: the '_persist_enabled() guard -> 403' shape every mutating /api/memory* route repeated, with wording that had drifted between call sites - this deliberately picks memory_put's more helpful wording for all five (an intentional behavior change, not an oversight)."""
     if not _persist_enabled():
         raise HTTPException(
             403, "Memory writes are off in privacy mode (no new traces). "
@@ -137,9 +93,7 @@ def _home() -> Path:
 
 
 def _persist_enabled() -> bool:
-    """Memory recall AND writes are off in privacy mode (the default). Unlike the
-    rest of the app, memory treats privacy as FULLY off: this gates recall too, so
-    no past facts are injected in privacy mode (not just "no new traces")."""
+    """Memory recall AND writes are off in privacy mode (the default)."""
     from localm.audit import SessionMode, effective_mode
     return effective_mode("chat") != SessionMode.PRIVACY
 
@@ -154,10 +108,7 @@ def _recall_enabled() -> bool:
 
 
 def _recall_in_privacy(surface: str) -> bool:
-    """Whether the user opted into READ-ONLY memory recall in privacy mode for
-    *surface* ('chat' or 'coder'). Off by default so privacy stays fully inert; the
-    master switch AND the per-surface switch must both be on. Never permits a
-    WRITE - only reading existing memories into the prompt."""
+    """Whether the user opted into READ-ONLY memory recall in privacy mode for *surface* ('chat' or 'coder')."""
     try:
         from localm.config import load_config
         cfg = load_config()
@@ -174,10 +125,7 @@ def _memory_root() -> Path:
 
 
 def _embed_fn():
-    """The embedding callable memory uses for semantic (vector) recall, or None
-    when no embedding model is available (recall + consolidation then fall back to
-    lexical BM25). Cheap after the first call - the embedder is a cached, shared
-    singleton (localm.inference.embedder)."""
+    """The embedding callable memory uses for semantic (vector) recall, or None when no embedding model is available (recall + consolidation then fall back to lexical BM25)."""
     try:
         from localm.inference.embedder import get_embedder
         emb = get_embedder()
@@ -189,23 +137,7 @@ def _embed_fn():
 
 
 async def _off_loop(fn):
-    """Run a blocking store operation OFF the server event loop, mapping a
-    contended namespace to 409.
-
-    CHK-MEM-XPROC: memory writes now take a cross-process lock, so another
-    process (a `localm memory ...` command, another instance) can legitimately
-    hold the namespace. That is a normal, recoverable conflict - the store
-    refused and changed NOTHING - so it surfaces as 409 with the holder named,
-    exactly as the rag routes surface the same error, rather than as a 500 that
-    reads like a crash.
-
-    BUG #648: a memory write resolves the shared embedder (via _embed_fn ->
-    get_embedder), which can trigger a VRAM swap (vram.evict_chat_for_embedder).
-    That swap must NOT run on the event-loop thread - it blocks on a coroutine the
-    loop itself has to execute, so doing it inline froze the whole server for up to
-    300s. Offloading to the default executor keeps the loop free (and lets the
-    eviction actually complete off-loop) while the store write / embedder load runs.
-    """
+    """Run a blocking store operation OFF the server event loop, mapping a contended namespace to 409."""
     from localm.rag.collection_lock import CollectionLockedError
     try:
         return await asyncio.get_running_loop().run_in_executor(None, fn)
@@ -218,13 +150,7 @@ def _legacy_memory_file() -> Path:
 
 
 def _read_memory() -> str:
-    """The legacy flat chat-memory.md text (migration source).
-
-    Returns "" ONLY when the file is genuinely ABSENT. Raises OSError when it
-    EXISTS but cannot be read (locked / IO error): the caller MUST distinguish
-    the two. Collapsing an unreadable file into "" let ``_migrate_legacy`` write
-    its permanent ``.legacy-imported`` marker having imported nothing - a false
-    success that also dropped the legacy facts from recall (AGENTS.md rule 5)."""
+    """The legacy flat chat-memory.md text (migration source)."""
     p = _legacy_memory_file()
     if not p.is_file():
         return ""
@@ -239,8 +165,7 @@ def _read_memory() -> str:
 
 
 def _strip_bullet(line: str) -> str:
-    """Strip any leading list markers (a model may emit '- ', '* ', or even a
-    nested '- - ') and surrounding whitespace, leaving the bare fact."""
+    """Strip any leading list markers (a model may emit '- ', '* ', or even a nested '- - ') and surrounding whitespace, leaving the bare fact."""
     return re.sub(r"^[\s\-*]+", "", line).strip()
 
 
@@ -251,19 +176,7 @@ def _legacy_bullets() -> list:
 
 
 def _migrate_legacy(store) -> None:
-    """Import the legacy flat chat-memory.md into the structured store ONCE.
-
-    Gated on the chat session mode (privacy skips - a migration materialises new
-    durable records, which is a write) and on a per-namespace marker file so it
-    never re-imports. Best-effort: a failure is logged, never fatal, and never
-    reported as a success it did not perform (RULE 5).
-
-    CHK-MEM-LOCK: this batches several ``add(..., save=False)`` calls into ONE
-    save, so it must hold the namespace lock across the WHOLE batch (a reload +
-    loop + one final save), the same way rag's ``_add_paths_locked`` reloads once
-    before its per-file loop rather than once per file - the per-call add()/
-    delete() lock is not enough here, it would only serialise each individual
-    append, not the read-then-decide-then-write-once shape of a batch."""
+    """Import the legacy flat chat-memory.md into the structured store ONCE."""
     marker = store.path.with_suffix(".legacy-imported")
     if marker.exists() or not _persist_enabled():
         return
@@ -310,9 +223,7 @@ def _item(rec) -> dict:
 
 
 def _correction_item(c, target) -> dict:
-    """A pending supersede proposal rendered for the memory modal: what it wants to
-    change and how stale the targeted fact is (its last-confirmed timestamp), so the
-    user can accept or reject it (memory-audit 2026-07-02 [9])."""
+    """A pending supersede proposal rendered for the memory modal: what it wants to change and how stale the targeted fact is (its last-confirmed timestamp), so the user can accept or reject it (memory-audit 2026-07-02 [9])."""
     return {"id": c.id, "action": c.action, "proposed_text": c.proposed_text,
             "target_id": c.target_id, "target_text": c.target_text,
             "confidence": c.confidence, "created": c.created,
@@ -320,8 +231,7 @@ def _correction_item(c, target) -> dict:
 
 
 def _corrections_payload(store) -> list:
-    """Pending corrections for GET /api/memory, each paired with its (still-present)
-    target record so the modal can show the was/now and the fact's staleness."""
+    """Pending corrections for GET /api/memory, each paired with its (still-present) target record so the modal can show the was/now and the fact's staleness."""
     corrs = store.corrections()                 # already filtered to live targets
     by_id = {r.id: r for r in store.all()}
     return [_correction_item(c, by_id.get(c.target_id)) for c in corrs]
@@ -335,9 +245,7 @@ def _forgotten_item(entry: dict) -> dict:
 
 
 def _rendered_text(store) -> str:
-    """The store's facts as a markdown bullet list (what the memory modal textarea
-    shows). Falls back to the legacy flat file when the structured store is still
-    empty so existing memory stays visible."""
+    """The store's facts as a markdown bullet list (what the memory modal textarea shows)."""
     recs = store.all()
     if recs:
         return "\n".join(f"- {r.text}" for r in recs)
@@ -373,15 +281,7 @@ async def memory_get(request: Request = None):
 
 @_router.put("/api/memory")
 async def memory_put(req: MemoryUpdate, request: Request = None):
-    """Bulk-edit: the modal textarea is the authoritative user memory. DIFF-AWARE:
-    a line matching an existing record's text keeps that record as-is; only new
-    lines become new user records; omitted lines are deletes.
-
-    CHK-MEM-LOCK: the existing/records diff below is a snapshot-then-decide-then-
-    write sequence, same shape as consolidation's - a concurrent POST
-    /api/memory/append (e.g. a second browser tab) landing between the snapshot
-    and store.replace() would be silently discarded by replace()'s whole-namespace
-    overwrite if this route didn't hold the lock across the whole thing."""
+    """Bulk-edit: the modal textarea is the authoritative user memory."""
     _require_writable()
     from localm.memory import MAX_TEXT_LEN, N_MAX, MemoryRecord
     if len(req.text) > _MEMORY_MAX:
@@ -483,30 +383,21 @@ async def memory_delete(mem_id: str, request: Request = None):
 
 @_router.post("/api/memory/corrections/{cid}/accept")
 async def memory_correction_accept(cid: str, request: Request = None):
-    """Apply a proposed supersession of a trusted fact: replace its text (or delete
-    it), archiving the old value to the recoverable .forgotten sidecar. The user is
-    the one deciding - a synth candidate never auto-overwrites a user fact ([9])."""
+    """Apply a proposed supersession of a trusted fact: replace its text (or delete it), archiving the old value to the recoverable .forgotten sidecar."""
     # Offloaded (BUG #648): resolve_correction -> _embed_fn -> get_embedder off-loop.
     return await _off_loop(lambda: _apply_correction(cid, True, request))
 
 
 @_router.post("/api/memory/corrections/{cid}/reject")
 async def memory_correction_reject(cid: str, request: Request = None):
-    """Dismiss a proposed supersession: keep the fact as-is, reset its
-    last-confirmed staleness, and remember the dismissal so consolidation does not
-    re-propose the same change on the next pass."""
+    """Dismiss a proposed supersession: keep the fact as-is, reset its last-confirmed staleness, and remember the dismissal so consolidation does not re-propose the same change on the next pass."""
     # Offloaded (BUG #648): resolve_correction -> _embed_fn -> get_embedder off-loop.
     return await _off_loop(lambda: _apply_correction(cid, False, request))
 
 
 @_router.get("/api/memory/forgotten")
 async def memory_forgotten(request: Request = None):
-    """List archived (forgotten) records for the caller's own namespace (LM-DA-024):
-    ``_archive_forgotten()`` has always written a recoverable archive, but nothing
-    read it back until now - recovery was filesystem-only. Read-only (no side
-    effect), so available in privacy mode too, matching how memory_get already
-    returns existing records regardless of mode - nothing here is a NEW trace, it is
-    what was already removed."""
+    """List archived (forgotten) records for the caller's own namespace (LM-DA-024): ``_archive_forgotten()`` has always written a recoverable archive, but nothing read it back until now - recovery was filesystem-only."""
     store = _request_store(request)
     return {"items": [_forgotten_item(e) for e in store.forgotten()]}
 
@@ -542,8 +433,7 @@ def _apply_correction(cid: str, accept: bool, request):
 
 @_router.post("/api/memory/consolidate")
 async def memory_consolidate(request: Request = None):
-    """Manually distil durable facts from recent sessions into the store (the
-    opt-in consolidation trigger). Gated on privacy; needs a loaded model."""
+    """Manually distil durable facts from recent sessions into the store (the opt-in consolidation trigger)."""
     _require_writable()
     principal = _request_principal(request)
 
@@ -592,9 +482,7 @@ async def memory_consolidate(request: Request = None):
 # path is gated on _persist_enabled().
 
 def _recent_sessions_text(max_chars: int = 8000) -> str:
-    """User+assistant content from the newest session JSONL logs (written only in
-    log/full mode), newest file first, capped to *max_chars*. Empty when none.
-    Prioritises the most recent turns within each file."""
+    """User+assistant content from the newest session JSONL logs (written only in log/full mode), newest file first, capped to *max_chars*."""
     sdir = _home() / "sessions"
     if not sdir.is_dir():
         return ""
@@ -648,16 +536,7 @@ def _recent_sessions_text(max_chars: int = 8000) -> str:
 
 def synthesize_memory(complete, *, principal: str | None = None, max_facts: int = 12,
                       max_chars: int = 8000) -> dict:
-    """Distil durable user facts from recent sessions into the structured store.
-
-    *complete* is an injected ``(prompt: str) -> str`` model call (the jobs runner
-    binds it to the engine; tests pass a fake). Delegates to the memory
-    consolidation loop (ADD/UPDATE/DELETE/NO_OP + decay).
-
-    Privacy: gated on _persist_enabled(); in privacy mode returns
-    ``{"status": "skipped", "reason": "privacy", "added": 0}`` and NEVER calls the
-    model. Returns ``{status, added, updated, deleted, facts}``, the shape the jobs
-    "memory" runner consumes."""
+    """Distil durable user facts from recent sessions into the structured store."""
     if not _persist_enabled():
         return {"status": "skipped", "reason": "privacy", "added": 0}
     sessions = _recent_sessions_text(max_chars=max_chars)
@@ -710,9 +589,7 @@ def synthesize_memory(complete, *, principal: str | None = None, max_facts: int 
 
 
 def _episodic_watermark_path(store) -> Path:
-    """Sidecar next to the episodic store holding the newest session mtime already
-    turned into an episode, so a processed session is never re-summarised
-    (memory-audit 2026-07-02 [14])."""
+    """Sidecar next to the episodic store holding the newest session mtime already turned into an episode, so a processed session is never re-summarised (memory-audit 2026-07-02 [14])."""
     p = store.path
     return p.with_name(p.stem + ".episodic-watermark.json")
 
@@ -726,13 +603,7 @@ def _read_episodic_watermark(store) -> float:
 
 
 def _read_episodic_stems(store) -> set:
-    """The session stems already summarised AT EXACTLY last_mtime. mtime alone is
-    not a unique cursor: a bulk LOCALM_HOME restore, or a coarse-granularity volume
-    (FAT/exFAT/SMB, 1-2s mtime resolution), gives many files one identical mtime, so
-    a strict `st_mtime > watermark` filter would permanently skip the tied files the
-    per-run cap left unprocessed. Pairing the watermark mtime with the stems already
-    done at that mtime makes the cursor tie-safe (REG-591): a tied file is re-picked
-    iff its stem is not yet recorded. Absent/old sidecar -> empty set."""
+    """The session stems already summarised AT EXACTLY last_mtime. mtime alone is not a unique cursor: a bulk LOCALM_HOME restore, or a coarse-granularity volume (FAT/exFAT/SMB, 1-2s mtime resolution), gives many files one identical mtime, so a strict `st_mtime > watermark` filter would permanently skip th..."""
     try:
         data = json.loads(_episodic_watermark_path(store).read_text(encoding="utf-8"))
         stems = data.get("stems", [])
@@ -754,9 +625,7 @@ def _write_episodic_watermark(store, mtime: float, stems=()) -> None:
 
 
 def _session_text(path: Path, max_chars: int = 6000) -> str:
-    """User+assistant content of ONE session file, chronological, capped (keeping the
-    most recent turns). Assistant reasoning (<think>) is stripped so a summary never
-    ingests scratchpad. Empty when the file has no usable turns."""
+    """User+assistant content of ONE session file, chronological, capped (keeping the most recent turns)."""
     try:
         raw = path.read_text(encoding="utf-8")
     except OSError as e:
@@ -809,32 +678,7 @@ EPISODIC_SETTLE_SECONDS = 900.0
 
 
 def _store_episodes(store, complete, embed_fn=_UNSET, now=None) -> int:
-    """Store one EPISODIC summary PER NEW session file (past the watermark), so N
-    sessions become N episodes instead of collapsing into <=1 blob summary
-    (memory-audit 2026-07-02 [14]). Each episode is tagged with its source session id
-    + mtime. Deduped against existing episodics (0.85). Best-effort; the caller
-    confirmed writes are allowed (privacy). Returns the number of episodes stored.
-
-    BOUNDED + SETTLED + ONE-PER-SESSION (REG-591):
-      - at most EPISODIC_MAX_PER_RUN real summaries per run, so a large first-pass
-        backlog drains over several runs instead of one unbounded serial burst;
-      - only SETTLED sessions (idle >= EPISODIC_SETTLE_SECONDS) are summarised, so a
-        conversation is never distilled mid-flight from partial content;
-      - the watermark advances only past a file actually processed (summarised, or
-        seen-but-empty), never past an unsettled file nor past files the cap deferred;
-      - a session that is RESUMED (grows after being summarised, so its mtime
-        re-crosses the watermark) SUPERSEDES its own earlier episode via the
-        meta["session"] stem tag, rather than accumulating a second record for the
-        same conversation. Net: exactly ONE episode per session stem, always the
-        fullest summary of it.
-
-    *embed_fn*: reuse an already-resolved embedder (synthesize_memory calls this
-    right after run_consolidation, in the same round, so it passes its own
-    embed_fn instead of this function re-resolving get_embedder() a second
-    time). Omit to resolve independently (existing test callers).
-
-    *now*: injected wall-clock for the settle check (defaults to time.time());
-    tests pass an explicit value for determinism."""
+    """Store one EPISODIC summary PER NEW session file (past the watermark), so N sessions become N episodes instead of collapsing into <=1 blob summary (memory-audit 2026-07-02 [14])."""
     ef = _embed_fn() if embed_fn is _UNSET else embed_fn
     try:
         import time as _time
@@ -878,9 +722,7 @@ def _store_episodes(store, complete, embed_fn=_UNSET, now=None) -> int:
                 prior_by_stem.setdefault(_meta["session"], []).append(_r)
 
         def _advance(mt: float, stem: str) -> None:
-            """Move the (mtime, stems-at-mtime) cursor past a processed file. A
-            file that ties `newest` ADDS its stem; a strictly-newer file resets the
-            stem set to just itself (nothing else at that new mtime is done yet)."""
+            """Move the (mtime, stems-at-mtime) cursor past a processed file."""
             nonlocal newest, newest_stems
             if mt > newest:
                 newest, newest_stems = mt, {stem}
@@ -985,8 +827,7 @@ def _auto_marker() -> "Path":
 
 
 def _auto_last_run() -> float:
-    """Epoch of the last auto-consolidation, persisted so the debounce survives a
-    restart. 0.0 when never run or unreadable (treated as 'due')."""
+    """Epoch of the last auto-consolidation, persisted so the debounce survives a restart. 0.0 when never run or unreadable (treated as 'due')."""
     try:
         return float(_auto_marker().read_text(encoding="utf-8").strip())
     except (OSError, ValueError):
@@ -1006,9 +847,7 @@ def _auto_stamp(now: float) -> None:
 
 
 def _auto_consolidate_bg(principal: str | None = None) -> None:
-    """Run one consolidation pass in the background, binding the model to the
-    stashed engine. Never raises (a daemon thread); clears the in-progress flag and
-    stamps the marker when done."""
+    """Run one consolidation pass in the background, binding the model to the stashed engine."""
     global _auto_running
     from localm.debuglog import logger
     try:
@@ -1043,10 +882,7 @@ def _auto_consolidate_bg(principal: str | None = None) -> None:
 
 
 def _maybe_auto_consolidate(principal: str | None = None) -> None:
-    """Best-effort trigger for the debounced background consolidation. Cheap when
-    not due (a timestamp compare under a lock); spawns at most one daemon thread.
-    Gated on config + privacy + model-loaded so it never runs a write the mode
-    forbids and never blocks the turn."""
+    """Best-effort trigger for the debounced background consolidation."""
     global _auto_running
     try:
         from localm.config import load_config
@@ -1113,13 +949,7 @@ def _user_msg_text(m) -> str:
 
 
 def _recall_query(messages, *, max_chars: int = 400, max_user_turns: int = 3) -> str:
-    """The recall QUERY: the most recent user message plus a short window of prior
-    user turns, so an anaphoric follow-up ("yes, do that") still carries the earlier
-    turn's topic (memory-audit 2026-07-02 [58]: a last-message-only query recalls
-    poorly and, with the [10] relevance gate, would wrongly fall silent). Newest-first
-    and truncated to max_chars so the latest turn is never dropped. Only steers
-    relevance ranking + the eligibility gate; recalled memories are neutralised before
-    injection."""
+    """The recall QUERY: the most recent user message plus a short window of prior user turns, so an anaphoric follow-up ('yes, do that') still carries the earlier turn's topic (memory-audit 2026-07-02 [58]: a last-message-only query recalls poorly and, with the [10] relevance gate, would wrongly fall sile..."""
     texts = []
     for m in reversed(messages):
         if m.get("role") != "user":
@@ -1135,9 +965,7 @@ def _recall_query(messages, *, max_chars: int = 400, max_user_turns: int = 3) ->
 
 
 def _memory_outlet(text, messages, ctx):
-    """After a completed turn, opportunistically grow the memory in the background
-    (debounced). Side-effect only: returns the text unchanged. Any failure is
-    contained so it can never affect the reply."""
+    """After a completed turn, opportunistically grow the memory in the background (debounced)."""
     try:
         # Owner (ADMIN scope) collapses to the shared "owner" namespace, matching
         # memory_principal on the request-based paths and the recall inlet
@@ -1151,14 +979,7 @@ def _memory_outlet(text, messages, ctx):
 
 
 def _stash_memory_used(ctx, records, diag) -> None:
-    """Record, in the per-request ``ctx.state``, WHICH memories the inlet injected
-    and WHY recall degraded (F11 observability), so the chat route can surface a
-    "used N memories" affordance + the degrade reason in a response header. Only
-    metadata + the already-injected memory text is stashed (in-memory, per request,
-    returned to the same authenticated user) - never written to any log; the debug
-    line carries the COUNT and reason only, no memory content (privacy). Best-effort
-    and side-effect free: a stash failure never affects the reply. No-op without a
-    ctx (e.g. a pipeline-less test call)."""
+    """Record, in the per-request ``ctx.state``, WHICH memories the inlet injected and WHY recall degraded (F11 observability), so the chat route can surface a 'used N memories' affordance + the degrade reason in a response header."""
     if ctx is None:
         return
     try:
@@ -1191,11 +1012,7 @@ def _stash_memory_used(ctx, records, diag) -> None:
 
 
 def _memory_inlet(messages, ctx):
-    """Inject recalled memories into the system message. Off when the `memory_enabled`
-    recall knob is off. In privacy mode it is off too UNLESS the user opted into
-    read-only recall for chat (`memory_recall_in_privacy` + ..._chat) - and even
-    then it only READS: no reinforcement, no migration, no write. Best-effort: any
-    failure is logged at debug and skipped (the pipeline also isolates it)."""
+    """Inject recalled memories into the system message."""
     if ctx is not None and ctx.state.get("client_id") == "coder":
         return None
     if not _recall_enabled():
@@ -1245,26 +1062,7 @@ def _memory_inlet(messages, ctx):
 
 
 async def _memory_inlet_hook(messages, ctx):
-    """The REGISTERED inlet hook: runs _memory_inlet OFF the event loop.
-
-    _memory_inlet's body is blocking, on the highest-frequency path there is (every
-    chat turn): it _load()s the records JSONL AND the .vec.json embedding sidecar,
-    re-_save()s both under the namespace lock when reinforcing (store.py's
-    recall(reinforce=True)), and resolves the shared embedder. chat.py awaits
-    run_inlet, which calls a hook INLINE (chat_pipeline.py), so a sync hook does all
-    of that ON the uvicorn event loop - multiple MB of JSON parsed and rewritten per
-    turn once embeddings are on, stalling every other request (REG-520).
-
-    It also fixes a real degradation, not just latency: _embed_fn -> get_embedder can
-    trigger a VRAM swap, and BUG #648 (vram.py) makes that swap SKIP the guarded
-    chat-model eviction when it detects it is running on the loop thread - because
-    completing it there would deadlock. So on-loop, the embedder loaded alongside the
-    resident chat model ("may be tight on VRAM") with a warning saying this call
-    "should be offloaded to an executor". Off-loop, the eviction can actually run.
-
-    Kept as a thin wrapper so _memory_inlet stays sync and directly unit-testable;
-    run_inlet awaits an awaitable hook, so nothing else changes.
-    """
+    """The REGISTERED inlet hook: runs _memory_inlet OFF the event loop."""
     return await _off_loop(lambda: _memory_inlet(messages, ctx))
 
 

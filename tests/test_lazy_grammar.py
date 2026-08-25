@@ -1,12 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Lazy (text-or-tool) grammar plumbing, end to end.
-
-The lazy grammar leaves generation unconstrained until the output matches a
-trigger pattern (e.g. <tool_call>), then the GBNF grammar enforces from that
-point - so thinking models think freely and a started tool call must be valid
-(REC-CODER-GRAMMAR, decided + live-verified 2026-07-02). These tests pin the
-sampler-chain selection, the never-silently-strict fallbacks, and the server
-API contract; the @integration test proves activation on a real model."""
+"""Lazy (text-or-tool) grammar plumbing, end to end."""
 
 from unittest.mock import MagicMock, patch
 
@@ -64,10 +57,7 @@ class TestBuildSamplerLazySelection:
         mock_api.llama_sampler_init_grammar.assert_not_called()
 
     def test_refusal_frees_the_chain_on_both_arms(self):
-        """A refusal must not leak the native sampler chain it had already
-        allocated. Both InvalidGrammarError arms in _build_sampler free it before
-        raising; these two must match, or a client retrying a lazy request
-        against an old build leaks one chain per attempt."""
+        """A refusal must not leak the native sampler chain it had already allocated."""
         for kwargs in ({}, {"grammar_triggers": ["p"]}):
             mock_api = self._mock_api(lazy_supported=not kwargs)
             mock_api.llama_sampler_chain_init.return_value = 4242
@@ -78,11 +68,7 @@ class TestBuildSamplerLazySelection:
             mock_api.llama_sampler_free.assert_called_once_with(4242)
 
     def test_the_three_grammar_messages_are_mutually_non_containing(self):
-        """``coder/agent/context.py`` routes a refusal by SUBSTRING match against
-        these strings, testing the lazy one first. If any were a substring of
-        another, a no-triggers refusal (a caller bug) would latch
-        _lazy_grammar_confirmed_unsupported and disable trigger-gated tool calls
-        for the whole session, blaming the backend."""
+        """``coder/agent/context.py`` routes a refusal by SUBSTRING match against these strings, testing the lazy one first."""
         from localm.inference.backends.base import GRAMMAR_UNSUPPORTED_MESSAGE
         msgs = [GRAMMAR_UNSUPPORTED_MESSAGE, GRAMMAR_LAZY_UNSUPPORTED_MESSAGE,
                 GRAMMAR_LAZY_NO_TRIGGERS_MESSAGE]
@@ -172,10 +158,7 @@ class TestCoderBodyForwardsLazyFields:
 
 
 class TestSupportsGrammarIsLocalmOnly:
-    """Grammar kwargs are sent BY DEFAULT now, so supports_grammar must mean
-    what its comment always claimed: OUR server only. The old URL blacklist
-    mislabelled every third-party OpenAI-compatible server as grammar-capable
-    (unknown body fields can 400 there)."""
+    """Grammar kwargs are sent BY DEFAULT now, so supports_grammar must mean what its comment always claimed: OUR server only."""
 
     def test_localm_backend_supports_grammar(self):
         from localm.plugins.coder.backends.http import make_localm_backend

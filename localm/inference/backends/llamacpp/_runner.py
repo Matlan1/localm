@@ -1,108 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Subprocess isolation for the whole GGUF model lifecycle (load, generate,
-tokenize, grammar-check, unload) - the fix for a confirmed native-abort crash
-in ``llama_load_model_from_file``.
-
-WHY the whole lifecycle, not just the load: a ``ctypes.c_void_p`` model/context
-handle is meaningless outside the process that created it (no IPC-safe handle
-export exists for it, and the underlying CUDA/HIP context is bound to its
-owning process), and ``LlamaCpp._prefill_fresh_context`` calls the same
-abort-prone native call class again on every context-window GROW (a common
-event, not an edge case) - so isolating only the initial load would leave the
-identical crash reachable on the very next grow of a model that "loaded
-successfully". The model's whole lifecycle therefore runs in a disposable
-child process; a native abort there kills only that child, never the server.
-
-This mirrors ``localm/voice.py``'s proven design for the identical class of
-problem (an uncatchable native abort in faster-whisper/ctranslate2) - a
-long-lived ``multiprocessing.get_context("spawn")`` worker, ``Queue``s for
-request/response, ``proc.is_alive()``/``exitcode`` for crash detection, and a
-tagged error envelope instead of shipping native exception objects across the
-boundary - proven on Windows (this project's primary platform) with its own
-crash-containment test suite. The one structural difference: this runner is
-INSTANCE-scoped (one ``ModelRunner`` per loaded ``GgufBackend``), not a global
-singleton, since multiple GGUF models can be loaded simultaneously (the
-existing VRAM-based eviction/LRU in http_server.py). It also needs to stream
-(voice.py is one-shot request/response) and support mid-stream cancellation.
-
-Cancellation needs NO changes to llama.py (verified during design):
-- Load cancellation already works via ``LlamaCpp(cancel_event=...)``, polled
-  by llama.cpp's own native progress callback - the child just creates its
-  OWN local ``threading.Event`` for this and a control-thread ``.set()``s it
-  on a ``cancel_load`` signal relayed from the parent over ``ctrl_q``.
-- Stream cancellation already works via plain Python generator ``.close()``
-  (``GeneratorExit`` unwinds ``LlamaCpp._generate``'s lock cleanly) - the
-  child's own dispatch loop does this locally now that the generator lives
-  there instead of in the parent.
-
-Protocol (three ``multiprocessing.Queue``s, tagged tuples, mirroring the
-tagged-envelope style of ``voice.py`` rather than shipping exception objects):
-
-``req_q`` (parent -> child), one command processed at a time:
-    ("load", {model_path, mmproj_path, n_ctx, n_gpu_layers, n_ctx_max, n_ctx_grow,
-              vram_overhead_bytes, gpu_split_ratios, n_cpu_moe})
-    ("chat_stream", {messages, max_tokens, temperature, top_p, top_k,
-                      repeat_penalty, grammar, grammar_lazy, grammar_triggers, seed})
-    ("count_tokens", text)
-    ("count_messages_tokens", messages)
-    ("check_grammar", grammar)
-    ("shutdown", None)
-
-``resp_q`` (child -> parent):
-    ("ok", value)                        - success (value shape depends on command)
-    ("cancelled", message)                - load() aborted via cancel_load
-    ("error", message[, kind])            - a clean, expected failure; kind is
-                                             an optional typed-exception tag,
-                                             re-raised as that type by the parent.
-                                             Recognised: "InvalidGrammarError",
-                                             "UnsupportedInputError",
-                                             "GrammarUnsupportedError". An
-                                             UNTAGGED error becomes a
-                                             RuntimeError, which GgufBackend
-                                             reads as "the isolated worker
-                                             faulted" and answers by UNLOADING
-                                             the model - so anything the CALLER
-                                             can fix must carry a tag
-    ("chunk", text)                       - one streamed token (chat_stream only)
-    ("done", {finish_reason, grammar_unsupported, chatml_fallback_reason})
-                                          - end of one chat_stream
-    ("progress", payload)                 - NON-TERMINAL: the load is still
-                                             running. See below.
-
-TERMINAL vs NON-TERMINAL envelopes. Every kind above except ``progress`` ENDS
-the wait that received it. ``chat_stream`` has always had this distinction
-(``chunk`` is non-terminal, ``done`` ends the stream); the LOAD wait did not,
-so a load could report nothing at all between "started" and "finished or
-failed" - ``spawn_and_load`` returned or raised on the FIRST envelope it saw,
-whatever it was, and an unrecognised kind was an outright error.
-
-``progress`` closes that gap for the load path. Its payload is deliberately
-UNINTERPRETED here: this module only guarantees delivery, so whatever decides
-what is worth reporting during a load owns the payload's shape, and this
-protocol does not have to change again when that is settled. NOTHING EMITS IT
-YET - the consumer learns it first, on purpose, because a producer cannot be
-added until the parent can receive a load envelope without treating it as the
-end of the load.
-
-Two properties this must NOT weaken, both covered by tests:
-- An UNKNOWN kind is still a loud error, never ignored. Tolerating unknown
-  kinds would turn a protocol mismatch into a silent hang, which is the whole
-  reason the strict check exists.
-- ``progress`` does NOT extend the load deadline. A child that emitted it in a
-  tight loop would otherwise keep a hung load alive forever, and the deadline
-  is the only thing standing between a wedged native call and a stuck server.
-  The timeout therefore still bounds the WHOLE load, exactly as before.
-
-A native abort, an unrecoverable fault deliberately left uncaught by
-``GgufWorker.chat_stream``, or a genuine hang produces NO envelope - the
-parent detects the dead/stuck child via ``proc.is_alive()``/``exitcode`` and a
-bounded timeout, exactly like ``voice.py``.
-
-``ctrl_q`` (parent -> child), drained by a dedicated control-thread so a
-signal takes effect even while the main thread is blocked in a native call:
-    ("cancel_load",)
-    ("cancel_stream",)
-"""
+"""Subprocess isolation for the whole GGUF model lifecycle (load, generate, tokenize, grammar-check, unload) - the fix for a confirmed native-abort crash in ``llama_load_model_from_file``."""
 
 from __future__ import annotations
 
@@ -120,21 +17,7 @@ from localm.inference.backends.base import (
 
 
 class RunnerBusy(Exception):
-    """A best-effort, non-blocking command (a token count) declined to run
-    because the runner's single response queue is already being driven by
-    another command on this process (typically a live ``chat_stream``).
-
-    This is NOT a failure: the caller has a documented fallback and should use
-    it rather than block a request behind a whole generation - or, worse, queue
-    an RPC whose reply would race the live stream's envelopes on the shared queue
-    (HON-02). ``count_tokens``/``count_messages_tokens`` opt into this (they fall
-    back to a chars/4 heuristic), and so does ``check_grammar``:
-    ``validate_grammar`` is called SYNCHRONOUSLY on the server's async event
-    loop, so a blocking wait there would freeze the whole loop for the length of
-    a concurrent same-model stream - a busy check is instead DEFERRED to
-    generation time, which rejects a malformed grammar with the same clean
-    ``InvalidGrammarError``. ``load`` and ``chat_stream`` never raise this: they
-    own their own queue drive."""
+    """A best-effort, non-blocking command (a token count) declined to run because the runner's single response queue is already being driven by another command on this process (typically a live ``chat_stream``)."""
 
 
 # Fault-injection hook, honoured by the child ONLY when this environment
@@ -175,32 +58,7 @@ _crash_trace_fh = None   # child-side: kept alive so faulthandler can write to i
 
 
 def _arm_native_crash_trace(path) -> None:
-    """Child side: point faulthandler at *path* so a death by native SIGNAL
-    leaves a trace the parent can relay into the debug log.
-
-    THIS IS THE ONLY THING THAT CAN CAPTURE THAT CLASS. ``_runner_entry``'s
-    ``except BaseException`` below covers a crash that still has a Python
-    exception; a SIGILL/SIGSEGV/SIGABRT inside native code never returns to
-    Python at all, so no handler written in Python can run and the parent's
-    "See the debug log for the native stack trace" had nothing behind it.
-    Reported as issue 1222 / 1223: ``worker exit -4`` is SIGILL (multiprocessing
-    reports ``-N`` for signal N), and neither field log contains any trace.
-
-    MEASURED both directions before relying on it: armed, a real SIGILL on Linux
-    and ``os.abort()`` on Windows each write "Fatal Python error" plus the Python
-    frame that entered native code; disarmed, the file stays EMPTY. So a trace
-    appearing here is evidence of this arming and not of something else.
-
-    Armed as early as possible - before the native library is anywhere near
-    loaded - because a fault can only be captured by a handler that was already
-    installed when it happened.
-
-    Failures are logged, never raised: losing the trace must not stop the worker
-    from doing its job. But it is NOT silenced (AGENTS.md rule 5) and
-    ``is_enabled()`` is checked rather than trusting "enable() did not raise" -
-    that exact silent-no-op is on record in bugreport.arm_crash_guard, where
-    every native-trace file on the maintainer's box came out 0 bytes with no
-    clue why."""
+    """Child side: point faulthandler at *path* so a death by native SIGNAL leaves a trace the parent can relay into the debug log."""
     global _crash_trace_fh
     if path is None:
         return
@@ -222,46 +80,7 @@ def _arm_native_crash_trace(path) -> None:
 
 
 def _runner_entry(req_q, resp_q, ctrl_q, crash_trace_path=None) -> None:
-    """Process target (replaces a bare ``_runner_main`` reference so every
-    exit path is covered - see below). Wraps the whole worker body so ANY
-    exception escaping it - a bug anywhere in ``_runner_main``'s own dispatch
-    code, or the DELIBERATE let-a-native-fault-kill-the-process design in the
-    "chat_stream" branch (see ``GgufWorker.chat_stream``'s docstring) - is
-    logged via the ``logging`` module before the process dies, not left to
-    ``multiprocessing.process.BaseProcess._bootstrap``'s own
-    ``traceback.print_exc()`` alone.
-
-    WHY this is needed even though native stderr is already redirected into
-    the debug log during model load and generation (``_quiet_stderr`` /
-    ``_capture_stderr`` / ``dedup_native_stderr`` in ``llama.py``): those are
-    ``@contextlib.contextmanager`` fd-2 redirects, and their ``__exit__``
-    (restoring fd 2) runs as an escaping exception unwinds THROUGH them - i.e.
-    BEFORE it ever reaches ``_bootstrap``. So by the time multiprocessing
-    prints its own traceback, fd 2 has already been restored to whatever this
-    process inherited from its parent (closed or NUL for a GUI-launched,
-    console-less server) - the one traceback that would actually explain the
-    crash is written nowhere. Confirmed against issue #928's own "worker exit
-    1": that is multiprocessing's own signature for exactly this case (an
-    uncaught PYTHON exception), not a genuine native abort, which would exit
-    with a different, OS-specific status. See
-    dev-notes/worker-stderr-lifetime-gap.md for the full investigation.
-
-    Logging here is fd-2-independent (a ``logging.FileHandler`` writes
-    through its own Python-level stream, never through fd 2), so it captures
-    the exception regardless of what fd 2 currently points to. Deliberately
-    RE-RAISES: this only ADDS a capture, it must never change whether or how
-    the process exits - every existing crash-containment test in
-    tests/test_gguf_runner_isolation.py depends on the parent's
-    ``is_alive()``/``exitcode``-based detection staying exactly as it is.
-
-    Does NOT help a genuine native crash with no Python exception at all
-    (SIGSEGV, a raw abort with nothing printed first) - Python never regains
-    control there, so no ``except`` clause, including this one, can run. That
-    residual gap is exactly why the whole model lifecycle runs in this
-    isolated process to begin with (see the module docstring); the parent's
-    crash detection is what covers it, unchanged by this function - PLUS, now,
-    the faulthandler trace :func:`_arm_native_crash_trace` leaves behind, which
-    is the one mechanism that CAN say where such a fault happened."""
+    """Process target (replaces a bare ``_runner_main`` reference so every exit path is covered - see below)."""
     _arm_native_crash_trace(crash_trace_path)
     try:
         _runner_main(req_q, resp_q, ctrl_q)
@@ -275,8 +94,7 @@ def _runner_entry(req_q, resp_q, ctrl_q, crash_trace_path=None) -> None:
 
 
 def _runner_main(req_q, resp_q, ctrl_q) -> None:
-    """Long-lived child: owns one GgufWorker (one loaded model) for its whole
-    process lifetime, dispatching one request at a time."""
+    """Long-lived child: owns one GgufWorker (one loaded model) for its whole process lifetime, dispatching one request at a time."""
     from localm.debuglog import attach_child_logging
     attach_child_logging()   # so native load-failure diagnostics captured via
                               # _quiet_stderr/_capture_stderr land in the shared
@@ -468,13 +286,7 @@ _LOAD_NON_TERMINAL_KINDS = frozenset({"progress"})
 
 
 def _emit_load_progress(sink, payload) -> None:
-    """Hand one non-terminal load envelope to *sink*, never letting it break the
-    load. A raising progress callback must not fail a load that is going fine:
-    the sink is a reporting concern and the load is the actual work, so this
-    mirrors embedder._emit_stage rather than the load's own error handling.
-    Swallowing is correct here and is NOT an AGENTS.md rule-5 violation - the
-    failure is logged at debug with its traceback, and it says nothing about
-    whether the model loaded."""
+    """Hand one non-terminal load envelope to *sink*, never letting it break the load."""
     if sink is None:
         return
     try:
@@ -541,30 +353,11 @@ _STREAM_PROGRESS_INTERVAL = 50
 
 
 class _RunnerTornDown(Exception):
-    """Internal: ``shutdown()`` released the child and its queues underneath an
-    in-flight command on another thread.
-
-    NOT a native fault and NOT a crash. ``shutdown()`` deliberately takes no lock
-    (so teardown works while a command holds ``_q_lock``), and it CLOSES the three
-    queues BEFORE it nulls them, so a command polling the response queue can land
-    on either side of that window:
-
-    * a closed queue - measured, ``multiprocessing.Queue.get()`` after ``close()``
-      raises ``ValueError``, not ``Empty``, so it slips straight past the
-      ``except _queue.Empty`` handler;
-    * ``_proc``/``_resp_q`` already None - an ``AttributeError`` on the next
-      attribute access.
-
-    Both used to escape raw and be reported by GgufBackend.load() as "Native llama
-    runtime failed to load: 'NoneType' object has no attribute 'is_alive'.
-    Provision or repair it with localm setup-llama" - telling the user to repair a
-    perfectly healthy runtime for what is really "you unloaded the model while it
-    was loading"."""
+    """Internal: ``shutdown()`` released the child and its queues underneath an in-flight command on another thread."""
 
 
 class ModelRunner:
-    """Parent-side handle to one isolated GGUF worker process. One instance
-    per loaded ``GgufBackend`` - never a module-level singleton."""
+    """Parent-side handle to one isolated GGUF worker process."""
 
     def __init__(self) -> None:
         self._proc = None
@@ -595,14 +388,7 @@ class ModelRunner:
         return self._proc is not None and self._proc.is_alive()
 
     def _native_crash_trace(self) -> str:
-        """This child's captured native-fault trace, consumed and removed, or ""
-        when there is none.
-
-        Consuming rather than merely reading is deliberate: the file is a
-        one-shot record of one death, so leaving it in place would let a later
-        reader (or the next spawn of a reused runner) attribute a stale trace to
-        a fresh crash. Fully guarded - a diagnostic read must never replace the
-        real crash error with an IO error."""
+        """This child's captured native-fault trace, consumed and removed, or '' when there is none."""
         path = self._crash_trace_path
         if path is None:
             return ""
@@ -615,8 +401,7 @@ class ModelRunner:
         return text
 
     def _discard_native_crash_trace(self) -> None:
-        """Remove this child's trace file. Best-effort: a leftover costs one
-        small file in the logs dir, never correctness."""
+        """Remove this child's trace file."""
         path = self._crash_trace_path
         if path is None:
             return
@@ -626,24 +411,7 @@ class ModelRunner:
             pass
 
     def _death_report(self):
-        """``(native_evidenced, detail)`` for a dead worker.
-
-        Reads the captured trace EXACTLY ONCE, because reading consumes it (see
-        :meth:`_native_crash_trace`) and both halves need it: the trace is the
-        strongest evidence of whether this was a native fault at all, and it is
-        also the detail worth relaying.
-
-        Saying "no native fault trace was captured" OUT LOUD matters as much as
-        relaying one (AGENTS.md rule 5): the message used to claim a trace was in
-        the debug log whether or not anything had written one, so a user following
-        that instruction found nothing and could not tell an empty capture from
-        their own failure to find it.
-
-        The non-native branch deliberately gives an INSTRUCTION rather than a
-        promise ("check the debug log") - a Python exception escaping
-        ``_runner_main`` is logged with its traceback by ``_runner_entry``, but a
-        hard ``os._exit`` produces no exception and therefore no traceback, and
-        promising one for that case would repeat the exact defect this fixes."""
+        """``(native_evidenced, detail)`` for a dead worker."""
         trace = self._native_crash_trace()
         native = self._exit_was_native_fault(trace_captured=bool(trace))
         if not trace:
@@ -656,52 +424,27 @@ class ModelRunner:
         return native, f" Native fault: {first} (full trace in the debug log)."
 
     def _crash_detail(self) -> str:
-        """Just the detail half of :meth:`_death_report`, for the load and
-        simple-request messages, whose own opening words ("crashed") are already
-        true of any worker death and need no native/ordinary distinction."""
+        """Just the detail half of :meth:`_death_report`, for the load and simple-request messages, whose own opening words ('crashed') are already true of any worker death and need no native/ordinary distinction."""
         return self._death_report()[1]
 
     def _exitcode(self):
-        """The child's exit code, or None once it has been released.
-
-        Reads ``_proc`` ONCE into a local. Every caller of this used to be
-        ``self._proc.exitcode`` inside a branch entered because ``is_alive()``
-        was False - and ``is_alive()`` is False both when the child DIED and when
-        ``shutdown()`` set ``_proc`` to None, so the branch that reports the death
-        could itself AttributeError on the second case."""
+        """The child's exit code, or None once it has been released."""
         proc = self._proc
         return None if proc is None else proc.exitcode
 
     def _exit_reason(self) -> str:
-        """The child's exit code DECODED - "-4 (killed by signal SIGILL)" rather
-        than "-4".
-
-        Every user-facing report of a dead worker goes through this rather than
-        interpolating the raw code. On issues 1222/1223 the raw number was the
-        only fact the product surfaced about the death, and decoding it is what
-        separates an illegal instruction from a segfault from an abort."""
+        """The child's exit code DECODED - '-4 (killed by signal SIGILL)' rather than '-4'."""
         from localm._mp_spawn import describe_exit_code
         return describe_exit_code(self._exitcode())
 
     def _exit_was_native_fault(self, *, trace_captured: bool) -> bool:
-        """Whether this worker's death is EVIDENCED as a native fault.
-
-        A named wrapper per concern, exactly like :meth:`_exit_reason` above: the
-        raw exit code has precisely two legitimate consumers - the decoder that
-        renders it and the classifier that interprets it - and everything else
-        must go through one of those rather than touching the number. Keeping
-        both behind one-line accessors is what lets the source-scan guard in
-        tests/test_worker_exit_code_decoding.py state that rule mechanically."""
+        """Whether this worker's death is EVIDENCED as a native fault."""
         from localm._mp_spawn import death_was_a_native_fault
         return death_was_a_native_fault(self._exitcode(),
                                         trace_captured=trace_captured)
 
     def _poll(self, timeout: float):
-        """``resp_q.get()`` that turns a concurrent teardown into
-        :class:`_RunnerTornDown`.
-
-        ``_queue.Empty`` still propagates untouched - it is the normal
-        keep-waiting signal every caller's loop is built around."""
+        """``resp_q.get()`` that turns a concurrent teardown into :class:`_RunnerTornDown`."""
         q = self._resp_q
         if q is None:
             raise _RunnerTornDown
@@ -744,22 +487,7 @@ class ModelRunner:
     def spawn_and_load(self, params: dict, cancel_event=None,
                         timeout: float = LOAD_TIMEOUT_DEFAULT,
                         on_progress=None) -> dict:
-        """Spawn the child and load the model. Returns the metadata dict
-        (``n_layers``/``kv_bytes_per_token``/``supports_images``) on success.
-
-        Raises :class:`ModelLoadCancelled` if *cancel_event* fires during the
-        load, or :class:`RuntimeError` on a genuine load failure, a child
-        crash (native abort - detected via ``is_alive()``, never an
-        exception this process had to catch), or a timeout (the child is
-        killed; a load has no safe "unmeasurable" fallback, so this always
-        raises rather than silently reporting not-loaded).
-
-        *on_progress*, if given, receives the payload of each NON-TERMINAL
-        ``progress`` envelope (see this module's protocol notes). Purely
-        additive: no caller passes it today and nothing emits the envelope yet,
-        so every existing load behaves exactly as before. A raising sink is
-        swallowed (``_emit_load_progress``) - a reporting callback must never
-        fail a load that is otherwise fine."""
+        """Spawn the child and load the model."""
         self._spawn()
         self._req_q.put(("load", params))
         deadline = time.monotonic() + timeout
@@ -838,43 +566,7 @@ class ModelRunner:
         raise RuntimeError(f"Unexpected response from the model-loading process: {result!r}")
 
     def chat_stream(self, *, first_chunk_timeout: Optional[float] = None, **kwargs):
-        """Yield text tokens. On the caller's ``GeneratorExit`` (mirroring how
-        ``http_server.py`` cancels a stream today - a plain generator
-        ``.close()``), relays a ``cancel_stream`` signal to the child and
-        drains for its confirming "done" before returning, so the worker is
-        never left mid-generation when this backend serves its next request.
-
-        Polls in short increments (not one big ``get(timeout=...)``) so a
-        crashed child is detected promptly - within one poll interval, not
-        after the full per-token ceiling - while still allowing up to
-        ``_STREAM_CHUNK_TIMEOUT`` of genuine native decode time per token
-        before treating it as stalled.
-
-        The FIRST envelope gets its own, much larger budget
-        (*first_chunk_timeout*, default ``FIRST_TOKEN_TIMEOUT_DEFAULT``): it
-        waits for the whole prompt prefill, not for one token's decode. Keyword-
-        only and popped here, so it is never mistaken for a generation
-        parameter forwarded to the child in *kwargs*.
-
-        Holds ``_q_lock`` for the whole drive so no concurrent token-count RPC
-        can consume this stream's envelopes off the shared response queue
-        (HON-02). The lock is acquired here and released when this generator is
-        exhausted, errors, or is closed - all of which happen on the single
-        producer thread that drives it, so the non-reentrant Lock is always
-        released on the thread that took it.
-
-        BOUNDARY LOGGING (dev-notes/generation-path-logging-instrumentation-
-        2026-08-12.md): unlike llama.py's own boundary markers (which only
-        reach a bug report once --debug is on, since they run inside the
-        isolated child), the INFO-level lines here run in THIS process, where
-        ``install_ring_buffer()`` already ran at CLI startup - so they reach
-        the always-on ring buffer unconditionally (the one DEBUG-level line,
-        decode progress, does not - see ``_STREAM_PROGRESS_INTERVAL``: it
-        recurs too often for the ring's fixed 400-record budget). Built
-        entirely from envelopes this method already receives: no new IPC, no
-        protocol change. In particular the worker-died branch below now says
-        WHICH PHASE the child was in (no response ever received vs N chunks
-        already streamed) - the question a bare exit code cannot answer."""
+        """Yield text tokens."""
         from localm.debuglog import logger
         first_budget = first_chunk_timeout or FIRST_TOKEN_TIMEOUT_DEFAULT
         awaiting_first = True
@@ -1052,16 +744,7 @@ class ModelRunner:
 
     def _simple_request(self, name: str, payload, timeout: float = _SIMPLE_CMD_TIMEOUT,
                         *, try_lock: bool = False):
-        """Send one request/response command and return its value.
-
-        Holds ``_q_lock`` for the whole exchange so its reply can never be
-        stolen by (or steal from) a concurrent stream on the shared response
-        queue (HON-02). ``try_lock=True`` acquires the lock NON-blocking and
-        raises :class:`RunnerBusy` immediately if it is held (a live stream, or
-        another simple command) - used by the token counters, which have a
-        documented heuristic fallback and must not queue a 30s-timeout RPC
-        behind a whole generation. The default blocking acquire is for commands
-        that genuinely need the real answer (e.g. check_grammar)."""
+        """Send one request/response command and return its value."""
         if try_lock:
             if not self._q_lock.acquire(blocking=False):
                 raise RunnerBusy(name)
@@ -1134,9 +817,7 @@ class ModelRunner:
         self._simple_request("check_grammar", grammar, try_lock=True)
 
     def shutdown(self, grace: float = 5.0) -> None:
-        """Best-effort teardown: ask the worker to close cleanly, then kill it
-        if it does not exit within *grace* seconds. Safe to call more than
-        once, or when nothing is running."""
+        """Best-effort teardown: ask the worker to close cleanly, then kill it if it does not exit within *grace* seconds."""
         proc = self._proc
         if proc is None:
             return

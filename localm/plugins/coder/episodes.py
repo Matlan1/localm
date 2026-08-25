@@ -1,44 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""
-Episodic memory for the coder agent.
-
-The coder already has working memory (the live context), semantic memory
-(project memory in LOCALCODER.md), procedural memory (skills), and retrieval
-(RAG). The one gap is EPISODIC memory: a record of what happened on past tasks
-and what was learned, recalled when a similar task comes up again.
-
-This module stores one *episode* per finished session (task, outcome, what
-worked, what failed, the single most useful lesson, and the files touched) and
-retrieves the most relevant past episodes for a new task with the same
-embedding-free BM25 ranker the RAG plugin uses.
-
-Episodes have a LIFECYCLE, not a FIFO queue (memory-audit 2026-07-02 finding
-39). ``add()`` merges a near-identical restatement into the record it repeats,
-then, at the cap, evicts by VALUE (what the episode teaches, decayed by age)
-rather than by arrival order, and ARCHIVES whatever it drops to a capped
-``.forgotten.jsonl`` sidecar so forgetting is recoverable. This mirrors the chat
-memory store, which already archives its evictions (``localm/memory/store.py``
-``_archive_forgotten``) and reports its consolidation instead of mutating
-silently. An LLM merge of merely *related* lessons is available too, but it is
-strictly OPT-IN (``consolidate``): a local model rewriting memory is exactly
-where a bad merge would poison every future run, so it never runs on a timer or
-at session close, and it archives its inputs so it is reversible.
-
-Every episode carries a stable ``id``, so a run can record WHICH lessons it
-recalled (the agent surfaces them on an ``episodes_recalled`` event and in the
-audit trail) and the user can forget one by id instead of wiping the lot.
-
-Storage is per-project and lives under the localm home data dir
-(``<home>/coder/episodes/<key>.jsonl``), NOT in the user's repository, so an
-auto-growing log never surprises them in git. Writes are the caller's
-responsibility to gate on the privacy contract (the Agent skips them in privacy
-mode and for restricted, shareable-key sessions) so episodic memory never leaves
-a trace the session mode forbids.
-
-``reflect_and_store`` takes an injected ``complete(prompt) -> str`` model call
-(the Agent binds it to its backend; tests pass a fake), so the deterministic
-logic here is unit-testable without a model.
-"""
+"""Episodic memory for the coder agent."""
 
 from __future__ import annotations
 
@@ -129,15 +90,13 @@ _WORD_RE = re.compile(r"[a-z0-9]+")
 
 
 def _content_tokens(text: str) -> str:
-    """Lowercased content words (stopwords removed), space-joined, for the lexical
-    relevance gate. Empty when *text* is all stopwords/punctuation."""
+    """Lowercased content words (stopwords removed), space-joined, for the lexical relevance gate."""
     return " ".join(t for t in _WORD_RE.findall((text or "").lower())
                     if t not in _STOPWORDS)
 
 
 def _embed_fn():
-    """The shared on-device embedder (localm.inference.embedder), or None when no
-    embedding model is available - recall then uses BM25 lexical ranking only."""
+    """The shared on-device embedder (localm.inference.embedder), or None when no embedding model is available - recall then uses BM25 lexical ranking only."""
     try:
         from localm.inference.embedder import get_embedder
         emb = get_embedder()
@@ -184,22 +143,14 @@ class Episode:
         return ep
 
     def search_text(self) -> str:
-        """The text BM25 ranks against when matching a new task.
-
-        Includes ``what_worked``: the approach or command that actually worked is
-        precisely what a similar future task wants to find, and leaving it out of
-        the ranked text was half of what made the field dead (audit finding 39).
-        ``what_failed`` stays out of the ranked text but is rendered on recall, as
-        before - a lesson should be found by what to DO, then warn about the trap.
-        """
+        """The text BM25 ranks against when matching a new task."""
         parts = [self.task, self.summary, self.lesson, self.what_worked,
                  " ".join(self.files)]
         return " ".join(p for p in parts if p)
 
 
 def _derive_id(ep: "Episode") -> str:
-    """A stable, content-derived id. Pure function of the episode's own text, so
-    a legacy record becomes citable on load and stays citable across reads."""
+    """A stable, content-derived id."""
     raw = "\x00".join([
         "%.6f" % (ep.ts or 0.0), ep.task or "", ep.summary or "",
         ep.what_worked or "", ep.what_failed or "", ep.lesson or "",
@@ -208,20 +159,13 @@ def _derive_id(ep: "Episode") -> str:
 
 
 def _dedup_signature(ep: "Episode") -> str:
-    """The content-word text near-duplicate detection compares.
-
-    Task AND distilled lesson, deliberately: a duplicate restates both. Comparing
-    the lesson alone would collapse two genuinely different tasks that happened to
-    yield the same generic advice ("add a test first"), which is memory loss
-    dressed up as tidying."""
+    """The content-word text near-duplicate detection compares."""
     return _content_tokens(" ".join(p for p in (ep.task, ep.lesson or ep.summary)
                                     if p))
 
 
 def _similarity(a: str, b: str) -> float:
-    """difflib ratio of two signatures, 0.0 when either is empty. quick_ratio is
-    an upper bound on ratio(), so it cheaply rejects the vast majority of pairs
-    before the quadratic compare runs."""
+    """difflib ratio of two signatures, 0.0 when either is empty. quick_ratio is an upper bound on ratio(), so it cheaply rejects the vast majority of pairs before the quadratic compare runs."""
     if not a or not b:
         return 0.0
     if a == b:
@@ -233,14 +177,7 @@ def _similarity(a: str, b: str) -> float:
 
 
 def _episode_value(ep: "Episode", now: float) -> float:
-    """Eviction value: how much this episode teaches, decayed by age.
-
-    Same shape as the chat store's ``_decayed`` (importance * recency, lifted by
-    reinforcement), with the importance term derived from the fields an episode
-    actually carries. A FAILURE record weighs most: audit cluster 11 found failure
-    lessons were systematically absent and they are what a future session most
-    needs to be told. ``what_worked`` carries real weight here too - that, plus
-    being searched and rendered, is what stops it being a dead field."""
+    """Eviction value: how much this episode teaches, decayed by age."""
     imp = 0.10                                    # a thin record still beats nothing
     if ep.lesson:
         imp += 0.40
@@ -258,13 +195,7 @@ def _episode_value(ep: "Episode", now: float) -> float:
 
 
 def _absorb(new: "Episode", dupes: list) -> None:
-    """Fold near-identical predecessors *dupes* into *new*, in place.
-
-    *new* keeps its own (newer) wording, but INHERITS any field the newer
-    reflection left blank and the union of the file lists, so collapsing a
-    restatement never loses evidence the older record happened to carry. The merge
-    count it accumulates is what makes a repeatedly-relearned lesson outrank a
-    one-off at eviction time."""
+    """Fold near-identical predecessors *dupes* into *new*, in place."""
     for d in dupes:
         for f in ("summary", "what_worked", "what_failed", "lesson"):
             if not getattr(new, f) and getattr(d, f):
@@ -281,17 +212,13 @@ def _absorb(new: "Episode", dupes: list) -> None:
 
 
 def _episodes_root() -> Path:
-    """The episodes data dir, resolved at call time so a test that monkeypatches
-    the home dir is honoured."""
+    """The episodes data dir, resolved at call time so a test that monkeypatches the home dir is honoured."""
     from localm.config import home_dir
     return (home_dir() / "coder" / "episodes").resolve()
 
 
 def _key_for(cwd: Path) -> str:
-    """A stable per-project filename key from the resolved working directory.
-
-    A hash (not the raw path) keeps the filename short, filesystem-safe, and free
-    of any local path detail."""
+    """A stable per-project filename key from the resolved working directory."""
     return hashlib.sha1(str(Path(cwd).resolve()).encode("utf-8")).hexdigest()[:16]
 
 
@@ -326,12 +253,7 @@ def _store_lock(file_path: Path):
 
 
 def _tmp_for(path: Path) -> Path:
-    """A temp-file name unique to this (process, thread), like
-    storekit.atomic_write's. The per-store lock above serialises writers INSIDE one
-    process, but two localm processes touching the same project would otherwise
-    both write and rename the same fixed ``<name>.tmp``, so one could replace the
-    target with the other's half-written body - corrupting the very log the lock
-    exists to protect. A unique name makes that impossible even unserialised."""
+    """A temp-file name unique to this (process, thread), like storekit.atomic_write's."""
     return path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
 
 
@@ -364,15 +286,11 @@ class EpisodeStore:
 
     @property
     def archive_path(self) -> Path:
-        """The recoverable-forgotten sidecar: every episode this store drops
-        (merged, evicted at the cap, or forgotten by id) lands here first."""
+        """The recoverable-forgotten sidecar: every episode this store drops (merged, evicted at the cap, or forgotten by id) lands here first."""
         return self._file.with_suffix(".forgotten.jsonl")
 
     def all(self) -> list:
-        """Every stored episode, oldest first. Malformed lines are skipped (a
-        partial write must not break recall). Retries with backoff on a transient
-        PermissionError: on Windows, a concurrent add()'s atomic replace can
-        momentarily deny an open of the same path while the rename is in flight."""
+        """Every stored episode, oldest first."""
         if not self._file.is_file():
             return []
         text = None
@@ -403,10 +321,7 @@ class EpisodeStore:
         return out
 
     def _write_all(self, eps: list) -> None:
-        """Persist *eps* (oldest first) as the whole log. Written atomically (temp
-        + replace) so a crash mid-write cannot corrupt it. Retries with backoff on
-        a transient PermissionError: on Windows, a concurrent reader with the
-        destination open can momentarily deny the rename."""
+        """Persist *eps* (oldest first) as the whole log."""
         self._file.parent.mkdir(parents=True, exist_ok=True)
         # dumps_lines escapes the line-break-alikes json.dumps(ensure_ascii=False)
         # would otherwise emit raw (U+0085/U+2028/U+2029), so a record can never
@@ -425,15 +340,7 @@ class EpisodeStore:
                 time.sleep(delay)
 
     def _archive(self, episodes: list, reason: str) -> bool:
-        """Append *episodes* to the capped ``.forgotten.jsonl`` sidecar BEFORE they
-        leave the live log, so a drop is RECOVERABLE instead of a silent delete
-        (the chat store does exactly this, memory/store.py ``_archive_forgotten``).
-
-        Returns True when persisted, or when there was nothing to archive. On
-        failure it returns False and the caller LOGS AND PROCEEDS: refusing the
-        write would break a working setup over a best-effort sidecar, which is the
-        wrong altitude, but the failure must still leave a trace rather than being
-        swallowed (AGENTS.md rule 5)."""
+        """Append *episodes* to the capped ``.forgotten.jsonl`` sidecar BEFORE they leave the live log, so a drop is RECOVERABLE instead of a silent delete (the chat store does exactly this, memory/store.py ``_archive_forgotten``)."""
         if not episodes:
             return True
         try:
@@ -474,14 +381,7 @@ class EpisodeStore:
             return False
 
     def forgotten(self) -> list:
-        """Everything this store has dropped, oldest first, as raw dicts carrying
-        their ``forgotten_at`` and ``reason``. Malformed lines are skipped, exactly
-        like all(): a partial write must not break recovery either.
-
-        Sets ``last_forgotten_ok`` to False when the archive EXISTS but could not
-        be read (as opposed to genuinely absent/empty), so a caller like the CLI
-        can tell an unreadable archive apart from "nothing was ever forgotten"
-        instead of both printing the same reassuring-but-wrong message."""
+        """Everything this store has dropped, oldest first, as raw dicts carrying their ``forgotten_at`` and ``reason``."""
         af = self.archive_path
         self.last_forgotten_ok = True
         if not af.is_file():
@@ -516,19 +416,7 @@ class EpisodeStore:
         return out
 
     def add(self, ep: Episode, *, dedup: bool = True) -> Episode:
-        """Store *ep*, running the episode lifecycle: merge a near-identical
-        restatement into it, then evict by VALUE (not arrival order) at the cap,
-        archiving anything dropped first.
-
-        What the write did is left on ``last_merged`` / ``last_evicted`` /
-        ``last_archive_ok`` and logged, so an eviction is reportable rather than
-        invisible. *dedup* is False only for restore(), where collapsing the record
-        back into the one that superseded it would silently undo the restore.
-
-        The whole read-mutate-write sequence runs under this project's lock (see
-        _store_lock): unlocked, a concurrent add() elsewhere reading the same
-        pre-write state would have its own addition silently clobbered by whichever
-        write lands second (LM-DA-checkup finding, episode-lifecycle round 2)."""
+        """Store *ep*, running the episode lifecycle: merge a near-identical restatement into it, then evict by VALUE (not arrival order) at the cap, archiving anything dropped first."""
         with _store_lock(self._file):
             eps = self.all()
             now = time.time()
@@ -587,14 +475,7 @@ class EpisodeStore:
             return ep
 
     def forget(self, episode_id: str) -> bool:
-        """Drop ONE episode by id - what stable ids are for. Returns False when no
-        episode has that id. The removed record is archived like any other drop so
-        an accidental forget is recoverable; clear() is the erase-everything path
-        and takes the archive with it.
-
-        Locked like add() (see _store_lock): a concurrent add()/restore() on the
-        same project cannot read a stale pre-forget snapshot and write it back,
-        which would silently resurrect the very episode this just dropped."""
+        """Drop ONE episode by id - what stable ids are for."""
         with _store_lock(self._file):
             eps = self.all()
             gone = [e for e in eps if e.id == episode_id]
@@ -605,21 +486,7 @@ class EpisodeStore:
             return True
 
     def restore(self, episode_id: str) -> Optional[Episode]:
-        """Put an archived episode back into the live log, or None when the archive
-        has no such id.
-
-        The restored copy keeps its id (so an old citation still resolves) but is
-        re-stamped to now: the user is re-asserting this lesson TODAY, and leaving
-        the original age on it would let the very decay that evicted it evict it
-        again on the next write, making restore a silent no-op. Dedup is skipped
-        for the same reason - a record superseded by a restatement must not be
-        folded straight back into it.
-
-        Locked across the WHOLE method (see _store_lock), not just the add() it
-        calls: this does its own read-modify-write of the archive on top of that
-        add (re-entering the same RLock harmlessly), and a writer interleaved
-        anywhere in that span could resurrect what was just forgotten or discard
-        the recovery copies add() had only just written for what it evicted."""
+        """Put an archived episode back into the live log, or None when the archive has no such id."""
         with _store_lock(self._file):
             self.last_restore_archive_ok = True
             rows = self.forgotten()
@@ -701,9 +568,7 @@ class EpisodeStore:
             return ep
 
     def _vectors(self, texts: list, ef) -> Optional[list]:
-        """Embeddings for the episode search-texts, cached in a ``.vec.json``
-        sidecar keyed by a content hash so they are recomputed only when the
-        episodes change (a new episode, or the cap dropping the oldest)."""
+        """Embeddings for the episode search-texts, cached in a ``.vec.json`` sidecar keyed by a content hash so they are recomputed only when the episodes change (a new episode, or the cap dropping the oldest)."""
         import hashlib
         h = hashlib.sha1("\x00".join(texts).encode("utf-8")).hexdigest()
         vf = self._file.with_suffix(".vec.json")
@@ -729,11 +594,7 @@ class EpisodeStore:
         return vecs
 
     def search(self, task: str, k: int = _RETRIEVE_K) -> list:
-        """The *k* most relevant past episodes for *task*, above the relevance
-        floor (so an unrelated task injects nothing). Uses BM25 (lexical) blended
-        with cosine similarity (semantic) when an embedding model is available, so
-        a lesson phrased differently from the task is still recalled - both gated
-        ABSOLUTELY so silence-when-irrelevant holds."""
+        """The *k* most relevant past episodes for *task*, above the relevance floor (so an unrelated task injects nothing)."""
         eps = self.all()
         if not eps or not (task or "").strip():
             return []
@@ -777,20 +638,14 @@ class EpisodeStore:
         return [e for _s, _i, e in scored[:k]]
 
     def clear(self) -> None:
-        """Erase everything this project remembers, ARCHIVE INCLUDED.
-
-        The archive has to go too: "cleared episodic memory" while the lesson text
-        still sat in a sidecar would be a privacy claim that is not true, and a
-        user wiping what the coder remembers means all of it (rule 5 - a step that
-        does not fully happen must not report success)."""
+        """Erase everything this project remembers, ARCHIVE INCLUDED."""
         self._file.unlink(missing_ok=True)
         self._file.with_suffix(".vec.json").unlink(missing_ok=True)
         self.archive_path.unlink(missing_ok=True)
 
 
 def render_for_prompt(episodes: list) -> str:
-    """Format retrieved episodes as a context block to prepend to a task. Empty
-    string when there is nothing relevant to add."""
+    """Format retrieved episodes as a context block to prepend to a task."""
     if not episodes:
         return ""
     lines = [
@@ -841,11 +696,7 @@ _CONSOLIDATE_HEADER = (
 
 
 def _relate_groups(eps: list, ratio: float = _RELATE_RATIO) -> list:
-    """Indices of episodes grouped by signature similarity (single-link, greedy).
-
-    Deliberately simple and deterministic: the model decides what a merged lesson
-    SAYS, never which records are related, so a bad model cannot silently pull two
-    unrelated lessons together."""
+    """Indices of episodes grouped by signature similarity (single-link, greedy)."""
     n = len(eps)
     sigs = [_dedup_signature(e) for e in eps]
     seen: set = set()
@@ -880,18 +731,7 @@ def _build_consolidate_prompt(members: list) -> str:
 
 def consolidate(store: "EpisodeStore", *, complete: Callable[[str], str],
                 max_groups: int = 5, group_max: int = 6) -> dict:
-    """OPT-IN: ask a model to merge RELATED (not near-identical) lessons into one.
-
-    This is deliberately never automatic - not on a timer, not at session close.
-    A local model rewriting stored memory is exactly where one bad merge poisons
-    every future run, and the 2026-07-02 audit put background reflection agents on
-    its explicitly-not list. Near-identical records are already collapsed
-    deterministically by add(); this only touches the looser related band, and it
-    ARCHIVES every input, so any merge it gets wrong is reversible via restore().
-
-    Returns a report ({groups, merged, replaced, skipped, archived, warning}) so
-    the caller can tell the user what happened rather than mutating silently. A
-    group whose merge comes back unusable is LEFT ALONE, never dropped."""
+    """OPT-IN: ask a model to merge RELATED (not near-identical) lessons into one."""
     from localm.debuglog import logger
     eps = store.all()
     out = {"groups": 0, "merged": 0, "replaced": 0, "skipped": 0, "archived": 0}
@@ -1035,9 +875,7 @@ def _build_reflect_prompt(task: str, outcome: str, files: list, diff: str,
 
 
 def _summarise_errors(errors: str, limit: int = 400) -> str:
-    """Collapse the session's error trace into one deduped line for a thin failure
-    episode: the raw evidence stored deterministically when the model produced no
-    usable reflection (so a failure lesson is not lost to a weak model)."""
+    """Collapse the session's error trace into one deduped line for a thin failure episode: the raw evidence stored deterministically when the model produced no usable reflection (so a failure lesson is not lost to a weak model)."""
     seen: set = set()
     uniq: list = []
     for ln in (errors or "").splitlines():
@@ -1049,8 +887,7 @@ def _summarise_errors(errors: str, limit: int = 400) -> str:
 
 
 def _extract_json(raw: str) -> dict:
-    """Best-effort: parse a JSON object out of a model reply that may wrap it in
-    prose or a code fence. Returns {} if nothing parseable is found."""
+    """Best-effort: parse a JSON object out of a model reply that may wrap it in prose or a code fence."""
     text = (raw or "").strip()
     if text.startswith("```"):
         # Drop the opening fence (optionally ```json) and any closing fence.
@@ -1089,18 +926,7 @@ def reflect_and_store(
     max_diff_chars: int = 6000,
     max_error_chars: int = 2000,
 ) -> Episode:
-    """Ask the model to reflect on a finished session, then store one episode.
-
-    Caller gates this on the privacy contract (privacy mode / restricted sessions
-    must not call it). *errors* is a bounded trace of the tool/command failures the
-    session hit; it is fed to the reflection as evidence for what_failed (cluster
-    13), and, when the model produces nothing usable, is stored as a thin FAILURE
-    episode so the most valuable lessons (what went wrong) are not lost to a weak
-    model (cluster 11). A no-evidence unusable reply yields an EMPTY episode that is
-    NOT stored (a blank record would only dilute retrieval) - the skip is logged so
-    a silently non-learning setup is discoverable (rule 5); episodic memory is
-    best-effort and must never break a coder run.
-    """
+    """Ask the model to reflect on a finished session, then store one episode."""
     prompt = _build_reflect_prompt(task, outcome, files, diff, max_diff_chars,
                                    errors, max_error_chars)
     try:

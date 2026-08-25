@@ -1,16 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""REAL grammar-constrained-decoding test for the HuggingFace backend.
-
-No mocks: a tiny ungated causal LM (sshleifer/tiny-gpt2, full GPT-2 tokenizer)
-is loaded for real under transformers 5, and we assert that a GBNF/EBNF grammar
-passed through ``HFBackend.chat_stream`` actually constrains the generated
-tokens via xgrammar. The negative assertion (same prompt, no grammar -> NOT a
-legal value) is what proves the grammar caused the constraint, not the model.
-
-Marked @integration so the default `pytest -m "not integration"` skips it (it
-downloads ~2.5 MB on first run and needs the optional [grammar] extra). A mock
-here would be theater - the whole point is that the masking is exercised for real.
-"""
+"""REAL grammar-constrained-decoding test for the HuggingFace backend."""
 
 from __future__ import annotations
 
@@ -79,8 +68,7 @@ def _generate(be, grammar, max_tokens):
 
 
 def test_grammar_constrains_output_to_choice(hf_backend):
-    """A 2-alternative grammar forces the output to one of its literals; the
-    unconstrained model emits neither (the negative test that proves causation)."""
+    """A 2-alternative grammar forces the output to one of its literals; the unconstrained model emits neither (the negative test that proves causation)."""
     choice = 'root ::= "yes" | "no"'
     constrained = _generate(hf_backend, choice, max_tokens=5)
     unconstrained = _generate(hf_backend, None, max_tokens=5)
@@ -97,8 +85,7 @@ def test_grammar_constrains_output_to_choice(hf_backend):
 
 
 def test_grammar_forces_parseable_json(hf_backend):
-    """A fixed-shape JSON grammar yields output that json.loads actually parses,
-    with the expected key - structural validity by construction."""
+    """A fixed-shape JSON grammar yields output that json.loads actually parses, with the expected key - structural validity by construction."""
     fixed = r'root ::= "{" "\"ok\"" ":" ("true"|"false") "}"'
     out = _generate(hf_backend, fixed, max_tokens=16)
     obj = json.loads(out)               # raises -> test fails if masking is wrong
@@ -106,9 +93,7 @@ def test_grammar_forces_parseable_json(hf_backend):
 
 
 def test_unconstrained_baseline_is_not_json(hf_backend):
-    """Guards the negative side of the JSON test: the same tiny model, free-
-    running, does NOT emit valid JSON - so test_grammar_forces_parseable_json
-    is really measuring the grammar, not the model."""
+    """Guards the negative side of the JSON test: the same tiny model, free- running, does NOT emit valid JSON - so test_grammar_forces_parseable_json is really measuring the grammar, not the model."""
     out = _generate(hf_backend, None, max_tokens=16)
     with pytest.raises(Exception):
         json.loads(out)

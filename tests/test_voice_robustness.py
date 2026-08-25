@@ -1,18 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""VOICE-1: speech-to-text must never take the whole server down.
-
-faster-whisper's native engine (ctranslate2) and PyAV can fault at the C level
-on some inputs/builds - an abort()/access-violation that no Python ``try/except``
-can catch and that terminates the whole interpreter. localm therefore runs the
-native pipeline (decode -> load -> transcribe) in an isolated worker process; a
-crash or hang there kills only the worker, and the server returns a clean
-``VoiceError`` and respawns.
-
-These tests prove the containment property with REAL, uncatchable faults (a hard
-process exit, a genuine segfault, and a hang) injected into the worker via the
-``LOCALM_VOICE_FAULT_FOR_TEST`` hook - the same code path a real ctranslate2
-crash would take. The premise test below shows that, without isolation, such a
-fault bypasses ``try/except`` entirely (which is why isolation is required)."""
+"""VOICE-1: speech-to-text must never take the whole server down."""
 
 import io
 import math
@@ -41,8 +28,7 @@ def _has_faster_whisper() -> bool:
 
 @pytest.fixture(autouse=True)
 def _clean_worker():
-    """Each test starts and ends with no STT worker and no fault env, so the
-    next worker spawns fresh (and inherits only the env the test sets)."""
+    """Each test starts and ends with no STT worker and no fault env, so the next worker spawns fresh (and inherits only the env the test sets)."""
     os.environ.pop(voice._FAULT_ENV, None)
     voice.shutdown_stt()
     yield
@@ -114,14 +100,7 @@ def test_stt_model_cached_resolves_hub_path_without_import(monkeypatch, tmp_path
 
 
 def test_stt_cache_dir_is_contained_in_the_data_dir(monkeypatch, tmp_path):
-    """The Whisper model lands inside LOCALM_HOME, never the user's home profile.
-
-    The user consents to the DOWNLOAD, never to the location: left to itself
-    faster-whisper caches into the global HF hub cache (~/.cache/huggingface/hub, up
-    to ~1.5 GB) outside the data dir, which is the rule-4 containment leak this pins
-    shut. An ambient HF_* env var must NOT be able to pull it back out: containment
-    that any unrelated environment variable can silently switch off is not a
-    guarantee. LOCALM_HOME is the knob, so the cache follows the data dir."""
+    """The Whisper model lands inside LOCALM_HOME, never the user's home profile."""
     monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
     for k in ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "HF_HOME", "XDG_CACHE_HOME"):
         monkeypatch.setenv(k, str(tmp_path / "somewhere-else"))
@@ -134,14 +113,7 @@ def test_stt_cache_dir_is_contained_in_the_data_dir(monkeypatch, tmp_path):
 
 
 def test_stt_request_carries_the_contained_download_root(monkeypatch, tmp_path):
-    """The parent sends the resolved cache dir WITH each request, and the worker
-    hands it to WhisperModel as download_root.
-
-    Pinned because these are two processes: if the worker recomputed the path
-    itself, the parent's stt_model_cached() probe and the actual download could
-    silently disagree (a consent prompt for a model already on disk, or a re-download
-    into a second location). Asserting the value crosses the queue proves they cannot.
-    Uses a fake queue - no worker spawn - so it stays fast and hermetic."""
+    """The parent sends the resolved cache dir WITH each request, and the worker hands it to WhisperModel as download_root."""
     monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
     sent = []
 

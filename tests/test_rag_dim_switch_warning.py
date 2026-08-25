@@ -1,18 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""NEW-RAG-DIM-NO-REEMBED item 3: switching the embedding model
-(``POST /api/rag/embedding``) used to end with a generic "click reindex on a
-collection below" - it never enumerated collections, never compared any
-stored dimension, and never named what it was about to invalidate. A
-collection built under the OLD model still shows "hybrid" in
-``/api/rag/collections`` right after the switch (``has_vectors`` is a purely
-offline fact, never compared against the live model) - only an actual query
-discovers the mismatch and silently drops to BM25.
-
-Covers, bottom-up: ``Collection.vector_dim()`` (the new accessor), then
-``_collection_dim_report()`` (the enumeration/comparison), then the real
-``POST /api/rag/embedding`` job end to end with only the embedder mocked, so
-the wiring between them - not just each piece in isolation - is exercised.
-"""
+"""NEW-RAG-DIM-NO-REEMBED item 3: switching the embedding model (``POST /api/rag/embedding``) used to end with a generic 'click reindex on a collection below' - it never enumerated collections, never compared any stored dimension, and never named what it was about to invalidate."""
 from __future__ import annotations
 
 import json
@@ -35,10 +22,7 @@ def _embedder(dim):
 
 def _collection(base: Path, name: str, texts: list[str], dim: int | None = None
                  ) -> Collection:
-    """A saved collection with *texts* as chunks and, when *dim* is given,
-    real vectors at that dimension - mirrors test_rag_reembed.py's helper of
-    the same shape, parametrised on *base* so it can point at a fixture's
-    rag_dir() instead of always tmp_path directly."""
+    """A saved collection with *texts* as chunks and, when *dim* is given, real vectors at that dimension - mirrors test_rag_reembed.py's helper of the same shape, parametrised on *base* so it can point at a fixture's rag_dir() instead of always tmp_path directly."""
     c = Collection(name, base=base).create()
     c._chunks = [{"source": f"doc{i}.txt", "pos": i, "text": t}
                  for i, t in enumerate(texts)]
@@ -50,10 +34,7 @@ def _collection(base: Path, name: str, texts: list[str], dim: int | None = None
 
 @pytest.fixture
 def rag_home(tmp_path, monkeypatch) -> Path:
-    """Points rag_dir() (via home_dir()) at tmp_path, mirroring the pattern in
-    test_disclosure.py's rag_app / test_rag_api_mode.py's api_mode_app - so
-    collection_names()/Collection(name) (both default base=rag_dir()) resolve
-    under this test's own tmp_path with no explicit base= needed."""
+    """Points rag_dir() (via home_dir()) at tmp_path, mirroring the pattern in test_disclosure.py's rag_app / test_rag_api_mode.py's api_mode_app - so collection_names()/Collection(name) (both default base=rag_dir()) resolve under this test's own tmp_path with no explicit base= needed."""
     home = tmp_path / "userhome"
     home.mkdir()
     data = home / ".localm"
@@ -87,10 +68,7 @@ class TestVectorDim:
 
     def test_falls_back_to_the_first_vector_for_a_legacy_file_with_no_dim_key(
             self, tmp_path):
-        """A vectors.json written before the top-level "dim" field existed -
-        _load()'s own fallback (data.get("dim") or _first_dim(vectors)) must
-        still resolve a real number, matching what the C3 add-time guard
-        already trusts as this collection's dimension."""
+        """A vectors.json written before the top-level 'dim' field existed - _load()'s own fallback (data.get('dim') or _first_dim(vectors)) must still resolve a real number, matching what the C3 add-time guard already trusts as this collection's dimension."""
         _collection(tmp_path, "kb", ["alpha", "beta"], dim=None)
         (tmp_path / "kb" / "vectors.json").write_text(
             json.dumps({"vectors": [[0.1] * 12, [0.2] * 12]}), encoding="utf-8")
@@ -130,10 +108,7 @@ class TestCollectionDimReport:
         assert report["unaffected"] == 1
 
     def test_a_never_embedded_collection_is_not_mentioned_at_all(self, rag_home):
-        """It was already BM25-only before the switch and stays BM25-only
-        after it - nothing about THIS action changed anything for it (the
-        existing 're-embed needed' GUI badge already covers it, independent
-        of any model switch)."""
+        """It was already BM25-only before the switch and stays BM25-only after it - nothing about THIS action changed anything for it (the existing 're-embed needed' GUI badge already covers it, independent of any model switch)."""
         _collection(rag_home, "notes", ["a"], dim=None)
         report = _report(384)
         assert report == {"degrades": [], "unknown": [], "unaffected": 0}
@@ -147,10 +122,7 @@ class TestCollectionDimReport:
         assert report["unaffected"] == 1
 
     def test_a_corrupt_vectors_file_is_not_reported_as_will_degrade(self, rag_home):
-        """A collection whose vectors were already unusable BEFORE this
-        switch is a pre-existing state (has_vectors already False, surfaced
-        by the GUI's own 're-embed needed' badge) - it must not be
-        misreported as something THIS switch newly broke."""
+        """A collection whose vectors were already unusable BEFORE this switch is a pre-existing state (has_vectors already False, surfaced by the GUI's own 're-embed needed' badge) - it must not be misreported as something THIS switch newly broke."""
         _collection(rag_home, "broken", ["a", "b"], dim=8)
         (rag_home / "broken" / "vectors.json").write_text("{not json", encoding="utf-8")
         report = _report(384)
@@ -159,11 +131,7 @@ class TestCollectionDimReport:
 
     def test_dim_none_while_has_vectors_true_renders_unknown_not_fine(
             self, rag_home, monkeypatch):
-        """Not reachable under the current has_vectors/vector_dim coupling
-        (has_vectors implies a resolvable vector_dim - see vector_dim()'s
-        docstring), but the report must still treat that combination as
-        UNKNOWN rather than silently skipping it as fine or reporting a
-        false dim mismatch, in case that coupling ever changes."""
+        """Not reachable under the current has_vectors/vector_dim coupling (has_vectors implies a resolvable vector_dim - see vector_dim()'s docstring), but the report must still treat that combination as UNKNOWN rather than silently skipping it as fine or reporting a false dim mismatch, in case that coupling..."""
         _collection(rag_home, "docs", ["a", "b"], dim=768)
         from localm.rag.store import Collection as StoreCollection
         monkeypatch.setattr(StoreCollection, "vector_dim", lambda self: None)
@@ -173,10 +141,7 @@ class TestCollectionDimReport:
 
     def test_an_unreadable_collection_directory_is_reported_unknown_not_dropped(
             self, rag_home):
-        """A hand-placed or half-deleted directory that fails to even
-        construct as a Collection must not silently vanish from the report -
-        AGENTS rule 5: best-effort here means naming the failure, not folding
-        it into a false "nothing to see"."""
+        """A hand-placed or half-deleted directory that fails to even construct as a Collection must not silently vanish from the report - AGENTS rule 5: best-effort here means naming the failure, not folding it into a false 'nothing to see'."""
         rogue = rag_home / "not a valid name!"
         rogue.mkdir(parents=True)
         (rogue / "meta.json").write_text("{}", encoding="utf-8")
@@ -361,15 +326,7 @@ class TestEmbeddingSetConfirmGate:
 
     def test_unconfirmed_names_an_unreadable_collection_without_leaking_the_exception(
             self, embedding_route_app, rag_home, caplog):
-        """CodeQL py/stack-trace-exposure (alert #292): a construction failure
-        must still be NAMED in the response (rule 5 - not silently dropped,
-        mirroring _collection_dim_report's own 'unknown' bucket), but the raw
-        exception text must never reach the HTTP response body - only the
-        server-side log. _collection_dim_report's identical 'reason' field
-        never had this problem because its only reader is _setup(), which logs
-        just the collection NAME, never re-serializes 'reason' into a
-        response; this route serializes its whole report straight into JSON,
-        so the exception text itself must be kept out of the field it returns."""
+        """CodeQL py/stack-trace-exposure (alert #292): a construction failure must still be NAMED in the response (rule 5 - not silently dropped, mirroring _collection_dim_report's own 'unknown' bucket), but the raw exception text must never reach the HTTP response body - only the server-side log. _collection..."""
         rogue = rag_home / "not a valid name!"
         rogue.mkdir(parents=True)
         (rogue / "meta.json").write_text("{}", encoding="utf-8")
@@ -435,13 +392,7 @@ def _owner_headers():
 
 @pytest.fixture
 def config_app(rag_home, monkeypatch):
-    """A real core app (PATCH /v1/config included), sharing rag_home's
-    monkeypatched HOME_DIR/Path.home so collection_names()/Collection(name)
-    resolve into the same directory the TestClient's requests operate
-    against. An owner API key (mirrors test_config_admin_gating.py's
-    app_env): a bare TestClient supplies no GUI shell token, and an actual
-    config WRITE (unlike the dry-run/needs_confirm response, which never
-    reaches update_config()) requires either that or an owner key."""
+    """A real core app (PATCH /v1/config included), sharing rag_home's monkeypatched HOME_DIR/Path.home so collection_names()/Collection(name) resolve into the same directory the TestClient's requests operate against."""
     monkeypatch.setenv("LOCALM_API_KEY", CONFIG_OWNER_KEY)
     from localm.inference.http_server import create_app
     return create_app(None)
@@ -636,10 +587,7 @@ class TestListDetailRoutesSurfaceDimMismatch:
 
     def test_list_route_reports_unknown_rather_than_a_false_match_when_no_embedder_is_loaded(
             self, dim_badge_app, rag_home, monkeypatch):
-        """The common cold-start case: nothing loaded yet. Must read as 'cannot
-        tell' (None), never silently as 'matches' (False) - a false False here
-        would be indistinguishable from a genuine match and hide exactly the
-        collections a user most needs to be warned about."""
+        """The common cold-start case: nothing loaded yet."""
         _collection(rag_home, "docs", ["a", "b"], dim=768)
         monkeypatch.setattr("localm.inference.embedder.loaded_dim", lambda: None)
 

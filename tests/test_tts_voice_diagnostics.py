@@ -1,12 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""TTS/voice diagnostics gaps from the 2026-07-02 honesty audit.
-
-- tts/plug.py silently returned {} for a corrupt or unreadable SHIPPED template
-  and silently dropped the user's overrides on a config-layer failure - both
-  now leave a log trace (behaviour unchanged: TTS keeps serving).
-- voice/plug.py picked the HTTP status (501 vs 422) by substring-matching
-  "faster-whisper" in the human error MESSAGE; it now branches on the
-  structured VoiceError.code, so rewording a message cannot flip the status."""
+"""TTS/voice diagnostics gaps from the 2026-07-02 honesty audit."""
 
 import logging
 

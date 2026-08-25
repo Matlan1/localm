@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""SRV-2: a single global exception handler so an unexpected error in any route
-returns a clean JSON 500 (no traceback / no exception detail leaked) instead of a
-bare error, and the server stays responsive."""
+"""SRV-2: a single global exception handler so an unexpected error in any route returns a clean JSON 500 (no traceback / no exception detail leaked) instead of a bare error, and the server stays responsive."""
 
 from fastapi.testclient import TestClient
 

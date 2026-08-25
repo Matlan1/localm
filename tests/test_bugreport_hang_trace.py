@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""A captured event-loop hang trace (from the always-on watchdog) must be bundled
-into a bug report automatically, so a non-technical tester who just files their
-normal report carries the freeze diagnosis with them - no env var, no py-spy."""
+"""A captured event-loop hang trace (from the always-on watchdog) must be bundled into a bug report automatically, so a non-technical tester who just files their normal report carries the freeze diagnosis with them - no env var, no py-spy."""
 
 import json
 import os
@@ -12,10 +10,7 @@ from localm import bugreport
 
 def _seed_registry(home, *, pid, instance_id="testsrv",
                    started="2026-07-10T12:00:00+00:00"):
-    """Seed a live-instance registry entry the way a running server advertises one
-    (<home>/run/<id>.json). Only the fields live_server_hang_trace reads (pid,
-    started) matter here; the file is a plain JSON dict, exactly what
-    instances.list_entries parses."""
+    """Seed a live-instance registry entry the way a running server advertises one (<home>/run/<id>.json)."""
     run = home / "run"
     run.mkdir(parents=True, exist_ok=True)
     (run / f"{instance_id}.json").write_text(json.dumps({
@@ -25,13 +20,7 @@ def _seed_registry(home, *, pid, instance_id="testsrv",
 
 
 def _seed_hang(home, name=None, body=None):
-    """Seed a hang capture the way the product actually produces one: the stall
-    watchdog runs INSIDE the server process (http_server.py) and names the file
-    hang_<date>_<os.getpid()>.log, and the only caller of save_user_report is a
-    route in that same process. So the trace of the run being reported carries
-    THIS process's pid - seeding a foreign pid would test a file the product
-    never creates on this path (and one a report must NOT attach, since it would
-    belong to some other run - REG-542)."""
+    """Seed a hang capture the way the product actually produces one: the stall watchdog runs INSIDE the server process (http_server.py) and names the file hang_<date>_<os.getpid()>.log, and the only caller of save_user_report is a route in that same process."""
     logs = home / "logs"
     logs.mkdir(parents=True, exist_ok=True)
     name = name or f"hang_2026-07-10_120000_{os.getpid()}.log"
@@ -129,11 +118,7 @@ def test_live_server_hang_trace_skips_a_dead_registered_server(tmp_path, monkeyp
 
 
 def test_bug_report_cli_bundles_live_server_hang_trace(cli_runner):
-    """End-to-end through the REAL `localm bug-report` command: a live server has
-    registered itself and captured a freeze; the generated report must carry the
-    hang-trace section. Drives the actual CLI + registry + collector, no mock of
-    the collector (the 0.1.2 defect was exactly this integration silently missing).
-    """
+    """End-to-end through the REAL `localm bug-report` command: a live server has registered itself and captured a freeze; the generated report must carry the hang-trace section."""
     from localm import instances
     from localm.cli import main
     home = cfg.HOME_DIR   # cli_runner points HOME_DIR (and LOCALM_HOME) at a throwaway

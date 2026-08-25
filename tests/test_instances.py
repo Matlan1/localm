@@ -1,11 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Instance discovery registry (H6 phase 3, advertise-only): localm/instances.py
-+ the GET /whoami endpoint.
-
-Covers root-dir resolution, atomic register/unregister, stale reaping (dead PID
-removed, live + self kept, corrupt removed), the identity payload (no token/pid
-leak), and the advertise() context manager lifecycle.
-"""
+"""Instance discovery registry (H6 phase 3, advertise-only): localm/instances.py + the GET /whoami endpoint."""
 
 import json
 import os
@@ -96,12 +90,7 @@ def test_version_falls_back_to_dist_info_when_live_raises(monkeypatch):
 
 
 def test_version_reports_unknown_not_a_fabricated_literal(monkeypatch):
-    """When BOTH the live VERSION file and dist-info are unreadable, _version()
-    must return the honest "unknown" sentinel, never a hardcoded version literal:
-    /whoami's version gates the post-update health watchdog by EQUALITY, so a
-    stale literal that ever equalled the expected version would false-PASS a build
-    whose version machinery is actually broken. "unknown" can never equal a real
-    target -> fails safe."""
+    """When BOTH the live VERSION file and dist-info are unreadable, _version() must return the honest 'unknown' sentinel, never a hardcoded version literal: /whoami's version gates the post-update health watchdog by EQUALITY, so a stale literal that ever equalled the expected version would false-PASS a bu..."""
     def boom(*a, **k):
         raise OSError("no version anywhere")
     monkeypatch.setattr("localm._version.read_version", boom)
@@ -149,9 +138,7 @@ def test_read_entry_empty_file_is_rejected_and_reports_size_zero(tmp_path, caplo
 
 
 def test_read_entry_truncated_file_reports_nonzero_size(tmp_path, caplog):
-    """A file with SOME content that is still invalid JSON - the shape a
-    mid-write truncation would leave - must report a NONZERO size, the exact
-    signal that distinguishes it from the empty-file case above."""
+    """A file with SOME content that is still invalid JSON - the shape a mid-write truncation would leave - must report a NONZERO size, the exact signal that distinguishes it from the empty-file case above."""
     instances.run_dir(tmp_path).mkdir(parents=True)
     p = instances.run_dir(tmp_path) / "truncated.json"
     p.write_text('{"instance_id": "abc", "pid":', encoding="utf-8")   # cut off
@@ -163,8 +150,7 @@ def test_read_entry_truncated_file_reports_nonzero_size(tmp_path, caplog):
 
 
 def test_read_entry_missing_file_does_not_log(tmp_path, caplog):
-    """The normal, expected case (no entry yet, or already reaped) must stay
-    silent - only a genuinely unreadable EXISTING file is diagnostic-worthy."""
+    """The normal, expected case (no entry yet, or already reaped) must stay silent - only a genuinely unreadable EXISTING file is diagnostic-worthy."""
     p = instances.run_dir(tmp_path) / "does-not-exist.json"
     with caplog.at_level("WARNING"):
         assert instances.read_entry(p) is None
@@ -172,9 +158,7 @@ def test_read_entry_missing_file_does_not_log(tmp_path, caplog):
 
 
 def test_reap_removes_the_empty_entry_read_entry_flags(tmp_path):
-    """The existing reap behaviour (already covered by test_reap_removes_corrupt
-    for a non-empty corrupt file) must hold for the empty-file case too - the
-    instrumentation is diagnostic-only and must not change what gets cleaned up."""
+    """The existing reap behaviour (already covered by test_reap_removes_corrupt for a non-empty corrupt file) must hold for the empty-file case too - the instrumentation is diagnostic-only and must not change what gets cleaned up."""
     instances.run_dir(tmp_path).mkdir(parents=True)
     bad = instances.run_dir(tmp_path) / "empty.json"
     bad.write_bytes(b"")
@@ -250,29 +234,7 @@ def test_pid_alive_self_and_invalid():
 # ------------------------------------------------------------------ #
 
 def _wait_until_reads_dead(pid: int, timeout: float = 10.0) -> bool:
-    """Wait for *pid* to stop reading as alive, and report whether it did.
-
-    Popen.wait() returns as soon as the process handle is signalled, which is
-    process TERMINATION, not the end of process rundown. On Windows the exited
-    process stays in the OS process enumeration for a short window afterwards,
-    and psutil.pid_exists() (what pid_alive uses there) is enumeration-based,
-    not exit-code-based: OpenProcess + GetExitCodeProcess already report the
-    real exit code while psutil still answers True. Sampling pid_alive ONCE
-    right after wait() therefore samples inside that window and is inherently
-    racy. Measured on a 12-core Windows box under a loaded parallel run: the
-    enumeration window is ~0.12 ms at the median, 0.37 ms at p90 and 2.0 ms at
-    worst, which made the old single-sample assertion fail 3.3% of the time
-    (150 failures in 4573 runs). The same harness, polling, failed 0 times in
-    4573 runs, and a live process was never once misreported as dead.
-
-    The contract under test is that a pid which has exited stops reading as
-    alive, not that the OS process table updates synchronously with exit, so
-    poll for it. This returns in ~0.3 ms at the median; the worst observed wait
-    was 27.6 ms, which is sleep granularity and scheduler delay under load
-    rather than the window itself. The timeout is ~360x that worst case, so a
-    genuine regression (a pid that never stops reading as alive) still fails
-    hard rather than being waited away.
-    """
+    """Wait for *pid* to stop reading as alive, and report whether it did."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if instances.pid_alive(pid) is False:
@@ -354,8 +316,7 @@ def test_advertise_project_override(tmp_path):
 
 
 def test_advertise_sets_bind_coordinates_on_state(tmp_path):
-    """Phase 5: the instance records its own port + scheme on app.state so it can
-    build its loopback /v1 self-url when it mounts a surface on demand."""
+    """Phase 5: the instance records its own port + scheme on app.state so it can build its loopback /v1 self-url when it mounts a surface on demand."""
     app = _FakeApp()
     with instances.advertise(app, tmp_path, host="0.0.0.0", port=8651,
                              mode="api", scheme="https"):
@@ -428,10 +389,7 @@ def test_whoami_endpoint_before_wiring_returns_nulls():
 
 
 def test_whoami_omits_root_dir_on_a_network_bind(tmp_path):
-    """root_dir is an absolute host path (it can carry the OS username); it must
-    not leak to LAN clients. It is disclosed only on a loopback bind - discovery
-    matches root_dir from the registry file, not /whoami, so identity still works
-    (security review 2026-06-20)."""
+    """root_dir is an absolute host path (it can carry the OS username); it must not leak to LAN clients."""
     from fastapi.testclient import TestClient
     from localm.inference.http_server import create_app
 
@@ -545,10 +503,7 @@ def test_default_probe_missing_scheme_tries_both(monkeypatch):
 
 
 def test_default_probe_forwards_the_recorded_bind_host(monkeypatch):
-    """The entry's bind host must reach _try_whoami, or an IPv6-bound server is
-    probed on an IPv4 loopback it is not listening on and reported DEAD while
-    it is serving. Measured before the fix: a live ``-H ::1`` server showed
-    alive=False and `localm status` said nothing was serving."""
+    """The entry's bind host must reach _try_whoami, or an IPv6-bound server is probed on an IPv4 loopback it is not listening on and reported DEAD while it is serving."""
     seen = []
     monkeypatch.setattr(instances, "_try_whoami",
                         lambda s, p, i, t, h=None: (seen.append(h), True)[1])

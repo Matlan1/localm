@@ -1,26 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Jobs plugin: scheduled recurring tasks.
-
-Routes (mounted by the engine, auto-scoped to the ``jobs`` capability):
-  GET    /api/jobs                 - list jobs
-  POST   /api/jobs                 - create a job
-  GET    /api/jobs/{id}            - job detail
-  PUT    /api/jobs/{id}            - update a job
-  DELETE /api/jobs/{id}            - delete a job (and its results)
-  POST   /api/jobs/{id}/run        - run the job now
-  GET    /api/jobs/{id}/results    - past run results (newest first)
-
-A job runs a chat or coder prompt, a memory-synthesis pass, or a RAG collection
-re-sync, on an interval or 5-field cron schedule. The
-JobScheduler wakes periodically (~30s) and runs every enabled + due job via the
-runner, recording each result. Job RESULTS are explicit user data (saved in any
-privacy mode, like generated images); a coder/chat RUN's own session trace still
-honours ``effective_mode``.
-
-The scheduler starts only when the plugin is loaded under a running event loop
-(a live server). Under a bare-FastAPI test harness or a headless import there is
-no loop, so ``start`` is a safe no-op and the routes still work for run-now.
-"""
+"""Jobs plugin: scheduled recurring tasks."""
 
 from __future__ import annotations
 
@@ -35,9 +14,7 @@ from localm.plugins.builtin.jobs.store import Job, JobStore, cwd_unc_error
 
 
 def _run_job(job, *, engine=None):
-    """Indirection through the runner MODULE (not a bound import) so the route
-    and scheduler always call the live ``runner.run_job`` - and a test can patch
-    it via the canonical ``localm.plugins.builtin.jobs.runner`` path."""
+    """Indirection through the runner MODULE (not a bound import) so the route and scheduler always call the live ``runner.run_job`` - and a test can patch it via the canonical ``localm.plugins.builtin.jobs.runner`` path."""
     return _runner.run_job(job, engine=engine)
 
 _router = APIRouter()
@@ -83,16 +60,7 @@ class JobUpdate(BaseModel):
 
 
 def _check_model_name(model) -> None:
-    """Refuse a job whose ``model`` is not a registered model name.
-
-    The jobs scope is NOT in scopes.PRIVILEGED_SCOPES, so a deliberately
-    restricted key reaches this field, and the field used to flow verbatim into
-    get_model_info -> Engine(...). That let any jobs-scoped caller name an
-    arbitrary path on disk and have the server stat it, walk it, read it, and -
-    for a HuggingFace directory - execute its bundled .py through transformers.
-    Registry membership is checked HERE, at the write, so a poisoned row never
-    reaches disk in the first place (the runner re-checks at run time for rows
-    persisted by an older build)."""
+    """Refuse a job whose ``model`` is not a registered model name."""
     from localm.model_manager import unregistered_model_error
     err = unregistered_model_error(model)
     if err:
@@ -100,30 +68,7 @@ def _check_model_name(model) -> None:
 
 
 def _effective_cwd(cwd, request: Request):
-    """The working directory a job may actually be stored with: *cwd* as asked when
-    the caller is allowed to choose one, else the instance's project root.
-
-    ``_check_cwd`` below asks what SHAPE the path is; this asks WHO is choosing it.
-    The coder route already draws exactly this line - a restricted caller is forced
-    into the project root "so a scoped key cannot point the (confined) file tools at
-    arbitrary paths" - and the scheduler had no equivalent, so a plain
-    ``jobs``-scoped key got read plus confined-write anywhere on the server just by
-    scheduling a job there.
-
-    CONFINED rather than REJECTED, which is the opposite of how ``allow_shell`` is
-    handled two routes down, and the difference is the point: ``allow_shell`` is an
-    optional opt-in, so refusing it still leaves a working job and tells the caller
-    the opt-in was denied. ``cwd`` is MANDATORY for a coder job (Job.validate), so
-    refusing it would not restrict the feature, it would remove it - a jobs-scoped
-    key could no longer schedule a coder job at all. Confining matches the coder
-    route exactly and keeps the capability.
-
-    Not silent either: the created/updated job is returned to the caller with its
-    effective ``cwd``, so the value that will actually be used is visible in the
-    response rather than assumed. The runner ALSO confines at run time
-    (``_cwd_trusted``), because this route is not the only writer - the CLI and rows
-    persisted by older builds reach the scheduler without passing here - and it
-    reports the confinement in the job's own output when it bites."""
+    """The working directory a job may actually be stored with: *cwd* as asked when the caller is allowed to choose one, else the instance's project root."""
     if cwd is None or not str(cwd).strip():
         return cwd                    # nothing chosen: let validate() have its say
     if _caller_can_allow_shell(request):
@@ -133,32 +78,14 @@ def _effective_cwd(cwd, request: Request):
 
 
 def _check_cwd(cwd) -> None:
-    """Refuse a coder job's ``cwd`` when it is UNC or device syntax.
-
-    Same shape as _check_model_name above, sharing store.cwd_unc_error's
-    wording the same way _check_model_name shares unregistered_model_error's:
-    checked HERE, at the write, so a poisoned row never persists via this
-    route. This is early rejection only, not the authoritative guard - a row
-    written before this check existed (or added straight to the store) is
-    still on disk, and the autonomous scheduler tick has no caller to gate
-    here. _run_coder's own check is authoritative because it runs immediately
-    before the filesystem call, for every job regardless of when or how its
-    cwd was set (mirrors the model-name re-check in runner.py's _load_engine,
-    and PR #893's fix for the identical gap in the MCP server's
-    pull_model/run_coder_task/generate_image tools)."""
+    """Refuse a coder job's ``cwd`` when it is UNC or device syntax."""
     err = cwd_unc_error(cwd)
     if err:
         raise HTTPException(400, err)
 
 
 def _caller_can_allow_shell(request: Request) -> bool:
-    """True if the caller may opt a coder job into the full, shell-capable coder.
-
-    Only the OWNER (open-mode loopback, or an ADMIN key) or a key holding the
-    privileged ``coder:full`` scope qualifies. ``coder:full`` is owner-only to
-    mint, so a plain ``jobs`` or ``coder`` key can never schedule an
-    unrestricted-shell job: it gets the safe restricted coder. Mirrors the
-    coder route's ``restricted = not (is_owner or coder:full)`` policy."""
+    """True if the caller may opt a coder job into the full, shell-capable coder."""
     from localm import scopes as S
     from localm.auth import any_key_configured
     from localm.inference.http_server import caller_scopes
@@ -173,59 +100,7 @@ def _caller_can_allow_shell(request: Request) -> bool:
 
 
 def _caller_is_owner_key(request: Request) -> bool:
-    """True when the caller's credential IS the owner key, i.e. the one credential
-    whose authority does not come from a revocable keystore entry.
-
-    This asks a POSITIVE question - "is this principal the current owner key?" -
-    and reads nothing but the owner key itself. An earlier version of this fix
-    asked the negative ("absent from the keystore, therefore the owner") via
-    ``not key_hash_live(h)``, and that was wrong twice over (both caught by the
-    pre-merge security review of REG-509):
-
-    - ``verify()`` rejects an EXPIRED key on the bearer path, but expiry (unlike
-      ``revoke_key``) neither deletes the keystore record nor drops sessions, and
-      ``_principal_from_token`` exempts an ADMIN session from ``key_hash_live``
-      entirely. So an expired ADMIN-scoped keystore key over its still-live cookie
-      resolved a principal that ``key_hash_live`` called dead - and the negative
-      test read that as "the owner", handing a revoked-by-expiry key permanent
-      shell. That is precisely the LM-DA-014 hole this whole re-check exists to
-      close.
-    - ``_load_keystore()`` swallows OSError/ValueError and returns ``[]``, so a
-      transient unreadable/corrupt auth.json makes ``key_hash_live`` say "not
-      live" for a perfectly live key. Deriving a PERMANENT, persisted privilege
-      stamp from a fail-open read is exactly backwards - and note the module's own
-      ``_keystore_configured()`` deliberately fails CLOSED on those same errors.
-
-    ADMIN is deliberately not consulted: it is in PRIVILEGED_SCOPES, so the owner
-    may mint an ADMIN-scoped keystore key, and that key is revocable and must stay
-    subject to the re-check.
-
-    Returns False in open mode / for a tokenless caller: ``owner`` is then None,
-    which the runner already treats as needing no re-check.
-
-    TWO WAYS TO PROVE IT, because one of them cannot survive a roll:
-
-    1. The SESSION's own mint-time record (``caller_minted_by_owner_key``). This is
-       the authoritative answer for a cookie caller and closes what an earlier pass
-       had to leave open as a KNOWN GAP: an owner key ROLL deliberately leaves
-       browser sessions alive (cli/keys.py: a GUI roll must not log the browser
-       out), so a job created afterwards through that still-valid owner session
-       resolved the OLD key's hash - matching neither the new owner key nor any
-       keystore entry, i.e. indistinguishable from a REVOKED scoped key. It was
-       stamped False, and the runner then stripped shell from the owner's own
-       automation, silently and permanently. That is REG-509's own named trigger.
-    2. The key VALUE comparison below. Still needed, and not merely legacy: it is
-       the ONLY answer for a BEARER caller (no session exists to have recorded
-       anything), and it covers a cookie session minted before the flag existed.
-
-    Both are positive proofs, and (1) adds no authority: the session it reads is
-    already ADMIN-scoped and already exempt from ``key_hash_live``, so the same
-    caller can already create this job and drive the coder route with shell
-    interactively - only the SCHEDULED path disagreed. The flag is an attribute of
-    the session, so it dies with it: logout, ``revoke_all`` (key clear / sign out
-    everywhere) and expiry all revoke it, leaving the containment path for a leaked
-    owner key exactly as it was.
-    """
+    """True when the caller's credential IS the owner key, i.e. the one credential whose authority does not come from a revocable keystore entry."""
     from localm.auth import _hash_key, _legacy_owner_identity, ct_equal, get_api_key
     from localm.inference.http_server import caller_minted_by_owner_key, principal_id
     owner_key = get_api_key()
@@ -258,32 +133,7 @@ def _caller_is_owner_key(request: Request) -> bool:
 
 
 def _needs_owner_key_restamp(job: Job, request: Request) -> bool:
-    """True when THIS request is provable proof that its caller now owns *job*
-    the way ``owner_is_owner_key`` records, and the stamp has not been set yet.
-
-    Repairs the residual REG-509 gap: a shell-enabled job whose stamp is False
-    because it was created before #1171 over an owner COOKIE session, or before
-    #663 with no field at all, AND that never ran while the owner key still had
-    its creation-time value (disabled, long-cron, or created shortly before a
-    roll) - so ``_remember_owner_key_job`` (runner.py) never got a run to prove
-    it during. After a roll the runner alone can no longer tell that job apart
-    from a genuinely revoked scoped key (both hash to nothing live), and there
-    was no path back short of delete-and-recreate. An authenticated REQUEST is a
-    second, independent proof the runner cannot make: ``_caller_is_owner_key``
-    reads the session's own mint-time record (``caller_minted_by_owner_key``),
-    which survives a roll by design, precisely when the runner's key-VALUE
-    compare stops matching.
-
-    The ``job.owner == principal_id(request)`` conjunction is load-bearing and
-    is NOT redundant with ``_caller_is_owner_key`` alone: ``owned_job`` (via
-    ``job_owner_ok``) lets an ADMIN caller reach ANOTHER principal's job, and
-    that caller must never be able to upgrade THAT job to permanent owner-key
-    shell just by running or editing it - only the job's own creator, proven as
-    the owner key, may. ``principal_id`` returns the SAME frozen identity a
-    cookie session was minted with (never re-derived from the current key
-    value), so for the exact pre-roll session that created (or was live when it
-    was created) *job*, this equality still holds after the roll - that is what
-    makes the repair reachable at all."""
+    """True when THIS request is provable proof that its caller now owns *job* the way ``owner_is_owner_key`` records, and the stamp has not been set yet."""
     if getattr(job, "owner_is_owner_key", False) or job.owner is None:
         return False
     if not _caller_is_owner_key(request):
@@ -329,16 +179,7 @@ def _job_dict(job: Job) -> dict:
 # ------------------------------------------------------------------ #
 
 def owned_job(job_id: str, request: Request) -> Job:
-    """FastAPI dependency: fetch the job named by the job_id path param and
-    enforce per-principal ownership - only the creating key (or an
-    admin/owner) may touch it. Depends()-injectable (``job: Job =
-    Depends(owned_job)``), so a new per-job route cannot omit the ownership
-    check by construction (design-audit LM-DA-020). A mismatch returns the
-    SAME 404 as a missing id so a foreign jobs-scoped key cannot even confirm
-    another principal's job exists. owner=None (a tokenless / open-mode
-    creation) stays unrestricted. Imports http_server lazily (not at module
-    level) so this plugin still imports cleanly under a headless/no-engine
-    harness."""
+    """FastAPI dependency: fetch the job named by the job_id path param and enforce per-principal ownership - only the creating key (or an admin/owner) may touch it."""
     from localm.inference.http_server import job_owner_ok
     job = _store().get(job_id)
     if job is None or not job_owner_ok(request, getattr(job, "owner", None)):
@@ -517,8 +358,7 @@ async def job_results(job_id: str, limit: int = 100, offset: int = 0,
 # ------------------------------------------------------------------ #
 
 def register(host) -> None:
-    """Mount the jobs routes and start the scheduler when running under a live
-    server. The host auto-scopes every route to the ``jobs`` capability."""
+    """Mount the jobs routes and start the scheduler when running under a live server."""
     global _scheduler, _host
     _host = host
     host.mount_router(_router)
@@ -552,11 +392,7 @@ def register(host) -> None:
 
 
 def _publish_self_url(host) -> None:
-    """Publish the live server's OWN /v1 URL into LOCALM_SELF_URL so a scheduled
-    coder job talks to THIS server (the actual, possibly auto-bumped, port),
-    not a wrong hardcoded default. Only set when unset, so an explicit
-    LOCALM_SELF_URL from the environment always wins. Best-effort: a missing
-    app.state just leaves the runner's configured-port fallback in place."""
+    """Publish the live server's OWN /v1 URL into LOCALM_SELF_URL so a scheduled coder job talks to THIS server (the actual, possibly auto-bumped, port), not a wrong hardcoded default."""
     import os
     if os.environ.get("LOCALM_SELF_URL"):
         return

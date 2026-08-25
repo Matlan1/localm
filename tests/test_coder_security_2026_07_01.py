@@ -1,10 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Regression tests for the 2026-07-01 coder-security backlog cluster.
-
-  AUD-CODERTOOLS - scope allowlist is default-deny (contract test)
-  REC-N1-PROSE   - RULES prose + subagent prompt omit run_shell when disabled
-  R19a           - unattended one-shot gates run_shell (fail-closed, opt-out --yes)
-"""
+"""Regression tests for the 2026-07-01 coder-security backlog cluster."""
 
 from pathlib import Path
 
@@ -37,13 +32,7 @@ def _is_pathy(param_name: str) -> bool:
 
 
 def _has_path_arg(tool) -> bool:
-    """True if the tool takes a filesystem path in ANY of its params.
-
-    Covers both shapes: a top-level path-like arg, and a path NESTED inside a
-    collection arg (edit_files' ``edits=[{path, old, new}]``). The nested shape
-    is the one that hides: its own param name ("edits") is not path-like, so a
-    name-only check would clear the tool while its real targets go unconfined.
-    """
+    """True if the tool takes a filesystem path in ANY of its params."""
     for param_name, meta in tool.params.items():
         if _is_pathy(param_name):
             return True
@@ -69,10 +58,7 @@ def test_scope_allowlist_is_default_deny():
 
 
 def test_default_deny_check_sees_a_nested_path_arg():
-    """Negative test for the contract test above: a tool whose paths live inside
-    a collection arg must be DETECTED as path-taking. Without this, a nested-path
-    tool passes the scope check by having no `path` arg to check - a fail-OPEN,
-    which is the exact opposite of what the allowlist is for."""
+    """Negative test for the contract test above: a tool whose paths live inside a collection arg must be DETECTED as path-taking."""
     from localm.plugins.coder.tools.registry import TOOL_REGISTRY
 
     class _NestedPathTool:
@@ -91,8 +77,7 @@ def test_default_deny_check_sees_a_nested_path_arg():
 
 
 def test_nested_path_tool_scope_check_reads_the_nested_paths():
-    """The resolver the scope check depends on must actually see nested paths -
-    an empty result would silently allow everything."""
+    """The resolver the scope check depends on must actually see nested paths - an empty result would silently allow everything."""
     from localm.plugins.coder.agent.constants import (
         _SCOPED_TOOLS, _call_target_paths,
     )

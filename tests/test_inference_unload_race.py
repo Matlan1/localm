@@ -1,16 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""
-Crash-safety contract for unload-during-generation.
-
-The native llama.cpp context must never be freed while a generation step is
-making a native call against it (a use-after-free that crashes the GPU
-driver). The wrapper guarantees this with a per-instance lock + stop event:
-close() signals stop, then frees *under* the lock, so it blocks until any
-in-flight native region releases - and the generation loop bails at its next
-step because stop is set / the context is gone.
-
-These tests exercise that contract directly without loading the DLL.
-"""
+"""Crash-safety contract for unload-during-generation."""
 
 import threading
 import time
@@ -31,8 +20,7 @@ def _lockable_llama() -> LlamaCpp:
 
 
 def test_close_signals_stop_immediately_and_waits_for_the_lock():
-    """While a 'native region' holds _gen_lock, close() must not free - but it
-    must set _stop right away so the generation loop bails at its next step."""
+    """While a 'native region' holds _gen_lock, close() must not free - but it must set _stop right away so the generation loop bails at its next step."""
     llm = _lockable_llama()
 
     llm._gen_lock.acquire()              # simulate a decode in its locked region
@@ -58,9 +46,7 @@ def test_close_signals_stop_immediately_and_waits_for_the_lock():
 
 
 def test_stop_set_before_lock_is_observable_by_a_generator_step():
-    """A generator step checks `_stop.is_set() or _ctx_ptr is None` inside the
-    lock; once close() has run, both are true, so the step aborts instead of
-    touching a freed context."""
+    """A generator step checks `_stop.is_set() or _ctx_ptr is None` inside the lock; once close() has run, both are true, so the step aborts instead of touching a freed context."""
     llm = _lockable_llama()
     llm._ctx_ptr = 1234      # pretend a live context
     llm._model_ptr = 5678

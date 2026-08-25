@@ -1,42 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""``dispatch_parallel``: run up to two child agents at once, each in its own git
-worktree, and return their diffs for EXPLICIT human review.
-
-WHY THIS EXISTS SEPARATELY FROM ``spawn_agent``
------------------------------------------------
-``spawn_agent`` hands the child the parent's own ``cwd``. Two of those running at
-once would edit the same files in the same directory with no isolation at all, so
-``spawn_agent`` is marked destructive and therefore runs strictly serially. This
-tool is the safe way to get real concurrency: each child gets its own checkout, so
-two children can edit the SAME file without interfering, and the parent's working
-tree is never touched.
-
-``spawn_agent`` staying serial is the permanent design, not a stopgap this tool
-lifts. Concurrency is available only through the isolation, never without it.
-
-WHAT IS AND IS NOT ISOLATED (do not overstate this)
----------------------------------------------------
-Isolated: every file tool. They all resolve paths through ``_confine(cwd, path)``
-(tools/base.py:84), which rejects anything outside ``cwd``. With ``cwd`` set to the
-child's own worktree, file reads and writes genuinely cannot escape it.
-
-NOT isolated: ``run_shell`` and ``run_tests``. Both are in
-``_INTENTIONALLY_UNSCOPED`` (agent/constants.py:36-38) because a path-argument check
-cannot confine arbitrary code. A child can still shell its way out of its worktree.
-So worktree isolation is REAL for file tools and BEST-EFFORT for shell. Describe it
-that way; do not call a dispatched child sandboxed.
-
-NEVER AUTO-MERGE
-----------------
-Each child's work is committed to its own branch and the diff is returned. Nothing
-is ever merged. A local model resolving a merge conflict unsupervised is the worst
-version of silently papering over a problem, so the human always decides.
-
-The BRANCH is the durable artifact; the WORKTREE is transient. After a child
-finishes we commit its work, capture the diff, and remove the worktree. That way
-the review artifact survives while nothing is left lying around on disk. Committing
-is not merging: the parent's tree is untouched either way.
-"""
+"""``dispatch_parallel``: run up to two child agents at once, each in its own git worktree, and return their diffs for EXPLICIT human review."""
 
 from __future__ import annotations
 
@@ -85,18 +48,7 @@ _CONFIRM_LOCK = threading.RLock()
 
 
 def _serialised_confirm_handler(parent: Any, child_label: str):
-    """The confirmation channel for one concurrent child.
-
-    Wraps the parent's real channel so that (a) only one child can prompt at a
-    time, and (b) the human is told WHICH child is asking before the prompt - on
-    the terminal by the announcement line below, and in the GUI by the ``agent``
-    keyword this relays to the parent's handler (../confirm.py).
-
-    The fail-closed property is preserved exactly: when the parent has no channel
-    at all (a genuinely unattended run), this returns None, and the caller's
-    ``needs_confirm`` branch denies the tool rather than self-approving. This never
-    invents an approval - it only queues and labels real ones.
-    """
+    """The confirmation channel for one concurrent child."""
     from .agents import _inherited_confirm_handler
     base = _inherited_confirm_handler(parent)
     if base is None:
@@ -135,21 +87,7 @@ def _serialised_confirm_handler(parent: Any, child_label: str):
 
 
 def _announce_asker(child_label: str, call) -> None:
-    """Name the child that is about to prompt.
-
-    With several children alive, an unattributed "run_shell? [y/N]" is ambiguous.
-    The prompt itself is rendered by the parent's own handler (terminal or GUI) and
-    we deliberately do not rewrite the ToolCall to smuggle a label into it, so this
-    prints an attribution line immediately before the prompt instead.
-
-    This line is the TERMINAL half of the attribution and is still what a REPL user
-    sees, including on the REG-507 path where a child borrows the parent's
-    ``_confirm_tool`` (a plain one-argument handler that cannot be told a label).
-    The GUI half no longer depends on it: the label now travels the confirm chain as
-    the optional ``agent`` keyword (../confirm.py) and reaches the browser on the
-    confirm_request event, so a GUI user sees WHICH child is asking on the approval
-    card itself rather than in a server console they are not looking at.
-    """
+    """Name the child that is about to prompt."""
     try:
         from ..display import console
         console.print(
@@ -162,11 +100,7 @@ def _announce_asker(child_label: str, call) -> None:
 
 
 def _normalise_tasks(tasks: Any) -> tuple[list[dict], Optional[str]]:
-    """Accept the shapes a model actually emits and return [{name, task, model}].
-
-    Tolerates a list of strings, a list of dicts, or a single string, because a
-    local model will produce all three. Returns (tasks, error).
-    """
+    """Accept the shapes a model actually emits and return [{name, task, model}]."""
     if tasks is None:
         return [], "dispatch_parallel needs a 'tasks' list"
     if isinstance(tasks, (str, bytes)):
@@ -206,18 +140,7 @@ def _normalise_tasks(tasks: Any) -> tuple[list[dict], Optional[str]]:
 
 
 def _absorb_child_errors(parent: Any, errors: list) -> None:
-    """Fold a finished child's error trace into the parent, and nothing else.
-
-    ERRORS ONLY, deliberately. A child ran in its own worktree, so its
-    ``_changed_files`` keys are relative to a tree this parent does not have:
-    merging them would make ``session_diff()`` resolve them against the PARENT's
-    cwd and either fabricate a diff for a file the parent never touched or lose
-    the child's work silently. Errors carry no path, so that half stays valid -
-    the same split the background absorption path makes.
-
-    Called on the parent's OWN thread once every worker has been waited on, never
-    from a worker.
-    """
+    """Fold a finished child's error trace into the parent, and nothing else."""
     if not errors:
         return
     from ..agent.constants import _MAX_ERROR_TRACE
@@ -239,31 +162,7 @@ def _safe_label(raw: str) -> str:
 
 
 class _ChildOutcome:
-    """What happened to one dispatched child, for the review report.
-
-    SHARED BETWEEN TWO THREADS, so the writes are synchronised rather than left to
-    luck. A child that outlives the batch deadline is ABANDONED, not stopped - a
-    Python thread cannot be killed - so its worker is still running, and still
-    holds a reference to this object, while the parent reports on it and tears the
-    batch down. Two rules make that safe:
-
-    * The PARENT's terminal verdict is authoritative and one-way. ``seal()``
-      records it and locks the object; no later worker write can move the status
-      off it. Without this a child abandoned at the deadline could write
-      ``status = "ok"`` a moment later and the parent would then read its own
-      timeout back as a success - rendering ``[ok]``, returning ``ok=True``,
-      recording an ``ok`` change-set, and committing and removing a worktree a live
-      thread is still writing into.
-    * A WORKER publishes through ``publish()`` only, which writes every field under
-      one lock acquisition. Atomic on purpose: the fields are read together, so a
-      parent must never see ``status="ok"`` next to the ``turns=0`` of a child that
-      had not finished.
-
-    A refused publish is a real event and is REPORTED (``late_note``), never
-    silently dropped: the child did finish, just too late to be used, and the
-    files it wrote are sitting uncommitted in a worktree we deliberately left in
-    place. Saying so is what lets the operator find them.
-    """
+    """What happened to one dispatched child, for the review report."""
 
     def __init__(self, name: str) -> None:
         self.name = name
@@ -290,11 +189,7 @@ class _ChildOutcome:
         self._sealed_at = 0.0
 
     def seal(self, status: str, detail: str) -> None:
-        """Record the PARENT's terminal verdict and lock out later worker writes.
-
-        Parent thread only. After this the status is final: a worker that finishes
-        afterwards can no longer change what was reported.
-        """
+        """Record the PARENT's terminal verdict and lock out later worker writes."""
         with self._lock:
             self._sealed = True
             self._sealed_at = time.monotonic()
@@ -302,11 +197,7 @@ class _ChildOutcome:
             self.detail = detail
 
     def publish(self, **fields) -> bool:
-        """Publish a WORKER's fields atomically. Worker thread only.
-
-        Returns False - having written NOTHING - when the parent has already
-        sealed a verdict for this child, and records the refusal for the report.
-        """
+        """Publish a WORKER's fields atomically."""
         with self._lock:
             if self._sealed:
                 self.late_note = self._describe_late_locked(fields)
@@ -316,7 +207,7 @@ class _ChildOutcome:
             return True
 
     def _describe_late_locked(self, fields: dict) -> str:
-        """Word a refused publish. Caller holds the lock."""
+        """Word a refused publish."""
         late = time.monotonic() - self._sealed_at
         verdict = fields.get("status") or "a result"
         return (
@@ -329,20 +220,7 @@ class _ChildOutcome:
 
 def _run_one_child(parent: Any, spec: dict, child_cwd: Path, branch: str,
                    max_turns: int, outcome: _ChildOutcome) -> None:
-    """Run one child agent to completion inside its own worktree.
-
-    *child_cwd* is where the child runs, which mirrors the parent's position within
-    the repo and so may be a subdirectory of the worktree root rather than the root
-    itself. ``outcome.worktree`` remains the root, which is what gets committed,
-    diffed, and removed.
-
-    Runs on a pool worker, so every write to *outcome* goes through
-    ``publish()`` - never a bare attribute assignment. This thread can outlive the
-    parent's wait (an abandoned child cannot be killed, only left), and a bare
-    assignment from here would overwrite the parent's own verdict. ``detail`` is
-    accumulated in a LOCAL string rather than read back off the shared object, so
-    there is no read-modify-write across the two threads either.
-    """
+    """Run one child agent to completion inside its own worktree."""
     from ..agent import Agent
     from .agents import inherited_child_kwargs
 
@@ -430,37 +308,7 @@ def tool_dispatch_parallel(
     timeout_s: int = DEFAULT_CHILD_TIMEOUT_S,
     _parent_agent: Optional[Any] = None,
 ) -> ToolResult:
-    """
-    Run up to 2 sub-tasks CONCURRENTLY, each in its own git worktree.
-
-    Each child gets an isolated checkout on its own branch, so two children may edit
-    the same file without interfering and your working tree is never modified. Each
-    child's work is committed to its branch and its diff returned FOR REVIEW.
-    Nothing is merged - you decide what to keep.
-
-    Parameters
-    ----------
-    tasks:
-        1 or 2 sub-tasks. Either plain strings, or objects with ``task`` (required),
-        ``name``, and ``model``.
-    max_turns:
-        Per-child iteration cap (default 10).
-    timeout_s:
-        Wall-clock budget for the WHOLE batch (default 600), not per child: one
-        shared deadline, because waiting the full budget on each child in turn
-        would let two hung children block the parent for twice what the caller
-        asked for. A child still running when it expires is abandoned and
-        reported; a child that never got a slot is reported as never started.
-
-    Notes
-    -----
-    This tool is registered ``destructive=True``, which has two consequences worth
-    knowing rather than discovering: under ``--dry-run`` the whole dispatch is
-    skipped (no worktrees, no child turns burned), and an unattended parent with
-    ``auto_approve=False`` and no confirm handler FAILS CLOSED on it instead of
-    dispatching unconfirmed. Both are intended - dispatching two children that
-    write files is exactly the kind of action that should need a human.
-    """
+    """Run up to 2 sub-tasks CONCURRENTLY, each in its own git worktree."""
     if _parent_agent is None:
         return ToolResult.error("dispatch_parallel requires a running parent agent")
 

@@ -1,12 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Config update validation (localm.settings_schema.validate_update) and its two
-consumers: the `localm config` CLI command and PATCH /v1/config.
-
-Before the shared validator, both call sites wrote any key/any type with no
-checking: `localm config bogus x` persisted an unknown key, a scalar clobbered a
-list key (plugins_enabled / net_allow), and PATCH {net_deny: null} silently wiped
-the SSRF deny-list (P0-6 / SEC-2 / BUG-3).
-"""
+"""Config update validation (localm.settings_schema.validate_update) and its two consumers: the `localm config` CLI command and PATCH /v1/config."""
 
 from unittest.mock import patch
 
@@ -451,10 +444,7 @@ class TestGpusCli:
         assert "does not match any gpu" in r.output.lower()
 
     def test_timeout_reports_retry_not_no_torch(self, cli_runner, monkeypatch):
-        """A GPU probe that overruns the deadline (a cold ROCm/CUDA driver init)
-        must be reported as a TIMEOUT with a retry hint, NOT as 'no torch / no
-        GPU'. Misattributing a slow cold probe to 'no torch' is exactly the
-        rule-5 bug this fixes (torch IS installed; a warm retry works)."""
+        """A GPU probe that overruns the deadline (a cold ROCm/CUDA driver init) must be reported as a TIMEOUT with a retry hint, NOT as 'no torch / no GPU'."""
         import threading
         from localm.cli import main
 
@@ -510,10 +500,7 @@ class TestGpusCli:
         assert "free VRAM reading unavailable" not in self._flat(r.output)
 
     def test_stale_probe_status_omits_free_even_with_device_scope(self, cli_runner):
-        """A served last-known-good list (TIMEOUT/BUSY/INCONCLUSIVE) is not a
-        current measurement even when it carries a FREE_SCOPE_DEVICE tag from
-        the earlier successful probe that produced it - list_gpus()'s own
-        docstring documents exactly this. Freshness AND scope must both hold."""
+        """A served last-known-good list (TIMEOUT/BUSY/INCONCLUSIVE) is not a current measurement even when it carries a FREE_SCOPE_DEVICE tag from the earlier successful probe that produced it - list_gpus()'s own docstring documents exactly this."""
         from localm.cli import main
         gpus = [{**self._GPUS[0], "free_scope": FREE_SCOPE_DEVICE}]
         with patch("localm.discover.list_gpus",
@@ -525,10 +512,7 @@ class TestGpusCli:
         assert "free VRAM reading unavailable on this platform" in self._flat(r.output)
 
     def test_untagged_free_scope_defers_to_raw_reading_check(self, cli_runner):
-        """No free_scope key at all (never happens from the real discover.list_gpus,
-        which always tags it, but is what a raw/legacy entry would look like) must
-        fall back to gpu_usage.raw_reading_is_process_scoped() exactly like
-        doctor.py's torch VRAM check does, not silently assume either scope."""
+        """No free_scope key at all (never happens from the real discover.list_gpus, which always tags it, but is what a raw/legacy entry would look like) must fall back to gpu_usage.raw_reading_is_process_scoped() exactly like doctor.py's torch VRAM check does, not silently assume either scope."""
         from localm.cli import main
         gpus = [dict(self._GPUS[0])]   # no "free_scope" key
         with patch("localm.discover.list_gpus", return_value=(gpus, GPU_PROBE_OK)), \
@@ -546,8 +530,7 @@ class TestGpusCli:
         assert "free VRAM reading unavailable" not in self._flat(r.output)
 
     def test_no_free_reading_has_no_caveat(self, cli_runner):
-        """free itself is None (no reading at all) - nothing to caveat, even when
-        free_scope claims PROCESS scope, since no free figure is ever printed."""
+        """free itself is None (no reading at all) - nothing to caveat, even when free_scope claims PROCESS scope, since no free figure is ever printed."""
         from localm.cli import main
         gpus = [{**self._GPUS[0], "free": None, "free_scope": FREE_SCOPE_PROCESS}]
         with patch("localm.discover.list_gpus", return_value=(gpus, GPU_PROBE_OK)):

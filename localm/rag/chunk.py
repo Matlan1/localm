@@ -11,14 +11,7 @@ CHUNK_OVERLAP = 150
 
 def chunk_text(text: str, *, chunk_chars: int = CHUNK_CHARS,
                overlap: int = CHUNK_OVERLAP) -> list[dict]:
-    """
-    Split *text* into chunks of roughly *chunk_chars* characters.
-
-    Paragraph boundaries (blank lines) are preferred split points; a paragraph
-    longer than the target is split at line breaks, then hard-wrapped. Each
-    chunk dict carries ``text`` and ``pos`` (1-based line number of its start
-    in the original document) so citations can point somewhere useful.
-    """
+    """Split *text* into chunks of roughly *chunk_chars* characters."""
     if not text.strip():
         return []
     # A non-positive chunk size makes the wrap loop below (len(line) > chunk_chars

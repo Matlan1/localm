@@ -1,8 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Module-level constants shared across the Agent mixins: the tool-category sets
-(mutating / undoable / scoped / network), the scope path-arg map, and the
-compaction / repair / error-breaker thresholds. Extracted verbatim from the
-former single-file agent.py."""
+"""Module-level constants shared across the Agent mixins: the tool-category sets (mutating / undoable / scoped / network), the scope path-arg map, and the compaction / repair / error-breaker thresholds."""
 
 from __future__ import annotations
 
@@ -71,13 +68,7 @@ _NESTED_PATH_TOOLS: dict[str, tuple[str, str]] = {
 
 
 def _call_target_paths(tool_name: str, args: dict) -> list[str]:
-    """Every filesystem path a tool call targets, in call order.
-
-    One `path` arg for most tools; for a tool in _NESTED_PATH_TOOLS, each
-    item's path inside its collection arg. Malformed items are skipped here
-    (the tool itself reports them); duplicates are preserved so a caller can
-    count edits, and callers that need unique files de-duplicate.
-    """
+    """Every filesystem path a tool call targets, in call order."""
     nested = _NESTED_PATH_TOOLS.get(tool_name)
     if nested is None:
         value = args.get("path", "")
@@ -206,27 +197,7 @@ _PARENT_AGENT_TOOLS: frozenset[str] = frozenset(
 
 
 def expand_shell_disable(disabled: frozenset) -> frozenset:
-    """Disabling any tool in a capability family disables the whole family.
-
-    A caller that passes ``{"run_shell"}`` means "this session must not execute
-    arbitrary commands" (that is exactly how the shareable-key path uses it).
-    Honouring that literally, tool-name by tool-name, would leave
-    ``run_shell_background`` - the same capability minus the wait - enabled, so
-    the safety choice would be silently defeated by a tool added after the
-    caller was written. Expand the intent instead.
-
-    Two families, expanded INDEPENDENTLY: shell execution, and sub-agent
-    delegation. Keeping them separate matters - a single merged family would make
-    disabling ``spawn_agent`` also disable ``run_shell``, silently removing a
-    capability the caller never asked to lose.
-
-    Applied at BOTH boundaries that consume a disabled set: the Agent (which
-    hard-refuses at dispatch) and the prompt builders (which decide what the
-    model is told exists). Applying it in only one leaves the other advertising
-    or accepting a tool the caller meant to switch off. (The name is historical -
-    it predates the second family - but every consuming site already calls it, so
-    extending it here is what keeps both boundaries covered for free.)
-    """
+    """Disabling any tool in a capability family disables the whole family."""
     out = frozenset(disabled)
     if out & _SHELL_EXEC_TOOLS:
         out = out | _SHELL_EXEC_TOOLS | _SHELL_JOB_TOOLS

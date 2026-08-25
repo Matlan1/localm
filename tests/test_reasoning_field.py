@@ -1,10 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""H4: the model's <think> reasoning is separated from the visible answer.
-
-The API surfaces it in a `reasoning_content` field (message + streaming delta)
-with clean `content`; the full-mode transcript writes it to a collapsed
-`<details>` block instead of dumping raw <think> tags inline.
-"""
+"""H4: the model's <think> reasoning is separated from the visible answer."""
 
 import json
 import os
@@ -16,8 +11,7 @@ from localm.inference.http_server import create_app
 
 
 def _engine(pieces):
-    """A mock engine whose chat_stream yields *pieces* (already canonical, as the
-    real engine emits post-textnorm)."""
+    """A mock engine whose chat_stream yields *pieces* (already canonical, as the real engine emits post-textnorm)."""
     e = MagicMock()
     e.display_name = "test-model"
     e.count_tokens.return_value = 5

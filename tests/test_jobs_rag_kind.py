@@ -1,15 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The `rag` scheduled-job kind: a folder re-sync you can put on a schedule.
-
-Covers the job DEFINITION side (it is expressible, validated, persisted, and
-survives a scheduler round-trip) and the RUNNER side (it drives the real
-Collection.resync against a real folder, with the confinement policy applied and
-no chat model loaded).
-
-Everything that touches disk points LOCALM_HOME at a tmp dir and patches the
-config module, matching tests/test_jobs_plugin.py, so nothing touches the user's
-real data.
-"""
+"""The `rag` scheduled-job kind: a folder re-sync you can put on a schedule."""
 
 from __future__ import annotations
 
@@ -29,13 +19,7 @@ def home(tmp_path, monkeypatch):
 
 @pytest.fixture
 def docs(tmp_path, home):
-    """An indexable folder, plus a config that allows indexing it.
-
-    The default policy is whitelist (home folder + cwd + configured roots), and
-    a pytest tmp dir is under neither on most boxes - so without this every
-    runner test would be asserting against a BLOCKED root by accident. The two
-    policy tests below set their own config explicitly.
-    """
+    """An indexable folder, plus a config that allows indexing it."""
     d = tmp_path / "papers"
     d.mkdir()
     (d / "one.txt").write_text("the first paper is about turbines", encoding="utf-8")
@@ -68,8 +52,7 @@ def test_rag_is_an_accepted_task_kind(home):
 
 
 def test_a_rag_job_needs_no_prompt(home):
-    """It re-syncs a named collection against folders it already knows, so it is
-    fully specified without one (same as the memory kind)."""
+    """It re-syncs a named collection against folders it already knows, so it is fully specified without one (same as the memory kind)."""
     job = _rag_job(prompt="")
     assert job.prompt == ""
 
@@ -82,8 +65,7 @@ def test_a_rag_job_without_a_collection_is_refused(home):
 
 
 def test_a_bad_collection_name_is_refused_at_definition_time(home):
-    """A typo must fail when the job is CREATED, not silently on every
-    unattended tick."""
+    """A typo must fail when the job is CREATED, not silently on every unattended tick."""
     with pytest.raises(ValueError):
         _rag_job(collection="../escape")
     with pytest.raises(ValueError):
@@ -91,8 +73,7 @@ def test_a_bad_collection_name_is_refused_at_definition_time(home):
 
 
 def test_other_kinds_still_require_a_prompt(home):
-    """Negative control: relaxing the prompt rule for rag must not relax it for
-    chat/coder."""
+    """Negative control: relaxing the prompt rule for rag must not relax it for chat/coder."""
     from localm.plugins.builtin.jobs.store import Job
     with pytest.raises(ValueError, match="prompt"):
         Job(name="x", task_kind="chat", prompt="")
@@ -139,8 +120,7 @@ def test_a_rag_job_survives_a_scheduler_round_trip(home):
 
 
 def test_a_rag_job_is_creatable_over_the_api(home, monkeypatch):
-    """Through the real plugin engine (open mode, no key), mirroring
-    tests/test_jobs_plugin.py::test_plugin_routes_via_engine."""
+    """Through the real plugin engine (open mode, no key), mirroring tests/test_jobs_plugin.py::test_plugin_routes_via_engine."""
     from pathlib import Path
 
     from fastapi import FastAPI
@@ -206,17 +186,7 @@ def test_the_cli_can_add_a_rag_job(home):
 
 @pytest.fixture(autouse=True)
 def no_shared_embedder(monkeypatch):
-    """Keep the runner tests off the process-wide embedder singleton.
-
-    ``localm.inference.embedder`` caches its embedder (and its load-failure and
-    download-attempt latches) in module globals for the whole pytest process, so
-    whether a resync here indexes with vectors would depend on what an unrelated
-    test did earlier. Default every test in this module to lexical-only; the
-    embedding-specific tests below set their own. The real resolution path is
-    covered by ``test_rag_embed_fn_is_none_without_an_embedding_model`` and was
-    exercised end to end against a real bge-small model by hand.
-
-    Yields the ORIGINAL function so that one test can still drive it."""
+    """Keep the runner tests off the process-wide embedder singleton."""
     from localm.plugins.builtin.jobs import runner
     original = runner._rag_embed_fn
     monkeypatch.setattr(runner, "_rag_embed_fn", lambda: None)
@@ -225,8 +195,7 @@ def no_shared_embedder(monkeypatch):
 
 def test_rag_embed_fn_is_none_without_an_embedding_model(home, monkeypatch,
                                                          no_shared_embedder):
-    """No embedding model available -> lexical-only, not a crash. It must not
-    hand back ``embed_texts``, whose None return ``add_paths`` cannot consume."""
+    """No embedding model available -> lexical-only, not a crash."""
     from localm.inference import embedder
     monkeypatch.setattr(embedder, "get_embedder", lambda: None)
     assert no_shared_embedder() is None
@@ -291,10 +260,7 @@ def test_run_job_reports_an_unreachable_folder_instead_of_deleting(home, docs):
 
 
 def test_run_job_applies_the_indexing_policy(home, docs):
-    """A scheduled run must never index what an interactive API add would
-    refuse. The folder was legal when it was indexed; the owner has since put it
-    on the deny list, so the re-sync must skip it and SAY so - not index it
-    because it used to be allowed."""
+    """A scheduled run must never index what an interactive API add would refuse."""
     from localm.plugins.builtin.jobs.runner import run_job
     from localm.rag import Collection
 
@@ -315,8 +281,7 @@ def test_run_job_applies_the_indexing_policy(home, docs):
 
 
 def test_the_same_run_indexes_once_the_folder_is_allowed(home, docs):
-    """Negative control for the policy test: with the deny lifted, the identical
-    run picks the new file up - so the skip really was the policy."""
+    """Negative control for the policy test: with the deny lifted, the identical run picks the new file up - so the skip really was the policy."""
     from localm.plugins.builtin.jobs.runner import run_job
     from localm.rag import Collection
 
@@ -341,8 +306,7 @@ def test_run_job_errors_cleanly_on_an_unknown_collection(home):
 
 
 def test_a_rag_job_never_loads_a_chat_engine(home, docs, monkeypatch):
-    """A folder re-sync needs no chat model; loading one would evict the user's
-    live model for nothing."""
+    """A folder re-sync needs no chat model; loading one would evict the user's live model for nothing."""
     from localm.plugins.builtin.jobs import runner
 
     _collection_with(home, docs)
@@ -359,8 +323,7 @@ def test_a_rag_job_never_loads_a_chat_engine(home, docs, monkeypatch):
 
 
 def test_run_job_flags_lost_embedding_coverage(home, docs, monkeypatch):
-    """A re-sync that indexes new documents lexical-only into a collection that
-    HAS vectors degrades semantic search. That must be said, not implied."""
+    """A re-sync that indexes new documents lexical-only into a collection that HAS vectors degrades semantic search."""
     from localm.plugins.builtin.jobs import runner
     from localm.rag import Collection
 
@@ -382,8 +345,7 @@ def test_run_job_flags_lost_embedding_coverage(home, docs, monkeypatch):
 
 def test_no_embedding_note_when_the_collection_never_had_vectors(home, docs,
                                                                  monkeypatch):
-    """Negative control: a lexical-only collection loses nothing, so the warning
-    must not fire (a warning that always fires teaches people to ignore it)."""
+    """Negative control: a lexical-only collection loses nothing, so the warning must not fire (a warning that always fires teaches people to ignore it)."""
     from localm.plugins.builtin.jobs import runner
 
     _collection_with(home, docs)

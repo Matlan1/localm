@@ -1,14 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""On-demand GUI surface mount (H6 phase 5): localm/inference/http_server.py
-``mount_gui_surface`` + ``POST /v1/surfaces/gui``.
-
-An ``api``-mode instance (``localm serve``) serves only /v1; a later ``localm
-gui`` in the same dir asks it to mount the GUI surface live - one process, no
-second model load. These pin: the mount is gated (this instance's attach token
-OR an owner API key), idempotent, and actually adds the GUI routes; and that the
-gate refuses an unauthenticated / wrong-credential caller (the route exposes the
-coder agent, so the negative cases are the point).
-"""
+"""On-demand GUI surface mount (H6 phase 5): localm/inference/http_server.py ``mount_gui_surface`` + ``POST /v1/surfaces/gui``."""
 
 import pytest
 from fastapi.testclient import TestClient
@@ -17,8 +8,7 @@ from localm.inference.http_server import create_app, mount_gui_surface
 
 
 def _api_app(tmp_path, instance_token="inst-secret-token"):
-    """A fresh api-mode app (no engine) wired as advertise() would: an instance
-    id, token, and bind coordinates on app.state, surface mode 'api'."""
+    """A fresh api-mode app (no engine) wired as advertise() would: an instance id, token, and bind coordinates on app.state, surface mode 'api'."""
     app = create_app(None)
     app.state.instance_id = "iid-test"
     app.state.instance_token = instance_token
@@ -61,8 +51,7 @@ class TestMountGuiSurfaceUnit:
         assert mount_gui_surface(app) is False
 
     def test_attach_failure_rolls_back_the_mounted_flag(self, tmp_path, monkeypatch):
-        """If attach_gui raises, the claimed gui_mounted flag is rolled back so a
-        later real attempt can still mount (no permanently-wedged surface)."""
+        """If attach_gui raises, the claimed gui_mounted flag is rolled back so a later real attempt can still mount (no permanently-wedged surface)."""
         monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
         app = _api_app(tmp_path)
         import localm.plugins.gui.web as web
@@ -76,8 +65,7 @@ class TestMountGuiSurfaceUnit:
         assert getattr(app.state, "gui_mounted", False) is False
 
     def test_missing_port_raises_rather_than_dialling_none(self, tmp_path, monkeypatch):
-        """No bind port on app.state -> a loud 500, not a broken
-        'http://127.0.0.1:None/v1' self-url. The flag must not be claimed."""
+        """No bind port on app.state -> a loud 500, not a broken 'http://127.0.0.1:None/v1' self-url."""
         from fastapi import HTTPException
         monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
         app = _api_app(tmp_path)

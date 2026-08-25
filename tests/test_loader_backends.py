@@ -1,11 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Unit tests for ggml backend registration in the llama.cpp loader.
-
-No native library: a fake lib records ggml_backend_load calls, so these run on
-any CI host. Covers (a) old builds without the loader symbol are left untouched
-(the bundled AMD path), (b) ggml-base / ggml are NOT registered as backends, and
-(c) the real backend plugins are registered by absolute path.
-"""
+"""Unit tests for ggml backend registration in the llama.cpp loader."""
 
 from __future__ import annotations
 
@@ -28,8 +22,7 @@ class _RecordingLoad:
 
 
 class _FakeFn:
-    """A callable with a settable ``restype`` (ctypes function-pointer shape),
-    returning whatever ``impl`` produces. Records its call count."""
+    """A callable with a settable ``restype`` (ctypes function-pointer shape), returning whatever ``impl`` produces."""
 
     def __init__(self, impl):
         self.restype = None
@@ -123,10 +116,7 @@ def test_load_all_used_when_nothing_registered(tmp_path, monkeypatch):
 
 
 def test_loaded_but_no_device_reports_false(tmp_path, monkeypatch):
-    """A non-null ggml_backend_load handle does NOT prove a usable device. When
-    the plugin loads "succeed" but the device registry still reports 0, the
-    registration is a FAILURE - the authoritative device count wins over the raw
-    load signal, so setup does not report a broken build as a success (rule 5)."""
+    """A non-null ggml_backend_load handle does NOT prove a usable device."""
     monkeypatch.setattr(sys, "platform", "win32")
     _touch(tmp_path, ["ggml-base.dll", "ggml-cpu.dll", "ggml-vulkan.dll", "llama.dll"])
     lib = _FakeLib(with_loader=True, dev_count=0)   # loads return truthy, 0 devices
@@ -135,8 +125,7 @@ def test_loaded_but_no_device_reports_false(tmp_path, monkeypatch):
 
 
 def test_compute_backends_available_reflects_flag(monkeypatch):
-    """compute_backends_available() mirrors the flag load_lib() records, and is
-    False before a load has happened (None) so a caller never reads a stale True."""
+    """compute_backends_available() mirrors the flag load_lib() records, and is False before a load has happened (None) so a caller never reads a stale True."""
     monkeypatch.setattr(_loader, "load_lib", lambda: None)   # do not touch real lib
     monkeypatch.setattr(_loader, "_compute_backends_ok", True)
     assert _loader.compute_backends_available() is True

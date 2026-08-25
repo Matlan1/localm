@@ -1,34 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""REG-612: the embed-failure log must not leak memory CONTENT in privacy mode.
-
-`_embed_one`'s except branch logs the record being embedded:
-
-    _dbg.debug("memory embed_one failed for %r: %s", text[:80], e)
-
-`text` is a memory record - a synthesized fact about the user, or an episodic
-summary of their chat sessions. It is chat-derived CONTENT, and this writes a
-snippet of it to the persisted debug log file.
-
-Every other content-logging site in the codebase (llama.py, jobs/webtool.py)
-gates raw content on `debug_content_enabled()`, which returns False in privacy
-mode even when `debug_enabled()` is True. This line uses a plain `logger.debug`,
-gated only on debug_enabled(), so privacy mode does NOT suppress it. Before #612
-the branch was silent, so nothing leaked.
-
-The concrete leak: the user runs in privacy mode with the debug log on for
-operational diagnostics (--debug / LOCALM_DEBUG / keep_diagnostics). A real
-embedder raises inside embed_fn([text]) - a worker restart, an OOM, a dim
-mismatch - and their memory content lands in a file on disk. Per AGENTS.md, a
-privacy step that fails must NEVER report success, and chat content must never
-reach the debug log in privacy mode.
-
-The fix must NOT be to re-silence the branch: the failure itself is real and must
-stay surfaced (rule 5). Content is gated; the failure is always logged.
-
-Suite miss: the branch only runs when a REAL embedder raises from embed_fn.
-Test/mock embedders return vectors and never throw, so it is never exercised, and
-no test asserts the embed-failure output is content-gated.
-"""
+"""REG-612: the embed-failure log must not leak memory CONTENT in privacy mode."""
 
 from __future__ import annotations
 
@@ -42,20 +13,13 @@ SECRET_TEXT = "User's bank PIN hint is his mother's maiden name Vandermeulen"
 
 
 def _boom_embedder(texts):
-    """A REAL embedder failing the way a real one does - a worker restart, an
-    OOM, a dim mismatch. Mock embedders return vectors and never reach the
-    except branch, which is exactly why the suite missed this."""
+    """A REAL embedder failing the way a real one does - a worker restart, an OOM, a dim mismatch."""
     raise RuntimeError("embedding worker died")
 
 
 @pytest.fixture
 def _debug_log(monkeypatch, caplog):
-    """Debug log ON (the operational-diagnostics case), so the only thing
-    deciding whether CONTENT is written is the content gate.
-
-    The logger is `localm` (debuglog.py:37), NOT `localm.debug`. Capturing the
-    wrong name made every leak assertion pass VACUOUSLY against an empty blob -
-    a test that cannot fail. `_assert_capturing` below guards that regression."""
+    """Debug log ON (the operational-diagnostics case), so the only thing deciding whether CONTENT is written is the content gate."""
     monkeypatch.setattr("localm.debuglog.debug_enabled", lambda: True)
     caplog.set_level(logging.DEBUG, logger="localm")
     return caplog
@@ -67,14 +31,7 @@ def _embed_one(tmp_path, text=SECRET_TEXT):
 
 
 def _captured_blob(caplog) -> str:
-    """The captured debug output, PROVEN to be live capture.
-
-    A "the secret is not in the log" assertion is worthless against an empty
-    blob: it passes whether or not the leak exists. The first draft of this file
-    captured the wrong logger name and every leak test passed vacuously against
-    "" - green, and proving nothing. So every read of the log goes through here,
-    which fails loudly if nothing was captured at all.
-    """
+    """The captured debug output, PROVEN to be live capture."""
     blob = "\n".join(r.getMessage() for r in caplog.records)
     assert blob.strip(), (
         "NOTHING was captured from the 'localm' logger, so a not-in-log "
@@ -104,9 +61,7 @@ class TestPrivacyModeDoesNotLeakContent:
             assert fragment not in blob, f"leaked {fragment!r}: {blob}"
 
     def test_the_failure_is_STILL_surfaced(self, tmp_path, _debug_log):
-        """Rule 5: gate the CONTENT, never the failure. Re-silencing the branch
-        would pass the leak tests above while hiding a real embedder fault - the
-        exact anti-pattern AGENTS.md names."""
+        """Rule 5: gate the CONTENT, never the failure."""
         _embed_one(tmp_path)
         blob = _captured_blob(_debug_log)
         assert "embedding worker died" in blob, \
@@ -118,9 +73,7 @@ class TestPrivacyModeDoesNotLeakContent:
 
 
 class TestNonPrivacyModeStillLogsContent:
-    """NEGATIVE CASE: the gate must actually be a GATE, not a blanket removal. If
-    the fix just deleted the content, these fail - and the debug log would lose a
-    genuinely useful diagnostic for the non-privacy user it is meant for."""
+    """NEGATIVE CASE: the gate must actually be a GATE, not a blanket removal. If the fix just deleted the content, these fail - and the debug log would lose a genuinely useful diagnostic for the non-privacy user it is meant for."""
 
     @pytest.fixture(autouse=True)
     def _not_privacy(self, monkeypatch):
@@ -140,8 +93,7 @@ class TestNonPrivacyModeStillLogsContent:
 
 
 class TestGateIsTheRealOne:
-    """Guards the wiring itself: the fix must consult debug_content_enabled(),
-    the shared privacy gate, not re-implement its own weaker check."""
+    """Guards the wiring itself: the fix must consult debug_content_enabled(), the shared privacy gate, not re-implement its own weaker check."""
 
     def test_the_content_gate_is_actually_consulted(self, tmp_path, monkeypatch,
                                                     _debug_log):

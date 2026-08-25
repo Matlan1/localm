@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Download a coder-created file (pull output onto a phone). The endpoint must
-serve only files the session's tracker recorded, confined to the session root -
-never an arbitrary-file-read primitive."""
+"""Download a coder-created file (pull output onto a phone)."""
 
 from pathlib import Path
 

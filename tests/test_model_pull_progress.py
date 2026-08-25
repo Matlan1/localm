@@ -1,9 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""R06: the model pull progress payload carries per-file info for a multi-file
-(split GGUF) download, so the GUI can show "file 2 of 3: <name>" on top of the
-percentage / bytes / rate / ETA it already renders (#171). A single-file download
-omits the per-file fields so its progress UX is unchanged.
-"""
+"""R06: the model pull progress payload carries per-file info for a multi-file (split GGUF) download, so the GUI can show 'file 2 of 3: <name>' on top of the percentage / bytes / rate / ETA it already renders (#171)."""
 
 import json
 

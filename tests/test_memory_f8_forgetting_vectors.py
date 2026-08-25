@@ -1,14 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""F8 regression suite (memory-audit 2026-07-02): forgetting and semantic recall
-must work in real operation.
-
-- prune (decay + size cap) must run even when a consolidation extracts zero
-  facts (it used to be reachable only through a fact-producing run);
-- vectors must backfill so semantic recall turns on retroactively after an
-  embedding model is installed later;
-- the vector path must be used on a small store (< TINY_CORPUS), where the
-  lexical signal is skipped but cosine is not noisy.
-"""
+"""F8 regression suite (memory-audit 2026-07-02): forgetting and semantic recall must work in real operation."""
 
 from __future__ import annotations
 
@@ -26,10 +17,7 @@ _EDITOR_TERMS = ("vim", "editor", "edit")
 
 
 def _fake_embed(texts):
-    """Deterministic topic-clustered vectors: measurement-related words (metric,
-    unit, measure, measurement, system) load axis 0, editor words load axis 1.
-    A paraphrased query about measurements therefore cosine-matches the 'metric'
-    record even with no shared exact tokens (stand-in for real semantics)."""
+    """Deterministic topic-clustered vectors: measurement-related words (metric, unit, measure, measurement, system) load axis 0, editor words load axis 1."""
     out = []
     for t in texts:
         lo = t.lower()

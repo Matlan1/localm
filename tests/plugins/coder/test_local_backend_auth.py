@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""C1 / H13: the coder's local backend must present the real API key
-(LOCALM_API_KEY or --api-key), not the hardcoded "localm" that 401s against a
-require_auth server."""
+"""C1 / H13: the coder's local backend must present the real API key (LOCALM_API_KEY or --api-key), not the hardcoded 'localm' that 401s against a require_auth server."""
 
 from click.testing import CliRunner
 
@@ -28,11 +26,7 @@ class TestMakeLocalmBackendKey:
         assert make_localm_backend("m", port=8642, api_key="")._api_key == "envkey"
 
     def test_reads_persisted_auth_key_file(self, monkeypatch):
-        """FAILS pre-fix: make_localm_backend read $LOCALM_API_KEY only, never
-        the persisted auth.key file, so a server keyed via `localm key
-        generate` (file, no env var) still 401'd every `localcoder
-        --no-server` attach (checkup 2026-08-11 item 12, a narrower re-open
-        of this same C1 class)."""
+        """FAILS pre-fix: make_localm_backend read $LOCALM_API_KEY only, never the persisted auth.key file, so a server keyed via `localm key generate` (file, no env var) still 401'd every `localcoder --no-server` attach (checkup 2026-08-11 item 12, a narrower re-open of this same C1 class)."""
         monkeypatch.delenv("LOCALM_API_KEY", raising=False)
         from localm import auth
         auth.set_api_key("file-key-persisted")
@@ -53,8 +47,7 @@ class TestMakeLocalmBackendKey:
 
 
 class TestCoderCliThreadsKey:
-    """The local (auto-started / --no-server) path must pass the resolved key
-    into make_localm_backend, honouring $LOCALM_API_KEY and --api-key."""
+    """The local (auto-started / --no-server) path must pass the resolved key into make_localm_backend, honouring $LOCALM_API_KEY and --api-key."""
 
     def _capture(self, monkeypatch):
         captured = {}
@@ -86,13 +79,7 @@ class TestCoderCliThreadsKey:
 
     def test_neither_flag_nor_env_forwards_empty_not_the_literal_default(
             self, monkeypatch):
-        """--api-key's click default is the literal placeholder "localm"
-        (always truthy), so forwarding it as-is would short-circuit
-        make_localm_backend's own env/auth.key resolution before it ever
-        runs (checkup 2026-08-11 item 12). With nothing explicit, the CLI
-        must forward "" - make_localm_backend's own "nothing given" sentinel
-        - so ITS resolution (env, then auth.key, then "localm") actually
-        gets a chance to run."""
+        """--api-key's click default is the literal placeholder 'localm' (always truthy), so forwarding it as-is would short-circuit make_localm_backend's own env/auth.key resolution before it ever runs (checkup 2026-08-11 item 12)."""
         monkeypatch.delenv("LOCALM_API_KEY", raising=False)
         captured = self._capture(monkeypatch)
         CliRunner().invoke(ccli.main, ["--model", "m", "--no-server", "hi"])

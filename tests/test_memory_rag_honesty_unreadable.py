@@ -1,19 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Honesty-audit (AGENTS.md rule 5) regression: a present-but-UNREADABLE sidecar
-must NOT be collapsed into "absent" and then rewritten to a lesser state.
-
-The systematic gap these guard: ``except OSError: return []`` treats a file that
-EXISTS but cannot be read (a transient Windows AV/indexer lock - see
-storekit.py) exactly like a file that is simply ABSENT. When the empty result
-then feeds a full-sidecar REWRITE, every prior entry is silently wiped while the
-caller is told it succeeded. The in-tree precedent is sessions.py:_load, which
-re-raises on an unreadable store so lookup fails CLOSED.
-
-Fault is injected only at the DISK BOUNDARY (a per-path ``Path.read_text`` that
-raises, or an embedded-NUL config root that ``resolve()`` rejects) - the real
-store/rag code under test runs unmocked, so this exercises the actual behavior,
-not a stand-in for it.
-"""
+"""Honesty-audit (AGENTS.md rule 5) regression: a present-but-UNREADABLE sidecar must NOT be collapsed into 'absent' and then rewritten to a lesser state."""
 
 from __future__ import annotations
 
@@ -33,11 +19,7 @@ def allow_writes(monkeypatch):
 
 
 def _lock_reads_of(monkeypatch, target: Path):
-    """Make BOTH ``Path.read_text`` and ``Path.read_bytes`` raise for *target* only
-    (an existing file that is unreadable by any method), leaving every other path
-    readable. Simulates a transient exclusive lock: a real lock fails every read, and
-    the store reads different sidecars via different methods (corrections/forgotten via
-    read_text, dismissed via read_bytes), so both must be faulted to be faithful."""
+    """Make BOTH ``Path.read_text`` and ``Path.read_bytes`` raise for *target* only (an existing file that is unreadable by any method), leaving every other path readable."""
     real_text = Path.read_text
     real_bytes = Path.read_bytes
 

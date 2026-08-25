@@ -1,14 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Concurrent loads of DIFFERENT models must not preempt each other (audit HIGH-3).
-
-The single-model preemption globals (_switch_desired / _switch_cancel) were kept
-unchanged when switch_engine became the loader for EVERY /v1 request via
-get_engine. So any load-triggering request for model B set _switch_desired="B"
-and fired _switch_cancel for an in-flight load of model A, aborting it - and
-get_engine turned that into HTTP 503 "superseded". Independent clients loading
-different models cancelled each other. Preemption should only fire for an
-explicit user model-switch (GUI), not for API-routed loads.
-"""
+"""Concurrent loads of DIFFERENT models must not preempt each other (audit HIGH-3)."""
 
 import asyncio
 import threading

@@ -1,25 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""CHK-COMFY-REDIRECT (LM-DA-045): sanitize_comfy_url (CHK-COMFY-APIURL) only
-screens the CONFIGURED comfy_api_url, at resolution time. A redirect target is
-chosen by the remote ComfyUI AFTER that check has already run, and urllib's
-default opener follows up to 10 such redirects with no validation at all - so a
-hostile or compromised ComfyUI (SECURITY.md: it "may be another machine, over
-plain http") could answer any request with a 3xx straight past the guard, e.g.
-to a cloud-metadata address. ComfyUI's HTTP API has no legitimate reason to
-redirect, so the connection itself must refuse every hop outright.
-
-TWO real (loopback) HTTP stubs, not one: "hop A" plays the compromised/hostile
-ComfyUI and answers every request with a 302 to "hop B", which plays the
-redirect target and answers with real, valid-looking data (the way an actual
-cloud metadata endpoint or an internal service would). This is deliberate: a
-single stub whose Location points at a genuinely unreachable address (e.g. the
-literal 169.254.169.254) cannot tell "refused the redirect" apart from
-"reached for it and failed for an unrelated network reason" - both look like
-the same benign False/None to a best-effort caller. Routing the redirect to a
-second stub that WOULD succeed if followed is what actually proves the guard:
-under the fix, hop B is never contacted at all; under a regression, hop B's
-data comes back to the caller exactly as a real SSRF would deliver it.
-"""
+"""CHK-COMFY-REDIRECT (LM-DA-045): sanitize_comfy_url (CHK-COMFY-APIURL) only screens the CONFIGURED comfy_api_url, at resolution time."""
 
 from __future__ import annotations
 
@@ -46,8 +26,7 @@ class _Stub(HTTPServer):
 
 
 class _RedirectToHopB(BaseHTTPRequestHandler):
-    """Hop A: the hostile/compromised ComfyUI. 302s every request to hop B,
-    preserving the path+query so hop B's router matches the same endpoint."""
+    """Hop A: the hostile/compromised ComfyUI. 302s every request to hop B, preserving the path+query so hop B's router matches the same endpoint."""
 
     hop_b_base = ""   # set per-test via server attribute below
 
@@ -72,10 +51,7 @@ class _RedirectToHopB(BaseHTTPRequestHandler):
 
 
 class _HopBHandler(BaseHTTPRequestHandler):
-    """Hop B: what the redirect target answers with IF a broken client
-    followed it. Real, valid, ComfyUI-shaped responses - so a fix regression
-    is observable as real second-hop data flowing back to the caller, not
-    just as some exception or other."""
+    """Hop B: what the redirect target answers with IF a broken client followed it."""
 
     def log_message(self, *_a):
         pass

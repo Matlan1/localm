@@ -1,11 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Tests for TTFT / throughput metrics in the usage field of HTTP responses.
-
-The load-fold regression (a cold start's model-load time was charged against the
-generation rate, so the first call after a load reported tok/s ~100x too low and
-tripped the CPU-fallback heuristic) is locked here: tok/s must be measured over the
-DECODE window only, never over total wall time.
-"""
+"""Tests for TTFT / throughput metrics in the usage field of HTTP responses."""
 
 import json
 import os
@@ -94,15 +88,7 @@ def _make_engine():
 
 
 def _slow_load_engine(load_delay=0.4, reported_tokens=20, pieces=6, decode_gap=0.005):
-    """An engine whose first token is preceded by a big synthetic load delay, then
-    emits its remaining pieces quickly. This is the cold-start shape: a long wait
-    before the first token (model load + prefill), then fast decode. Used to prove
-    the reported rate reflects the FAST decode, not the slow load.
-
-    decode_gap=0.005: the 5 gaps between 6 pieces give a 25ms decode window for
-    a claimed 20 tokens (12.5ms/token average) - comfortably above the 1ms/token
-    plausibility floor (see _MIN_SEC_PER_TOKEN) with margin for sleep-timing
-    jitter on a loaded box, while still being "fast" relative to the 400ms load."""
+    """An engine whose first token is preceded by a big synthetic load delay, then emits its remaining pieces quickly."""
     engine = MagicMock()
     engine.display_name = "slow-model"
     engine.count_tokens.return_value = reported_tokens
@@ -120,12 +106,7 @@ def _slow_load_engine(load_delay=0.4, reported_tokens=20, pieces=6, decode_gap=0
 
 
 def _burst_after_delay_engine(delay=0.3, pieces=20):
-    """An engine shaped like the real GPU-contention anomaly this was verified
-    against: a delay before the first token (a contended first token, or a cold
-    load), then the REST arrive in a near-instantaneous burst (no inter-token
-    gap at all) - exactly what a GPU scheduler can produce when a delayed first
-    request finally gets an uncontended run. completion_tokens / decode_elapsed
-    would report tens of thousands of tok/s if not for the plausibility floor."""
+    """An engine shaped like the real GPU-contention anomaly this was verified against: a delay before the first token (a contended first token, or a cold load), then the REST arrive in a near-instantaneous burst (no inter-token gap at all) - exactly what a GPU scheduler can produce when a delayed first re..."""
     engine = MagicMock()
     engine.display_name = "burst-model"
     engine.count_tokens.return_value = pieces

@@ -1,11 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Per-plugin media workflow management (localm.media_workflows).
-
-Users upload ComfyUI API-format workflows and select which one a media plugin
-uses. These tests pin: upload validation (reject non-JSON / non-workflow),
-the select/clear config marker, active-file resolution + the generator fallback
-chain, delete refusing the active file, and path-traversal safety.
-"""
+"""Per-plugin media workflow management (localm.media_workflows)."""
 
 from __future__ import annotations
 
@@ -131,10 +125,7 @@ def test_router_endpoints_list_upload_select_delete():
 
 
 def test_upload_route_504s_when_the_write_hangs_past_budget(monkeypatch):
-    """Follow-up to #1057: before this fix, a wedged save_workflow() call left
-    the HTTP request hanging forever. Now it returns a clear 504 within the
-    configured budget - proven end to end through the real route, not just
-    the underlying wrapper (see test_threadpool_timeout.py for that)."""
+    """Follow-up to #1057: before this fix, a wedged save_workflow() call left the HTTP request hanging forever."""
     import time as _time
 
     from fastapi import FastAPI
@@ -165,26 +156,13 @@ def test_upload_route_504s_when_the_write_hangs_past_budget(monkeypatch):
 
 
 def test_rmw_timeout_has_headroom_over_a_single_holders_own_work_ceiling():
-    """Structural guard (diff-review-discipline: assert the ARITHMETIC, not
-    the literal): _WORKFLOW_RMW_TIMEOUT_S is the budget every route actually
-    uses, but all four routes share ONE _lock_for(media) lock acquired INSIDE
-    that same bounded call - so a request's own clock also covers however
-    long it waits behind another holder. If this ever regresses to matching
-    _WORKFLOW_OWN_WORK_TIMEOUT_S exactly, a merely-slow (not hung) writer can
-    again collaterally 504 a concurrently-queued, otherwise-instant reader
-    sharing the same lock (see test_a_merely_slow_write_does_not_collaterally_
-    504_a_queued_read below for the reproduction)."""
+    """Structural guard (diff-review-discipline: assert the ARITHMETIC, not the literal): _WORKFLOW_RMW_TIMEOUT_S is the budget every route actually uses, but all four routes share ONE _lock_for(media) lock acquired INSIDE that same bounded call - so a request's own clock also covers however long it waits..."""
     assert mw._WORKFLOW_RMW_TIMEOUT_S >= 2 * mw._WORKFLOW_OWN_WORK_TIMEOUT_S
 
 
 @pytest.mark.anyio
 async def test_a_merely_slow_write_does_not_collaterally_504_a_queued_read(monkeypatch):
-    """Regression for a cascade found in adversarial review of the #1057
-    follow-up: a write that is merely slow (not hung, and would have
-    exceeded a naive single-holder budget) must not push a concurrently-
-    queued, trivially-fast read past ITS OWN budget purely from waiting on
-    the shared per-media lock. Reproduced end to end over real concurrent
-    HTTP requests, not just at the function level."""
+    """Regression for a cascade found in adversarial review of the #1057 follow-up: a write that is merely slow (not hung, and would have exceeded a naive single-holder budget) must not push a concurrently- queued, trivially-fast read past ITS OWN budget purely from waiting on the shared per-media lock."""
     import asyncio
 
     import httpx
@@ -260,8 +238,7 @@ def test_generator_uses_selected_workflow(monkeypatch):
 
 
 def _legacy(tmp_path, name="flux_workflow.json"):
-    """A fake legacy override sitting 'inside the package', at a temp path so the
-    test never touches the real repo checkout."""
+    """A fake legacy override sitting 'inside the package', at a temp path so the test never touches the real repo checkout."""
     p = tmp_path / "pkg" / "image_gen" / name
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_bytes(_WF)
@@ -462,10 +439,7 @@ def test_in_package_override_is_destroyed_by_update_without_migration(tmp_path):
 # --------------------------------------------------------------------------- #
 
 def test_lock_for_serializes_concurrent_operations_on_the_same_media():
-    """Direct proof of the property every route now relies on: two threads
-    racing for the SAME media's lock must never be inside the critical
-    section at the same time. A sleep widens the window so a race would
-    reliably show up rather than being missed by luck."""
+    """Direct proof of the property every route now relies on: two threads racing for the SAME media's lock must never be inside the critical section at the same time."""
     concurrent_now = []
     max_concurrent = [0]
     guard = threading.Lock()
@@ -490,10 +464,7 @@ def test_lock_for_serializes_concurrent_operations_on_the_same_media():
 
 
 def test_lock_for_does_not_serialize_different_media():
-    """image/music/video are independent directory trees and independent
-    config blocks - only genuinely shared state needs mutual exclusion.
-    Serializing across DIFFERENT media would be pure unnecessary contention,
-    not a correctness requirement."""
+    """image/music/video are independent directory trees and independent config blocks - only genuinely shared state needs mutual exclusion."""
     both_held = threading.Event()
 
     def _hold(media):
@@ -516,12 +487,7 @@ def test_lock_for_does_not_serialize_different_media():
 
 
 def test_concurrent_uploads_to_the_same_name_no_longer_corrupt_the_file(home):
-    """CONFIRMED by the adversarial review (live reproduction against the
-    real save_workflow(), 59-74% corruption rate across several trial
-    shapes): two real OS threads racing to save the SAME filename, with no
-    lock, produced torn/invalid JSON on disk. Under the per-media lock the
-    writes must serialize, so the file on disk must ALWAYS be valid JSON
-    matching one of the two payloads, in full, never a mix of both."""
+    """CONFIRMED by the adversarial review (live reproduction against the real save_workflow(), 59-74% corruption rate across several trial shapes): two real OS threads racing to save the SAME filename, with no lock, produced torn/invalid JSON on disk."""
     small_data = {"3": {"class_type": "KSampler", "inputs": {"a": "x" * 500}}}
     large_data = {"3": {"class_type": "KSampler", "inputs": {"a": "y" * 50_000}}}
     small = json.dumps(small_data).encode()
@@ -561,12 +527,7 @@ def test_concurrent_uploads_to_the_same_name_no_longer_corrupt_the_file(home):
 
 
 def test_concurrent_list_survives_a_racing_delete(home):
-    """CONFIRMED by the adversarial review (live reproduction): a DELETE
-    landing between list_workflows' is_file() check and its later stat()
-    calls raised an unhandled FileNotFoundError -> 500. Under the lock, a
-    listing and a delete for the same media can no longer interleave at
-    all - list_workflows must never raise, no matter how many concurrent
-    deletes are racing it."""
+    """CONFIRMED by the adversarial review (live reproduction): a DELETE landing between list_workflows' is_file() check and its later stat() calls raised an unhandled FileNotFoundError -> 500."""
     d = mw.workflows_dir("image")
     d.mkdir(parents=True, exist_ok=True)
     names = [f"wf{i}.json" for i in range(20)]
@@ -600,13 +561,7 @@ def test_concurrent_list_survives_a_racing_delete(home):
 
 
 def test_concurrent_select_and_delete_never_orphans_the_selection(home):
-    """CONFIRMED by the adversarial review (live reproduction): a select and a
-    delete of the SAME file, racing, could leave config["plugins"]["image"]
-    ["workflow"] pointing at a file that no longer exists on disk - the
-    documented invariant ("a generation is never left pointing at a missing
-    file") violated. Under the lock the two operations fully serialize, so
-    after both finish, the invariant must hold: whatever is selected (if
-    anything) must still exist on disk."""
+    """CONFIRMED by the adversarial review (live reproduction): a select and a delete of the SAME file, racing, could leave config['plugins']['image'] ['workflow'] pointing at a file that no longer exists on disk - the documented invariant ('a generation is never left pointing at a missing file') violated."""
     d = mw.workflows_dir("image")
     d.mkdir(parents=True, exist_ok=True)
     (d / "x.json").write_bytes(_WF)

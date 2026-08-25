@@ -1,12 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""reload_chat_after_media must report the REAL reload outcome, not a blanket
-"Chat model ready." (honesty audit, AGENTS.md rule 5).
-
-Regression: the function discarded the /v1/models/load response and always pushed
-"Chat model ready.", so a non-2xx (503 "No model specified", 401, or a 500 when
-the media backend still holds VRAM) was reported as success. It now mirrors its
-sibling unload_chat_for_media's resp.ok check and defers honestly on failure.
-"""
+"""reload_chat_after_media must report the REAL reload outcome, not a blanket 'Chat model ready.' (honesty audit, AGENTS.md rule 5)."""
 
 from localm import vram
 
@@ -55,8 +48,7 @@ def test_reload_success_reports_ready(monkeypatch):
 
 
 def test_reload_http_error_is_not_reported_as_success(monkeypatch):
-    """A 503 must NOT surface as "Chat model ready." - the exact false success the
-    audit flagged. It must defer honestly with the HTTP status."""
+    """A 503 must NOT surface as 'Chat model ready.' - the exact false success the audit flagged."""
     job = _reload(monkeypatch, _Resp(ok=False, status_code=503))
     text = job.text()
     assert "Chat model ready." not in text          # the falsehood is gone
@@ -73,7 +65,7 @@ def test_reload_transport_error_still_defers(monkeypatch):
 
 
 def test_reload_skipped_when_off():
-    """reload_after off -> no reload attempted, no false "ready"."""
+    """reload_after off -> no reload attempted, no false 'ready'."""
     job = _FakeJob()
     vram.reload_chat_after_media(
         job, "http://127.0.0.1:8642/v1", {"reload_after": False},

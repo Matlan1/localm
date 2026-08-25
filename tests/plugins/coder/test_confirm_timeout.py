@@ -1,15 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""
-_confirm_timeout() (localm/plugins/coder/sessions.py) reads the
-"coder_confirm_timeout" config key, documented in settings_schema.py as
-"0 = wait forever". Regression coverage for two related bugs:
-
-  - `x or default` treats a configured 0 as falsy and silently substitutes
-    the 600s default instead of the user's explicit choice.
-  - Even once 0 round-trips, `threading.Event.wait(timeout=0)` does NOT
-    block - it's a non-blocking poll - so "wait forever" must be signaled
-    as timeout=None, not timeout=0.0.
-"""
+"""_confirm_timeout() (localm/plugins/coder/sessions.py) reads the 'coder_confirm_timeout' config key, documented in settings_schema.py as '0 = wait forever'."""
 
 from localm.plugins.coder.sessions import _CONFIRM_TIMEOUT_S, _confirm_timeout
 

@@ -1,12 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The scheduled-jobs VRAM gate must not swallow failures silently (audit rule 5).
-
-runner._load_engine wrapped its whole live-engine-reuse + VRAM-gate block in a
-bare `try/except Exception: pass`. Falling through to a fresh load when the gate
-cannot run is a legitimate best-effort path, but muting the cause entirely
-violates AGENTS.md rule 5 (surface real failures - a log line is the right
-altitude, not silence, and not a hard failure either).
-"""
+"""The scheduled-jobs VRAM gate must not swallow failures silently (audit rule 5)."""
 
 import pytest
 

@@ -1,15 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""F12b regression suite (memory-audit 2026-07-02 cluster [9]): a stale user fact
-must be CORRECTABLE by the system, not permanently immortal.
-
-Pre-fix, consolidation downgraded any UPDATE/DELETE against a source=user record to
-a silent NO_OP, so the user's own later words ("actually I moved to Munich") could
-never supersede an earlier typed fact ("I live in Berlin") - the new info was
-dropped and the stale fact stayed forever. Now a high-confidence contradiction is
-recorded as a PENDING CORRECTION the user accepts or rejects; nothing is silently
-lost and the trusted fact is never auto-overwritten by a possibly-hallucinated
-synth candidate.
-"""
+"""F12b regression suite (memory-audit 2026-07-02 cluster [9]): a stale user fact must be CORRECTABLE by the system, not permanently immortal."""
 
 from __future__ import annotations
 

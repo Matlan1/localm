@@ -1,10 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Tests for the jobs plugin backend (store, cron matcher, scheduler, runner, CLI).
-
-Every test that touches disk points LOCALM_HOME at a tmp dir and patches the
-config module's HOME_DIR (the jobs store resolves the data dir at call time via
-``home_dir()``), so nothing touches the user's real data.
-"""
+"""Tests for the jobs plugin backend (store, cron matcher, scheduler, runner, CLI)."""
 
 from __future__ import annotations
 
@@ -91,9 +86,7 @@ def test_store_atomic_write_leaves_no_tmp(home):
 
 
 def test_record_result_survives_metadata_stamp_failure(home, monkeypatch):
-    """CHK-JOBS-META: if stamping the job metadata fails AFTER the result file is
-    written, record_result must still persist the result and return its id (not
-    orphan it or propagate) - the failure is surfaced via a warning, not silence."""
+    """CHK-JOBS-META: if stamping the job metadata fails AFTER the result file is written, record_result must still persist the result and return its id (not orphan it or propagate) - the failure is surfaced via a warning, not silence."""
     from localm.plugins.builtin.jobs.store import JobStore
     store = JobStore()
     job = store.add(_make_job(name="j"))
@@ -110,8 +103,7 @@ def test_record_result_survives_metadata_stamp_failure(home, monkeypatch):
 
 
 def test_list_results_paginates(home):
-    """CHK-JOBS-RESULTS-PAGE: list_results reads only the requested page, so a huge
-    history cannot OOM the caller; limit=None keeps the full list."""
+    """CHK-JOBS-RESULTS-PAGE: list_results reads only the requested page, so a huge history cannot OOM the caller; limit=None keeps the full list."""
     from localm.plugins.builtin.jobs.store import JobStore
     store = JobStore()
     job = store.add(_make_job(name="j"))
@@ -131,8 +123,7 @@ def test_list_results_paginates(home):
 
 
 def test_scheduler_prunes_cron_fired_for_deleted_jobs(home):
-    """CHK-JOBS-CRONLEAK: a tick drops _cron_fired entries for jobs that no longer
-    exist, so a long-running server with churny cron jobs does not leak forever."""
+    """CHK-JOBS-CRONLEAK: a tick drops _cron_fired entries for jobs that no longer exist, so a long-running server with churny cron jobs does not leak forever."""
     from localm.plugins.builtin.jobs.scheduler import JobScheduler
     sched = JobScheduler(run_job=lambda *a, **k: {})
     sched._cron_fired["ghost-job"] = 12345           # a fired cron job since deleted
@@ -414,8 +405,7 @@ def test_runner_chat_no_engine_no_model_errors(home, monkeypatch):
 
 
 def test_runner_coder_best_effort_mocked(home, tmp_path, monkeypatch):
-    """Coder path: with the agent + backend mocked it runs the prompt and
-    returns ok. (A real run needs the coder extra + a live server.)"""
+    """Coder path: with the agent + backend mocked it runs the prompt and returns ok. (A real run needs the coder extra + a live server.)."""
     from localm.plugins.builtin.jobs import runner
 
     work = tmp_path / "proj"
@@ -519,9 +509,7 @@ def test_cli_add_cron_and_every_conflict(home):
 # --------------------------------------------------------------------------- #
 
 def test_cli_show_full_definition(home):
-    """`job show` is the CLI's only window onto allow_shell/cwd/scope - the
-    audit's 'sharpest loss' (a CLI operator could not audit which unattended
-    jobs run the shell-capable coder, nor in which cwd/scope)."""
+    """`job show` is the CLI's only window onto allow_shell/cwd/scope - the audit's 'sharpest loss' (a CLI operator could not audit which unattended jobs run the shell-capable coder, nor in which cwd/scope)."""
     from click.testing import CliRunner
     from localm.plugins.builtin.jobs.cli import main
     from localm.plugins.builtin.jobs.store import JobStore
@@ -551,9 +539,7 @@ def test_cli_show_full_definition(home):
 
 
 def test_cli_show_defaults_for_non_coder_job(home):
-    """A plain chat job has no cwd/scope/collection/allow_shell - `show` must
-    render that as '-'/'no', not omit the lines (this command's whole point is
-    a complete, predictable definition, never a kind-conditional one)."""
+    """A plain chat job has no cwd/scope/collection/allow_shell - `show` must render that as '-'/'no', not omit the lines (this command's whole point is a complete, predictable definition, never a kind-conditional one)."""
     from click.testing import CliRunner
     from localm.plugins.builtin.jobs.cli import main
     from localm.plugins.builtin.jobs.store import JobStore
@@ -609,9 +595,7 @@ def test_cli_results_reports_status_and_output(home):
 
 
 def test_cli_results_empty_is_not_unknown_job(home):
-    """A job with zero runs and a job that does not exist must print
-    DIFFERENT things - collapsing them would hide a typo'd id behind an
-    'ok, nothing happened yet' reading."""
+    """A job with zero runs and a job that does not exist must print DIFFERENT things - collapsing them would hide a typo'd id behind an 'ok, nothing happened yet' reading."""
     from click.testing import CliRunner
     from localm.plugins.builtin.jobs.cli import main
     from localm.plugins.builtin.jobs.store import JobStore
@@ -653,9 +637,7 @@ def test_cli_results_limit_and_offset(home):
 
 
 def test_cli_run_then_results_round_trip(home, monkeypatch):
-    """A run recorded through the pre-existing `job run` command must be
-    readable back through the new `job results` - the two compose against the
-    same store, exactly like the GUI's run-now + results panel do."""
+    """A run recorded through the pre-existing `job run` command must be readable back through the new `job results` - the two compose against the same store, exactly like the GUI's run-now + results panel do."""
     from click.testing import CliRunner
     from localm.plugins.builtin.jobs import runner
     from localm.plugins.builtin.jobs.cli import main
@@ -689,8 +671,7 @@ def test_cli_run_then_results_round_trip(home, monkeypatch):
 # --------------------------------------------------------------------------- #
 
 def test_plugin_routes_via_engine(home, monkeypatch):
-    """Install the bundled jobs plugin onto a bare app and exercise the routes
-    (open mode, no API key) end to end, with the runner mocked."""
+    """Install the bundled jobs plugin onto a bare app and exercise the routes (open mode, no API key) end to end, with the runner mocked."""
     from pathlib import Path
 
     from fastapi import FastAPI
@@ -760,8 +741,7 @@ def test_jobs_in_catalog():
 
 
 def test_jobs_client_entry_is_served(home, monkeypatch):
-    """The GUI imports the Jobs view from /plugins/jobs/jobs.js; the plugin must
-    mount its static assets or the view 404s and silently never loads."""
+    """The GUI imports the Jobs view from /plugins/jobs/jobs.js; the plugin must mount its static assets or the view 404s and silently never loads."""
     from pathlib import Path
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
@@ -851,8 +831,7 @@ def test_cron_dow_7_is_sunday():
 
 
 def test_store_concurrent_adds_lose_nothing(home):
-    """Concurrent writers (scheduler tick + route handlers) must not lose jobs
-    or collide on the temp file."""
+    """Concurrent writers (scheduler tick + route handlers) must not lose jobs or collide on the temp file."""
     import threading
     from localm.plugins.builtin.jobs.store import JobStore
     store = JobStore()
@@ -876,8 +855,7 @@ def test_store_concurrent_adds_lose_nothing(home):
 
 
 def test_localm_job_wired_into_top_level_cli(home):
-    """`localm job ...` must be reachable from the top-level CLI (the manifest
-    cli_entry alone does not mount it; cli.py wires it like coder/mcp/gui)."""
+    """`localm job ...` must be reachable from the top-level CLI (the manifest cli_entry alone does not mount it; cli.py wires it like coder/mcp/gui)."""
     from click.testing import CliRunner
     from localm.cli import main
     assert "job" in main.commands
@@ -935,9 +913,7 @@ def _fake_agent_capture(monkeypatch):
 
 
 def test_runner_coder_is_restricted_by_default(home, tmp_path, monkeypatch):
-    """A scheduled coder job with no opt-in must build a RESTRICTED Agent (no
-    run_shell/network). Negative-testable: pre-fix the runner never set
-    restricted, so this assertion failed."""
+    """A scheduled coder job with no opt-in must build a RESTRICTED Agent (no run_shell/network)."""
     work = tmp_path / "proj"; work.mkdir()
     runner, captured = _fake_agent_capture(monkeypatch)
     job = _make_job(task_kind="coder", prompt="x", cwd=str(work), schedule=60)
@@ -1048,8 +1024,7 @@ def test_cli_coder_job_defaults_to_no_shell(home):
 # --------------------------------------------------------------------------- #
 
 def _install_jobs_into(home):
-    """Copy+enable the jobs plugin into *home*'s installed folder using a
-    throwaway bootstrap manager (mirrors what a user install does)."""
+    """Copy+enable the jobs plugin into *home*'s installed folder using a throwaway bootstrap manager (mirrors what a user install does)."""
     from pathlib import Path
 
     from fastapi import FastAPI
@@ -1061,11 +1036,7 @@ def _install_jobs_into(home):
 
 
 def test_scheduler_starts_via_server_lifespan(home, monkeypatch):
-    """Build the app the way `localm serve` does (create_app -> attach_engine
-    inside it -> uvicorn lifespan) and assert the scheduler actually starts
-    and a due job actually RUNS. Pre-fix, register() ran before the loop
-    existed, start() no-opped, and no scheduled job ever fired on a stock
-    server (the audit's live 3.7-minute silence)."""
+    """Build the app the way `localm serve` does (create_app -> attach_engine inside it -> uvicorn lifespan) and assert the scheduler actually starts and a due job actually RUNS."""
     from fastapi.testclient import TestClient
 
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
@@ -1108,8 +1079,7 @@ def test_scheduler_starts_via_server_lifespan(home, monkeypatch):
 
 
 def test_on_startup_runs_immediately_when_loop_is_up(home):
-    """Runtime enable (management API, loop already running) must keep the old
-    behavior: the callback runs right away, nothing is queued."""
+    """Runtime enable (management API, loop already running) must keep the old behavior: the callback runs right away, nothing is queued."""
     import asyncio
     from types import SimpleNamespace
 
@@ -1129,8 +1099,7 @@ def test_on_startup_runs_immediately_when_loop_is_up(home):
 
 
 def test_unmount_discards_queued_startup_callbacks(home):
-    """A plugin disabled before the lifespan ran must not have its deferred
-    startup work fire later."""
+    """A plugin disabled before the lifespan ran must not have its deferred startup work fire later."""
     from types import SimpleNamespace
 
     from fastapi import FastAPI
@@ -1150,9 +1119,7 @@ def test_unmount_discards_queued_startup_callbacks(home):
 # --------------------------------------------------------------------------- #
 
 def test_coder_backend_uses_configured_port_not_8080(home, monkeypatch):
-    """The old hardcoded :8080 never matched the default :8642 bind, so a
-    shipped coder job could not reach the server. With no LOCALM_SELF_URL the
-    backend must target the configured port."""
+    """The old hardcoded :8080 never matched the default :8642 bind, so a shipped coder job could not reach the server."""
     monkeypatch.delenv("LOCALM_SELF_URL", raising=False)
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     import localm.config as cfg
@@ -1217,8 +1184,7 @@ def test_publish_self_url_does_not_override_env(monkeypatch):
 
 
 def test_cron_catch_up_fires_a_slot_missed_while_down(home):
-    """A cron slot that passed while the server was down runs ONCE on restart
-    (the docs promise it; cron used to silently skip it)."""
+    """A cron slot that passed while the server was down runs ONCE on restart (the docs promise it; cron used to silently skip it)."""
     from localm.plugins.builtin.jobs.scheduler import JobScheduler
     from localm.plugins.builtin.jobs.store import JobStore
     sched = JobScheduler(JobStore())
@@ -1231,8 +1197,7 @@ def test_cron_catch_up_fires_a_slot_missed_while_down(home):
 
 
 def test_cron_no_catch_up_for_never_run_job(home):
-    """A freshly created cron job never back-fires history: it waits for its
-    next real slot."""
+    """A freshly created cron job never back-fires history: it waits for its next real slot."""
     from localm.plugins.builtin.jobs.scheduler import JobScheduler
     from localm.plugins.builtin.jobs.store import JobStore
     sched = JobScheduler(JobStore())
@@ -1242,8 +1207,7 @@ def test_cron_no_catch_up_for_never_run_job(home):
 
 
 def test_cron_no_catch_up_beyond_window(home):
-    """A cron slot whose most recent occurrence is more than 24h before now is
-    too stale to back-fire (a weekly job on a machine off for days)."""
+    """A cron slot whose most recent occurrence is more than 24h before now is too stale to back-fire (a weekly job on a machine off for days)."""
     import datetime as _dt
 
     from localm.plugins.builtin.jobs.scheduler import JobScheduler
@@ -1262,8 +1226,7 @@ def test_cron_no_catch_up_beyond_window(home):
 
 
 def test_cron_no_catch_up_when_no_slot_missed(home):
-    """No spurious catch-up: a daily job whose next slot is still in the future
-    (now is before today's slot) must not fire."""
+    """No spurious catch-up: a daily job whose next slot is still in the future (now is before today's slot) must not fire."""
     from localm.plugins.builtin.jobs.scheduler import JobScheduler
     from localm.plugins.builtin.jobs.store import JobStore
     sched = JobScheduler(JobStore())
@@ -1274,8 +1237,7 @@ def test_cron_no_catch_up_when_no_slot_missed(home):
 
 
 def test_cron_current_minute_still_fires_once(home):
-    """The normal same-minute cron path is unchanged: fires once, then the
-    per-minute dedup blocks a second sub-minute poll."""
+    """The normal same-minute cron path is unchanged: fires once, then the per-minute dedup blocks a second sub-minute poll."""
     from localm.plugins.builtin.jobs.scheduler import JobScheduler
     from localm.plugins.builtin.jobs.store import JobStore
     sched = JobScheduler(JobStore())

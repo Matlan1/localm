@@ -1,9 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The update apply ENGINE (localm/_apply_update): verify, extract, and the
-swap/backup/rollback file primitives on a fake install tree. The live re-exec
-orchestration is integration-level and verified on a real install; these pin the
-correctness + safety of the file ops (deletions applied, never-touch preserved,
-rollback restores the exact pre-apply state)."""
+"""The update apply ENGINE (localm/_apply_update): verify, extract, and the swap/backup/rollback file primitives on a fake install tree."""
 
 import shutil
 import subprocess
@@ -229,11 +225,7 @@ def test_rollback_keeps_provisioned_binaries_and_restores_scaffold(tmp_path):
 
 
 def test_swap_does_not_choke_on_a_held_open_binary(tmp_path):
-    """Regression: while localm runs, a loaded DLL is file-locked on Windows; a swap
-    that deletes it raises WinError 32 and can strand a half-applied tree. The preserve
-    keeps the swap off the binary entirely, so it completes with the binary intact.
-    (On POSIX an open file is deletable, so this also pins that the binary is preserved
-    rather than replaced by the empty scaffold.)"""
+    """Regression: while localm runs, a loaded DLL is file-locked on Windows; a swap that deletes it raises WinError 32 and can strand a half-applied tree."""
     inst, staged, bdir = tmp_path / "i", tmp_path / "s", tmp_path / "b"
     inst.mkdir(); staged.mkdir()
     _install_with_runtime(inst)
@@ -254,11 +246,7 @@ def test_post_swap_command_per_class():
 
 
 def test_post_swap_command_runtime_uses_absolute_interpreter_not_bare_localm():
-    """A bare "localm" argv[0] resolves back to the calling exe itself when running as
-    the default native LocaLM.exe launcher (see the live repro below), which then
-    mis-invokes and rolls back every "runtime"-class update. Must go through
-    sys.executable + "-m localm" instead, same as every other self-invocation site
-    (setup_llama.py, applaunch.py, http_server.py, ...)."""
+    """A bare 'localm' argv[0] resolves back to the calling exe itself when running as the default native LocaLM.exe launcher (see the live repro below), which then mis-invokes and rolls back every 'runtime'-class update."""
     cmd = au.post_swap_command("runtime", backend="cuda")
     assert cmd[0] == sys.executable
     assert cmd[1:3] == ["-m", "localm"]
@@ -266,36 +254,14 @@ def test_post_swap_command_runtime_uses_absolute_interpreter_not_bare_localm():
 
 
 def test_post_swap_command_runtime_forces_and_never_prompts():
-    """NEW-UPDATE-RUNTIME-CLASS-IS-A-NO-OP: without --force, setup-llama's own
-    "already provisioned" guard short-circuits on any already-present library, so
-    a "runtime"-class update re-provisioned nothing and still reported success.
-    --yes must ALSO be present: this argv is run with no one watching its stdin,
-    and --force alone would newly reach _cuda_setup_dialogue's click.confirm(),
-    which is gated on assume_yes only (not on isatty) and would hang forever."""
+    """NEW-UPDATE-RUNTIME-CLASS-IS-A-NO-OP: without --force, setup-llama's own 'already provisioned' guard short-circuits on any already-present library, so a 'runtime'-class update re-provisioned nothing and still reported success. --yes must ALSO be present: this argv is run with no one watching its stdi..."""
     cmd = au.post_swap_command("runtime", backend="vulkan")
     assert "--force" in cmd
     assert "--yes" in cmd
 
 
 def test_bare_localm_argv_on_the_launcher_exe_fails_with_exit_2(tmp_path):
-    """Live repro of the underlying failure mode this fix avoids. The native launcher
-    build (LocaLM.exe) is literally a renamed copy of the interpreter (see
-    applaunch.py's `os.path.basename(sys.executable).lower() == "localm.exe"` check),
-    and the original incident confirmed a bare "localm" argv[0] resolves straight back
-    to that same exe on the default install (Windows favors a same-directory match over
-    a PATH-installed console-script shim). Reproduce the resulting failure directly: a
-    copy of the interpreter, invoked with the OLD post_swap_command's trailing args,
-    fails to do what was asked - exactly what rolled back every "runtime"-class update.
-    The fix's absolute sys.executable argv never depends on that name resolution, so it
-    can't hit this failure mode (verified separately above).
-
-    The EXACT failure signature depends on what sys.executable is in the process
-    running this test: a standalone interpreter treats "setup-llama" as a script path
-    it can't open and exits 2; a venv's own python.exe (the common case under a test
-    runner, since pytest itself usually runs inside a project .venv) refuses to run
-    away from its venv at all ("No pyvenv.cfg file", a distinct nonzero code). Both are
-    the bare-copy approach breaking, which is the only thing this test needs to prove -
-    it does not assert a fully-loaded backend actually started."""
+    """Live repro of the underlying failure mode this fix avoids."""
     launcher = tmp_path / ("localm.exe" if sys.platform == "win32" else "localm")
     shutil.copy2(sys.executable, launcher)
     if sys.platform != "win32":
@@ -339,17 +305,7 @@ def test_unsafe_member_detection():
 # ----------------- rollback surfaces restore failures -------------------
 
 class TestRollbackRefusesPoisonedManifestNames:
-    """CodeQL 172: rollback() names can come from <home>/updates/applied_names.json,
-    an ordinary file in the data dir, previously validated only as list[str]. Each
-    name reached `installed / name` and then shutil.rmtree/unlink.
-
-    update_watchdog.py calls main(['--yes']) automatically after a failed health
-    probe with stdin=DEVNULL, so the isatty() confirmation is skipped and this can
-    fire with no human present.
-
-    Every vector asserts the same two things: the target OUTSIDE the install
-    survives, and the refusal is REPORTED (RuntimeError), never silently skipped.
-    """
+    """CodeQL 172: rollback() names can come from <home>/updates/applied_names.json, an ordinary file in the data dir, previously validated only as list[str]."""
 
     @staticmethod
     def _install_and_backup(tmp_path):
@@ -393,10 +349,7 @@ class TestRollbackRefusesPoisonedManifestNames:
 
     @pytest.mark.parametrize("name", ["", ".", "   ", "./"])
     def test_collapsing_name_does_not_delete_the_install(self, tmp_path, name):
-        """`Path(install) / ""` and `/ "."` both collapse to the install dir
-        itself, so rmtree on the result would delete the WHOLE installation.
-        These do not escape the root, so an escape-only check (_unsafe_member)
-        returns False for them - this is the case that check cannot see."""
+        """`Path(install) / ''` and `/ '.'` both collapse to the install dir itself, so rmtree on the result would delete the WHOLE installation."""
         inst, bdir = self._install_and_backup(tmp_path)
 
         with pytest.raises(RuntimeError) as ei:
@@ -409,11 +362,7 @@ class TestRollbackRefusesPoisonedManifestNames:
 
     @pytest.mark.parametrize("name", ["home", ".venv", ".git", "issues", "qa"])
     def test_never_touch_name_is_refused(self, tmp_path, name):
-        """swap_entries EXCLUDES NEVER_TOUCH, so a manifest naming one is poisoned
-        by construction. It matters most on a portable install, where `home` sits
-        INSIDE the install root: rolling back an entry named `home` would delete
-        the user's models, chat history and auth keys, and the backup does not
-        hold them to restore."""
+        """swap_entries EXCLUDES NEVER_TOUCH, so a manifest naming one is poisoned by construction."""
         inst, bdir = self._install_and_backup(tmp_path)
 
         with pytest.raises(RuntimeError) as ei:
@@ -424,9 +373,7 @@ class TestRollbackRefusesPoisonedManifestNames:
         assert (inst / ".venv" / "marker").read_text() == "keep"
 
     def test_safe_names_alongside_a_poisoned_one_still_roll_back(self, tmp_path):
-        """Best-effort, matching rollback()'s existing contract: it attempts every
-        name, then reports the collected failures. A poisoned entry must not
-        abort the legitimate half of the rollback."""
+        """Best-effort, matching rollback()'s existing contract: it attempts every name, then reports the collected failures."""
         inst, bdir = self._install_and_backup(tmp_path)
         (bdir / "VERSION").write_text("0.1.0", encoding="utf-8")
         (inst / "VERSION").write_text("0.2.0", encoding="utf-8")
@@ -437,12 +384,7 @@ class TestRollbackRefusesPoisonedManifestNames:
         assert (inst / "VERSION").read_text().strip() == "0.1.0"   # restored anyway
 
     def test_unsafe_swap_name_detection(self):
-        """Unit-level truth table, so a future edit to the helper cannot quietly
-        widen it. Includes the two shapes _unsafe_member alone passes.
-
-        These are PURE string checks - _unsafe_swap_name touches no filesystem -
-        so naming a drive here deletes nothing. Contrast the parametrized cases
-        above, which drive the real rollback and must stay inside tmp_path."""
+        """Unit-level truth table, so a future edit to the helper cannot quietly widen it."""
         for bad in ["", ".", "..", "   ", "../x", "Z:/x", "/x", "//h/s",
                     "a/b", "home", ".venv", "__pycache__", None, 3]:
             assert au._unsafe_swap_name(bad), f"should be unsafe: {bad!r}"
@@ -491,8 +433,7 @@ def test_swap_with_backup_surfaces_double_failure(tmp_path, monkeypatch):
 
 
 def test_prune_returns_error_for_unremovable_file(tmp_path, monkeypatch):
-    """A FILE _prune cannot unlink is REPORTED (not silently left behind); files it can
-    remove are still removed for real, and the return is [] when everything succeeds."""
+    """A FILE _prune cannot unlink is REPORTED (not silently left behind); files it can remove are still removed for real, and the return is [] when everything succeeds."""
     good = tmp_path / "good"
     (good / "a").mkdir(parents=True)
     (good / "a" / "f.py").write_text("stale", encoding="utf-8")
@@ -519,9 +460,7 @@ def test_prune_returns_error_for_unremovable_file(tmp_path, monkeypatch):
 
 
 def test_rollback_surfaces_prune_unlink_failure(tmp_path, monkeypatch):
-    """A scaffold file _prune cannot strip while unwinding a PRESERVE_WITHIN name during
-    rollback must reach rollback()'s errors and RAISE - never a stale file left under a
-    silent rolled_back:True (do-not-hide-problems)."""
+    """A scaffold file _prune cannot strip while unwinding a PRESERVE_WITHIN name during rollback must reach rollback()'s errors and RAISE - never a stale file left under a silent rolled_back:True (do-not-hide-problems)."""
     inst, staged, bdir = tmp_path / "i", tmp_path / "s", tmp_path / "b"
     inst.mkdir(); staged.mkdir()
     _install_with_runtime(inst)
@@ -541,8 +480,7 @@ def test_rollback_surfaces_prune_unlink_failure(tmp_path, monkeypatch):
 
 
 def test_apply_files_logs_prune_failure_without_raising(tmp_path, monkeypatch, caplog):
-    """On the FORWARD apply path a stale file that cannot be pruned is LOGGED, not raised:
-    a leftover file must not brick an otherwise-good update, but must stay visible."""
+    """On the FORWARD apply path a stale file that cannot be pruned is LOGGED, not raised: a leftover file must not brick an otherwise-good update, but must stay visible."""
     import logging
     inst, staged = tmp_path / "i", tmp_path / "s"
     inst.mkdir(); staged.mkdir()
@@ -569,10 +507,7 @@ def test_apply_files_logs_prune_failure_without_raising(tmp_path, monkeypatch, c
 
 
 def test_prune_swallows_empty_dir_rmdir_failure(tmp_path, monkeypatch):
-    """The BENIGN half of the fix: an already-empty dir whose rmdir fails (lock/perms) is
-    SWALLOWED, never surfaced - a leftover empty dir strands nothing. Only FILE-removal
-    failures reach the returned errors (guards against a regression that would spuriously
-    fail rollback() on a harmless leftover dir)."""
+    """The BENIGN half of the fix: an already-empty dir whose rmdir fails (lock/perms) is SWALLOWED, never surfaced - a leftover empty dir strands nothing."""
     dst = tmp_path / "runtime"
     (dst / "emptydir").mkdir(parents=True)   # an empty subdir _prune will try to rmdir
 

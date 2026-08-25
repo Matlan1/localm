@@ -1,38 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""localm-managed ComfyUI: the compatibility patch set applied to localm's own,
-fully-owned ComfyUI checkout.
-
-localm pins a known-good ComfyUI commit and carries a small, versioned set of
-localm-owned patches ON TOP of it. Because this is localm's OWN, fully-owned
-ComfyUI (never the user's install), a patch is a DIRECT core file edit, not the
-in-memory shim the reactive T1 path uses on a user-owned ComfyUI. The patches are
-applied right after provisioning (fresh and copy paths) and re-applied by
-``localm comfy update`` whenever the pin advances.
-
-The first (and today only) patch is the ``__func__`` tolerance: ComfyUI core's
-``comfy_api/internal/__init__.py::make_locked_method_func`` does the bare
-``getattr(type_obj, func).__func__``, assuming a node's FUNCTION is a bound method.
-A node whose FUNCTION resolves to a plain function (core VAEDecodeAudio, used by
-native ACE-Step music) has no ``.__func__`` -> ``AttributeError``. Refs:
-Comfy-Org/ComfyUI #12116, patientx/ComfyUI-Zluda #424. The patch rewrites that one
-access to the tolerant ``attr = getattr(type_obj, func); method = attr.__func__ if
-hasattr(attr, "__func__") else attr`` - the SAME change the T1 shim makes in memory
-(localm/media/comfy_shim/sitecustomize.py), here a persistent file edit since we own
-the checkout.
-
-Every patch is:
-  - GUARDED: it only rewrites when the exact known-fragile shape is present; an
-    already-tolerant file (upstream fixed it, or we patched it earlier) or an
-    unexpected shape is left ALONE.
-  - IDEMPOTENT: re-applying is a byte no-op (the fragile shape is gone after the
-    first apply, so the second finds nothing to do).
-  - FAIL-SAFE (AGENTS.md rule 5, no facade, no corruption): a missing/renamed target
-    is skipped WITHOUT error; a rewrite whose result would not parse is NEVER written
-    (an ast.parse gate) and is reported failed; the write is atomic (temp file +
-    os.replace) so a crash mid-write can never leave a half-written core file.
-
-Design + locked decisions: dev-notes/DESIGN-localm-managed-comfyui-2026-07-08.md
-"""
+"""localm-managed ComfyUI: the compatibility patch set applied to localm's own, fully-owned ComfyUI checkout."""
 
 from __future__ import annotations
 
@@ -61,11 +28,7 @@ Transform = Callable[[str], Tuple[Optional[str], str]]
 
 @dataclass(frozen=True)
 class ComfyPatch:
-    """One localm-owned edit to the managed ComfyUI checkout.
-
-    ``target`` is the path RELATIVE to the managed ComfyUI root. ``transform`` decides,
-    from the file's current text, whether and how to rewrite it (returning None for a
-    guarded no-op)."""
+    """One localm-owned edit to the managed ComfyUI checkout."""
     name: str
     description: str
     target: str
@@ -74,8 +37,7 @@ class ComfyPatch:
 
 @dataclass(frozen=True)
 class PatchOutcome:
-    """What happened to one patch. ``ok`` is False only for FAILED - a patch that
-    could not be applied safely; a deliberate no-op (SKIPPED/ABSENT) is ok."""
+    """What happened to one patch. ``ok`` is False only for FAILED - a patch that could not be applied safely; a deliberate no-op (SKIPPED/ABSENT) is ok."""
     name: str
     status: str
     detail: str = ""
@@ -101,8 +63,7 @@ _FRAGILE_RE = re.compile(
 
 
 def _func_tolerant_transform(text: str) -> Tuple[Optional[str], str]:
-    """Rewrite the fragile ``getattr(type_obj, func).__func__`` into the plain-function
-    tolerant form. Returns (new_text, note); new_text is None for a guarded no-op."""
+    """Rewrite the fragile ``getattr(type_obj, func).__func__`` into the plain-function tolerant form."""
     def _repl(m: "re.Match") -> str:
         indent = m.group("indent")
         return (f"{indent}attr = getattr(type_obj, func)\n"
@@ -139,19 +100,14 @@ PATCHES: Tuple[ComfyPatch, ...] = (FUNC_PATCH,)
 # --------------------------------------------------------------------------- #
 
 def _atomic_write(target: Path, text: str) -> None:
-    """Write *text* to *target* atomically: a sibling temp file, then os.replace. So a
-    crash mid-write never leaves a half-written core file (the old file stays intact
-    until the rename)."""
+    """Write *text* to *target* atomically: a sibling temp file, then os.replace."""
     tmp = target.with_name(target.name + ".localm-patch.tmp")
     tmp.write_text(text, encoding="utf-8")
     os.replace(str(tmp), str(target))
 
 
 def apply_patch(patch: ComfyPatch, managed_comfy_dir) -> PatchOutcome:
-    """Apply one *patch* to the managed ComfyUI at *managed_comfy_dir*. Never raises;
-    always returns an honest PatchOutcome. A missing target is ABSENT (fail-safe skip);
-    an unreadable file, an unparseable rewrite, or a failed write is FAILED and leaves
-    the file untouched; a guarded no-op is SKIPPED; a real rewrite is APPLIED."""
+    """Apply one *patch* to the managed ComfyUI at *managed_comfy_dir*."""
     target = Path(managed_comfy_dir) / patch.target
     try:
         if not target.is_file():
@@ -189,9 +145,6 @@ def apply_patch(patch: ComfyPatch, managed_comfy_dir) -> PatchOutcome:
 
 def apply_patches(managed_comfy_dir, patches: Optional[Tuple[ComfyPatch, ...]] = None,
                   ) -> List[PatchOutcome]:
-    """Apply the localm patch set to the managed ComfyUI at *managed_comfy_dir*.
-    Returns one PatchOutcome per patch, in order. Never raises. Callers surface any
-    FAILED outcome (rule 5) but a failed COMPAT patch is non-fatal to the base install
-    (it only breaks the workflow that needs it), so provisioning does not abort on it."""
+    """Apply the localm patch set to the managed ComfyUI at *managed_comfy_dir*."""
     patches = PATCHES if patches is None else patches
     return [apply_patch(p, managed_comfy_dir) for p in patches]

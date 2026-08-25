@@ -1,33 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The list of projects this instance has run a coder session in.
-
-WHY IT EXISTS SEPARATELY FROM THE SESSION STORES: neither store can answer "what
-have I worked on".
-
-* ``full`` mode writes to ``<project>/.localcoder/sessions/`` - INSIDE each project.
-  Enumerating projects from it would mean scanning the disk, which is slow and is
-  exactly the kind of thing a local-first tool should not do uninvited.
-* ``log`` mode writes to ``<data dir>/sessions/`` - central, but it indexes
-  SESSIONS, and a ``full``-mode session never lands there at all.
-
-So this is a small central file recording only WHERE work happened, never WHAT was
-done. Design: dev-notes/DESIGN-coder-session-rail-and-project-history-2026-08-19.md.
-
-PRIVACY MODE WRITES NOTHING HERE. THIS IS NOT CONFIGURABLE.
-
-That is the load-bearing rule of this module, so it is stated before anything else.
-A "projects I have worked on" list is itself a record: it leaks the existence, the
-name and the timing of the work. Recording a privacy-mode session's project would
-defeat the mode WHILE APPEARING TO HONOUR IT - nothing else about that session
-touches the disk, so the user has no reason to suspect this did, and no surface
-would tell them. A privacy mode with an "except for this list" carve-out is not a
-privacy mode, and the setting that disabled the carve-out would be the one nobody
-reads.
-
-The honest consequence, which callers must surface rather than hide: this list is
-INCOMPLETE by construction for anyone who uses privacy mode. It must never be
-presented as the whole history (AGENTS.md rule 5).
-"""
+"""The list of projects this instance has run a coder session in."""
 
 from __future__ import annotations
 
@@ -86,17 +58,7 @@ def _limit() -> int:
 
 
 def record_project(cwd, mode: Optional[str]) -> bool:
-    """Record that a session ran in *cwd*. Returns True when something was written.
-
-    Refuses, in this order, and each for its own reason:
-
-    1. ``mode`` is privacy - see the module docstring. NOT configurable.
-    2. The user turned remembering off - their choice, and it means "do not write",
-       not "write but hide".
-    3. The limit is zero - the same thing said with a number.
-
-    Never raises: a failure to record is logged and the session continues.
-    """
+    """Record that a session ran in *cwd*."""
     if (mode or "").strip().lower() == PRIVACY_MODE:
         return False
     if not _remember_enabled():
@@ -131,14 +93,7 @@ def record_project(cwd, mode: Optional[str]) -> bool:
 
 
 def list_projects() -> list:
-    """Every remembered project, most recent first, each tagged ``available``.
-
-    A path that no longer exists is RETURNED, marked unavailable, rather than
-    filtered out. The user's own memory of a project is worth preserving after the
-    directory is gone, and silently dropping the row hides a fact instead of
-    reporting it - the caller can then say "moved or deleted" rather than leaving
-    someone to wonder why their project vanished from the list.
-    """
+    """Every remembered project, most recent first, each tagged ``available``."""
     out = []
     for e in _load():
         if not isinstance(e, dict) or not e.get("path"):
@@ -161,12 +116,7 @@ def list_projects() -> list:
 
 
 def forget_all() -> None:
-    """Delete the whole list.
-
-    A record the user cannot remove is a worse deal than one that was never
-    offered, so turning remembering OFF must not be the only way to get rid of what
-    was already written.
-    """
+    """Delete the whole list."""
     try:
         _store().unlink()
     except FileNotFoundError:

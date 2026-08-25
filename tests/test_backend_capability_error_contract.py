@@ -1,25 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""A backend declares what it can do, and a refusal reaches the caller with its reason.
-
-Two halves of one contract, because fixing either alone leaves a rule 5 violation:
-
-* A backend that cannot apply a grammar must SAY SO. ``Engine.validate_grammar``
-  used to probe ``getattr(backend, "validate_grammar", None)`` and no-op when it
-  was absent, which asked "does this backend have a validator" and acted on the
-  answer as though it had asked "can this backend apply a grammar". Only the GGUF
-  backend defined it, so a grammar sent to an HF model was never checked and,
-  without the optional ``[grammar]`` extra, never applied - the caller got a 200
-  full of unconstrained text with nothing saying the constraint had been dropped.
-
-* The non-streaming path caught only ``RuntimeError``. Every user-actionable
-  backend error is a ``ValueError`` subclass, so all of them escaped to the
-  generic handler and came back as ``{"detail": "Internal server error"}`` with
-  the reason discarded, while the STREAMING twin of the same function delivered
-  that reason to the client.
-
-Fixing the first alone turns a silent wrong answer into an opaque 500. Fixing the
-second alone leaves grammar silently dropped. Hence one test module.
-"""
+"""A backend declares what it can do, and a refusal reaches the caller with its reason."""
 
 import importlib.util
 import json
@@ -62,12 +42,7 @@ _GRAMMAR = 'root ::= "yes" | "no"'
 # --------------------------------------------------------------------------- #
 
 class _MinimalBackend(BaseBackend):
-    """A backend that declares nothing beyond the abstract minimum.
-
-    This is what a new backend author writes on day one, and the whole point of
-    the deny-by-default contract is that it is SAFE - so this class must never
-    grow a ``supports_grammar`` declaration.
-    """
+    """A backend that declares nothing beyond the abstract minimum."""
 
     def __init__(self) -> None:
         self.chat_stream_calls: List[dict] = []
@@ -96,14 +71,7 @@ class _GrammarCapableBackend(_MinimalBackend):
 
 
 class _EngineWithBackend(Engine):
-    """A real Engine (real ``validate_grammar``, real ``supports_grammar``) over a
-    hand-built backend.
-
-    Subclassed rather than constructed, because ``Engine.__init__`` calls
-    ``create_backend`` and would resolve a real model file. Every METHOD under
-    test is inherited unchanged, which is the point: this exercises the real
-    delegation path, not a re-implementation of it.
-    """
+    """A real Engine (real ``validate_grammar``, real ``supports_grammar``) over a hand-built backend."""
 
     def __init__(self, backend: BaseBackend, display_name: str = "test-model") -> None:
         from localm.inference.engine import _LOAD_LOCK
@@ -116,14 +84,7 @@ class _EngineWithBackend(Engine):
 
 
 def _raising_stream(exc: BaseException):
-    """A chat_stream that raises when ITERATED, which is how a real backend fails.
-
-    ``GgufBackend.chat_stream`` and ``HFBackend.chat_stream`` are generator
-    functions, so calling them returns a generator and the guard fires on the
-    first ``next()``. A side_effect that raised at CALL time would exercise a
-    different code path in ``_generate_full`` (before its try block) than the one
-    production actually takes.
-    """
+    """A chat_stream that raises when ITERATED, which is how a real backend fails."""
     def _stream(messages, **kwargs):
         raise exc
         yield ""     # unreachable; makes this a generator function
@@ -156,18 +117,7 @@ def _post(engine, payload: dict, path: str = "/v1/chat/completions",
 
 
 def _post_observing_500(engine, payload: dict, path: str = "/v1/chat/completions"):
-    """POST and read the response even when the app's generic handler fired.
-
-    ``raise_server_exceptions=False`` is REQUIRED to see an unhandled-error
-    response at all: Starlette's ServerErrorMiddleware builds the 500 from the
-    registered ``@app.exception_handler(Exception)`` and then RE-RAISES, so a real
-    server logs the traceback after the client already has its JSON. With the
-    default TestClient setting that re-raise reaches the test instead, and the
-    body - the thing under test - is never observed.
-
-    So this helper is not a way to make a red test green. It is the only way to
-    assert on the opaque 500 the client actually receives in production.
-    """
+    """POST and read the response even when the app's generic handler fired."""
     return _post(engine, payload, path, raise_server_exceptions=False)
 
 
@@ -400,8 +350,7 @@ class TestNonStreamingReportsTheReason:
 
 
 class TestAGenuineBugStillReturnsAnOpaque500:
-    """The other half of D3: do not widen the catch until a real defect is
-    reported to the user as their fault."""
+    """The other half of D3: do not widen the catch until a real defect is reported to the user as their fault."""
 
     def test_an_attribute_error_is_an_opaque_500(self):
         r = _post_observing_500(
@@ -430,8 +379,7 @@ class TestAGenuineBugStillReturnsAnOpaque500:
 
 class TestBothPathsAgree:
     def _sse_text(self, body: str) -> str:
-        """Concatenate every delta the stream carried, so an assertion can look
-        for a reason without caring how it was chunked."""
+        """Concatenate every delta the stream carried, so an assertion can look for a reason without caring how it was chunked."""
         out = []
         for line in body.splitlines():
             if not line.startswith("data: ") or line.endswith("[DONE]"):
@@ -576,10 +524,7 @@ _RUNTIME_REASON = "not enough free VRAM for this prompt (needs 6.2 GiB, 1.1 GiB 
 
 
 def _sse_completion_text(body: str) -> str:
-    """Concatenate the `text` deltas of a /v1/completions stream. Its chunks
-    carry `text`, not chat's `delta.content`, so the chat helper above cannot
-    read them - and a helper that silently returned "" for the wrong shape
-    would make an assertion pass on an empty string."""
+    """Concatenate the `text` deltas of a /v1/completions stream."""
     out = []
     for line in body.splitlines():
         if not line.startswith("data: ") or line.endswith("[DONE]"):
@@ -601,11 +546,7 @@ def _completion_finish_reasons(body: str) -> list:
 
 
 class TestARuntimeErrorReachesTheClientOnAllFourPaths:
-    """The gap was ONE of four legs, so all four are asserted here rather than
-    the one that was broken. A leg covered only by the leg next to it cannot
-    fail when a regression re-opens it specifically, and 'these four must agree'
-    IS the property - see the identical reasoning on the ValueError families
-    above."""
+    """The gap was ONE of four legs, so all four are asserted here rather than the one that was broken."""
 
     def test_non_streaming_completions_reports_the_reason_and_marks_it(self):
         # THE regression. Before this arm existed the assertions below read
@@ -649,9 +590,7 @@ class TestARuntimeErrorReachesTheClientOnAllFourPaths:
         assert "error" in TestBothPathsAgree()._finish_reasons(r.text)
 
     def test_the_two_completions_legs_agree_with_each_other(self):
-        """The pairing the entry was actually about: same route, same failure,
-        one streamed and one not. These two disagreeing is what a caller hits
-        when it flips `stream` and nothing else."""
+        """The pairing the entry was actually about: same route, same failure, one streamed and one not."""
         streamed = _post(_mock_engine(stream_exc=RuntimeError(_RUNTIME_REASON)),
                          {"model": "test-model", "prompt": "hi", "stream": True},
                          path="/v1/completions")
@@ -666,17 +605,7 @@ class TestARuntimeErrorReachesTheClientOnAllFourPaths:
 
 
 class TestTheReasonIsRedactedNotMuted:
-    """A generation failure's reason crosses a trust boundary into a response
-    body, and it is NOT always a tidy sentence: the GGUF loader raises
-    ``Failed to load model: <absolute path>`` with a native stderr tail, and an
-    auto-reload inside chat_stream surfaces exactly that here.
-
-    Both halves matter and they pull against each other, which is why each gets
-    its own assertion: the machine's directory layout must NOT reach the client,
-    and the REASON must still reach it. Dropping the message entirely would
-    satisfy the first and destroy the error contract this module exists for
-    (AGENTS.md rule 5: redact, never mute).
-    """
+    """A generation failure's reason crosses a trust boundary into a response body, and it is NOT always a tidy sentence: the GGUF loader raises ``Failed to load model: <absolute path>`` with a native stderr tail, and an auto-reload inside chat_stream surfaces exactly that here."""
 
     _HOMEISH = r"C:\Users\someaccount\models\thing.gguf"
 
@@ -718,10 +647,7 @@ class TestTheReasonIsRedactedNotMuted:
 
 
 class TestTheRuntimeCatchIsNotWidened:
-    """The other half, and the reason the arm names RuntimeError rather than
-    Exception: a genuine defect must still be an opaque 500, not dressed up as
-    an 'inference error' the user is invited to read (AGENTS.md rule 5, in the
-    direction people forget)."""
+    """The other half, and the reason the arm names RuntimeError rather than Exception: a genuine defect must still be an opaque 500, not dressed up as an 'inference error' the user is invited to read (AGENTS.md rule 5, in the direction people forget)."""
 
     def test_an_attribute_error_on_completions_is_still_an_opaque_500(self):
         r = _post_observing_500(

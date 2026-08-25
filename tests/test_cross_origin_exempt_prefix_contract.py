@@ -1,34 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Contract test for ``_CROSS_ORIGIN_OK`` in ``localm/inference/http_server.py``.
-
-Every entry in that tuple must be a full route path, never a directory prefix
-(it is matched with ``str.startswith()``), because a prefix silently exempts
-every FUTURE route added under it from both the cross-origin/CSRF refusal and
-the open-mode shell-token gate - without its author writing anything that
-looks like a security decision.
-
-Two things are pinned independently, and both are needed:
-
-- The route walk below watches the two DIRECTORIES the exemption used to
-  match by prefix (``/v1/surfaces/``, ``/v1/instances/``), hardcoded here
-  rather than read off the live tuple. This is deliberate: reading it off
-  the live (now-narrowed) tuple could never flag a new, unrelated route
-  under either directory, because such a route no longer matches the
-  narrowed tuple at all - which is correct production behavior, but it
-  would make the test blind to the exact "was this new route reviewed"
-  question it exists to ask. Any route appearing under either directory,
-  authenticated or not, exempt or not, needs a deliberate look before it
-  ships - this walk forces that look by failing until one is taken.
-- The tuple-contents assertion catches a regression back to directory-prefix
-  matching directly, which the route walk alone cannot: the two real exempt
-  routes satisfy a prefix match exactly as well as a full-path match, so a
-  route walk against a reverted (prefixed) tuple still finds no offenders.
-
-``_CROSS_ORIGIN_OK`` is local to ``create_app()``, not a module attribute, so
-the second check recovers it from the live ``_origin_guard`` middleware's
-closure - the actual object controlling production behavior, not a
-re-implementation of it.
-"""
+"""Contract test for ``_CROSS_ORIGIN_OK`` in ``localm/inference/http_server.py``."""
 
 from fastapi.routing import APIRoute
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -54,9 +25,7 @@ _REVIEWED_WATCHED_ROUTES = {
 
 
 def _live_cross_origin_ok(app) -> tuple:
-    """Recover the actual ``_CROSS_ORIGIN_OK`` tuple ``_origin_guard`` closes
-    over, from its live closure cell - the real deployed value, not a
-    hardcoded guess at what it should be."""
+    """Recover the actual ``_CROSS_ORIGIN_OK`` tuple ``_origin_guard`` closes over, from its live closure cell - the real deployed value, not a hardcoded guess at what it should be."""
     for mw in app.user_middleware:
         if mw.cls is not BaseHTTPMiddleware:
             continue
@@ -105,10 +74,7 @@ def test_every_route_under_a_watched_prefix_is_reviewed():
 
 
 def test_cross_origin_ok_tuple_entries_are_full_paths_not_prefixes():
-    """Pins the production half of the fix directly. The route-walk test
-    above alone cannot catch a regression back to directory-prefix matching:
-    both real exempt routes satisfy a prefix match exactly as well as a
-    full-path match, so it would report the same clean result either way."""
+    """Pins the production half of the fix directly."""
     app = create_app(None)
     cross_origin_ok = _live_cross_origin_ok(app)
     assert cross_origin_ok[-2:] == (

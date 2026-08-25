@@ -1,15 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""
-Phase 3 (FAC-2) regression tests for localm.plugins.coder.privacy.
-
-Bug: clear_shell_history_traces() keyed only on binary_name="localcoder", but
-the documented/real invocation is "localm coder <task>".  Coder-command lines
-therefore survived in shell history even in privacy mode.
-
-These tests construct a fake history file containing BOTH the "localm coder ..."
-form and the legacy "localcoder ..." form, run the scrub against it, and assert
-that BOTH are removed while unrelated lines are kept.
-"""
+"""Phase 3 (FAC-2) regression tests for localm.plugins.coder.privacy."""
 
 
 
@@ -53,11 +43,7 @@ class TestScrubMatchesBothInvocations:
         assert "git commit -m 'wip'" in remaining
 
     def test_keeps_plain_localm_chat_lines(self, tmp_path):
-        """A bare 'localm <subcommand>' that is NOT the coder must survive.
-
-        Only coder invocations are in scope for this scrub; scrubbing every
-        'localm' line would wipe unrelated chat/serve/gui history.
-        """
+        """A bare 'localm <subcommand>' that is NOT the coder must survive."""
         hist = tmp_path / ".bash_history"
         hist.write_text(
             "localm gui --no-model\n"

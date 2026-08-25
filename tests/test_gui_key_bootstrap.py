@@ -1,9 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""S2 (GUI half): a loopback `localm gui` must not be locked out when require_auth
-is on, WITHOUT putting the API key in JS-readable localStorage. On a loopback bind
-the shell route sets the key as an HttpOnly session cookie (protected mode) or
-seeds the per-process shell token as a JS global (open mode); a non-loopback LAN
-client gets neither (it enters the key in the page -> POST /api/session)."""
+"""S2 (GUI half): a loopback `localm gui` must not be locked out when require_auth is on, WITHOUT putting the API key in JS-readable localStorage."""
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -189,21 +185,7 @@ class TestShellRoute:
 
 
 class TestKeyedShellNeverMintsForAnAnonymousCaller:
-    """On a KEYED install, GET / must not mint a session for a caller that
-    presented no credential. Presenting no key to a keyed instance is the same as
-    presenting an invalid one.
-
-    The auto-seed this class used to guard is GONE. It was origin-gated first,
-    which closed the cross-ORIGIN tier, but it could never close the LOCAL-PROCESS
-    one: a top-level browser navigation to http://127.0.0.1:PORT/ and a local
-    script calling the same URL are byte-identical at the HTTP layer. Measured on
-    a real socket, the cookie it handed out resolved to scopes ['admin'] and
-    minted a fresh admin key.
-
-    Assertions are on the Set-Cookie ITSELF, never on a later request's status
-    code: a downstream 401 can arrive for reasons unrelated to this route, so it
-    cannot distinguish "no session was minted" from "one was minted and something
-    else refused it"."""
+    """On a KEYED install, GET / must not mint a session for a caller that presented no credential. Presenting no key to a keyed instance is the same as presenting an invalid one."""
 
     KEY = "REALKEY123"
 
@@ -213,9 +195,7 @@ class TestKeyedShellNeverMintsForAnAnonymousCaller:
             "/", headers=headers or {})
 
     def test_same_origin_first_visit_mints_nothing(self, monkeypatch):
-        """THE RULING. The ordinary manually-typed-URL case: a real browser
-        navigation, no credential. It gets the shell and NO session - the page
-        then shows its key gate, which is the intended outcome."""
+        """THE RULING."""
         for host in ("127.0.0.1", "127.0.0.1:8642", "localhost", "[::1]:8642"):
             r = self._get(monkeypatch, {"Host": host})
             assert r.status_code == 200, host
@@ -238,10 +218,7 @@ class TestKeyedShellNeverMintsForAnAnonymousCaller:
         assert self.KEY not in cookies and self.KEY not in r.text
 
     def test_local_process_shaped_request_mints_nothing(self, monkeypatch):
-        """The tier the origin gate could not reach, and the reason the auto-seed
-        was removed rather than gated harder: no Origin and a loopback-literal
-        Host is exactly what a local script sends, and it is indistinguishable
-        from the legitimate browser navigation above. Neither gets a session now."""
+        """The tier the origin gate could not reach, and the reason the auto-seed was removed rather than gated harder: no Origin and a loopback-literal Host is exactly what a local script sends, and it is indistinguishable from the legitimate browser navigation above."""
         r = self._get(monkeypatch, {"Host": "127.0.0.1:8642"})
         assert r.status_code == 200
         assert "localm_session=" not in _set_cookies(r)
@@ -253,18 +230,12 @@ class TestKeyedShellNeverMintsForAnAnonymousCaller:
 
 
 class TestKeyedShellStillSupportsEveryLEGITIMATEPath:
-    """The three things the removed auto-seed legitimately supported. Each is
-    driven through the path that ACTUALLY mints the session now, rather than
-    through the removed branch - so if any of these regress, the removal broke a
-    real property rather than only the superseded one."""
+    """The three things the removed auto-seed legitimately supported."""
 
     KEY = "REALKEY123"
 
     def _grant_session(self, app):
-        """Establish a session the way the LAUNCHER does: redeem a single-use
-        ?localm_token= grant. This is a real, still-supported path through this
-        same route, so it is the honest way to obtain the "existing session"
-        precondition now that the auto-seed cannot supply it."""
+        """Establish a session the way the LAUNCHER does: redeem a single-use ?localm_token= grant."""
         from localm.plugins.gui.web import mint_launch_grant
         grant = mint_launch_grant(app)
         c = TestClient(app)
@@ -285,8 +256,7 @@ class TestKeyedShellStillSupportsEveryLEGITIMATEPath:
         assert _sessions.lookup(sid) is not None
 
     def test_an_existing_session_is_not_bounced_and_is_not_re_minted(self, monkeypatch):
-        """A browser that already holds a valid session must keep working: the
-        shell is served, and nothing re-issues or clears the cookie it holds."""
+        """A browser that already holds a valid session must keep working: the shell is served, and nothing re-issues or clears the cookie it holds."""
         monkeypatch.setenv("LOCALM_API_KEY", self.KEY)
         app = _app("127.0.0.1")
         sid = self._grant_session(app)
@@ -298,9 +268,7 @@ class TestKeyedShellStillSupportsEveryLEGITIMATEPath:
         assert _sessions.lookup(sid) is not None            # and not invalidated
 
     def test_an_existing_session_survives_an_owner_key_roll(self, monkeypatch):
-        """THE PROPERTY THE REMOVED BRANCH WAS ORIGINALLY WRITTEN FOR, and the one
-        most at risk from deleting it. The session is deliberately decoupled from
-        the key VALUE, so rolling the owner key must not sign the browser out."""
+        """THE PROPERTY THE REMOVED BRANCH WAS ORIGINALLY WRITTEN FOR, and the one most at risk from deleting it."""
         monkeypatch.setenv("LOCALM_API_KEY", self.KEY)
         app = _app("127.0.0.1")
         sid = self._grant_session(app)
@@ -317,15 +285,7 @@ class TestKeyedShellStillSupportsEveryLEGITIMATEPath:
 
 
 class TestLaunchGrantHandoff:
-    """One-time ?localm_token= handoff: the launcher opens the browser at a fresh
-    URL that forces a real navigation (a stale tab / warm SW cannot short-circuit
-    it); the server redeems the single-use grant, establishes a session, and 303s
-    to the clean path. Each test carries its negative case.
-
-    The boundary the grant does not cross (a plain GET / on a network bind, no
-    grant, still seeds no session) is covered by
-    TestShellRoute.test_lan_bind_never_seeds, which asserts the same 200/
-    no-cookie outcome plus the page-text and shell-token checks."""
+    """One-time ?localm_token= handoff: the launcher opens the browser at a fresh URL that forces a real navigation (a stale tab / warm SW cannot short-circuit it); the server redeems the single-use grant, establishes a session, and 303s to the clean path."""
 
     def _grant(self, app):
         from localm.plugins.gui.web import mint_launch_grant
@@ -383,13 +343,7 @@ class TestLaunchGrantHandoff:
 
 
 class TestPullGrant:
-    """SEC-PULL-CONFIRM: `localm gui --pull SPEC` mints a single-use, spec-bound
-    secret (mint_pull_grant) so its OWN deep link can auto-start the download with
-    zero clicks (see init.js), while a forged `?pull=` link elsewhere - which
-    cannot know this secret - falls back to an explicit human confirmation. This
-    class covers the grant primitive itself; the HTTP redeem endpoint is covered
-    by TestPullTokenRedeemEndpoint in test_gui.py, alongside the other pull
-    routes."""
+    """SEC-PULL-CONFIRM: `localm gui --pull SPEC` mints a single-use, spec-bound secret (mint_pull_grant) so its OWN deep link can auto-start the download with zero clicks (see init.js), while a forged `?pull=` link elsewhere - which cannot know this secret - falls back to an explicit human confirmation."""
 
     def test_valid_grant_redeems_once(self):
         from localm.plugins.gui.web import consume_pull_grant, mint_pull_grant

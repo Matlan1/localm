@@ -1,9 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Tests for tolerant tool-call parsing (mangled finetune dialects).
-
-The "logged" cases are verbatim model outputs from a real session where
-zero tool calls parsed - the finetune wraps valid JSON in broken markers.
-"""
+"""Tests for tolerant tool-call parsing (mangled finetune dialects)."""
 
 import pytest
 
@@ -118,9 +114,7 @@ class TestMangledVariants:
 
 
 class TestNameGatedLenientFormats:
-    """Bare JSON and ```json / bare fences are accepted only when the caller
-    passes the real tool names and the parsed name is one of them - the exact
-    formats weak local models emit, without mistaking JSON prose for a call."""
+    """Bare JSON and ```json / bare fences are accepted only when the caller passes the real tool names and the parsed name is one of them - the exact formats weak local models emit, without mistaking JSON prose for a call."""
 
     TOOLS = {"read_file", "write_file", "run_shell", "tree"}
 
@@ -180,14 +174,7 @@ class TestNameGatedLenientFormats:
 
 
 class TestLenientFlag:
-    """ToolCall.lenient marks a call recovered ONLY because its JSON shape
-    happened to match a real tool name, with no marker of its own signalling
-    the model intended to call a tool at all (a bare top-level JSON object,
-    or a ```json/bare ``` fence). Every OTHER recognised shape carries such a
-    marker, however mangled, and must stay unflagged - execution.py keys a
-    confirmation requirement on this, so a false positive here would demand
-    confirmation on ordinary, already-trusted tool calls, and a false
-    negative would silently reopen the gap this exists to close."""
+    """ToolCall.lenient marks a call recovered ONLY because its JSON shape happened to match a real tool name, with no marker of its own signalling the model intended to call a tool at all (a bare top-level JSON object, or a ```json/bare ``` fence)."""
 
     TOOLS = {"read_file", "write_file", "edit_files", "run_shell", "tree"}
 
@@ -340,8 +327,7 @@ class TestStreamHiding:
 
 
 class TestRecoveredMalformations:
-    """Local models often emit JSON that is not quite valid - recover it instead of
-    silently failing to parse (which showed an empty bubble + wrote nothing)."""
+    """Local models often emit JSON that is not quite valid - recover it instead of silently failing to parse (which showed an empty bubble + wrote nothing)."""
 
     def test_python_triple_quoted_content(self):
         # Verbatim iter-11 GUI failure: write_file with triple-quoted content.
@@ -394,10 +380,7 @@ class TestRecoveredMalformations:
 
 
 class TestNonStringName:
-    """A tool call whose "name" is not a string is malformed, same as broken
-    JSON. Without the guard an unhashable name (dict/list) raised TypeError at
-    the parser's own `parsed[0] in tool_names` check and at execution's
-    `call.name in self.disabled_tools` (2026-07-02 coder tool sweep)."""
+    """A tool call whose 'name' is not a string is malformed, same as broken JSON."""
 
     @pytest.mark.parametrize("name_literal", ["123", "null"])
     def test_scalar_name_rejected(self, name_literal):

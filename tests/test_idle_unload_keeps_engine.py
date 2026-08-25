@@ -1,18 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Idle-unload must keep the Engine object for lazy reload (Antigravity-audit HIGH-5).
-
-_idle_unload_once used to DELETE the engine from _engines after unloading it,
-which breaks its own "the next inference reloads the model lazily" contract:
-
-  - a direct-path served model (``localm serve <path>``) whose display name is
-    NOT in the registry cannot be rebuilt by the default factory, so it 404s
-    forever after one idle timeout;
-  - a registered model gets rebuilt by the default factory, silently dropping
-    the user's original --ctx / --gpu-layers / --device / --mmproj settings.
-
-Keeping the (now-unloaded) object in _engines lets the next request reuse it
-with its original constructor settings, and never lose a direct-path model.
-"""
+"""Idle-unload must keep the Engine object for lazy reload (Antigravity-audit HIGH-5)."""
 
 import asyncio
 import time
@@ -83,9 +70,7 @@ def test_idle_unload_keeps_engine_object(monkeypatch):
 
 
 def test_lazy_reload_reuses_kept_object_not_the_factory(monkeypatch):
-    """After an idle unload, a new request must reload the SAME kept object (its
-    original settings), never fall through to a factory that cannot rebuild a
-    direct-path / non-registered model."""
+    """After an idle unload, a new request must reload the SAME kept object (its original settings), never fall through to a factory that cannot rebuild a direct-path / non-registered model."""
     _reset()
     eng = _install_loaded("served-model", marker="had-user-flags")
 

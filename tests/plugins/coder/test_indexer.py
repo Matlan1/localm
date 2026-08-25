@@ -1,14 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""ProjectMap.build: directory pruning, bounded collection, and a wall-clock
-deadline so a coder session pointed at a huge root (Z:\\) cannot appear to hang
-(CODER-1). The old build did sorted(root.rglob("*")) - it materialised and
-sorted the WHOLE tree (descending into node_modules / .git / system dirs) before
-the file cap was ever checked.
-
-Also mark_dirty() / _rescan_if_dirty(): the stat-diff + listdir reconciliation
-that keeps the map from going stale after a run_shell write (which - unlike
-write_file/edit_file - has no `path` arg to refresh_file() ahead of time; see
-execution.py's _refresh_map_for_tool and context.py's _build_messages)."""
+"""ProjectMap.build: directory pruning, bounded collection, and a wall-clock deadline so a coder session pointed at a huge root (Z:\\) cannot appear to hang (CODER-1)."""
 
 import json
 import time
@@ -246,21 +237,7 @@ def test_rescan_does_not_discover_a_brand_new_directory(tmp_path):
 
 
 def test_rescan_skips_new_file_discovery_on_a_capped_build(tmp_path):
-    """Live finding on the real repo: build() truncated at 300 of 1000+
-    matching files, so a directory with one tracked file could hold dozens
-    more that were NEVER candidates - a listdir sweep cannot tell those apart
-    from a file run_shell genuinely just created, and treating them the same
-    silently grew the map past max_files a little more on every dirty read
-    (measured: 79 "new" files, 45ms, on one rescan of this repo alone).
-    files_capped gates exactly that pass off; the stat-diff pass for already-
-    tracked files is unaffected, since a tracked file's own stat is
-    meaningful either way.
-
-    Spies on refresh_file directly, not just the outcome, so the GATE is what
-    is under test: without files_capped this is exactly the call the spy
-    would record for z.py. (The touched-a.py edit is what makes this a REAL
-    rescan rather than a no-op - mark_dirty() alone never triggers one; only
-    the next read, here pm.file_count(), does.)"""
+    """Live finding on the real repo: build() truncated at 300 of 1000+ matching files, so a directory with one tracked file could hold dozens more that were NEVER candidates - a listdir sweep cannot tell those apart from a file run_shell genuinely just created, and treating them the same silently grew the..."""
     sub = tmp_path / "pkg"
     sub.mkdir()
     (sub / "a.py").write_text("def old():\n    pass\n", encoding="utf-8")
@@ -291,9 +268,7 @@ def test_rescan_skips_new_file_discovery_on_a_capped_build(tmp_path):
 
 
 def test_many_mark_dirty_calls_before_one_read_cost_one_rescan(tmp_path):
-    """The whole point of the flag: any number of run_shell calls before the
-    map is next read must reconcile in ONE pass, not one per call - and a
-    later read with nothing newly dirty must not re-scan at all."""
+    """The whole point of the flag: any number of run_shell calls before the map is next read must reconcile in ONE pass, not one per call - and a later read with nothing newly dirty must not re-scan at all."""
     a = tmp_path / "a.py"
     a.write_text("a = 1\n", encoding="utf-8")
     (tmp_path / "b.py").write_text("b = 1\n", encoding="utf-8")
@@ -399,11 +374,7 @@ def test_load_reconcile_discovers_a_new_file_when_not_capped(tmp_path):
 
 
 def test_load_reconcile_does_not_discover_a_new_file_when_capped(tmp_path):
-    """Mirrors test_rescan_skips_new_file_discovery_on_a_capped_build: caching
-    must not weaken the existing files_capped guard - a project bigger than
-    max_files still cannot tell a genuinely-new file from one that was simply
-    never a candidate, so pass 2 stays off, same as an intra-session dirty
-    rescan."""
+    """Mirrors test_rescan_skips_new_file_discovery_on_a_capped_build: caching must not weaken the existing files_capped guard - a project bigger than max_files still cannot tell a genuinely-new file from one that was simply never a candidate, so pass 2 stays off, same as an intra-session dirty rescan."""
     sub = tmp_path / "pkg"
     sub.mkdir()
     (sub / "a.py").write_text("a = 1\n", encoding="utf-8")
@@ -432,8 +403,7 @@ def test_load_reconcile_returns_none_for_a_corrupt_cache(tmp_path):
 
 
 def test_load_reconcile_returns_none_for_wrong_shape(tmp_path):
-    """A future-version or hand-edited cache with the wrong fields must fall
-    back to a full build(), never raise and never be trusted (rule 5)."""
+    """A future-version or hand-edited cache with the wrong fields must fall back to a full build(), never raise and never be trusted (rule 5)."""
     cache = tmp_path / ".cache" / "cache.json"
     cache.parent.mkdir(parents=True)
     cache.write_text('{"version": 2, "files": []}', encoding="utf-8")
@@ -451,13 +421,7 @@ def test_load_reconcile_returns_none_for_a_different_root(tmp_path):
 
 
 def test_load_reconcile_returns_none_when_older_than_max_age(tmp_path):
-    """A cache older than max_age_s is rejected. Backdates cached_at directly
-    (rather than asserting elapsed real time > 0.0) because time.time() on
-    this platform resolves via GetSystemTimeAsFileTime() at ~15.6ms
-    granularity (MEASURED: back-to-back time.time() calls return the exact
-    same value) - a save-then-load round trip this fast can complete inside
-    one tick, making elapsed == 0.0 and racing a max_age_s=0.0 bound instead
-    of testing the staleness check."""
+    """A cache older than max_age_s is rejected."""
     (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
     cache = tmp_path / ".cache" / "cache.json"
     ProjectMap.build(tmp_path).save_cache(cache)

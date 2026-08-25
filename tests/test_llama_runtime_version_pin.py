@@ -1,19 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Recording, pinning and rolling back the provisioned llama.cpp build.
-
-localm resolved the runtime version dynamically at every install and recorded
-nothing, so an upstream build that broke a machine arrived on the next install
-with no way to name it, pin away from it, or go back. Three separate breakages
-in one week came through that mechanism (the llama_context_params ABI shift, the
-Windows AMD asset rename at b10356, and a suspected Vulkan fault on b10361).
-
-The tests here are grouped by the property they defend:
-
-  * the tag is RECORDED, for every backend, at no extra network cost;
-  * a PIN is honoured by later installs, including the updater's re-provision;
-  * ROLLBACK returns to a build that was actually installed before;
-  * a request that CANNOT be honoured is refused with a reason, never dropped.
-"""
+"""Recording, pinning and rolling back the provisioned llama.cpp build."""
 
 from pathlib import Path
 
@@ -26,12 +12,7 @@ from localm import setup_llama as sl
 
 @pytest.fixture
 def home(tmp_path, monkeypatch):
-    """A throwaway LOCALM_HOME with config.py's frozen module paths redirected.
-
-    config.py binds CONFIG_FILE at import, so setting the env var alone leaves
-    load_config()/update_config() writing the real user's file - the same reason
-    conftest's cli_runner fixture patches both.
-    """
+    """A throwaway LOCALM_HOME with config.py's frozen module paths redirected."""
     h = tmp_path / ".localm"
     h.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("LOCALM_HOME", str(h))
@@ -53,9 +34,7 @@ def _release_listing(tag, name="llama-x-bin-win-vulkan-x64.zip"):
 # --------------------------------------------------------------------------- #
 
 def test_provision_returns_the_tag_it_installed(monkeypatch, tmp_path, home):
-    """_provision_backend reports WHICH build it fetched, so the caller can
-    record it. Before this it returned None and the marker could only ever carry
-    a version for amd-rocm."""
+    """_provision_backend reports WHICH build it fetched, so the caller can record it."""
     monkeypatch.setattr(sl, "_platform_key", lambda: "win32")
     monkeypatch.setattr(sl, "_release_assets",
                         lambda tag, repo=sl._UPSTREAM_REPO: _release_listing(tag))
@@ -65,16 +44,7 @@ def test_provision_returns_the_tag_it_installed(monkeypatch, tmp_path, home):
 
 
 def test_recording_the_tag_costs_no_release_lookup_at_all(monkeypatch, tmp_path, home):
-    """The design rests on the tag ALREADY being known, so recording it must not
-    add a network call. It used to cost exactly one (the _latest_tag resolution
-    every provision made anyway); with the pin it costs ZERO, because a constant
-    needs no lookup. Asserting the stronger number is the point - "one" would
-    still pass if the pin were quietly re-resolved.
-
-    Counted from OUTSIDE rather than asserted by raising inside the call: an
-    exception raised in a stub is an input to the code under test, and anything
-    that catches broadly between here and pytest would swallow it.
-    """
+    """The design rests on the tag ALREADY being known, so recording it must not add a network call."""
     calls = []
     listings = []
     monkeypatch.setattr(sl, "_platform_key", lambda: "win32")
@@ -94,9 +64,7 @@ def test_recording_the_tag_costs_no_release_lookup_at_all(monkeypatch, tmp_path,
 
 
 def test_amd_rocm_provision_makes_no_upstream_lookup_at_all(monkeypatch, tmp_path, home):
-    """amd-rocm resolves against lemonade-sdk's own numbering, so it must not
-    reach for an upstream tag - a call made purely to decorate a marker is still
-    a call."""
+    """amd-rocm resolves against lemonade-sdk's own numbering, so it must not reach for an upstream tag - a call made purely to decorate a marker is still a call."""
     calls = []
     monkeypatch.setattr(sl.sys, "platform", "win32")
     monkeypatch.setattr(sl, "_latest_tag",
@@ -118,9 +86,7 @@ def test_marker_round_trips_backend_and_build(tmp_path):
 
 
 def test_installed_build_reads_the_real_runtime_dir(monkeypatch, tmp_path):
-    """installed_build() is the public lookup doctor and the bug reporter use.
-    It must resolve the target dir the same way provisioning does, or it reads a
-    marker nothing wrote."""
+    """installed_build() is the public lookup doctor and the bug reporter use."""
     monkeypatch.setattr(sl, "_repo_runtime_lib", lambda: tmp_path)
     sl._record_provisioned_backend(tmp_path, "cuda", build="b10355")
     assert sl.installed_build() == "b10355"
@@ -128,8 +94,7 @@ def test_installed_build_reads_the_real_runtime_dir(monkeypatch, tmp_path):
 
 
 def test_installed_build_is_none_when_the_marker_predates_tags(monkeypatch, tmp_path):
-    """A one-token marker is NORMAL, not corruption. None means 'not recorded'
-    and every reader must be able to say so instead of guessing a version."""
+    """A one-token marker is NORMAL, not corruption."""
     monkeypatch.setattr(sl, "_repo_runtime_lib", lambda: tmp_path)
     sl._record_provisioned_backend(tmp_path, "vulkan")
     assert sl.installed_backend() == "vulkan"
@@ -137,9 +102,7 @@ def test_installed_build_is_none_when_the_marker_predates_tags(monkeypatch, tmp_
 
 
 def test_fallback_records_the_fallback_tag_not_the_chosen_one(monkeypatch, tmp_path, home):
-    """A cuda pick that falls back to vulkan has VULKAN on disk. Recording the
-    tag the chosen backend would have used would name a build that was never
-    installed - the marker has to describe the disk."""
+    """A cuda pick that falls back to vulkan has VULKAN on disk."""
     seen = []
 
     def fake_provision(backend, target, sha256, with_cudart, cuda_line=sl._CUDA_LINE, tag=None):
@@ -166,8 +129,7 @@ def test_fallback_records_the_fallback_tag_not_the_chosen_one(monkeypatch, tmp_p
 # --------------------------------------------------------------------------- #
 
 def test_tag_for_prefers_the_pin_over_a_release_lookup(monkeypatch, home):
-    """A pin must not merely win the comparison - it must make the lookup
-    unnecessary, so a pinned install still works when the release API does not."""
+    """A pin must not merely win the comparison - it must make the lookup unnecessary, so a pinned install still works when the release API does not."""
     monkeypatch.setattr(sl, "_latest_tag",
                         lambda: pytest.fail("a pinned install must not query releases"))
     sl.set_pinned_tag("b10355")
@@ -175,12 +137,7 @@ def test_tag_for_prefers_the_pin_over_a_release_lookup(monkeypatch, home):
 
 
 def test_tag_for_installs_the_confirmed_pin_with_no_user_choice(monkeypatch, home):
-    """THE DEFAULT, and it makes NO NETWORK CALL. This function used to end in a
-    live release lookup, which is how a build nobody here had ever run could
-    arrive on any installed localm the moment a third party published it. The
-    _latest_tag stand-in FAILS the test if it is reached: 'the default resolves
-    to the pin' and 'the default asks nobody' are two different properties and
-    only the second one closes that hole."""
+    """THE DEFAULT, and it makes NO NETWORK CALL."""
     monkeypatch.setattr(
         sl, "_latest_tag",
         lambda: pytest.fail("the default path must not query upstream at all"))
@@ -199,9 +156,7 @@ def test_tag_for_tracks_latest_only_when_the_user_opted_in(monkeypatch, home):
 
 
 def test_a_pin_survives_a_bare_reprovision(monkeypatch, tmp_path, home):
-    """The updater re-invokes `setup-llama --backend <installed>` with no tag
-    (see _apply_update.post_swap_command), so the pin is only real if a bare
-    provision reads it. This drives the real resolver, not _tag_for directly."""
+    """The updater re-invokes `setup-llama --backend <installed>` with no tag (see _apply_update.post_swap_command), so the pin is only real if a bare provision reads it."""
     monkeypatch.setattr(sl, "_platform_key", lambda: "win32")
     monkeypatch.setattr(sl, "_latest_tag",
                         lambda: pytest.fail("the pin must short-circuit the lookup"))
@@ -231,9 +186,7 @@ def test_tag_latest_clears_the_pin(home):
 
 
 def test_pin_that_cannot_apply_is_reported_not_dropped(monkeypatch, capsys, home):
-    """amd-rocm ships from lemonade-sdk's tag series, so an upstream pin cannot
-    apply to it. Saying nothing would leave the user believing a build is pinned
-    when it is not (AGENTS.md rule 5)."""
+    """amd-rocm ships from lemonade-sdk's tag series, so an upstream pin cannot apply to it."""
     sl.set_pinned_tag("b10355")
     sl._pin_note_for_backend("amd-rocm")
     out = capsys.readouterr().out
@@ -259,9 +212,7 @@ def test_history_records_each_provision(home):
 
 
 def test_history_collapses_a_repeat_instead_of_appending(home):
-    """Re-running setup-llama on the same build must not push the previous
-    DISTINCT tag out of a bounded list - that would silently destroy the only
-    thing --rollback can return to."""
+    """Re-running setup-llama on the same build must not push the previous DISTINCT tag out of a bounded list - that would silently destroy the only thing --rollback can return to."""
     sl._record_runtime_history("vulkan", "b10300")
     for _ in range(sl._RUNTIME_HISTORY_MAX + 5):
         sl._record_runtime_history("vulkan", "b10361")
@@ -270,10 +221,7 @@ def test_history_collapses_a_repeat_instead_of_appending(home):
 
 
 def test_a_failed_history_write_is_reported_not_only_logged(monkeypatch, capsys, home):
-    """A silent journal failure resurfaces much later as --rollback's "nothing to
-    roll back to", which reads identically to "you have only ever had this
-    build". Two different situations, one message - so say it when it happens.
-    Still not fatal: the install itself succeeded."""
+    """A silent journal failure resurfaces much later as --rollback's 'nothing to roll back to', which reads identically to 'you have only ever had this build'."""
     def boom(mutator):
         raise OSError("config is read-only")
 
@@ -287,8 +235,7 @@ def test_a_failed_history_write_is_reported_not_only_logged(monkeypatch, capsys,
 
 
 def test_history_ignores_a_tagless_provision(home):
-    """A --from/--url install has no tag, so journalling it would let --rollback
-    offer a target it cannot install."""
+    """A --from/--url install has no tag, so journalling it would let --rollback offer a target it cannot install."""
     sl._record_runtime_history("custom", None)
     assert sl.runtime_history() == []
 
@@ -302,8 +249,7 @@ def test_previous_tag_skips_the_installed_build(monkeypatch, tmp_path, home):
 
 
 def test_previous_tag_is_per_backend(monkeypatch, tmp_path, home):
-    """A cuda b10361 and a vulkan b10361 are different builds; rolling a vulkan
-    install back onto a cuda entry would install the wrong thing."""
+    """A cuda b10361 and a vulkan b10361 are different builds; rolling a vulkan install back onto a cuda entry would install the wrong thing."""
     monkeypatch.setattr(sl, "_repo_runtime_lib", lambda: tmp_path)
     sl._record_runtime_history("cuda", "b10200")
     sl._record_runtime_history("vulkan", "b10361")
@@ -314,9 +260,7 @@ def test_previous_tag_is_per_backend(monkeypatch, tmp_path, home):
 
 def test_previous_tag_compares_against_the_marker_not_the_newest_entry(
         monkeypatch, tmp_path, home):
-    """The marker is ground truth for what is installed; history is only the
-    list of candidates. If a history write failed, the newest entry is NOT what
-    is on disk, and rolling back relative to it would go to the wrong build."""
+    """The marker is ground truth for what is installed; history is only the list of candidates."""
     monkeypatch.setattr(sl, "_repo_runtime_lib", lambda: tmp_path)
     sl._record_runtime_history("vulkan", "b10300")
     sl._record_runtime_history("vulkan", "b10361")
@@ -347,13 +291,7 @@ def test_rollback_with_nothing_to_go_back_to_is_refused(monkeypatch, tmp_path, h
 
 
 def test_rollback_is_refused_for_amd_rocm(monkeypatch, tmp_path, home):
-    """amd-rocm's build is fixed by a constant in the shipped code, so a pin
-    cannot move it. Without this the command printed "Rolling back ... to
-    llama.cpp b1288" and then the pin note saying that build does not apply to
-    amd-rocm - two contradictory sentences for an action that changed nothing.
-
-    Note the history entries here use LEMONADE's numbering, which is what makes
-    the promise doubly wrong: b1288 is not even an upstream tag."""
+    """amd-rocm's build is fixed by a constant in the shipped code, so a pin cannot move it."""
     monkeypatch.setattr(sl, "_repo_runtime_lib", lambda: tmp_path)
     sl._record_runtime_history("amd-rocm", "b1288")
     sl._record_runtime_history("amd-rocm", "b1307")
@@ -388,8 +326,7 @@ def test_rollback_without_a_known_backend_is_refused(monkeypatch, tmp_path, home
     "",
 ])
 def test_a_tag_that_is_unsafe_in_a_url_is_refused(bad, home):
-    """The tag is interpolated into a GitHub API path and a download URL, so it
-    is validated as a path SEGMENT, not merely as 'looks like a tag'."""
+    """The tag is interpolated into a GitHub API path and a download URL, so it is validated as a path SEGMENT, not merely as 'looks like a tag'."""
     with pytest.raises(click.ClickException):
         sl._apply_version_request(bad, False, "vulkan", None, None)
     assert sl.pinned_tag() is None, "a refused tag must not be pinned"
@@ -397,8 +334,7 @@ def test_a_tag_that_is_unsafe_in_a_url_is_refused(bad, home):
 
 @pytest.mark.parametrize("good", ["b10355", "b9870", "v1.2.3", "master-1a2b3c"])
 def test_a_plausible_tag_shape_is_accepted(good, home):
-    """Broader than upstream's own bNNNNN, deliberately: the check is about what
-    is safe in a URL, so a future tag scheme must not be refused cosmetically."""
+    """Broader than upstream's own bNNNNN, deliberately: the check is about what is safe in a URL, so a future tag scheme must not be refused cosmetically."""
     assert sl._validated_tag(good) == good
 
 
@@ -412,9 +348,7 @@ def test_tag_and_rollback_together_are_refused(home):
 @pytest.mark.parametrize("from_dir,url", [("/some/dir", None),
                                           (None, "https://example/x.zip")])
 def test_tag_with_a_supplied_build_is_refused(from_dir, url, home):
-    """--from/--url install an artifact this command did not resolve from a
-    release, so there is no tag to pin. Refusing beats accepting a flag that
-    could not take effect."""
+    """--from/--url install an artifact this command did not resolve from a release, so there is no tag to pin."""
     with pytest.raises(click.ClickException) as e:
         sl._apply_version_request("b10355", False, "vulkan", from_dir, url)
     assert ("--from" in str(e.value)) if from_dir else ("--url" in str(e.value))
@@ -426,18 +360,7 @@ def test_tag_with_a_supplied_build_is_refused(from_dir, url, home):
 ])
 def test_an_unsafe_pin_STORED_IN_CONFIG_never_reaches_a_url(planted, monkeypatch,
                                                             capsys, tmp_path, home):
-    """--tag is NOT the only way a pin arrives, so validating there is not enough.
-
-    `llama_runtime_pin` is HIDDEN with no coercion branch, so PATCH /v1/config
-    stores whatever it is handed (owner-gated but verbatim - see
-    test_config_plugin_state_gate.py), and config.json is a plain file a user can
-    edit by hand, which no route can police. The value is interpolated into a
-    GitHub API path and a download URL, so a tag carrying '/', '..', '?' or '#'
-    would retarget the request. Checked on READ, at the one place it is used.
-
-    Asserts on WHERE THE REQUEST WENT, not merely on the return value: the
-    property is "this string never reached a URL", and a resolver call is the
-    thing that would carry it there."""
+    """--tag is NOT the only way a pin arrives, so validating there is not enough."""
     cfg.update_config(lambda c: c.__setitem__("llama_runtime_pin", planted))
     resolved = []
     monkeypatch.setattr(sl, "_platform_key", lambda: "win32")
@@ -457,8 +380,7 @@ def test_an_unsafe_pin_STORED_IN_CONFIG_never_reaches_a_url(planted, monkeypatch
 
 
 def test_an_unsafe_history_entry_cannot_become_a_pin(monkeypatch, tmp_path, home):
-    """--rollback takes a tag from history and PINS it, so an unchecked entry
-    would become a pin by a route that never passed through --tag's validator."""
+    """--rollback takes a tag from history and PINS it, so an unchecked entry would become a pin by a route that never passed through --tag's validator."""
     monkeypatch.setattr(sl, "_repo_runtime_lib", lambda: tmp_path)
     cfg.update_config(lambda c: c.__setitem__("llama_runtime_history", [
         {"backend": "vulkan", "tag": "../../evil"},
@@ -477,8 +399,7 @@ def test_no_version_request_leaves_the_pin_alone(home):
 
 
 def test_a_hand_edited_history_cannot_produce_a_nonsense_target(monkeypatch, tmp_path, home):
-    """runtime_history filters malformed entries, so a config someone edited by
-    hand cannot make --rollback offer an empty or non-dict target."""
+    """runtime_history filters malformed entries, so a config someone edited by hand cannot make --rollback offer an empty or non-dict target."""
     monkeypatch.setattr(sl, "_repo_runtime_lib", lambda: tmp_path)
     cfg.update_config(lambda c: c.__setitem__("llama_runtime_history", [
         "not-a-dict", {"backend": "vulkan"}, {"backend": "vulkan", "tag": "  "},
@@ -492,8 +413,7 @@ def test_a_hand_edited_history_cannot_produce_a_nonsense_target(monkeypatch, tmp
 # --------------------------------------------------------------------------- #
 
 def test_bug_report_carries_the_backend_and_build(monkeypatch, tmp_path, home):
-    """Field reports previously had to INFER the build from versioned library
-    filenames. This makes it a lookup."""
+    """Field reports previously had to INFER the build from versioned library filenames."""
     from localm import bugreport
     monkeypatch.setattr(sl, "_repo_runtime_lib", lambda: tmp_path)
     sl._record_provisioned_backend(tmp_path, "vulkan", build="b10361")
@@ -507,8 +427,7 @@ def test_bug_report_carries_the_backend_and_build(monkeypatch, tmp_path, home):
 
 
 def test_bug_report_says_not_recorded_rather_than_omitting(monkeypatch, tmp_path, home):
-    """An install predating build recording is a real, distinguishable state; a
-    missing field reads as a collector that failed."""
+    """An install predating build recording is a real, distinguishable state; a missing field reads as a collector that failed."""
     from localm import bugreport
     monkeypatch.setattr(sl, "_repo_runtime_lib", lambda: tmp_path)
     sl._record_provisioned_backend(tmp_path, "vulkan")
@@ -520,8 +439,7 @@ def test_bug_report_says_not_recorded_rather_than_omitting(monkeypatch, tmp_path
 
 
 def test_rendered_report_shows_the_build(monkeypatch, tmp_path, home):
-    """The label must be wired into the rendered body, not merely collected -
-    a diagnostics key with no label entry never reaches the report."""
+    """The label must be wired into the rendered body, not merely collected - a diagnostics key with no label entry never reaches the report."""
     from localm import bugreport
     monkeypatch.setattr(sl, "_repo_runtime_lib", lambda: tmp_path)
     sl._record_provisioned_backend(tmp_path, "vulkan", build="b10361")
@@ -547,8 +465,7 @@ def test_doctor_prints_the_build_and_the_pin(monkeypatch, tmp_path, capsys, home
 
 
 def test_doctor_flags_a_pin_the_disk_disagrees_with(monkeypatch, tmp_path, capsys, home):
-    """A pin set but never provisioned through is a real state. Reporting only
-    'pinned to X' would assert something the filesystem contradicts."""
+    """A pin set but never provisioned through is a real state."""
     # localm.cli exposes a click Command named `doctor`, which shadows the
     # submodule of the same name - import the function directly.
     from localm.cli.doctor import _check_runtime_build
@@ -575,8 +492,7 @@ def test_doctor_says_unrecorded_rather_than_guessing(monkeypatch, tmp_path, caps
 
 
 def test_doctor_stays_quiet_when_nothing_is_provisioned(capsys, home):
-    """_check_llama_lib has already said the dir is missing; repeating it adds
-    noise to a report people read under stress."""
+    """_check_llama_lib has already said the dir is missing; repeating it adds noise to a report people read under stress."""
     # localm.cli exposes a click Command named `doctor`, which shadows the
     # submodule of the same name - import the function directly.
     from localm.cli.doctor import _check_runtime_build
@@ -589,8 +505,7 @@ def test_doctor_stays_quiet_when_nothing_is_provisioned(capsys, home):
 # --------------------------------------------------------------------------- #
 
 def _wire_cli(monkeypatch, target, tags_seen, latest=None):
-    """Stub provisioning down to the release resolution so a CLI run exercises
-    main()'s real flag handling, guard and recording without any network."""
+    """Stub provisioning down to the release resolution so a CLI run exercises main()'s real flag handling, guard and recording without any network."""
     monkeypatch.setattr(sl, "_repo_runtime_lib", lambda: target)
     monkeypatch.setattr(sl, "_platform_key", lambda: "win32")
     monkeypatch.setattr(sl, "_lib_name", lambda: "llama.dll")
@@ -639,10 +554,7 @@ def test_cli_tag_installs_and_records_that_build(monkeypatch, tmp_path, cli_runn
 
 
 def test_cli_tag_reprovisions_an_already_provisioned_box(monkeypatch, tmp_path, cli_runner):
-    """The already-provisioned guard compares BACKENDS. An explicit --tag changes
-    the BUILD with the backend unchanged, so without forcing, setup would print
-    'Already provisioned', change nothing, and leave the pin disagreeing with the
-    disk - the config and the filesystem out of step with no sign of it."""
+    """The already-provisioned guard compares BACKENDS."""
     target = tmp_path / "rt"
     target.mkdir()
     (target / "llama.dll").write_text("old")
@@ -677,8 +589,7 @@ def test_cli_rollback_returns_to_the_previous_build(monkeypatch, tmp_path, cli_r
 
 
 def test_cli_bare_run_records_the_resolved_tag(monkeypatch, tmp_path, cli_runner):
-    """The default path - no flags - must record too, or nothing is recorded on
-    the installs that matter most."""
+    """The default path - no flags - must record too, or nothing is recorded on the installs that matter most."""
     target = tmp_path / "rt"
     target.mkdir()
     tags = []
@@ -693,18 +604,14 @@ def test_cli_bare_run_records_the_resolved_tag(monkeypatch, tmp_path, cli_runner
 
 
 def _updater_argv():
-    """The exact flags `localm update` re-provisions with, read from the updater
-    rather than retyped here - a copy would keep passing if the real command
-    changed, which is precisely the drift these two tests exist to catch."""
+    """The exact flags `localm update` re-provisions with, read from the updater rather than retyped here - a copy would keep passing if the real command changed, which is precisely the drift these two tests exist to catch."""
     from localm._apply_update import post_swap_command
     argv = post_swap_command("runtime", backend="vulkan")
     return argv[argv.index("setup-llama") + 1:]
 
 
 def test_update_reprovision_honours_the_pin(monkeypatch, tmp_path, cli_runner):
-    """The updater re-invokes setup-llama with --backend --force --yes (see
-    _apply_update.post_swap_command), so the pin is only real if that
-    invocation reads it. Driven with the updater's OWN argv."""
+    """The updater re-invokes setup-llama with --backend --force --yes (see _apply_update.post_swap_command), so the pin is only real if that invocation reads it."""
     target = tmp_path / "rt"
     target.mkdir()
     tags = []
@@ -725,17 +632,7 @@ def test_update_reprovision_honours_the_pin(monkeypatch, tmp_path, cli_runner):
 
 def test_update_reprovision_actually_reprovisions_when_backend_matches(
         monkeypatch, tmp_path, cli_runner):
-    """NEW-UPDATE-RUNTIME-CLASS-IS-A-NO-OP, closed: `updater.classify()` only ever
-    escalates to "runtime" class when the release manifest DECLARES the native
-    binaries need re-provisioning, so once the updater's re-invocation runs at
-    all, it must actually replace the build - not silently keep whatever is
-    already on disk just because the backend string happens to match. Before
-    _apply_update.post_swap_command carried --force, setup-llama's own
-    "already provisioned, same backend" guard short-circuited this exact
-    invocation and returned immediately: the update reported success having
-    changed nothing on disk. Driven with the updater's OWN argv, like its
-    pin-honouring sibling above, so a future change to what flags the updater
-    passes is caught here too."""
+    """NEW-UPDATE-RUNTIME-CLASS-IS-A-NO-OP, closed: `updater.classify()` only ever escalates to 'runtime' class when the release manifest DECLARES the native binaries need re-provisioning, so once the updater's re-invocation runs at all, it must actually replace the build - not silently keep whatever is al..."""
     target = tmp_path / "rt"
     target.mkdir()
     (target / "llama.dll").write_text("old")
@@ -752,11 +649,7 @@ def test_update_reprovision_actually_reprovisions_when_backend_matches(
 
 
 def test_cli_tag_latest_opts_in_to_upstreams_newest(monkeypatch, tmp_path, cli_runner):
-    """--tag latest is now an opt-IN to bleeding edge rather than a way to clear
-    a pin, so it must both STICK as a stored choice and actually resolve
-    upstream. The stored value is checked through tracks_latest() and NOT through
-    pinned_tag(), which must stay None: the sentinel reaching pinned_tag() would
-    be interpolated into a release URL by every existing caller."""
+    """--tag latest is now an opt-IN to bleeding edge rather than a way to clear a pin, so it must both STICK as a stored choice and actually resolve upstream."""
     target = tmp_path / "rt"
     target.mkdir()
     (target / "llama.dll").write_text("old")
@@ -775,10 +668,7 @@ def test_cli_tag_latest_opts_in_to_upstreams_newest(monkeypatch, tmp_path, cli_r
 
 
 def test_cli_tag_default_returns_to_the_confirmed_pin(monkeypatch, tmp_path, cli_runner):
-    """The way back, which did not need to exist before: clearing a pin used to
-    mean tracking upstream, and now means the confirmed build, so the two need
-    separate words. Without this a user who ran --tag latest once had no way to
-    return to the tested build short of naming its tag by hand."""
+    """The way back, which did not need to exist before: clearing a pin used to mean tracking upstream, and now means the confirmed build, so the two need separate words."""
     target = tmp_path / "rt"
     target.mkdir()
     (target / "llama.dll").write_text("old")
@@ -799,8 +689,7 @@ def test_cli_tag_default_returns_to_the_confirmed_pin(monkeypatch, tmp_path, cli
 
 def test_check_runtime_update_reports_not_installed_when_nothing_provisioned(
         monkeypatch, tmp_path):
-    """No marker at all means no runtime has ever been provisioned - that is
-    initial setup's job, not an update, and must not be reported as one."""
+    """No marker at all means no runtime has ever been provisioned - that is initial setup's job, not an update, and must not be reported as one."""
     monkeypatch.setattr(sl, "_repo_runtime_lib", lambda: tmp_path)
     assert sl.check_runtime_update() == {
         "installed": False, "backend": None, "current": None,
@@ -809,10 +698,7 @@ def test_check_runtime_update_reports_not_installed_when_nothing_provisioned(
 
 def test_check_runtime_update_compares_against_the_confirmed_pin_by_default(
         monkeypatch, tmp_path, home):
-    """The card must offer what setup-llama would actually install. If this
-    compared against upstream's newest while the command installs the pin, the
-    GUI would advertise an update that re-provisioning does not deliver - and
-    would keep advertising it forever."""
+    """The card must offer what setup-llama would actually install."""
     monkeypatch.setattr(sl, "_repo_runtime_lib", lambda: tmp_path)
     monkeypatch.setattr(
         sl, "_latest_tag",
@@ -852,11 +738,7 @@ def test_check_runtime_update_reports_up_to_date_when_matching(monkeypatch, tmp_
 
 def test_check_runtime_update_prefers_the_pin_over_a_release_lookup(
         monkeypatch, tmp_path, home):
-    """A build pinned away from a broken release must never be told THAT
-    release is "available" again - the pin, not upstream's newest, is the
-    correct comparison target. No release lookup should even happen: an
-    install that pinned specifically because the network/API was unreliable
-    must still get an honest check."""
+    """A build pinned away from a broken release must never be told THAT release is 'available' again - the pin, not upstream's newest, is the correct comparison target."""
     monkeypatch.setattr(sl, "_repo_runtime_lib", lambda: tmp_path)
     monkeypatch.setattr(sl, "_latest_tag",
                         lambda: pytest.fail("a pinned install must not query releases"))
@@ -871,9 +753,7 @@ def test_check_runtime_update_prefers_the_pin_over_a_release_lookup(
 
 
 def test_check_runtime_update_amd_rocm_compares_against_the_fixed_tag(monkeypatch, tmp_path):
-    """amd-rocm's build is fixed by the localm release (_ROCM_TAG), never
-    resolved from an upstream release listing - the check must not query one
-    for this backend either."""
+    """amd-rocm's build is fixed by the localm release (_ROCM_TAG), never resolved from an upstream release listing - the check must not query one for this backend either."""
     monkeypatch.setattr(sl, "_repo_runtime_lib", lambda: tmp_path)
     monkeypatch.setattr(sl, "_latest_tag",
                         lambda: pytest.fail("amd-rocm must not query releases"))
@@ -886,14 +766,7 @@ def test_check_runtime_update_amd_rocm_compares_against_the_fixed_tag(monkeypatc
 
 
 def test_check_runtime_update_never_raises_on_an_unreadable_config(monkeypatch, tmp_path):
-    """pinned_tag() already degrades an unreadable config to 'no pin' rather
-    than raising; this check must inherit that, not newly break on it.
-
-    tracks_latest() has to degrade the SAME way and in the SAME direction, which
-    is why it is asserted here rather than only in its own test: an unreadable
-    config that fell through to "tracking" would answer a broken read by
-    reaching for upstream's untested newest, which is the one answer that must
-    never be a fallback."""
+    """pinned_tag() already degrades an unreadable config to 'no pin' rather than raising; this check must inherit that, not newly break on it."""
     monkeypatch.setattr(sl, "_repo_runtime_lib", lambda: tmp_path)
     monkeypatch.setattr(
         sl, "_latest_tag",

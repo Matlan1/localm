@@ -14,8 +14,7 @@ from localm.rag.bm25 import BM25, ENGLISH_STOP_WORDS, tokenize
 
 
 def _tiny_pdf(text: str) -> bytes:
-    """A minimal valid single-page PDF that renders *text*, built by hand so the
-    test needs no PDF-writer dependency (only pypdf, to read it back)."""
+    """A minimal valid single-page PDF that renders *text*, built by hand so the test needs no PDF-writer dependency (only pypdf, to read it back)."""
     content = b"BT /F1 18 Tf 20 100 Td (" + text.encode("latin-1") + b") Tj ET"
     objs = [
         b"<< /Type /Catalog /Pages 2 0 R >>",
@@ -121,10 +120,7 @@ class TestExtract:
             extract_text(f)
 
     def test_pdf_extracted_with_pypdf(self, tmp_path):
-        """Present-pypdf counterpart of the install-hint test: a real PDF
-        round-trips through extract_text(). Runs in CI (which installs the [rag]
-        extra); skips locally when pypdf is absent. This is the regression guard
-        that future pypdf bumps cannot silently break PDF extraction."""
+        """Present-pypdf counterpart of the install-hint test: a real PDF round-trips through extract_text()."""
         pytest.importorskip("pypdf")
         f = tmp_path / "doc.pdf"
         f.write_bytes(_tiny_pdf("hello localm rag pdf"))
@@ -285,10 +281,7 @@ class TestCollection:
         assert "gpu.md" in c2.query("ROCm runtime", k=1)[0]["source"]
 
     def test_concurrent_add_paths_no_data_loss(self, tmp_path):
-        """CHK-RAG-LOCK: two concurrent add_paths() to ONE collection must BOTH
-        persist. Pre-fix, each Collection instance _load()s the same state, adds a
-        different doc, and _save()s with no per-collection coordination -> the
-        last writer overwrote the other and one doc was silently lost."""
+        """CHK-RAG-LOCK: two concurrent add_paths() to ONE collection must BOTH persist."""
         import threading
         base = tmp_path / "rag"
         Collection("kb", base=base).create()
@@ -317,12 +310,7 @@ class TestCollection:
         assert len(docs) == 2, f"data loss: expected both docs, got {docs}"
 
     def test_atomic_write_retries_transient_permission_error(self, tmp_path, monkeypatch):
-        """CHK-RAG-RETRY: on Windows, Path.replace() (MoveFileEx) can transiently
-        raise PermissionError(13, 'Access is denied') if another process (AV
-        real-time scan, Search Indexer) briefly has the destination or temp file
-        open. _atomic_write must retry a bounded number of times, mirroring the
-        established fix in localm.plugins.coder.episodes.EpisodeStore.add,
-        instead of letting a spurious OS-level rename failure propagate."""
+        """CHK-RAG-RETRY: on Windows, Path.replace() (MoveFileEx) can transiently raise PermissionError(13, 'Access is denied') if another process (AV real-time scan, Search Indexer) briefly has the destination or temp file open. _atomic_write must retry a bounded number of times, mirroring the established fix..."""
         import pathlib
 
         base = tmp_path / "rag"
@@ -449,8 +437,7 @@ class TestCollection:
     # --- silently swallowed into BM25-only (AGENTS rule 5). ------------------- #
 
     def test_absent_vectors_is_not_a_degrade(self, tmp_path, docs_dir):
-        """The benign case: no embeddings indexed -> no vectors.json, no degrade
-        reason. 'Absent' must not be conflated with 'corrupt' (rule 5)."""
+        """The benign case: no embeddings indexed -> no vectors.json, no degrade reason. 'Absent' must not be conflated with 'corrupt' (rule 5)."""
         base = tmp_path / "rag"
         c = Collection("kb", base=base).create()
         c.add_paths([docs_dir])                       # no embed_fn -> no vectors.json
@@ -459,8 +446,7 @@ class TestCollection:
         assert c.stats()["vector_degrade_reason"] is None
 
     def test_corrupt_vectors_json_warns_and_degrades(self, tmp_path, docs_dir, caplog):
-        """An unreadable vectors.json surfaces a warning + a stats reason and still
-        answers lexically - it does not silently vanish or crash."""
+        """An unreadable vectors.json surfaces a warning + a stats reason and still answers lexically - it does not silently vanish or crash."""
         base = tmp_path / "rag"
         c = Collection("kb", base=base).create()
         c.add_paths([docs_dir], embed_fn=lambda ts: [[1.0, 0.0, 0.0] for _ in ts])
@@ -474,11 +460,7 @@ class TestCollection:
         assert c2.query("ROCm DLLs", k=1)             # BM25 fallback, no crash
 
     def test_extra_vectors_length_mismatch_warns_orphaned(self, tmp_path, docs_dir, caplog):
-        """MORE vectors than chunks means leftover/orphaned entries from a prior,
-        larger index (e.g. docs removed/re-chunked without pruning vectors.json to
-        match) - a distinct diagnosis from a genuinely partial embed, surfaced with
-        its own wording rather than a blanket 'stale or partial' (both are fixed the
-        same way, by a full reindex, but the cause differs)."""
+        """MORE vectors than chunks means leftover/orphaned entries from a prior, larger index (e.g. docs removed/re-chunked without pruning vectors.json to match) - a distinct diagnosis from a genuinely partial embed, surfaced with its own wording rather than a blanket 'stale or partial' (both are fixed the s..."""
         base = tmp_path / "rag"
         c = Collection("kb", base=base).create()
         c.add_paths([docs_dir], embed_fn=lambda ts: [[1.0, 0.0, 0.0] for _ in ts])
@@ -494,9 +476,7 @@ class TestCollection:
         assert c2.query("ROCm DLLs", k=1)
 
     def test_fewer_vectors_length_mismatch_warns_partial(self, tmp_path, docs_dir, caplog):
-        """FEWER vectors than chunks is a genuinely partial embed (e.g. an
-        interrupted indexing run) - distinct wording from the 'extra vectors' case
-        above, though both degrade to BM25 and both are fixed by a full reindex."""
+        """FEWER vectors than chunks is a genuinely partial embed (e.g. an interrupted indexing run) - distinct wording from the 'extra vectors' case above, though both degrade to BM25 and both are fixed by a full reindex."""
         base = tmp_path / "rag"
         c = Collection("kb", base=base).create()
         c.add_paths([docs_dir], embed_fn=lambda ts: [[1.0, 0.0, 0.0] for _ in ts])
@@ -512,10 +492,7 @@ class TestCollection:
         assert c2.query("ROCm DLLs", k=1)
 
     def test_query_embedding_model_change_warns(self, tmp_path, docs_dir, caplog):
-        """Querying with an embedding model of a different dimensionality than the
-        stored vectors surfaces a 'model changed' warning + a stats reason (and
-        still answers lexically). Also covers BUG-5 (dim mismatch must degrade to
-        lexical, never crash or silently truncate)."""
+        """Querying with an embedding model of a different dimensionality than the stored vectors surfaces a 'model changed' warning + a stats reason (and still answers lexically)."""
         base = tmp_path / "rag"
         c = Collection("kb", base=base).create()
         c.add_paths([docs_dir],
@@ -531,9 +508,7 @@ class TestCollection:
 
     def test_malformed_vectors_json_degrades_not_crashes(self, tmp_path, docs_dir,
                                                          caplog):
-        """Valid JSON whose entries are scalars (a hand-edit or truncation) must be
-        caught at LOAD and degraded - not accepted and then crashed by cosine at
-        query time with an opaque 'int has no len()'."""
+        """Valid JSON whose entries are scalars (a hand-edit or truncation) must be caught at LOAD and degraded - not accepted and then crashed by cosine at query time with an opaque 'int has no len()'."""
         base = tmp_path / "rag"
         c = Collection("kb", base=base).create()
         c.add_paths([docs_dir], embed_fn=lambda ts: [[1.0, 0.0, 0.0] for _ in ts])
@@ -551,8 +526,7 @@ class TestCollection:
         assert hits and "gpu.md" in hits[0]["source"]
 
     def test_query_embedding_failure_warns(self, tmp_path, docs_dir, caplog):
-        """A raising embed_fn (embedder down) is a real failure, surfaced once, not
-        swallowed into silent lexical-only."""
+        """A raising embed_fn (embedder down) is a real failure, surfaced once, not swallowed into silent lexical-only."""
         base = tmp_path / "rag"
         c = Collection("kb", base=base).create()
         c.add_paths([docs_dir], embed_fn=lambda ts: [[1.0, 0.0, 0.0] for _ in ts])
@@ -659,12 +633,7 @@ class TestCollection:
         assert "gpu.md" in hits[0]["source"]
 
     def test_stopword_only_hit_does_not_outrank_semantic_match(self, tmp_path):
-        """Regression: a query overlapping a doc ONLY on a stopword must not let
-        that doc win the lexical half and, via the 50/50 blend, outrank the true
-        semantic match when vectors are present (the reported RAG-embedding
-        nuance). Four one-sentence docs; the query shares only the stopword "and"
-        with vehicles.txt, while animals.txt is the semantic match (cat~feline,
-        sleep~nap) with NO shared content word."""
+        """Regression: a query overlapping a doc ONLY on a stopword must not let that doc win the lexical half and, via the 50/50 blend, outrank the true semantic match when vectors are present (the reported RAG-embedding nuance)."""
         base = tmp_path / "rag"
         d = tmp_path / "docs"
         d.mkdir()
@@ -724,9 +693,7 @@ class TestCollection:
         assert c.query("sourdough flour", k=1)    # lexical retrieval works
 
     def test_has_vectors_matches_query_blend_threshold(self, tmp_path):
-        """stats() has_vectors reflects what query() DOES (blend at >=80% coverage),
-        not 'every chunk embedded' - so a partially-embedded collection is not
-        mislabelled BM25-only when it is actually doing hybrid retrieval."""
+        """stats() has_vectors reflects what query() DOES (blend at >=80% coverage), not 'every chunk embedded' - so a partially-embedded collection is not mislabelled BM25-only when it is actually doing hybrid retrieval."""
         base = tmp_path / "rag"
         c = Collection("kb", base=base).create()
         c._chunks = [{"text": f"c{i}", "source": "d"} for i in range(10)]
@@ -781,9 +748,7 @@ def test_rag_query_neutralise_handles_missing_or_nonstring_text():
 
 
 def test_rag_embedding_status_endpoint(monkeypatch):
-    """GET /api/rag/embedding reports the configured model, its install state, the
-    internal options, and the last error - the data the Knowledge page's embedding
-    picker renders. Cheap: it never loads a model."""
+    """GET /api/rag/embedding reports the configured model, its install state, the internal options, and the last error - the data the Knowledge page's embedding picker renders."""
     import asyncio
 
     from localm.inference import embedder as emb

@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Native tool-calling helper: convert TOOL_REGISTRY into the OpenAI
-/v1/chat/completions ``tools`` schema for backends with native_tools=True."""
+"""Native tool-calling helper: convert TOOL_REGISTRY into the OpenAI /v1/chat/completions ``tools`` schema for backends with native_tools=True."""
 
 from __future__ import annotations
 
@@ -8,12 +7,7 @@ import localm.plugins.coder.agent as _agent
 
 
 def _build_openai_tool_defs() -> list:
-    """
-    Convert TOOL_REGISTRY into the OpenAI /v1/chat/completions ``tools`` format.
-
-    Used when the backend has ``native_tools=True`` (e.g. the OpenAI API),
-    so the model receives a validated schema instead of relying on text parsing.
-    """
+    """Convert TOOL_REGISTRY into the OpenAI /v1/chat/completions ``tools`` format."""
     TOOL_REGISTRY = _agent.TOOL_REGISTRY  # live: honour a patched agent.TOOL_REGISTRY
     defs = []
     for tool in TOOL_REGISTRY.values():

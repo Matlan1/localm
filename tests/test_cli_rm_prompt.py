@@ -1,18 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The `localm rm` confirmation prompt must describe what the deletion actually
-does.
-
-The prompt used to carry its own weaker predicate - str(path).startswith(
-str(MODELS_DIR)) - while the real delete gate in remove_model() used
-path.is_relative_to(MODELS_DIR). startswith also matches a SIBLING directory, so
-an entry at <data dir>/models-old/x.gguf was announced as "PERMANENTLY deletes"
-when remove_model would in fact only unregister the name. Wrong text on a
-destructive confirmation trains users to distrust the prompt.
-
-These tests run the REAL CLI command against a REAL registry file and a REAL
-models dir, then check the file's actual fate on disk - so they assert the
-agreement itself, not that two copies of a predicate happen to match.
-"""
+"""The `localm rm` confirmation prompt must describe what the deletion actually does."""
 
 from __future__ import annotations
 
@@ -32,23 +19,7 @@ _KEEP_TEXT = "unregisters the name only"
 
 @pytest.fixture
 def home(tmp_path, monkeypatch):
-    """An isolated data dir whose models root BOTH call sites resolve through.
-
-    model_manager.MODELS_DIR is what the shared helper reads, so patching it
-    alone moves the prompt and the delete gate together - that is the fix.
-
-    config.MODELS_DIR is pinned to the SAME directory on purpose, even though no
-    code under test reads it any more. The prompt used to import it from there
-    while the delete gate read the model_manager one; patching only the latter
-    left the pre-fix prompt comparing against the real session home, so it
-    answered "not owned" for every path and these tests passed VACUOUSLY against
-    the very bug they exist to catch. Pinning both makes the predicate itself the
-    only remaining difference, so the negative control actually fires. Do not
-    drop this line.
-
-    REGISTRY_FILE is read at call time by load/save/update_registry, so one patch
-    redirects the whole real path.
-    """
+    """An isolated data dir whose models root BOTH call sites resolve through."""
     models = tmp_path / "models"
     models.mkdir()
     monkeypatch.setattr(model_manager, "MODELS_DIR", models)
@@ -63,7 +34,7 @@ def _register(home, name: str, path) -> None:
 
 
 def _run_rm(name: str):
-    """Run the real `localm rm <name>`, confirming the prompt. Returns its output."""
+    """Run the real `localm rm <name>`, confirming the prompt."""
     result = CliRunner().invoke(rm, [name], input="y\n")
     assert result.exit_code == 0, result.output
     return result.output
@@ -72,8 +43,7 @@ def _run_rm(name: str):
 # --------------------------- the shared predicate -------------------------- #
 
 def test_is_owned_model_path_rejects_a_sibling_directory(home):
-    """The exact startswith-vs-is_relative_to gap: <root>/models-old shares the
-    <root>/models prefix as a STRING but is not inside it as a PATH."""
+    """The exact startswith-vs-is_relative_to gap: <root>/models-old shares the <root>/models prefix as a STRING but is not inside it as a PATH."""
     assert is_owned_model_path(home / "models" / "a.gguf") is True
     assert is_owned_model_path(home / "models" / "sub" / "a.gguf") is True
     assert is_owned_model_path(home / "models-old" / "x.gguf") is False
@@ -139,9 +109,7 @@ def test_owned_file_is_announced_as_a_deletion_and_is_deleted(home):
 
 
 def test_owned_but_already_missing_file_is_not_called_outside_models(home):
-    """An owned path whose file is gone is a name-only drop, but saying it is
-    'outside <data dir>/models' would be a false statement about the user's
-    own data dir."""
+    """An owned path whose file is gone is a name-only drop, but saying it is 'outside <data dir>/models' would be a false statement about the user's own data dir."""
     target = home / "models" / "ghost.gguf"       # never created
     _register(home, "ghost", target)
 
@@ -154,9 +122,7 @@ def test_owned_but_already_missing_file_is_not_called_outside_models(home):
 
 
 def test_alias_still_wins_over_the_owned_branch(home):
-    """A second name pointing at the same owned file must still be reported as
-    unregister-only, and the file must survive - the pre-existing alias
-    behaviour is unchanged by the predicate fix."""
+    """A second name pointing at the same owned file must still be reported as unregister-only, and the file must survive - the pre-existing alias behaviour is unchanged by the predicate fix."""
     target = home / "models" / "shared.gguf"
     target.write_bytes(b"GGUF")
     (home / "registry.json").write_text(json.dumps({

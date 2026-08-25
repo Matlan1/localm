@@ -1,38 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""
-Parse tool calls from model response text.
-
-Supported formats (in priority order):
-
-1. XML wrapper with JSON body - primary:
-   <tool_call>
-   {"name": "read_file", "args": {"path": "src/main.py"}}
-   </tool_call>
-
-2. XML wrapper with name attr + JSON body:
-   <tool_call name="read_file">
-   {"path": "src/main.py"}
-   </tool_call>
-
-3. Gemma4 native format:
-   <|tool_call>call:read_file{"path": "utils.py"}<tool_call|>
-   Also handles <|"|> special quote tokens in args.
-
-4. Fenced code block:
-   ```tool_call        (also ```tool_code)
-   {"name": "read_file", "args": {"path": "src/main.py"}}
-   ```
-
-5. Name-gated lenient forms (only when the caller passes the set of real tool
-   names, and only when the parsed name is one of them - so a JSON example in
-   prose is never mistaken for a call):
-     - a ```json fence, or a bare ``` fence, wrapping the JSON above
-     - a bare top-level JSON object with no wrapper at all:
-       {"name": "read_file", "args": {"path": "src/main.py"}}
-
-Returns a list of (tool_name, args_dict, raw_match) tuples so the caller
-can reconstruct the text with results inserted in-place.
-"""
+"""Parse tool calls from model response text."""
 
 from __future__ import annotations
 
@@ -147,28 +114,7 @@ _RE_ARGS_KEY = re.compile(r"""["'](?:args|arguments)["']\s*:""")
 
 
 def looks_like_tool_attempt(text: str, tool_names: Optional[set] = None) -> bool:
-    """True when *text* looks like a botched tool call - a tool-call marker or
-    fence, or a JSON object carrying both a name and an args field - even
-    though :func:`parse_tool_calls` recovered nothing. Lets the caller
-    re-prompt for the correct format rather than show the broken call.
-
-    When *tool_names* is supplied, ALSO recognises an XML-ish open tag naming
-    one of those tools - ``<read_file``, ``<edit_file ...>`` - even with none
-    of the markers above: some finetunes (observed live on a "thinking"
-    heretic-abliterated model) hallucinate a per-tool XML convention (closer
-    to Anthropic's own ``<function_calls><invoke name="...">`` shape) instead
-    of this project's ``<tool_call>{"name": ...}`` wrapper, while still
-    getting the TOOL NAME itself exactly right (it is in the system prompt).
-    Before this, such a response matched none of the checks above, so it fell
-    through as if the model had never attempted anything at all - the exact
-    failure NEW-CODER-NO-TOOLCALL-SILENT is about, just one layer more subtle
-    than "no output at all": the model DID try, in a foreign dialect nothing
-    here was watching for. A plain prose answer does not coincidentally
-    contain ``<read_file`` as literal text, so this is a low-false-positive
-    signal of intent even in a shape :func:`parse_tool_calls` cannot recover -
-    and same as every other case this function reports, a false hit costs
-    only one repair re-prompt, which explicitly tells the model to ignore it
-    and give its plain-text final answer if it did not mean to call a tool."""
+    """True when *text* looks like a botched tool call - a tool-call marker or fence, or a JSON object carrying both a name and an args field - even though :func:`parse_tool_calls` recovered nothing."""
     if _RE_TOOL_MARKER.search(text) or _RE_TOOL_FENCE.search(text):
         return True
     if _RE_NAME_KEY.search(text) and _RE_ARGS_KEY.search(text):
@@ -183,14 +129,7 @@ def looks_like_tool_attempt(text: str, tool_names: Optional[set] = None) -> bool
 
 
 def _detriple_quoted(s: str) -> str:
-    """Convert Python triple-quoted string VALUES into valid JSON strings.
-
-    Local models frequently emit multi-line ``content`` as a Python triple-quoted
-    string (``"content": \"\"\"...\"\"\"``), which is NOT valid JSON, so the call
-    silently failed to parse (an empty assistant bubble, no file written). Replace
-    each ``\"\"\"...\"\"\"`` run with a properly escaped JSON string. Best-effort:
-    a fallback recovery, so a wrong guess just fails json.loads and we move on.
-    """
+    """Convert Python triple-quoted string VALUES into valid JSON strings."""
     return re.sub(r'"""(.*?)"""',
                   lambda m: json.dumps(m.group(1)), s, flags=re.DOTALL)
 
@@ -205,25 +144,12 @@ def _quote_single_keys(s: str) -> str:
 
 
 def _fix_unescaped_backslashes(s: str) -> str:
-    """Escapes backslashes in JSON strings that are not part of valid escape sequences.
-    This helps recover Windows paths (e.g. drive-letter style paths) that models fail to escape."""
+    """Escapes backslashes in JSON strings that are not part of valid escape sequences."""
     return re.sub(r'(?<!\\)\\(?!["\\/bfnrt]|u[0-9a-fA-F]{4})', r'\\\\', s)
 
 
 def _lenient_json(body: str) -> Optional[dict]:
-    """
-    JSON parse tolerating the mangles local finetunes actually produce:
-
-    - literal newlines/tabs inside string values (strict=False) - models
-      write multi-line file content without escaping it
-    - a doubled outer brace:  call:write_file{{"path": "x"}}  (seen from
-      Gemma finetunes in the wild; it silently broke tool calling)
-    - single-quoted keys:  {'path': "x"}
-    - Python triple-quoted string VALUES:  {"content": \"\"\"...\"\"\"} (a very
-      common local-model mistake that used to silently break write_file)
-    - trailing commas before } or ]
-    - unescaped backslashes in Windows file paths
-    """
+    """JSON parse tolerating the mangles local finetunes actually produce:."""
     candidates = [body]
     if body.startswith("{{") and body.endswith("}}"):
         candidates.append(body[1:-1])
@@ -249,13 +175,7 @@ def _lenient_json(body: str) -> Optional[dict]:
 
 
 def _parse_gemma_args(body: str) -> Optional[dict]:
-    """
-    Parse Gemma4's native tool-call argument format.
-
-    Gemma4 may produce either standard JSON  {"key": "val"}
-    or its special quote-token form  {key:<|"|>val<|"|>}.
-    Both forms are handled here.
-    """
+    """Parse Gemma4's native tool-call argument format."""
     # Normalise <|"|> quote tokens → regular double-quotes
     body = body.replace('<|"|>', '"')
     body = body.strip()
@@ -269,22 +189,7 @@ def _parse_gemma_args(body: str) -> Optional[dict]:
 
 
 def _try_parse_body(body: str, name_attr: Optional[str]) -> Optional[tuple[str, dict]]:
-    """
-    Try to extract (tool_name, args) from the body text.
-
-    Handles both:
-    - Full JSON: {"name": "...", "args": {...}}
-    - Args-only JSON (when name_attr is provided): {"path": "..."}
-
-    SECOND CONSUMER, outside this module: agent/context.py's
-    ``_stream_hiding_tool_calls`` (the live streaming hider shared by the CLI
-    and the GUI) imports and calls this directly, so it decides whether a
-    name-gated fence is a real call using the EXACT SAME rule this module's
-    own ``parse_tool_calls`` uses - deliberately, so the two can never
-    disagree (see coder-display-vs-execution-two-detectors in project
-    memory). A change to this function's contract (return shape, what counts
-    as a match) reaches that consumer too; check it before changing this.
-    """
+    """Try to extract (tool_name, args) from the body text."""
     body = body.strip()
     obj = _lenient_json(body)
     if obj is None:
@@ -313,30 +218,7 @@ def _try_parse_body(body: str, name_attr: Optional[str]) -> Optional[tuple[str, 
 
 
 def _pair_delimited(text: str, opener_re, closer_re, min_body: int = 1):
-    """Yield ``(opener_match, closer_match)`` for each opener paired with the next
-    closer after it, left to right and non-overlapping - exactly the spans a
-    single ``OPEN (?P<body>.+?) CLOSE`` regex would have matched, at linear cost
-    instead of quadratic.
-
-    The cost fix is the second ``return``: a closer search that fails from one
-    opener can never succeed from a LATER one (a later opener ends further right,
-    so it would search a suffix of the range that just came up empty), so the
-    scan stops instead of re-walking the tail once per opener. That is the whole
-    defect - with a lazy ``.+?`` body, an unterminated opener costs a scan to
-    end-of-text, and hostile text can plant thousands of them.
-
-    ``pos = closer.end()`` reproduces finditer's non-overlapping advance.
-
-    ``min_body`` is the minimum body length the replaced regex allowed, and it is
-    a parameter because the callers do NOT agree on it. The two patterns behind
-    parse_tool_calls used ``.+?`` (at least one character, so min_body=1), but the
-    transcript splitter stands in for a regex that used ``.*?`` (min_body=0). With
-    the wrong value a zero-length ``<tool_call></tool_call>`` is skipped, the
-    opener pairs with a LATER closer, and everything between - prose and any real
-    tool call - is swallowed into one unparseable body. Equivalence to the regexes
-    these replaced is pinned by differential fuzzes in tests/test_redos_bounds.py,
-    one per replaced pattern, not by inspection.
-    """
+    """Yield ``(opener_match, closer_match)`` for each opener paired with the next closer after it, left to right and non-overlapping - exactly the spans a single ``OPEN (?P<body>.+?) CLOSE`` regex would have matched, at linear cost instead of quadratic."""
     pos = 0
     while True:
         opener = opener_re.search(text, pos)
@@ -357,25 +239,7 @@ def _iter_xml_tool_calls(text: str):
 
 
 def strip_xml_tool_calls(text: str) -> tuple[list[tuple[Optional[str], str]], str]:
-    """Split *text* into its ``<tool_call>`` calls and the text around them.
-
-    Returns ``([(name_attr, body), ...], text_without_the_blocks)``. The coder's
-    session transcript and the resume recap both need those halves, and each used
-    to carry its OWN copy of the regex - agent/session.py had
-    ``<tool_call>\\s*(.*?)\\s*</tool_call>`` and sessions.py an inline
-    ``<tool_call>.*?</tool_call>``. Both had a superlinear shape, and the
-    transcript one re-ran over EVERY stored assistant message at teardown, so one
-    poisoned response re-hung the Markdown export on every later close, forever.
-    One implementation, one place to fix.
-
-    ``min_body=0`` because both replaced regexes used ``.*?``: an empty
-    ``<tool_call></tool_call>`` is a real match for them and must stay one here.
-
-    ``name_attr`` is returned, not discarded: the replaced regexes did not match
-    the ``name=`` attribute form at all, so those blocks used to survive into the
-    transcript as raw XML that at least NAMED the tool. Now they are stripped, so
-    the name has to come back out this way or the transcript renders a bare "?".
-    """
+    """Split *text* into its ``<tool_call>`` calls and the text around them."""
     calls: list[tuple[Optional[str], str]] = []
     kept: list[str] = []
     pos = 0
@@ -397,22 +261,7 @@ def _iter_fenced_blocks(text: str):
 
 
 def _object_end_from(text: str, i: int, last_close: int) -> int:
-    r"""Index just past the brace-balanced ``{...}`` starting at *i*, or -1.
-
-    Scanned LOCALLY from *i*, with string state local to this object. A global
-    brace map was tried first and is wrong: the text around a tool call is model
-    PROSE, and an unmatched ``{`` in prose (``use { to open``) leaves the map's
-    depth non-zero, so a later stray quote enters string mode and silently voids
-    every brace after it. A differential fuzz caught that - it lost calls the old
-    pattern found, on exactly that shape.
-
-    *last_close* is the index of the final ``}`` in the whole text, computed once
-    by the caller. Without it, a body that never balances costs a scan to
-    end-of-text FROM EVERY MARKER, which is the quadratic this whole change
-    exists to remove (measured 19.3s on 5,000 repetitions of ``'<tool_call>{{'``,
-    worse than the 2.08s regex it replaced). With it, a text containing no
-    closing brace after *i* costs nothing at all.
-    """
+    """Index just past the brace-balanced ``{...}`` starting at *i*, or -1."""
     if i >= len(text) or text[i] != "{" or last_close < i:
         return -1
     depth = 0
@@ -443,9 +292,7 @@ def _object_end_from(text: str, i: int, last_close: int) -> int:
 
 
 def _iter_top_level_json_objects(text: str, last_close: int = None):
-    """Yield ``(start, end, substring)`` for each brace-balanced top-level
-    ``{...}`` region. Used to recover a bare JSON tool call written with no
-    wrapper at all."""
+    """Yield ``(start, end, substring)`` for each brace-balanced top-level ``{...}`` region."""
     if last_close is None:
         last_close = text.rfind("}")
     i, n = 0, len(text)
@@ -498,32 +345,7 @@ _MAX_EXPENSIVE_MARKER_RESCANS = 32
 
 
 def _iter_marker_variant_calls(text: str, last_close: int = None):
-    r"""Yield ``(start, end, name, body)`` for the mangled ``<|tool_call>`` dialects.
-
-    Finetunes emit ``<|tool_call>``, ``<tool_call|>``, ``<|/tool_call>`` and an
-    optional ``call:NAME`` prefix. Structured as marker -> balanced body ->
-    marker rather than one regex, for two reasons that pull the same way:
-
-    COST. The regex form ``MARKER \s* (call:\w+)? \{.*?\} \s* MARKER`` scans to
-    end-of-text from EVERY marker when no closing brace follows - quadratic, and
-    measured at 2.08s on 5,000 repetitions of ``'<tool_call>{{'``. Here each
-    marker is visited once and the body scan is bounded by the object itself.
-
-    CORRECTNESS. The regex could not allow a marker inside the body without
-    reintroducing that scan, so the shipped fix forbade it - which silently
-    dropped a real case: the coder editing its own parser docs or test fixtures
-    emits a write_file whose CONTENT contains ``<tool_call>``. A brace-balanced,
-    string-aware scan has no such trade: it knows the marker is inside a string.
-
-    Also the safety net for a well-formed canonical ``<tool_call>...</tool_call>``
-    that pass 1's strict opener/closer PAIRING (``_iter_xml_tool_calls``) mis-reads
-    because an EARLIER, unclosed ``<tool_call>`` stole its closing tag: pass 1
-    then treats everything between the two as one unparseable body and drops
-    both. ``_RE_TOOL_MARKER`` matches plain ``<tool_call>``/``</tool_call>`` too
-    (not just the ``<|...|>`` finetune dialects), so this pass gets a second,
-    independent try at the later call by brace-matching FROM ITS OWN MARKER
-    rather than from the broken opener pass 1 paired it with.
-    """
+    """Yield ``(start, end, name, body)`` for the mangled ``<|tool_call>`` dialects."""
     if last_close is None:
         last_close = text.rfind("}")
     pos = 0
@@ -576,25 +398,7 @@ def _iter_marker_variant_calls(text: str, last_close: int = None):
 
 
 def parse_tool_calls(text: str, tool_names: Optional[set] = None) -> list[ToolCall]:
-    """Extract all tool calls from a model response string.
-
-    Recognised unconditionally (the wrapper itself signals intent):
-      - ``<tool_call>...</tool_call>`` (with or without a ``name=`` attribute)
-      - mangled ``<|tool_call>`` marker dialects from finetunes
-      - ```` ```tool_call ```` / ```` ```tool_code ```` fenced blocks
-
-    Recognised only when *tool_names* is supplied, and only when the parsed
-    name is one of those tools (so a JSON example in prose is not mistaken for
-    a call):
-      - ```` ```json ```` (or a bare ```` ``` ````) fenced blocks
-      - a bare top-level JSON object: ``{"name": "...", "args": {...}}``
-
-    Passing *tool_names* is how the agent opts into the lenient, name-gated
-    formats; callers that omit it get only the explicit wrappers (preserving
-    the original behaviour). Every call recovered via one of those two
-    name-gated formats has ``ToolCall.lenient`` set True - see that field's
-    own comment for why.
-    """
+    """Extract all tool calls from a model response string."""
     calls: list[ToolCall] = []
     seen_spans: list[tuple[int, int]] = []
 
@@ -663,12 +467,7 @@ def parse_tool_calls(text: str, tool_names: Optional[set] = None) -> list[ToolCa
 
 
 def split_response(text: str, calls: list[ToolCall]) -> list[str | ToolCall]:
-    """
-    Split the response into alternating text and ToolCall segments.
-
-    Returns a list where each element is either a str (plain text) or a
-    ToolCall.  Useful for rendering the response in the terminal.
-    """
+    """Split the response into alternating text and ToolCall segments."""
     parts: list[str | ToolCall] = []
     pos = 0
     for call in calls:
@@ -682,41 +481,7 @@ def split_response(text: str, calls: list[ToolCall]) -> list[str | ToolCall]:
 
 
 def strip_tool_calls(text: str, tool_names: Optional[set] = None) -> tuple[list[ToolCall], str, int]:
-    """Split *text* into every tool call parse_tool_calls recognises (all 5
-    shapes) and the prose around them, plus a count of malformed leftovers.
-
-    Returns ``(calls, clean_text, malformed_count)``. ``calls`` is exactly what
-    :func:`parse_tool_calls` returns, so passing *tool_names* opts into the same
-    name-gated fenced/bare-JSON forms it does; ``clean_text`` is *text* with every
-    one of those spans removed via :func:`split_response`, the same two-value shape
-    :func:`strip_xml_tool_calls` has always returned for the XML-only case, so both
-    existing call sites (the session transcript and the resume recap) only needed a
-    name to change, not their control flow.
-
-    ``malformed_count`` exists because parse_tool_calls only returns a call when the
-    body actually parsed as JSON. A response that hits the tool-call repair path in
-    agent/loop.py's ``_handle_no_tool_calls`` (a ``<tool_call>`` wrapper whose JSON
-    body is malformed, a real and not rare local-model failure mode) is persisted to
-    history via ``self._add_assistant(response)`` before the repair succeeds, so
-    persisted history can legitimately contain a tagged block that never parses.
-    Dropping that block silently would trade the raw-text leak this function exists
-    to fix for a different one, so after every parseable call is removed, a second
-    pass with strip_xml_tool_calls (a pure delimiter match, no JSON validation)
-    clears out whatever ``<tool_call>...</tool_call>`` blocks are still in the
-    remainder and reports how many there were, so a caller can render a generic
-    placeholder instead of raw tag soup - the same thing the session transcript
-    already did for this case before this function existed.
-
-    That second pass only ever understood the XML wrapper, same as
-    strip_xml_tool_calls always has: a malformed marker-variant (``<|tool_call>...``)
-    or a malformed explicit fence that reaches history through the same repair-path
-    gap is NOT cleaned up here and still surfaces raw, exactly as it does today. That
-    is a pre-existing gap in strip_xml_tool_calls, not a new one this function opens;
-    closing it for every shape is separate work from what this function targets (the
-    ```json fence and the bare top-level JSON object - the two forms that used to
-    leak raw and unsummarised even though the agent's own live loop already
-    understood and executed them).
-    """
+    """Split *text* into every tool call parse_tool_calls recognises (all 5 shapes) and the prose around them, plus a count of malformed leftovers."""
     calls = parse_tool_calls(text, tool_names=tool_names)
     clean = "".join(s for s in split_response(text, calls) if isinstance(s, str))
     leftover, clean = strip_xml_tool_calls(clean)

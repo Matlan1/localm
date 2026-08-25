@@ -1,37 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""
-Legacy plugin manifest discovery, plus small constants shared with the plugin
-engine (``localm/plugins/engine.py``).
-
-The engine's ``register = "plug"`` contract (``PluginManager``) is the ONE
-install/enable/disable/list mechanism for a plugin's server surface - it used
-to share this module with a second, independent ``entry = "<module>:<attr>"``
-CLI-manifest mechanism, but that half (install/remove, the ``/v1/plugins`` HTTP
-API, and the ``plugin list``/``plugin remove`` CLI verbs) was dead for every
-shipped plugin and has been removed (see PATHFINDER-2026-07-11).
-
-What remains here is still live: a third-party plugin's ``[tools] exports =
-[...]`` manifest section (this module's own ``discover_plugins``/
-``import_plugin_module``) is how ``localm/plugins/coder/plugin_tools.py``
-discovers and loads externally-exported coder-agent tools - a distinct
-capability from the engine's server-surface registration, unrelated to the
-CF-1/CF-2 install/enable/disable duplication that motivated the cut above.
-``plugins_dir()`` and ``_RESERVED_NAMES`` are also read directly by
-``engine.py``/``media_config.py``.
-
-    [plugin]
-    name = "myplugin"
-    version = "0.1.0"
-    description = "What it does"
-    entry = "myplugin_cli:main"       # "<module>:<attr>" - only needed for tool exports now
-
-    [tools]                           # tool exports for the coder agent
-    exports = ["tool_hello"]
-
-The entry module is imported from the plugin directory itself, so a plugin
-is fully self-contained: a folder with a manifest and one or more .py files.
-Everything works offline - installation is a local directory copy.
-"""
+"""Legacy plugin manifest discovery, plus small constants shared with the plugin engine (``localm/plugins/engine.py``)."""
 
 from __future__ import annotations
 
@@ -87,10 +55,7 @@ _RESERVED_NAMES = {
 
 def parse_manifest(plugin_dir: Path, *,
                    warnings: Optional[List[str]] = None) -> PluginManifest:
-    """Parse and validate ``plugin.toml`` in *plugin_dir*. When *warnings* is
-    given, non-fatal manifest problems (unknown/misspelled [plugin] keys) are
-    appended to it as human-readable strings - surfaced, never escalated: a
-    plugin with an unknown key must still load (LM-DA-007)."""
+    """Parse and validate ``plugin.toml`` in *plugin_dir*."""
     manifest_path = plugin_dir / "plugin.toml"
     if not manifest_path.is_file():
         raise PluginError(f"No plugin.toml in {plugin_dir}")
@@ -145,14 +110,7 @@ def parse_manifest(plugin_dir: Path, *,
 # ------------------------------------------------------------------ #
 
 def discover_plugins(root: Optional[Path] = None) -> List[PluginManifest]:
-    """
-    Scan the plugins directory and return manifests for every valid legacy
-    (``entry =``) plugin - this is how ``plugin_tools.register_plugin_tools()``
-    finds third-party coder-agent tool exports.
-
-    Invalid plugins are skipped silently here - use :func:`discover_errors`
-    when you want the reasons.
-    """
+    """Scan the plugins directory and return manifests for every valid legacy (``entry =``) plugin - this is how ``plugin_tools.register_plugin_tools()`` finds third-party coder-agent tool exports."""
     manifests, _, _ = _scan(root)
     return manifests
 
@@ -164,18 +122,13 @@ def discover_errors(root: Optional[Path] = None) -> List[str]:
 
 
 def discover_warnings(root: Optional[Path] = None) -> List[str]:
-    """Non-fatal manifest warnings (unknown/misspelled keys, LM-DA-007) for
-    plugins that still parse and load - so a typo does not degrade silently."""
+    """Non-fatal manifest warnings (unknown/misspelled keys, LM-DA-007) for plugins that still parse and load - so a typo does not degrade silently."""
     _, _, warns = _scan(root)
     return warns
 
 
 def _is_engine_plugin(plugin_dir: Path) -> bool:
-    """True for a plugin using the engine contract (``register = ...``) rather
-    than the legacy CLI manifest (``entry = "<module>:<attr>"``). Both kinds live
-    in the same installed dir, so the legacy loader must IGNORE engine plugins -
-    otherwise it reports every engine-installed builtin (coder, image, ...) as a
-    broken legacy plugin. Engine plugins are owned by ``engine.PluginManager``."""
+    """True for a plugin using the engine contract (``register = ...``) rather than the legacy CLI manifest (``entry = '<module>:<attr>'``)."""
     try:
         data = tomllib.loads((plugin_dir / "plugin.toml").read_text(encoding="utf-8"))
     except (OSError, tomllib.TOMLDecodeError):
@@ -206,11 +159,7 @@ def _scan(root: Optional[Path]) -> tuple[List[PluginManifest], List[str], List[s
 
 
 def import_plugin_module(manifest: PluginManifest):
-    """
-    Import the plugin's entry module from its directory and return the module
-    object. Raises :class:`PluginError` on failure and never leaves a
-    half-imported module behind in ``sys.modules``.
-    """
+    """Import the plugin's entry module from its directory and return the module object."""
     module_name = f"_localm_plugin_{manifest.name.replace('-', '_')}"
     module_file = manifest.path / f"{manifest.entry_module}.py"
     if not module_file.is_file():

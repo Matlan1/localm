@@ -1,15 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Tests for the GUI file/folder picker backend and its host-access gate.
-
-- GET /api/fs/dirs / /api/fs/places now require HOST filesystem access
-  (effective_fs_access == "host"): owner / open mode / a key minted with
-  fs_access=host. A merely config:read key can no longer enumerate the disk.
-- The listing itself: meta=true entries[] with size/mtime, include_files gating,
-  hidden-file/dir exclusion by default plus the include_hidden opt-in (#1220),
-  404, the large-listing cap (`truncated`), and no symlink-follow for metadata.
-- /api/fs/places: home + only the standard subfolders that exist, plus a drive.
-- The fs_access attribute round-trips on a key and surfaces via /api/capabilities.
-"""
+"""Tests for the GUI file/folder picker backend and its host-access gate."""
 
 from pathlib import Path
 
@@ -23,9 +13,7 @@ from localm.plugins.gui.web import attach_gui
 
 @pytest.fixture
 def fs_app(tmp_path, monkeypatch):
-    """GUI stack on a throwaway home whose Path.home() is tmp_path, so
-    /api/fs/places resolves against a directory tree we control. No owner key by
-    default, so a minted key's own fs_access governs its reach."""
+    """GUI stack on a throwaway home whose Path.home() is tmp_path, so /api/fs/places resolves against a directory tree we control."""
     home = tmp_path / ".localm"
     monkeypatch.setenv("LOCALM_HOME", str(home))
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
@@ -122,12 +110,7 @@ class TestListing:
             assert entries["sub"]["size"] is None             # dirs carry no faked size
 
     def test_include_hidden_reveals_dotdirs_and_dotfiles(self, fs_app, tmp_path):
-        """Issue #1220: dot-directories (and dot-files) are invisible by
-        default, matching plain `ls`. The GUI picker always requests
-        include_hidden=true and shows its own toggle client-side, so the
-        server has to actually have the entries to give it when asked -
-        this covers a hidden DIRECTORY, which the `tree` fixture above never
-        exercised (it only had a hidden file)."""
+        """Issue #1220: dot-directories (and dot-files) are invisible by default, matching plain `ls`."""
         d = tmp_path / "withdots"
         d.mkdir()
         (d / "visible_dir").mkdir()

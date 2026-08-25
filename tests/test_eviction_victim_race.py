@@ -1,31 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""VRAM eviction must not crash when the victim is removed during its unload.
-
-switch_engine picks an idle victim, then `await`s its unload (an executor call -
-an event-loop yield). During that yield a CONCURRENT remover (another API load
-that picked the SAME idle victim - get_engine loads with preempt=False so they
-coexist - or an idle/explicit unload) may have already dropped the victim from
-`_engines`/`_engines_lru`. The removal step then used a bare
-`del _engines[evict_name]` / `_engines_lru.remove(evict_name)`, which raises
-KeyError/ValueError and surfaces as an HTTP 500 with a traceback (plus a leaked
-`_inference_sems` entry). This pins the guarded removal.
-
-The concurrent removal is simulated deterministically by the victim's own
-unload() dropping itself from the registry (exactly what a racing remover does
-during the same await window) and freeing enough VRAM for the incoming load.
-
-The GatedEngine tests further down pin the deeper BUG-9b follow-up: the
-pin-arrives-during-the-native-unload-await window itself, on every evict/unload
-path. A request pins its engine lock-free (active_requests += 1) AFTER
-get_engine's active_requests==0 check has passed (AUDIT-CRIT-1 keeps the pin
-synchronous), so a QUEUED request could pin the victim DURING the unload await and
-get it freed out from under it, then silently auto-reloaded (VRAM
-over-subscription / a tight-box 500). The fix detaches the eviction victim from
-the live registry BEFORE the free and flags the kept-registered unload paths
-`unloading`, so get_engine/switch_engine's fast paths refuse an engine that is
-being freed - WITHOUT taking the victim's own semaphore (which would reintroduce
-the two-switch lock-ordering deadlock AUDIT-CRIT-1 warns about).
-"""
+"""VRAM eviction must not crash when the victim is removed during its unload."""
 
 import asyncio
 import threading
@@ -59,8 +33,7 @@ class _IncomingEngine:
 
 
 class _RacyVictim:
-    """An idle victim whose unload() ALSO removes it from the registry (like a
-    concurrent remover during the same await window) and frees VRAM."""
+    """An idle victim whose unload() ALSO removes it from the registry (like a concurrent remover during the same await window) and frees VRAM."""
 
     def __init__(self, name, vram_state):
         self.display_name = name
@@ -148,9 +121,7 @@ def test_eviction_survives_victim_removed_during_unload(evicting):
 
 
 class GatedEngine:
-    """Fake engine whose ``unload()`` blocks until ``release`` is set and signals
-    ``entered`` the instant it starts - so a test can inspect / act on server
-    state DURING the native free (the TOCTOU window)."""
+    """Fake engine whose ``unload()`` blocks until ``release`` is set and signals ``entered`` the instant it starts - so a test can inspect / act on server state DURING the native free (the TOCTOU window)."""
 
     def __init__(self, display_name, *, gate=False):
         self.display_name = display_name
@@ -197,11 +168,7 @@ class GatedEngine:
 
 
 def _install(monkeypatch, engines, *, total_gb=10):
-    """Register *engines* (a name -> GatedEngine dict) with a measurable,
-    usage-aware VRAM budget: each loaded model reports the code's 4 GB
-    unregistered-file default (-> vram_required ~= 4.8 GB, + 1 GB headroom =
-    ~5.8 GB), and total free is *total_gb* GB. At the default 10 GB exactly ONE
-    fits, so loading a second model forces eviction of the first."""
+    """Register *engines* (a name -> GatedEngine dict) with a measurable, usage-aware VRAM budget: each loaded model reports the code's 4 GB unregistered-file default (-> vram_required ~= 4.8 GB, + 1 GB headroom = ~5.8 GB), and total free is *total_gb* GB."""
     reg = {name: {"path": f"models/{name}.gguf", "source": "local"} for name in engines}
     monkeypatch.setattr("localm.config.load_registry", lambda: reg)
     monkeypatch.setattr("localm.model_manager.get_model_info",
@@ -237,8 +204,7 @@ def _install(monkeypatch, engines, *, total_gb=10):
 
 
 def _fast_path_pinnable(name):
-    """Mirror get_engine's fast-path predicate: would a queued request for
-    *name* be handed this engine (and then _pin it) right now?"""
+    """Mirror get_engine's fast-path predicate: would a queued request for *name* be handed this engine (and then _pin it) right now?"""
     e = hs._engines.get(name)
     return e is not None and e.loaded and getattr(e, "unloading", False) is not True
 
@@ -385,11 +351,7 @@ def test_idle_unload_victim_not_pinnable_during_native_free(monkeypatch):
 
 
 def test_localm_request_resolving_to_no_model_is_503_not_500(monkeypatch):
-    """Clearing _active_model_name on an active-model eviction (and unload_all /
-    idle-unload) can leave a 'localm'/empty request resolving to None when no
-    default model is configured (e.g. `gui --no-model` with a populated registry).
-    That must be an honest 503, NOT a 500 from switch_engine(None) ->
-    get_model_info(None) -> Path(None) TypeError."""
+    """Clearing _active_model_name on an active-model eviction (and unload_all / idle-unload) can leave a 'localm'/empty request resolving to None when no default model is configured (e.g. `gui --no-model` with a populated registry)."""
     a = GatedEngine("model-a")
     _install(monkeypatch, {"model-a": a})   # leaves _active_model_name / _default_model_name = None
 
@@ -406,11 +368,7 @@ def test_localm_request_resolving_to_no_model_is_503_not_500(monkeypatch):
 
 
 def test_eviction_skips_a_candidate_already_being_unloaded(monkeypatch):
-    """A switch_engine eviction must NOT pick a victim that another unload path is
-    already mid-freeing (unloading=True). Those paths keep the engine in
-    _engines_lru until the native free completes, so without the guard the
-    eviction would call _backend.unload() a SECOND time concurrently - a double
-    free of one native context that the per-model semaphore does not serialise."""
+    """A switch_engine eviction must NOT pick a victim that another unload path is already mid-freeing (unloading=True)."""
     a = GatedEngine("model-a")   # flagged unloading (pretend another path owns its free)
     b = GatedEngine("model-b")   # the genuinely-idle, evictable model
     c = GatedEngine("model-c")   # the new model whose load forces one eviction

@@ -65,9 +65,7 @@ class TestFailFast:
 
 
 def _fake_comfy(captured, *, output_key="images", history_outputs=None):
-    """urlopen stub that records the queued workflow and plays a ComfyUI
-    happy path: /prompt -> prompt_id, /history -> one finished output,
-    /view -> fake video bytes."""
+    """urlopen stub that records the queued workflow and plays a ComfyUI happy path: /prompt -> prompt_id, /history -> one finished output, /view -> fake video bytes."""
     outputs = history_outputs if history_outputs is not None else {
         "11": {output_key: [
             {"filename": "clip.mp4", "subfolder": "", "type": "output"}
@@ -114,13 +112,7 @@ class TestGenerateVideo:
         return ok, msg, captured
 
     def test_instance_token_reaches_localm_unload(self, tmp_path):
-        """The video route's instance_token (its own attach token, for
-        keyless-mode auth on the localm_url unload call) must reach
-        _localm_unload, not be silently dropped somewhere between the
-        plug.py route and comfy.py's call site - the fifth site of the
-        credential-precedence class fixed alongside cli/models.py (#1121)
-        and self_request (#1114): generate_video did not even accept an
-        instance_token parameter before this fix."""
+        """The video route's instance_token (its own attach token, for keyless-mode auth on the localm_url unload call) must reach _localm_unload, not be silently dropped somewhere between the plug.py route and comfy.py's call site - the fifth site of the credential-precedence class fixed alongside cli/models...."""
         captured = {}
         fake = _fake_comfy(captured)
         unload_spy = MagicMock(return_value=None)
@@ -182,8 +174,7 @@ class TestGenerateVideo:
 
     @pytest.mark.parametrize("key", ["videos", "gifs", "images"])
     def test_all_save_node_output_keys_found(self, tmp_path, key):
-        """SaveVideo reports under 'images', VHS under 'gifs' - the poller
-        must find the clip regardless of which save node the graph uses."""
+        """SaveVideo reports under 'images', VHS under 'gifs' - the poller must find the clip regardless of which save node the graph uses."""
         ok, msg, _ = self._run(tmp_path, output_key=key)
         assert ok, msg
 
@@ -193,8 +184,7 @@ class TestGenerateVideo:
         assert "no video output" in msg
 
     def test_comfy_side_copy_deleted_when_delete_outputs(self, tmp_path):
-        """With delete_outputs=True, the duplicate in ComfyUI's own output dir is
-        removed when COMFY_OUTPUT_DIR / comfy_output_dir points at it."""
+        """With delete_outputs=True, the duplicate in ComfyUI's own output dir is removed when COMFY_OUTPUT_DIR / comfy_output_dir points at it."""
         comfy_out = tmp_path / "comfy_out"
         comfy_out.mkdir()
         orig = comfy_out / "clip.mp4"          # matches the fake history
@@ -205,8 +195,7 @@ class TestGenerateVideo:
         assert (tmp_path / "out.mp4").is_file()   # local save unaffected
 
     def test_comfy_side_copy_kept_by_default(self, tmp_path):
-        """By default (delete_outputs off) ComfyUI's own copy is LEFT in place -
-        a user may run ComfyUI for its own gallery and want the file."""
+        """By default (delete_outputs off) ComfyUI's own copy is LEFT in place - a user may run ComfyUI for its own gallery and want the file."""
         comfy_out = tmp_path / "comfy_out"
         comfy_out.mkdir()
         orig = comfy_out / "clip.mp4"
@@ -238,9 +227,7 @@ class TestGenerateVideo:
 
 class TestWorkflowTemplate:
     def test_committed_template_has_expected_nodes(self):
-        """Sanity-check the committed template is well-formed. Injection is now by
-        ROLE (resolve_sampler_roles + find_node_by_class), so a local override no
-        longer has to preserve these ids - but the shipped template still should."""
+        """Sanity-check the committed template is well-formed."""
         wf = json.loads(
             (comfy._WORKFLOW_PATH).read_text(encoding="utf-8"))
         assert wf["4"]["class_type"] == "CLIPTextEncode"      # positive

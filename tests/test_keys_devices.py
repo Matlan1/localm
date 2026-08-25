@@ -1,10 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Keys & devices: key expiry, the privileged coder:full scope, and key presets.
-
-The route-level coder:full -> unrestricted-session wiring and the scoped-key
-pairing-QR endpoint are covered in test_coder_safe_share.py (it has the GUI app
-harness). These are the pure-logic checks.
-"""
+"""Keys & devices: key expiry, the privileged coder:full scope, and key presets."""
 from __future__ import annotations
 
 import time

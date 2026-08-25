@@ -1,30 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""A PATH conflict must be REAL, and the user decides what happens about it.
-
-Reported live from a real Windows install, at the "Make 'localm' runnable from
-any terminal?" step:
-
-    [!] A 'localm' command already exists at .\\localm.BAT. This clone's command
-        was still added (lower precedence); the existing one takes priority
-        until you reorder PATH.
-    'localm' is available (its directory was already on PATH). ...
-
-Two faults, and the second is worse than the first.
-
-FALSE POSITIVE. There was no other localm. ``shutil.which`` on Windows searches
-the CURRENT DIRECTORY before PATH, setup runs with the cwd set to the clone, and
-the clone SHIPS its own localm.bat - so it found OUR OWN file. Reproduced
-exactly: with the cwd inside a clone, ``shutil.which("localm")`` returns
-``.\\localm.BAT``. Passing ``path=`` does NOT suppress that search (the
-current-directory insert happens whether or not a search path was supplied), so
-the fix has to filter the RESULT.
-
-DECIDED FOR THE USER. On the back of that phantom it demoted this install to
-lower precedence and reported it as done - while the remedy it named (reorder
-PATH) is exactly what the user had just asked it to do. Nobody was asked.
-Reordering PATH has real consequences for whatever else is installed, so it is a
-question; the DEFAULT answer stays "change nothing that already works".
-"""
+"""A PATH conflict must be REAL, and the user decides what happens about it."""
 from __future__ import annotations
 
 import os
@@ -62,7 +37,7 @@ def test_anything_inside_the_clone_is_not_a_conflict(clone, monkeypatch):
 
 
 def test_a_hit_that_is_not_on_path_is_not_a_conflict(clone, tmp_path, monkeypatch):
-    """A conflict means reachable FROM PATH. A current-directory hit is not."""
+    """A conflict means reachable FROM PATH."""
     stray = tmp_path / "somewhere_else"
     stray.mkdir()
     (stray / "localm").write_text("x", encoding="utf-8")
@@ -184,8 +159,7 @@ def test_yes_flag_never_prompts(monkeypatch):
 @pytest.mark.skipif(sys.platform != "win32",
                     reason="the machine PATH is a Windows concept")
 def test_a_system_path_rival_cannot_be_outranked(monkeypatch):
-    """We only ever write the USER PATH, and Windows searches the machine PATH
-    first - so we must not promise a priority we cannot deliver."""
+    """We only ever write the USER PATH, and Windows searches the machine PATH first - so we must not promise a priority we cannot deliver."""
     monkeypatch.setattr(gc, "_win_read_system_path", lambda: "C:/Program Files/other")
     assert gc.conflict_outranks_user_path("C:/Program Files/other/localm.exe") is True
     assert gc.conflict_outranks_user_path("C:/Users/me/bin/localm.exe") is False

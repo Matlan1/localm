@@ -1,19 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The standalone reporter must only ever POST to an http/https endpoint, and
-must show the user WHERE the report is going before they confirm.
-
-scripts/report_issue.py built its outbound Request straight from the URL that
-read_proxy() returned, with no scheme check anywhere in the file. That URL has
-only two producers - the LOCALM_BUGREPORT_URL environment variable and a regex
-over the install's own localm/config.py - so this is NOT remotely reachable and
-these tests do not claim it is; an actor who can set either already controls the
-process or the code. It is cheap defence in depth on a sink that hands whatever
-it is given to urlopen(), plus a visible destination so a redirected reporter
-cannot be silent.
-
-The override's documented purpose - pointing the reporter at your own proxy or a
-test double - is preserved exactly: http and https both stay accepted.
-"""
+"""The standalone reporter must only ever POST to an http/https endpoint, and must show the user WHERE the report is going before they confirm."""
 
 from __future__ import annotations
 
@@ -81,8 +67,7 @@ def test_read_proxy_drops_a_non_http_override(url, tmp_path, monkeypatch, capsys
 
 
 def test_read_proxy_does_not_silently_fall_back_to_the_shipped_url(tmp_path, monkeypatch):
-    """A bad override must NOT be quietly replaced by the config default - that
-    would override an explicit choice in silence. It returns nothing instead."""
+    """A bad override must NOT be quietly replaced by the config default - that would override an explicit choice in silence."""
     cfg = tmp_path / "config.py"
     cfg.write_text('D = {\n    "bugreport_upload_url": "https://shipped.example",\n'
                    '    "bugreport_upload_token": "t",\n}\n', encoding="utf-8")
@@ -154,8 +139,7 @@ def test_post_report_rejection_message_does_not_leak_url_credentials(monkeypatch
 
 @pytest.mark.parametrize("url", ["file:///etc/passwd", "ftp://x/"])
 def test_main_never_sends_to_a_rejected_endpoint(url, tmp_path, monkeypatch, capsys):
-    """The real path: a poisoned override reaches neither post_report nor
-    urlopen, the run reports failure, and the report is saved locally."""
+    """The real path: a poisoned override reaches neither post_report nor urlopen, the run reports failure, and the report is saved locally."""
     _no_tty(monkeypatch)
     _explode_urlopen(monkeypatch)
     monkeypatch.setattr(ri, "REPO_ROOT", tmp_path)

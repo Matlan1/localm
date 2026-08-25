@@ -1,10 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Native AWQ (Activation-aware Weight Quantization) dequantization and inference module.
-
-Enables loading and inference of HuggingFace AWQ quantized checkpoints on all
-platforms (including Windows ROCm, Linux ROCm, NVIDIA CUDA, Intel XPU, and CPU)
-without external compiled dependencies like gptqmodel, autoawq, or torchao.
-"""
+"""Native AWQ (Activation-aware Weight Quantization) dequantization and inference module."""
 
 from __future__ import annotations
 

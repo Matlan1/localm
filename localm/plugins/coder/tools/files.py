@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""File-system tools: read/write/edit/patch, directory listing/tree, notebook cell
-edits, and content/glob search-and-replace. All paths are confined to cwd."""
+"""File-system tools: read/write/edit/patch, directory listing/tree, notebook cell edits, and content/glob search-and-replace."""
 
 from __future__ import annotations
 
@@ -58,12 +57,7 @@ def _line_count(text: str) -> int:
 
 
 def _closest_snippet(text: str, old: str, min_score: float = 0.55) -> str:
-    """
-    Find the file region most similar to a failed `old` string and return a
-    short line-numbered snippet of it, so the model can see exactly how the
-    real text differs (usually whitespace or a changed identifier).
-    Returns "" when nothing is similar enough to help.
-    """
+    """Find the file region most similar to a failed `old` string and return a short line-numbered snippet of it, so the model can see exactly how the real text differs (usually whitespace or a changed identifier)."""
     text_lines = text.splitlines()
     old_lines = [l for l in old.splitlines() if l.strip()]
     if not text_lines or not old_lines:
@@ -82,12 +76,7 @@ def _closest_snippet(text: str, old: str, min_score: float = 0.55) -> str:
 
 
 def _verify_syntax(path: Path, content: str) -> Optional[str]:
-    """
-    Quick offline syntax check for common file types.
-
-    Returns a short warning string on failure, or None if everything looks fine.
-    Does not raise - always safe to call after a write.
-    """
+    """Quick offline syntax check for common file types."""
     suffix = path.suffix.lower()
     if suffix == ".py":
         # compile() builtin only: it parses to a code object in memory and never
@@ -116,9 +105,7 @@ def _verify_syntax(path: Path, content: str) -> Optional[str]:
 
 
 def tool_read_file(cwd: Path, path: str, offset: int = 0, limit: int = 0) -> ToolResult:
-    """Read a file. *offset* (1-based start line) and *limit* (max lines)
-    slice big files so a truncated first read can be followed by targeted
-    reads of the middle instead of re-fetching the whole file."""
+    """Read a file. *offset* (1-based start line) and *limit* (max lines) slice big files so a truncated first read can be followed by targeted reads of the middle instead of re-fetching the whole file."""
     try:
         p = _confine(cwd, path)
     except PermissionError as e:
@@ -257,20 +244,7 @@ _MODEL_REGEX_MAX_LINE = 64 * 1024   # a single line longer than this is not sear
 
 
 def _compile_model_pattern(pattern: str, flags):
-    """Compile an attacker-supplied pattern on the interruptible engine.
-
-    Deliberately NO fallback to stdlib ``re`` when ``regex`` is missing. A
-    fallback would silently restore the unbounded path while every caller
-    carried on believing it was bounded - a safety step that fails and reports
-    success, which AGENTS.md rule 5 forbids in as many words. If the engine is
-    absent the tool refuses and says why, which is recoverable; a silent
-    downgrade is not.
-
-    ``regex`` is a DECLARED core dependency for this reason. It was previously
-    present only transitively, via `transformers` under optional-dependencies,
-    so a base install had no `regex` at all and this guard would have been
-    absent exactly where nobody was looking.
-    """
+    """Compile an attacker-supplied pattern on the interruptible engine."""
     try:
         import regex
     except ImportError as exc:      # pragma: no cover - declared dependency
@@ -312,14 +286,7 @@ def _model_regex_flags(ignore_case: bool = False):
 
 
 def _run_model_regex(op, *args, **kwargs):
-    """Run one match operation under the time budget, or raise
-    _ModelRegexTooSlow / _ModelRegexTooExpensive.
-
-    The budget is PER OPERATION, so a glob of many files cannot each burn it
-    silently - the caps below bound how much text is offered in the first place,
-    and the first file to exceed the budget aborts the whole call rather than
-    letting the cost accumulate one file at a time.
-    """
+    """Run one match operation under the time budget, or raise _ModelRegexTooSlow / _ModelRegexTooExpensive."""
     import regex
     try:
         return op(*args, timeout=_MODEL_REGEX_TIMEOUT, **kwargs)
@@ -350,24 +317,7 @@ def _run_model_regex(op, *args, **kwargs):
 
 
 def _resolve_edit(text: str, old: str):
-    """Find the single region of `text` an edit should replace.
-
-    Returns ``(start, end, exact_count, tolerant)`` or ``None``:
-      - ``start, end``: the slice of ``text`` to replace with ``new``.
-      - ``exact_count``: how many EXACT occurrences of ``old`` exist (for the
-        "N more unchanged" note); 1 for a whitespace-tolerant match.
-      - ``tolerant``: True when the exact match missed and a whitespace-tolerant
-        match was used instead (so the caller can say so, not hide it).
-
-    An exact substring match is tried first and always wins (unchanged
-    behavior). Only on an exact miss does it retry with a whitespace-tolerant
-    match: every run of whitespace in ``old`` is allowed to match any run of
-    whitespace in the file, so a snippet the model reconstructed with a
-    different indentation or a collapsed line wrap still lands. That fallback is
-    accepted ONLY when it matches exactly one region - never guess between
-    several candidates - so it can widen what matches but can never change WHICH
-    of two ambiguous regions is edited.
-    """
+    """Find the single region of `text` an edit should replace."""
     idx = text.find(old)
     if idx != -1:
         return idx, idx + len(old), text.count(old), False
@@ -443,9 +393,7 @@ def tool_edit_file(cwd: Path, path: str, old: str, new: str) -> ToolResult:
 
 
 def _edit_miss_message(path: str, old: str, text: str) -> str:
-    """The 'string not found' error for an exact-string edit, including the
-    closest-region hint. Shared by edit_file and edit_files so a miss reads
-    the same (and stays as helpful) whichever tool the model reached for."""
+    """The 'string not found' error for an exact-string edit, including the closest-region hint."""
     wanted = textwrap.shorten(repr(old[:120]), width=120)
     nearest = _closest_snippet(text, old)
     hint = f"Closest match in the file:\n{nearest}\n" if nearest else ""
@@ -459,12 +407,7 @@ def _edit_miss_message(path: str, old: str, text: str) -> str:
 
 
 def _restore_snapshots(snapshots: dict, written: list) -> list[str]:
-    """Restore each already-written file from its pre-edit bytes.
-
-    Returns the paths that could NOT be restored (with the reason), so a failed
-    rollback is surfaced rather than swallowed - a caller told "rolled back"
-    when a file is still half-edited is worse than no rollback at all.
-    """
+    """Restore each already-written file from its pre-edit bytes."""
     failures: list[str] = []
     for p in written:
         original = snapshots.get(p)
@@ -478,20 +421,7 @@ def _restore_snapshots(snapshots: dict, written: list) -> list[str]:
 
 
 def tool_edit_files(cwd: Path, edits: list) -> ToolResult:
-    """
-    Apply the same class of exact-string edit as ``edit_file`` across several
-    files in ONE call, all-or-nothing.
-
-    *edits* is a list of ``{"path": ..., "old": ..., "new": ...}`` dicts; each
-    replaces the FIRST occurrence of ``old`` with ``new`` in ``path``, exactly
-    like ``edit_file`` (this is NOT ``search_replace``, which is a regex).
-
-    Every target file is snapshotted BEFORE anything is written. If any edit
-    fails - a bad path, a missing file, a string that does not match, an
-    unwritable file - every already-written file is restored from its snapshot
-    and the whole call reports which edit failed and why. A caller therefore
-    never has to reason about a half-applied multi-file change.
-    """
+    """Apply the same class of exact-string edit as ``edit_file`` across several files in ONE call, all-or-nothing."""
     if not isinstance(edits, list) or not edits:
         return ToolResult.error(
             "`edits` must be a non-empty list of {path, old, new} objects. "
@@ -611,23 +541,7 @@ def tool_edit_files(cwd: Path, edits: list) -> ToolResult:
 
 
 def tool_patch_file(cwd: Path, path: str, diff: str) -> ToolResult:
-    """
-    Apply a unified diff to a file.
-
-    The diff must be in standard ``patch -u`` format::
-
-        --- a/path/to/file.py
-        +++ b/path/to/file.py
-        @@ -10,4 +10,5 @@
-         context line
-        -old line
-        +new line
-        +added line
-
-    File-header lines (``---``/``+++``) are optional but recommended.
-    Line numbers in ``@@`` headers are used as hints only - minor off-by-one
-    errors are tolerated.  Always read the file before generating the diff.
-    """
+    """Apply a unified diff to a file."""
     from .._patch import apply_diff, PatchError
 
     try:
@@ -889,11 +803,7 @@ _GREP_SNIFF_BYTES = 4096
 
 
 def _grep_config() -> dict:
-    """The config dict for grep's cap settings, or {} if config is unreadable.
-
-    Read ONCE per search and passed to each _grep_cap call: three separate
-    load_config() calls per grep would be three file reads for one search.
-    Never raises - a search must not fail because config could not be read."""
+    """The config dict for grep's cap settings, or {} if config is unreadable."""
     try:
         from localm.config import load_config
         cfg = load_config()
@@ -903,12 +813,7 @@ def _grep_config() -> dict:
 
 
 def _grep_cap(arg_value, cfg: dict, config_key: str, fallback: int) -> int:
-    """Resolve one grep cap: explicit call arg > config key > module default.
-
-    ``None`` means "not specified" (fall through); an explicit ``0`` means NO
-    CAP and is honoured as such, which is why the sentinel is None and not 0.
-    Never raises - a broken config value falls back to the default rather than
-    failing the search."""
+    """Resolve one grep cap: explicit call arg > config key > module default."""
     if arg_value is not None:
         try:
             return max(0, int(arg_value))
@@ -924,13 +829,7 @@ def _grep_cap(arg_value, cfg: dict, config_key: str, fallback: int) -> int:
 
 
 def _is_probably_binary(fp: Path) -> bool:
-    """True if *fp* looks like a binary file.
-
-    Known-text extensions (the indexer's own tables, so grep and the project map
-    agree on what counts as source) short-circuit to False; everything else is
-    sniffed for a NUL byte, so an extensionless Makefile or LICENSE is still
-    searched while a .pyc or a pack file is not.
-    """
+    """True if *fp* looks like a binary file."""
     ext = fp.suffix.lower()
     if ext in _SYMBOL_LANGS or ext in _TEXT_EXTS:
         return False
@@ -942,17 +841,7 @@ def _is_probably_binary(fp: Path) -> bool:
 
 
 def _grep_file_hits(fp: Path, rx, context: int, cap: int) -> tuple[list, int]:
-    """Stream *fp* one line at a time and collect matches.
-
-    Returns ``(hits, total)``: up to *cap* hits as
-    ``(lineno, context_lines, hit_offset)``, and the TOTAL number of matching
-    lines in the file. The total keeps counting past the cap (a bare
-    ``rx.search`` per line, no context bookkeeping) so the "N more match(es)
-    not shown" note stays exact instead of degrading to "at least N".
-
-    The file is never materialised: only the trailing *context* lines are held,
-    plus the windows of hits still collecting their following context.
-    """
+    """Stream *fp* one line at a time and collect matches."""
     before: deque = deque(maxlen=context)
     pending: list = []   # [lineno, window, hit_offset, wanted_len] - awaiting trailing context
     hits:    list = []
@@ -1003,18 +892,7 @@ def tool_grep(cwd: Path, pattern: str, path: str = ".", glob: str = "",
               context: int = 2, max_per_file: Optional[int] = None,
               max_output_lines: Optional[int] = None,
               max_file_bytes: Optional[int] = None) -> ToolResult:
-    """Search file contents with a regex pattern (pure Python, no external tools).
-
-    Files are streamed line by line rather than read whole, and three classes of
-    file are skipped before any content is read: those under a noise directory
-    (the indexer's ``_SKIP_DIRS``: .git, node_modules, __pycache__, .venv, ...),
-    binaries, and files over the size cap. Every skip is COUNTED and reported,
-    so a narrowed search never masquerades as a complete one.
-
-    The caps (*max_per_file*, *max_output_lines*, *max_file_bytes*) default to
-    the ``coder_grep_*`` config settings; pass a value to override one for a
-    single call, or 0 for "no cap".
-    """
+    """Search file contents with a regex pattern (pure Python, no external tools)."""
     try:
         base = _confine(cwd, path)
     except PermissionError as e:
@@ -1208,20 +1086,7 @@ def tool_search_replace(
     glob: str = "**/*",
     dry_run: bool = False,
 ) -> ToolResult:
-    """
-    Search for *pattern* across files and replace all matches.
-
-    Parameters
-    ----------
-    pattern:
-        Python regex.  Applied with ``re.MULTILINE``.
-    replacement:
-        Replacement string (supports ``\\1`` back-references).
-    glob:
-        File filter applied relative to *cwd* (default: all files).
-    dry_run:
-        When True, report what would change without modifying anything.
-    """
+    """Search for *pattern* across files and replace all matches."""
     try:
         rx = _compile_model_pattern(pattern, _model_regex_flags())
     except _ModelRegexInvalid as e:

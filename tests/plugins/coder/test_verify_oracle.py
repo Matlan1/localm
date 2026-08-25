@@ -1,15 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The exit-code oracle in interactive REPL/GUI sessions.
-
-Goal mode's un-gameable judge (the HARNESS runs a command, its exit code decides)
-used to run only in the one-shot CLI ``--until`` flow. These tests cover it at the
-pre-done boundary of an interactive session, plus the project-check auto-detection
-that supplies the command when the user gives none.
-
-The verification commands here are REAL subprocesses with real exit codes - the
-oracle is the thing under test, so mocking it out would prove nothing. Only the
-LLM backend is scripted.
-"""
+"""The exit-code oracle in interactive REPL/GUI sessions."""
 
 from __future__ import annotations
 
@@ -76,8 +66,7 @@ def _fresh_state(agent, verify_checked_at=0):
 
 
 def _touch_cmd(marker: Path):
-    """An argv command that creates *marker* - a probe for "did the check run?"
-    that needs no shell quoting on either platform."""
+    """An argv command that creates *marker* - a probe for 'did the check run?' that needs no shell quoting on either platform."""
     return [sys.executable, "-c", f"open(r'{marker}', 'w').close()"]
 
 
@@ -97,14 +86,7 @@ _FAKE_BIN = "/fake/bin/%s"
 
 @pytest.fixture
 def runners_installed(monkeypatch):
-    """Pretend every test runner is installed, at a stable fake path.
-
-    Detection gates on the runner actually resolving and carries its resolved
-    path, so without this the branch-order tests would assert one thing on a box
-    with cargo and another on a box without - a suite whose result depends on
-    what happens to be installed. Availability itself is the subject of
-    TestDetectionConfirmsTheRunnerCanRun; these tests are about which branch
-    wins and what shape it returns."""
+    """Pretend every test runner is installed, at a stable fake path."""
     monkeypatch.setattr(
         "localm.plugins.coder.tools.shell.resolve_runner",
         lambda name: _FAKE_BIN % name)
@@ -120,8 +102,7 @@ class TestRunVerify:
         assert verify.run_verify("exit 3", tmp_path)[0] == 3
 
     def test_argv_list_runs_without_a_shell(self, tmp_path):
-        """An auto-detected command arrives as argv, so an interpreter path with
-        spaces cannot be mangled by shell quoting."""
+        """An auto-detected command arrives as argv, so an interpreter path with spaces cannot be mangled by shell quoting."""
         code, out = verify.run_verify(
             [sys.executable, "-c", "print('marker_text')"], tmp_path)
         assert code == 0
@@ -160,16 +141,11 @@ class TestInconclusive:
 
 
 class TestLaunchFailureIsInconclusive:
-    """A command that never started is not a code defect to bill the model for.
-
-    X4: auto-detection handed back `npm test` on a box where an argv-list npm
-    cannot start; run_verify returned 125; 125 was not inconclusive, so it took
-    the FAILURE branch and correct work ended "NOT verified"."""
+    """A command that never started is not a code defect to bill the model for."""
 
     def test_the_launch_fact_travels_on_the_outcome_not_in_the_exit_code(
             self, tmp_path):
-        """Through the REAL primitive: run_verify is the only thing that knows
-        the launch raised, so it has to say so directly."""
+        """Through the REAL primitive: run_verify is the only thing that knows the launch raised, so it has to say so directly."""
         outcome = verify.run_verify(["definitely-not-a-real-binary-xyz"],
                                     tmp_path)
         code, out = outcome                       # still unpacks as a 2-tuple
@@ -186,13 +162,7 @@ class TestLaunchFailureIsInconclusive:
 
     @pytest.mark.parametrize("code", [1, 2, 5, 125, 126, 127, 124, 128])
     def test_no_exit_code_alone_makes_a_run_inconclusive(self, code):
-        """THE CORRECTION. 125/126/127 are POSIX's "could not execute" codes, but
-        a command that ran perfectly well can return them: npm exits 127 when a
-        test script's binary is missing, and `npm test` is exactly what
-        auto-detection produces. Reading the code as evidence would report a real
-        failure as "nothing was verified" - the same dishonesty as X4, pointed
-        the other way. Only the out-of-band fact counts (exit 5 stays a separate,
-        pytest-specific rule and is covered above)."""
+        """THE CORRECTION. 125/126/127 are POSIX's 'could not execute' codes, but a command that ran perfectly well can return them: npm exits 127 when a test script's binary is missing, and `npm test` is exactly what auto-detection produces."""
         assert verify.is_inconclusive(["npm", "test"], code) is False
 
     def test_the_reason_distinguishes_the_two_inconclusive_cases(self):
@@ -201,8 +171,7 @@ class TestLaunchFailureIsInconclusive:
         assert verify.inconclusive_reason("pytest -q", 5) == "collected no tests"
 
     def test_a_plain_tuple_never_claims_a_launch_failure(self):
-        """A patched cli._run_verify returns a bare 2-tuple; it must read as
-        "the command ran" rather than silently disarming the oracle."""
+        """A patched cli._run_verify returns a bare 2-tuple; it must read as 'the command ran' rather than silently disarming the oracle."""
         assert verify.launch_failed((127, "boom")) is False
 
 
@@ -212,8 +181,7 @@ class TestLaunchFailureIsInconclusive:
 
 class TestDetectVerifyCommand:
     def test_empty_project_has_no_check(self, tmp_path):
-        """The gate that keeps the oracle from running pytest (exit 5, forever)
-        in a project that simply has no tests."""
+        """The gate that keeps the oracle from running pytest (exit 5, forever) in a project that simply has no tests."""
         assert verify.detect_verify_command(tmp_path) is None
 
     def test_cargo_project(self, tmp_path, runners_installed):
@@ -240,9 +208,7 @@ class TestDetectVerifyCommand:
 
     def test_npm_project_without_a_test_script_is_not_a_check(
             self, tmp_path, runners_installed):
-        """`npm test` with no test script fails every run with "missing script",
-        which no code change can fix - so it must not become the oracle. npm is
-        present here, so this pins the test-script half specifically."""
+        """`npm test` with no test script fails every run with 'missing script', which no code change can fix - so it must not become the oracle. npm is present here, so this pins the test-script half specifically."""
         (tmp_path / "package.json").write_text(json.dumps({"name": "x"}))
         assert verify.detect_verify_command(tmp_path) is None
 
@@ -292,9 +258,7 @@ class TestDetectVerifyCommand:
 
 
 class TestDetectionConfirmsTheRunnerCanRun:
-    """X4's first half: a project file proves the project's SHAPE, not that its
-    runner is installed. Detecting a command that cannot start hands the oracle
-    a permanent 125 and bills it to the model as a code defect."""
+    """X4's first half: a project file proves the project's SHAPE, not that its runner is installed."""
 
     @staticmethod
     def _fake_which(monkeypatch, table):
@@ -332,11 +296,7 @@ class TestDetectionConfirmsTheRunnerCanRun:
 
     def test_npm_is_used_at_its_resolved_path_not_its_bare_name(
             self, tmp_path, monkeypatch):
-        """THE X4 BUG. `shutil.which('npm')` finds `npm.CMD` on Windows, but an
-        argv list naming it "npm" still cannot start: argv execution goes
-        through CreateProcess, which will not launch a .CMD shim. The resolved
-        path
-        does. So detection must carry the path, not the name."""
+        """THE X4 BUG. `shutil.which('npm')` finds `npm.CMD` on Windows, but an argv list naming it 'npm' still cannot start: argv execution goes through CreateProcess, which will not launch a .CMD shim."""
         (tmp_path / "package.json").write_text(
             json.dumps({"scripts": {"test": "jest"}}))
         self._fake_which(monkeypatch, {"npm": r"Z:\Program Files\nodejs\npm.CMD"})
@@ -345,8 +305,7 @@ class TestDetectionConfirmsTheRunnerCanRun:
                        "--", "--passWithNoTests"]
 
     def test_yarn_project_gates_on_yarn_not_npm(self, tmp_path, monkeypatch):
-        """The lockfile picks the runner, so the availability check has to follow
-        it - npm being installed says nothing about yarn."""
+        """The lockfile picks the runner, so the availability check has to follow it - npm being installed says nothing about yarn."""
         (tmp_path / "package.json").write_text(
             json.dumps({"scripts": {"test": "jest"}}))
         (tmp_path / "yarn.lock").write_text("")
@@ -357,10 +316,7 @@ class TestDetectionConfirmsTheRunnerCanRun:
 
     def test_python_project_without_pytest_importable_is_not_a_check(
             self, tmp_path, monkeypatch):
-        """The interpreter always launches, so the launch check cannot see this
-        one: with no pytest importable the check exits 1 with "No module named
-        pytest" on every run, unfixable by the model and wearing an exit code
-        that looks like a genuine test failure."""
+        """The interpreter always launches, so the launch check cannot see this one: with no pytest importable the check exits 1 with 'No module named pytest' on every run, unfixable by the model and wearing an exit code that looks like a genuine test failure."""
         (tmp_path / "pytest.ini").write_text("[pytest]\n")
         monkeypatch.setattr(
             "importlib.util.find_spec",
@@ -368,17 +324,12 @@ class TestDetectionConfirmsTheRunnerCanRun:
         assert verify.detect_verify_command(tmp_path) is None
 
     def test_python_project_with_pytest_still_detects(self, tmp_path):
-        """The other direction, unpatched: pytest is importable here (it is
-        running this test), so the oracle must still be offered."""
+        """The other direction, unpatched: pytest is importable here (it is running this test), so the oracle must still be offered."""
         (tmp_path / "pytest.ini").write_text("[pytest]\n")
         assert verify.detect_verify_command(tmp_path)[0] == sys.executable
 
     def test_whatever_is_detected_here_can_actually_be_launched(self, tmp_path):
-        """The invariant, against the REAL environment rather than a fake: for
-        every project shape, detection returns either None or a command whose
-        argv[0] this platform can genuinely start. This is the assertion that
-        fails on the pre-fix code on Windows, where npm resolves but `['npm',
-        ...]` raises WinError 2."""
+        """The invariant, against the REAL environment rather than a fake: for every project shape, detection returns either None or a command whose argv[0] this platform can genuinely start."""
         import shutil
         import subprocess
         (tmp_path / "package.json").write_text(
@@ -429,8 +380,7 @@ class TestVerifyGate:
         assert st.verify_checked_at == 1
 
     def test_a_pass_does_not_exempt_later_writes(self, tmp_path):
-        """A fix made after the check went green (the reviewer can prompt one)
-        must be checked too, not ride in on the earlier pass."""
+        """A fix made after the check went green (the reviewer can prompt one) must be checked too, not ride in on the earlier pass."""
         marker = tmp_path / "ran"
         agent = _make_agent(tmp_path, verify_cmd="exit 0")
         _record_write(agent)
@@ -442,8 +392,7 @@ class TestVerifyGate:
         assert marker.exists()
 
     def test_passing_check_suppresses_the_self_verify_nudge(self, tmp_path):
-        """The nudge is a self-graded proxy for exactly this check; once the real
-        one passes it has nothing left to ask for."""
+        """The nudge is a self-graded proxy for exactly this check; once the real one passes it has nothing left to ask for."""
         agent = _make_agent(tmp_path, verify_cmd="exit 0")
         _record_write(agent)
         agent._unverified_writes.add("mod.py")
@@ -463,8 +412,7 @@ class TestVerifyGate:
         assert "failed with exit code 1" in fed_back
 
     def test_feedback_forbids_editing_the_check(self, tmp_path):
-        """The anti-gaming instruction: a weak model's cheapest green is to
-        weaken the check."""
+        """The anti-gaming instruction: a weak model's cheapest green is to weaken the check."""
         agent = _make_agent(tmp_path, verify_cmd="exit 1")
         _record_write(agent)
         agent._run_verify_gate("done", False, _fresh_state(agent))
@@ -497,9 +445,7 @@ class TestVerifyGate:
 
     def test_a_check_that_could_not_run_is_neither_a_failure_nor_a_pass(
             self, tmp_path):
-        """X4 END TO END at the gate. The command names a binary that does not
-        exist, so it never starts. The model must not be asked to fix it, the
-        task must not be marked failed, and nothing may report a pass."""
+        """X4 END TO END at the gate."""
         agent = _make_agent(tmp_path,
                             verify_cmd=["definitely-not-a-real-binary-xyz"],
                             verify_max_retries=2)
@@ -515,9 +461,7 @@ class TestVerifyGate:
         assert "nothing was actually verified" in warn.call_args[0][0]
 
     def test_a_genuinely_failing_check_still_reports_failure(self, tmp_path):
-        """FIRES-CONTROL for the test above, in the same run: the oracle must
-        still fail the things it is there to fail. If widening "inconclusive"
-        had disarmed it, this is what would go quiet."""
+        """FIRES-CONTROL for the test above, in the same run: the oracle must still fail the things it is there to fail."""
         agent = _make_agent(tmp_path, verify_cmd="exit 1", verify_max_retries=1)
         _record_write(agent)
         st = _fresh_state(agent)
@@ -531,15 +475,7 @@ class TestVerifyGate:
 
     def test_a_run_that_collected_nothing_is_never_reported_as_a_pass(
             self, tmp_path):
-        """FALSE-GREEN fires-control. A mangled invocation (args split wrong, a
-        filter matching nothing) makes pytest collect zero tests and exit 5 in
-        about a second, and the wrapper log looks clean. Nothing about that run
-        verified anything, so the machine-readable answer must say so - "the
-        harness did not fall over" is not evidence of a passing check.
-
-        Before the third state existed this could only be asserted negatively
-        (last_run_ok stayed True either way, so a consumer could not tell this
-        from a green run). Now it is a positive assertion."""
+        """FALSE-GREEN fires-control."""
         agent = _make_agent(
             tmp_path,
             verify_cmd=[sys.executable, "-c",
@@ -557,8 +493,7 @@ class TestVerifyGate:
         assert agent.last_verify_state == "passed"
 
     def test_verify_state_is_none_when_no_check_ran(self, tmp_path):
-        """Not just "None from __init__": drive it to a real verdict first, so a
-        field that is never assigned cannot pass this by accident."""
+        """Not just 'None from __init__': drive it to a real verdict first, so a field that is never assigned cannot pass this by accident."""
         agent = _make_agent(tmp_path, self._NO_TOOL_SCRIPT, verify_cmd="exit 0")
         _record_write(agent)
         agent._run_verify_gate("done", False, _fresh_state(agent))
@@ -568,8 +503,7 @@ class TestVerifyGate:
         assert agent.last_verify_state is None
 
     def test_clearing_the_session_drops_the_stale_verdict(self, tmp_path):
-        """reset() re-arms last_run_ok; the new field has to go with it, or /clear
-        leaves a verdict about a conversation that no longer exists."""
+        """reset() re-arms last_run_ok; the new field has to go with it, or /clear leaves a verdict about a conversation that no longer exists."""
         agent = _make_agent(tmp_path, verify_cmd="exit 0")
         _record_write(agent)
         agent._run_verify_gate("done", False, _fresh_state(agent))
@@ -578,8 +512,7 @@ class TestVerifyGate:
         assert agent.last_verify_state is None
 
     def test_verify_state_is_per_run_like_last_run_ok(self, tmp_path):
-        """A later clean turn must not keep reporting the earlier turn's verdict
-        (the #792 defect, applied to the new field before it can happen)."""
+        """A later clean turn must not keep reporting the earlier turn's verdict (the #792 defect, applied to the new field before it can happen)."""
         agent = _make_agent(tmp_path, self._SCRIPT_THEN_ANSWER,
                             verify_cmd="exit 1", verify_max_retries=1)
         agent.chat("write mod.py")
@@ -588,8 +521,7 @@ class TestVerifyGate:
         assert agent.last_verify_state is None
 
     def test_gate_is_skipped_for_a_malformed_tool_call(self, tmp_path):
-        """A response that only looks like a broken tool call is mid-call, not a
-        finish - the repair turn owns it, and the suite must not run for it."""
+        """A response that only looks like a broken tool call is mid-call, not a finish - the repair turn owns it, and the suite must not run for it."""
         marker = tmp_path / "ran"
         agent = _make_agent(tmp_path, verify_cmd=_touch_cmd(marker))
         _record_write(agent)
@@ -598,8 +530,7 @@ class TestVerifyGate:
         assert not marker.exists()
 
     def test_restricted_session_never_gets_an_oracle(self, tmp_path):
-        """A restricted session has no process execution at all; an oracle would
-        hand a scoped key exactly what the restriction removes."""
+        """A restricted session has no process execution at all; an oracle would hand a scoped key exactly what the restriction removes."""
         agent = _make_agent(tmp_path, verify_cmd="exit 0", restricted=True)
         assert agent.verify_cmd is None
 
@@ -609,8 +540,7 @@ class TestVerifyGate:
 # --------------------------------------------------------------------------- #
 
 class TestInteractiveSessionEndToEnd:
-    """Drives the REAL agent loop with a scripted model: it writes a file, then
-    claims it is finished. Only the exit code decides whether it is."""
+    """Drives the REAL agent loop with a scripted model: it writes a file, then claims it is finished."""
 
     _SCRIPT = [_tool_call("write_file", path="mod.py", content="x = 1\n"),
                "All done - the code is correct and complete."]
@@ -624,10 +554,7 @@ class TestInteractiveSessionEndToEnd:
         assert (tmp_path / "mod.py").exists()      # the write really happened
 
     def test_failed_verification_is_recorded_session_wide(self, tmp_path):
-        """Coexistence with the per-run last_run_ok reset (#792): the gate's write
-        happens mid-run, inside _handle_no_tool_calls, so _loop's finally still
-        folds it into the session-level _had_any_failure the close-time episodic
-        reflection reads. Verified as a call chain, not by line position."""
+        """Coexistence with the per-run last_run_ok reset (#792): the gate's write happens mid-run, inside _handle_no_tool_calls, so _loop's finally still folds it into the session-level _had_any_failure the close-time episodic reflection reads."""
         agent = _make_agent(tmp_path, self._SCRIPT,
                             verify_cmd="exit 1", verify_max_retries=1)
         agent.chat("write mod.py")
@@ -635,9 +562,7 @@ class TestInteractiveSessionEndToEnd:
         assert agent._had_any_failure is True
 
     def test_clean_turn_after_a_failed_verification_reports_ok(self, tmp_path):
-        """The other half of that coexistence: #792's per-run reset must still
-        clear a PREVIOUS turn's verification failure, while the session-level
-        record of it survives."""
+        """The other half of that coexistence: #792's per-run reset must still clear a PREVIOUS turn's verification failure, while the session-level record of it survives."""
         agent = _make_agent(tmp_path, self._SCRIPT,
                             verify_cmd="exit 1", verify_max_retries=1)
         agent.chat("write mod.py")
@@ -656,8 +581,7 @@ class TestInteractiveSessionEndToEnd:
         assert agent.last_run_ok is True
 
     def test_check_actually_runs_against_the_written_code(self, tmp_path):
-        """The oracle sees the file the agent just wrote - a real check, not a
-        rerun of whatever was on disk before the turn."""
+        """The oracle sees the file the agent just wrote - a real check, not a rerun of whatever was on disk before the turn."""
         agent = _make_agent(
             tmp_path, self._SCRIPT,
             verify_cmd=[sys.executable, "-c",
@@ -676,8 +600,7 @@ class TestInteractiveSessionEndToEnd:
         assert agent.last_run_ok is True
 
     def test_gui_shaped_session_emits_the_failure(self, tmp_path):
-        """A GUI session has an event sink instead of a terminal; the failure has
-        to reach it, not only the console."""
+        """A GUI session has an event sink instead of a terminal; the failure has to reach it, not only the console."""
         events: list = []
         agent = _make_agent(tmp_path, self._SCRIPT, verify_cmd="exit 1",
                             verify_max_retries=1, on_event=events.append)
@@ -726,10 +649,7 @@ class TestSessionWiring:
 
     def test_final_event_distinguishes_unverified_from_a_clean_finish(
             self, tmp_path):
-        """X7: the GUI is the consumer that reads the gate's verdict as a
-        boolean. A check that could not run leaves ok true, so without a second
-        field the one machine-readable answer says "clean finish" about a task
-        nothing verified."""
+        """X7: the GUI is the consumer that reads the gate's verdict as a boolean."""
         import queue as _queue
         import time as _time
         from localm.plugins.coder.sessions import CoderSession
@@ -810,8 +730,7 @@ class TestCliWiring:
         assert captured["verify_cmd"] == "make check"
 
     def test_one_shot_task_has_no_in_loop_oracle(self, tmp_path, monkeypatch):
-        """--until owns the one-shot flow; running both would execute the check
-        twice per iteration."""
+        """--until owns the one-shot flow; running both would execute the check twice per iteration."""
         (tmp_path / "Cargo.toml").write_text("[package]\nname='x'\n")
         captured = {}
 

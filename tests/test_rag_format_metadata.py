@@ -1,15 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""RAG format labeling (audit Branch F: classify-burns -> metadata-only).
-
-The old behavior computed an LLM format guess inside ``extract_bytes`` and threw
-it away, while firing a 10s chat call during embedding-only indexes. This suite
-pins the fixed contract:
-
-  * a document's format is labeled heuristic-FIRST (free, deterministic) and the
-    label is carried into chunk metadata (used, not discarded);
-  * the LLM tie-break runs ONLY when the heuristic is unsure AND a chat model is
-    loaded - never an unconditional chat call that stalls an embedding-only index.
-"""
+"""RAG format labeling (audit Branch F: classify-burns -> metadata-only)."""
 
 import requests
 
@@ -22,8 +12,7 @@ from localm.plugins.builtin.rag import plug
 # --------------------------------------------------------------------------- #
 
 def test_odd_ext_json_labeled_via_heuristic_no_chat(tmp_path):
-    """An odd-extension file whose content is JSON gets chunk metadata
-    format="json" from the free structural heuristic, with ZERO classify calls."""
+    """An odd-extension file whose content is JSON gets chunk metadata format='json' from the free structural heuristic, with ZERO classify calls."""
     coll = Collection("kb", base=tmp_path)
     coll.create()
 
@@ -50,8 +39,7 @@ def test_odd_ext_json_labeled_via_heuristic_no_chat(tmp_path):
 
 
 def test_embedding_only_index_does_not_call_chat_path(tmp_path, monkeypatch):
-    """With no chat model loaded, indexing an ambiguous odd-extension file must
-    NOT fire the (10s-timeout) chat endpoint - no stall - and labels "text"."""
+    """With no chat model loaded, indexing an ambiguous odd-extension file must NOT fire the (10s-timeout) chat endpoint - no stall - and labels 'text'."""
     posted = []
     def fake_request(*args, **kwargs):
         posted.append((args, kwargs))

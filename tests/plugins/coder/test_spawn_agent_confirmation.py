@@ -1,22 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""spawn_agent must not let a child bypass the parent's confirmation posture.
-
-``tool_spawn_agent`` used to hardcode the child Agent's ``auto_approve=True``
-and never passed through ``dry_run``, ``always_confirm``, or
-``confirm_handler`` from the parent session. So a parent that required
-confirmation before destructive tools (``auto_approve=False``), was running
-under ``--dry-run``, or had a GUI confirm handler wired up would still spawn a
-child that freely executed write_file/edit_file/patch_file/run_shell/
-git_commit/git_push with zero confirmation - a full bypass of the parent's
-safety posture (2026-07-09 checkup finding #11).
-
-These tests use REAL parent and child Agent instances (no Agent mocking) and
-drive an actual destructive tool call through the child's own
-``_execute_tool`` - the exact code path ``run_task``/``_loop`` uses
-internally, always with ``interactive=False`` (see agent/loop.py
-``run_task``). This reproduces the original bypass end to end rather than
-merely inspecting constructor kwargs.
-"""
+"""spawn_agent must not let a child bypass the parent's confirmation posture."""
 
 from unittest.mock import patch
 
@@ -39,9 +22,7 @@ def _write_call(rel="child_output.txt"):
 
 
 def _spawn_and_capture_child(tmp_path, parent_kwargs):
-    """Spawn a real child via tool_spawn_agent, short-circuiting run_task so
-    no LLM call is needed, and return the constructed child Agent for direct
-    inspection of the code path spawn_agent actually exercises."""
+    """Spawn a real child via tool_spawn_agent, short-circuiting run_task so no LLM call is needed, and return the constructed child Agent for direct inspection of the code path spawn_agent actually exercises."""
     parent = Agent(_StubBackend(), cwd=tmp_path, **parent_kwargs)
     captured = {}
 

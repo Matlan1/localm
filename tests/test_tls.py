@@ -1,11 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Tests for built-in TLS (NET-1): localm/tls.ensure_cert and SAN discovery.
-
-Covers the happy path (valid CA + leaf, required SANs present), reuse stability
-(no needless regeneration), and the regeneration triggers the spec calls out:
-missing / expired / wrong-SAN leaf, and an IP-set change - with the CA reused
-across regenerations so a device trusted once stays trusted.
-"""
+"""Tests for built-in TLS (NET-1): localm/tls.ensure_cert and SAN discovery."""
 
 import socket
 import sys
@@ -215,9 +209,7 @@ def test_corrupt_ca_is_replaced(tmp_path):
 # ------------------------------------------------------------------ #
 
 def _verify_chain(leaf, ca):
-    """Raises (InvalidSignature or a key-mismatch error) unless *leaf* was
-    actually signed by *ca* - the same check a TLS client performs, and the
-    property _leaf_is_reusable's old issuer-name comparison could not prove."""
+    """Raises (InvalidSignature or a key-mismatch error) unless *leaf* was actually signed by *ca* - the same check a TLS client performs, and the property _leaf_is_reusable's old issuer-name comparison could not prove."""
     ca.public_key().verify(
         leaf.signature,
         leaf.tbs_certificate_bytes,
@@ -227,13 +219,7 @@ def _verify_chain(leaf, ca):
 
 
 def test_leaf_not_reused_after_out_of_band_ca_rotation(tmp_path):
-    """Every CA this module mints shares the identical constant subject, so a
-    leaf's ``issuer == ca.subject`` name comparison can never distinguish a
-    rotated CA keypair from the one the leaf was actually signed by. Simulate
-    the out-of-band rotation the finding names (restoring ``tls/`` from a
-    partial backup, or copying a data dir between machines): mint a CA, mint
-    a leaf against it, then re-mint the CA in place without touching the
-    leaf - exactly what a partial restore leaves behind."""
+    """Every CA this module mints shares the identical constant subject, so a leaf's ``issuer == ca.subject`` name comparison can never distinguish a rotated CA keypair from the one the leaf was actually signed by."""
     cert_path, _ = tls.ensure_cert(tmp_path)
     old_leaf_serial = _load(cert_path).serial_number
     old_leaf = _load(tls._leaf_cert_path(tmp_path))
@@ -264,14 +250,7 @@ def test_leaf_not_reused_after_out_of_band_ca_rotation(tmp_path):
 
 
 def test_ca_past_expiry_forces_full_regeneration(tmp_path, monkeypatch):
-    """An expired CA on disk must force ensure_cert to regenerate BOTH the CA
-    and the leaf, even when the leaf itself - minted late in the CA's life -
-    is nowhere near its own expiry. Reachable through ordinary renewal timing
-    (a long-running or rarely-restarted instance), not a corrupt file: the
-    leaf's own ~2-year validity window comfortably outlives an already-past
-    CA. Before the fix, _leaf_is_reusable never looked at the CA's own
-    not_valid_after (only the leaf's own), so ensure_cert reported success
-    while continuing to serve an unvalidatable chain and never self-healed."""
+    """An expired CA on disk must force ensure_cert to regenerate BOTH the CA and the leaf, even when the leaf itself - minted late in the CA's life - is nowhere near its own expiry."""
     t0 = tls._now()
     monkeypatch.setattr(tls, "_now", lambda: t0)
     ca_cert, ca_key = tls._make_ca(tmp_path)
@@ -366,8 +345,7 @@ def test_companion_addresses_skips_loopback_only_primary(monkeypatch):
 # ------------------------------------------------------------------ #
 
 class _FakeOutboundSocket:
-    """Stands in for the UDP socket _primary_lan_ip() opens - returns a fixed
-    address from getsockname() without touching the real network."""
+    """Stands in for the UDP socket _primary_lan_ip() opens - returns a fixed address from getsockname() without touching the real network."""
 
     def __init__(self, ip):
         self._ip = ip

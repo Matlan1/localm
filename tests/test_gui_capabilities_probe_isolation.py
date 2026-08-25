@@ -1,27 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""GUI capability probes are INDEPENDENT (ADR-0008 sweep).
-
-`/api/capabilities` reports whether three optional features are configured: the
-bug-report upload channel, the read-only issues view, and the update banner. Two
-of them shared a single try block:
-
-    try:
-        from localm import issue_tracker, updater
-        issues_avail = issue_tracker.available()
-        update_avail = updater.available()
-    except Exception:
-        issues_avail = update_avail = False
-
-`issue_tracker.available()` and `updater.available()` read INDEPENDENT endpoints,
-so a raise in the first left `update_avail` False having never called
-`updater.available()` at all. A user then silently stopped being offered updates
-because an unrelated issues probe broke - one feature's failure answering for
-another, which is the same collapse-two-outcomes-into-one shape as the rest of
-this sweep.
-
-Failing CLOSED is right (hiding a control that might not work beats offering one
-that errors). Failing closed on BEHALF OF A FEATURE THAT WAS NEVER PROBED is not.
-"""
+"""GUI capability probes are INDEPENDENT (ADR-0008 sweep)."""
 
 from __future__ import annotations
 
@@ -41,15 +19,13 @@ def _boom():
 # --------------------------------------------------------------------------- #
 
 def test_a_failing_probe_reports_only_its_own_feature_unavailable():
-    """The defect, stated directly: a broken issues probe must not withdraw the
-    update banner."""
+    """The defect, stated directly: a broken issues probe must not withdraw the update banner."""
     assert sysroutes._probe_available("issues", _boom) is False
     assert sysroutes._probe_available("update", lambda: True) is True
 
 
 def test_a_raising_probe_does_not_call_the_others():
-    """Proves ISOLATION rather than just the returned values: the surviving
-    probes must actually run, not merely happen to hold a truthy default."""
+    """Proves ISOLATION rather than just the returned values: the surviving probes must actually run, not merely happen to hold a truthy default."""
     calls = []
 
     def _tracked(name, value):
@@ -66,8 +42,7 @@ def test_a_raising_probe_does_not_call_the_others():
 
 
 def test_every_probe_can_fail_independently():
-    """Whichever one breaks, the other two are unaffected - not just the pair
-    that happened to share a try block."""
+    """Whichever one breaks, the other two are unaffected - not just the pair that happened to share a try block."""
     for broken in range(3):
         fns = [lambda: True, lambda: True, lambda: True]
         fns[broken] = _boom
@@ -86,9 +61,7 @@ def test_a_failing_probe_fails_closed():
 
 
 def test_a_failing_probe_is_recorded(caplog):
-    """Fail-closed is correct; fail-closed in TOTAL silence is not (rule 5). The
-    reason must be discoverable, at debug rather than warning because this runs
-    on every capability fetch and a broken probe would otherwise flood."""
+    """Fail-closed is correct; fail-closed in TOTAL silence is not (rule 5)."""
     import logging
     with caplog.at_level(logging.DEBUG, logger="localm"):
         sysroutes._probe_available("issues view", _boom)
@@ -98,8 +71,7 @@ def test_a_failing_probe_is_recorded(caplog):
 
 
 def test_a_truthy_non_bool_is_normalised():
-    """The route ships this straight to the GUI as JSON, so it must be a real
-    bool rather than whatever the probe happened to return."""
+    """The route ships this straight to the GUI as JSON, so it must be a real bool rather than whatever the probe happened to return."""
     assert sysroutes._probe_available("x", lambda: "yes") is True
     assert sysroutes._probe_available("x", lambda: 0) is False
 
@@ -114,8 +86,7 @@ def test_a_truthy_non_bool_is_normalised():
     (sysroutes._update_available, "localm.updater", "available"),
 ])
 def test_each_wrapper_calls_its_own_module(fn, module, attr, monkeypatch):
-    """Guards against the wrappers being cross-wired, which would reintroduce
-    exactly the bug this file exists for - one feature answering for another."""
+    """Guards against the wrappers being cross-wired, which would reintroduce exactly the bug this file exists for - one feature answering for another."""
     mod = importlib.import_module(module)
     monkeypatch.setattr(mod, attr, lambda: True)
     assert fn() is True
@@ -129,8 +100,7 @@ def test_each_wrapper_calls_its_own_module(fn, module, attr, monkeypatch):
 
 @pytest.fixture
 def caps_app(tmp_path, monkeypatch):
-    """GUI stack on a throwaway home, no owner key, so /api/capabilities answers
-    in open mode without needing a minted key."""
+    """GUI stack on a throwaway home, no owner key, so /api/capabilities answers in open mode without needing a minted key."""
     from pathlib import Path
 
     from fastapi import FastAPI
@@ -157,12 +127,7 @@ def caps_app(tmp_path, monkeypatch):
 
 def test_a_broken_issues_probe_does_not_withdraw_the_update_banner(
         caps_app, monkeypatch):
-    """The actual user-visible regression, driven through the REAL route.
-
-    The helper tests above cannot catch this on their own: they exercise
-    _probe_available directly, so restoring the old shared try block would not
-    flip any of them. This one goes through /api/capabilities, so it fails if the
-    two probes are ever bundled again."""
+    """The actual user-visible regression, driven through the REAL route."""
     from fastapi.testclient import TestClient
 
     from localm import issue_tracker, updater
@@ -179,8 +144,7 @@ def test_a_broken_issues_probe_does_not_withdraw_the_update_banner(
 
 def test_a_broken_bugreport_probe_leaves_the_other_two_alone(
         caps_app, monkeypatch):
-    """Same property from the other end, so the isolation is not accidentally
-    specific to one ordering."""
+    """Same property from the other end, so the isolation is not accidentally specific to one ordering."""
     from fastapi.testclient import TestClient
 
     from localm import bugreport, issue_tracker, updater

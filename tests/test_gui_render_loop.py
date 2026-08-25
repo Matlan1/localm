@@ -1,22 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Static tripwire against the GUI nav render/fetch loop.
-
-Bug (2026-06-16): loading the GUI / opening Settings fired ~230 GET /api/plugins
-in a burst and rendered the settings form twice (60 inputs instead of 30). Root
-cause was a re-entrant cycle:
-
-    onViewShown(chat|coder) -> refreshPluginCommands -> renderNav
-    -> reconcileActiveView -> showView -> onViewShown -> ...
-
-The fix: reconcileActiveView re-asserts the active highlight via the
-_applyActiveClasses helper WITHOUT re-firing onViewShown for the current view;
-it may only call showView for the genuine fallback to chat. And
-refreshSettingsPage guards overlapping renders with a token.
-
-The GUI has no JS test harness (jsdom etc.), so these are source-level guards:
-not a substitute for executing the JS, but they fail loudly if the specific loop
-or the unguarded-render pattern is reintroduced. A real JS test harness is a
-separate, larger piece of work."""
+"""Static tripwire against the GUI nav render/fetch loop."""
 
 import re
 from pathlib import Path
@@ -25,11 +8,7 @@ _STATIC = Path(__file__).resolve().parents[1] / "localm" / "plugins" / "gui" / "
 
 
 def _all_js() -> str:
-    """The shipped GUI JS as one string. ARCH-1 split the old monolithic app.js
-    and pages.js into ES modules under app/ and pages/, so read EVERY .js under
-    static/ (recursively, minus vendored third-party libs). The guarded functions
-    are unique by name, so which module holds one no longer matters - this survives
-    the split regardless of how the modules end up arranged."""
+    """The shipped GUI JS as one string."""
     return "\n".join(
         p.read_text(encoding="utf-8")
         for p in sorted(_STATIC.rglob("*.js"))
@@ -54,8 +33,7 @@ def _func_body(src: str, name: str) -> str:
 
 
 def _strip_line_comments(src: str) -> str:
-    """Drop // line comments so we match real code, not explanatory comments
-    (which legitimately mention the very patterns we guard against)."""
+    """Drop // line comments so we match real code, not explanatory comments (which legitimately mention the very patterns we guard against)."""
     return "\n".join(line.split("//", 1)[0] for line in src.splitlines())
 
 
@@ -72,9 +50,7 @@ def test_showview_uses_apply_active_classes():
 
 
 def test_reconcile_active_view_does_not_reenter_showview():
-    """reconcileActiveView must NOT call showView for the current/valid view -
-    that re-enters onViewShown and recreates the /api/plugins loop. Only the
-    fallback showView("chat") is allowed."""
+    """reconcileActiveView must NOT call showView for the current/valid view - that re-enters onViewShown and recreates the /api/plugins loop."""
     body = _strip_line_comments(
         _func_body(_all_js(), "reconcileActiveView"))
     assert "_applyActiveClasses(" in body, (
@@ -88,8 +64,7 @@ def test_reconcile_active_view_does_not_reenter_showview():
 
 
 def test_settings_render_is_guarded_against_overlap():
-    """refreshSettingsPage must guard overlapping renders with a token so two
-    concurrent calls can't double-render the form (the 60-vs-30 inputs bug)."""
+    """refreshSettingsPage must guard overlapping renders with a token so two concurrent calls can't double-render the form (the 60-vs-30 inputs bug)."""
     body = _func_body(_all_js(), "refreshSettingsPage")
     assert "_settingsRenderToken" in body, (
         "refreshSettingsPage must use a render token to drop superseded renders")

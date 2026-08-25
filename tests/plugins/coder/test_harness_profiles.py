@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Per-model harness profiles: a weak/small model and a long-reasoning model run
-with gen-kwarg defaults tuned to them, while an explicit caller value always wins.
-"""
+"""Per-model harness profiles: a weak/small model and a long-reasoning model run with gen-kwarg defaults tuned to them, while an explicit caller value always wins."""
 
 from __future__ import annotations
 

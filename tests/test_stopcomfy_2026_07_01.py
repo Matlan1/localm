@@ -1,9 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""NEW-STOPCOMFY - localm can stop/restart the ComfyUI IT launched.
-
-Covers the retained-handle registry, the graceful stop (abort render + clear
-queue + free VRAM), the never-kill-a-user's-ComfyUI rule, and the HTTP routes.
-"""
+"""NEW-STOPCOMFY - localm can stop/restart the ComfyUI IT launched."""
 
 from fastapi.testclient import TestClient
 
@@ -123,10 +119,7 @@ def test_stop_route_calls_stop_comfy(tmp_path, monkeypatch):
 
 
 def test_stop_route_504s_when_stop_comfy_hangs_past_budget(tmp_path, monkeypatch):
-    """Follow-up to #1057: before this fix, a wedged stop_comfy() call (a
-    taskkill that never returns, say) left the HTTP request hanging forever
-    - the exact gap #1057's own docstring named. Now it returns a clear 504
-    within the configured budget instead."""
+    """Follow-up to #1057: before this fix, a wedged stop_comfy() call (a taskkill that never returns, say) left the HTTP request hanging forever - the exact gap #1057's own docstring named."""
     import time
 
     from localm.inference.routes import config as config_routes

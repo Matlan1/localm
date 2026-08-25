@@ -1,8 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Tests for scripts/report_issue.py - the standalone reporter used when localm
-will not start. Focus: the privacy scrub (never leak a username/token), honest
-failure (a failed/declined send is never reported as success), reading the proxy
-config from source, and the report body."""
+"""Tests for scripts/report_issue.py - the standalone reporter used when localm will not start."""
 
 from __future__ import annotations
 
@@ -73,21 +70,14 @@ def test_scrub_strips_bearer_and_api_keys():
 
 
 def test_scrub_strips_url_credentials():
-    """The standalone scrub() must mirror localm/bugreport.py _scrub_secrets, which
-    strips user:pass@ from URLs - otherwise a credentialed URL pasted into --summary
-    or --detail is scrubbed by the in-app reporter but leaks through this fallback."""
+    """The standalone scrub() must mirror localm/bugreport.py _scrub_secrets, which strips user:pass@ from URLs - otherwise a credentialed URL pasted into --summary or --detail is scrubbed by the in-app reporter but leaks through this fallback."""
     out = ri.scrub("POST http://admin:SECRETPASS@api.corp.local/v1 failed")
     assert "SECRETPASS" not in out
     assert "<redacted>" in out
 
 
 def test_scrub_strips_query_string_and_header_credentials():
-    """Mirrors localm/bugreport.py's _scrub_query_and_header_secrets: a
-    credential is at least as often carried as a URL query parameter or a
-    pasted header line as via user:pass@ syntax. Same assertion block as the
-    user:pass@ case, deliberately (QA-FINDING-bugreport-url-query-secret-leak-
-    2026-08-13) - if a regression deletes the query/header redaction here, a
-    user:pass@-only test would not catch it, and vice versa."""
+    """Mirrors localm/bugreport.py's _scrub_query_and_header_secrets: a credential is at least as often carried as a URL query parameter or a pasted header line as via user:pass@ syntax."""
     out = ri.scrub(
         "https://x.example/s?api_key=CANARY1&q=hello "
         "and X-Api-Key: CANARY2 "
@@ -100,15 +90,7 @@ def test_scrub_strips_query_string_and_header_credentials():
 
 
 def test_scrub_strips_bare_and_prefixed_credential_assignments():
-    """Mirrors the bare-name widening of _QUERY_SECRET_RE in
-    localm/bugreport.py. A credential written as a plain name=value line (a .env
-    fragment, a shell line) or behind a prefix (OPENAI_API_KEY=, pull_token=)
-    reaches this reporter exactly as it reaches the in-app one, and a fallback
-    reporter that scrubs LESS than the in-app one is the shape that leaks.
-
-    Both directions are asserted in one block on purpose: a widening that eats
-    ordinary config text out of a report is a real failure, not a cosmetic one,
-    and nothing else in this file would catch it."""
+    """Mirrors the bare-name widening of _QUERY_SECRET_RE in localm/bugreport.py."""
     out = ri.scrub(
         "pasted from my .env:\napi_key=CANARYBARE7Q4M\n"
         "OPENAI_API_KEY=CANARYBARE1AAA\nSECRET_KEY=CANARYBARE2BBB\n"
@@ -125,9 +107,7 @@ def test_scrub_strips_bare_and_prefixed_credential_assignments():
 
 
 def test_scrub_keeps_assignments_whose_value_cannot_be_a_secret():
-    """Mirrors the non-secret-literal suppressor in localm/bugreport.py. Asserted
-    in the same block as a real redaction so a regression that deletes the
-    suppressor and one that deletes the scrub are both caught here."""
+    """Mirrors the non-secret-literal suppressor in localm/bugreport.py."""
     out = ri.scrub(
         "LOCALM_REQUIRE_AUTH=1 require_auth=true has_token=false "
         "digital_signature=True api_key=CANARYLIT9 api_key=trueCANARYLIT8")
@@ -142,14 +122,7 @@ def test_scrub_keeps_assignments_whose_value_cannot_be_a_secret():
 @pytest.mark.skipif(os.name != "nt",
                     reason="the PowerShell fallback reporter only runs on Windows")
 def test_powershell_scrub_behaves_when_actually_executed(tmp_path):
-    """The other ps1 test is a STATIC text guard: it asserts the file CONTAINS
-    the patterns. That would pass on a .ps1 whose regex is syntactically invalid
-    or whose replacement string is wrong, which is a real gap because nothing
-    else in either suite ever runs this file.
-
-    This one executes the shipped Scrub for real. It extracts the function by
-    AST so what runs is the file's own bytes, not a retyped copy, and asserts
-    BOTH directions in one call so a regression in either is caught."""
+    """The other ps1 test is a STATIC text guard: it asserts the file CONTAINS the patterns."""
     pwsh = shutil.which("powershell") or shutil.which("pwsh")
     if not pwsh:
         pytest.skip("no PowerShell interpreter on PATH")
@@ -183,9 +156,7 @@ def test_powershell_scrub_behaves_when_actually_executed(tmp_path):
 
 
 def test_scrub_strips_a_quoted_credential_value():
-    """Mirrors the quoted-value fix in localm/bugreport.py. A .env writes the
-    value quoted more often than bare, and stopping at the opening quote left
-    the secret in the report next to a marker claiming it had gone."""
+    """Mirrors the quoted-value fix in localm/bugreport.py."""
     out = ri.scrub(
         'my .env has API_KEY="RIQUOTED1" and SECRET_KEY=\'RIQUOTED2\' '
         'and require_auth="true" and n_gpu_layers=35')
@@ -321,12 +292,7 @@ def test_main_yes_no_endpoint_configured_saves_and_returns_1(tmp_path, monkeypat
 
 
 def test_yes_help_text_says_it_sends_not_preview_only(capsys):
-    """Regression for #1100: the old --yes help text read "skip the confirm
-    prompt (still previews)" - a session skimming it took "still previews" to
-    mean "preview only, does not send", ran it expecting a dry run, and filed a
-    real GitHub issue with test content. --yes genuinely sends (see
-    test_main_yes_send_success_returns_0 above); the help text must say so
-    plainly rather than rely on "still previews" being read the right way."""
+    """Regression for #1100: the old --yes help text read 'skip the confirm prompt (still previews)' - a session skimming it took 'still previews' to mean 'preview only, does not send', ran it expecting a dry run, and filed a real GitHub issue with test content. --yes genuinely sends (see test_main_yes_sen..."""
     with pytest.raises(SystemExit):
         ri.main(["--help"])
     out = capsys.readouterr().out
@@ -340,10 +306,7 @@ def test_yes_help_text_says_it_sends_not_preview_only(capsys):
 
 
 def test_main_scrubs_home_path_in_uploaded_title(tmp_path, monkeypatch, capsys):
-    """HON-03: the issue TITLE lands on a PUBLIC GitHub issue, so it must be
-    scrubbed like the body/preview. A home path (username) in --summary must not
-    reach the title unredacted - the tool's banner claims the preview is 'exactly
-    what will be sent'."""
+    """HON-03: the issue TITLE lands on a PUBLIC GitHub issue, so it must be scrubbed like the body/preview."""
     _no_tty(monkeypatch)
     monkeypatch.setattr(ri, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(ri, "read_proxy", lambda: ("https://proxy", "tok"))
@@ -366,8 +329,7 @@ def test_main_scrubs_home_path_in_uploaded_title(tmp_path, monkeypatch, capsys):
 
 
 def test_main_scrubs_url_credential_in_title_and_body(tmp_path, monkeypatch):
-    """A credentialed URL typed into --summary must not reach the PUBLIC issue title
-    or body (end-to-end through main() to what post_report is handed)."""
+    """A credentialed URL typed into --summary must not reach the PUBLIC issue title or body (end-to-end through main() to what post_report is handed)."""
     _no_tty(monkeypatch)
     monkeypatch.setattr(ri, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(ri, "read_proxy", lambda: ("https://proxy", "tok"))
@@ -387,10 +349,7 @@ def test_main_scrubs_url_credential_in_title_and_body(tmp_path, monkeypatch):
 
 
 def test_powershell_reporter_scrubs_title_and_credentials():
-    """The PowerShell no-Python fallback reporter (report_issue.ps1) must mirror the
-    Python fix: scrub the uploaded TITLE (not the raw $summary), and its Scrub must
-    strip URL credentials + API keys, not just home paths + bearer tokens. Static
-    guard - the .ps1 is not exercised by this Python suite - to catch a revert."""
+    """The PowerShell no-Python fallback reporter (report_issue.ps1) must mirror the Python fix: scrub the uploaded TITLE (not the raw $summary), and its Scrub must strip URL credentials + API keys, not just home paths + bearer tokens."""
     ps1 = _MOD_PATH.parent / "report_issue.ps1"
     text = ps1.read_text(encoding="utf-8")
     # The uploaded title is scrubbed, never the raw $summary.
@@ -400,15 +359,7 @@ def test_powershell_reporter_scrubs_title_and_credentials():
     assert r"(://)[^/@\s]+@" in text
     assert "localm[_-]sk" in text
 def test_powershell_reporter_scrubs_credential_named_assignments():
-    """Same static-guard reasoning as the test above, applied to the query and
-    header scrub. This one is worth pinning precisely: the .ps1 comment claimed
-    to mirror _scrub_secrets while the function carried NO query or header scrub
-    at all, so what rotted was the CLAIM, and nothing in either suite noticed.
-
-    The last two assertions are the load-bearing ones. A port that only handled
-    the old ?/&-anchored form would satisfy a laxer test while leaving the
-    fallback reporter weaker than the in-app one, which is the shape that
-    leaks."""
+    """Same static-guard reasoning as the test above, applied to the query and header scrub."""
     ps1 = _MOD_PATH.parent / "report_issue.ps1"
     text = ps1.read_text(encoding="utf-8")
     # The header-line port.

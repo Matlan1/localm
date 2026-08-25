@@ -1,19 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""
-GUI web layer - API routes and static file serving, attached to the
-existing localm FastAPI inference app.
-
-Routes (all under /api, bearer-protected when LOCALM_API_KEY is set):
-  GET    /api/models                       registry + active model
-  POST   /api/models/load                  switch the active engine
-
-Coder routes (/api/coder/*) live in the builtin "coder" plugin
-(localm/plugins/builtin/coder); attach_gui only publishes the shared
-services they read via request.app.state.
-
-The static frontend is mounted at / and must be attached AFTER all API
-routes so it doesn't shadow them.
-"""
+"""GUI web layer - API routes and static file serving, attached to the existing localm FastAPI inference app."""
 
 from __future__ import annotations
 
@@ -39,18 +25,7 @@ _KEEPALIVE_S = 15
 
 
 class _RevalidatingStatic(StaticFiles):
-    """Serve the GUI assets with ``Cache-Control: no-cache`` so the browser
-    REVALIDATES every load instead of silently serving a stale copy.
-
-    SEAMLESS UPDATES: Starlette's StaticFiles sends an ``ETag`` but no
-    ``Cache-Control``, so browsers fall back to HEURISTIC caching and can keep an
-    old ``app.js`` / ``sw.js`` / ``style.css`` for a while - the user (or a tester)
-    then has to clear the cache by hand to pick up new code. ``no-cache`` does NOT
-    disable caching: the browser still caches and revalidates with the ETag, so an
-    unchanged file is a cheap ``304`` and a changed one is fetched fresh. It also
-    lets a phone's ``serviceWorker.register(...).update()`` actually see a new
-    ``sw.js`` (the browser HTTP-caching sw.js is a known update-stickiness cause).
-    The server, not the user, is now responsible for delivering current code."""
+    """Serve the GUI assets with ``Cache-Control: no-cache`` so the browser REVALIDATES every load instead of silently serving a stale copy."""
 
     async def get_response(self, path, scope):
         resp = await super().get_response(path, scope)
@@ -83,18 +58,7 @@ CSP_NONCE_PLACEHOLDER = "{{LOCALM_CSP_NONCE}}"
 
 
 def _index_html_with_shell_token(token: str, nonce: str = "") -> str:
-    """The SPA shell, optionally seeding the per-process open-mode *token* (the
-    shell token) as a JS global so a loopback launch can still perform management
-    when no API key is configured. The protected-mode API key is NOT injected
-    here - the shell route sets it as an HttpOnly cookie instead, so it never
-    reaches page JS / localStorage. An empty *token* injects nothing.
-
-    The token is embedded only in same-origin HTML served to a trusted loopback
-    client and is a short-lived per-process secret, not the durable API key.
-
-    *nonce* is this request's CSP nonce (see http_server's _security_headers).
-    Every inline <script> in the shell, including the injected token snippet,
-    must carry it or the enforcing Content-Security-Policy blocks it."""
+    """The SPA shell, optionally seeding the per-process open-mode *token* (the shell token) as a JS global so a loopback launch can still perform management when no API key is configured."""
     html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
     # json.dumps escapes quotes/backslashes; also escape "<" so neither value can
     # break out of the <script> element (defence in depth). The nonce is
@@ -117,13 +81,7 @@ def _index_html_with_shell_token(token: str, nonce: str = "") -> str:
 
 
 def _host_header_hostname(host: str) -> str:
-    """The bare hostname portion of a ``Host`` header value, with any
-    ``:port`` suffix and IPv6 brackets stripped: ``"127.0.0.1:8642"`` ->
-    ``"127.0.0.1"``, ``"[::1]:8642"`` -> ``"::1"``, ``"localhost"`` unchanged.
-    A malformed value that this cannot parse cleanly is returned as-is, which
-    fails SAFE: ``is_loopback_host`` rejects anything that is not a literal
-    loopback string, so a garbled Host is treated as non-loopback, never as
-    loopback by accident."""
+    """The bare hostname portion of a ``Host`` header value, with any ``:port`` suffix and IPv6 brackets stripped: ``'127.0.0.1:8642'`` -> ``'127.0.0.1'``, ``'[::1]:8642'`` -> ``'::1'``, ``'localhost'`` unchanged."""
     host = host.strip()
     if host.startswith("["):
         end = host.find("]")
@@ -132,33 +90,7 @@ def _host_header_hostname(host: str) -> str:
 
 
 def _is_same_origin_document_request(request: Request) -> bool:
-    """True when *request* is same-origin with the loopback GUI shell.
-
-    An ``Origin`` header, when present, must match ``Host`` (a same-origin
-    fetch/reload); a mismatch is refused outright. When ``Origin`` is
-    ABSENT - an ordinary top-level browser navigation/reload never sends
-    one, which is the legitimate loopback GUI shell case - the ``Host``
-    header itself must ALSO be a loopback literal (127.0.0.1/localhost/::1).
-    This is not redundant with the ``loopback`` check the caller already did
-    on ``app.state.bind_host``: a DNS-rebinding attack (attacker registers a
-    domain, serves an initial page from their own IP, then repoints that
-    domain's DNS to this machine's loopback address) makes a follow-up
-    navigation that the BROWSER considers same-origin with the attacker's
-    opener page - Same-Origin Policy is computed from the URL STRING the
-    browser navigated to, never the resolved IP - so it carries no Origin
-    header at all, while its Host header is still the ATTACKER'S domain
-    string, never a literal ``127.0.0.1``/``localhost`` regardless of what
-    it resolves to. Requiring Host to be loopback-shaped in the no-Origin
-    case closes that gap without needing to know the server's own bind
-    address here.
-
-    Checked WITHOUT regard to the server's CORS config (``cors_origins``,
-    including ``"*"``): CORS decides whether a cross-origin caller may READ a
-    response body, it says nothing about whether embedding the shell token in
-    that body was safe to begin with. A wildcard or allow-listed
-    ``cors_origins`` must not change this answer - the token must never ride
-    on a response reachable from another origin, independent of what that
-    origin is later permitted to read."""
+    """True when *request* is same-origin with the loopback GUI shell."""
     origin = request.headers.get("origin")
     host = request.headers.get("host", "")
     if not origin:
@@ -182,12 +114,7 @@ SW_CACHE_LINE_RE = re.compile(r'(const CACHE = ")[^"]+(";)')
 
 
 def _sw_cacheable_files() -> list[Path]:
-    """Every FILE under STATIC_DIR the service worker's fetch handler can cache
-    first, sorted for deterministic hashing. Deliberately NOT limited to sw.js's
-    own SHELL precache list: the fetch handler runtime-caches ANY same-origin,
-    non-API GET into the same versioned cache (see sw.js's fetch listener), so a
-    non-SHELL asset (a KaTeX font, /vendor/jsQR.js, ...) goes stale exactly
-    as hard as a SHELL one and must invalidate the version the same way."""
+    """Every FILE under STATIC_DIR the service worker's fetch handler can cache first, sorted for deterministic hashing."""
     out = []
     for p in STATIC_DIR.rglob("*"):
         if not p.is_file():
@@ -200,27 +127,7 @@ def _sw_cacheable_files() -> list[Path]:
 
 
 def _compute_sw_cache_value() -> str:
-    """A short content digest over every file the service worker can cache-first
-    (see ``_sw_cacheable_files``), used as sw.js's served CACHE version.
-
-    Computed FRESH on every request from whatever is currently on disk - never
-    hand-typed, never committed to git. This is what makes it immune to the
-    incident this replaces: a hand-maintained ``localm-shell-vNN`` line shipped
-    stale THREE times (undetected by review) because bumping it depended on a
-    human remembering, and even after a hygiene gate was added to catch a
-    missed bump, the shared counter line still produced a real merge conflict
-    between any two GUI PRs landing close together. A value derived fresh from
-    the files being served has nothing checked into git to forget OR to
-    conflict over - two branches touching different assets each simply serve a
-    correct value; once merged, the tree naturally reflects both changes.
-
-    A file that cannot be read (missing, permission error) feeds a distinct
-    ``MISSING:<path>: <error>`` marker into the digest instead of crashing this
-    route - a broken asset still forces a cache-bust rather than either a 500
-    or, worse, silently serving a digest that looks unchanged. The read failure
-    is ALSO logged loudly (AGENTS.md rule 5): a client seeing stale assets
-    because of a broken install should be discoverable in the debug log, not
-    only inferable from cache behaviour."""
+    """A short content digest over every file the service worker can cache-first (see ``_sw_cacheable_files``), used as sw.js's served CACHE version."""
     h = hashlib.sha256()
     for p in _sw_cacheable_files():
         rel = p.relative_to(STATIC_DIR).as_posix()
@@ -239,28 +146,7 @@ def _compute_sw_cache_value() -> str:
 
 
 def _sw_js_response(if_none_match: "str | None" = None) -> Response:
-    """sw.js's own bytes with the CACHE constant substituted for a fresh content
-    digest (see ``_compute_sw_cache_value``). An unparseable source (the
-    placeholder line was edited into some other shape) is a real problem - fail
-    LOUD with a clear 500 rather than silently serving the placeholder text as
-    a literal cache name that could collide across unrelated deploys.
-
-    Honors a conditional GET (``If-None-Match``) with a real 304 the same way
-    ``_RevalidatingStatic`` already does for every other static asset - its own
-    docstring's contract is "no-cache does NOT disable caching: the browser
-    still caches and revalidates with the ETag, so an unchanged file is a
-    cheap 304". Routing this ONE path around that mount must not silently
-    drop that contract for it. The ETag is over the FINAL substituted body,
-    not just the computed cache value: an edit to sw.js's own logic (with no
-    watched asset changing) still changes what gets served and must not
-    collide with a stale ETag from before the edit.
-
-    ``read_text`` applies universal-newline translation, so a CRLF-checked-out
-    source (this repo's default on Windows) is served with LF line endings -
-    harmless (JS does not care) and, since it happens the same way on every
-    request, does not affect determinism; noted so a future reader diffing the
-    served bytes against the git-tracked file does not mistake the line-ending
-    difference for a real bug."""
+    """sw.js's own bytes with the CACHE constant substituted for a fresh content digest (see ``_compute_sw_cache_value``)."""
     text = (STATIC_DIR / "sw.js").read_text(encoding="utf-8")
     value = _compute_sw_cache_value()
     # Count matches BEFORE substituting, not via subn's own return count: subn(...,
@@ -287,12 +173,7 @@ def _sw_js_response(if_none_match: "str | None" = None) -> Response:
 
 
 def mint_launch_grant(app, ttl: float = 300.0) -> str:
-    """Mint a single-use, short-lived grant that the launcher/CLI puts in the
-    browser URL (``/?localm_token=<grant>``) so a just-launched loopback browser
-    lands AUTHENTICATED via a real navigation, instead of relying on the implicit
-    GET / cookie auto-seed (which a focused-but-not-reloaded tab or a warm service-
-    worker cache can skip). Stored in-process on ``app.state.launch_grants`` (dies on
-    restart); expired grants are pruned on each mint so the dict cannot grow."""
+    """Mint a single-use, short-lived grant that the launcher/CLI puts in the browser URL (``/?localm_token=<grant>``) so a just-launched loopback browser lands AUTHENTICATED via a real navigation, instead of relying on the implicit GET / cookie auto-seed (which a focused-but-not-reloaded tab or a warm ser..."""
     import secrets as _secrets
     import time as _time
     grants = getattr(app.state, "launch_grants", None)
@@ -308,9 +189,7 @@ def mint_launch_grant(app, ttl: float = 300.0) -> str:
 
 
 def _consume_launch_grant(app, token: str) -> bool:
-    """Redeem a launch grant: SINGLE-USE (popped) and not expired. False for an
-    unknown/used/expired token (so a replayed or guessed token simply falls through
-    to the normal key gate, never an error that would confirm anything)."""
+    """Redeem a launch grant: SINGLE-USE (popped) and not expired."""
     import time as _time
     if not token:
         return False
@@ -320,15 +199,7 @@ def _consume_launch_grant(app, token: str) -> bool:
 
 
 def mint_pull_grant(app, spec: str, ttl: float = 120.0) -> str:
-    """Mint a single-use, short-lived grant binding a specific model *spec* to an
-    unguessable token (SEC-PULL-CONFIRM). ``localm gui --pull SPEC`` puts this in
-    the deep link (``?pull=SPEC&pull_token=...``) so ITS OWN browser tab can
-    auto-start the download with zero clicks; a forged ``?pull=`` link (any other
-    page, or a hidden iframe on any site while localm runs locally) cannot know
-    this secret, so the frontend falls back to an explicit human confirmation
-    instead (see init.js) - a download never starts from a URL alone. Stored
-    in-process on ``app.state.pull_grants`` (dies on restart); expired grants are
-    pruned on each mint so the dict cannot grow."""
+    """Mint a single-use, short-lived grant binding a specific model *spec* to an unguessable token (SEC-PULL-CONFIRM). ``localm gui --pull SPEC`` puts this in the deep link (``?pull=SPEC&pull_token=...``) so ITS OWN browser tab can auto-start the download with zero clicks; a forged ``?pull=`` link (any ot..."""
     import secrets as _secrets
     import time as _time
     grants = getattr(app.state, "pull_grants", None)
@@ -344,12 +215,7 @@ def mint_pull_grant(app, spec: str, ttl: float = 120.0) -> str:
 
 
 def consume_pull_grant(app, spec: str, token: str) -> bool:
-    """Redeem a pull grant: SINGLE-USE, not expired, and bound to the EXACT spec
-    it was minted for (so a leaked/observed token cannot be replayed to authorise
-    pulling a different model). Only popped on an actual match or once expired -
-    a mismatched-spec probe must not burn an otherwise-still-valid grant, or a
-    single wrong guess could deny the legitimate redemption that follows it.
-    False for an unknown/used/expired/mismatched token."""
+    """Redeem a pull grant: SINGLE-USE, not expired, and bound to the EXACT spec it was minted for (so a leaked/observed token cannot be replayed to authorise pulling a different model)."""
     import time as _time
     if not token:
         return False
@@ -368,14 +234,7 @@ def consume_pull_grant(app, spec: str, token: str) -> bool:
 
 
 def _set_session_cookies(response, key: str, *, secure: bool) -> None:
-    """Establish the auth cookie on *response* for a loopback owner: mint an
-    OPAQUE server-side session for the current owner *key* and set the HttpOnly
-    ``localm_session`` cookie to the SESSION ID (never the key, so it never touches
-    page JS and rolling the key does not invalidate it). It carries SESSION_MAX_AGE
-    so the session PERSISTS across a browser/PWA restart (SEAMLESS). No-op if *key*
-    is not a valid key. The CSRF token is DERIVED from the session and fetched by
-    the client from GET /api/session, so there is no separate CSRF cookie to set (or
-    to fall out of sync with the session, the pre-rework 'missing CSRF token' bug)."""
+    """Establish the auth cookie on *response* for a loopback owner: mint an OPAQUE server-side session for the current owner *key* and set the HttpOnly ``localm_session`` cookie to the SESSION ID (never the key, so it never touches page JS and rolling the key does not invalidate it)."""
     from localm import scopes as S, sessions
     from localm.auth import (_hash_key, _is_owner_key, fs_access_for,
                              rag_roots_for, verify)
@@ -439,21 +298,7 @@ class PullTokenRedeemRequest(BaseModel):
 
 
 class RuntimeSetupRequest(BaseModel):
-    """Body for POST /api/runtime/update - the GUI's form of the three
-    `localm setup-llama` options a GUI-only user could not otherwise reach.
-
-    ALL FIELDS ARE OPTIONAL AND THE WHOLE BODY MAY BE ABSENT, deliberately:
-    an empty request still means exactly what it meant before they existed
-    ("re-provision what is installed"), so no existing caller changes.
-
-    backend:  one of setup_llama.BACKENDS, or None to keep the installed one
-              (and "auto" when nothing is installed - the first-provision case).
-    tag:      a release tag to install AND PIN, exactly as --tag does, or None
-              to leave the pin alone. The two words 'default' and 'latest' carry
-              the same meaning here as on the command line.
-    rollback: mirrors --rollback: pin and install the previous build recorded
-              for the chosen (or installed) backend. Mutually exclusive with
-              tag, exactly as the CLI refuses both at once."""
+    """Body for POST /api/runtime/update - the GUI's form of the three `localm setup-llama` options a GUI-only user could not otherwise reach."""
 
     backend: str | None = None
     tag: str | None = None
@@ -461,14 +306,7 @@ class RuntimeSetupRequest(BaseModel):
 
 
 class MediaPreflightRequest(BaseModel):
-    """Model-relevant overrides for a pre-generate model-existence check. Only
-    the fields that can change WHICH model filename a loader node references -
-    prompt text, seed, steps, dimensions, etc. never affect that and are not
-    accepted here. Image uses clip_name1/clip_name2/lora_name; music uses
-    ckpt_name. ``model_overrides`` is the per-slot node_id/input_name dict from
-    the Workflow panel's model dropdowns (see apply_model_overrides()) - shared
-    by all three media types, applied first, exactly like the real generate
-    call, so a picked-but-not-installed model is caught here too."""
+    """Model-relevant overrides for a pre-generate model-existence check."""
     clip_name1: str | None = None
     clip_name2: str | None = None
     lora_name: str | None = None
@@ -555,9 +393,7 @@ _SHARE_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".heic", 
 
 
 def _share_inbox() -> Path:
-    """Transient inbox for files shared INTO localm from a phone (PWA share
-    target). Lives under the data dir; entries are deleted once the app ingests
-    them, so it never accumulates."""
+    """Transient inbox for files shared INTO localm from a phone (PWA share target)."""
     from localm.config import home_dir
     d = home_dir() / "share_inbox"
     d.mkdir(parents=True, exist_ok=True)
@@ -570,20 +406,13 @@ _SHARE_NO_OWNER = "-"
 
 
 def _share_entry_name(owner: "str | None", fid: str, filename: str) -> str:
-    """Build an inbox filename carrying its creator's principal id, so a later
-    request can be checked against job_owner_ok before it is read or cleared."""
+    """Build an inbox filename carrying its creator's principal id, so a later request can be checked against job_owner_ok before it is read or cleared."""
     token = owner if owner else _SHARE_NO_OWNER
     return f"{fid}__{token}__{filename}"
 
 
 def _parse_share_entry(path: Path) -> "tuple[str, str | None, str]":
-    """(fid, owner_or_None, filename) from an inbox entry's name.
-
-    maxsplit=2 so a filename that itself contains "__" is not corrupted (fid and
-    the owner token are both constructed to never contain "_", so the first two
-    separators are unambiguous). Falls back to the pre-ownership two-part format
-    (owner=None, i.e. unrestricted) for any entry left over from before this
-    field existed, so an old on-disk inbox never breaks the listing."""
+    """(fid, owner_or_None, filename) from an inbox entry's name."""
     parts = path.name.split("__", 2)
     if len(parts) == 3:
         fid, token, name = parts
@@ -616,10 +445,7 @@ def _disp_param(disposition: bytes, key: bytes) -> "bytes | None":
 
 
 def _parse_multipart(body: bytes, boundary: bytes):
-    """Minimal multipart/form-data parser - no python-multipart dependency, in
-    keeping with localm's self-contained rule (it already hand-builds multipart
-    for ComfyUI uploads). Returns (fields: dict[str,str], files: list of
-    (filename, content_type, data))."""
+    """Minimal multipart/form-data parser - no python-multipart dependency, in keeping with localm's self-contained rule (it already hand-builds multipart for ComfyUI uploads)."""
     fields: dict = {}
     files: list = []
     for raw in body.split(b"--" + boundary):
@@ -665,26 +491,7 @@ _BAD_NAME_CHARS = pathsafe.WINDOWS_RESERVED_NAME_CHARS
 
 
 def _name_is_safe(safe: str) -> bool:
-    """True if *safe* (already a basename) is a usable, listable file name.
-
-    A shared security guard, not a local helper. Several call sites depend on it,
-    covering both the write paths (/api/upload, /share-target) and the delete
-    path (via _confined_upload_path), so widening _BAD_NAME_CHARS widens what all
-    of them accept. Grep for the callers before changing it rather than trusting
-    this sentence: a list written into a docstring goes stale the moment someone
-    adds one.
-
-    This is a bare character check plus a '.'/'..' rejection, with NO filesystem
-    call - the right shape for share.py's write path, which folds *safe* into an
-    already-unique, UUID-prefixed name rather than resolving it directly. Windows
-    reserved DEVICE names (con, nul, com1 ...) are deliberately NOT rejected here,
-    matching pathsafe.confined_name's documented contract; the upload write path
-    stays non-clobbering via _unique_upload_target's exists() check, so only a
-    bare extensionless device name behaves unusually on Windows. A caller that
-    resolves *safe* against a real directory (confinement, directory-escape,
-    OS-level alias substitution) needs the FULL check - see _confined_upload_path,
-    which uses pathsafe.confined_name for that.
-    """
+    """True if *safe* (already a basename) is a usable, listable file name."""
     return bool(safe) and safe not in (".", "..") and not (set(safe) & _BAD_NAME_CHARS)
 
 
@@ -697,27 +504,7 @@ def _uploads_dir() -> Path:
 
 
 def _confined_upload_path(name: str) -> Path:
-    """Resolve a user-supplied file name to a path INSIDE the uploads dir. Strips
-    any directory components (basename only) and rejects anything that would
-    resolve outside the uploads dir - so '..', absolute paths, encoded slashes, or
-    a name with illegal/control chars cannot traverse out or crash. Raises
-    HTTPException(400) on an unsafe name.
-
-    This is the ONLY caller in this file that resolves a raw name against a
-    real directory without going through _unique_upload_target's retry-with-
-    counter first (it backs DELETE /api/uploads/{name}, where the point is to
-    remove the EXISTING file, not to find a fresh name) - so it is also the
-    one place an OS-level alias (an NTFS 8.3 short name resolving to a
-    pre-existing, differently-named file) could have let a delete request for
-    a name the caller never saw land on someone else's real file, passing
-    confinement (the write/delete stays inside the uploads dir - not CWE-22)
-    while acting on the wrong target. pathsafe.confined_name closes this: its
-    strict resolved-name-equals-requested-name check rejects an alias as a
-    side effect of the same containment check, with no separate alias logic
-    needed - and it also carries the same reserved-character rejection
-    _name_is_safe already applies here, so this call is not weakening
-    anything, only adding the confinement + alias guarantee neither
-    _name_is_safe nor a bare .resolve() provided on its own."""
+    """Resolve a user-supplied file name to a path INSIDE the uploads dir."""
     base = _uploads_dir()
     safe = Path(name or "").name            # basename only, drops any dir parts
     if not _name_is_safe(safe):
@@ -726,11 +513,7 @@ def _confined_upload_path(name: str) -> Path:
 
 
 def _unique_upload_target(base: Path, safe_name: str) -> Path:
-    """A non-clobbering path for *safe_name* in *base*: 'note.txt' -> 'note (1).txt'
-    if it already exists (mirrors the log-export dedup), so an upload never
-    silently overwrites an existing file. This exists() check is also what saves
-    a bare Windows device name (nul, con ...) from silently discarding its data -
-    see _name_is_safe's docstring."""
+    """A non-clobbering path for *safe_name* in *base*: 'note.txt' -> 'note (1).txt' if it already exists (mirrors the log-export dedup), so an upload never silently overwrites an existing file."""
     target = base / safe_name
     if not target.exists():
         return target
@@ -750,19 +533,7 @@ def attach_gui(
     switch_model,
     active_model,
 ) -> SessionManager:
-    """
-    Add GUI routes and static serving to *app*.
-
-    Parameters
-    ----------
-    self_url:
-        Base URL of this server's own /v1 API - coder agents talk to the
-        model through it (e.g. ``http://127.0.0.1:8642/v1``).
-    switch_model:
-        ``Callable[[str], Awaitable[None]]`` - swaps the active engine.
-    active_model:
-        ``Callable[[], str]`` - name of the currently served model.
-    """
+    """Add GUI routes and static serving to *app*."""
     manager = SessionManager()
 
     # The background-job manager is created by attach_engine now (kernel level,

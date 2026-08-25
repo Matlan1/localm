@@ -1,10 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Model routes: list, registry detail, and explicit load/unload.
-
-Extracted verbatim from create_app(); behavior unchanged. Reads the live engine
-and inference semaphore from the http_server module globals (a model swap that
-reassigns them is reflected here).
-"""
+"""Model routes: list, registry detail, and explicit load/unload."""
 
 from __future__ import annotations
 
@@ -187,16 +182,7 @@ def register(app: FastAPI, ctx) -> None:
     @app.post("/v1/models/unload",
               dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
     async def unload_model(model: str | None = None):
-        """
-        Release model(s) from GPU/CPU memory.
-
-        With no `model`, releases EVERY currently-loaded model (unchanged
-        default behavior) - call this before a VRAM-intensive task (e.g.
-        ComfyUI FLUX generation) so the GPU memory is fully available. With
-        `model` set, releases only that one, leaving any other loaded models
-        untouched. Either way, the next matching /v1/chat/completions call
-        reloads lazily.
-        """
+        """Release model(s) from GPU/CPU memory."""
         if model:
             from localm.config import load_registry
             if model not in load_registry() and model != _hs._default_model_name:
@@ -207,34 +193,13 @@ def register(app: FastAPI, ctx) -> None:
     @app.post("/v1/models/rename",
               dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
     async def rename_model(model: str, new_name: str):
-        """
-        Rename a registered model, re-keying a loaded engine in place.
-
-        Unlike an alias, the old name stops working: this MOVES the
-        registration (and best-effort migrates config/job/RAG references that
-        named it). A model that is currently loaded keeps serving, under the
-        new name.
-
-        This lives on the always-present /v1 surface rather than only on the
-        GUI's /api one because the caller that needs it most is `localm
-        rename`, and a headless `localm serve` has no GUI routes. Renaming a
-        model from a separate process CANNOT re-key this server's in-memory
-        engine map, which would leave the engine orphaned under a name the
-        registry no longer has - so the CLI asks the server to do the whole
-        rename here instead, where the registry move and the re-key happen in
-        one process with no window between them.
-        """
+        """Rename a registered model, re-keying a loaded engine in place."""
         return await _hs.rename_registered_model(model, new_name)
 
     @app.post("/v1/models/load",
               dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
     async def load_model(model: str | None = None):
-        """
-        Explicitly reload a model into memory.
-
-        Use this endpoint if you want to pre-warm the model before the first
-        inference request. If no model is specified, pre-warms the default model.
-        """
+        """Explicitly reload a model into memory."""
         name = model or _hs._active_model_name or _hs._default_model_name
         if not name:
             raise HTTPException(503, "No model specified or configured to load")

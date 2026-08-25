@@ -1,15 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""
-Tests for bearer-token authentication in localm.inference.http_server.
-
-Covers:
-  - Open mode (no LOCALM_API_KEY set) - all requests allowed
-  - Protected mode (LOCALM_API_KEY set) - wrong/missing token → 401, correct → 200
-  - /health stays open in both modes; /v1/models requires models:read once a key is set
-
-Key invariant: _require_auth reads os.environ at REQUEST time, so env vars
-must be active when the request is processed (not just at app-creation time).
-"""
+"""Tests for bearer-token authentication in localm.inference.http_server."""
 
 import os
 import pytest
@@ -56,7 +46,7 @@ def _make_engine():
 
 @pytest.fixture()
 def client():
-    """TestClient with no API key set (open mode). Context manager triggers ASGI lifespan."""
+    """TestClient with no API key set (open mode)."""
     os.environ.pop("LOCALM_API_KEY", None)
     with TestClient(create_app(_make_engine()), raise_server_exceptions=True) as c:
         yield c
@@ -64,7 +54,7 @@ def client():
 
 @pytest.fixture()
 def protected_client():
-    """TestClient for protected-mode tests. Lifespan triggered; env var patched per-request."""
+    """TestClient for protected-mode tests."""
     os.environ.pop("LOCALM_API_KEY", None)
     with TestClient(create_app(_make_engine()), raise_server_exceptions=True) as c:
         yield c
@@ -183,8 +173,7 @@ class TestUnprotectedEndpoints:
         assert r.status_code == 200
 
     def test_models_list_requires_key_when_configured(self, protected_client):
-        """With a key set, /v1/models requires it (models:read); the owner key
-        (implicit ADMIN) is accepted. It is no longer open like /health."""
+        """With a key set, /v1/models requires it (models:read); the owner key (implicit ADMIN) is accepted."""
         with patch.dict(os.environ, {"LOCALM_API_KEY": SECRET}):
             denied = protected_client.get("/v1/models")
             assert denied.status_code == 401

@@ -1,11 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Opaque server-side browser sessions (localm/sessions.py).
-
-The session store is what decouples "this browser is logged in" from the raw API
-key: rolling the key must NOT invalidate live sessions, the id is stored only as a
-hash, expiry (absolute + idle) and revocation work, and a corrupt store fails
-CLOSED. Each test carries its negative case.
-"""
+"""Opaque server-side browser sessions (localm/sessions.py)."""
 
 import json
 import time

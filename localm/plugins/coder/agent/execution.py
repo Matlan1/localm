@@ -1,8 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Single tool-call execution: the security-critical dispatch path (disabled-tool
-gate, scope check, dry-run, network policy, fail-closed confirmation, snapshot,
-hidden-arg injection, the failure breaker), plus patch-mode capture, the
-confirm prompt, scope resolution, and the per-write map refresh. Mixed into Agent."""
+"""Single tool-call execution: the security-critical dispatch path (disabled-tool gate, scope check, dry-run, network policy, fail-closed confirmation, snapshot, hidden-arg injection, the failure breaker), plus patch-mode capture, the confirm prompt, scope resolution, and the per-write map refresh."""
 
 from __future__ import annotations
 
@@ -37,20 +34,7 @@ from .scope import _scope_pattern
 
 
 def _looks_like_drive_path(tok: str) -> bool:
-    """True for a Windows drive-qualified token: ``C:``, ``C:\\x``, ``d:/x``.
-
-    The drive letter must be a single ASCII letter followed by a separator or the
-    end of the token. Testing only for a colon in position 1 made every ``a:b``
-    token a path, so ``5:30`` and ``4:3`` (an ffmpeg offset, an aspect ratio) and
-    ``s:old:new:`` (a sed delimiter) were all reported as out-of-scope paths.
-    ``C:foo``, drive-relative with no separator, is given up deliberately: it is
-    rare and cannot be told apart from an ordinary key:value argument.
-
-    A real drive-qualified path carries exactly ONE colon, so requiring that
-    also rejects ``s:/usr/local:/opt:g``. That is the COMMON sed form (a colon
-    delimiter is chosen precisely because the pattern contains slashes), and the
-    separator rule alone would still have read it as a drive path.
-    """
+    """True for a Windows drive-qualified token: ``C:``, ``C:\\x``, ``d:/x``."""
     if len(tok) < 2 or tok[1] != ":" or tok.count(":") != 1:
         return False
     if not (tok[0].isascii() and tok[0].isalpha()):
@@ -59,13 +43,7 @@ def _looks_like_drive_path(tok: str) -> bool:
 
 
 def _is_path_like(tok: str) -> bool:
-    """True when a shell token is a path by SYNTAX alone, with no filesystem look.
-
-    Absolute, drive-qualified (``C:\\x``, bare ``E:``), explicitly relative
-    (``./``, ``../``, ``~/``), or carrying a ``/../`` segment. Everything else is
-    treated as not-a-path: see ``_shell_paths_outside_scope`` for why this may
-    never fall back to asking the filesystem, and what that costs.
-    """
+    """True when a shell token is a path by SYNTAX alone, with no filesystem look."""
     norm = tok.replace("\\", "/")
     return (norm.startswith(("./", "../", "~/", "/"))
             or "/../" in norm
@@ -74,50 +52,7 @@ def _is_path_like(tok: str) -> bool:
 
 class _ExecutionMixin:
     def _scope_rel(self, value: str) -> Optional[str]:
-        """
-        Resolve a path/glob arg to a cwd-relative POSIX string for scope
-        matching, or return None if it escapes cwd.
-
-        Relative paths are joined onto cwd; absolute paths are accepted only
-        when they live inside cwd (an in-cwd absolute path that matches the
-        scope must pass - BUG-6). Glob metacharacters in *value* (e.g.
-        ``**/*.py`` for grep/search_replace) survive resolution: they are kept
-        verbatim in the relative string and matched against the scope as-is.
-
-        The VALUE is never touched on disk, not even to refuse it. This gate ran
-        ``Path(raw).resolve()`` on an absolute path that was not lexically under
-        cwd, so a ``--scope`` session where the model emitted an absolute path
-        anywhere on the machine stat-ed precisely that path (realpath + stat,
-        measured) in order to decide it was out of scope. A stat is an access:
-        at the access point a legitimate gate-check, a command gone wrong and a
-        live injection attempt are indistinguishable, so the gate must not have
-        the capability rather than try to use it carefully. Same defect class the
-        shell WARNING path was cleared of (see :meth:`_scope_rel_lexical`), which
-        deliberately left this one; this closes it.
-
-        The cwd ANCHOR still resolves, and that is a different thing: it is not a
-        model-supplied value but the owner's own working directory, which this
-        process is already running in. It is kept exactly as it was so this change
-        has one behavioural delta and one only.
-
-        That delta is strictly in the fail-CLOSED direction, which a confinement
-        gate requires. With R = ``self.cwd.resolve()``, a path was allowed when R
-        prefixed it OR R prefixed its resolved form; it is now allowed only when R
-        prefixes it. The new set is a strict subset of the old one, so refusal can
-        only widen, never narrow. Nor can dropping the fallback open an escape:
-        the escape direction (a path lexically INSIDE cwd that symlinks OUT)
-        satisfies the FIRST ``relative_to`` and never reached the fallback at all.
-        Real escapes are caught by ``tools/base.py::_confine``, which resolves at
-        actual execution time (where the tool is about to open the file anyway,
-        so the stat is inherent) and is untouched.
-
-        Cost, accepted: an absolute path that is lexically OUTSIDE cwd but reaches
-        INSIDE through a symlink now reads as outside. The fallback was added
-        speculatively ("for symlinks etc.") rather than for a reported case, no
-        scope or confinement test covers it, and the variant where cwd ITSELF is
-        symlinked cannot arise - every Agent construction site passes an
-        already-resolved cwd.
-        """
+        """Resolve a path/glob arg to a cwd-relative POSIX string for scope matching, or return None if it escapes cwd."""
         raw = str(value).replace("\\", "/")
         p = Path(raw)
         cwd = self.cwd.resolve()
@@ -146,29 +81,7 @@ class _ExecutionMixin:
         return _scope_pattern(self.scope).match(rel) is not None
 
     def _scope_rel_lexical(self, value: str) -> Optional[str]:
-        """Filesystem-free twin of :meth:`_scope_rel`, for the shell WARNING only.
-
-        Same contract (cwd-relative POSIX string, or None if it escapes cwd). The
-        two no longer differ in how they treat the model-supplied VALUE: neither
-        resolves it, because neither may stat what it is deciding about. What is
-        left is the cwd ANCHOR, and that difference is deliberate.
-
-        ``os.path.abspath`` rather than ``resolve()`` for cwd here: it normalises
-        and anchors without a symlink lookup, so no part of this call stats
-        ANYTHING at all. That total property is what a warning needs, because it
-        runs over a command the model has merely PROPOSED, before any confirmation
-        and before anything executes. :meth:`_scope_rel` keeps ``resolve()`` for
-        its anchor instead, because it is a hard gate whose refusal set must not
-        widen or narrow by accident, and swapping the anchor would change which
-        paths match (in the cwd-is-symlinked case, in the more permissive
-        direction). Statting the owner's own working directory is not the exposure
-        this rule is about; statting a value the model named is.
-
-        Cost, shared with the enforcement twin: a path that reaches cwd only
-        through a symlink reads as outside. For a best-effort warning that is the
-        safe direction (it can over-report a link, never miss a real escape), and
-        it is the only one that keeps the check from touching what it inspects.
-        """
+        """Filesystem-free twin of :meth:`_scope_rel`, for the shell WARNING only."""
         raw = str(value).replace("\\", "/")
         p = Path(raw)
         cwd = Path(os.path.abspath(self.cwd))
@@ -187,22 +100,14 @@ class _ExecutionMixin:
         return "/".join(parts)
 
     def _scope_allows_lexical(self, value: str) -> bool:
-        """True if *value* is within the active scope, decided without any
-        filesystem access. See :meth:`_scope_rel_lexical`."""
+        """True if *value* is within the active scope, decided without any filesystem access."""
         rel = self._scope_rel_lexical(value)
         if rel is None:
             return False
         return _scope_pattern(self.scope).match(rel) is not None
 
     def _scope_violation(self, call: ToolCall) -> Optional[str]:
-        """
-        Return the first in-scope-checked arg value that falls outside the
-        active scope, or None if the call is allowed.
-
-        Defaults to checking the ``path`` arg; ``_SCOPE_PATH_ARGS`` overrides
-        this for tools whose primary target is a ``glob`` or ``output_path``
-        arg (and may add ``path`` alongside it).
-        """
+        """Return the first in-scope-checked arg value that falls outside the active scope, or None if the call is allowed."""
         # MCP and PLUGIN tools are registered dynamically with unknown arg schemas,
         # so an owner's --scope confines their file ops via a broad set of common
         # path-arg names (CHK-MCP-SCOPE / CHK-SCOPE-PLUGIN). Best-effort: an unusual
@@ -225,38 +130,7 @@ class _ExecutionMixin:
         return None
 
     def _shell_paths_outside_scope(self, call: ToolCall) -> list[str]:
-        """Best-effort: the path-like tokens of a shell call that fall outside the
-        active scope. Empty when nothing suspicious was found OR when the check
-        simply could not tell - it is a heuristic, never a gate.
-
-        PURELY LEXICAL, and that is the point: a model-supplied token is never
-        stat-ed, resolved, or ``.exists()``-ed. This runs over a command the model
-        has merely PROPOSED, before any confirmation and before anything executes,
-        so a filesystem probe here reaches out of the workspace on the model's say
-        so alone. ``(self.cwd / tok)`` drops cwd entirely for a drive-anchored
-        token, so the old exists-under-cwd guess stat-ed precisely whatever the
-        model named, anywhere on the machine. There is no safe stat at this point:
-        a legitimate probe, a command gone wrong, and a live injection attempt are
-        indistinguishable at the access point, so the check must not have the
-        capability at all rather than try to use it carefully.
-
-        A token therefore counts as path-like only by SYNTAX (``_is_path_like``).
-        An arg the tool's own schema DECLARES to be a path (run_tests' ``path``)
-        needs no heuristic and is checked whole, spaces and all.
-
-        Trade-off, accepted: a bare-relative path that merely exists
-        (``cat secrets.txt``, ``git -C docs``) is no longer flagged, because
-        telling it apart from ``npm test`` in a repo that has a ``test/`` folder
-        is exactly what the removed probe did. A separator rule is not a
-        replacement - it re-flags ``sed s/foo/bar/``, ``sed s:/usr/local:/opt:g``
-        and a quoted ``-m 'fix a/b handling'``, the false positives that cost this
-        check its credibility once already. What survives is the high-signal case
-        with no false positives: a command reaching OUT of the workspace. And the
-        trade weakens no boundary, because this was never one: it is a warning
-        that never blocked anything, while hard confinement (the disabled-tool
-        gate, and ``_scope_violation`` for file tools) is enforced elsewhere and
-        is unchanged by this.
-        """
+        """Best-effort: the path-like tokens of a shell call that fall outside the active scope."""
         flagged: list[str] = []
         for arg in _SHELL_COMMAND_ARGS.get(call.name, ()):
             raw = call.args.get(arg)
@@ -306,10 +180,7 @@ class _ExecutionMixin:
         return flagged
 
     def _warn_shell_outside_scope(self, call: ToolCall) -> None:
-        """Warn (never block) when a shell command references paths outside the
-        active scope. The scope glob cannot confine a process, so this is the only
-        signal the user gets that the command they are about to see run is not
-        bounded by the scope they set."""
+        """Warn (never block) when a shell command references paths outside the active scope."""
         print_warning = _agent.print_warning  # live: honour a patched agent.print_warning
         flagged = self._shell_paths_outside_scope(call)
         if not flagged:
@@ -640,10 +511,7 @@ class _ExecutionMixin:
         return result
 
     def _track_tool_failure(self, call: ToolCall, result: ToolResult) -> ToolResult:
-        """Update the per-tool + global failure streaks and arm the circuit
-        breakers; on a failure, fold escalating recovery hints into the result.
-        Returns the (possibly augmented) result. Split out of _execute_tool; the
-        breaker flags it sets are checked back in _loop."""
+        """Update the per-tool + global failure streaks and arm the circuit breakers; on a failure, fold escalating recovery hints into the result."""
         # Track consecutive failures and inject escalating recovery hints;
         # at 4 identical failures the circuit breaker stops the task after
         # this batch (checked in _loop) instead of burning the turn budget.
@@ -682,13 +550,7 @@ class _ExecutionMixin:
 
     def _post_tool_success(self, call: ToolCall, result: ToolResult,
                            snapshots: "dict[str, bytes | None]") -> None:
-        """Post-success bookkeeping split out of _execute_tool: record changed
-        code files for the changed-files tracker and clear the unverified-writes
-        set when the agent runs the test suite (or a test command).
-
-        *snapshots* maps each path the call targeted to its pre-call bytes (a
-        multi-file tool such as edit_files supplies several), so every file it
-        wrote is tracked, not just the first."""
+        """Post-success bookkeeping split out of _execute_tool: record changed code files for the changed-files tracker and clear the unverified-writes set when the agent runs the test suite (or a test command)."""
         # Self-verification bookkeeping: remember code files changed on disk,
         # forget them once the agent runs the test suite (or a test command)
         if result.ok and not self.dry_run and not self.patch_mode:
@@ -732,11 +594,7 @@ class _ExecutionMixin:
                     self._unverified_writes.add(rel)
 
     def _patch_mode_intercept(self, call: ToolCall) -> Optional[str]:
-        """
-        Compute a unified diff for a write/edit/patch call without touching disk.
-
-        Returns the diff string, or None if the diff cannot be computed.
-        """
+        """Compute a unified diff for a write/edit/patch call without touching disk."""
         # edit_files spans several files, so it has no single old_content -
         # without this branch compute_tool_diff returns None, the intercept
         # reports "cannot be captured", and patch mode silently loses the edit.
@@ -757,34 +615,15 @@ class _ExecutionMixin:
         return compute_tool_diff(call.name, call.args, old_text)
 
     def current_patch(self) -> str:
-        """The accumulated unified diff so far, WITHOUT clearing the buffer.
-
-        Split out of :meth:`flush_patch` for readers that only want to LOOK:
-        a GUI "show me the patch" request, a status poll, a preview. Reaching
-        for ``flush_patch`` there would destroy the very thing it was asked to
-        display, and the destruction is invisible at the call site because the
-        RESULT looks identical the first time.
-        """
+        """The accumulated unified diff so far, WITHOUT clearing the buffer."""
         return "\n".join(c for c in self._patch_chunks if c)
 
     def has_patch(self) -> bool:
-        """Is there anything in the patch buffer? Cheap, and exactly equivalent
-        to ``bool(self.current_patch())``.
-
-        Separate from ``current_patch`` because ``CoderSession.info()`` needs
-        only the boolean and is called once PER SESSION by the session-list
-        route: joining every session's whole diff to throw the string away
-        would put an O(patch size) allocation on whatever timer that endpoint
-        ends up being polled on.
-        """
+        """Is there anything in the patch buffer? Cheap, and exactly equivalent to ``bool(self.current_patch())``."""
         return any(c for c in self._patch_chunks)
 
     def flush_patch(self, output_path: Optional[Path] = None) -> str:
-        """
-        Return the accumulated unified diff (and optionally write it to a file).
-
-        Clears the internal patch buffer.
-        """
+        """Return the accumulated unified diff (and optionally write it to a file)."""
         content = self.current_patch()
         self._patch_chunks.clear()
         if output_path is not None:
@@ -793,37 +632,13 @@ class _ExecutionMixin:
         return content
 
     def _confirm_agent_label(self) -> Optional[str]:
-        """Who is asking, for a confirmation prompt: this sub-agent's name, or None.
-
-        ``parent`` is set only when this Agent IS a sub-agent, so it - not the name,
-        which every Agent has - is what distinguishes "a child is asking on the
-        human's shared confirmation channel" from "the session the human started is
-        asking for itself". The top-level agent deliberately gets None so its own
-        prompts are worded exactly as they always were.
-
-        This is the ONE place a child's identity enters the confirm chain, so every
-        delegation path (worktree-isolated parallel dispatch, spawn_agent, background
-        sub-agents) is attributed by construction rather than each re-implementing it.
-
-        A child with a falsy name still gets a label. ``spawn_agent``'s ``name`` comes
-        straight from the model's tool-call arguments, and an empty one would collapse
-        to "no label" - making a delegated request look exactly like the human's own,
-        which is the confusion this whole path exists to prevent. Being unable to say
-        WHICH child is asking is tolerable; letting a child's prompt pass for the
-        user's own is not.
-        """
+        """Who is asking, for a confirmation prompt: this sub-agent's name, or None."""
         if self.parent is None:
             return None
         return self.name or "sub-agent"
 
     def _confirm_tool(self, call: ToolCall) -> bool:
-        """
-        Ask the user to approve a destructive tool call.
-
-        For *write_file*, shows a coloured unified diff of the proposed change
-        before the prompt so the user can see exactly what will happen.
-        For all other destructive tools, falls back to a plain y/N prompt.
-        """
+        """Ask the user to approve a destructive tool call."""
         # Live-attribute access so tests patching agent.confirm / confirm_diff /
         # print_diff_preview are honoured (the names moved into this submodule).
         confirm = _agent.confirm
@@ -876,25 +691,7 @@ class _ExecutionMixin:
 
     def _refresh_map_for_tool(self, call: ToolCall,
                               result: "ToolResult | None" = None) -> None:
-        """Update the project map for files touched by a write/edit tool call.
-
-        *result* is optional (existing callers - and the test that drives
-        this directly - omit it) and consulted only for a tool whose targets
-        are not knowable from the call args alone: search_replace's paths
-        come from its own glob+regex sweep, reported post-call via
-        ToolResult.changes, not from a `path`-shaped arg _call_target_paths()
-        could resolve ahead of time.
-
-        run_shell is a step further: it has no `path`-shaped arg AT ALL (only
-        a free-form `command` string), so there is no path to resolve even
-        post-call. Mark the whole map dirty instead and return - deliberately
-        NOT calling _rebuild_system_prompt() here, unlike every other branch
-        below. That rebuild is what actually reconciles the map (see
-        ProjectMap._rescan_if_dirty via context._build_messages, called once
-        per turn), so triggering it eagerly on every run_shell call would scan
-        on every call instead of once for however many run_shell calls happen
-        before the map is next actually read.
-        """
+        """Update the project map for files touched by a write/edit tool call."""
         if call.name == "run_shell":
             self._project_map.mark_dirty()
             return

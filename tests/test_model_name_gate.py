@@ -1,25 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""A model NAME from an untrusted caller must never resolve to an arbitrary path.
-
-registry.get_model_info() falls through to ``Path(name)`` on a registry miss and
-accepts any GGUF / Ollama blob / HF directory anywhere on disk. That fallthrough is
-a deliberate, documented CLI feature (``localm run D:/models/foo.gguf``), but the
-jobs plugin and the MCP server reached it with a name straight off the wire, and
-neither is gated behind a privileged scope. For an HF *directory* the chosen
-backend was HFBackend, which passed ``trust_remote_code=True`` - so transformers
-imported and executed the model directory's own .py via ``auto_map``: arbitrary
-code execution as the server user (CodeQL alerts 11-17, 48, 49, 65-71, 73-76,
-108-111).
-
-The fix is an opt-in (``allow_direct_path``), not a deletion, plus a
-registry-membership check at each untrusted entry point.
-
-NOTE ON WHAT (e) PROVES. hf.load() calls _require_torch() FIRST, so on a
-torch-less GGUF-only build the whole branch raises before from_pretrained is ever
-reached. An "it did not execute" observation on this box would therefore prove
-nothing at all. (e) asserts on the FLAG VALUE reaching transformers, which is the
-property that actually holds on every build.
-"""
+"""A model NAME from an untrusted caller must never resolve to an arbitrary path."""
 
 from __future__ import annotations
 
@@ -35,13 +15,7 @@ import pytest
 
 @pytest.fixture
 def home(tmp_path, monkeypatch):
-    """Isolated LOCALM_HOME with a NON-EMPTY registry.
-
-    Non-empty matters: the membership check mirrors http_server's existing
-    "only enforce registration when the registry is not empty" convention, so an
-    empty registry would skip layer 2 and test nothing. Layer 1
-    (allow_direct_path) is unconditional and is covered by (d) either way.
-    """
+    """Isolated LOCALM_HOME with a NON-EMPTY registry."""
     monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
     import localm.config as cfg
     monkeypatch.setattr(cfg, "HOME_DIR", tmp_path)
@@ -68,12 +42,7 @@ def evil_gguf(tmp_path):
 
 @pytest.fixture
 def evil_hf_dir(tmp_path):
-    """An HF model directory that declares custom code via auto_map.
-
-    This is the RCE shape: _is_hf_dir() accepts it (config.json + a tokenizer
-    file), create_backend picks HFBackend, and auto_map is what transformers
-    would import and execute when trust_remote_code is on.
-    """
+    """An HF model directory that declares custom code via auto_map."""
     d = tmp_path / "evil_hf"
     d.mkdir()
     (d / "config.json").write_text(json.dumps({
@@ -113,7 +82,7 @@ def _jobs_client(home, monkeypatch):
 # --------------------------------------------------------------------------- #
 
 def test_get_model_info_refuses_direct_path_by_default(home, evil_gguf):
-    """The default is REFUSE. This is the one unconditional security boundary."""
+    """The default is REFUSE."""
     from localm.model_manager.registry import get_model_info
     assert get_model_info(str(evil_gguf)) is None
 
@@ -204,8 +173,7 @@ def test_put_jobs_rejects_absolute_model_path(home, evil_gguf, monkeypatch):
 
 def test_persisted_job_with_absolute_path_never_reaches_engine(
         home, evil_gguf, monkeypatch):
-    """Defence in depth: rows written by an older build must be refused at RUN
-    time, and Engine() must never be constructed for one."""
+    """Defence in depth: rows written by an older build must be refused at RUN time, and Engine() must never be constructed for one."""
     from localm.plugins.builtin.jobs import runner as runner_mod
     from localm.plugins.builtin.jobs.store import Job, JobStore
 
@@ -233,11 +201,7 @@ def test_persisted_job_with_absolute_path_never_reaches_engine(
 
 
 def test_scheduler_interval_path_refuses_too(home, evil_gguf, monkeypatch):
-    """Jobs also fire UNATTENDED via the scheduler, so /run is not the only path.
-
-    run_job must return a clean error result for a poisoned row rather than
-    loading it (and must not crash the scheduler loop).
-    """
+    """Jobs also fire UNATTENDED via the scheduler, so /run is not the only path."""
     from localm.plugins.builtin.jobs import runner as runner_mod
     from localm.plugins.builtin.jobs.store import Job
 
@@ -276,8 +240,7 @@ def test_mcp_resolve_model_accepts_registered(home):
 
 
 def test_mcp_operator_default_model_may_be_a_path(home, evil_gguf):
-    """--model / LOCALM_MODEL is OPERATOR-typed, so a direct path stays legal
-    there. Gating it would break `localm mcp --model D:/models/foo.gguf`."""
+    """--model / LOCALM_MODEL is OPERATOR-typed, so a direct path stays legal there."""
     from localm.plugins.mcpserver.server import EngineCache
     engines = EngineCache(default_model=str(evil_gguf))
     assert engines.resolve_model(None) == str(evil_gguf)
@@ -302,11 +265,7 @@ def test_mcp_build_engine_rejects_absolute_path(home, evil_gguf, monkeypatch):
 # --------------------------------------------------------------------------- #
 
 def test_trust_remote_code_literal_is_gone_from_the_tree():
-    """The grep gate, as a test so it runs in CI too.
-
-    Only a config-driven variable may remain. A bare ``trust_remote_code=True``
-    literal is the defect itself.
-    """
+    """The grep gate, as a test so it runs in CI too."""
     root = Path(__file__).resolve().parents[1] / "localm"
     offenders = [
         f"{p.relative_to(root.parent)}:{i}"
@@ -333,12 +292,7 @@ def test_trust_remote_code_follows_config(home):
 
 
 def test_custom_code_model_is_refused_with_an_actionable_error(home, evil_hf_dir):
-    """A model dir declaring auto_map must raise a CLEAR error naming the flag,
-    not silently execute and not fail with an opaque transformers traceback.
-
-    This runs on a torch-less build too: the check is deliberately placed BEFORE
-    _require_torch() so the refusal is the same on every build.
-    """
+    """A model dir declaring auto_map must raise a CLEAR error naming the flag, not silently execute and not fail with an opaque transformers traceback."""
     from localm.inference.backends.hf import _check_custom_code_allowed
     with pytest.raises(RuntimeError) as exc:
         _check_custom_code_allowed(str(evil_hf_dir))
@@ -369,8 +323,7 @@ def test_ordinary_hf_dir_is_not_refused(home, tmp_path):
 # --------------------------------------------------------------------------- #
 
 def test_display_name_does_not_echo_arbitrary_config_text(evil_hf_dir):
-    """model_display_name read an attacker-named directory's config.json and
-    echoed _name_or_path straight back to the caller."""
+    """model_display_name read an attacker-named directory's config.json and echoed _name_or_path straight back to the caller."""
     from localm.inference.engine import model_display_name
     hostile = json.loads((evil_hf_dir / "config.json").read_text())["_name_or_path"]
     assert model_display_name(str(evil_hf_dir)) != hostile
@@ -386,10 +339,7 @@ def test_display_name_keeps_a_sane_value(tmp_path):
 
 
 def test_export_is_pinned(home):
-    """A dropped line in an export list fails HERE, not as an ImportError in some
-    unrelated module weeks later. Mirrors the sibling pin for is_owned_model_path;
-    two lanes edit these lists concurrently and a bad conflict resolution silently
-    removes a name."""
+    """A dropped line in an export list fails HERE, not as an ImportError in some unrelated module weeks later."""
     import localm.model_manager as mm
     assert hasattr(mm, "unregistered_model_error")
     assert "unregistered_model_error" in mm.__all__
@@ -422,9 +372,7 @@ def _mcp_handler(name, monkeypatch):
 
 
 def test_run_coder_task_refuses_unregistered_model(home, evil_gguf, monkeypatch):
-    """run_coder_task builds a command line, so 'it is argv' does not mean an
-    operator typed it: the coder CLI spawns `localm gui <model>`, whose startup
-    resolver opts into allow_direct_path."""
+    """run_coder_task builds a command line, so 'it is argv' does not mean an operator typed it: the coder CLI spawns `localm gui <model>`, whose startup resolver opts into allow_direct_path."""
     import subprocess
     spawned = []
     monkeypatch.setattr(subprocess, "run",
@@ -438,8 +386,7 @@ def test_run_coder_task_refuses_unregistered_model(home, evil_gguf, monkeypatch)
 
 
 def test_run_coder_task_allows_a_registered_model(home, monkeypatch):
-    """The gate must not break the legitimate call: a registered name proceeds
-    to the subprocess."""
+    """The gate must not break the legitimate call: a registered name proceeds to the subprocess."""
     import subprocess
     spawned = []
 
@@ -462,9 +409,7 @@ def test_run_coder_task_allows_a_registered_model(home, monkeypatch):
 
 
 def test_pull_model_refuses_a_local_path_repo(home, evil_hf_dir, monkeypatch):
-    """pull_model treats an existing path as a local add, which would REGISTER an
-    arbitrary directory under a client-chosen name - and a registered name passes
-    the membership check and resolves via the registry branch, around the gate."""
+    """pull_model treats an existing path as a local add, which would REGISTER an arbitrary directory under a client-chosen name - and a registered name passes the membership check and resolves via the registry branch, around the gate."""
     called = []
     import localm.model_manager.pull as pull_mod
     monkeypatch.setattr(pull_mod, "pull_model",
@@ -484,12 +429,7 @@ def test_pull_model_refuses_a_local_path_repo(home, evil_hf_dir, monkeypatch):
 # --------------------------------------------------------------------------- #
 
 def test_unregistered_name_cannot_evict_the_live_engine(home, evil_gguf, monkeypatch):
-    """The reason the registry check is the FIRST statement of _load_engine.
-
-    Earlier tests set hs._engine = None, so the reuse/VRAM branch never ran and
-    the placement rationale went unexercised. Here a live engine IS loaded, which
-    is the only shape in which the eviction is reachable at all.
-    """
+    """The reason the registry check is the FIRST statement of _load_engine."""
     from localm.plugins.builtin.jobs import runner as runner_mod
 
     class Live:
@@ -542,16 +482,7 @@ def test_pull_is_quiet_for_an_ordinary_repo(tmp_path, capsys):
 
 
 def test_pull_warning_filename_cannot_blank_the_notice(tmp_path, capsys):
-    """A REMOTE repo names these files and they are interpolated into a Rich
-    markup string. Unescaped, '[red]x.py' parses as a STYLE TAG and vanishes, so a
-    security notice reports "1 Python file(s) ()" and names nothing - a warning a
-    hostile repo can blank by choosing a filename.
-
-    Brackets are legal in a filename on Windows and POSIX, so this vector is real.
-    A CLOSING tag like '[/b]x.py' is NOT reachable this way: '/' is the path
-    separator on every platform, so no such file can exist on disk. That vector
-    goes through repo_id instead - see the next test.
-    """
+    """A REMOTE repo names these files and they are interpolated into a Rich markup string."""
     from localm.model_manager.pull import _warn_if_repo_ships_code
     d = tmp_path / "hostile"
     d.mkdir()
@@ -566,11 +497,7 @@ def test_pull_warning_filename_cannot_blank_the_notice(tmp_path, capsys):
 
 
 def test_pull_warning_repo_id_cannot_crash_the_notice(tmp_path, capsys):
-    """The repo id is remote-supplied too, and unlike a filename it is NOT
-    constrained by the filesystem - so it CAN carry a closing tag. Unescaped,
-    '[/b]' raises MarkupError, and this call sits between the download and
-    _register, so the crash would leave the model on disk and UNREGISTERED while
-    the CLI aborts with a traceback."""
+    """The repo id is remote-supplied too, and unlike a filename it is NOT constrained by the filesystem - so it CAN carry a closing tag."""
     from localm.model_manager.pull import _warn_if_repo_ships_code
     d = tmp_path / "repo"
     d.mkdir()
@@ -583,9 +510,7 @@ def test_pull_warning_repo_id_cannot_crash_the_notice(tmp_path, capsys):
 
 
 def test_custom_code_detected_in_preprocessor_config(home, tmp_path):
-    """preprocessor_config.json (with the 'pre') is the file AutoProcessor reads;
-    missing it meant the clear refusal never fired for the common multimodal
-    case."""
+    """preprocessor_config.json (with the 'pre') is the file AutoProcessor reads; missing it meant the clear refusal never fired for the common multimodal case."""
     from localm.inference.backends.hf import _check_custom_code_allowed
     d = tmp_path / "vlm"
     d.mkdir()
@@ -597,8 +522,7 @@ def test_custom_code_detected_in_preprocessor_config(home, tmp_path):
 
 
 def test_custom_code_detected_in_legacy_list_auto_map(home, tmp_path):
-    """transformers still accepts the list/tuple auto_map form; an isinstance-dict
-    test alone under-detects, and under-detecting is the unsafe direction."""
+    """transformers still accepts the list/tuple auto_map form; an isinstance-dict test alone under-detects, and under-detecting is the unsafe direction."""
     from localm.inference.backends.hf import _check_custom_code_allowed
     d = tmp_path / "legacy"
     d.mkdir()
@@ -609,9 +533,7 @@ def test_custom_code_detected_in_legacy_list_auto_map(home, tmp_path):
 
 
 def test_refusal_names_a_command_that_actually_exists(home, evil_hf_dir):
-    """The refusal used to say `localm config set <k> <v>`; the CLI takes two
-    positionals with no 'set', so following the instruction produced a click
-    error. An actionable error whose action fails is not actionable."""
+    """The refusal used to say `localm config set <k> <v>`; the CLI takes two positionals with no 'set', so following the instruction produced a click error."""
     from localm.inference.backends.hf import _check_custom_code_allowed
     with pytest.raises(RuntimeError) as exc:
         _check_custom_code_allowed(str(evil_hf_dir))
@@ -634,9 +556,7 @@ def test_model_footprint_rglob_is_bounded(tmp_path, monkeypatch):
 
 
 def test_model_footprint_bound_counts_entries_not_just_files(tmp_path, monkeypatch):
-    """The ceiling must apply to ENTRIES WALKED. Counting only successfully
-    measured files left the walk unbounded for a tree of pure directories - every
-    entry hits `continue` and the counter never advances."""
+    """The ceiling must apply to ENTRIES WALKED."""
     from localm.inference import residency
 
     walked = []
@@ -661,9 +581,7 @@ def test_model_footprint_bound_counts_entries_not_just_files(tmp_path, monkeypat
 
 
 def test_jobs_cli_refuses_an_unregistered_model(home, evil_gguf):
-    """The third write path into `model`. It was ungated, so the row saved and
-    then failed on every unattended tick with nothing at creation time saying
-    why."""
+    """The third write path into `model`."""
     from click.testing import CliRunner
     from localm.plugins.builtin.jobs.cli import main
     from localm.plugins.builtin.jobs.store import JobStore

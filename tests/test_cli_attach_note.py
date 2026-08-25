@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""CLI-1: `localm run` must not silently load the model in-process when it fails
-to attach to a background server - it should say why (or that none was found).
---no-server stays quiet (the user opted out)."""
+"""CLI-1: `localm run` must not silently load the model in-process when it fails to attach to a background server - it should say why (or that none was found). --no-server stays quiet (the user opted out)."""
 
 from localm.cli import _attach_fallback_note
 

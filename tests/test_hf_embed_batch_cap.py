@@ -1,19 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Per-request size cap on /v1/embeddings for HF-backed models.
-
-HFBackend.embed() loops over texts one at a time with no batching (or, for a
-sentence-transformer model, batches with no truncation at all), against a model
-that is always loaded full bf16/fp32 - so an oversized batch had no bound of its
-own beyond the generous hf_embed_timeout_s (see _hf_runner.EMBED_TIMEOUT_DEFAULT's
-comment). These tests exercise the new cap directly against HFBackend (no real
-model/subprocess - mirrors test_image_unsupported.py's idiom: construct a real
-HFBackend, hand-set _loaded=True and a fake _runner), plus the route-level mapping
-to a 413.
-
-Not applicable to GGUF (can_embed is a fixed False there, see test_hf_backend
-coverage elsewhere) or the dedicated on-device embedder (embedder.py's
-IsolatedEmbedder - a separate, purpose-built path, out of scope for this cap).
-"""
+"""Per-request size cap on /v1/embeddings for HF-backed models."""
 
 import logging
 
@@ -42,8 +28,7 @@ class _FakeRunner:
 
 
 class _PoisonRunner:
-    """Fails the test if a request reaches the runner - i.e. crosses into the
-    isolated worker - proving the cap check runs first, in the parent."""
+    """Fails the test if a request reaches the runner - i.e. crosses into the isolated worker - proving the cap check runs first, in the parent."""
 
     def embed(self, texts, timeout=None):
         raise AssertionError(

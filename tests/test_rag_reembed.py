@@ -1,12 +1,4 @@
-"""Changing the embedding model must not be a dead end, and a chunk whose text
-contains an exotic line separator must not vanish.
-
-Both defects were reported by the maintainer against a real 1192-chunk collection.
-The second is the root cause of the first's whole symptom cluster, and it had been
-"fixed" repeatedly by treating downstream symptoms, so each test here asserts the
-BEHAVIOUR (records survive, vectors get rebuilt) rather than the wording of a
-warning.
-"""
+"""Changing the embedding model must not be a dead end, and a chunk whose text contains an exotic line separator must not vanish."""
 import json
 import os
 
@@ -47,9 +39,7 @@ def _collection(tmp_path, texts, dim=8):
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize("sep", sorted(UNSAFE_SEPARATORS))
 def test_chunk_text_containing_a_line_separator_survives_save_and_reload(tmp_path, sep):
-    """json.dumps(ensure_ascii=False) emits U+0085/U+2028/U+2029 raw, and
-    str.splitlines() splits on them - which tore one record into two unparseable
-    fragments. Measured in the wild: 36 raw U+0085 cost 26 chunks per load/save."""
+    """json.dumps(ensure_ascii=False) emits U+0085/U+2028/U+2029 raw, and str.splitlines() splits on them - which tore one record into two unparseable fragments."""
     texts = ["plain one", f"before{sep}after", "plain two"]
     _collection(tmp_path, texts)
 
@@ -62,8 +52,7 @@ def test_chunk_text_containing_a_line_separator_survives_save_and_reload(tmp_pat
 
 @pytest.mark.parametrize("sep", sorted(UNSAFE_SEPARATORS))
 def test_load_save_load_never_deletes_records(tmp_path, sep):
-    """The damaging half: the reader dropped records, then _save() rewrote the
-    file from the survivors, permanently deleting the user's data."""
+    """The damaging half: the reader dropped records, then _save() rewrote the file from the survivors, permanently deleting the user's data."""
     texts = ["a", f"x{sep}y", "b", f"p{sep}q", "c"]
     _collection(tmp_path, texts)
     path = tmp_path / "kb" / "chunks.jsonl"
@@ -76,8 +65,7 @@ def test_load_save_load_never_deletes_records(tmp_path, sep):
 
 
 def test_writer_emits_no_raw_separator(tmp_path):
-    """Belt and braces: the file must be safe for ANY line-oriented reader,
-    including a JS JSON.parse consumer that U+2028/U+2029 would break."""
+    """Belt and braces: the file must be safe for ANY line-oriented reader, including a JS JSON.parse consumer that U+2028/U+2029 would break."""
     text = "".join(f"seg{i}{s}" for i, s in enumerate(sorted(UNSAFE_SEPARATORS)))
     _collection(tmp_path, [text])
     raw = (tmp_path / "kb" / "chunks.jsonl").read_text(encoding="utf-8")
@@ -112,16 +100,14 @@ def test_reembed_rebuilds_every_vector_at_the_new_dimension(tmp_path):
 
 
 def test_reembed_needs_no_source_files(tmp_path):
-    """The whole point: `rag repair --embed` re-indexes from the ORIGINAL FILES
-    and cannot help when they are gone. Re-embed works from stored text."""
+    """The whole point: `rag repair --embed` re-indexes from the ORIGINAL FILES and cannot help when they are gone."""
     c = _collection(tmp_path, ["alpha", "beta"], dim=8)
     assert not any(p.exists() for p in [tmp_path / "doc0.txt", tmp_path / "doc1.txt"])
     assert c.reembed(embed_fn=_embedder(16))["dim"] == 16
 
 
 def test_a_failed_reembed_leaves_the_previous_index_intact(tmp_path):
-    """A half-dimension index would mis-score every query, so a dying embedder
-    must change nothing."""
+    """A half-dimension index would mis-score every query, so a dying embedder must change nothing."""
     c = _collection(tmp_path, ["a", "b", "c", "d"], dim=8)
     vf = tmp_path / "kb" / "vectors.json"
     before = vf.read_text(encoding="utf-8")
@@ -148,8 +134,7 @@ def test_reembed_refuses_ragged_dimensions(tmp_path):
 
 
 def test_dimension_mismatch_error_names_the_collection_and_a_working_command(tmp_path):
-    """The old text said "Rebuild it (delete and re-add)" - destructive, and it
-    named neither the collection nor a command that worked."""
+    """The old text said 'Rebuild it (delete and re-add)' - destructive, and it named neither the collection nor a command that worked."""
     c = _collection(tmp_path, ["alpha"], dim=8)
     doc = tmp_path / "extra.txt"
     doc.write_text("some new content", encoding="utf-8")
@@ -164,9 +149,7 @@ def test_dimension_mismatch_error_names_the_collection_and_a_working_command(tmp
 
 
 def test_degrade_warning_fires_once_per_process_not_once_per_instance(tmp_path, caplog):
-    """_load() runs from __init__ and every request builds a FRESH Collection, so
-    the old instance-level guard re-armed constantly: 25+ identical WARNING lines
-    in one real session, several twice inside a single request."""
+    """_load() runs from __init__ and every request builds a FRESH Collection, so the old instance-level guard re-armed constantly: 25+ identical WARNING lines in one real session, several twice inside a single request."""
     from localm.rag import store as store_mod
 
     _collection(tmp_path, ["a", "b", "c"], dim=8)
@@ -187,8 +170,7 @@ def test_degrade_warning_fires_once_per_process_not_once_per_instance(tmp_path, 
 
 
 def test_a_new_degrade_reason_still_warns(tmp_path, caplog):
-    """Dedup must be per (collection, reason) - a fault that changes shape is a
-    new fault and must not hide behind an earlier one."""
+    """Dedup must be per (collection, reason) - a fault that changes shape is a new fault and must not hide behind an earlier one."""
     from localm.rag import store as store_mod
 
     _collection(tmp_path, ["a", "b"], dim=8)
@@ -209,8 +191,7 @@ def test_a_new_degrade_reason_still_warns(tmp_path, caplog):
 
 
 def test_set_aside_vector_indexes_are_pruned_to_the_newest_few(tmp_path):
-    """Each set-aside file is a full copy of the index. A real install had three
-    totalling 88 MB and the allocator would have gone on to twenty."""
+    """Each set-aside file is a full copy of the index."""
     from localm.rag import store as store_mod
 
     c = _collection(tmp_path, ["a", "b"], dim=8)
@@ -260,13 +241,7 @@ def _unusable_numpy():
     ("_vectors_finite", ([[1.0, 2.0]],)),
 ])
 def test_numpy_present_but_unusable_falls_back_at_every_site(monkeypatch, fn, args):
-    """The shared Windows-CI red: numpy is PARTIALLY INITIALISED, so `import numpy`
-    SUCCEEDS while np.asarray is absent. Both sites caught only ImportError.
-
-    _vectors_finite is the worse of the two - it returns the boolean deciding
-    whether the vector store is TRUSTED, so an escaping AttributeError errors the
-    whole query instead of degrading to BM25 with a surfaced reason. CI only ever
-    pointed at _cosine because it was reached first."""
+    """The shared Windows-CI red: numpy is PARTIALLY INITIALISED, so `import numpy` SUCCEEDS while np.asarray is absent."""
     from localm.rag import store as store_mod
 
     monkeypatch.setattr(store_mod, "_numpy", _unusable_numpy())
@@ -293,14 +268,7 @@ def test_the_unusable_numpy_degrade_is_announced_once_not_per_chunk(monkeypatch,
 
 
 def test_a_namespace_stub_numpy_is_reported_as_a_broken_environment(monkeypatch, caplog):
-    """A bare directory named `numpy` on sys.path resolves as a PEP 420 implicit
-    namespace package: `import numpy` SUCCEEDS, the module has no attributes, and
-    `__file__` is None. That is NOT "numpy is missing" - something has put a fake
-    one on the path, which breaks anything else here that imports numpy.
-
-    Collapsing that into a routine "numpy unavailable" message is the same rule-5
-    error as collapsing missing-vs-corrupt into one code path, made in the message
-    instead of the branch."""
+    """A bare directory named `numpy` on sys.path resolves as a PEP 420 implicit namespace package: `import numpy` SUCCEEDS, the module has no attributes, and `__file__` is None."""
     import types
 
     from localm.rag import store as store_mod
@@ -348,8 +316,7 @@ def test_numpy_absent_entirely_still_works(monkeypatch):
 
 
 def test_a_usable_numpy_failing_for_a_real_reason_still_propagates(monkeypatch):
-    """The widened except must not become a bare catch-all: a broken install that
-    fails numerically has to surface, not silently halve retrieval quality."""
+    """The widened except must not become a bare catch-all: a broken install that fails numerically has to surface, not silently halve retrieval quality."""
     import types
 
     from localm.rag import store as store_mod
@@ -367,17 +334,7 @@ def test_a_usable_numpy_failing_for_a_real_reason_still_propagates(monkeypatch):
 
 
 def test_numpy_is_never_imported_lazily_inside_a_function():
-    """THE RACE GUARD, and the reason the module-level binding exists.
-
-    Both numpy users run on the shared plugin ThreadPoolExecutor. CPython's import
-    lock is PER-MODULE since 3.3, so a thread finding numpy already in sys.modules
-    does NOT wait for it to finish initialising - it gets the module as it stands.
-    That is what produced a numpy with no asarray, and it is why the failure is
-    nondeterministic on identical trees.
-
-    A future edit re-introducing `import numpy` inside one of these functions would
-    silently restore the race while every other test here still passed, because the
-    state-handling fallback would keep masking it. This pins the absence."""
+    """THE RACE GUARD, and the reason the module-level binding exists."""
     import ast
     import inspect
     import textwrap
@@ -421,10 +378,7 @@ _MSGS = '{"model":"localm","messages":[{"role":"user","content":"hi"}],'
 
 
 def test_max_tokens_zero_explains_itself_instead_of_dumping_pydantic():
-    """Reported verbatim by the maintainer as
-    `422: {"detail":[{"type":"greater_than_equal","loc":["body","max_tokens"],...}]}`.
-    0 looks like a legitimate "no limit"; the real reason it is refused (it
-    collides with the engine's internal unlimited sentinel) is not guessable."""
+    """Reported verbatim by the maintainer as `422: {'detail':[{'type':'greater_than_equal','loc':['body','max_tokens'],...}]}`. 0 looks like a legitimate 'no limit'; the real reason it is refused (it collides with the engine's internal unlimited sentinel) is not guessable."""
     r = _post(_api(), _MSGS + '"max_tokens":0}')
     assert r.status_code == 422
     detail = r.json()["detail"]
@@ -443,9 +397,7 @@ def test_validation_errors_keep_the_structured_form_under_errors():
 
 
 def test_a_non_finite_number_still_renders_a_422_not_a_500():
-    """Regression guard on the existing protection: JSONResponse serializes with
-    allow_nan=False, so a NaN in the error detail used to crash the handler into
-    a 500. Reformatting the message must not reintroduce that."""
+    """Regression guard on the existing protection: JSONResponse serializes with allow_nan=False, so a NaN in the error detail used to crash the handler into a 500."""
     r = _post(_api(), _MSGS + '"temperature":NaN}')
     assert r.status_code == 422, f"got {r.status_code}, the 422 handler crashed"
     assert "temperature" in r.json()["detail"]
@@ -460,8 +412,7 @@ def test_a_missing_field_does_not_echo_the_whole_request_body():
 
 
 def test_reembed_after_a_mismatch_lets_the_add_succeed(tmp_path):
-    """End to end: hit the refusal, follow the advice, and the add now works -
-    which is the whole user journey that was a dead end."""
+    """End to end: hit the refusal, follow the advice, and the add now works - which is the whole user journey that was a dead end."""
     c = _collection(tmp_path, ["alpha"], dim=8)
     doc = tmp_path / "extra.txt"
     doc.write_text("some new content", encoding="utf-8")
@@ -491,15 +442,7 @@ _TOPICS = ["zebra", "quasar", "tugboat", "marzipan"]
 
 
 def _topic_embedder(dim, fail_after=-1):
-    """An embedder that genuinely DISCRIMINATES: one axis per topic word.
-
-    _embedder() above hashes the text into a single repeated value, so every
-    vector is a scalar multiple of every other and cosine cannot tell any two
-    chunks apart. That is harmless where only the DIMENSION is under test, but a
-    query assertion written against it would pass no matter which chunk came
-    back. Here the retrieved chunk is the property, so the embedding has to be
-    able to be wrong.
-    """
+    """An embedder that genuinely DISCRIMINATES: one axis per topic word."""
     seen = {"n": 0}
 
     def embed(texts):
@@ -532,9 +475,7 @@ def _uploads_only(tmp_path, dim=384, model="bge-small-en-v1.5"):
 
 
 def test_an_uploads_only_collection_survives_a_model_switch_end_to_end(tmp_path):
-    """After switching the embedding model, a collection built entirely from
-    uploads whose source files never existed can be re-embedded in place and
-    QUERIED CORRECTLY, without the user deleting anything."""
+    """After switching the embedding model, a collection built entirely from uploads whose source files never existed can be re-embedded in place and QUERIED CORRECTLY, without the user deleting anything."""
     coll = _uploads_only(tmp_path)
     assert coll._vec_dim == 384
     n_chunks = len(coll._chunks)
@@ -576,17 +517,7 @@ def test_an_uploads_only_collection_survives_a_model_switch_end_to_end(tmp_path)
 
 
 def test_a_failed_reembed_leaves_the_index_intact_across_MULTIPLE_batches(tmp_path):
-    """The multi-batch case, which the single-batch test above cannot express.
-
-    test_a_failed_reembed_leaves_the_previous_index_intact embeds 4 chunks at the
-    default batch of 32, so the whole run is ONE embed_fn call: the embedder
-    raises INSIDE it, before any result is ever appended. A write-as-you-go
-    implementation would therefore never reach a write, and that test stays green
-    against it - measured, by reverting reembed to save inside the loop. Only a
-    failure in a LATER batch, after an earlier one has already succeeded, can tell
-    the two apart, and that is exactly the shape that leaves a half-written
-    mixed-dimension index behind.
-    """
+    """The multi-batch case, which the single-batch test above cannot express."""
     coll = _uploads_only(tmp_path)
     vf = tmp_path / "eng" / "vectors.json"
     before = vf.read_text(encoding="utf-8")

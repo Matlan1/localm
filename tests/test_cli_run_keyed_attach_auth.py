@@ -1,33 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""`localm run` (and the shared attach flow it uses) must authenticate to its
-OWN server with the OWNER KEY once one is configured, not the raw per-instance
-attach token.
-
-``instances.attach_target`` always returns the discovered instance's own
-per-instance registry token (a random per-process secret with no keystore
-entry). ``_principal_from_token`` (http_server.py) resolves a header-sourced
-bearer via ``auth.verify()`` only, which has no notion of instance tokens at
-all - so once ANY owner key is configured, presenting the raw instance token
-as ``Authorization: Bearer <instance_token>`` always 401s. Pre-fix,
-``cli/chat.py``'s ``run()`` sent exactly that value straight into
-``remote_model_status``/``HttpEngine``, so `localm run` printed "connected
-... (no second model load)" and then died with a 401 on any keyed install
-(checkup 2026-08-11 item 12).
-
-Same shape already fixed for ``self_request`` / ``cli/models.py``'s
-``unload_cmd``/``stop_cmd`` / ``media/comfy_client.py``'s ``_localm_unload``
-(see tests/test_localm_unload_auth.py) via ``auth.resolve_bearer_headers``;
-this file covers the two attach sites in ``cli/chat.py`` that were never
-swept into that fix, at two levels:
-
-  - a REAL uvicorn server, keyed, proving the actual HTTP round trip succeeds
-    with the resolved credential and 401s with the raw instance token alone
-    (the control) - the genuinely end-to-end oracle;
-  - the CLI's own `run()` control flow (CliRunner, network layer stubbed),
-    proving the token that reaches HttpEngine/remote_model_status is the
-    OWNER KEY when one is configured and the raw instance token in open mode
-    - drives the real credential-SELECTION code, not a mock of it.
-"""
+"""`localm run` (and the shared attach flow it uses) must authenticate to its OWN server with the OWNER KEY once one is configured, not the raw per-instance attach token."""
 
 import asyncio
 import socket as _socket
@@ -55,10 +27,7 @@ def _wait_sync(cond, want=True, timeout: float = 6.0) -> bool:
 
 
 def _real_keyed_server(owner_key: str):
-    """A real uvicorn instance with an owner key configured, and
-    app.state.instance_token set the way instances.advertise() sets it in
-    production - mirrors test_localm_unload_auth.py's open-mode helper,
-    applied here to the keyed case."""
+    """A real uvicorn instance with an owner key configured, and app.state.instance_token set the way instances.advertise() sets it in production - mirrors test_localm_unload_auth.py's open-mode helper, applied here to the keyed case."""
     auth.set_api_key(owner_key)
     app = create_app(None)
     app.state.instance_token = "wrong-instance-token-should-never-auth"
@@ -87,9 +56,7 @@ def _shutdown(server, th):
 
 class TestRealKeyedServerAttachAuth:
     def test_raw_instance_token_401s_control(self):
-        """CONTROL: the pre-fix value (the raw instance token, unresolved) is
-        refused by the real server - proves the positive test below is really
-        about credential RESOLUTION, not a permissive server."""
+        """CONTROL: the pre-fix value (the raw instance token, unresolved) is refused by the real server - proves the positive test below is really about credential RESOLUTION, not a permissive server."""
         app, port, server, th = _real_keyed_server("e2e-owner-key-0123456789")
         try:
             import requests
@@ -115,8 +82,7 @@ class TestRealKeyedServerAttachAuth:
             _shutdown(server, th)
 
     def test_remote_model_status_succeeds_with_resolved_token(self):
-        """The exact call cli/chat.py's run() makes to probe the attach
-        target, driven for real against a real keyed server."""
+        """The exact call cli/chat.py's run() makes to probe the attach target, driven for real against a real keyed server."""
         from localm.inference.http_engine import remote_model_status
         app, port, server, th = _real_keyed_server("e2e-owner-key-0123456789")
         try:
@@ -129,8 +95,7 @@ class TestRealKeyedServerAttachAuth:
             _shutdown(server, th)
 
     def test_remote_model_status_fails_with_unresolved_instance_token(self):
-        """Sanity/negative: proves the previous test's success is really
-        about resolution, not remote_model_status being lenient."""
+        """Sanity/negative: proves the previous test's success is really about resolution, not remote_model_status being lenient."""
         from localm.inference.http_engine import remote_model_status
         app, port, server, th = _real_keyed_server("e2e-owner-key-0123456789")
         try:
@@ -147,10 +112,7 @@ class TestRealKeyedServerAttachAuth:
 
 @pytest.fixture
 def patched(monkeypatch):
-    """Stub only the network seam (attach discovery, the /v1/models probe,
-    and the HTTP engine class) exactly like test_cli_run_model_conflict.py -
-    the credential SELECTION logic under test (auth.get_api_key() +
-    resolve_bearer_token) runs for real."""
+    """Stub only the network seam (attach discovery, the /v1/models probe, and the HTTP engine class) exactly like test_cli_run_model_conflict.py - the credential SELECTION logic under test (auth.get_api_key() + resolve_bearer_token) runs for real."""
     fake_target = {"base_url": "http://127.0.0.1:8642/v1", "token": "raw-instance-token"}
     engine_spy = MagicMock(name="HttpEngine")
     captured = {}

@@ -1,30 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""ADR-0009 P6/P7: rag-reembed and rag-upload report STRUCTURED progress
-(``Job.progress``, from PR #1102 / test_job_progress_channel.py's P5) instead of
-prose (reembed) or nothing (upload).
-
-P6: ``Collection.reembed``'s batch loop already computed the exact ``n/total``
-for every batch and could only print it as prose
-(``on_progress(f"re-embedding {n}/{tot}")``, invisible to ``/api/activity``, the
-CLI and MCP). It now ALSO passes ``phase``/``done``/``total``/``unit`` as
-keywords on the SAME call, carrying the identical numbers the line text was
-built from, so ``plug._job_progress`` can forward them to ``Job.progress``
-verbatim - never a second, independent computation that could drift from what
-the line says (that drift is exactly what P5's single-derivation-point
-guarantee exists to prevent).
-
-P7: ``POST /api/rag/collections/{name}/upload`` knows the file count and the
-total DECODED byte size before any indexing work starts - the whole request is
-already base64-decoded by the time the job function runs - and reported
-neither. It now reports both as one t=0 progress event, so a client sees a real
-denominator immediately instead of silence until the first file finishes.
-
-Neither call site computes a percentage itself; ``Job.progress`` is still the
-only place that divides (ADR-0008 R1 / P5), and an unknown total must still
-report ``pct: null`` rather than a fabricated 0 - covered here only at the
-point where these two units could have reintroduced that mistake; the general
-contract is test_job_progress_channel.py's.
-"""
+"""ADR-0009 P6/P7: rag-reembed and rag-upload report STRUCTURED progress (``Job.progress``, from PR #1102 / test_job_progress_channel.py's P5) instead of prose (reembed) or nothing (upload)."""
 from __future__ import annotations
 
 import base64
@@ -69,20 +44,14 @@ class TestReembedStructuredProgress:
                                "unit": "chunks"}
 
     def test_never_hands_on_progress_a_precomputed_percentage(self, tmp_path):
-        """P5's whole point is that pct is derived in exactly one place
-        (Job.progress). If reembed did that division itself and passed a
-        ``pct`` kwarg along, it would reopen the four-independent-derivations
-        problem P5 exists to close - just one call site later."""
+        """P5's whole point is that pct is derived in exactly one place (Job.progress)."""
         c = _collection(tmp_path, ["a", "b", "c"], dim=8)
         calls = []
         c.reembed(embed_fn=_embedder(8), on_progress=lambda t, **kw: calls.append(kw))
         assert calls and all("pct" not in kw for kw in calls)
 
     def test_a_kwargs_tolerant_string_only_sink_still_works(self, tmp_path):
-        """Any sink reused for reembed must accept and ignore the new keywords
-        (the CLI's own reembed callback was updated the same way); this pins
-        that the contract is additive, not a breaking change to on_progress's
-        established single-string-argument callers elsewhere in store.py."""
+        """Any sink reused for reembed must accept and ignore the new keywords (the CLI's own reembed callback was updated the same way); this pins that the contract is additive, not a breaking change to on_progress's established single-string-argument callers elsewhere in store.py."""
         c = _collection(tmp_path, ["a", "b"], dim=8)
         messages = []
 
@@ -120,10 +89,7 @@ class TestJobProgressWrapperForwardsReembedNumbers:
             40.0, 2, 5, "chunks", "re-embedding")
 
     def test_plain_text_only_call_does_not_fabricate_a_progress_event(self):
-        """add_paths/add_uploads call this SAME wrapper with only a message
-        (e.g. "indexed foo.txt (3 chunks)", "embeddings unavailable ..."). That
-        must keep producing a line and nothing else - no invented progress
-        event with no numbers behind it."""
+        """add_paths/add_uploads call this SAME wrapper with only a message (e.g. 'indexed foo.txt (3 chunks)', 'embeddings unavailable ...')."""
         from localm.plugins.builtin.rag.plug import _job_progress
 
         job = _job()
@@ -245,9 +211,7 @@ class TestUploadReportsKnownTotalsAtJobStart:
 
     def test_byte_total_reflects_decoded_size_not_the_base64_length(
             self, tmp_path, monkeypatch):
-        """Guards the specific arithmetic mistake this unit could reintroduce:
-        base64 inflates by ~4/3, so reporting the encoded string length instead
-        of len(data) would overstate every upload's byte total by ~33%."""
+        """Guards the specific arithmetic mistake this unit could reintroduce: base64 inflates by ~4/3, so reporting the encoded string length instead of len(data) would overstate every upload's byte total by ~33%."""
         from fastapi.testclient import TestClient
 
         app = _upload_app(tmp_path, monkeypatch)

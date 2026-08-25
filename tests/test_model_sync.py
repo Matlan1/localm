@@ -1,11 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Tests for sync_models_dir - registry/folder reconciliation and autoprune.
-
-This runs on every launch and can delete registry entries, yet had no coverage.
-Pins: loose-file registration, missing->flagged (default), flag clearing on
-reappear, prune deletion with a registry backup, the all-missing guardrail, and
-that external (out-of-folder) models are never pruned.
-"""
+"""Tests for sync_models_dir - registry/folder reconciliation and autoprune."""
 
 import os
 import time
@@ -17,16 +11,14 @@ from localm import model_manager as mm
 
 
 def _backdate(path, seconds=60):
-    """Set *path*'s mtime `seconds` in the past, so it reads as settled (not
-    mid-copy) regardless of how fast the test itself runs."""
+    """Set *path*'s mtime `seconds` in the past, so it reads as settled (not mid-copy) regardless of how fast the test itself runs."""
     old = time.time() - seconds
     os.utime(path, (old, old))
 
 
 @pytest.fixture()
 def fake_registry(tmp_path, monkeypatch):
-    """In-memory registry + temp MODELS_DIR wired into model_manager, with a
-    spy standing in for the on-disk registry backup."""
+    """In-memory registry + temp MODELS_DIR wired into model_manager, with a spy standing in for the on-disk registry backup."""
     store: dict = {}
     models_dir = tmp_path / "models"
     models_dir.mkdir()
@@ -95,9 +87,7 @@ class TestRegisterLooseFiles:
 
 
 class TestSettlePeriod:
-    """R45: a mid-copy of a *valid* GGUF clears the magic+size floor long
-    before the copy finishes (the floor only needs ~1KiB to have landed), so
-    sync_models_dir must not auto-register it until its mtime has gone quiet."""
+    """R45: a mid-copy of a *valid* GGUF clears the magic+size floor long before the copy finishes (the floor only needs ~1KiB to have landed), so sync_models_dir must not auto-register it until its mtime has gone quiet."""
 
     def test_freshly_written_gguf_is_not_registered_yet(self, fake_registry):
         store, models_dir, _ = fake_registry

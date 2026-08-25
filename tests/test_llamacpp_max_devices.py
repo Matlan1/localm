@@ -1,17 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Direct-binding coverage for the multi-GPU tensor-split capacity probe:
-has_max_devices()/llama_max_devices() in
-localm/inference/backends/llamacpp/_api.py, plus discover._tensor_split_capacity
-(the sole caller, via apply_gpu_split) which decides between the live native
-answer and the documented fallback constant.
-
-_api.py's own probes (has_memory_api, has_penalties_sampler) are normally
-exercised indirectly by mocking the whole ``llama.api`` module object at call
-sites (see test_kv_cache.py). These two are new enough, and load-bearing
-enough (an under-sized tensor_split allocation is a real out-of-bounds read -
-see _tensor_split_capacity's docstring), to also warrant testing the bindings
-themselves: mock only load_lib() (what has_max_devices/llama_max_devices
-actually call) and exercise the real hasattr/getattr + ctypes-bind logic."""
+"""Direct-binding coverage for the multi-GPU tensor-split capacity probe: has_max_devices()/llama_max_devices() in localm/inference/backends/llamacpp/_api.py, plus discover._tensor_split_capacity (the sole caller, via apply_gpu_split) which decides between the live native answer and the documented fall..."""
 
 from unittest.mock import MagicMock, patch
 
@@ -27,9 +15,7 @@ _LOAD_LIB = "localm.inference.backends.llamacpp._api.load_lib"
 
 
 class _NoMaxDevices:
-    """Stands in for a ctypes.CDLL handle from an older build that never
-    exported llama_max_devices. A plain object() (not a Mock) so hasattr()
-    genuinely fails instead of a Mock auto-creating the attribute."""
+    """Stands in for a ctypes.CDLL handle from an older build that never exported llama_max_devices."""
 
 
 class TestHasMaxDevices:
@@ -80,12 +66,7 @@ _LLAMA_MAX_DEVICES = "localm.inference.backends.llamacpp._api.llama_max_devices"
 
 
 class TestTensorSplitCapacity:
-    """discover._tensor_split_capacity: the sole call site is
-    apply_gpu_split, deciding how many float slots to allocate for
-    mp.tensor_split. It imports localm.inference.backends.llamacpp._api
-    lazily inside the function, so the probes are monkeypatched on the _api
-    module directly (patching localm.discover.<name> would miss it, since
-    that name is never bound in discover's own module namespace)."""
+    """discover._tensor_split_capacity: the sole call site is apply_gpu_split, deciding how many float slots to allocate for mp.tensor_split."""
 
     def test_false_falls_back_to_documented_constant(self, monkeypatch):
         monkeypatch.setattr(_HAS_MAX_DEVICES, lambda: False)

@@ -1,25 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""BUG-15 (M2 Phase 3): the launcher's Launch action must be cross-platform.
-
-The launcher spawned child processes with
-``creationflags=subprocess.CREATE_NEW_CONSOLE``. That flag (and the
-``CREATE_NEW_CONSOLE`` attribute itself) is Windows-only. On Linux/macOS the
-attribute does not exist, so referencing it raises ``AttributeError`` - which
-the launcher's bare ``except Exception`` swallowed into a silent
-"Launch failed". The setup.sh ``.desktop`` entry was therefore a dead button on
-POSIX.
-
-These tests pin the contract for the extracted spawn helper:
-- on POSIX (``sys.platform != "win32"``) the child is spawned WITHOUT
-  ``creationflags`` (and never touches ``subprocess.CREATE_NEW_CONSOLE``), so no
-  ``AttributeError`` can occur; and
-- on Windows (``sys.platform == "win32"``) ``creationflags`` is still passed
-  with ``CREATE_NEW_CONSOLE`` so the visible-console behavior is unchanged.
-
-The launcher lives at the repo root as ``launcher.pyw`` (a ``.pyw`` so a
-double-click runs it without a console). That extension is not importable by
-plain ``import``, so we load it from its file path.
-"""
+"""BUG-15 (M2 Phase 3): the launcher's Launch action must be cross-platform."""
 
 from __future__ import annotations
 
@@ -34,11 +14,7 @@ LAUNCHER_PATH = REPO_DIR / "launcher.pyw"
 
 
 def _load_launcher():
-    """Import launcher.pyw as a module without instantiating any Tk window.
-
-    The module only ``import``s tkinter at load time (it does not build a root
-    window until ``Launcher()`` is constructed), so this is safe headless.
-    """
+    """Import launcher.pyw as a module without instantiating any Tk window."""
     # launcher.pyw uses the .pyw suffix, which is a recognized Python source
     # suffix only on Windows. On POSIX spec_from_file_location cannot infer a
     # loader for it and returns None, so pass an explicit SourceFileLoader to
@@ -73,8 +49,7 @@ class _PopenSpy:
 
 
 def test_posix_spawn_omits_creationflags(launcher_mod, monkeypatch):
-    """On POSIX the child is spawned WITHOUT creationflags and WITHOUT touching
-    subprocess.CREATE_NEW_CONSOLE (the attribute that does not exist there)."""
+    """On POSIX the child is spawned WITHOUT creationflags and WITHOUT touching subprocess.CREATE_NEW_CONSOLE (the attribute that does not exist there)."""
     spy = _PopenSpy()
     monkeypatch.setattr(launcher_mod.subprocess, "Popen", spy)
     # Simulate a POSIX interpreter where the Windows-only flag is absent, so any
@@ -93,8 +68,7 @@ def test_posix_spawn_omits_creationflags(launcher_mod, monkeypatch):
 
 
 def test_windows_spawn_passes_create_new_console(launcher_mod, monkeypatch):
-    """On Windows the spawn still passes creationflags=CREATE_NEW_CONSOLE so the
-    child opens in its own console window (behavior must not regress)."""
+    """On Windows the spawn still passes creationflags=CREATE_NEW_CONSOLE so the child opens in its own console window (behavior must not regress)."""
     spy = _PopenSpy()
     monkeypatch.setattr(launcher_mod.subprocess, "Popen", spy)
     monkeypatch.setattr(launcher_mod.sys, "platform", "win32")
@@ -130,8 +104,7 @@ def test_spawn_forwards_cwd_and_env(launcher_mod, monkeypatch):
 
 
 def _build_fake(launcher_mod, **overrides):
-    """A headless stand-in carrying just the StringVar/BooleanVar-like fields
-    _build_command reads. Avoids constructing a Tk root."""
+    """A headless stand-in carrying just the StringVar/BooleanVar-like fields _build_command reads."""
     class _Var:
         def __init__(self, v):
             self._v = v
@@ -159,9 +132,7 @@ def _build_fake(launcher_mod, **overrides):
 
 
 def test_gui_expose_drives_network_bind_with_auto_tls(launcher_mod):
-    """NET-1: ticking "Expose on the network" in Web GUI mode must launch
-    `localm gui -H 0.0.0.0` (which turns on built-in HTTPS) - the maintainer's
-    phone flow. No --no-tls: encryption stays on by default."""
+    """NET-1: ticking 'Expose on the network' in Web GUI mode must launch `localm gui -H 0.0.0.0` (which turns on built-in HTTPS) - the maintainer's phone flow."""
     fake = _build_fake(launcher_mod, mode="gui", host_lan=True)
     cmd = launcher_mod.Launcher._build_command(fake)
     assert "gui" in cmd
@@ -183,8 +154,7 @@ def test_serve_expose_still_binds_network(launcher_mod):
 
 
 def test_keep_diagnostics_checkbox_passes_flag(launcher_mod):
-    """The Privacy-card "Keep diagnostics" checkbox passes --keep-diagnostics for
-    gui and serve, and nothing when it is off."""
+    """The Privacy-card 'Keep diagnostics' checkbox passes --keep-diagnostics for gui and serve, and nothing when it is off."""
     for mode in ("gui", "serve"):
         on = launcher_mod.Launcher._build_command(
             _build_fake(launcher_mod, mode=mode, model="m", keep_diagnostics=True))
@@ -195,8 +165,7 @@ def test_keep_diagnostics_checkbox_passes_flag(launcher_mod):
 
 
 def test_invalid_numeric_fields(launcher_mod):
-    """The launcher refuses a bad port/ctx/gpu before spawning (a stray letter or
-    an out-of-range port used to crash the child in pick_port)."""
+    """The launcher refuses a bad port/ctx/gpu before spawning (a stray letter or an out-of-range port used to crash the child in pick_port)."""
     f = launcher_mod._invalid_numeric_fields
     # all-blank and all-valid -> no error
     assert f("", "", "") is None
@@ -211,13 +180,7 @@ def test_invalid_numeric_fields(launcher_mod):
 
 
 def test_launch_handler_uses_helper_on_posix(launcher_mod, monkeypatch):
-    """End-to-end-ish: the buried Launch handler routes through the helper, so a
-    POSIX user clicking Launch spawns a real child instead of getting the
-    swallowed 'Launch failed' from an AttributeError.
-
-    We avoid building a Tk root by calling the launch path on a lightweight
-    stand-in object that provides only what _launch / _import_from_url touch.
-    """
+    """End-to-end-ish: the buried Launch handler routes through the helper, so a POSIX user clicking Launch spawns a real child instead of getting the swallowed 'Launch failed' from an AttributeError."""
     spy = _PopenSpy()
     monkeypatch.setattr(launcher_mod.subprocess, "Popen", spy)
     monkeypatch.setattr(launcher_mod.sys, "platform", "linux")

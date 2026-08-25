@@ -1,29 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""STAGE S3 (FRESH hardware-matched install) for the localm-managed ComfyUI feature.
-
-When a user has NO usable ComfyUI to copy (the case S2 stubbed as "not yet
-implemented"), `localm comfy setup` instead installs a FRESH, hardware-matched
-ComfyUI under LOCALM_HOME (design decisions 4 + 5):
-
-  * decision 4 - torch per hardware: ONE testable map, comfy_torch_spec(det),
-    reusing hwdetect (the single hardware source of truth). AMD gfx1030 -> the
-    ROCm gfx103X wheels localm itself runs on; NVIDIA -> CUDA; Intel -> XPU;
-    no GPU -> CPU (ComfyUI ALWAYS needs torch, so a hardware combo with no
-    verified GPU wheel degrades to CPU torch, never to nothing).
-  * decision 5 - custom nodes: derive the required nodes by scanning localm's
-    OWN shipped workflow JSONs for non-core class_types, each mapped to a PINNED
-    repo+commit. Today exactly {UnetLoaderGGUFAdvanced -> city96/ComfyUI-GGUF}.
-
-The heavy end-to-end test exercises the FRESH mechanism FOR REAL against a MINIMAL
-fake: a tiny throwaway git "ComfyUI" (stub main.py + a requirements.txt holding one
-tiny `name @ file://` wheel, NO torch) and a tiny git "custom node", with the torch
-step skipped. It proves clone-at-pin + fresh venv + pip -r requirements + custom-node
-clone-at-pin end to end, fast and offline. The multi-GB hardware-matched torch install
-is a documented manual/integration check; the torch-map unit test proves that mechanism
-without it.
-
-Design + locked decisions: dev-notes/DESIGN-localm-managed-comfyui-2026-07-08.md
-"""
+"""STAGE S3 (FRESH hardware-matched install) for the localm-managed ComfyUI feature."""
 
 from __future__ import annotations
 
@@ -93,8 +69,7 @@ def _build_tiny_wheel(dest_dir: Path, name: str, version: str) -> Path:
 
 
 def _make_git_repo(workdir: Path, files: dict) -> str:
-    """Write *files* into *workdir*, git-init + commit, return the HEAD sha. Uses a
-    hermetic git config (no user global/system config, gpg off)."""
+    """Write *files* into *workdir*, git-init + commit, return the HEAD sha."""
     workdir.mkdir(parents=True, exist_ok=True)
     for rel, content in files.items():
         p = workdir / rel
@@ -135,9 +110,7 @@ def _det(vendors, gpu_names=""):
 # =========================================================================== #
 
 def test_torch_spec_amd_gfx1030_is_rocm_wheels(monkeypatch):
-    """AMD RX 6000 (gfx103X) on Windows -> the SAME ROCm torch wheels + AMD index
-    localm itself runs on (pyproject [gpu]). This is the hardest, least-portable
-    path - it must resolve to the AMD repo, never a plain PyPI torch."""
+    """AMD RX 6000 (gfx103X) on Windows -> the SAME ROCm torch wheels + AMD index localm itself runs on (pyproject [gpu])."""
     from localm.media import managed_comfy_fresh as fresh
     monkeypatch.setattr(sys, "platform", "win32")
     spec = fresh.comfy_torch_spec(_det(["amd"], "AMD Radeon RX 6800"))
@@ -149,19 +122,7 @@ def test_torch_spec_amd_gfx1030_is_rocm_wheels(monkeypatch):
 
 
 def test_torch_spec_amd_gfx1030_pins_a_matching_torchaudio(monkeypatch):
-    """Managed-ComfyUI-music-generation-broken bug: ComfyUI's own requirements.txt
-    lists torch/torchvision/torchaudio UNPINNED, and the later "install ComfyUI's
-    requirements" step runs plain `pip install -r requirements.txt` with no
-    --extra-index-url. torch/torchvision are already satisfied by the ROCm
-    wheels this spec installs first (pip does not reinstall an already-satisfied
-    bare requirement), but torchaudio had nothing to satisfy it and fell through
-    to a plain-PyPI build whose compiled C extension does not match this ROCm
-    torch's ABI - confirmed live: "OSError: Could not load this library:
-    ..._torchaudio.pyd" on import, disabling every audio-dependent ComfyUI node
-    (VAEDecodeAudio, MMAudio, Whisper-based audio encoders), not just ACE-Step
-    music specifically. Pinning a matching ROCm torchaudio build here (same
-    repo, same "2.9" series and rocm7.13.0 tag as the torch pin) makes that
-    later bare requirement already-satisfied too."""
+    """Managed-ComfyUI-music-generation-broken bug: ComfyUI's own requirements.txt lists torch/torchvision/torchaudio UNPINNED, and the later 'install ComfyUI's requirements' step runs plain `pip install -r requirements.txt` with no --extra-index-url. torch/torchvision are already satisfied by the ROCm whe..."""
     from localm.media import managed_comfy_fresh as fresh
     monkeypatch.setattr(sys, "platform", "win32")
     spec = fresh.comfy_torch_spec(_det(["amd"], "AMD Radeon RX 6900 XT"))
@@ -201,8 +162,7 @@ def test_torch_spec_intel_is_xpu(monkeypatch):
 
 
 def test_torch_spec_amd_linux_is_upstream_rocm(monkeypatch):
-    """Linux AMD -> upstream ROCm wheels (broad gfx). ComfyUI wants ROCm torch on
-    AMD even though the llama runtime uses vulkan there - documented divergence."""
+    """Linux AMD -> upstream ROCm wheels (broad gfx)."""
     from localm.media import managed_comfy_fresh as fresh
     monkeypatch.setattr(sys, "platform", "linux")
     spec = fresh.comfy_torch_spec(_det(["amd"], "AMD Radeon RX 6800"))
@@ -219,8 +179,7 @@ def test_torch_spec_amd_gfx110x_windows_is_rocm_win(monkeypatch):
 
 
 def test_torch_spec_unknown_amd_windows_degrades_to_cpu_with_note(monkeypatch):
-    """AMD on Windows with no verified prebuilt (e.g. RX 5000) -> CPU torch, and
-    SAY so (rule 5: no silent wrong-vendor stack, no silent skip)."""
+    """AMD on Windows with no verified prebuilt (e.g. RX 5000) -> CPU torch, and SAY so (rule 5: no silent wrong-vendor stack, no silent skip)."""
     from localm.media import managed_comfy_fresh as fresh
     monkeypatch.setattr(sys, "platform", "win32")
     spec = fresh.comfy_torch_spec(_det(["amd"], "AMD Radeon RX 5700 XT"))
@@ -230,8 +189,7 @@ def test_torch_spec_unknown_amd_windows_degrades_to_cpu_with_note(monkeypatch):
 
 
 def test_torch_install_args_amd_uses_extra_index(monkeypatch):
-    """The pip args builder: AMD ROCm packages go in, with the AMD repo as an
-    --extra-index-url so torch resolves there and everything else from PyPI."""
+    """The pip args builder: AMD ROCm packages go in, with the AMD repo as an --extra-index-url so torch resolves there and everything else from PyPI."""
     from localm.media import managed_comfy_fresh as fresh
     monkeypatch.setattr(sys, "platform", "win32")
     spec = fresh.comfy_torch_spec(_det(["amd"], "AMD Radeon RX 6800"))
@@ -257,10 +215,7 @@ def test_torch_install_args_cuda_uses_index_url(monkeypatch):
 
 
 def test_torch_install_args_cuda_blackwell_uses_cu130(monkeypatch):
-    """ComfyUI's own torch install shares hwdetect.pytorch_index_url with the
-    HF backend's, so it gets the same Blackwell fix for free - proven here
-    rather than assumed, since this is a SEPARATE call site
-    (managed_comfy_fresh.comfy_torch_spec) from torch_pip_args."""
+    """ComfyUI's own torch install shares hwdetect.pytorch_index_url with the HF backend's, so it gets the same Blackwell fix for free - proven here rather than assumed, since this is a SEPARATE call site (managed_comfy_fresh.comfy_torch_spec) from torch_pip_args."""
     from localm import hwdetect
     from localm.media import managed_comfy_fresh as fresh
     monkeypatch.setattr(sys, "platform", "linux")
@@ -271,8 +226,7 @@ def test_torch_install_args_cuda_blackwell_uses_cu130(monkeypatch):
 
 
 def test_hwdetect_pytorch_index_url_public_accessor(monkeypatch):
-    """The shared index table is reachable via a public hwdetect accessor (single
-    source of truth), including the newly-added cpu key."""
+    """The shared index table is reachable via a public hwdetect accessor (single source of truth), including the newly-added cpu key."""
     from localm import hwdetect
     monkeypatch.setattr(hwdetect, "_cuda_compute_capabilities", lambda: [])
     assert hwdetect.pytorch_index_url("cuda") == "https://download.pytorch.org/whl/cu126"
@@ -285,8 +239,7 @@ def test_hwdetect_pytorch_index_url_public_accessor(monkeypatch):
 # =========================================================================== #
 
 def test_required_custom_nodes_from_real_shipped_workflows():
-    """Scanning localm's REAL shipped workflows yields EXACTLY the one non-core
-    node (city96 GGUF) and classifies everything else as core (nothing unclassified)."""
+    """Scanning localm's REAL shipped workflows yields EXACTLY the one non-core node (city96 GGUF) and classifies everything else as core (nothing unclassified)."""
     from localm.media import managed_comfy_fresh as fresh
     req = fresh.required_custom_nodes()
     assert len(req.nodes) == 1
@@ -299,8 +252,7 @@ def test_required_custom_nodes_from_real_shipped_workflows():
 
 
 def test_required_custom_nodes_surfaces_a_new_noncore_node(tmp_path):
-    """A workflow using a class_type that is neither known-core nor mapped is
-    SURFACED (rule 5), so a future workflow's new node is never silently missing."""
+    """A workflow using a class_type that is neither known-core nor mapped is SURFACED (rule 5), so a future workflow's new node is never silently missing."""
     from localm.media import managed_comfy_fresh as fresh
     wf = tmp_path / "fake_workflow.json"
     wf.write_text(
@@ -324,9 +276,7 @@ def test_required_custom_nodes_maps_gguf_in_a_fake_workflow(tmp_path):
 
 
 def test_shipped_workflow_files_ignores_personal_overrides(tmp_path):
-    """The shipped-workflow scan must read the COMMITTED templates only, never the
-    gitignored personal overrides (flux_workflow.json / *_local.json) - otherwise a
-    dev's personal workflow makes the derivation non-deterministic."""
+    """The shipped-workflow scan must read the COMMITTED templates only, never the gitignored personal overrides (flux_workflow.json / *_local.json) - otherwise a dev's personal workflow makes the derivation non-deterministic."""
     from localm.media import managed_comfy_fresh as fresh
     pkg = tmp_path / "localm"
     (pkg / "image_gen").mkdir(parents=True)
@@ -351,8 +301,7 @@ def test_shipped_workflow_files_ignores_personal_overrides(tmp_path):
 # =========================================================================== #
 @pytest.fixture(scope="session")
 def fake_fresh_sources(tmp_path_factory):
-    """A minimal fake 'ComfyUI' git repo (stub main.py + requirements.txt holding one
-    tiny `name @ file://` wheel) and a tiny fake custom-node git repo. Built once."""
+    """A minimal fake 'ComfyUI' git repo (stub main.py + requirements.txt holding one tiny `name @ file://` wheel) and a tiny fake custom-node git repo."""
     if not _git_available():
         pytest.skip("git not on PATH (S3 fresh path clones ComfyUI + custom nodes)")
     root = tmp_path_factory.mktemp("fresh_src")
@@ -385,10 +334,7 @@ def _yaml_base_paths(yaml_path: Path) -> set:
 
 
 def test_provision_fresh_end_to_end(home, fake_fresh_sources, monkeypatch):
-    """Fresh install against the minimal fake: clone at the pinned commit, a fresh
-    localm venv, ComfyUI requirements installed, the pinned custom node cloned, and
-    S1 routing now targets the managed instance. Torch install is SKIPPED (the map is
-    unit-tested separately); everything else runs FOR REAL and offline."""
+    """Fresh install against the minimal fake: clone at the pinned commit, a fresh localm venv, ComfyUI requirements installed, the pinned custom node cloned, and S1 routing now targets the managed instance."""
     from localm.media import managed_comfy_fresh as fresh
     monkeypatch.setenv("PIP_NO_INDEX", "1")
 
@@ -451,8 +397,7 @@ def test_provision_fresh_refuses_when_managed_dir_exists(home, fake_fresh_source
 
 
 def test_provision_fresh_rolls_back_on_clone_failure(home):
-    """A failed clone leaves NOTHING that reads as installed (rule 5: no
-    broken-but-reads-as-ready facade)."""
+    """A failed clone leaves NOTHING that reads as installed (rule 5: no broken-but-reads-as-ready facade)."""
     from localm.media import managed_comfy_fresh as fresh
     result = fresh.provision_fresh(
         comfyui_repo=str(home / "does-not-exist-repo"),
@@ -504,9 +449,7 @@ def test_setup_managed_comfy_selects_copy_when_user_comfy_present(home, monkeypa
 
 
 def test_cli_setup_no_user_comfy_runs_fresh(cli_runner, monkeypatch):
-    """`localm comfy setup` with no user ComfyUI now routes to the fresh install
-    (replacing S2's 'not yet implemented' stub). The heavy install is mocked; this
-    asserts the WIRING selects fresh and reports its result."""
+    """`localm comfy setup` with no user ComfyUI now routes to the fresh install (replacing S2's 'not yet implemented' stub)."""
     from localm.cli import main
     from localm.media import managed_comfy_fresh as fresh
     from localm.media import managed_comfy_provision as prov

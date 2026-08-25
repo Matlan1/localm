@@ -1,12 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""F9 regression suite (memory-audit 2026-07-02): a PARAPHRASED contradiction
-must reach the ADD/UPDATE/DELETE decision instead of blind-accumulating.
-
-Pre-fix, consolidation matched candidates against existing records by difflib
-text ratio only, so 'User lives in Berlin' vs 'User moved to Munich' (ratio
-~0.45) blind-ADDed a second, conflicting record. With an embedder present, the
-semantic matcher now routes cosine-near candidates to the LLM decide step.
-"""
+"""F9 regression suite (memory-audit 2026-07-02): a PARAPHRASED contradiction must reach the ADD/UPDATE/DELETE decision instead of blind-accumulating."""
 
 from __future__ import annotations
 

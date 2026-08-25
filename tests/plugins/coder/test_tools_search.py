@@ -1,8 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""
-Tests for search tools in localm.plugins.coder.tools:
-  tool_search_files, tool_grep, tool_search_replace
-"""
+"""Tests for search tools in localm.plugins.coder.tools: tool_search_files, tool_grep, tool_search_replace."""
 
 import pytest
 from pathlib import Path
@@ -155,25 +152,7 @@ class TestSearchReplace:
         assert (project / "src" / "main.py").read_text() == original
 
     def test_dry_run_reports_the_same_changes_shape_a_real_apply_would(self, project):
-        """dry_run's preview and a real apply share ONE matching pass (see
-        ToolResult.changes) - this is what lets patch mode compute an
-        accurate diff via dry_run without a second, possibly-diverging
-        implementation. old must be the file's REAL current bytes (nothing
-        was written) and new must be what a real apply would write.
-
-        Compared against the file's OWN bytes rather than a hardcoded
-        literal: Path.write_text() (the `project` fixture) translates \\n to
-        the platform line separator on write, so the raw on-disk bytes
-        differ between Windows and Linux even though the logical content
-        does not - old_bytes must match whichever this platform produced.
-        `name` is compared via as_posix() for the same portability reason:
-        ToolResult.changes' path uses this tool's existing native-separator
-        convention (matching the report text search_replace has always
-        produced), Windows-native here - the downstream consumer
-        (_record_changed_file) re-derives and normalises it to posix
-        regardless, which is what the footer test elsewhere in this PR
-        checks; this test is about the raw field's CONTENT, not that
-        normalisation."""
+        """dry_run's preview and a real apply share ONE matching pass (see ToolResult.changes) - this is what lets patch mode compute an accurate diff via dry_run without a second, possibly-diverging implementation. old must be the file's REAL current bytes (nothing was written) and new must be what a real app..."""
         r = tool_search_replace(
             project, pattern="def main", replacement="def entrypoint",
             glob="**/*.py", dry_run=True

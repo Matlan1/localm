@@ -1,22 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The 2026-07-22 drain-review fixes (X1, X2, X3, X9, X10, X11, X15).
-
-THE LOAD-BEARING TEST IS THE FIRST ONE. `dispatch_parallel` shipped through two
-PRs unable to run at all: the dispatcher injects the hidden ``_parent_agent``
-argument for a hardcoded list of tool names, the tool was never added to it, and
-its first statement is ``if _parent_agent is None: return error``. So the model
-was told the tool existed, the user was shown a confirmation card, and every call
-failed. A 525-line test file missed it because every one of its calls invoked
-``tool_dispatch_parallel(...)`` DIRECTLY with ``_parent_agent=parent`` supplied by
-hand, which is the one thing the product never does.
-
-``test_every_registry_tool_receives_its_hidden_args_through_the_real_dispatcher``
-is the test whose absence hid that: it walks the WHOLE registry, dispatches each
-tool through the real ``Agent._execute_tool``, and asserts the tool function
-actually received every hidden parameter its signature declares. It is derived
-from signatures rather than a hand-kept list, so a tool added tomorrow with a new
-hidden argument is covered without anyone remembering to update this file.
-"""
+"""The 2026-07-22 drain-review fixes (X1, X2, X3, X9, X10, X11, X15)."""
 
 from __future__ import annotations
 
@@ -91,8 +74,7 @@ def _call(agent, name, **args):
 
 
 def _hidden_params(fn) -> list[str]:
-    """Underscore-prefixed parameters: the ones a model's tool call can never
-    supply, because they are absent from the tool's declared JSON schema."""
+    """Underscore-prefixed parameters: the ones a model's tool call can never supply, because they are absent from the tool's declared JSON schema."""
     try:
         sig = inspect.signature(fn)
     except (TypeError, ValueError):       # pragma: no cover - builtins only
@@ -132,17 +114,7 @@ def clean_gate():
 
 def test_every_registry_tool_receives_its_hidden_args_through_the_real_dispatcher(
         tmp_path, monkeypatch):
-    """EVERY registry tool, dispatched for real, gets every hidden arg it declares.
-
-    Run in PRIVACY mode because that is the maximal-injection configuration (it
-    adds ``_privacy`` on top of ``_parent_agent`` and ``_session``), so one pass
-    covers every injection site.
-
-    The tool FUNCTION is swapped for a recorder: the subject here is the
-    dispatcher's injection, not what the tools do, and actually running
-    ``git_push`` or ``run_shell`` for all 32 tools is not something a unit test
-    should do. Everything up to and including the call is the real code path.
-    """
+    """EVERY registry tool, dispatched for real, gets every hidden arg it declares."""
     agent = _agent(tmp_path, mode=SessionMode.PRIVACY)
     # Take the network POLICY out of the picture. It is a separate gate that
     # returns before the tool function when net_mode is "off", so leaving it to
@@ -203,12 +175,7 @@ def test_the_parent_agent_injection_set_matches_the_registry(tmp_path):
 
 
 def test_dispatch_parallel_gets_past_its_parent_agent_guard(tmp_path):
-    """The live reproduction from the review, as a regression test.
-
-    An EMPTY repo is the cheap probe: reaching "no commits yet" proves the call
-    got past the ``_parent_agent`` guard, past task normalisation, past the
-    git-repo check and into the dispatch body - without spawning a child.
-    """
+    """The live reproduction from the review, as a regression test."""
     proj = tmp_path / "empty"
     proj.mkdir()
     _run(proj, "git", "init", "-b", "trunk")
@@ -253,16 +220,7 @@ def test_a_malformed_model_value_is_rejected_cleanly(repo):
 
 def test_the_child_budget_is_returned_when_the_acquire_loop_itself_raises(
         repo, monkeypatch):
-    """The STRUCTURAL half of X2, with an oracle that can actually tell.
-
-    The window the fix closed is between the FIRST successful acquire and the
-    `try`. Raising from anything further in (say the first `_git` call) does NOT
-    discriminate: that call was already inside the try before the fix, and the
-    old `finally` already released. So this raises from the acquire LOOP itself,
-    on the second slot, which is only covered once the loop moved inside the
-    try/finally. Hoist the acquire back out and this goes red; the sibling
-    malformed-model test would not.
-    """
+    """The STRUCTURAL half of X2, with an oracle that can actually tell."""
     before = child_limit.available()
     assert before >= 2, "this test needs at least two free slots to be meaningful"
 
@@ -291,8 +249,7 @@ def test_the_child_budget_is_returned_when_the_acquire_loop_itself_raises(
 # --------------------------------------------------------------------------- #
 
 class _FailingChild:
-    """A child that FAILS the way the real Agent does: run_task RETURNS the
-    failure message instead of raising, and records the verdict on itself."""
+    """A child that FAILS the way the real Agent does: run_task RETURNS the failure message instead of raising, and records the verdict on itself."""
 
     def __init__(self, **kwargs):
         self.__dict__.update(kwargs)
@@ -400,8 +357,7 @@ def test_polling_a_failed_background_child_does_not_report_it_finished(tmp_path)
 # --------------------------------------------------------------------------- #
 
 class _SlowChild:
-    """Child 1 runs long enough to burn the batch deadline; child 2 would be
-    quick but never gets a slot, because only one token was available."""
+    """Child 1 runs long enough to burn the batch deadline; child 2 would be quick but never gets a slot, because only one token was available."""
 
     started = threading.Event()
     release = threading.Event()
@@ -458,12 +414,7 @@ def test_synchronous_spawn_agent_does_not_report_a_failed_child_as_finished(
 
 
 def test_the_scoped_prune_probe_forces_english_git_messages(repo, monkeypatch):
-    """D2: the line we parse is gettext-translated.
-
-    On a git build shipping message catalogs, a localized line fails the regex,
-    the fail-closed branch reports OUR OWN records as foreign, and cleanup is
-    disabled permanently on that machine. The probe must pin the locale.
-    """
+    """D2: the line we parse is gettext-translated."""
     from localm.plugins.coder.tools import git as gitmod
 
     seen: dict = {}
@@ -487,12 +438,7 @@ def test_the_scoped_prune_probe_forces_english_git_messages(repo, monkeypatch):
 
 def test_a_queued_child_that_never_started_says_so_and_leaves_no_worktree(
         repo, slow_child):
-    """X9: one slot, two tasks, deadline burned by the first child.
-
-    The second child never runs. Calling that a 600s timeout whose 'worktree is
-    still held by the running thread' was false in every clause, and the teardown
-    skipped its worktree on that basis, leaking it with no reaper.
-    """
+    """X9: one slot, two tasks, deadline burned by the first child."""
     # Take one of the two slots so the dispatch can only get one, forcing the
     # pool to run the children in turn.
     outsider = child_limit.try_acquire("test", "outsider")
@@ -547,12 +493,7 @@ def _register_worktree(repo: Path, path: Path, branch: str) -> None:
 
 
 def test_a_foreign_worktree_record_survives_the_coder_prune(repo, tmp_path):
-    """A user worktree on a drive that is not mounted looks 'missing' to git.
-
-    `git worktree prune` takes no pathspec, so the coder's teardown used to drop
-    that record too. Recovery needs `git worktree repair`, and the coder never
-    locks the worktrees it does not own.
-    """
+    """A user worktree on a drive that is not mounted looks 'missing' to git."""
     foreign = tmp_path / "user-work"
     _register_worktree(repo, foreign, "user/feature")
     ours = tmp_path / f"{WORKTREE_PREFIX}child1-abc123"
@@ -573,11 +514,7 @@ def test_a_foreign_worktree_record_survives_the_coder_prune(repo, tmp_path):
 
 
 def test_the_scoped_prune_still_reaps_our_own_records(repo, tmp_path):
-    """The fires-control for the test above: with only OUR record stale, it prunes.
-
-    Without this, 'never prune anything' would pass the foreign-record test while
-    silently disabling the cleanup.
-    """
+    """The fires-control for the test above: with only OUR record stale, it prunes."""
     ours = tmp_path / f"{WORKTREE_PREFIX}child1-abc123"
     _register_worktree(repo, ours, "coder/child1-abc123")
     import shutil
@@ -620,12 +557,7 @@ def test_the_background_finalizer_uses_the_scoped_prune(repo, tmp_path):
 
 def test_a_destructive_tool_does_not_run_beside_an_abandoned_peer(tmp_path,
                                                                   monkeypatch):
-    """run_tests is non-destructive and a real suite outlives the batch deadline.
-
-    The timeout path cancels (a no-op on a running future) and shuts the pool down
-    without joining, so the destructive segment used to start while the peer was
-    still executing - the exact stacked concurrency destructive=True prevents.
-    """
+    """run_tests is non-destructive and a real suite outlives the batch deadline."""
     agent = _agent(tmp_path)
     monkeypatch.setattr(type(agent), "_PARALLEL_BATCH_TIMEOUT_S", 0.2)
     monkeypatch.setattr(type(agent), "_ABANDONED_PEER_GRACE_S", 0.2)
@@ -659,13 +591,7 @@ def test_a_destructive_tool_does_not_run_beside_an_abandoned_peer(tmp_path,
 
 
 def test_the_destructive_gate_survives_into_the_next_turn(tmp_path, monkeypatch):
-    """The refusal tells the model to wait, so the NEXT turn must gate too.
-
-    _execute_tools runs once per turn. When the abandoned list lived in that call
-    frame it was empty again immediately, so a model that did what the refusal
-    said walked into an ungated dispatch while the peer was still running - the
-    fix's own advice routing it into the hole the fix exists to close.
-    """
+    """The refusal tells the model to wait, so the NEXT turn must gate too."""
     agent = _agent(tmp_path)
     monkeypatch.setattr(type(agent), "_PARALLEL_BATCH_TIMEOUT_S", 0.2)
     monkeypatch.setattr(type(agent), "_ABANDONED_PEER_GRACE_S", 0.2)

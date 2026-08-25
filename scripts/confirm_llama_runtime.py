@@ -1,73 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Confirm a llama.cpp release LOADS AND GENERATES before it is pinned.
-
-``localm/setup_llama.py`` installs ``_PINNED_TAG`` - one release we decided on -
-rather than whatever upstream published most recently. This script is what earns
-that word "confirmed". It exists because the bar is explicit: a build that merely
-LOADS is not confirmed, since "it loads so it will be fine" is exactly what shipped
-the b10373 outage (a release that loaded fine for upstream and that localm's own ABI
-gate then refused, leaving a fresh install dead on arrival).
-
-WHAT IT DOES, per requested backend:
-
-  1. resolves that backend's asset for the tag through setup_llama's OWN resolver,
-     so the thing tested is the thing an install would fetch, not a hand-built URL;
-  2. downloads, checksum-validates and extracts it into a THROWAWAY directory;
-  3. loads it in a fresh interpreter through localm's real loader, and reports the
-     ABI verdict and the compute backends it registered;
-  4. loads a small real GGUF and GENERATES tokens through the product's own
-     GgufBackend, in the isolated worker process a real chat uses.
-
-WHAT IT DELIBERATELY DOES NOT DO: touch the provisioned runtime. It never calls
-setup-llama and never writes into the localm-llama-runtime wheel, so running it
-cannot disturb the runtime this machine (or another session) is using. The build
-under test is injected with ``LLAMA_CPP_LIB``, a documented first-class override.
-
-PROVING THE INJECTION TOOK, which is the whole reason a verdict here is worth
-anything. An override that silently failed to apply looks EXACTLY like a healthy
-run against the build under test - it would load the ALREADY-PROVISIONED runtime,
-generate perfectly, and report PASS for a binary it never opened. So:
-
-  * the probe asserts ``runtime_binary_dir()`` resolves inside the throwaway dir,
-    and reports INCONCLUSIVE rather than PASS when it does not;
-  * generation runs in an isolated WORKER process, a different process from the
-    probe, so the probe's own successful override proves nothing about it. The
-    worker's mapped modules are read back (psutil) and the loaded llama library
-    is checked to be the one under test. A worker that mapped a different llama
-    library, or one whose modules cannot be read, is INCONCLUSIVE - never PASS.
-
-Three outcomes, kept distinct on purpose (collapsing them is the failure this
-whole area keeps producing): PASS (loaded and generated, and both were proven to
-be the build under test), FAIL (the build is bad - it did not load, or the ABI
-gate refused it, or it produced no tokens), and INCONCLUSIVE (we could not
-measure: no network, no model, an override that did not apply, an unreadable
-worker). Exit code 0 / 1 / 2 in that order.
-
-WHAT ONE RUN CAN AND CANNOT COVER, because a confirm job that is green because it
-SKIPPED what it could not test would be worse than no job at all:
-
-  * The ABI/struct property is BACKEND-INDEPENDENT by construction. Upstream ships
-    ONE ``llama.dll`` for every backend of a given tag - the backend lives in the
-    separate ``ggml-*`` plugin libraries - so a single backend's ABI verdict covers
-    them all. This script hashes the library for every backend it fetched and
-    prints whether they are byte-identical, so that premise is re-measured at each
-    tag rather than inherited. That property is also precisely the one that broke
-    in the incident this exists to prevent.
-  * GENERATION is backend-specific and hardware-specific. A cpu run says nothing
-    about whether a cuda build produces tokens on an NVIDIA card. Only the
-    backends actually run here are confirmed for generation; the summary names the
-    ones that were not, and ``setup_llama._PIN_CONFIRMATION`` is where that record
-    lives for the shipped pin.
-
-Usage:
-    python scripts/confirm_llama_runtime.py --tag b10375
-    python scripts/confirm_llama_runtime.py --tag b10375 --backend cpu --backend vulkan
-    python scripts/confirm_llama_runtime.py            # confirm the current pin
-
-Needs localm importable (unlike scripts/check_llama_pin.py, which is stdlib-only).
-Nothing under localm/ imports this; it never runs from a user's install.
-"""
+"""Confirm a llama.cpp release LOADS AND GENERATES before it is pinned."""
 
 from __future__ import annotations
 
@@ -247,8 +180,7 @@ def _sha256(path: Path) -> str:
 
 
 def _fetch_model() -> "tuple[str, str]":
-    """(path, error). Never raises: no model is INCONCLUSIVE, not a failure of
-    the build under test."""
+    """(path, error)."""
     try:
         from huggingface_hub import hf_hub_download
     except Exception as e:
@@ -261,15 +193,7 @@ def _fetch_model() -> "tuple[str, str]":
 
 def _place_build(backend: str, tag: str, dest: Path, attempts: int = 3
                  ) -> "tuple[str, str]":
-    """Download and extract *backend* at *tag* into *dest*. Returns (lib_path,
-    error).
-
-    Retried, because the release CDN drops connections: measured twice while
-    writing this, both times as "Remote end closed connection without response"
-    after 0 bytes. A transient drop and a build we could not test are the same
-    INCONCLUSIVE outcome to the caller, so without a retry the common case would
-    be a run that measured nothing - and a maintenance check that usually
-    measures nothing is one people stop reading."""
+    """Download and extract *backend* at *tag* into *dest*."""
     from localm import setup_llama as sl
     try:
         url, sha, _tag = sl._resolve_backend_asset(backend, tag=tag)

@@ -1,12 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Validate every bundled (store) plugin manifest so a broken plugin.toml, a
-missing register module, or a client-asset plugin shipping a missing entry module
-fails CI rather than the user at install time.
-
-Unlike the engine tests (which use synthetic manifests), this iterates the REAL
-store under localm/plugins/builtin/, located repo-relative so it validates the
-checkout under test.
-"""
+"""Validate every bundled (store) plugin manifest so a broken plugin.toml, a missing register module, or a client-asset plugin shipping a missing entry module fails CI rather than the user at install time."""
 
 import tomllib
 from pathlib import Path
@@ -59,9 +52,7 @@ def test_builtin_manifest_valid(plugin_dir):
 
 @pytest.mark.parametrize("plugin_dir", _builtin_dirs(), ids=lambda d: d.name)
 def test_builtin_requires_extras_are_real_pyproject_extras(plugin_dir):
-    """A builtin's requires_extras must name a real [project.optional-dependencies]
-    extra, so a typo cannot silently turn the plugin dep self-installer into a
-    no-op (the host resolves the extra name against localm's own metadata)."""
+    """A builtin's requires_extras must name a real [project.optional-dependencies] extra, so a typo cannot silently turn the plugin dep self-installer into a no-op (the host resolves the extra name against localm's own metadata)."""
     spec = parse_spec(plugin_dir, builtin=True)
     extras = _declared_extras()
     for e in spec.requires_extras:
@@ -70,9 +61,7 @@ def test_builtin_requires_extras_are_real_pyproject_extras(plugin_dir):
 
 
 def test_rag_declares_its_pdf_extra():
-    """RAG's PDF extraction needs pypdf (the [rag] extra). It must self-provision
-    that on enable - like voice does for faster-whisper - or PDFs silently fail on
-    a default install (which ships .[coder,voice,monitor], no rag)."""
+    """RAG's PDF extraction needs pypdf (the [rag] extra)."""
     spec = parse_spec(_BUILTIN / "rag", builtin=True)
     assert spec.requires_extras == ["rag"]
     from localm.plugins import deps

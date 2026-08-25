@@ -1,23 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The GUI form of ``localm update --rollback``: GET/POST /api/update/rollback.
-
-Three properties this file exists to pin, in the order they matter:
-
-1. **The probe never performs the action.** ``rollback_info()`` answers "is there a
-   backup" WITHOUT calling ``rollback_last()``, which MOVES THE INSTALL. An existence
-   check implemented as try-the-action-and-catch would roll a user back for opening a
-   settings page.
-2. **A partial restore never reads as success, and never restarts.**
-   ``_apply_update.rollback`` reports a half-restored tree by raising; that is the one
-   outcome that must be loudest, and it must not be confused with the benign "there is
-   no backup" refusal.
-3. **The route is OWNER-only, not merely config:write.** Restoring an older build can
-   put back a fixed defect, so a delegated config:write key - which drives the rest of
-   the Updates card - must not reach it. See CHK-UPDATE-ROLLBACK in routes/admin.py.
-
-Assertions about a restore lead with the FILES and only then the status code: a status
-code invites you to "fix" the number, a restored-or-not file does not.
-"""
+"""The GUI form of ``localm update --rollback``: GET/POST /api/update/rollback."""
 from __future__ import annotations
 
 from unittest.mock import MagicMock
@@ -40,11 +22,7 @@ def _engine():
 
 
 def _seed_install(tmp_path, monkeypatch, *, with_backup=True):
-    """A fake install plus (optionally) the backup an earlier apply() left behind.
-
-    ``marker.txt`` is the discriminator: "new" in the install, "old" in the backup. It
-    is a file the fixture can express BOTH values of, so a rollback that silently did
-    nothing cannot pass (diff-review item 19)."""
+    """A fake install plus (optionally) the backup an earlier apply() left behind."""
     import json
     home = tmp_path / "home"
     home.mkdir()
@@ -87,9 +65,7 @@ def _auth(app):
 # --------------------------------------------------------------------------- #
 
 def test_rollback_info_reports_nothing_and_creates_nothing(tmp_path, monkeypatch):
-    """No backup -> available False. And the probe must not bring an ``updates/``
-    tree into existence: a status poll on an install that never updated leaves the
-    data dir exactly as it found it."""
+    """No backup -> available False."""
     home, _install = _seed_install(tmp_path, monkeypatch, with_backup=False)
     info = updater.rollback_info()
     assert info["available"] is False
@@ -100,8 +76,7 @@ def test_rollback_info_reports_nothing_and_creates_nothing(tmp_path, monkeypatch
 
 def test_rollback_info_names_the_backed_up_version_without_restoring_it(
         tmp_path, monkeypatch):
-    """The load-bearing property: after the probe the install is UNCHANGED. This is
-    what makes it safe to call on every settings load."""
+    """The load-bearing property: after the probe the install is UNCHANGED."""
     _home, install = _seed_install(tmp_path, monkeypatch)
     info = updater.rollback_info()
     assert (install / "marker.txt").read_text(encoding="utf-8") == "new", \
@@ -114,9 +89,7 @@ def test_rollback_info_names_the_backed_up_version_without_restoring_it(
 
 def test_rollback_info_reports_an_unknown_version_rather_than_guessing(
         tmp_path, monkeypatch):
-    """A backup written before VERSION existed (or unreadable) is still restorable.
-    Report the version as unknown; never substitute the running one, which would name
-    the build the user is trying to leave."""
+    """A backup written before VERSION existed (or unreadable) is still restorable."""
     home, _install = _seed_install(tmp_path, monkeypatch)
     (home / "updates" / "backup" / "VERSION").unlink()
     info = updater.rollback_info()
@@ -162,7 +135,7 @@ def test_post_restores_the_previous_build_and_restarts(
 
 def test_post_without_a_backup_is_a_409_and_restarts_nothing(
         tmp_path, monkeypatch, no_restart):
-    """Distinct from the partial-restore 500 below. Nothing was touched here."""
+    """Distinct from the partial-restore 500 below."""
     _open_mode(monkeypatch)
     _home, install = _seed_install(tmp_path, monkeypatch, with_backup=False)
     app = create_app(_engine())
@@ -176,9 +149,7 @@ def test_post_without_a_backup_is_a_409_and_restarts_nothing(
 
 def test_a_partial_restore_is_reported_as_such_and_does_not_restart(
         tmp_path, monkeypatch, no_restart):
-    """_apply_update.rollback raises to report a HALF-RESTORED tree and keeps the
-    backup. That must surface as its own failure - not as success, and not as the
-    benign 'no backup' refusal - and must not re-exec into a half-restored install."""
+    """_apply_update.rollback raises to report a HALF-RESTORED tree and keeps the backup."""
     _open_mode(monkeypatch)
     _home, _install = _seed_install(tmp_path, monkeypatch)
     import localm._apply_update as au
@@ -202,15 +173,7 @@ def test_a_partial_restore_is_reported_as_such_and_does_not_restart(
 
 def test_rollback_is_refused_while_an_update_holds_the_lock(
         tmp_path, monkeypatch, no_restart):
-    """apply() and rollback_last() mutate the SAME install tree. Before the GUI
-    route, rollback was unserialised and safe only by accident of having exactly one
-    caller; a route makes an apply and a rollback two buttons in one Settings card.
-    A rollback that interleaved with a swap would remove names the swap is restoring.
-
-    The lock dir is created DIRECTLY (an atomic mkdir at the real path), not
-    monkeypatched, so this exercises the cross-process guard as a separate process
-    would actually contend with it - the CLI in a terminal is a real contender that
-    no in-process lock could see."""
+    """apply() and rollback_last() mutate the SAME install tree."""
     _open_mode(monkeypatch)
     home, install = _seed_install(tmp_path, monkeypatch)
     (home / "updates" / "apply.lock").mkdir()
@@ -247,8 +210,7 @@ def protected(tmp_path, monkeypatch, no_restart):
 
 
 def test_scoped_config_write_key_cannot_roll_the_install_back(protected):
-    """config:write drives Check and Update now. It must NOT drive a downgrade:
-    restoring an older build can put back a defect the newer one fixed."""
+    """config:write drives Check and Update now."""
     c, scoped, install, restarts = protected
     r = c.post("/api/update/rollback", headers={"Authorization": f"Bearer {scoped}"})
     assert (install / "marker.txt").read_text(encoding="utf-8") == "new", \
@@ -259,8 +221,7 @@ def test_scoped_config_write_key_cannot_roll_the_install_back(protected):
 
 
 def test_owner_key_can_roll_the_install_back(protected):
-    """The gate hides the capability from a delegated key; it must not remove it
-    from the owner, or the GUI would ship a control nobody can use."""
+    """The gate hides the capability from a delegated key; it must not remove it from the owner, or the GUI would ship a control nobody can use."""
     c, _scoped, install, restarts = protected
     r = c.post("/api/update/rollback", headers={"Authorization": f"Bearer {OWNER_KEY}"})
     assert (install / "marker.txt").read_text(encoding="utf-8") == "old"
@@ -269,9 +230,7 @@ def test_owner_key_can_roll_the_install_back(protected):
 
 
 def test_the_gate_is_specific_not_a_blanket_block(protected):
-    """The same scoped key still reads the probe, so the control can render (and
-    correctly stay hidden) for a delegated key - this is a write gate, not a loss of
-    the scope."""
+    """The same scoped key still reads the probe, so the control can render (and correctly stay hidden) for a delegated key - this is a write gate, not a loss of the scope."""
     c, scoped, _install, _restarts = protected
     r = c.get("/api/update/rollback", headers={"Authorization": f"Bearer {scoped}"})
     assert r.status_code == 200, r.text

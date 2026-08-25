@@ -1,22 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""
-localm agent-memory: a local-first, privacy-gated, scoped memory layer.
-
-Semantic (facts/preferences) + episodic (past interactions) memory that lets an
-agent recall across sessions with no cloud dependency. A small, auditable store
-(JSONL + BM25 + optional on-device embeddings, mirroring ``localm/rag``) with:
-  - recency + importance + relevance retrieval (Generative-Agents blend),
-  - an ADD/UPDATE/DELETE/NO_OP consolidation loop + decay/forgetting on the write
-    path,
-  - hard ``(principal, agent, scope_key)`` namespacing (never leak across users or
-    projects),
-  - a privacy gate on EVERY durable write (``writes_allowed``), and
-  - poisoning defence: every recalled memory is neutralised (``localm.textguard``)
-    and injected inside a fenced, labelled data-not-instructions block.
-
-Consumers: the chat plugin (server-side inlet injection + /api/memory routes) and,
-later, the coder. See ``dev-notes/agent-memory/DESIGN.md``.
-"""
+"""localm agent-memory: a local-first, privacy-gated, scoped memory layer."""
 
 from __future__ import annotations
 
@@ -62,8 +45,7 @@ _CLOSE_FENCE = "</remembered_facts>"
 
 
 def principal_of(ctx_principal: Optional[str]) -> str:
-    """Map a chat-hook principal (sha256 of the bearer key, or None in owner/open
-    mode) to a namespace component. Single-user localm collapses to "owner"."""
+    """Map a chat-hook principal (sha256 of the bearer key, or None in owner/open mode) to a namespace component."""
     return ctx_principal or "owner"
 
 
@@ -74,10 +56,7 @@ def open_store(principal: Optional[str], agent: str, scope_key: str = "", *,
 
 
 def _truncate_line(text: str, limit: int) -> str:
-    """Truncate *text* at a WORD boundary with a trailing ellipsis when it exceeds
-    *limit*, never mid-word (memory-audit 2026-07-02 [52]). Text within the limit is
-    returned unchanged. A single over-long word (no interior space) is hard-cut so
-    the result never runs away past the limit."""
+    """Truncate *text* at a WORD boundary with a trailing ellipsis when it exceeds *limit*, never mid-word (memory-audit 2026-07-02 [52])."""
     text = (text or "").strip()
     if len(text) <= limit:
         return text
@@ -91,11 +70,7 @@ def _truncate_line(text: str, limit: int) -> str:
 def render_memories(records: list, *, label: str = _INJECT_LABEL,
                     max_chars: int = INJECT_BLOCK_CHARS,
                     line_chars: int = INJECT_LINE_CHARS) -> str:
-    """Format recalled memories as a fenced, labelled, neutralised block for
-    prompt injection. Empty string when there is nothing to add. Every line is
-    neutralised so a stored memory cannot forge a frame / control-token boundary,
-    and the whole block is fenced + labelled as data-not-instructions so an
-    instruction-shaped memory is treated as context, not a command."""
+    """Format recalled memories as a fenced, labelled, neutralised block for prompt injection."""
     if not records:
         return ""
     lines = [f"[{label}]", _OPEN_FENCE]

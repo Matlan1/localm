@@ -1,19 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""
-Agent - the core agentic loop.
-
-Flow per turn:
-    1. Call the LLM with the current message history
-    2. Parse the response for <tool_call> blocks
-    3. If no tool calls -> final answer, break
-    4. For each tool call: display, optionally confirm, execute, append result
-    5. Repeat
-
-The Agent class is assembled here from the concern mixins (loop / execution /
-context / persistence / session); this module owns construction (__init__) and
-the small shared-state accessors. The Agent class is used by the CLI (interactive
-chat + single-task run_task) and by the spawn_agent tool (child agents).
-"""
+"""Agent - the core agentic loop."""
 
 from __future__ import annotations
 
@@ -42,32 +28,7 @@ class Agent(
     _PersistenceMixin,
     _SessionMixin,
 ):
-    """
-    Stateful agentic loop.
-
-    Parameters
-    ----------
-    backend:
-        LLM backend (local or remote).
-    cwd:
-        Working directory for all file/shell operations.
-    name:
-        Display name (shown in the terminal and sub-agent logs).
-    max_turns:
-        Hard cap on LLM calls per task to prevent infinite loops.
-    verbose:
-        Print full tool outputs (not just summaries).
-    auto_approve:
-        Skip confirmation prompts for destructive tools.
-    always_confirm:
-        Set of tool names that always prompt for confirmation, even when
-        ``auto_approve=True``.  Typical use: ``{"run_shell"}`` to auto-approve
-        file writes but still gate shell execution.
-    parent:
-        Parent Agent when this instance is a sub-agent.
-    gen_kwargs:
-        Extra kwargs forwarded to every LLM call (temperature, max_tokens, …).
-    """
+    """Stateful agentic loop."""
 
     def __init__(
         self,
@@ -424,14 +385,7 @@ class Agent(
 
     @property
     def auto_approve(self) -> bool:
-        """Whether destructive tools skip confirmation.
-
-        A child can only ever be NARROWER than its parent: once the parent's
-        approval is revoked the child's own True stops counting. It cannot work
-        the other way round - a parent turning auto-approve back ON does not
-        silently re-approve a child that was deliberately spawned without it,
-        because the child's own value still has to be True as well.
-        """
+        """Whether destructive tools skip confirmation."""
         if not self._auto_approve:
             return False
         parent = getattr(self, "parent", None)
@@ -447,18 +401,7 @@ class Agent(
 
     @property
     def scope(self):
-        """The glob confining the file tools, or None.
-
-        A child that INHERITED its scope follows the parent's, live - so
-        tightening a scope mid-run reaches work already in flight. A child given
-        an EXPLICIT scope keeps it: an explicit child scope is a deliberate
-        narrowing (see inherited_child_kwargs), and following the parent over it
-        would widen the child, the one direction that must never happen.
-
-        The inherited copy in ``_scope`` is the floor and is never discarded, so
-        a child whose parent reference is gone still confines itself to whatever
-        it inherited rather than silently becoming unscoped.
-        """
+        """The glob confining the file tools, or None."""
         if self._scope_inherited:
             parent = getattr(self, "parent", None)
             if parent is not None:
@@ -601,17 +544,7 @@ class Agent(
             print_warning(f"Skill setup failed: {e}")
 
     def _notify_scope_does_not_confine_shell(self) -> None:
-        """Once per session: say plainly that an active scope does not confine the
-        shell tools, when any of them is actually enabled.
-
-        ``--scope`` reads as "this session can only touch these files", and for
-        every file tool it is exactly that. run_shell / run_tests execute a
-        process, which no path-arg check can confine, so they are deliberately
-        left out (_INTENTIONALLY_UNSCOPED). That decision is sound and stays; what
-        was wrong is that it lived only in a source comment, so a user running
-        under --scope got no runtime signal and could reasonably believe a
-        confinement they did not have. Silence about a safety property that does
-        not hold is the failure mode AGENTS.md rule 5 exists to prevent."""
+        """Once per session: say plainly that an active scope does not confine the shell tools, when any of them is actually enabled."""
         print_warning = _agent.print_warning
         if not self.scope:
             return
@@ -644,20 +577,7 @@ class Agent(
             frozenset(TOOL_REGISTRY) - SAFE_RESTRICTED_TOOLS)
 
     def _apply_role_toolset(self) -> None:
-        """Narrow this session to its role's allowlist. STRICTLY SUBTRACTIVE.
-
-        The new disabled set is a UNION with what is already disabled, never an
-        assignment, so a role can only ever REMOVE capability: it cannot hand back
-        a tool the parent disabled, nor one a restricted (shareable, non-owner)
-        session forbids. That ordering matters - this runs after
-        _apply_restricted_toolset, so restricted-then-role composes to the
-        intersection of both allowlists rather than whichever ran last.
-
-        Subtracting from the LIVE registry (like the restricted path above, and
-        for the same reason) means every dynamically registered MCP / plugin /
-        skill tool is denied to a role by default: an allowlist cannot be
-        outflanked by a tool that did not exist when the preset was written.
-        """
+        """Narrow this session to its role's allowlist."""
         TOOL_REGISTRY = _agent.TOOL_REGISTRY
         assert self._role_preset is not None  # guarded at the call site
         # External tool docs go too: a narrowed child that cannot call any of them
@@ -671,19 +591,7 @@ class Agent(
     # ------------------------------------------------------------------ #
 
     def _apply_inherited_skill_toolset(self) -> None:
-        """Carry a spawning parent's active skill restriction into this child.
-
-        Without it, ``allowed-tools: read_file, spawn_agent`` would be a one-line
-        bypass of the whole gate: the skill delegates, and the child - a fresh
-        Agent with no active skill - writes files the skill never declared. Same
-        shape as the scope hole and the role hole ``inherited_child_kwargs``
-        already guards against, so it is applied the same way and in the same
-        place: STRICTLY SUBTRACTIVE, a union with what is already disabled,
-        after every dynamic tool has registered.
-
-        The skill's own two tools stay reachable so a child can still read the
-        skill's bundled files (see SKILL_META_TOOLS).
-        """
+        """Carry a spawning parent's active skill restriction into this child."""
         from ..skills import SKILL_META_TOOLS
         TOOL_REGISTRY = _agent.TOOL_REGISTRY
         assert self._inherited_skill_tools is not None   # guarded at the call site
@@ -692,31 +600,14 @@ class Agent(
             - self._inherited_skill_tools - SKILL_META_TOOLS)
 
     def active_skill_tools(self) -> Optional[frozenset]:
-        """The live allowed-tools intersection, or None when nothing is active.
-
-        Public because the spawn path (tools/agents.py) has to read it off the
-        parent to hand it to a child. Expires the same way every other read does,
-        so a stale restriction from an earlier turn is never inherited.
-        """
+        """The live allowed-tools intersection, or None when nothing is active."""
         with self._skill_lock:
             self._expire_active_skill_locked()
             return self._active_skill_tools
 
     @property
     def _last_user_request(self) -> str:
-        """The raw text of the most recent USER request (not a mid-run nudge).
-
-        A property, rather than a plain attribute, so the SETTER can count user
-        requests - that count is what retires an active skill's restriction (see
-        _activate_skill). loop.py assigns this at exactly the three user entry
-        points (run_task / continue_task / chat) and nowhere else, so observing
-        the assignment gives the turn boundary exactly, with no cooperation
-        needed from loop.py and no hook inside the agentic loop to keep in step.
-
-        Observing the ASSIGNMENT and not the VALUE is the point: a user who
-        repeats a request verbatim still starts a new turn, and comparing the
-        strings would silently miss it.
-        """
+        """The raw text of the most recent USER request (not a mid-run nudge)."""
         return self.__dict__.get("_last_user_request_text", "")
 
     @_last_user_request.setter
@@ -727,33 +618,7 @@ class Agent(
         self._user_request_seq = getattr(self, "_user_request_seq", 0) + 1
 
     def _activate_skill(self, name: str, allowed_tools) -> None:
-        """Arm ``name``'s allowed-tools restriction for the rest of this turn.
-
-        THE RESTRICTION ONLY EVER NARROWS. It is intersected with any skill
-        already active, and the dispatch gate is checked on top of (never
-        instead of) ``disabled_tools``, so the tools that can actually run are
-        ``(registry - disabled_tools) & every active skill's allowed-tools``.
-        That is the same strictly-subtractive invariant roles.py states for role
-        presets, and it exists here for the same reason: a narrowing mechanism
-        that can hand capability BACK is a privilege escalation wearing the
-        clothes of a restriction.
-
-        WHY THERE IS NO RELEASE THE MODEL CAN CALL, and why a second use_skill
-        intersects rather than replaces: a SKILL.md body is UNTRUSTED content
-        (skills.py), so the threat this gate answers is a skill's own
-        instructions steering the model. Any widening the model can reach is
-        therefore a one-line bypass - "release the restriction, then write_file",
-        or "load this other skill that declares nothing, then write_file". The
-        only sound boundary is one the model cannot reach, which is the human's
-        next request: hence the sequence check below.
-
-        An absent or empty allowed-tools arms NOTHING. That is deliberate and
-        backward compatible - the field is optional in the format and most
-        skills omit it, so treating absent as deny-all would break every one of
-        them. It also closes the bypass above rather than opening it: an
-        unrestricted skill contributes no set to intersect, so loading one while
-        a restricted skill is active leaves the restriction exactly as it was.
-        """
+        """Arm ``name``'s allowed-tools restriction for the rest of this turn."""
         allowed = frozenset(t for t in (allowed_tools or ()) if t)
         if not allowed:
             return
@@ -767,24 +632,14 @@ class Agent(
                 self._active_skill_names.append(name)
 
     def _expire_active_skill_locked(self) -> None:
-        """Drop the restriction if it belongs to an earlier user request.
-
-        Lazy rather than cleared at a turn boundary: the boundary lives in
-        loop.py's ``_loop``, and expiring on READ needs nothing there at all.
-        Caller must hold ``_skill_lock``.
-        """
+        """Drop the restriction if it belongs to an earlier user request."""
         if self._active_skill_seq != self._user_request_seq:
             self._active_skill_tools = None
             self._active_skill_names = []
             self._active_skill_seq = self._user_request_seq
 
     def _skill_gate_denial(self, tool_name: str) -> Optional[str]:
-        """The refusal message when an active skill forbids ``tool_name``, else None.
-
-        The enforcement half of ``allowed-tools``. Kept beside the state it reads
-        rather than in the dispatcher so the whole lifetime lives in one place;
-        the dispatcher owns only the branch that acts on the answer.
-        """
+        """The refusal message when an active skill forbids ``tool_name``, else None."""
         from ..skills import SKILL_META_TOOLS
         with self._skill_lock:
             self._expire_active_skill_locked()
@@ -806,21 +661,12 @@ class Agent(
 
     @property
     def last_run_ok(self) -> bool:
-        """False if the LAST run failed (max_turns, a circuit breaker, a stop)
-        rather than completing normally.
-
-        Per-run, not per-session: a fresh run re-arms it, so a later healthy turn
-        in the same session reports ok. ``_had_any_failure`` is the session-wide
-        answer."""
+        """False if the LAST run failed (max_turns, a circuit breaker, a stop) rather than completing normally."""
         return self._last_run_ok
 
     @property
     def last_verify_state(self) -> Optional[str]:
-        """How the exit-code oracle ended for the LAST run.
-
-        ``"passed"`` (exited 0), ``"failed"`` (still failing after the retries),
-        ``"inconclusive"`` (the command could not run, or collected nothing), or
-        None when no check ran at all. Per-run, like ``last_run_ok``."""
+        """How the exit-code oracle ended for the LAST run."""
         return self._last_verify_state
 
     @property
@@ -834,15 +680,12 @@ class Agent(
             return [dict(t) for t in self._todos]
 
     def set_todos(self, todos: list[dict]) -> None:
-        """Replace the task list. Copies in, so the caller cannot mutate the
-        stored list afterwards; the whole-list swap under the lock is what makes
-        two set_todos calls in one parallel batch last-writer-wins instead of
-        torn."""
+        """Replace the task list."""
         with self._todos_lock:
             self._todos = [dict(t) for t in todos]
 
     def _emit(self, event_type: str, **data) -> None:
-        """Send a structured event to the registered sink. Never raises."""
+        """Send a structured event to the registered sink."""
         if self.on_event is None:
             return
         try:
@@ -855,9 +698,7 @@ class Agent(
             logger.debug("on_event sink raised on a %r event: %s", event_type, e)
 
     def _record_error(self, tool: str, output: str) -> None:
-        """Append a tool/command failure to the bounded session error trace that
-        feeds the close-time episode reflection (audit cluster 13). Each entry is
-        collapsed to one trimmed line; the newest _MAX_ERROR_TRACE are kept."""
+        """Append a tool/command failure to the bounded session error trace that feeds the close-time episode reflection (audit cluster 13)."""
         from .constants import _MAX_ERROR_TRACE
         line = " ".join((output or "").split())[:200]
         if not line:
@@ -871,16 +712,7 @@ class Agent(
         self._stop_requested = True
 
     def queue_message(self, text: str) -> None:
-        """
-        Queue a steering message for delivery at the next turn boundary.
-
-        Thread-safe - the GUI calls this from the request thread while the
-        agent loop runs in its own thread. The message is injected into the
-        conversation before the next LLM call, so the user can redirect a
-        running task ("also add logging", "skip the tests") without stopping
-        it. Messages queued after a task finishes are delivered at the start
-        of the next one.
-        """
+        """Queue a steering message for delivery at the next turn boundary."""
         with self._queue_lock:
             self._queued_messages.append(text)
 

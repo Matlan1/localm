@@ -1,26 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""
-Pure-Python unified diff applier.
-
-Handles standard ``patch -u`` output:
-
-    --- a/path/to/file
-    +++ b/path/to/file
-    @@ -OLD_START[,OLD_COUNT] +NEW_START[,NEW_COUNT] @@
-     context line
-    -removed line
-    +added line
-
-File-header lines (``---``/``+++``) and ``\\ No newline at end of file``
-markers are tolerated but ignored.  Line numbers in ``@@`` headers are
-used only as *hints* - the applier does a fuzzy search (±20 lines) so
-that minor off-by-one errors from the LLM are silently corrected.
-
-Public API
-----------
-apply_diff(original_text, diff_text) -> str
-    Raises ``PatchError`` on any unrecoverable failure.
-"""
+"""Pure-Python unified diff applier."""
 
 from __future__ import annotations
 
@@ -113,12 +92,7 @@ def _find_hunk_position(
     *,
     fuzz: int = 20,
 ) -> Optional[int]:
-    """
-    Find the 0-indexed position in *orig* where *hunk*'s old-side matches.
-
-    Tries the hint first, then searches ±fuzz lines around it.
-    Returns None if no match is found.
-    """
+    """Find the 0-indexed position in *orig* where *hunk*'s old-side matches."""
     old_lines = _old_side(hunk)
     n = len(old_lines)
 
@@ -154,12 +128,7 @@ def _find_hunk_position(
 # ---------------------------------------------------------------------------
 
 def apply_diff(original_text: str, diff_text: str) -> str:
-    """
-    Apply *diff_text* (unified diff format) to *original_text*.
-
-    Returns the patched text.
-    Raises ``PatchError`` if a hunk cannot be applied.
-    """
+    """Apply *diff_text* (unified diff format) to *original_text*."""
     # Detect and preserve line ending style
     eol = "\r\n" if "\r\n" in original_text else "\n"
 

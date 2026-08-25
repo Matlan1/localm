@@ -1,15 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The changed-files tracker (GUI "files changed" / session_diff) must survive
-a checkpoint save/resume cycle.
-
-Before this fix, save_checkpoint() never wrote _changed_files at all: a
-server restart or GUI reconnect mid-session lost every prior write's record
-even though the writes themselves were still on disk and the conversation
-resumed intact - the diff view would silently go blank for work that
-genuinely happened. Modelled on test_todos.py's real-dispatch pattern: drive
-the REAL Agent._execute_tool (so write_file's own snapshot/tracking code
-runs), the REAL checkpoint file, and a genuinely fresh Agent for the resume.
-"""
+"""The changed-files tracker (GUI 'files changed' / session_diff) must survive a checkpoint save/resume cycle."""
 
 from unittest.mock import patch
 
@@ -86,9 +76,7 @@ def test_changed_files_survive_a_real_checkpoint_resume_cycle(tmp_path, monkeypa
 
 def test_older_checkpoint_without_changed_files_key_resumes_with_empty_tracker(
         tmp_path, monkeypatch):
-    """A checkpoint saved before this fix existed has no "changed_files" key
-    at all - resuming it must not crash, and leaves the tracker empty (the
-    same lossy behaviour it already had, not a new failure mode)."""
+    """A checkpoint saved before this fix existed has no 'changed_files' key at all - resuming it must not crash, and leaves the tracker empty (the same lossy behaviour it already had, not a new failure mode)."""
     import localm.config as cfg
     monkeypatch.setattr(cfg, "HOME_DIR", tmp_path / "home")
     proj = tmp_path / "proj"
@@ -103,8 +91,7 @@ def test_older_checkpoint_without_changed_files_key_resumes_with_empty_tracker(
 
 def test_garbage_changed_files_in_a_checkpoint_are_dropped_not_trusted(
         tmp_path, monkeypatch):
-    """The checkpoint is plain user-writable JSON: a hand-edited or corrupted
-    changed_files value must normalise, not crash or land unvalidated."""
+    """The checkpoint is plain user-writable JSON: a hand-edited or corrupted changed_files value must normalise, not crash or land unvalidated."""
     import localm.config as cfg
     monkeypatch.setattr(cfg, "HOME_DIR", tmp_path / "home")
     proj = tmp_path / "proj"

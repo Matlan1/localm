@@ -1,13 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""KEY-SCOPE: the GUI /api/* capability routes must be gated on their scope, not
-just "any valid key" (_require_auth). Policy: chat is BASELINE (any valid key may
-chat); every OTHER capability is optional and gated by its own scope. The owner
-key (admin) and the owner-paired companion imply every scope and are unaffected;
-only deliberately under-scoped non-owner keys lose access.
-
-Also covers GET /api/capabilities - the baseline endpoint that tells the GUI which
-tabs the CURRENT key may show (so a tab the key can't use is never rendered).
-"""
+"""KEY-SCOPE: the GUI /api/* capability routes must be gated on their scope, not just 'any valid key' (_require_auth)."""
 
 from pathlib import Path
 
@@ -21,9 +13,7 @@ from localm.plugins.gui.web import attach_gui
 
 @pytest.fixture
 def scoped_app(tmp_path, monkeypatch):
-    """Full stack (engine + GUI) on a throwaway home, so app.state.plugin_manager
-    exists for /api/capabilities and create_key writes to the throwaway auth.json.
-    No owner key by default -> a created scoped key is the only auth in effect."""
+    """Full stack (engine + GUI) on a throwaway home, so app.state.plugin_manager exists for /api/capabilities and create_key writes to the throwaway auth.json."""
     home = tmp_path / ".localm"
     monkeypatch.setenv("LOCALM_HOME", str(home))
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
@@ -144,9 +134,7 @@ class TestConfigTierRoutes:
             assert r.status_code != 403
 
     def test_config_write_without_fs_host_denied_logs_export(self, scoped_app, tmp_path):
-        """CodeQL WS8 (alert 2): config:write alone is NOT enough - the route
-        writes into a caller-named host directory, and its does-it-exist 400
-        was a directory-existence oracle for the whole disk."""
+        """CodeQL WS8 (alert 2): config:write alone is NOT enough - the route writes into a caller-named host directory, and its does-it-exist 400 was a directory-existence oracle for the whole disk."""
         from localm import auth
         writer = auth.create_key("cfgwrite-nofs", [S.CONFIG_WRITE],
                                  allow_privileged=True)["key"]   # fs_access="none"
@@ -164,8 +152,7 @@ class TestConfigTierRoutes:
 
 class TestBaselineRoutesStayOpen:
     def test_stats_and_capabilities_are_baseline(self, scoped_app):
-        """A zero-extra-capability key (only mcp here) still gets the status bar
-        and can learn its own capabilities - both are baseline (any valid key)."""
+        """A zero-extra-capability key (only mcp here) still gets the status bar and can learn its own capabilities - both are baseline (any valid key)."""
         from localm import auth
         narrow = auth.create_key("narrow", [S.MCP])["key"]
         with TestClient(scoped_app) as c:
@@ -173,8 +160,7 @@ class TestBaselineRoutesStayOpen:
             assert c.get("/api/capabilities", headers=_hdr(narrow)).status_code == 200
 
     def test_no_key_still_401s_baseline_when_keystore_configured(self, scoped_app):
-        """With a keystore configured, even a baseline route needs SOME valid key
-        (baseline = any valid key, not no key)."""
+        """With a keystore configured, even a baseline route needs SOME valid key (baseline = any valid key, not no key)."""
         from localm import auth
         auth.create_key("narrow", [S.MCP])           # configures the keystore
         with TestClient(scoped_app) as c:
@@ -220,8 +206,7 @@ class TestCapabilitiesEndpoint:
             assert all(caps["core"].values())
 
     def test_plugins_are_scope_filtered(self, scoped_app):
-        """The chat plugin (scope 'chat') is listed only for a key that grants
-        chat; an mcp-only key does not see it in its capability plugin list."""
+        """The chat plugin (scope 'chat') is listed only for a key that grants chat; an mcp-only key does not see it in its capability plugin list."""
         from localm import auth
         narrow = auth.create_key("narrow", [S.MCP])["key"]
         chatter = auth.create_key("chatter", [S.CHAT])["key"]

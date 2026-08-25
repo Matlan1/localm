@@ -1,8 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""First-party plugin catalog: command -> plugin lookup and the
-'that command needs the X plugin' suggestion, plus the CLI REPL wiring that
-turns an unknown command for a known-but-inactive plugin into that hint
-(gated on the suggest_plugins config toggle)."""
+"""First-party plugin catalog: command -> plugin lookup and the 'that command needs the X plugin' suggestion, plus the CLI REPL wiring that turns an unknown command for a known-but-inactive plugin into that hint (gated on the suggest_plugins config toggle)."""
 
 import io
 

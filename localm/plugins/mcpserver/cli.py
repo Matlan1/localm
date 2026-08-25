@@ -20,25 +20,7 @@ import click
 @click.option("--print-config", is_flag=True,
               help="Print the mcpServers JSON block for your MCP client and exit.")
 def main(model, no_images, no_coder, print_config):
-    """Run localm as an MCP server (stdio transport).
-
-    MCP clients launch this command on demand - add it to the client's
-    server config and the client starts/stops it automatically:
-
-    \b
-      Claude Desktop (claude_desktop_config.json) and most clients:
-        localm mcp --print-config
-
-    \b
-    Exposed tools: chat, model management (list_models, search_models,
-    list_model_files, pull_model, remove_model, setup_embeddings),
-    system_stats, run_doctor, plugin management (list/install/enable/
-    disable/uninstall_plugin), and, conditionally, embed, generate_image
-    (unless --no-images), and run_coder_task (coder plugin active, unless
-    --no-coder). remove_model and uninstall_plugin are marked destructive.
-    All output except the protocol goes to stderr; logs never corrupt
-    the JSON-RPC stream.
-    """
+    """Run localm as an MCP server (stdio transport)."""
     if print_config:
         args = ["mcp"]
         if model:

@@ -1,117 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Subprocess isolation for the whole HuggingFace-transformers backend
-lifecycle (load, tokenize, embed, generate, unload) - the fix for the
-"thread cannot be interrupted" class of bug: ``HFWorker.count_tokens()``
-calls a Rust "fast" tokenizer directly (its pre-tokenizer regex stage is the
-same Oniguruma-class native-regex-hang risk a catastrophic pattern can hit),
-``embed()`` runs a real torch forward pass, and ``chat_stream()`` drives
-``model.generate()``. None of these are cancellable once started - a Python
-``threading`` timeout only stops the CALLER waiting, never the underlying
-native call - so a hang used to burn a slot in the server's shared
-``asyncio`` default thread pool PERMANENTLY (see
-``dev-notes/decisions-2026-07-30-release-gate.md``, Q2). Isolating this
-backend in its own disposable child process is what makes a hang killable
-without taking the server down with it.
-
-Mirrors ``backends/llamacpp/_runner.py``'s ``ModelRunner`` (PR #606) and
-``_embedder_runner.py``'s ``EmbedderRunner`` closely: three
-``multiprocessing.Queue``s, tagged-tuple commands/responses, ``proc.
-is_alive()``/``exitcode`` for crash detection, a bounded RPC timeout per
-command that kills the child and raises on expiry rather than waiting
-forever.
-
-Mid-stream cancellation is COOPERATIVE, the same shape as ``ModelRunner``'s
-``ctrl_q``/``_cancel_stream_and_drain`` design, though built on a different
-hook: transformers exposes nothing shaped like llama.cpp's native
-progress-callback, but ``generate()``'s own decode loop calls every
-``StoppingCriteria`` in ``stopping_criteria=`` once per generated token
-(verified directly against transformers' own ``generation/utils.py``:
-``unfinished_sequences = unfinished_sequences & ~stopping_criteria(input_ids,
-scores)``, checked right after each token is pushed onto the streamer) - so a
-``StoppingCriteria`` that polls a ``threading.Event`` is a real per-token
-cancel hook. A disconnected stream now sends ``("cancel_stream", seq)`` over
-``ctrl_q``; the child's control-thread ``.set()``s a ``threading.Event`` the
-worker passes into ``model.generate()`` as a ``StoppingCriteria``
-(``_hf_worker.py``'s ``_CancelCriteria``); and the SAME worker process keeps
-serving the next request instead of respawning. ``seq`` (a monotonically
-increasing id the parent assigns per stream, echoed on both the
-``"chat_stream"`` command and its matching ``"cancel_stream"``) exists
-because ``ctrl_q`` and ``req_q`` are independent queues with no ordering
-relationship: if a stream finishes naturally right as it is also being
-cancelled, the cancel can still be sitting on ``ctrl_q`` when the dispatch
-loop has already moved on to a later, unrelated stream - without the seq
-check (``_ctrl_msg_cancels_seq``), that stale message would wrongly cancel
-the new stream instead of being silently dropped. One residual limit, shared
-with GGUF: cancellation still cannot interrupt an in-flight forward pass or
-the prompt prefill - the check only runs between decode steps, so a
-cancelled stream still finishes its current token (at most one extra token
-past the signal) before stopping. If the child never confirms within
-``_CANCEL_DRAIN_TIMEOUT`` (a genuinely wedged native call - the same
-uninterruptible-from-Python risk this whole module exists to contain),
-``_cancel_stream_and_drain`` falls back to ``shutdown(grace=0)`` exactly as
-before: kill is now the timeout fallback, not the primary path. The
-previously accepted cost (a disconnect-heavy client serializing its later
-requests behind a full reload) no longer applies to the common case; see
-``hf.py`` for what changed on the parent-proxy side (nothing - it already
-propagates ``GeneratorExit`` through untouched and already reads worker
-liveness live).
-
-Protocol (three ``multiprocessing.Queue``s, tagged tuples; ``req_q``/
-``resp_q`` process one command at a time, ``ctrl_q`` is drained by a
-dedicated control-thread so a cancel signal takes effect even while the main
-dispatch thread is blocked on ``req_q.get()`` or forwarding chunks):
-
-``req_q`` (parent -> child):
-    ("load", {model_path, device})
-    ("chat_stream", {messages, max_tokens, temperature, top_p, top_k,
-                      repeat_penalty, grammar, grammar_lazy,
-                      grammar_triggers, seed}, seq)
-    ("count_tokens", text)
-    ("count_messages_tokens", messages)
-    ("embed", texts)
-    ("shutdown", None)
-
-``ctrl_q`` (parent -> child):
-    ("cancel_stream", seq)   - seq must match the CURRENTLY active stream's
-                                seq (see _ctrl_msg_cancels_seq) or it is
-                                silently dropped as stale.
-
-``resp_q`` (child -> parent):
-    ("ok", value)              - success (value shape depends on command;
-                                  "load" returns {supports_images, can_embed})
-    ("error", message[, kind]) - a clean, expected failure; kind is an
-                                  optional typed-exception tag, re-raised as that
-                                  type by the parent. Recognised tags:
-                                  "UnsupportedInputError",
-                                  "GrammarUnsupportedError",
-                                  "InvalidGrammarError". An UNTAGGED error becomes
-                                  a RuntimeError, which callers read as "the
-                                  isolated worker faulted" (503), so anything the
-                                  CALLER can fix needs a tag
-    ("chunk", text)            - one streamed token (chat_stream only)
-    ("done", {"finish_reason": "stop"|"length"}) - end of one chat_stream,
-                                  whether it ran to completion, hit a genuine
-                                  end-of-sequence token, was cut off by
-                                  max_tokens, or was stopped by a cooperative
-                                  cancel (see ``_CancelCriteria`` above -
-                                  reported as "stop", the same value a normal
-                                  EOS gets, since a cancel is not a length
-                                  cutoff). finish_reason is
-                                  ``HFWorker.last_finish_reason``, computed for
-                                  real by ``HFWorker.chat_stream`` (see
-                                  ``_hf_worker.py``'s ``_FinishReasonObserver``)
-                                  - "stop" when the model produced its own
-                                  end-of-sequence token (or was cancelled),
-                                  "length" when the max_tokens budget ran out
-                                  first with no EOS ever produced. Mirrors
-                                  GgufBackend/ModelRunner's identical "done"
-                                  envelope shape (llamacpp/_runner.py).
-
-A native abort, or any other uncaught fault in the child's dispatch loop,
-produces NO envelope - the parent detects the dead/stuck child via
-``proc.is_alive()``/``exitcode`` and a bounded timeout, exactly like
-``ModelRunner``/``EmbedderRunner``.
-"""
+"""Subprocess isolation for the whole HuggingFace-transformers backend lifecycle (load, tokenize, embed, generate, unload) - the fix for the 'thread cannot be interrupted' class of bug: ``HFWorker.count_tokens()`` calls a Rust 'fast' tokenizer directly (its pre-tokenizer regex stage is the same Oniguru..."""
 
 from __future__ import annotations
 
@@ -124,19 +12,7 @@ from typing import List, Optional
 
 
 class RunnerBusy(Exception):
-    """A best-effort, non-blocking command (a token count) declined to run
-    because the runner's single response queue is already being driven by
-    another command on this process (typically a live ``chat_stream``).
-
-    This is NOT a failure: the caller (``HFBackend``) has a documented
-    chars/4 heuristic fallback and should use it rather than block a request
-    behind a whole generation - or, worse, queue an RPC whose reply would
-    race the live stream's envelopes on the shared queue (the protocol
-    carries no per-request correlation id). Mirrors
-    ``llamacpp._runner.RunnerBusy`` exactly in spirit; kept as its own class
-    here rather than imported, matching how every other piece of this
-    isolation layer mirrors rather than couples to the GGUF one - the two
-    runners share zero imports beyond the common ``_mp_spawn.py`` leaf."""
+    """A best-effort, non-blocking command (a token count) declined to run because the runner's single response queue is already being driven by another command on this process (typically a live ``chat_stream``)."""
 
 
 # Fault-injection hook, honoured by the child ONLY when this environment
@@ -159,33 +35,7 @@ def _simulate_fault(mode: str) -> None:
 
 
 def _ctrl_msg_cancels_seq(msg, current_seq) -> bool:
-    """True when *msg* (a ctrl_q message) is a ``cancel_stream`` targeting
-    *current_seq* - the currently active stream's sequence number, as known
-    at the moment this is evaluated.
-
-    ``ctrl_q`` and ``req_q`` are independent ``multiprocessing.Queue``s with
-    no ordering relationship between them: the parent sending a cancel
-    before starting a new "chat_stream" does NOT guarantee the child's
-    control-thread drains that cancel before the child's dispatch thread
-    moves on. If stream N finishes naturally (its own "done" already sent)
-    right as the parent decides to cancel it, the parent's cancel can still
-    be sitting on ``ctrl_q`` when the dispatch thread starts stream N+1 -
-    without a per-stream identity check, the control-thread would set
-    ``stream_cancel_event`` for N+1 once it finally drains N's stale
-    message, silently truncating an unrelated request to ~1 token.
-
-    Every ``("chat_stream", payload, seq)`` the parent sends and every
-    ``("cancel_stream", seq)`` it later sends for that same request carry
-    the SAME parent-assigned seq (see ``HFRunner.chat_stream`` /
-    ``_cancel_stream_and_drain``), so a cancel only takes effect if its
-    target seq still matches whatever stream is actually current when the
-    control-thread gets to it - a stale one is silently, correctly dropped.
-    ``target_seq is not None`` guards against an accidental match when
-    neither side supplies a real seq (current_seq defaults to None before
-    the first stream starts).
-
-    Pure and side-effect-free so it is unit-testable without a real
-    subprocess or model."""
+    """True when *msg* (a ctrl_q message) is a ``cancel_stream`` targeting *current_seq* - the currently active stream's sequence number, as known at the moment this is evaluated."""
     if not isinstance(msg, tuple) or not msg or msg[0] != "cancel_stream":
         return False
     target_seq = msg[1] if len(msg) > 1 else None
@@ -200,31 +50,7 @@ _crash_trace_fh = None   # child-side: kept alive so faulthandler can write to i
 
 
 def _arm_native_crash_trace(path) -> None:
-    """Child side: point faulthandler at *path* so a death by native SIGNAL
-    leaves a trace the parent can relay into the debug log.
-
-    THIS IS THE ONLY THING THAT CAN CAPTURE THAT CLASS. ``_runner_entry``'s
-    ``except BaseException`` below covers a crash that still has a Python
-    exception; a SIGILL/SIGSEGV/SIGABRT inside native code (a torch forward
-    pass, a CUDA/ROCm kernel, a fast tokenizer's Rust stage) never returns to
-    Python at all, so no handler written in Python can run and this runner's
-    "see the debug log for the native stack trace" had nothing behind it.
-
-    Ported from ``llamacpp/_runner.py``, where the same gap was closed first;
-    issues 1222 / 1223 are that shape (``worker exit -4`` is SIGILL, since
-    multiprocessing reports ``-N`` for signal N) and neither field log contains
-    any trace.
-
-    Armed as early as possible - before torch or any native library is anywhere
-    near loaded - because a fault can only be captured by a handler that was
-    already installed when it happened.
-
-    Failures are logged, never raised: losing the trace must not stop the worker
-    from doing its job. But it is NOT silenced (AGENTS.md rule 5) and
-    ``is_enabled()`` is checked rather than trusting "enable() did not raise" -
-    that exact silent-no-op is on record in bugreport.arm_crash_guard, where
-    every native-trace file on the maintainer's box came out 0 bytes with no
-    clue why."""
+    """Child side: point faulthandler at *path* so a death by native SIGNAL leaves a trace the parent can relay into the debug log."""
     global _crash_trace_fh
     if path is None:
         return
@@ -246,22 +72,7 @@ def _arm_native_crash_trace(path) -> None:
 
 
 def _runner_entry(req_q, resp_q, ctrl_q, crash_trace_path=None) -> None:
-    """Process target. Wraps ``_runner_main`` so any exception escaping it is
-    logged via the ``logging`` module before the process dies, not left to
-    multiprocessing's own ``traceback.print_exc()`` alone - mirrors
-    ``llamacpp._runner._runner_entry``'s reasoning exactly (native stderr
-    redirects installed during a load/generate can restore fd 2 as an
-    escaping exception unwinds through them, before ``_bootstrap`` ever gets
-    to print anything; a ``logging.FileHandler`` writes through its own
-    Python-level stream, independent of fd 2, so it survives that unwind).
-    Deliberately RE-RAISES: this only ADDS a capture, never changes how or
-    whether the process exits.
-
-    Does NOT help a genuine native crash with no Python exception at all
-    (SIGSEGV, a raw abort): Python never regains control there, so no ``except``
-    clause, including this one, can run. That residual half is covered by the
-    faulthandler trace :func:`_arm_native_crash_trace` leaves behind, which is
-    the one mechanism that CAN say where such a fault happened."""
+    """Process target."""
     _arm_native_crash_trace(crash_trace_path)
     try:
         _runner_main(req_q, resp_q, ctrl_q)
@@ -273,15 +84,7 @@ def _runner_entry(req_q, resp_q, ctrl_q, crash_trace_path=None) -> None:
 
 
 def _runner_main(req_q, resp_q, ctrl_q) -> None:
-    """Long-lived child: owns one HFWorker (one loaded model) for its whole
-    process lifetime, dispatching one request at a time on ``req_q``/
-    ``resp_q``. A dedicated control-thread drains ``ctrl_q`` for a
-    mid-stream cancel signal and sets ``stream_cancel_event``, which the
-    active ``chat_stream``'s ``StoppingCriteria`` polls (see
-    ``_hf_worker.py``'s ``_CancelCriteria``) - mirrors
-    ``llamacpp/_runner.py``'s ``_control_loop``, minus the load-cancel
-    message HF never supported (``spawn_and_load`` below still takes no
-    ``cancel_event`` - see its docstring for why)."""
+    """Long-lived child: owns one HFWorker (one loaded model) for its whole process lifetime, dispatching one request at a time on ``req_q``/ ``resp_q``."""
     from localm.debuglog import attach_child_logging
     attach_child_logging()   # native/tokenizer failure diagnostics land in
                               # the shared debug log from this process too.
@@ -564,26 +367,13 @@ class HFRunner:
         return self._proc is not None and self._proc.is_alive()
 
     def _exit_reason(self) -> str:
-        """The child's exit code DECODED - "-4 (killed by signal SIGILL)" rather
-        than "-4".
-
-        Every user-facing report of a dead worker goes through this rather than
-        interpolating the raw code, mirroring ``ModelRunner._exit_reason``. The
-        decoder lives in ``_mp_spawn`` precisely so this runner reuses it
-        instead of growing a second version."""
+        """The child's exit code DECODED - '-4 (killed by signal SIGILL)' rather than '-4'."""
         from localm._mp_spawn import describe_exit_code
         proc = self._proc
         return describe_exit_code(None if proc is None else proc.exitcode)
 
     def _native_crash_trace(self) -> str:
-        """This child's captured native-fault trace, consumed and removed, or ""
-        when there is none.
-
-        Consuming rather than merely reading is deliberate: the file is a
-        one-shot record of one death, so leaving it in place would let a later
-        reader (or the next spawn of a reused runner) attribute a stale trace to
-        a fresh crash. Fully guarded - a diagnostic read must never replace the
-        real crash error with an IO error."""
+        """This child's captured native-fault trace, consumed and removed, or '' when there is none."""
         path = self._crash_trace_path
         if path is None:
             return ""
@@ -596,8 +386,7 @@ class HFRunner:
         return text
 
     def _discard_native_crash_trace(self) -> None:
-        """Remove this child's trace file. Best-effort: a leftover costs one
-        small file in the logs dir, never correctness."""
+        """Remove this child's trace file."""
         path = self._crash_trace_path
         if path is None:
             return
@@ -607,36 +396,14 @@ class HFRunner:
             pass
 
     def _exit_was_native_fault(self, *, trace_captured: bool) -> bool:
-        """Whether this worker's death is EVIDENCED as a native fault.
-
-        A named accessor per concern, exactly like :meth:`_exit_reason` above, and
-        mirroring ``ModelRunner._exit_was_native_fault``: the raw exit code has
-        precisely two legitimate consumers - the decoder that renders it and the
-        classifier that interprets it - and everything else goes through one of
-        those. The predicate lives in ``_mp_spawn`` so this runner reuses it
-        rather than growing a second version."""
+        """Whether this worker's death is EVIDENCED as a native fault."""
         from localm._mp_spawn import death_was_a_native_fault
         proc = self._proc
         return death_was_a_native_fault(None if proc is None else proc.exitcode,
                                         trace_captured=trace_captured)
 
     def _death_report(self):
-        """``(native_evidenced, detail)`` for a dead worker.
-
-        Reads the captured trace EXACTLY ONCE, because reading consumes it and
-        both halves need it: the trace is the strongest evidence of whether this
-        was a native fault at all, and it is also the detail worth relaying.
-
-        Saying "no native fault trace was captured" OUT LOUD matters as much as
-        relaying one (AGENTS.md rule 5): the message used to claim a trace was in
-        the debug log whether or not anything had written one, so a user following
-        that instruction found nothing and could not tell an empty capture from
-        their own failure to find it.
-
-        The non-native branch gives an INSTRUCTION rather than a promise - a
-        Python exception escaping the worker body is logged with its traceback,
-        but a hard ``os._exit`` produces no exception and therefore no traceback,
-        and promising one for that case would repeat the very defect this fixes."""
+        """``(native_evidenced, detail)`` for a dead worker."""
         trace = self._native_crash_trace()
         native = self._exit_was_native_fault(trace_captured=bool(trace))
         if not trace:
@@ -649,9 +416,7 @@ class HFRunner:
         return native, f" Native fault: {first} (full trace in the debug log)."
 
     def _crash_detail(self) -> str:
-        """Just the detail half of :meth:`_death_report`, for messages whose own
-        opening words ("crashed") are already true of any worker death and need no
-        native/ordinary distinction."""
+        """Just the detail half of :meth:`_death_report`, for messages whose own opening words ('crashed') are already true of any worker death and need no native/ordinary distinction."""
         return self._death_report()[1]
 
     def _spawn(self) -> None:
@@ -682,18 +447,7 @@ class HFRunner:
         self._proc.start()
 
     def spawn_and_load(self, params: dict, timeout: float = LOAD_TIMEOUT_DEFAULT) -> dict:
-        """Spawn the child and load the model. Returns ``{supports_images,
-        can_embed}`` on success. Raises RuntimeError on a genuine load
-        failure, a child crash (native abort - detected via is_alive(),
-        never an exception this process had to catch), or a timeout (the
-        child is killed).
-
-        No ``cancel_event`` parameter, unlike ``ModelRunner.spawn_and_load``:
-        the in-process ``HFBackend`` this replaces never supported
-        preemptive load cancellation either (``BaseBackend.set_load_cancel``'s
-        default no-op was never overridden), so there is nothing to relay -
-        adding cancellation here would be new behavior, not a preserved
-        contract."""
+        """Spawn the child and load the model."""
         self._spawn()
         self._req_q.put(("load", params))
         deadline = time.monotonic() + timeout
@@ -723,17 +477,7 @@ class HFRunner:
         raise RuntimeError(f"Unexpected response from the HF model-loading process: {result!r}")
 
     def chat_stream(self, *, first_chunk_timeout: Optional[float] = None, **kwargs):
-        """Yield text tokens. On the caller's ``GeneratorExit`` (a client
-        disconnect or a superseding request), requests a cooperative cancel
-        and drains for its confirmation - see ``_cancel_stream_and_drain``
-        and the module docstring for the mechanism and its fallback to a
-        kill.
-
-        Holds ``_q_lock`` for the whole drive so no concurrent token-count
-        RPC can consume this stream's envelopes off the shared response
-        queue. Released when this generator is exhausted, errors, or is
-        closed - all on the single producer thread that drives it, so the
-        non-reentrant Lock is always released on the thread that took it."""
+        """Yield text tokens."""
         first_budget = first_chunk_timeout or FIRST_TOKEN_TIMEOUT_DEFAULT
         awaiting_first = True
         with self._q_lock:
@@ -837,19 +581,7 @@ class HFRunner:
                 raise
 
     def _cancel_stream_and_drain(self, seq) -> None:
-        """Ask the child to stop the live generation cooperatively and wait
-        for its confirmation, mirroring ``ModelRunner._cancel_stream_and_drain``
-        exactly (including NOT caching the drained "done" envelope onto
-        ``self.last_done`` - a cancelled stream's caller never reaches the
-        code that would read it, since ``GeneratorExit`` unwinds straight
-        past it; see ``hf.py``'s ``chat_stream``). Falls back to a kill if
-        the child never confirms within ``_CANCEL_DRAIN_TIMEOUT`` - never
-        assumes cancellation succeeded without seeing it (rule 5).
-
-        *seq* is this stream's id (see ``HFRunner.__init__``), echoed to the
-        child so its control-thread can tell this genuine, still-current
-        cancel apart from a stale one left over from an already-finished
-        stream - see ``_ctrl_msg_cancels_seq``."""
+        """Ask the child to stop the live generation cooperatively and wait for its confirmation, mirroring ``ModelRunner._cancel_stream_and_drain`` exactly (including NOT caching the drained 'done' envelope onto ``self.last_done`` - a cancelled stream's caller never reaches the code that would read it, since..."""
         if self._shutdown_requested or not self.is_alive():
             return
         try:
@@ -880,14 +612,7 @@ class HFRunner:
 
     def _simple_request(self, name: str, payload, timeout: float = _SIMPLE_CMD_TIMEOUT,
                         *, try_lock: bool = False):
-        """Send one request/response command and return its value.
-
-        ``try_lock=True`` acquires ``_q_lock`` NON-blocking and raises
-        :class:`RunnerBusy` immediately if it is held (a live stream, or
-        another simple command) - used by the token counters, which have a
-        documented heuristic fallback and must not queue a timeout-bound RPC
-        behind a whole generation. The default blocking acquire is for
-        commands with no honest fallback value (``embed``)."""
+        """Send one request/response command and return its value."""
         if try_lock:
             if not self._q_lock.acquire(blocking=False):
                 raise RunnerBusy(name)
@@ -934,9 +659,7 @@ class HFRunner:
         return self._simple_request("embed", texts, timeout=timeout, try_lock=False)
 
     def shutdown(self, grace: float = 5.0) -> None:
-        """Best-effort teardown: ask the worker to close cleanly, then kill it
-        if it does not exit within *grace* seconds. Safe to call more than
-        once, or when nothing is running."""
+        """Best-effort teardown: ask the worker to close cleanly, then kill it if it does not exit within *grace* seconds."""
         self._shutdown_requested = True
         proc = self._proc
         if proc is None:

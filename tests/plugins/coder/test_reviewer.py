@@ -1,8 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Pre-done self-review: a reviewer model reads the diff before the coder declares
-done and feeds blocking issues back. A network reviewer is gated off privacy /
-restricted; the diff is neutralised + guarded (it can carry fetched content).
-"""
+"""Pre-done self-review: a reviewer model reads the diff before the coder declares done and feeds blocking issues back."""
 
 from __future__ import annotations
 
@@ -120,8 +117,7 @@ def test_reviewer_fails_open_on_backend_error():
 
 
 def test_reviewer_failure_warning_is_empty_for_a_real_approval():
-    """The control: a genuine approval must stay silent, or the warning is noise
-    rather than signal."""
+    """The control: a genuine approval must stay silent, or the warning is noise rather than signal."""
     rv = Reviewer(_backend_returning('{"approved": true, "blocking": []}'))
     assert rv.failure_warning(rv.review("a diff")) == ""
 
@@ -224,20 +220,7 @@ def _make_agent(tmp_path: Path, **kwargs):
 
 
 def _agent_that_changed_something(tmp_path: Path, **kwargs):
-    """An agent whose session state says it HAS edited a file, for the review
-    tests that mock session_diff to a non-empty diff.
-
-    A diff with no recorded write is not a state the agent can actually reach -
-    the diff comes FROM the writes - and leaving the fixture in it made these
-    tests describe an impossible session. That went unnoticed while nothing
-    read the write ledger at this point in the loop; the zero-tool-call
-    escalation (NEW-CODER-NO-TOOLCALL-SILENT) does read it, to tell a model
-    that is working from one that never touched a tool, and correctly judged
-    the impossible fixture to be the latter.
-
-    self_verify is off because these tests are about the REVIEW gate: with
-    unverified writes present the self-verification nudge would otherwise fire
-    first and add a turn none of their response scripts allow for."""
+    """An agent whose session state says it HAS edited a file, for the review tests that mock session_diff to a non-empty diff."""
     kwargs.setdefault("self_verify", False)
     agent = _make_agent(tmp_path, **kwargs)
     agent._unverified_writes = {"a.py"}
@@ -290,8 +273,7 @@ def test_review_gate_absent_when_no_reviewer(tmp_path):
 # --------------------------------------------------------------------------- #
 
 def _run_with_crashing_reviewer(tmp_path):
-    """Drive a full run_task whose reviewer backend raises, and return
-    (result, warnings, events, audit)."""
+    """Drive a full run_task whose reviewer backend raises, and return (result, warnings, events, audit)."""
     events: list = []
     agent = _agent_that_changed_something(tmp_path, on_event=events.append)
     agent._reviewer = Reviewer(MagicMock())
@@ -321,16 +303,14 @@ def test_crashed_review_is_recorded_in_the_audit_trail(tmp_path):
 
 
 def test_crashed_review_reaches_a_gui_session_over_on_event(tmp_path):
-    """A GUI/web session has no terminal, so the warning must also ride the event
-    stream or it is invisible there."""
+    """A GUI/web session has no terminal, so the warning must also ride the event stream or it is invisible there."""
     _, _, events, _ = _run_with_crashing_reviewer(tmp_path)
     texts = [str(e.get("text", "")) for e in events if e.get("type") == "info"]
     assert any("self-review did NOT run" in t for t in texts), texts
 
 
 def test_crashed_review_still_does_not_block_the_answer(tmp_path):
-    """Fail-open is unchanged: visibility only. A flaky reviewer must never cost
-    the user their answer."""
+    """Fail-open is unchanged: visibility only."""
     result, _, _, _ = _run_with_crashing_reviewer(tmp_path)
     assert _final_answer(result) == "All done!"
 

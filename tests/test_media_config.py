@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Media-plugin config resolution: the opt-in "use config from" share-config,
-its cycle-prevention, and source-unavailable fallback. Backend-agnostic - this
-only exercises localm.plugins.media_config dict logic."""
+"""Media-plugin config resolution: the opt-in 'use config from' share-config, its cycle-prevention, and source-unavailable fallback."""
 
 from localm.plugins import media_config as mc
 
@@ -43,8 +41,7 @@ def test_share_never_mutates_sharer_own_block():
 
 
 def test_returned_block_is_deep_copy():
-    """Mutating the resolved block (even nested sub-dicts) must not corrupt the
-    stored config - the guarantee behind 'sharer values are never cleared'."""
+    """Mutating the resolved block (even nested sub-dicts) must not corrupt the stored config - the guarantee behind 'sharer values are never cleared'."""
     plugins = {"image": {"comfy": {"api_url": "http://image"}}}
     cfg = _cfg(plugins)
     block, _ = mc.resolve_config("image", cfg)
@@ -54,8 +51,7 @@ def test_returned_block_is_deep_copy():
 
 
 def test_resolved_share_block_is_deep_copy_of_source():
-    """When music shares image, mutating music's resolved block must not corrupt
-    image's stored config."""
+    """When music shares image, mutating music's resolved block must not corrupt image's stored config."""
     plugins = {
         "image": {"comfy": {"api_url": "http://image"}},
         "music": {"use_config_from": "image", "comfy": {"api_url": "http://own-music"}},
@@ -67,8 +63,7 @@ def test_resolved_share_block_is_deep_copy_of_source():
 
 
 def test_source_installed_but_disabled_falls_back():
-    """Two-axis: a source that is installed but DISABLED is not active, so the
-    sharer must fall back to its own config (not silently use a dormant source)."""
+    """Two-axis: a source that is installed but DISABLED is not active, so the sharer must fall back to its own config (not silently use a dormant source)."""
     cfg = _cfg({
         "image": {"comfy": {"api_url": "http://image"}},
         "music": {"use_config_from": "image", "comfy": {"api_url": "http://own-music"}},
@@ -100,8 +95,7 @@ def test_direct_cycle_is_broken():
 
 
 def test_three_way_cycle_is_broken():
-    """A transitive cycle image->music->video->image must not loop; each falls
-    back to its own block with a warning."""
+    """A transitive cycle image->music->video->image must not loop; each falls back to its own block with a warning."""
     cfg = _cfg({
         "image": {"use_config_from": "music", "comfy": {"api_url": "http://i"}},
         "music": {"use_config_from": "video", "comfy": {"api_url": "http://m"}},

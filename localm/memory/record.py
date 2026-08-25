@@ -1,23 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""
-One remembered thing: the ``MemoryRecord`` dataclass.
-
-A record is a small, distilled memory (a durable fact/preference, or an episodic
-summary), NOT a raw transcript. Fields carry everything retrieval + forgetting +
-provenance need:
-
-  id          stable 16-hex id (so vectors and edits key on it, not on position)
-  kind        "semantic" (facts/preferences) | "episodic" (past interactions)
-  text        the memory content (bounded; see store.MAX_TEXT_LEN)
-  importance  0..1 salience, set at write time (Generative-Agents "importance")
-  created     first stored (unix seconds)
-  updated     last edited/consolidated
-  last_used   last retrieved (drives recency decay + reinforcement)
-  uses        retrieval count (reinforcement)
-  source      "user" (typed /remember - trusted) | "synth" (LLM-distilled -
-              untrusted, importance-capped) | "import" (migrated legacy memory)
-  meta        free-form extras (e.g. episodic: outcome/files); forward-compatible
-"""
+"""One remembered thing: the ``MemoryRecord`` dataclass."""
 
 from __future__ import annotations
 

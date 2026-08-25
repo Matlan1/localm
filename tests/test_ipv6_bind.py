@@ -1,15 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Regression tests for end-to-end IPv6 bind support (NEW-IPV6-HOST-CRASH).
-
-``localm gui -H ::`` used to die at startup: the port-availability probe opened
-an AF_INET socket, so resolving any IPv6 host raised ``socket.gaierror`` before
-anything was bound and the process exited through the unexpected-error path.
-
-Every test here was fires-controlled: the fix was reverted and each test
-confirmed to go RED for its own reason, then the tree restored byte-identical.
-The control is named in each test so a future reader can redo it rather than
-trust this sentence.
-"""
+"""Regression tests for end-to-end IPv6 bind support (NEW-IPV6-HOST-CRASH)."""
 
 from __future__ import annotations
 
@@ -32,16 +22,11 @@ class TestPortProbeIsFamilyAware:
     @pytest.mark.parametrize("host", ["::", "::1", "2001:db8::5", "127.0.0.1",
                                       "0.0.0.0", "localhost"])
     def test_probe_never_raises_on_any_bindable_host(self, host):
-        """The original defect verbatim: a bare ``socket.socket()`` is AF_INET,
-        so ``connect_ex(("::1", port))`` raised gaierror. Control: restore the
-        AF_INET socket and this goes red with socket.gaierror on the IPv6
-        params."""
+        """The original defect verbatim: a bare ``socket.socket()`` is AF_INET, so ``connect_ex(('::1', port))`` raised gaierror."""
         assert port_in_use(9, host) in (True, False)
 
     def test_probe_reports_a_listening_ipv6_socket(self):
-        """The instrument must be able to answer TRUE over IPv6, or every False
-        above proves nothing: a probe that could only ever say "free" would pass
-        the test above while being useless."""
+        """The instrument must be able to answer TRUE over IPv6, or every False above proves nothing: a probe that could only ever say 'free' would pass the test above while being useless."""
         s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
         try:
             s.bind(("::1", 0))
@@ -52,10 +37,7 @@ class TestPortProbeIsFamilyAware:
             s.close()
 
     def test_unresolvable_host_is_not_reported_as_busy(self):
-        """A name that cannot resolve is not evidence the port is taken. The
-        caller goes on to bind and produces the accurate error; claiming a
-        conflict here would send the user hunting a collision that is not
-        there."""
+        """A name that cannot resolve is not evidence the port is taken."""
         assert port_in_use(9, "no-such-host.invalid") is False
 
 
@@ -65,9 +47,7 @@ class TestPortProbeIsFamilyAware:
 
 class TestListenSocket:
     def test_ipv6_wildcard_is_dual_stack(self):
-        """asyncio's create_server sets IPV6_V6ONLY unconditionally, which would
-        make ``-H ::`` unreachable from every IPv4 client on the LAN. Control:
-        drop the setsockopt in netlisten and this goes red with V6ONLY == 1."""
+        """asyncio's create_server sets IPV6_V6ONLY unconditionally, which would make ``-H ::`` unreachable from every IPv4 client on the LAN."""
         if not socket.has_dualstack_ipv6():
             pytest.skip("this platform cannot clear IPV6_V6ONLY")
         sock = netlisten.create_listen_socket("::", 0)
@@ -78,8 +58,7 @@ class TestListenSocket:
             sock.close()
 
     def test_a_specific_ipv6_literal_is_not_widened(self):
-        """A single address names one family. Clearing V6ONLY on ``::1`` would
-        claim a reach it does not have."""
+        """A single address names one family."""
         sock = netlisten.create_listen_socket("::1", 0)
         try:
             assert sock.getsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY) == 1
@@ -98,14 +77,7 @@ class TestListenSocket:
             sock.close()
 
     def test_dual_stack_wildcard_actually_accepts_an_ipv4_client(self):
-        """The property users care about, measured rather than inferred from a
-        socket option: an IPv4 client connects to a ``::`` listener.
-
-        BOTH arms are asserted. Without the IPv4 arm this passes on a v6-only
-        socket; without the IPv6 arm a dead listener looks like a passing test.
-        Control: revert the dual-stack upgrade and the IPv4 arm goes red while
-        the IPv6 arm stays green, which is what distinguishes this regression
-        from a listener that is simply broken."""
+        """The property users care about, measured rather than inferred from a socket option: an IPv4 client connects to a ``::`` listener."""
         if not socket.has_dualstack_ipv6():
             pytest.skip("this platform cannot clear IPV6_V6ONLY")
         sock = netlisten.create_listen_socket("::", 0)
@@ -155,16 +127,12 @@ class TestSelfConnectHost:
         assert self_connect_host(bind) == expected
 
     def test_never_returns_a_wildcard(self):
-        """A wildcard is not a connectable address; returning one would produce
-        a self-call to an address nothing answers on."""
+        """A wildcard is not a connectable address; returning one would produce a self-call to an address nothing answers on."""
         for bind in (None, "", "0.0.0.0", "::"):
             assert not netlisten.is_wildcard_host(self_connect_host(bind))
 
     def test_the_probe_helpers_agree(self):
-        """They disagreed before this unit: _watchdog_probe_host returned
-        127.0.0.1 for :: while _hang_alarm._probe_host returned ::1, and
-        mount_gui_surface hardcoded 127.0.0.1 regardless of the bind. Control:
-        restore any one of the inline copies and this goes red."""
+        """They disagreed before this unit: _watchdog_probe_host returned 127.0.0.1 for :: while _hang_alarm._probe_host returned ::1, and mount_gui_surface hardcoded 127.0.0.1 regardless of the bind."""
         from localm.inference._hang_alarm import _probe_host
         from localm.inference.routes.admin import _watchdog_probe_host
         for bind in (None, "", "0.0.0.0", "::", "::1", "10.0.0.5"):
@@ -187,8 +155,7 @@ class TestUrlHost:
         assert url_host(url_host("::1")) == "[::1]"
 
     def test_produces_a_parseable_authority(self):
-        """The point of the brackets: without them a URL parser reads the
-        address's own colons as the port separator."""
+        """The point of the brackets: without them a URL parser reads the address's own colons as the port separator."""
         from urllib.parse import urlsplit
         parts = urlsplit("https://" + url_host("::1") + ":8642/v1/models")
         assert parts.hostname == "::1"
@@ -199,15 +166,7 @@ class TestShowUrl:
     @pytest.mark.parametrize("host", ["fd7a:115c:a1e0::e44:2839", "fe80::1",
                                       "abcd::1", "::1", "2001:db8::5"])
     def test_a_bracketed_ipv6_url_survives_rich_markup(self, host):
-        """Rich reads ``[...]`` as a style tag, so a printed address LOST ITS
-        HOST for every literal starting with a lowercase hex letter - which is
-        every link-local (fe80::) and every unique-local (fd..). Measured: Rich
-        rendered ``[fd7a:115c:a1e0::e44:2839]`` as the empty string while
-        ``[::1]`` survived, so the bug reached only SOME addresses.
-
-        Control: drop the escape in console.show_url and the fd7a/fe80/abcd
-        params go red while ::1 and 2001:db8::5 stay green - which is exactly
-        why this would have shipped."""
+        """Rich reads ``[...]`` as a style tag, so a printed address LOST ITS HOST for every literal starting with a lowercase hex letter - which is every link-local (fe80::) and every unique-local (fd..)."""
         import io
 
         from rich.console import Console
@@ -228,36 +187,24 @@ class TestBindHostWidening:
 
     @pytest.mark.parametrize("host", ["fe80::1%eth0", "::1%13", "[::1]", "[::]"])
     def test_zone_ids_and_brackets_stay_rejected(self, host):
-        """A zone index names an interface as numbered on ONE machine and does
-        not survive the getaddrinfo(AI_PASSIVE) the server binds through."""
+        """A zone index names an interface as numbered on ONE machine and does not survive the getaddrinfo(AI_PASSIVE) the server binds through."""
         assert is_valid_bind_host(host) is False
 
     def test_widening_did_not_disturb_the_loopback_predicate(self):
-        """is_valid_bind_host and is_loopback_host answer different questions,
-        and every trust decision in the server reads the second one. Widening
-        the first must not move the second."""
+        """is_valid_bind_host and is_loopback_host answer different questions, and every trust decision in the server reads the second one."""
         assert is_loopback_host("::1") is True
         assert is_loopback_host("::") is False
         assert is_loopback_host("2001:db8::5") is False
 
     @pytest.mark.parametrize("host", ["::", "::1", "2001:db8::5"])
     def test_every_accepted_ipv6_value_is_screened_for_bindability(self, host):
-        """The unbrickable-startup invariant. Syntax acceptance is not enough,
-        so the read site probes a real bind; this asserts the probe can SPEAK
-        for an IPv6 host (a reason string or None) rather than raising, which is
-        what that call site depends on."""
+        """The unbrickable-startup invariant."""
         from localm.cli._core import _bind_preflight_error
         result = _bind_preflight_error(host)
         assert result is None or isinstance(result, str)
 
     def test_the_preflight_refuses_a_wellformed_but_unbindable_ipv6(self):
-        """Control for the test above: the preflight must be able to say NO, or
-        its None answers prove nothing.
-
-        ``::ffff:127.0.0.1`` is the real case that forced the read site to stop
-        skipping the loopback class - it is well-formed, it IS loopback, and the
-        OS refuses to bind it, so a Settings write could otherwise have killed
-        the server for a user with no terminal."""
+        """Control for the test above: the preflight must be able to say NO, or its None answers prove nothing."""
         from localm.cli._core import _bind_preflight_error
         assert is_valid_bind_host("::ffff:127.0.0.1") is True
         assert is_loopback_host("::ffff:127.0.0.1") is True

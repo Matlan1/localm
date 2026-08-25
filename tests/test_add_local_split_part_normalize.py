@@ -1,13 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""M13: `localm add/pull <some-part>.gguf` pointed directly at a non-first split
-part must normalise to the first part.
-
-llama.cpp loads a split GGUF set from its ``*-00001-of-N`` part. The folder
-branch (_gguf_first_parts) and sync_models_dir already normalise, and
-get_model_info normalises at read time, but a directly-supplied single-file
-part was registered verbatim (wrong key, path pointing at part 2), so the model
-could not load. These tests pin the single-file normalisation.
-"""
+"""M13: `localm add/pull <some-part>.gguf` pointed directly at a non-first split part must normalise to the first part."""
 
 import pytest
 
@@ -35,8 +27,7 @@ def _gguf(d, name):
 
 
 def test_direct_non_first_part_normalizes_to_first(tmp_path, isolated_home):
-    """NEGATIVE: pre-fix this registers key 'big-00002-of-00002' pointing at
-    part 2; post-fix it registers 'big' pointing at part 1."""
+    """NEGATIVE: pre-fix this registers key 'big-00002-of-00002' pointing at part 2; post-fix it registers 'big' pointing at part 1."""
     d = tmp_path / "models"
     d.mkdir()
     _gguf(d, "big-00001-of-00002.gguf")
@@ -72,8 +63,7 @@ def test_non_split_single_file_unaffected(tmp_path, isolated_home):
 
 
 def test_only_non_first_part_present_does_not_register_missing_first(tmp_path, isolated_home):
-    """EDGE: if only part 2 exists on disk, do not rewrite the path to a
-    non-existent first part."""
+    """EDGE: if only part 2 exists on disk, do not rewrite the path to a non-existent first part."""
     d = tmp_path / "models"
     d.mkdir()
     part2 = _gguf(d, "lonely-00002-of-00002.gguf")

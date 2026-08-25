@@ -1,12 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Reaching a past coder session from the rail: list what is dormant across
-every remembered project, and continue one PARTICULAR conversation by id.
-
-The load-bearing test is the first one. Resuming by id has a silent failure
-mode that looks like success from the outside - falling back to the newest
-checkpoint - so the assertions here are on WHICH conversation came back, never
-on the `resumed` flag alone. A boolean cannot tell those two apart.
-"""
+"""Reaching a past coder session from the rail: list what is dormant across every remembered project, and continue one PARTICULAR conversation by id."""
 
 from pathlib import Path
 
@@ -16,8 +9,7 @@ from fastapi.testclient import TestClient
 
 
 def _coder_app(tmp_path, monkeypatch, *, api_key):
-    """Same shape as test_coder_resume.py's builder: a real app, real routes,
-    real Agent, real checkpoint files on disk."""
+    """Same shape as test_coder_resume.py's builder: a real app, real routes, real Agent, real checkpoint files on disk."""
     home = tmp_path / ".localm"
     monkeypatch.setenv("LOCALM_HOME", str(home))
     monkeypatch.setenv("LOCALM_API_KEY", api_key)
@@ -43,8 +35,7 @@ def _coder_app(tmp_path, monkeypatch, *, api_key):
 
 
 def _seed(app, sid, messages, title):
-    """Persist a saved conversation for a live session and return its
-    checkpoint id."""
+    """Persist a saved conversation for a live session and return its checkpoint id."""
     sess = app.state.coder_sessions.get(sid)
     sess.agent._messages = messages
     sess.agent._turns = len(messages)
@@ -55,14 +46,7 @@ def _seed(app, sid, messages, title):
 
 
 def _age(app, cwd, checkpoint_id, mtime):
-    """Stamp a checkpoint's mtime explicitly.
-
-    list_checkpoints sorts by mtime, and two files written microseconds apart
-    can tie or land in either order. Without this the "resumed the one I asked
-    for" test could pass by coincidence rather than because the id was
-    honoured - the fixture has to be able to express the failure it is looking
-    for.
-    """
+    """Stamp a checkpoint's mtime explicitly."""
     import os
     from localm.plugins.coder.agent.checkpoint import _checkpoint_path_for
     p = _checkpoint_path_for(Path(cwd), checkpoint_id)

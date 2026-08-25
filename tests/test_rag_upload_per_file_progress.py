@@ -1,32 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""ADR-0009 P7-b: the upload bar has to MOVE, not just have a denominator.
-
-#1112 landed P7's t=0 half - one event at `done=0, total=N` before indexing
-starts - and stopped there, on this stated reason:
-
-    add_uploads itself has no per-file progress signal to hook
-
-Accurate about what EXISTED, false about what was POSSIBLE: `_add_uploads_locked`
-owns the loop. So what shipped reported a real denominator with a frozen
-numerator, and the bar read "0 of 12 files" for the entire run. Honest, so no
-ADR-0008 breach, and exactly the frozen-or-working experience ADR-0009 exists to
-remove.
-
-WHAT THE FIXTURES MUST BE ABLE TO EXPRESS (item 19), because #1112's own test
-class could not have caught this: it had two tests, both about the t=0 report,
-with no per-item advancement to assert BECAUSE NONE WAS EMITTED. A capability
-wrongly believed absent produces a test file that reads as complete.
-
-* The loop body has three exits, two of which `continue`. A fixture of only
-  indexable files can never reach either, so the mix below is deliberate.
-* Asserting the FINAL event cannot distinguish "advanced through the skips" from
-  "jumped at the end". Measured: an earlier version of this test stayed green
-  under the fires-control that stopped the skip path ticking. Every count
-  assertion here is on the SEQUENCE.
-* Most callers pass no `on_progress` at all, so the no-op path is the live one
-  and gets its own test - the structured keywords would raise TypeError against
-  a one-positional lambda.
-"""
+"""ADR-0009 P7-b: the upload bar has to MOVE, not just have a denominator."""
 
 import pytest
 
@@ -88,9 +61,7 @@ class TestTheBarMoves:
 
 
 class TestEveryExitFromTheLoopTicks:
-    """The three exits, each with its own fixture. A forgotten one is the whole
-    risk of the chosen shape, so each is pinned separately AND by the contiguous
-    sequence, which is what catches a FOURTH exit added later."""
+    """The three exits, each with its own fixture."""
 
     def test_a_skipped_duplicate_advances_and_is_no_longer_silent(self, coll):
         payload = [{"filename": "same.txt", "data": b"unchanging"}]
@@ -129,9 +100,7 @@ class TestEveryExitFromTheLoopTicks:
 
     def test_the_sequence_is_contiguous_with_every_outcome_mixed(self, coll,
                                                                  monkeypatch):
-        """All three exits in ONE run. This is the assertion that catches a
-        fourth exit being added later without a tick, which no single-outcome
-        fixture can."""
+        """All three exits in ONE run."""
         dup = {"filename": "dup.txt", "data": b"seen before"}
         coll.add_uploads([dup], embed_fn=_embed)
 
@@ -157,10 +126,7 @@ class TestEveryExitFromTheLoopTicks:
 
 class TestBothChannelsTravelTogether:
     def test_the_line_and_the_numbers_arrive_on_one_call(self, coll):
-        """#1112's design, which this reuses rather than replaces: the prose and
-        the structured numbers ride the SAME call, so they cannot drift. A
-        separate channel would need a test asserting they agree; this needs only
-        that neither is dropped."""
+        """#1112's design, which this reuses rather than replaces: the prose and the structured numbers ride the SAME call, so they cannot drift."""
         rec = _Recorder()
         coll.add_uploads(_files(2), embed_fn=_embed, on_progress=rec)
 
@@ -169,18 +135,14 @@ class TestBothChannelsTravelTogether:
             assert kw.get("done") is not None, f"a line carried no numbers: {text!r}"
 
     def test_no_callback_at_all_does_not_raise(self, coll):
-        """The live path for almost every caller. The structured keywords would
-        hit a one-positional no-op lambda and raise TypeError, turning a progress
-        change into a broken upload."""
+        """The live path for almost every caller."""
         out = coll.add_uploads(_files(2), embed_fn=_embed)
         assert out["added"] == 2
 
 
 class TestItReachesAJobListing:
     def test_a_percentage_lands_where_a_watching_client_reads_it(self, coll):
-        """End to end through the real adapter, because the value is the whole
-        path: `_job_progress` forwards the same numbers to `Job.progress`, which
-        is the only place that divides."""
+        """End to end through the real adapter, because the value is the whole path: `_job_progress` forwards the same numbers to `Job.progress`, which is the only place that divides."""
         from localm.plugins.builtin.rag.plug import _job_progress
         from localm.plugins.gui.jobs import Job
 

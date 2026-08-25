@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The interactive REPL: multiline input, readline/tab-completion setup, the read
-loop, and the /command handler."""
+"""The interactive REPL: multiline input, readline/tab-completion setup, the read loop, and the /command handler."""
 
 from __future__ import annotations
 
@@ -22,12 +21,7 @@ from ..display import (
 )
 
 def _read_multiline() -> str:
-    """
-    Read one user message, supporting backslash line continuation.
-
-    End a line with \\ to keep typing on the next line.  The backslash is
-    stripped and the lines are joined with a newline before being sent.
-    """
+    """Read one user message, supporting backslash line continuation."""
     lines: list[str] = []
     first = True
     while True:
@@ -55,15 +49,7 @@ _SLASH_COMMANDS = (
 
 
 def _setup_readline(agent: Agent) -> None:
-    """
-    Tab completion (slash commands + project paths) and persistent REPL
-    history.
-
-    Best-effort: stock Windows CPython has no readline (pyreadline3 provides
-    it when installed), so every step degrades silently. History persists to
-    .localcoder/repl_history only outside privacy mode - privacy promises no
-    traces, and suppress_readline_history() has already disabled saving there.
-    """
+    """Tab completion (slash commands + project paths) and persistent REPL history."""
     try:
         import readline
     except ImportError:
@@ -156,7 +142,7 @@ def _repl(agent: Agent) -> None:
 
 
 def _handle_command(raw: str, agent: Agent) -> bool:
-    """Handle a /command. Returns True if the REPL should exit."""
+    """Handle a /command."""
     parts = raw[1:].split(" ", 1)
     cmd = parts[0].lower()
     arg = parts[1].strip() if len(parts) > 1 else ""
@@ -284,10 +270,7 @@ def _handle_command(raw: str, agent: Agent) -> bool:
 
 
 def _handle_command_extended(cmd: str, arg: str, agent: Agent) -> bool:
-    """The second half of the /command dispatch, split out of _handle_command: the
-    changed-files / diff / compact / memory / save / export / scope commands and
-    the unknown-command fallback. Returns False (none of these exit the REPL); the
-    bool return keeps a uniform signature with _handle_command."""
+    """The second half of the /command dispatch, split out of _handle_command: the changed-files / diff / compact / memory / save / export / scope commands and the unknown-command fallback."""
     if cmd == "changes":
         files = agent.changed_files()
         # Delegated work lives in another tree, so it is deliberately absent from

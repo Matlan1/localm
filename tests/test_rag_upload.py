@@ -1,12 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Per-device upload: a caller that cannot browse the server disk (a phone, a
-scoped key with no host filesystem access) uploads document BYTES from its own
-device, which are extracted in memory and persisted into a collection.
-
-Unlike /add, /upload reads NO server path, so there is NO whitelist/blacklist
-confinement and NO host-fs requirement - the bytes are the caller's own content.
-Size caps + the extractor's zip-bomb guard are the protections that apply.
-"""
+"""Per-device upload: a caller that cannot browse the server disk (a phone, a scoped key with no host filesystem access) uploads document BYTES from its own device, which are extracted in memory and persisted into a collection."""
 
 import base64
 
@@ -68,7 +61,7 @@ class TestAddUploads:
 
 @pytest.fixture
 def upload_app(tmp_path, monkeypatch):
-    """A GUI app with the rag plugin, open mode (owner). Home is isolated."""
+    """A GUI app with the rag plugin, open mode (owner)."""
     from localm.plugins.engine import PluginManager
     from localm.plugins.gui.web import attach_gui
     localm = tmp_path / ".localm"
@@ -172,8 +165,7 @@ class TestUploadRoute:
 
 
 class TestBodySizeGuard:
-    """The global request-body cap (Content-Length rejected before the body is
-    buffered) that backstops the upload/extract decode-time OOM DoS."""
+    """The global request-body cap (Content-Length rejected before the body is buffered) that backstops the upload/extract decode-time OOM DoS."""
 
     def test_oversized_body_rejected_before_parsing(self, tmp_path, monkeypatch):
         import localm.inference.http_server as hs

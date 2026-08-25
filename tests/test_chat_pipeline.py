@@ -1,12 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Chat-pipeline hooks: the ChatPipeline registry/runners (unit) and the
-inlet/stream/outlet chain wired through the real /v1/chat/completions handler
-with a stub engine and a synthetic plugin (integration).
-
-Open mode (no API key) so the chat route and the mounted plugin are reachable;
-the engine is a MagicMock whose chat_stream echoes the last message content, so
-an inlet transform is observable in the reply.
-"""
+"""Chat-pipeline hooks: the ChatPipeline registry/runners (unit) and the inlet/stream/outlet chain wired through the real /v1/chat/completions handler with a stub engine and a synthetic plugin (integration)."""
 
 import asyncio
 import json
@@ -214,8 +207,7 @@ def _make_plugin(root, name, body):
 
 
 def _echo_engine():
-    """Engine stub whose chat_stream yields the last message's text content, so
-    an inlet that rewrites that content is visible in the reply."""
+    """Engine stub whose chat_stream yields the last message's text content, so an inlet that rewrites that content is visible in the reply."""
     from unittest.mock import MagicMock
     engine = MagicMock()
     engine.display_name = "test-model"

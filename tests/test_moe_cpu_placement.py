@@ -1,22 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Opt-in MoE expert placement (config ``n_cpu_moe``): keep the EXPERT weights of
-the first N layers in system RAM via llama_model_params.tensor_buft_overrides.
-
-What these pin, and why each matters:
-
-  * ``gguf_expert_count`` reads ``<arch>.expert_count`` from the header pre-load,
-    and refuses to guess. It is deliberately SEPARATE from the KV-size probe:
-    expert weights cost VRAM but contribute nothing to the KV cache, and
-    conflating the two is the bug that probe exists to fix.
-  * The override ARRAY is built to llama.cpp's layout and NULL-terminated, and the
-    pattern bytes are kept alive with it - ctypes does not own those strings, so
-    losing them would leave the native side reading freed memory at load time.
-  * Only the FUSED expert tensors are matched. The router and any shared expert
-    stay put on purpose: they are read for every token and are tiny.
-  * Both refusal paths are LOUD and leave the params untouched. A placement the
-    user asked for that silently becomes a different placement is exactly the
-    kind of false success AGENTS.md rule 5 forbids.
-"""
+"""Opt-in MoE expert placement (config ``n_cpu_moe``): keep the EXPERT weights of the first N layers in system RAM via llama_model_params.tensor_buft_overrides."""
 
 import ctypes
 import struct
@@ -143,8 +126,7 @@ class TestApplyCpuMoe:
 
     def test_pattern_bytes_are_kept_alive_with_the_array(
             self, tmp_path, monkeypatch):
-        """ctypes does not own the pattern strings. If they are not retained the
-        native side reads freed memory at load time."""
+        """ctypes does not own the pattern strings."""
         monkeypatch.setattr(
             "localm.inference.backends.llamacpp._loader.cpu_buffer_type",
             lambda: 0xBEEF)
@@ -187,13 +169,7 @@ class TestApplyCpuMoe:
 
     def test_skip_reasons_never_console_print_from_this_function(
             self, tmp_path, monkeypatch):
-        """_apply_cpu_moe runs INSIDE the isolated worker child (see its own
-        docstring) - it may never console.print (the child's stdout is not
-        the server's own console; see isolated-child-must-not-console-print).
-        Both refusal branches must report the fact via their return value
-        only, never by printing directly - proven by spying on the shared
-        console object itself, not by re-deriving the assertion from reading
-        the source."""
+        """_apply_cpu_moe runs INSIDE the isolated worker child (see its own docstring) - it may never console.print (the child's stdout is not the server's own console; see isolated-child-must-not-console-print)."""
         from localm.console import console as real_console
         calls = []
         monkeypatch.setattr(real_console, "print",
@@ -216,11 +192,7 @@ class TestApplyCpuMoe:
             f"_apply_cpu_moe printed directly from the child: {calls}")
 
     def test_every_skip_reason_has_a_rendered_message(self):
-        """Every key _apply_cpu_moe can return through skip_reason must have
-        a corresponding entry in MOE_SKIP_MESSAGES - the parent
-        (GgufBackend._load_native) looks it up by that exact key, and a
-        missing entry would silently fall back to a generic message instead
-        of the specific, actionable one this whole fix exists to preserve."""
+        """Every key _apply_cpu_moe can return through skip_reason must have a corresponding entry in MOE_SKIP_MESSAGES - the parent (GgufBackend._load_native) looks it up by that exact key, and a missing entry would silently fall back to a generic message instead of the specific, actionable one this whole fix..."""
         assert set(llama_mod.MOE_SKIP_MESSAGES) == {"no_experts", "buffer_unresolved"}
         for reason, message in llama_mod.MOE_SKIP_MESSAGES.items():
             assert "n_cpu_moe" in message, reason
@@ -228,10 +200,7 @@ class TestApplyCpuMoe:
 
 
 def test_tensor_buft_overrides_offset_is_layout_agnostic():
-    """The premise of using one layout's class above: the field MoE placement
-    writes did not move in the lemonade b1288 -> b1307 reorder. If a future reorder moves
-    it, these tests must start covering both layouts instead of silently
-    exercising the wrong offset."""
+    """The premise of using one layout's class above: the field MoE placement writes did not move in the lemonade b1288 -> b1307 reorder."""
     assert (LlamaModelParamsV1.tensor_buft_overrides.offset
             == LlamaModelParamsV2.tensor_buft_overrides.offset == 8)
     assert (LlamaModelParamsV1.n_gpu_layers.offset
@@ -243,8 +212,7 @@ def test_tensor_buft_overrides_offset_is_layout_agnostic():
 # --------------------------------------------------------------------------- #
 
 def test_default_is_off():
-    """Off by default: this is a footprint dial, not a free speed-up. At matched
-    VRAM it measured throughput-NEUTRAL (52.23 vs 52.04 tok/s)."""
+    """Off by default: this is a footprint dial, not a free speed-up."""
     from localm.config import DEFAULT_CONFIG
     assert DEFAULT_CONFIG["n_cpu_moe"] == 0
 

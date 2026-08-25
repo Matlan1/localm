@@ -1,10 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Server-management routes: shutdown, restart, bug report, issues, and updater.
-
-Extracted verbatim from create_app(); behavior unchanged. The shutdown/restart
-request helpers and the client-context sanitiser live on the http_server module
-and are referenced via ``_hs.``.
-"""
+"""Server-management routes: shutdown, restart, bug report, issues, and updater."""
 
 from __future__ import annotations
 
@@ -20,18 +15,7 @@ from localm.inference.errors import format_localm_error
 
 
 def _watchdog_probe_host(bind_host) -> str:
-    """The address the post-update health watchdog should probe: a wildcard bind
-    (0.0.0.0 / :: / unset) is not itself connectable, so it is mapped to the
-    loopback it covers; a concrete single-interface bind is used AS-IS, since
-    that is the only address it answers on.
-
-    Now delegates to ``bindhost.self_connect_host`` so there is one mapping
-    instead of three. That matters: this function returned ``127.0.0.1`` for
-    ``::`` while ``_hang_alarm._probe_host`` returned ``::1`` for the same bind,
-    and only one of those survives a ``::`` bind whose dual-stack upgrade did not
-    take. ``mount_gui_surface`` (http_server.py, self_url) no longer hardcodes
-    127.0.0.1 either - the note this docstring used to carry about that
-    divergence is resolved rather than merely described."""
+    """The address the post-update health watchdog should probe: a wildcard bind (0.0.0.0 / :: / unset) is not itself connectable, so it is mapped to the loopback it covers; a concrete single-interface bind is used AS-IS, since that is the only address it answers on."""
     from localm.bindhost import self_connect_host
     return self_connect_host(bind_host)
 
@@ -73,19 +57,7 @@ _BUG_REPORT_UPLOAD_TIMEOUT_S = 60.0
 
 
 def _strip_unreleased(markdown: str) -> str:
-    """Return *markdown* with the ``[Unreleased]`` section (and its link-reference
-    definition) removed, or UNCHANGED when there is no such section.
-
-    Deliberately a LINE SCAN rather than a regex span across the whole document. The
-    file is ~3600 lines and the only realistic way to break this is a pattern that
-    matches past the section's end and silently eats a real release - a changelog
-    missing its newest shipped version is far worse than showing one extra section.
-    A line scan cannot over-match: it removes exactly from the heading up to the next
-    line beginning ``## ``, and touches nothing else.
-
-    A section that runs to end-of-file (``[Unreleased]`` last or only, the legitimate
-    shape of a project with no releases yet) is removed to EOF. Serving it instead
-    would be serving precisely the unreleased content this exists to withhold."""
+    """Return *markdown* with the ``[Unreleased]`` section (and its link-reference definition) removed, or UNCHANGED when there is no such section."""
     lines = markdown.splitlines(keepends=True)
     start = next((i for i, ln in enumerate(lines) if _UNRELEASED_HEADING.match(ln)), None)
     if start is None:
@@ -105,25 +77,14 @@ def register(app: FastAPI, ctx) -> None:
     @app.post("/v1/server/shutdown",
               dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
     async def server_shutdown_ep():
-        """SRV-4: stop this server cleanly (owner / config-write scope). A direct
-        method to shut down so the user is not left force-closing the window
-        (which segfaults) or relying on a Ctrl+C that sometimes does nothing. The
-        model is unloaded before exit. (A Settings button calls this - Lane E.)"""
+        """SRV-4: stop this server cleanly (owner / config-write scope)."""
         _request_shutdown(instance_id=getattr(app.state, "instance_id", None))
         return {"stopping": True}
 
     @app.post("/v1/server/restart",
               dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
     async def server_restart_ep():
-        """R18: restart this server in place (owner / config-write scope). The model
-        is unloaded first, then the process re-execs the same command line and comes
-        back on the same port - a Settings button calls this, and the GUI's reconnect
-        overlay auto-reconnects when the fresh process is up.
-
-        "The same port" only holds if we say which one: the re-exec'd process
-        otherwise re-runs pick_port() and can bind elsewhere, leaving the reconnect
-        overlay waiting forever on a port nothing is listening on (the same root
-        cause as REG-605's false rollback, minus the watchdog)."""
+        """R18: restart this server in place (owner / config-write scope)."""
         _request_restart(port=getattr(app.state, "instance_port", None),
                          instance_id=getattr(app.state, "instance_id", None))
         return {"restarting": True}
@@ -131,13 +92,7 @@ def register(app: FastAPI, ctx) -> None:
     @app.post("/api/bug-report",
               dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
     async def file_bug_report_ep(body: dict):
-        """R47: file a bug report from the GUI. The CLI has `localm bug-report`, but
-        the GUI had no manual trigger. Saves an editable markdown report (a safe
-        environment snapshot plus the user's note - never keys/config/chat data;
-        with ``include_log`` the home-scrubbed tail of the current run's log) and
-        returns its path so the GUI can point the user at the file to edit/send.
-        Owner / config-write scoped and same-origin gated like the other management
-        routes (a report can carry local diagnostics)."""
+        """R47: file a bug report from the GUI."""
         from localm import bugreport
         # The GUI "Report a bug" button sends ``description``; ``message`` is
         # accepted as an alias so the documented payload and CLI-shaped callers
@@ -257,9 +212,7 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.get("/api/issues", dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
     async def issues_ep(state: str = "all"):
-        """Read-only list of the project's issues via the proxy (no GitHub account
-        needed), so a tester can see whether a filed bug is acknowledged or fixed.
-        A proxy failure is surfaced as ``error`` (never a fake empty success)."""
+        """Read-only list of the project's issues via the proxy (no GitHub account needed), so a tester can see whether a filed bug is acknowledged or fixed."""
         from localm import issue_tracker
         from localm.bugreport import LocalmError
         if not issue_tracker.available():
@@ -272,9 +225,7 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.get("/api/update/check", dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
     async def update_check_ep():
-        """Check the proxy for a newer release. Read-only; never applies. Returns
-        ``{available, current, latest, newer, notes, asset}`` or ``{available:false}``
-        / ``{error}``."""
+        """Check the proxy for a newer release."""
         from localm import updater
         from localm.bugreport import LocalmError
         if not updater.available():
@@ -288,21 +239,7 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.get("/api/changelog", dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
     async def changelog_ep():
-        """Serve the RELEASED history from CHANGELOG.md so the Settings "Show
-        changelog" button can show it (newest first) in-app, without leaving for
-        GitHub. Read-only, public build content; scoped like its Updates sibling. The
-        path is resolved via updater.repo_root() so it is correct in dev AND in an
-        installed release. Returns {available, version, markdown}, or {available:
-        false} when the file is absent from this build - an honest signal, never a
-        faked empty success (we do not hide problems).
-
-        The in-progress ``[Unreleased]`` section is REMOVED before serving. It
-        describes changes that are not in the running build, so showing it tells users
-        about fixes they do not have - and on a security-fix day it describes those
-        fixes in detail before they ship. Stripped HERE rather than in the GUI because
-        this endpoint is the single serving point: a client-side filter would leave the
-        raw section reachable over the API by anyone who asks. Published prereleases
-        (0.1.5rc2 and the like) are NOT stripped - they are on GitHub, so they shipped."""
+        """Serve the RELEASED history from CHANGELOG.md so the Settings 'Show changelog' button can show it (newest first) in-app, without leaving for GitHub."""
         import localm
         from localm import updater
         try:
@@ -314,11 +251,7 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.post("/api/update/apply", dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
     async def update_apply_ep():
-        """Apply the latest update (download + swap + class step), then restart in
-        place so the new code loads. EXPLICIT only (a button calls this); localm never
-        self-updates on its own. A failed apply rolls back and is surfaced honestly,
-        never as success. The asset is re-derived from the latest release server-side
-        (not taken from the client)."""
+        """Apply the latest update (download + swap + class step), then restart in place so the new code loads."""
         from localm import updater
         from localm.bugreport import LocalmError
         if not updater.available():
@@ -420,35 +353,14 @@ def register(app: FastAPI, ctx) -> None:
     @app.get("/api/update/rollback",
              dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
     async def update_rollback_info_ep():
-        """Whether a rollback is possible and which build it would restore.
-        Read-only: it never rolls anything back, and never creates the updates dir.
-        Returns ``{available, backup, version, current}``. Scoped like its
-        /api/update/check sibling; the POST below is the owner-gated half."""
+        """Whether a rollback is possible and which build it would restore."""
         from localm import updater
         return await asyncio.to_thread(updater.rollback_info)
 
     @app.post("/api/update/rollback",
               dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
     async def update_rollback_ep(request: Request):
-        """Restore the previous build from the last update backup, then restart in
-        place so it actually loads. OWNER-only (see CHK-UPDATE-ROLLBACK above).
-
-        THE RESTART IS NOT A CONVENIENCE, it is what makes this correct on a server.
-        rollback_last() replaces the running install's own source ON DISK, including
-        the localm package. `localm update --rollback` gets away with printing
-        "restart to load it" because that process exits moments later; a server does
-        not, and localm imports lazily throughout, so every subsequent lazy import in
-        this process would load OLD code into a NEW-code process. Re-exec ends that
-        window instead of leaving the user in it.
-
-        No update watchdog on this restart, unlike /api/update/apply's: that
-        watchdog's failure action IS a rollback, so arming it here would answer a
-        failed rollback with another one.
-
-        HONEST LIMIT: this restores the previous build's FILES, which is exactly what
-        the CLI does. It does not undo a deps-class update's package installs, and
-        the class of the last apply is not recorded anywhere, so this cannot warn
-        about that specific case rather than guess at it."""
+        """Restore the previous build from the last update backup, then restart in place so it actually loads."""
         from localm import updater
         from localm.bugreport import LocalmError
         held = _hs.caller_scopes(request)

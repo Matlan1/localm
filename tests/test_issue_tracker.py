@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The read-only issues tracker: configured-endpoint gating + the list/get calls
-through the proxy."""
+"""The read-only issues tracker: configured-endpoint gating + the list/get calls through the proxy."""
 
 import json
 

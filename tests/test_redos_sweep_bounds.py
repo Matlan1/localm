@@ -1,25 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Superlinear-backtracking bounds for the sites found by the repo-wide sweep.
-
-tests/test_redos_bounds.py covers the six CodeQL alerts. This file covers what
-the sweep found AFTER those closed, which is the more interesting half: CodeQL
-flagged 6 patterns, the sweep found 11, and the extras are not a long tail of the
-same thing. Three of them say something about how this class hides.
-
-  * jobs/webtool.py carried a SECOND COPY of two patterns the coder's parser had
-    already been fixed for. Nothing flagged the copy.
-  * _top_level_objects is NOT A REGEX. It is a hand-rolled brace scanner with the
-    identical many-start-positions defect, so no regex-shaped query could ever
-    have found it.
-  * rag/extract.py had ALREADY been hardened for exactly this class - its
-    comments describe fixing a quadratic ``<w:p\\b.*?</w:p>`` that burned ~135s.
-    That pass fixed the CONTENT group and left the ATTRIBUTE group with the same
-    shape. And it is reached by a crafted .docx, not by model output.
-
-Same two assertions per site as the alert file: a wall-clock bound on the witness
-(the defect), and a semantic check that real input still parses (the regression
-risk). Budgets sit orders of magnitude clear of both sides.
-"""
+"""Superlinear-backtracking bounds for the sites found by the repo-wide sweep."""
 
 from __future__ import annotations
 
@@ -44,14 +24,7 @@ def _timed(fn, *a, **kw):
 
 
 def _timed_cpu(fn, *a, **kw):
-    """Like _timed, but measures CPU time (time.process_time), not wall-clock.
-
-    Wall-clock elapsed time includes time this process spent DESCHEDULED while
-    an unrelated process on the same box used the CPU - exactly the shared-load
-    contention this box's test coordinator has to account for once targeted
-    test runs go concurrent. CPU time only counts cycles actually spent
-    executing this process, so a sibling process hogging a core cannot inflate
-    it."""
+    """Like _timed, but measures CPU time (time.process_time), not wall-clock."""
     start = time.process_time()
     result = fn(*a, **kw)
     return result, time.process_time() - start
@@ -81,8 +54,7 @@ def _timed_cpu(fn, *a, **kw):
     ("wrap_openers", lambda: "<|tool_call>" * 5_000),
 ])
 def test_parse_web_call_is_bounded_on_hostile_model_output(name, make_witness):
-    """This runs on RAW MODEL OUTPUT in the jobs plugin, so every quantifier is
-    reachable by whatever a poisoned page persuaded the model to emit."""
+    """This runs on RAW MODEL OUTPUT in the jobs plugin, so every quantifier is reachable by whatever a poisoned page persuaded the model to emit."""
     _, elapsed = _timed(parse_web_call, make_witness())
     assert elapsed < BUDGET, f"parse_web_call took {elapsed:.2f}s on {name}"
 
@@ -106,20 +78,7 @@ def test_parse_web_call_is_bounded_on_hostile_model_output(name, make_witness):
 ])
 def test_parse_web_calls_is_bounded_when_a_real_call_precedes_the_hostile_tail(
         name, make_witness):
-    """``parse_web_call`` stops at the FIRST call, so on input that contains one
-    the scan ends before any hostile tail is examined - the limit=1 bound above
-    cannot speak for what follows a valid call.
-
-    ``run_chat_with_web`` now asks for ``limit=2``: it runs the first call and
-    needs to know whether ANY further call followed, which deliberately keeps
-    scanning past the first hit. That is a new input shape reaching the same
-    quantifiers, on raw model output, so it gets the same budget.
-
-    HONEST SCOPE: the first five witnesses are enumerated into ``candidates``
-    before any parsing in BOTH limits, so they cost the same either way and are
-    breadth, not the new risk. Only the last one isolates the cost limit=2
-    actually adds.
-    """
+    """``parse_web_call`` stops at the FIRST call, so on input that contains one the scan ends before any hostile tail is examined - the limit=1 bound above cannot speak for what follows a valid call."""
     valid = '<tool_call>{"name": "web_search", "args": {"query": "x"}}</tool_call>'
     calls, elapsed = _timed(parse_web_calls, valid + make_witness(), 2)
     assert elapsed < BUDGET, f"parse_web_calls took {elapsed:.2f}s on {name}"
@@ -154,8 +113,7 @@ def test_real_web_calls_still_parse(text, expected_name):
 
 
 def test_top_level_objects_still_finds_real_objects():
-    """The brace scanner's bound must not cost it a real object. It stops when no
-    closing brace remains AHEAD, which cannot discard one that is still to come."""
+    """The brace scanner's bound must not cost it a real object."""
     text = 'prose {"a": 1} more {"b": {"c": 2}} tail'
     assert list(_top_level_objects(text)) == ['{"a": 1}', '{"b": {"c": 2}}']
     # A trailing unmatched opener must not suppress the objects before it.
@@ -163,30 +121,7 @@ def test_top_level_objects_still_finds_real_objects():
 
 
 def test_top_level_objects_stays_linear_when_many_opens_never_balance():
-    """The gap ``unmatched_braces`` above does NOT cover.
-
-    ``"{" * 16_000`` (the existing witness) has NO closing brace anywhere, so
-    the fast path (``if i > last_close: return``) fires on the very first
-    unmatched opener and nothing after it is ever scanned - O(1) per
-    remaining character. That never exercises the OTHER failure path: a scan
-    from ``i`` that runs all the way through ``last_close`` and never
-    balances, even though a closing brace exists somewhere ahead.
-
-    ``"{" * n + "}"`` forces exactly that: n opens, one stray close far away.
-    ``last_close`` sits at the very end, so every one of the n opens passes
-    the ``i > last_close`` guard and pays a real scan through last_close that
-    fails, and the pre-fix recovery (``i += 1``) retried the SAME scan from
-    the very next character - O(n) per position, O(n^2) overall. Measured
-    pre-fix on this project's venv: 0.01s at n=500, 3.1s at n=8000 (~4x per
-    doubling, i.e. quadratic). Fixed, this should be near-instant, so 2.0s
-    leaves a wide margin while still catching the 3+s regression.
-
-    Asserted on CPU time (_timed_cpu), not wall-clock: this test can now run
-    concurrently with other targeted test-slot work on this box (the test
-    coordinator's budget model allows it), and a wall-clock bound would be
-    flaky under that shared load. CPU time only counts cycles this process
-    actually executed, so contention from a sibling process cannot inflate
-    it."""
+    """The gap ``unmatched_braces`` above does NOT cover."""
     hostile = ("{" * 8_000) + "}"
     result, cpu_elapsed = _timed_cpu(parse_web_call, hostile)
     assert cpu_elapsed < 2.0, (
@@ -209,18 +144,14 @@ _DOCX_RUN_FIND = re.compile(r"<w:t\b[^<>]*>([^<]*)</w:t>")
     ("run_find_unclosed_t", _DOCX_RUN_FIND, lambda: "<w:t" * 20_000),
 ])
 def test_docx_tag_scans_are_bounded(label, pattern, make_witness):
-    """Pre-fix 16.21s and 1.69s. The attribute class was ``[^>]*``: bounded only
-    by ``>``, so a document with no ``>`` after an opener ran to end-of-text and
-    backtracked once per opener. Excluding ``<`` as well stops each attempt at
-    the next tag, which XML guarantees is where an attribute value ends."""
+    """Pre-fix 16.21s and 1.69s."""
     witness = make_witness()
     _, elapsed = _timed(lambda: pattern.findall(witness))
     assert elapsed < BUDGET, f"{label} took {elapsed:.2f}s"
 
 
 def test_well_formed_docx_xml_is_parsed_identically():
-    """The bound must not narrow what a real document matches - attribute values
-    with namespaces and spaces are ordinary in .docx."""
+    """The bound must not narrow what a real document matches - attribute values with namespaces and spaces are ordinary in .docx."""
     xml = ('<w:p><w:r><w:t xml:space="preserve">Hello </w:t></w:r>'
            '<w:r><w:tab/><w:t>World</w:t></w:r></w:p>')
     assert _DOCX_ATTR_SUB.sub("\t", xml) == (
@@ -234,8 +165,7 @@ def test_well_formed_docx_xml_is_parsed_identically():
 # ---------------------------------------------------------------------------
 
 def test_log_line_pattern_is_bounded_on_a_long_space_run():
-    """``\\s+([^:]+)`` let both quantifiers claim the same run, because whitespace
-    is a SUBSET of ``[^:]``. Pre-fix 0.594s on one line."""
+    """``\\s+([^:]+)`` let both quantifiers claim the same run, because whitespace is a SUBSET of ``[^:]``."""
     line = "2026-01-01 00:00:00,000 X" + " " * 8_000 + "y" * 8_000
     _, elapsed = _timed(_LOG_LINE_RE.match, line)
     assert elapsed < BUDGET, f"log-line match took {elapsed:.2f}s"
@@ -262,16 +192,13 @@ def test_real_log_lines_still_parse(line, groups):
 # ---------------------------------------------------------------------------
 
 def test_edit_fallback_caps_are_generous_enough_to_be_invisible():
-    """A bound that excludes ordinary work is a broken feature, not a fix. 400
-    tokens is roughly a 40-line snippet and 512 KB is far past a single edit."""
+    """A bound that excludes ordinary work is a broken feature, not a fix. 400 tokens is roughly a 40-line snippet and 512 KB is far past a single edit."""
     assert _WS_FALLBACK_MAX_TOKENS >= 200
     assert _WS_FALLBACK_MAX_TEXT >= 256 * 1024
 
 
 def test_exact_edit_match_is_unaffected_by_the_cap():
-    """The cap guards only the tolerant FALLBACK. The exact path is a linear
-    str.find and must keep working at any size, or the bound has cost a
-    capability rather than a convenience."""
+    """The cap guards only the tolerant FALLBACK."""
     text = "x" * (_WS_FALLBACK_MAX_TEXT + 10_000) + "\nNEEDLE\n"
     result = _resolve_edit(text, "NEEDLE")
     assert result is not None, "the exact-match path must not be capped"
@@ -281,8 +208,7 @@ def test_exact_edit_match_is_unaffected_by_the_cap():
 
 
 def test_tolerant_edit_fallback_still_lands_below_the_cap():
-    """The behaviour the cap must not break: a snippet the model reconstructed
-    with different whitespace still matches, and is reported as tolerant."""
+    """The behaviour the cap must not break: a snippet the model reconstructed with different whitespace still matches, and is reported as tolerant."""
     text = "def f():\n    return    1\n"
     result = _resolve_edit(text, "return 1")
     assert result is not None, "the tolerant fallback stopped working"
@@ -292,12 +218,7 @@ def test_tolerant_edit_fallback_still_lands_below_the_cap():
 
 
 def test_tolerant_edit_fallback_declines_a_pathological_input_quickly():
-    """The defect: O(len(text) x len(pattern)) with BOTH sides model-supplied.
-    Measured 0.646s for a 16 KB file against an 8 KB `old`, which squares.
-
-    Asserting the DECLINE, not just the speed - a bound that happened to be fast
-    for some other reason would pass a timing-only check. `old` here is over the
-    token cap, so the fallback must refuse and return None rather than grind."""
+    """The defect: O(len(text) x len(pattern)) with BOTH sides model-supplied."""
     text = "a " * 100_000                      # 200 KB
     old = "a " * (_WS_FALLBACK_MAX_TOKENS + 50) + "b"   # over the token cap, no match
     result, elapsed = _timed(_resolve_edit, text, old)

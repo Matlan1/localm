@@ -1,11 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""A model that cannot see images must REJECT image input, not silently drop it.
-
-Regression guard for the audit finding that GGUF (and text-only HF) accepted an
-image_url part, discarded it, and answered about a picture the model never
-received. The contract now: raise UnsupportedInputError at the backend, and
-return a clean 400 at the HTTP route.
-"""
+"""A model that cannot see images must REJECT image input, not silently drop it."""
 
 import importlib.util
 import json
@@ -180,12 +174,7 @@ class TestVisionGuidance:
 
     def test_no_transformers_stack_offers_gguf_route_not_a_false_claim(
             self, monkeypatch):
-        """The final fallback (no HF vision model registered, no transformers
-        stack installed) used to claim 'the built-in GGUF backend is
-        text-only' - flatly false: mtmd GGUF vision IS implemented (this same
-        function's own mmproj_failed docstring says so, and #957's own live
-        E2E proves it). The message must offer the GGUF+mmproj route instead
-        of denying GGUF vision exists at all."""
+        """The final fallback (no HF vision model registered, no transformers stack installed) used to claim 'the built-in GGUF backend is text-only' - flatly false: mtmd GGUF vision IS implemented (this same function's own mmproj_failed docstring says so, and #957's own live E2E proves it)."""
         import localm.model_manager as mm
         import importlib.util
         monkeypatch.setattr(mm, "load_registry", lambda: {})

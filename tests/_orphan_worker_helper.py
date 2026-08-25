@@ -1,16 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Helper process for test_spawn_worker_dies_with_parent.py - NOT a test module
-(no ``test_`` prefix, so pytest does not collect it).
-
-Run as ``python _orphan_worker_helper.py <gguf|embedder|voice>``: it spawns ONE
-real isolated worker via that runner's real spawn path, prints the worker PID on
-its first stdout line, then blocks forever. The test then HARD-kills this process
-(the worker's parent) and asserts the worker dies on its own.
-
-The ``if __name__ == "__main__"`` guard is load-bearing: multiprocessing's spawn
-re-imports this module in the worker child, and without the guard the child would
-re-run the spawn at import and crash on ``_check_not_importing_main`` (which looks
-exactly like a reaped worker and would fake a passing test)."""
+"""Helper process for test_spawn_worker_dies_with_parent.py - NOT a test module (no ``test_`` prefix, so pytest does not collect it)."""
 
 from __future__ import annotations
 

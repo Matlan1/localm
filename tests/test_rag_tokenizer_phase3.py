@@ -1,11 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Phase 3 (GAP-RAG-1): the BM25 tokenizer must be unicode-aware.
-
-The original tokenizer used an ASCII-only regex ([a-z0-9]+), so any
-non-latin corpus (CJK, Cyrillic, Arabic, accented latin) tokenized to an
-empty list and BM25 lexical retrieval silently returned no hits. These
-tests pin the unicode behavior while guarding the existing ASCII contract.
-"""
+"""Phase 3 (GAP-RAG-1): the BM25 tokenizer must be unicode-aware."""
 
 from __future__ import annotations
 

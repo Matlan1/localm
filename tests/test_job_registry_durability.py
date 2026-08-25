@@ -1,40 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The in-flight job registry survives a restart (ADR-0008's option E).
-
-ADR-0008 chose the in-memory registry and named the cost in its own limits
-section: "a server restart still loses the record while a pull may continue". So
-a server that was interrupted mid-pull came back claiming nothing had ever been
-running, while the download carried on with no record anywhere.
-
-What these tests pin, and why each one is not a restatement of the others:
-
-  * the record is written at the LIFECYCLE points and not on progress. A
-    per-second progress tick rewriting the whole file is the specific objection
-    ADR-0008 raised against reusing the scheduled-jobs store here, so "does not
-    write on progress" is a requirement, not an optimisation.
-  * a row that was still running is reported as "interrupted", NOT "failed".
-    ADR-0008 R3: "I lost the connection" and "the work failed" are different
-    claims and must not share a word. A pull that was 99% done may well have
-    finished, and "failed" would assert something nobody measured.
-  * a LIVE writer's file is left completely alone. Several localm servers may
-    share one data dir (ADR-0002), and adopting a running server's operations
-    would make each of them report the other's work as interrupted.
-  * the corrupt-file posture matches the sibling scheduled-jobs store: quarantine
-    a copy, redact the owner digest to a NON-NULL sentinel, keep the newest few,
-    warn loudly. Nulling the owner would make job_owner_ok treat every recovered
-    row as unowned, i.e. streamable and cancellable by any caller.
-  * a recovered job's event stream terminates. Without a seeded end frame a client
-    that reattaches by id waits on keepalives forever, because the worker thread
-    that would have pushed it died with the previous process.
-
-TIMING NOTE, measured while writing these: the terminal write happens on the job's
-worker thread and takes about 25 ms (restrict_file_perms shells out to icacls on
-Windows), so it is NOT complete the instant job.status flips. os.replace is atomic,
-so a read inside that window legitimately returns the PREVIOUS file. Every
-assertion about persisted state therefore polls - see _wait_for_row. A fixed sleep
-here would be a flake generator, and asserting immediately reads as a product bug
-when it is a harness one (the first draft of this file made exactly that mistake).
-"""
+"""The in-flight job registry survives a restart (ADR-0008's option E)."""
 
 from __future__ import annotations
 
@@ -63,11 +28,7 @@ def store_root(tmp_path, monkeypatch):
 
 
 def _rows(path: Path) -> list:
-    """The operations in a record file, retrying a transient Windows share lock.
-
-    A file written microseconds ago can still be held by the ACL tool or a
-    scanner; that is the documented transient case (config._is_transient_
-    permission_error), not a defect in what we are testing."""
+    """The operations in a record file, retrying a transient Windows share lock."""
     for _ in range(50):
         try:
             return json.loads(path.read_text(encoding="utf-8"))["operations"]
@@ -77,9 +38,7 @@ def _rows(path: Path) -> list:
 
 
 def _wait_for_row(store, job_id, *, status=None, timeout=10.0):
-    """The persisted row for *job_id* once it reaches *status*, else fail.
-
-    Polls rather than sleeping a fixed amount - see this module's timing note."""
+    """The persisted row for *job_id* once it reaches *status*, else fail."""
     deadline = time.time() + timeout
     last = None
     while time.time() < deadline:
@@ -151,9 +110,7 @@ class TestPersistence:
         _wait_for_row(m._store, job.id, status="failed")
 
     def test_argv_is_never_persisted(self, store_root):
-        """summary() withholds argv from clients because it carries the resolved
-        model spec and any host path the caller passed. A durable file has no
-        business holding what the API refuses to hand out."""
+        """summary() withholds argv from clients because it carries the resolved model spec and any host path the caller passed."""
         m = J.JobManager()
         job = m.start_fn("smoke", lambda j: True)
         row = _wait_for_row(m._store, job.id)
@@ -162,9 +119,7 @@ class TestPersistence:
         assert "argv" not in text
 
     def test_progress_does_not_rewrite_the_record(self, store_root):
-        """The ADR's own objection to the sibling store: a per-second tick must not
-        rewrite the whole file. Counted, not eyeballed - a wall-clock or file-mtime
-        check could not tell "no write" from "a write that happened to be fast"."""
+        """The ADR's own objection to the sibling store: a per-second tick must not rewrite the whole file."""
         m = J.JobManager()
         job = m.start_fn("prog", lambda j: True)
         _wait_for_row(m._store, job.id, status="done")
@@ -179,8 +134,7 @@ class TestPersistence:
             "each time")
 
     def test_an_empty_registry_removes_the_file(self, store_root):
-        """Otherwise a data dir collects one abandoned file per process that ever
-        started a job."""
+        """Otherwise a data dir collects one abandoned file per process that ever started a job."""
         m = J.JobManager()
         job = m.start_fn("smoke", lambda j: True)
         _wait_for_row(m._store, job.id, status="done")
@@ -216,9 +170,7 @@ class TestPersistence:
 class TestReconciliation:
 
     def test_dead_pid_is_a_precondition_of_these_tests(self):
-        """A guard, not a test of the product: if this pid were alive, every
-        adoption test below would silently exercise the leave-it-alone path and
-        pass for the wrong reason."""
+        """A guard, not a test of the product: if this pid were alive, every adoption test below would silently exercise the leave-it-alone path and pass for the wrong reason."""
         from localm.instances import pid_alive
         assert not pid_alive(DEAD_PID)
 
@@ -231,9 +183,7 @@ class TestReconciliation:
         assert snap[0]["cancellable"] is False
 
     def test_interrupted_is_not_failed(self, store_root):
-        """ADR-0008 R3. Stated as its own test because "failed" is the word a
-        reader reaches for first, and it is the one claim the server cannot
-        support: nobody measured whether the work succeeded."""
+        """ADR-0008 R3."""
         _write_record(store_root, pid=DEAD_PID, rows=[_row()])
         m = J.JobManager()
         assert m.get("aaaaaaaaaaaa").status == "interrupted"
@@ -252,10 +202,7 @@ class TestReconciliation:
 
     def test_an_interrupted_row_is_stamped_at_detection_so_the_ttl_keeps_it(
             self, store_root):
-        """_gc sweeps on finished_at, so stamping a recovered row with anything
-        from before the crash would evict it the instant it was recovered - the
-        exact defect _gc's own docstring records for created_at. A two-hour pull
-        interrupted seconds ago must still be visible after the restart."""
+        """_gc sweeps on finished_at, so stamping a recovered row with anything from before the crash would evict it the instant it was recovered - the exact defect _gc's own docstring records for created_at."""
         old = time.time() - 3 * J.JobManager._TTL_S
         _write_record(store_root, pid=DEAD_PID, rows=[_row(created_at=old)])
         m = J.JobManager()
@@ -269,8 +216,7 @@ class TestReconciliation:
             "age from it")
 
     def test_an_expired_finished_row_is_still_swept(self, store_root):
-        """The stamp above must not turn the TTL off: a row that finished hours
-        ago is history, not activity."""
+        """The stamp above must not turn the TTL off: a row that finished hours ago is history, not activity."""
         long_ago = time.time() - 5 * J.JobManager._TTL_S
         _write_record(store_root, pid=DEAD_PID, rows=[
             _row(status="done", created_at=long_ago, finished_at=long_ago)])
@@ -287,9 +233,7 @@ class TestReconciliation:
         assert [r["id"] for r in _rows(m._store.path)] == ["aaaaaaaaaaaa"]
 
     def test_a_live_writers_file_is_left_completely_alone(self, store_root):
-        """Two localm servers can share a data dir (ADR-0002). Uses a REAL live
-        process: pid 1 does not exist on Windows, so hardcoding it would make this
-        test silently exercise the DEAD path and pass for the wrong reason."""
+        """Two localm servers can share a data dir (ADR-0002)."""
         sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
         try:
             from localm.instances import pid_alive
@@ -307,9 +251,7 @@ class TestReconciliation:
             sleeper.wait(timeout=10)
 
     def test_a_sibling_managers_file_is_left_alone(self, store_root):
-        """pid liveness cannot answer the same-process question: this process is
-        obviously alive. Two managers can coexist (gui/web.py's fallback creates
-        one), and the second must not swallow the first's live operations."""
+        """pid liveness cannot answer the same-process question: this process is obviously alive."""
         first = J.JobManager()
         job = first.start_fn("smoke", lambda j: True)
         _wait_for_row(first._store, job.id)
@@ -330,9 +272,7 @@ class TestReconciliation:
         assert [s["id"] for s in m.snapshot()] == ["222222222222"]
 
     def test_a_recovered_job_has_a_terminal_event_stream(self, store_root):
-        """Without this a client reattaching by id waits on keepalives forever:
-        the worker thread that would have pushed the end frame died with the
-        previous process."""
+        """Without this a client reattaching by id waits on keepalives forever: the worker thread that would have pushed the end frame died with the previous process."""
         _write_record(store_root, pid=DEAD_PID, rows=[_row()])
         m = J.JobManager()
         history = list(m.get("aaaaaaaaaaaa")._history)
@@ -352,8 +292,7 @@ class TestReconciliation:
         assert list(job._history)[-1]["result"] == "C:/out/image.png"
 
     def test_a_still_alive_child_pid_is_reported(self, store_root, caplog):
-        """Adopting or killing an orphan is out of scope per ADR-0008, but a
-        process still running with nothing tracking it must not be invisible."""
+        """Adopting or killing an orphan is out of scope per ADR-0008, but a process still running with nothing tracking it must not be invisible."""
         sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
         try:
             _write_record(store_root, pid=DEAD_PID,
@@ -390,10 +329,7 @@ class TestCorruptFiles:
         assert "corrupt" in caplog.text.lower(), caplog.text
 
     def test_the_quarantine_copy_does_not_carry_the_owner_digest(self, store_root):
-        """The copy is made from a file that failed to parse, so the redaction has
-        to work on raw text. The replacement is a non-null SENTINEL on purpose:
-        job_owner_ok treats owner=None as unowned and therefore unrestricted, so
-        dropping the field would turn a recovery artefact into an open ACL."""
+        """The copy is made from a file that failed to parse, so the redaction has to work on raw text."""
         digest = "d" * 64
         store_root.mkdir(parents=True, exist_ok=True)
         bad = store_root / f"{DEAD_PID}-abcabcabcabc.json"
@@ -406,8 +342,7 @@ class TestCorruptFiles:
         assert J._REDACTED_OWNER in text
 
     def test_quarantine_copies_are_capped(self, store_root):
-        """Nothing else ever deletes these, and per-writer file names would give
-        every pid its own unbounded series."""
+        """Nothing else ever deletes these, and per-writer file names would give every pid its own unbounded series."""
         store_root.mkdir(parents=True, exist_ok=True)
         for i in range(6):
             (store_root / f"{DEAD_PID}-run{i}.json.corrupt-{1000 + i}").write_text(
@@ -429,9 +364,7 @@ class TestCorruptFiles:
 
     def test_an_unreadable_file_is_reported_and_left_in_place(self, store_root,
                                                              monkeypatch, caplog):
-        """Not collapsed to empty and not raised: a process only ever writes its
-        OWN file, so a file it could not read is never one it is about to
-        overwrite. Reported, then left for a later run."""
+        """Not collapsed to empty and not raised: a process only ever writes its OWN file, so a file it could not read is never one it is about to overwrite."""
         path = _write_record(store_root, pid=DEAD_PID, rows=[_row()])
         real = Path.read_text
 
@@ -449,8 +382,7 @@ class TestCorruptFiles:
 
     def test_a_store_write_failure_never_breaks_the_job(self, store_root,
                                                         monkeypatch, caplog):
-        """Persistence is a convenience layered on top of an operation. A full
-        disk must not fail a model pull - but it must not be silent either."""
+        """Persistence is a convenience layered on top of an operation."""
         m = J.JobManager()
         # Injected at the LEAF the store actually depends on, not at the store's
         # own _write: patching _write replaces the guarded body, so the test would
@@ -474,10 +406,7 @@ class TestCorruptFiles:
 class TestStoreFile:
 
     def test_the_path_is_unique_per_store_within_one_process(self, store_root):
-        """MEASURED before this was true: two managers sharing one path both wrote
-        through config.atomic_write_private's FIXED "<name>.tmp", so one writer's
-        os.replace moved the temp out from under the other and 37 of 40 terminal
-        writes were LOST - the file kept claiming "running" for a finished job."""
+        """MEASURED before this was true: two managers sharing one path both wrote through config.atomic_write_private's FIXED '<name>.tmp', so one writer's os.replace moved the temp out from under the other and 37 of 40 terminal writes were LOST - the file kept claiming 'running' for a finished job."""
         a, b = J._ActivityStore(store_root), J._ActivityStore(store_root)
         assert a.path != b.path
         assert a.path.parent == b.path.parent
@@ -497,9 +426,7 @@ class TestStoreFile:
         assert [s["id"] for s in m.snapshot()] == ["333333333333"]
 
     def test_concurrent_writers_do_not_lose_the_last_write(self, store_root):
-        """The lost-write race above, driven directly: two managers in one process
-        writing as fast as they can. Asserts on the FILES (what a restart would
-        read), not on a call count."""
+        """The lost-write race above, driven directly: two managers in one process writing as fast as they can."""
         import threading
         managers = [J.JobManager() for _ in range(3)]
         stop = []

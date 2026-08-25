@@ -1,57 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-r"""REAL end-to-end test of the split-GPU load/inference path across two
-genuinely distinct native ggml-vulkan devices - the gap identified in
-dev-notes/split-gpu-testing-research-2026-07-13.md: tests/test_gpu_split_wiring.py
-already proves the Python-side wiring (apply_gpu_split() writes the right
-mp.tensor_split/mp.split_mode/mp.main_gpu) against a fully MOCKED ctypes api, but
-never touches the real native loader. This file does the opposite: only
-localm.config.load_config is mocked (to inject gpu_split_indices/gpu_split_ratios,
-exactly like the wiring tests), everything else - LlamaCpp construction,
-apply_gpu_split, the native llama.dll call, the actual model load and a real
-chat completion - runs for REAL, against two real Vulkan devices.
-
-PREREQUISITES (this test does not perform them - see the doc's Tier 1 section):
-  1. A second real Vulkan device is registered ADDITIVELY alongside whatever
-     GPU(s) are already installed (Mesa lavapipe is the researched/recommended
-     choice - free, and the same technique llama.cpp's own upstream CI already
-     uses). Register it via VK_ADD_DRIVER_FILES (NOT VK_ICD_FILENAMES/
-     VK_DRIVER_FILES - those REPLACE the driver search and would hide the real
-     GPU). Run unelevated (the Vulkan loader ignores the *_DRIVER_FILES env vars
-     for elevated processes).
-  2. localm's `vulkan` native runtime build is provisioned (`localm setup-llama
-     vulkan`), so ggml-vulkan is the active backend.
-  3. Set LOCALM_TEST_LAVAPIPE_ICD to the second device's ICD manifest path
-     BEFORE launching pytest (not inside a test - see the ordering caveat below).
-     This both gates the test (tests/conftest.py's real_vulkan_split resource
-     gate) and, unless VK_ADD_DRIVER_FILES is already exported separately, is
-     used AS the VK_ADD_DRIVER_FILES value.
-
-ORDERING CAVEAT - run this file in ISOLATION, not mixed into a full suite run:
-  the native Vulkan loader only reads VK_ADD_DRIVER_FILES once, when the ggml
-  backend is first registered inside this process (triggered by the FIRST
-  load_lib()/LlamaCpp() call). If an earlier test in the same pytest session
-  already loaded the native runtime (e.g. any real_gguf-marked test that RAN
-  earlier - its lazy resource gate, or the test itself, calls load_lib() at
-  that test's setup), the env var
-  would already be too late for THIS process. The fixture below guards this: it
-  refuses (skips, with a clear reason) rather than silently running against
-  whatever device set happened to already be registered - a false pass here
-  would be worse than a skip (AGENTS.md rule 5). Invoke it as its own run:
-
-      $env:LOCALM_TEST_LAVAPIPE_ICD = "Z:\path\to\lvp_icd.x86_64.json"
-      pytest -m real_vulkan_split tests/test_gpu_split_native_vulkan.py -v -s
-
-Also optionally set LOCALM_TEST_VULKAN_SPLIT_INDICES (default "0,1") if the
-real enumeration order puts the two devices at different indices - confirm the
-real order first with `vulkaninfo --summary` or the native startup log this
-test itself captures and prints (run once with -s to see it before trusting the
-default).
-
-NOT covered here (see the doc for why): real VRAM pressure/OOM behavior (a
-software Vulkan device is backed by system RAM, not a real second memory
-domain), and the amd-rocm/HIP backend (no software HIP implementation exists -
-that path needs the Tier 2 real-hardware cloud rental instead).
-"""
+"""REAL end-to-end test of the split-GPU load/inference path across two genuinely distinct native ggml-vulkan devices - the gap identified in dev-notes/split-gpu-testing-research-2026-07-13.md: tests/test_gpu_split_wiring.py already proves the Python-side wiring (apply_gpu_split() writes the right mp.t..."""
 
 from __future__ import annotations
 
@@ -127,38 +75,7 @@ def vulkan_split_model_path():
 
 
 def test_split_load_uses_both_native_devices(vulkan_split_model_path, monkeypatch, capfd):
-    """The actual DONE oracle for GPU-SPLIT-VKINDEX (issues/issues.txt): load a
-    real GGUF with a deliberately LOPSIDED configured split ratio (9:1) across
-    two real, independent native Vulkan devices, and confirm from the native
-    backend's OWN per-layer device-assignment log that the ratio was actually
-    HONORED - not just that both devices happen to receive some layers (which
-    can also happen via llama.cpp's own unrelated auto-split fallback; see the
-    CONFIRMED BUG note below) and not just that list_gpus() (which is
-    Vulkan-blind, see discover.py) was told about them.
-
-    CONFIRMED BUG (live run, 2026-07-13, real AMD RX 6900 XT + real Mesa
-    lavapipe): this assertion currently FAILS. discover.apply_gpu_split()
-    validates the configured gpu_split_indices against list_gpus() - which
-    only enumerates via torch.cuda (CUDA/HIP) or nvidia-smi and is
-    structurally blind to Vulkan - so on a Vulkan-only box list_gpus() never
-    reports the second (Vulkan-enumerated) device index, and
-    apply_gpu_split() SILENTLY DROPS it ("gpu_split_indices contains 1
-    device(s) not currently detected; dropping them from the split", logged
-    at WARNING, discover.py:640) rather than applying the configured split.
-    With fewer than 2 valid devices left, it leaves mp.tensor_split/
-    mp.split_mode at the native LlamaCpp default, which for
-    SPLIT_MODE_LAYER means llama.cpp's OWN built-in auto-split (proportional
-    to each device's free memory) silently takes over instead - independent
-    of, and in this live run's case DIRECTLY CONTRADICTING, the user's
-    explicit 9:1 request (the observed result was an even 15/15 layer split,
-    identical to a separate control run using an explicit 1:1 ratio - proving
-    the configured ratio had zero effect either way). This is a live instance
-    of exactly the class of bug the project's own working agreement calls out
-    as a cardinal sin: silently overriding a user's explicit choice instead of
-    informing them and offering the alternative. FIX: teach list_gpus() a
-    Vulkan enumeration path, or have apply_gpu_split() validate against the
-    native ggml device count/order (llama_max_devices()) directly instead of
-    the Vulkan-blind list_gpus() when the active backend is vulkan."""
+    """The actual DONE oracle for GPU-SPLIT-VKINDEX (issues/issues.txt): load a real GGUF with a deliberately LOPSIDED configured split ratio (9:1) across two real, independent native Vulkan devices, and confirm from the native backend's OWN per-layer device-assignment log that the ratio was actually HONOR..."""
     indices = _split_indices()
     assert len(indices) >= 2, (
         "LOCALM_TEST_VULKAN_SPLIT_INDICES must name at least 2 device indices"
@@ -263,21 +180,7 @@ def test_split_load_uses_both_native_devices(vulkan_split_model_path, monkeypatc
 
 def test_auto_split_ratios_from_native_free_vram(
         vulkan_split_model_path, monkeypatch, capfd, caplog):
-    """End-to-end oracle for the AUTO split distribution on the vulkan build:
-    with gpu_split_indices configured and NO ratios pinned, the parent-side
-    discover.resolve_auto_split_ratios() must read per-device free VRAM from
-    the NATIVE registry (the crash-isolated probe daemon - the only source in
-    ggml-vulkan's own index space, GPU-SPLIT-VKINDEX), and a load pinned with
-    those ratios (exactly what GgufBackend._load_native forwards through
-    GgufWorker/LlamaCpp) must place layers in that proportion - proving the
-    whole "query free vram from each card, compare and distribute" feature
-    against two genuinely distinct native devices, not mocks.
-
-    On the researched setup (a real ~16 GB GPU + lavapipe backed by more
-    system RAM) the free readings are genuinely asymmetric, so the resulting
-    layer split is visibly NOT the historical equal split - but the assertion
-    band is anchored to the ratios THIS run computed, not to any hardcoded
-    hardware expectation."""
+    """End-to-end oracle for the AUTO split distribution on the vulkan build: with gpu_split_indices configured and NO ratios pinned, the parent-side discover.resolve_auto_split_ratios() must read per-device free VRAM from the NATIVE registry (the crash-isolated probe daemon - the only source in ggml-vulka..."""
     indices = _split_indices()
     assert len(indices) >= 2, (
         "LOCALM_TEST_VULKAN_SPLIT_INDICES must name at least 2 device indices"

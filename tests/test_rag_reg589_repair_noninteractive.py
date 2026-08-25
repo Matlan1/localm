@@ -1,30 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""REG-589: `rag repair` must still repair when run non-interactively.
-
-#589 correctly stopped `rag repair` SILENTLY stripping a hybrid collection's
-embeddings (REC-RAG-REPAIR-EMBED) by asking first. But it asked with
-`click.confirm(..., abort=True)`, which collapses two different answers into one
-Abort:
-
-    user typed "n"   -> Abort   (verified)
-    EOF / no stdin   -> Abort   (verified)
-
-So run from cron, CI, or any script with no stdin, repair exits NON-ZERO having
-done NOTHING - on exactly the stale/corrupt hybrid indexes it exists to rebuild.
-The command's documented core purpose ("use this when an index may be out of
-date") became unavailable by default to every non-interactive caller.
-
-Both obvious fixes are wrong on their own: aborting is REG-589, and proceeding
-would silently delete semantic search (the bug #589 fixed). The fix takes the
-branch that loses NOTHING - preserve the embeddings the collection already has -
-and says so, so the repair happens and no capability is lost.
-
-Without `abort=True`, an explicit "n" RETURNS False while EOF still raises Abort,
-so the two are separable (verified against click in this environment).
-
-Suite miss: the #589 tests always supply stdin (input="n\\n" / input="y\\n") or
-pass --yes, so none ever reaches the EOF path a real script produces.
-"""
+"""REG-589: `rag repair` must still repair when run non-interactively."""
 
 from __future__ import annotations
 
@@ -33,8 +8,7 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def env(tmp_path, monkeypatch):
-    """Own copy rather than importing the one in
-    test_plugin_rag_lifecycle_2026_07_01.py, which is module-private."""
+    """Own copy rather than importing the one in test_plugin_rag_lifecycle_2026_07_01.py, which is module-private."""
     monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     import localm.config as cfg
@@ -123,9 +97,7 @@ class TestNonInteractiveRepairStillRepairs:
 
 
 class TestInteractiveBehaviourIsUnchanged:
-    """NEGATIVE CASES: the REC-RAG-REPAIR-EMBED guard must survive. Without these,
-    'fixing' REG-589 by deleting the prompt would pass everything above while
-    re-opening the silent-embedding-loss bug."""
+    """NEGATIVE CASES: the REC-RAG-REPAIR-EMBED guard must survive."""
 
     def test_explicit_no_still_aborts_without_repairing(self, _cli):
         runner, ragcli, captured, monkeypatch = _cli

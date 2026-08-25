@@ -1,26 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""F1: permission-gated, NON-PERSISTENT network-policy override for the two
-prerequisite model downloads (the embedding model and the Whisper STT model).
-
-The properties pinned here, most important first:
-
-1. net_mode=off is an ABSOLUTE floor: even the explicit allow_download=True
-   authorization refuses under off, on every surface (voice prefetch, the voice
-   download route, the embedding download route). The bypass rule is
-   bypass-ASK-respect-OFF, never bypass-both.
-2. The one-time authorization cannot persist BY CONSTRUCTION: the whole
-   download flow leaves config.json byte-identical and never calls
-   update_config. Asserted on the DATA (the file, the spy) before any status
-   code, per diff-review item 24.
-3. bypass-ask: allow_download=True downloads under net_mode=ask, while the
-   IMPLICIT paths do not - the transcribe worker is dispatched with
-   local_files_only=True whenever the policy did not authorize a download, so
-   the child process is structurally unable to fetch.
-4. The block reason is always surfaced (stt_available / voice_status reason,
-   the can_download flags), never a silent degrade.
-5. The bypass is scope-gated on config:write - the same scope that could
-   change net_mode itself; a key without it gets a 403 and no download.
-"""
+"""F1: permission-gated, NON-PERSISTENT network-policy override for the two prerequisite model downloads (the embedding model and the Whisper STT model)."""
 
 from __future__ import annotations
 
@@ -44,9 +23,7 @@ _REAL_FIND_SPEC = importlib.util.find_spec
 
 
 def _fake_faster_whisper_present(monkeypatch):
-    """Pretend the faster-whisper package is importable WITHOUT importing it
-    (CI installs [dev,rag], not [voice], so the real find_spec answers None
-    there and these policy tests would silently test the wrong branch)."""
+    """Pretend the faster-whisper package is importable WITHOUT importing it (CI installs [dev,rag], not [voice], so the real find_spec answers None there and these policy tests would silently test the wrong branch)."""
     monkeypatch.setattr(
         importlib.util, "find_spec",
         lambda name, *a, **kw: (object() if name == "faster_whisper"
@@ -64,8 +41,7 @@ def _voice_cfg(monkeypatch, tmp_path, net_mode: str, model: str = "base"):
 
 
 def _lay_whisper_snapshot(name: str = "base") -> None:
-    """Materialise the cached-model layout the probe (and the worker) read.
-    Reads stt_cache_dir() live, so it follows the test's LOCALM_HOME."""
+    """Materialise the cached-model layout the probe (and the worker) read."""
     snap = (voice.stt_cache_dir()
             / f"models--Systran--faster-whisper-{name}" / "snapshots" / "rev0")
     snap.mkdir(parents=True, exist_ok=True)
@@ -73,9 +49,7 @@ def _lay_whisper_snapshot(name: str = "base") -> None:
 
 
 def _snapshot_spy(monkeypatch, *, create: bool = False):
-    """Replace huggingface_hub.snapshot_download with a recorder. With
-    ``create`` it also lays down the snapshot, so the post-download honesty
-    check in prefetch_stt_model sees a real model.bin."""
+    """Replace huggingface_hub.snapshot_download with a recorder."""
     calls = []
 
     def _fake(repo_id, **kwargs):
@@ -95,9 +69,7 @@ def _snapshot_spy(monkeypatch, *, create: bool = False):
 
 class TestPrefetchPolicy:
     def test_off_beats_explicit_consent(self, monkeypatch, tmp_path):
-        """THE property: net_mode=off refuses even allow_download=True. If this
-        ever goes green while the spy recorded a call, the kill switch has a
-        bypass and everything else here is decoration."""
+        """THE property: net_mode=off refuses even allow_download=True."""
         _voice_cfg(monkeypatch, tmp_path, "off")
         calls = _snapshot_spy(monkeypatch)
         ok, reason = voice.prefetch_stt_model(allow_download=True)
@@ -141,8 +113,7 @@ class TestPrefetchPolicy:
         assert (ok, reason) == (True, "")
 
     def test_fetch_without_a_model_bin_reports_failure(self, monkeypatch, tmp_path):
-        """Rule 5: a download that 'succeeded' without producing a loadable
-        snapshot must not report success."""
+        """Rule 5: a download that 'succeeded' without producing a loadable snapshot must not report success."""
         _voice_cfg(monkeypatch, tmp_path, "allow")
         calls = _snapshot_spy(monkeypatch, create=False)   # fetches nothing
         ok, reason = voice.prefetch_stt_model(allow_download=True)
@@ -151,8 +122,7 @@ class TestPrefetchPolicy:
         assert "model.bin" in reason
 
     def test_authorization_never_reaches_config(self, monkeypatch, tmp_path):
-        """Non-persistable BY CONSTRUCTION: the whole prefetch path never calls
-        update_config, and the config file's bytes are untouched."""
+        """Non-persistable BY CONSTRUCTION: the whole prefetch path never calls update_config, and the config file's bytes are untouched."""
         monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
         monkeypatch.delenv("LOCALM_NET_MODE", raising=False)
         import localm.config as _cfg
@@ -262,9 +232,7 @@ class TestTranscribeDispatchPolicy:
             "a cached model must load with no network access at all"
 
     def test_blocked_load_failure_reports_the_policy(self, monkeypatch, tmp_path):
-        """When the policy refused the download and the offline load then
-        fails, the error is the POLICY reason (code download-blocked), not a
-        mysterious loader message."""
+        """When the policy refused the download and the offline load then fails, the error is the POLICY reason (code download-blocked), not a mysterious loader message."""
         _fake_faster_whisper_present(monkeypatch)
         _voice_cfg(monkeypatch, tmp_path, "ask")
         self._capture_dispatch(monkeypatch,
@@ -313,11 +281,7 @@ def _join_prefetch_threads():
 
 @pytest.fixture
 def voice_client(tmp_path, monkeypatch):
-    """The voice plugin on a real auth-enforcing app: an owner key plus a
-    voice-only key and a voice+config:write key. install() fires on_install,
-    whose prefetch is stubbed and whose thread is JOINED before yielding, so it
-    cannot outlive the monkeypatch scope (see the voice_app fixture note in
-    test_gui.py)."""
+    """The voice plugin on a real auth-enforcing app: an owner key plus a voice-only key and a voice+config:write key. install() fires on_install, whose prefetch is stubbed and whose thread is JOINED before yielding, so it cannot outlive the monkeypatch scope (see the voice_app fixture note in test_gui.py)..."""
     home = _isolated_home(tmp_path, monkeypatch)
     import localm.voice as _voice
     hook_calls = []
@@ -359,9 +323,7 @@ def _wait_job(app, job_id, timeout=30.0):
 
 class TestVoiceRoutes:
     def test_on_install_prefetches_with_one_time_consent(self, voice_client):
-        """Installing the plugin is the user's explicit action: the hook runs
-        prefetch with allow_download=True (bypass-ask), exactly once, on the
-        named background thread the fixture joined."""
+        """Installing the plugin is the user's explicit action: the hook runs prefetch with allow_download=True (bypass-ask), exactly once, on the named background thread the fixture joined."""
         assert voice_client.hook_calls == [True]
 
     def test_status_reports_reason_and_can_download(self, voice_client, monkeypatch):
@@ -451,8 +413,7 @@ class TestVoiceRoutes:
 
 @pytest.fixture
 def rag_client(tmp_path, monkeypatch):
-    """The rag plugin on a real auth-enforcing app (mirrors rag_app_env in
-    test_config_admin_gating.py) plus a rag-only and a rag+config:write key."""
+    """The rag plugin on a real auth-enforcing app (mirrors rag_app_env in test_config_admin_gating.py) plus a rag-only and a rag+config:write key."""
     home = _isolated_home(tmp_path, monkeypatch)
     from localm import auth
     rag_only = auth.create_key("ragbot", ["rag"], allow_privileged=True)["key"]
@@ -515,9 +476,7 @@ class TestEmbeddingRoutes:
 
     def test_download_route_fetches_under_ask_persists_nothing(
             self, rag_client, monkeypatch):
-        """The whole point end to end: net_mode=ask blocks the lazy fetch, the
-        explicit route fetches anyway (config:write key), and NOTHING lands in
-        config - the file is byte-identical and net_mode is still ask."""
+        """The whole point end to end: net_mode=ask blocks the lazy fetch, the explicit route fetches anyway (config:write key), and NOTHING lands in config - the file is byte-identical and net_mode is still ask."""
         from localm.inference.embedder import (
             DEFAULT_EMBEDDING_MODEL, KNOWN_EMBEDDING_MODELS, _embeddings_dir)
         _repo, filename = KNOWN_EMBEDDING_MODELS[DEFAULT_EMBEDDING_MODEL]
@@ -562,11 +521,7 @@ class TestEmbeddingRoutes:
 
     def test_embedder_off_beats_explicit_consent_at_the_inner_layer(
             self, tmp_path, monkeypatch):
-        """The embedder-side twin of the voice off-floor test, pinned at
-        _download_known itself: allow_download=True (the explicit consent the
-        download route AND the existing change-model route pass) still refuses
-        under net_mode=off. This inner layer is what keeps the floor absolute
-        even if a future route forgets its own off pre-check."""
+        """The embedder-side twin of the voice off-floor test, pinned at _download_known itself: allow_download=True (the explicit consent the download route AND the existing change-model route pass) still refuses under net_mode=off."""
         monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
         monkeypatch.delenv("LOCALM_NET_MODE", raising=False)
         import localm.config as _cfg

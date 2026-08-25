@@ -1,12 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Offline tests for scripts/tier2_gpu_split/model_selection.py's pure
-candidate-picking logic (the Tier 2 GPU-split harness - see
-scripts/tier2_gpu_split/README.md and issues/issues.txt's GPU-SPLIT-TESTING
-entry). No network, no GPU: sizes are fabricated, exactly what
-tests/test_gpu_split_real_hardware.py cannot do (it needs a live HF lookup and
-real hardware) - this is the one piece of the harness's own logic provable in
-full without the Tier 2 rental.
-"""
+"""Offline tests for scripts/tier2_gpu_split/model_selection.py's pure candidate-picking logic (the Tier 2 GPU-split harness - see scripts/tier2_gpu_split/README.md and issues/issues.txt's GPU-SPLIT-TESTING entry)."""
 
 from __future__ import annotations
 
@@ -43,9 +36,7 @@ def _c(name: str, gb: float) -> Candidate:
 
 
 def _split_c(name: str, part_gbs: tuple) -> Candidate:
-    """A multi-part (split-GGUF) candidate, e.g. a Q6_K/Q8_0-class quant that
-    Hugging Face stores as several sibling files - mirrors
-    CANDIDATE_TABLE's real Q6_K/Q8_0 entries."""
+    """A multi-part (split-GGUF) candidate, e.g. a Q6_K/Q8_0-class quant that Hugging Face stores as several sibling files - mirrors CANDIDATE_TABLE's real Q6_K/Q8_0 entries."""
     parts = tuple(f"{name}-{i + 1:05d}-of-{len(part_gbs):05d}.gguf"
                   for i in range(len(part_gbs)))
     return Candidate(f"org/{name}", parts, int(sum(part_gbs) * _GB))

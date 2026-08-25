@@ -1,37 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""
-Privacy-mode helpers for localcoder.
-
-When ``--mode privacy`` is active this module is responsible for suppressing
-every data-persistence point that the process can control:
-
-  1. Python readline history (``~/.python_history``) - suppressed at startup.
-  2. Subprocess shell history (bash/sh ``HISTFILE``) - suppressed per call.
-  3. Shell history files cleaned at exit - PSReadLine, bash, zsh history files
-     are scrubbed of lines referencing the binary name.
-  4. External-provider warning - printed when prompts would leave the machine.
-
-Shell history coverage by shell:
-  cmd.exe      No persistent history at all.  Nothing to do.
-  PowerShell   PSReadLine writes incrementally to a plain-text file.  We
-               remove any localcoder-referencing lines on exit.
-  bash/zsh     $HISTFILE (defaults to ~/.bash_history / ~/.zsh_history).
-               Cleaned on exit; also suppressed in child shells via env vars.
-  fish         Non-interactive fish sessions never save history.  No action.
-
-Online providers (--online / --anthropic) are *always* explicit opt-in flags.
-You cannot accidentally send data to an external API.  The privacy-mode warning
-fires only when both flags are active simultaneously (e.g. --mode privacy set
-in config.toml but --online passed on the command line), to surface the
-contradiction clearly.
-
-What privacy mode CANNOT suppress:
-  - OS-level process-creation logs (Windows Event Log, Linux auditd/syslog).
-    Requires elevated privileges to suppress and is outside our scope.
-  - DNS queries and network-layer logs from ``fetch_url``.
-  - Files the *agent* is explicitly asked to write (write_file, patch_file).
-    Those are intentional outputs, not traces.
-"""
+"""Privacy-mode helpers for localcoder."""
 
 from __future__ import annotations
 
@@ -63,39 +31,7 @@ _MODE_RANK = {"privacy": 0, "log": 1, "full": 2}
 
 
 def refuse_move_into_stricter_project(session_mode: str, dest_cwd) -> str | None:
-    """Reason to refuse moving a session into *dest_cwd*, or None to allow it.
-
-    A session's persistence mode is resolved ONCE, from the directory it started
-    in, and cannot be changed afterwards - the audit log is already open, which
-    is what the REPL's /mode tells anyone who asks. Changing the DIRECTORY is
-    therefore the one way a session's mode and its location can come to
-    disagree, and the disagreement is not harmless: the Markdown transcript is
-    written to the session's CURRENT cwd at close, so a ``full`` session moved
-    into a project marked private leaves a complete record inside a project that
-    asked for none. MEASURED before this guard existed: the transcript landed in
-    <dest>/.localcoder/sessions/, and the episodic store took the work too.
-
-    Since the mode cannot be lowered to match, such a move is REFUSED and the
-    reason named - the only option that neither writes into a project that
-    declared itself private nor pretends the setting was honoured (AGENTS.md
-    rule 5: a privacy step that cannot run must never report success).
-
-    KEYED ON THE PROJECT'S OWN DECLARATION, NOT ON effective_mode(). The global
-    default coder mode is ``privacy``, so effective_mode() answers "privacy" for
-    every ordinary directory that has said nothing at all - and keying on it
-    refused moving a recording session ANYWHERE, which is a blanket ban wearing
-    a privacy control's clothes. Only ``.localcoder/config.toml`` is a project
-    SAYING something, so only that is treated as a claim to respect. A project
-    that has said nothing is not asserting privacy; the session's own mode,
-    chosen when it started, still governs.
-
-    An UNREADABLE project config refuses too, for exactly the reason
-    audit.effective_mode gives at the same fork: the file is the one place a
-    user can mark a project private, and we cannot tell whether this one did.
-
-    Shared by the web cwd route and the REPL's /cd deliberately: fixing one
-    surface and not the other would put the two back out of step.
-    """
+    """Reason to refuse moving a session into *dest_cwd*, or None to allow it."""
     from pathlib import Path as _Path
 
     from localm.plugins.coder.project_config import (
@@ -135,31 +71,7 @@ def refuse_move_into_stricter_project(session_mode: str, dest_cwd) -> str | None
 
 
 def subprocess_privacy_env() -> dict[str, str]:
-    """
-    Return a copy of the current environment with shell history vars zeroed.
-
-    Used by ``tool_run_shell`` in privacy mode so that any bash/sh/zsh child
-    process cannot write command history to disk.  For non-interactive shells
-    (our normal case) these are no-ops, but they are an explicit statement of
-    intent and guard against edge cases where a script opens an interactive
-    sub-shell.
-
-    Variables overridden:
-      HISTFILE       - path where bash/zsh writes history on exit.
-      HISTSIZE       - in-memory history depth (0 = disabled in bash).
-      HISTFILESIZE   - max lines written to HISTFILE (0 = truncate to empty).
-      HISTIGNORE     - ``*`` ignores every command in bash history.
-      HISTCONTROL    - ``ignorespace:ignoredups`` (belt-and-suspenders).
-      LESSHISTFILE   - less pager history.
-      MYSQL_HISTFILE - mysql CLI history.
-      SQLITE_HISTORY - sqlite3 CLI history.
-
-    We deliberately do NOT set env vars for fish or PowerShell because:
-      * fish: non-interactive fish sessions never save history regardless.
-      * PowerShell: PSReadLine only runs in interactive sessions; our
-        subprocesses use ``cmd.exe /C`` (Windows) or ``/bin/sh -c`` (Unix),
-        neither of which loads PSReadLine.
-    """
+    """Return a copy of the current environment with shell history vars zeroed."""
     env = dict(os.environ)
 
     null = "NUL" if sys.platform == "win32" else os.devnull
@@ -183,15 +95,7 @@ def subprocess_privacy_env() -> dict[str, str]:
 # ---------------------------------------------------------------------------
 
 def _psreadline_history_paths() -> list[Path]:
-    """
-    Return candidate PSReadLine history file paths (Windows only).
-
-    PSReadLine saves to the same location for both Windows PowerShell 5 and
-    PowerShell 7 on Windows:
-      %APPDATA%\\Microsoft\\Windows\\PowerShell\\PSReadLine\\ConsoleHost_history.txt
-
-    cmd.exe has no persistent history at all - nothing to clean.
-    """
+    """Return candidate PSReadLine history file paths (Windows only)."""
     if sys.platform != "win32":
         return []
     appdata = os.environ.get("APPDATA", "")
@@ -204,13 +108,7 @@ def _psreadline_history_paths() -> list[Path]:
 
 
 def _unix_history_paths() -> list[Path]:
-    """
-    Return candidate shell history file paths (Unix/Mac only).
-
-    Priority:
-      1. $HISTFILE (set by the parent shell - covers bash, zsh, and others).
-      2. Well-known defaults as fallbacks for shells that don't export HISTFILE.
-    """
+    """Return candidate shell history file paths (Unix/Mac only)."""
     if sys.platform == "win32":
         return []
 
@@ -237,14 +135,7 @@ def _unix_history_paths() -> list[Path]:
 
 
 def _scrub_history_file(path: Path, pattern: re.Pattern) -> bool:
-    """
-    Remove lines matching *pattern* from *path*.
-
-    Handles both plain bash/PSReadLine format and zsh extended_history format
-    (lines like ``: 1234567890:0;command``).
-
-    Returns True if any lines were removed.
-    """
+    """Remove lines matching *pattern* from *path*."""
     try:
         data = path.read_bytes()
     except (OSError, PermissionError) as exc:
@@ -300,27 +191,7 @@ def _scrub_history_file(path: Path, pattern: re.Pattern) -> bool:
 
 
 def clear_shell_history_traces(binary_name: str = "localcoder") -> int:
-    """
-    Scrub lines referencing the coder invocation from shell history on exit.
-
-    Matches BOTH spellings of the coder command:
-      * the standalone ``binary_name`` console-script (default ``localcoder``);
-      * the documented ``localm coder`` subcommand form (the real, primary
-        invocation), allowing any inter-word whitespace.
-
-    A bare ``localm`` line for some *other* subcommand (``localm gui``,
-    ``localm serve``, the chat REPL, ...) is intentionally left untouched: only
-    the coder pollutes its own history, and wiping every ``localm`` line would
-    delete unrelated history.
-
-    Cleans:
-      Windows  - PSReadLine ConsoleHost_history.txt
-      Unix     - $HISTFILE, ~/.bash_history, ~/.zsh_history, ~/.history
-
-    cmd.exe has no persistent history - nothing to clean there.
-
-    Returns the number of files that were modified.
-    """
+    """Scrub lines referencing the coder invocation from shell history on exit."""
     # Match either the standalone binary name or the "localm coder" subcommand,
     # as a word at the start of the command or after common prefixes like
     # 'sudo ', a pipe, '&&', etc.  ``\b`` after each alternative keeps the match
@@ -355,19 +226,7 @@ _PROVIDER_NAMES = {
 
 
 def warn_external_provider(provider: str) -> None:
-    """
-    Print a prominent warning when privacy mode is active but prompts will be
-    sent to an external API.
-
-    Note: using an external provider is always an explicit opt-in (--online /
-    --anthropic flags).  This warning fires only when privacy mode is also
-    active, to surface the contradiction clearly (e.g. mode = "privacy" in
-    config.toml but --online on the CLI).
-
-    Privacy mode suppresses *local* persistence (no log files, no readline
-    history, shell history cleaned on exit), but it cannot prevent the API
-    provider from receiving, logging, or training on your prompts.
-    """
+    """Print a prominent warning when privacy mode is active but prompts will be sent to an external API."""
     name = _PROVIDER_NAMES.get(provider, provider)
     console.print(
         f"\n[bold yellow]⚠  Privacy mode + {name} API[/bold yellow]\n"

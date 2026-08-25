@@ -1,14 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""#617 follow-up: a background model-preload failure (localm gui's automatic
-warm-up load at startup) must be LOGGED, not just printed to console.
-
-Real-world evidence: the reporter's own log showed "Background model load
-failed: ..." with no corresponding entry in the debug log file at all -
-console.print never reaches it. If a user's only symptom is a failed preload
-(they never explicitly try to chat), a bug report built from the log file
-would show nothing wrong. _report_preload_failure logs the exception (full
-traceback) in addition to the console notice.
-"""
+"""#617 follow-up: a background model-preload failure (localm gui's automatic warm-up load at startup) must be LOGGED, not just printed to console."""
 
 from __future__ import annotations
 

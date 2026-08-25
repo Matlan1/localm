@@ -1,59 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""
-On-device text embeddings via a DEDICATED embedding GGUF, on the bundled runtime.
-
-This module loads a small, dedicated embedding model (bge / nomic, ~25-90 MB) into
-its OWN llama.cpp model + context in EMBEDDINGS mode, independent of whatever chat
-model is loaded, so semantic retrieval (RAG hybrid search, agent memory) works on
-the default GGUF runtime with consistent quality and without disturbing the chat
-model.
-
-Why a dedicated model rather than the chat model, in order of how binding each
-reason is:
-
-1. CAPABILITY: the bundled GGUF chat backend cannot embed at all - the ctypes
-   binding exposes no create_embedding (``backends/gguf.py``, ``can_embed=False``).
-2. COST: loading a multi-GB chat model purely to embed would be wasteful, and
-   under VRAM pressure would evict the resident one.
-3. QUALITY: a chat model is a decoder LLM trained to predict the next token, not
-   to place related texts near each other, so its pooled hidden states make poor
-   embeddings. Measured 2026-07-15 through this very module, CPU-only, against
-   memory's REL_COS_MIN=0.55 gate: bge-small separated related from unrelated
-   pairs by +0.29 (min related 0.6498 vs max unrelated 0.3585, 4/4 gate), while
-   Qwen2.5-0.5B's max UNRELATED cosine (0.7523) EXCEEDED its min RELATED cosine
-   (0.7518) - NO threshold splits them. That is decoder anisotropy (no contrastive
-   objective), not a pooling artifact: LAST-token pooling was measured too and
-   scored worse (-0.17). The failure is silent - the vectors are non-zero,
-   normalised and plausible - which is precisely why this path is not optional.
-
-It is a process-wide, lazily-loaded singleton (``get_embedder`` / ``embed_texts``):
-one small model is loaded once and shared by every caller (chat memory, coder
-memory, /v1/embeddings). Loading serialises on the engine's process-global load lock
-so it never races a chat-model load onto the GPU.
-
-Provisioning (``resolve_embedding_model_path``): the ``embedding_model`` config key
-is either a filesystem path, a registered model name, or a known key (default
-``bge-small-en-v1.5``). A known model missing from ``<home>/models/embeddings/`` is
-downloaded on demand, gated by the network policy (never behind ``net_mode=off``;
-auto only under ``net_mode=allow`` - otherwise the user runs ``localm setup-embeddings``).
-When no embedding model can be resolved, callers degrade to lexical-only retrieval;
-the reason is recorded for ``last_error()`` (what the GUI's RAG-embedding status
-reads) on every resolve attempt, not only when a load is actually attempted - a
-registered model can name something real (localm pulled it, it is on disk) and
-still not be usable HERE, because this embedder loads a single GGUF file only. The
-common way that happens is a HuggingFace-format pull (a directory of shards, not a
-GGUF): that is a real, different embedding path - see ``inference/backends/hf.py``'s
-``HFBackend``, used when such a checkpoint is loaded as the primary model instead.
-
-The native load (and every ``embed()`` call - it hits ``llama_decode``, the
-same abort-prone native call class) runs inside an ISOLATED CHILD PROCESS
-(``_embedder_runner.py``), not in this process - mirroring
-``backends/gguf.py``'s containment for the identical native-abort risk (PR
-#606: a native CUDA/HIP driver failure can hard-``abort()`` the whole process
-in C, uncatchable from Python). ``GGUFEmbedder`` below is the raw, unguarded
-native loader (constructed only inside that child); ``IsolatedEmbedder`` is
-the parent-side handle ``get_embedder()`` actually returns.
-"""
+"""On-device text embeddings via a DEDICATED embedding GGUF, on the bundled runtime."""
 
 from __future__ import annotations
 
@@ -165,12 +111,7 @@ _EMBED_CTX_FALLBACK = 512
 
 
 def _resolve_embed_ctx(native_ctx_train: int) -> int:
-    """The auto-sizing decision itself, isolated as a pure function so it is
-    directly unit-testable without mocking the whole native load path: cap
-    the model's own declared training window at _EMBED_CTX_CEILING, or fall
-    back to _EMBED_CTX_FALLBACK when the model does not usefully declare one
-    (<= 0 - a build too old for llama_model_n_ctx_train, or genuinely absent
-    metadata)."""
+    """The auto-sizing decision itself, isolated as a pure function so it is directly unit-testable without mocking the whole native load path: cap the model's own declared training window at _EMBED_CTX_CEILING, or fall back to _EMBED_CTX_FALLBACK when the model does not usefully declare one (<= 0 - a buil..."""
     return min(native_ctx_train, _EMBED_CTX_CEILING) if native_ctx_train > 0 else _EMBED_CTX_FALLBACK
 
 
@@ -181,21 +122,7 @@ _EMBED_BATCH_TARGET = 32
 
 
 def configure_embed_context(cp, n_ctx: int, n_seq_max: int, pooling_type: int):
-    """Fill a llama_context_params for EMBEDDING and return it.
-
-    A plain function taking the params object rather than code inline in
-    __init__, so the settings below are testable WITHOUT a native runtime. The
-    first version of the kv_unified test drove the whole GGUFEmbedder and passed
-    on a dev box while failing on CI: with no llama.cpp provisioned, __init__
-    raised long before it reached context creation, the pytest.raises() around
-    it swallowed that, and the assertion then read an unset value. A test for a
-    parameter should not depend on whether a GPU runtime exists.
-
-    kv_unified: ONE shared KV cache across the sequences of a batch, instead of
-    llama.cpp's default of carving n_ctx into n_seq_max private slices. See
-    _pack_groups, which bounds a group by its SUMMED token count against n_ctx -
-    the correct budget for a shared cache and far too generous for a sliced one.
-    """
+    """Fill a llama_context_params for EMBEDDING and return it."""
     cp.n_ctx = n_ctx
     cp.n_batch = n_ctx
     cp.n_ubatch = n_ctx      # non-causal encode needs ubatch >= seq len
@@ -207,35 +134,7 @@ def configure_embed_context(cp, n_ctx: int, n_seq_max: int, pooling_type: int):
 
 
 def _choose_n_seq_max(n_ubatch: int, target_max: int = _EMBED_BATCH_TARGET) -> int:
-    """How many sequences a multi-sequence embed batch may use, for a context
-    whose n_ubatch is *n_ubatch*.
-
-    ROOT CAUSE (measured 2026-08-05 via subprocess-isolated bisection across
-    two models of different dim, three n_ctx values, and both CPU and GPU -
-    see dev-notes/FINDING-embedder-serial-batching-2026-08-04.md): a
-    multi-sequence llama_context whose ``n_seq_max`` does NOT evenly divide
-    its ``n_ubatch`` hits a hard, uncatchable native
-    ``GGML_ASSERT(ggml_can_mul_mat(a, b))`` abort() *during context creation*
-    (llama_init_from_model's own internal graph-reserve warmup pass) - before
-    any real batch is ever submitted. n_ubatch=512 with n_seq_max=8 works;
-    n_seq_max=12 hard-crashes the process. This is NOT a property of the
-    model (confirmed identical across dim=384 and dim=768, and across CPU and
-    GPU) - it is a property of the (n_seq_max, n_ubatch) PAIR, so a fixed
-    hardcoded n_seq_max would still be a latent crash for any future model
-    whose resolved n_ctx (== n_ubatch here) does not happen to be a multiple
-    of it.
-
-    Searches powers of two descending from *target_max*, returning the first
-    that evenly divides n_ubatch. Falls back to 1 - today's exact
-    single-sequence behavior, proven safe by every model this embedder has
-    ever loaded - if nothing larger divides evenly; 1 always divides
-    everything, so this can never return an unsafe value regardless of what
-    n_ctx a future model resolves to. In practice this lands on
-    _EMBED_BATCH_TARGET for every currently-known model (2048, the
-    _EMBED_CTX_CEILING, and 512, the _EMBED_CTX_FALLBACK, are both powers of
-    two, and real GGUF native_ctx_train metadata is essentially always a
-    power of two or otherwise highly composite) - but the search means an
-    unusual future value degrades safely instead of crashing."""
+    """How many sequences a multi-sequence embed batch may use, for a context whose n_ubatch is *n_ubatch*."""
     n = target_max
     while n > 1:
         if n_ubatch % n == 0:
@@ -245,11 +144,7 @@ def _choose_n_seq_max(n_ubatch: int, target_max: int = _EMBED_BATCH_TARGET) -> i
 
 
 def resolve_pooling_setting(spec: object) -> object:
-    """Map the ``embedding_pooling`` config value to a llama.cpp pooling int,
-    POOLING_AUTO for per-model resolution, or _POOLING_UNSET when nothing was
-    configured (see _effective_pooling for what that resolves to). An
-    unrecognised value falls back to the same per-model-aware default rather
-    than failing the load, but says so (never silently)."""
+    """Map the ``embedding_pooling`` config value to a llama.cpp pooling int, POOLING_AUTO for per-model resolution, or _POOLING_UNSET when nothing was configured (see _effective_pooling for what that resolves to)."""
     if spec is None:
         return _POOLING_UNSET
     text = str(spec).strip().lower()
@@ -266,14 +161,7 @@ def resolve_pooling_setting(spec: object) -> object:
 
 
 def declared_pooling_type(model, api) -> Optional[int]:
-    """The pooling type the GGUF itself DECLARES (``<arch>.pooling_type``), or
-    None when it declares none. Read from model metadata, so it needs no context.
-
-    Verified 2026-07-15: bge-small -> 2 (CLS), nomic -> 1 (MEAN),
-    Qwen3-Embedding-0.6B -> 3 (LAST), gte-Qwen2 / Qwen2.5-chat -> not declared.
-    Best-effort by design: a model that declares nothing is the NORMAL case, and
-    an unreadable value must not fail an otherwise fine load - the caller then
-    just keeps its configured pooling (and this is debug-logged, not silent)."""
+    """The pooling type the GGUF itself DECLARES (``<arch>.pooling_type``), or None when it declares none."""
     try:
         if not api.has_model_meta_api():
             logger.debug("llama.dll exports no metadata reader; cannot read the "
@@ -297,19 +185,7 @@ def declared_pooling_type(model, api) -> Optional[int]:
 
 
 def _effective_pooling(requested: object, declared: Optional[int]) -> int:
-    """Resolve the pooling actually used:
-    - UNSET (nothing configured) applies the measured-safe default: MEAN,
-      EXCEPT when the model declares LAST-token pooling specifically - the one
-      case the module docstring's table names "the real defect", where there is
-      no already-working mean-built index of this shape to protect. Every
-      other declaration (CLS, MEAN, unspecified) keeps the exact MEAN default
-      it always had.
-    - an explicit choice (a real pooling int, including an explicit "mean")
-      always wins as-is, never overridden - the user's call, not ours;
-    - AUTO honours what the model declares, falling back to MEAN when it
-      declares nothing usable (a decoder declaring NONE would otherwise
-      produce no pooled output at all - see _embed_one's null-embedding
-      guard)."""
+    """Resolve the pooling actually used: - UNSET (nothing configured) applies the measured-safe default: MEAN, EXCEPT when the model declares LAST-token pooling specifically - the one case the module docstring's table names 'the real defect', where there is no already-working mean-built index of this shap..."""
     if requested == _POOLING_UNSET:
         return _POOLING_LAST if declared == _POOLING_LAST else _POOLING_DEFAULT
     if requested != POOLING_AUTO:
@@ -334,39 +210,13 @@ _URL_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]+://")
 
 
 def _current_spec() -> str:
-    """The ``embedding_model`` config value, defaulted and stripped - the
-    identity ``resolve_embedding_model_path`` resolves from, and the same
-    identity ``_LOAD_FAILED_SPEC``/``_set_resolve_outcome``/``get_embedder``
-    compare against to tell "still the same broken spec" from "the config
-    changed". Factored out so every one of those derives it identically -
-    two independent copies of this read+default+strip is exactly the kind of
-    derivation that can silently drift the day only one of them changes."""
+    """The ``embedding_model`` config value, defaulted and stripped - the identity ``resolve_embedding_model_path`` resolves from, and the same identity ``_LOAD_FAILED_SPEC``/``_set_resolve_outcome``/``get_embedder`` compare against to tell 'still the same broken spec' from 'the config changed'."""
     from localm.config import load_config
     return str(load_config().get("embedding_model") or DEFAULT_EMBEDDING_MODEL).strip()
 
 
 def _nonlocal_spec_reason(spec: str) -> Optional[str]:
-    """Why *spec* is not something this module may hand to the filesystem, or
-    None if it is fine. Purely LEXICAL - no syscall - so it can run first.
-
-    ``embedding_model`` accepts exactly three shapes: a KNOWN_EMBEDDING_MODELS
-    key, a registered model name, or a LOCAL GGUF path. A UNC/device path and a
-    URL are none of those, so refusing them here loses no documented behaviour
-    while keeping the string away from the SMB redirector.
-
-    The UNC/device half is pathsafe's shared predicate - CALLED, never
-    reimplemented, so a fix there reaches this call site. It covers the mixed
-    separator spellings (``\\/host\\share``) too, which Windows resolves as UNC;
-    a test here asserts that delegation so this policy cannot drift into a fork.
-
-    The URL-scheme half is deliberately LOCAL, and belongs here rather than in
-    pathsafe: "is this string a locator rather than a path at all" is a question
-    about what this SETTING accepts, not about path syntax, and a scheme rule
-    inside a path-confinement primitive is a second concern that the next caller
-    would bend or fork. The regex requires TWO or more scheme characters so a
-    Windows drive letter can never match - a drive is exactly one letter, so
-    ``C://models/x.gguf`` stays a path while ``http://``, ``file://`` and
-    ``smb://`` are caught."""
+    """Why *spec* is not something this module may hand to the filesystem, or None if it is fine."""
     from localm.pathsafe import is_unc_or_device_path
     if is_unc_or_device_path(spec):
         return ("it is a UNC or device path; only a local filesystem path, a "
@@ -377,49 +227,7 @@ def _nonlocal_spec_reason(spec: str) -> Optional[str]:
 
 
 def _set_resolve_outcome(spec: str, reason: Optional[str]) -> None:
-    """The ONE place any RESOLVE-side code may touch ``_LAST_ERROR`` - never
-    assigned directly anywhere else in this module below this point. Every
-    resolve-side writer (``_record_resolve_failure``, ``_record_resolve_success``,
-    and ``_download_known``'s two policy-decline branches) routes through this
-    single choke point, specifically so the guard below cannot be silently
-    reopened by a future write site that forgets to carry it - the exact way
-    this bug happened the first time: ``_record_resolve_success`` got the
-    guard, ``_record_resolve_failure`` and ``_download_known`` (added in the
-    same change) did not, and a status poll silently destroyed a genuine load
-    failure the instant it re-resolved a not-yet-downloaded known key (#996's
-    own regression, root-caused live against a real corrupted-then-deleted
-    model file).
-
-    *spec* is the ``embedding_model`` config value the CALLER is currently
-    resolving - required, not optional, because a bare "is anything latched"
-    check (the previous ``_LOAD_FAILED: bool``) cannot tell a stale failure
-    for an abandoned spec apart from a live one for the spec actually
-    configured now. That conflation was measured to be a real regression:
-    once ANY load failed, a completely unrelated, ACTIVELY REFUSED spec
-    (e.g. a UNC path just typed into ``embedding_model``) had its own live
-    resolve failure silently swallowed here, and ``last_error()`` kept
-    reporting the old, unrelated reason instead - defeating the whole point
-    of the step-0 UNC/URL refusal that recorded it in the first place.
-
-    Suppression applies ONLY when *spec* matches the latched
-    ``_LOAD_FAILED_SPEC`` exactly:
-      * A successful resolve for the SAME spec proves a file exists - already
-        true before that load attempt failed too, so re-confirming it proves
-        nothing new.
-      * A resolve FAILURE for the SAME spec CAN happen once ``_LOAD_FAILED_SPEC``
-        matches it (the file can be removed, or otherwise stop resolving,
-        between the load attempt and the next poll - verified live, this is
-        not a hypothetical) but is still suppressed: the latched load failure
-        is the more specific, harder-won fact, and a caller who already knows
-        loading this exact spec failed learns nothing new from "and now it
-        cannot even be found."
-      * A resolve outcome for ANY OTHER spec is new, live information about a
-        setting the user has since changed (or a poll racing a config edit)
-        and is never suppressed, regardless of what is latched.
-    Only an ACTUAL new load attempt for a MATCHING spec (``get_embedder()``'s
-    own except/success branches), a load attempt for a DIFFERENT spec (which
-    clears the stale latch itself - see ``get_embedder()``), or an explicit
-    ``reset_embedder()`` may otherwise change what is latched."""
+    """The ONE place any RESOLVE-side code may touch ``_LAST_ERROR`` - never assigned directly anywhere else in this module below this point."""
     global _LAST_ERROR
     if _LOAD_FAILED_SPEC is not None and _LOAD_FAILED_SPEC == spec:
         return
@@ -427,20 +235,7 @@ def _set_resolve_outcome(spec: str, reason: Optional[str]) -> None:
 
 
 def _record_resolve_failure(spec: str, reason: str) -> None:
-    """Record *reason* as the current resolve failure for *spec* (subject to
-    ``_set_resolve_outcome``'s guard), and log it - WARNING the first time
-    this exact reason is seen, DEBUG on repeats of the same one.
-
-    The dedup matters because ``resolve_embedding_model_path`` can run on every
-    single ``embed_texts()`` call while no embedder is loaded: ``get_embedder()``
-    deliberately never caches a missing-model result (so a mid-session
-    ``localm setup-embeddings`` is picked up without a restart - see its
-    docstring), which means an UNCHANGED misconfiguration re-hits this function on
-    every embed, not once. Logging WARNING every time would flood the log for the
-    life of the process (the exact failure mode named in this project's own
-    diff-review notes: a warning on somebody else's timer). ``last_error()`` still
-    carries the reason on every single call regardless of the log level, so the
-    GUI is never blind to it even once the log goes quiet."""
+    """Record *reason* as the current resolve failure for *spec* (subject to ``_set_resolve_outcome``'s guard), and log it - WARNING the first time this exact reason is seen, DEBUG on repeats of the same one."""
     global _LAST_RESOLVE_WARNED
     _set_resolve_outcome(spec, reason)
     if _LAST_RESOLVE_WARNED != reason:
@@ -451,30 +246,14 @@ def _record_resolve_failure(spec: str, reason: str) -> None:
 
 
 def _record_resolve_success(spec: str) -> None:
-    """Clear a prior RESOLVE failure once *spec* resolves (subject to
-    ``_set_resolve_outcome``'s guard) - a fixed config (or one that never
-    needed fixing) must not keep reporting a stale reason via ``last_error()``,
-    and a later, DIFFERENT misconfiguration must warn again rather than
-    staying silenced by a dedup entry from an unrelated failure."""
+    """Clear a prior RESOLVE failure once *spec* resolves (subject to ``_set_resolve_outcome``'s guard) - a fixed config (or one that never needed fixing) must not keep reporting a stale reason via ``last_error()``, and a later, DIFFERENT misconfiguration must warn again rather than staying silenced by a d..."""
     global _LAST_RESOLVE_WARNED
     _set_resolve_outcome(spec, None)
     _LAST_RESOLVE_WARNED = None
 
 
 def resolve_embedding_model_path(*, allow_download: Optional[bool] = None) -> Optional[str]:
-    """Resolve the configured embedding model to a GGUF path, or None.
-
-    Order: an explicit filesystem path -> a registered model name -> a known key
-    (downloaded into <home>/models/embeddings if missing and the net policy allows).
-    ``allow_download`` overrides the policy (used by ``localm setup-embeddings`` to
-    force the fetch); default follows net_mode (auto only under 'allow').
-
-    Every failure to resolve is recorded via ``last_error()`` (see
-    ``_record_resolve_failure``/``_record_resolve_success``) - including a
-    registered model that names something real but is not a single GGUF file
-    (almost always a HuggingFace-format pull: a directory of safetensors shards,
-    not a file), which used to be indistinguishable from "not found at all" and
-    surfaced only as a DEBUG log line nobody but the operator could see (#949)."""
+    """Resolve the configured embedding model to a GGUF path, or None."""
     spec = _current_spec()
     if not spec:
         return None
@@ -592,21 +371,7 @@ def resolve_embedding_model_path(*, allow_download: Optional[bool] = None) -> Op
 
 def _download_known(name: str, repo: str, filename: str, dest: Path,
                     allow_download: Optional[bool]) -> Optional[str]:
-    """Fetch a known embedding GGUF, gated by the network policy.
-
-    Every failure path also records into ``last_error()`` (like
-    ``resolve_embedding_model_path``'s own failure branches - both policy
-    branches below route through the SAME ``_set_resolve_outcome`` choke
-    point, so its spec-aware guard applies here too without being
-    re-implemented; *name* is that spec, since this is only ever called with
-    the ``spec`` a caller in ``resolve_embedding_model_path`` was already
-    resolving), so GET /api/rag/embedding's ``error`` field explains a
-    policy-gated or failed download too. The log LEVEL for the two
-    policy-gated branches stays INFO regardless of whether the write is
-    skipped - an unset net_mode or a deliberately offline box is an expected
-    state, not a defect worth a WARNING - only the download-failure branch
-    below (a real fault) warns, deduped the same way as
-    ``resolve_embedding_model_path``'s own WARNING-worthy failures."""
+    """Fetch a known embedding GGUF, gated by the network policy."""
     from localm.netpolicy import network_mode
     if allow_download is None:
         allow_download = network_mode() == "allow"
@@ -768,11 +533,7 @@ class GGUFEmbedder:
         self._mem = api.llama_get_memory(self._ctx) if api.has_memory_api() else None
 
     def _tokenize(self, text: str) -> List[int]:
-        """Tokenize *text*, truncated to fit n_ctx. Returns ``[]`` only for
-        the degenerate retokenize-failure case below - a real success always
-        yields at least the BERT CLS/SEP special tokens, so an empty list is
-        an unambiguous "could not tokenize this at all" signal to callers,
-        never a legitimate zero-token text."""
+        """Tokenize *text*, truncated to fit n_ctx."""
         api = self._api
         raw = (text or " ").encode("utf-8")
         buf = (self._llama_token * self.n_ctx)()
@@ -809,14 +570,7 @@ class GGUFEmbedder:
         return list(buf[:n])
 
     def _decode_single(self, tokens: List[int]) -> List[float]:
-        """One sequence via ``llama_batch_get_one`` - the pre-existing,
-        proven-fast path for a lone text. Deliberately kept as its OWN path
-        rather than folded into the multi-sequence one below (a "batch of
-        one"): measured, a real multi-sequence batch is SLOWER for a single
-        sequence (0.60x on GPU - the batch-allocation/seq-id-array setup
-        costs more than it saves when there is only one sequence to pack),
-        and a lone embed (a chat memory query, most /v1/embeddings calls in
-        practice) is the common case that must not regress."""
+        """One sequence via ``llama_batch_get_one`` - the pre-existing, proven-fast path for a lone text."""
         api = self._api
         if self._mem is not None:
             api.llama_memory_clear(self._mem, True)
@@ -835,24 +589,7 @@ class GGUFEmbedder:
         return [x / norm for x in v] if norm else v
 
     def _decode_batch(self, token_lists: List[List[int]]) -> List[List[float]]:
-        """Decode 2+ texts in ONE native ``llama_decode`` call, each as its
-        own sequence (`self._n_seq_max` computed at load time - see
-        ``_choose_n_seq_max``). Proven correct against the pre-existing
-        serial path (cosine similarity 0.9999-1.0, measurement unit
-        2026-08-05) before ever being trusted for its timing.
-
-        FAILURE GRANULARITY (AGENTS.md rule 5 - never let a partial failure
-        report as success): a nonzero decode return, OR a null/non-finite
-        readout for ANY ONE sequence in the group, raises and discards the
-        WHOLE group's result - never a partial list, and never a fabricated
-        placeholder vector for the sequence that failed. This does not
-        change embed()'s external contract: the pre-existing serial loop
-        ALREADY had all-or-nothing semantics (one _embed_one raising
-        propagated out of the whole call, per Python's ordinary list-
-        comprehension exception behavior - no caller anywhere in this
-        codebase ever received or handled a partial result). Batching moves
-        the failure UNIT from "one text" to "one group"; it does not
-        introduce a new way for a caller to see wrong data as success."""
+        """Decode 2+ texts in ONE native ``llama_decode`` call, each as its own sequence (`self._n_seq_max` computed at load time - see ``_choose_n_seq_max``)."""
         api = self._api
         if self._mem is not None:
             api.llama_memory_clear(self._mem, True)
@@ -904,16 +641,7 @@ class GGUFEmbedder:
             api.llama_batch_free(batch)
 
     def _pack_groups(self, token_lists: List[List[int]]) -> List[List[int]]:
-        """Group token-list INDICES for one embed() call into batches of up
-        to ``self._n_seq_max`` texts, never letting a group's SUMMED token
-        count exceed ``self.n_ctx`` (== n_ubatch here) - llama.cpp's own hard
-        constraint for this non-causal 'encoder' architecture ("encoder
-        requires n_ubatch >= n_tokens": unlike causal generation, it cannot
-        split one micro-batch across multiple internal passes). A single
-        text is already truncated to fit n_ctx by _tokenize, so it always
-        fits alone; only MULTIPLE texts sharing a group can overflow, and
-        this shrinks the group automatically for longer texts rather than
-        ever submitting a batch that would violate the constraint."""
+        """Group token-list INDICES for one embed() call into batches of up to ``self._n_seq_max`` texts, never letting a group's SUMMED token count exceed ``self.n_ctx`` (== n_ubatch here) - llama.cpp's own hard constraint for this non-causal 'encoder' architecture ('encoder requires n_ubatch >= n_tokens': un..."""
         groups: List[List[int]] = []
         current: List[int] = []
         current_tokens = 0
@@ -931,30 +659,7 @@ class GGUFEmbedder:
         return groups
 
     def embed(self, texts: List[str]) -> List[List[float]]:
-        """L2-normalised embedding per text (aligned 1:1 with *texts*).
-
-        Multiple texts sharing one call are packed into groups of up to
-        ``self._n_seq_max`` and decoded with ONE native ``llama_decode`` per
-        group (measured: a real, growing speedup on GPU - 1.6x/2.4x/4.5x at
-        N=2/4/8, still climbing at the largest N tested; ~1.0x, no
-        regression, on CPU - see dev-notes/FINDING-embedder-serial-batching-
-        2026-08-04.md). A lone text still uses the cheaper single-sequence
-        path (measured slower when routed through the batched machinery for
-        just one sequence).
-
-        Every ``llama_decode`` call here, single or batched, writes native
-        lines like ``decode: cannot decode batches with this context
-        (calling encode() instead)`` to raw stderr (#963 adversarial
-        follow-up: #993 only wrapped the model LOAD). Deliberately NOT
-        wrapped in ``dedup_native_stderr()`` at this level - measured live
-        that grouping buys nothing here, since a typical call (one text, or
-        one group) feeds the grouper exactly one line and flushes it raw at
-        scope exit either way; the real repetition is ACROSS separate
-        embed() calls (20 single-text RAG/memory calls in a row emit the
-        SAME line 20 times), which only a scope spanning multiple calls can
-        collapse. See ``_embedder_runner.py``'s dispatch loop, which wraps
-        the whole isolated child's run of "embed" commands in one scope for
-        exactly this reason."""
+        """L2-normalised embedding per text (aligned 1:1 with *texts*)."""
         with self._lock:
             if self._ctx is None:
                 raise RuntimeError("embedder is closed")
@@ -1006,16 +711,7 @@ class GGUFEmbedder:
 
 
 class IsolatedEmbedder(VramSizingMixin):
-    """Parent-side handle to a ``GGUFEmbedder`` running inside an isolated
-    child process (see ``_embedder_runner.py``) - the same native-abort
-    containment PR #606 gave the chat backend, applied to the embedder's
-    separate, previously-unisolated GGUF/llama.cpp load path (honesty-audit
-    follow-up, 2026-07-14).
-
-    Preflight VRAM sizing (inherited from VramSizingMixin, shared with
-    GgufBackend) runs HERE, before a child is even spawned - a load that can
-    never fit still fails fast without paying a process-spawn cost, exactly
-    mirroring GgufBackend/GgufWorker's split of responsibilities."""
+    """Parent-side handle to a ``GGUFEmbedder`` running inside an isolated child process (see ``_embedder_runner.py``) - the same native-abort containment PR #606 gave the chat backend, applied to the embedder's separate, previously-unisolated GGUF/llama.cpp load path (honesty-audit follow-up, 2026-07-14)."""
 
     def __init__(self, model_path: str, *, n_gpu_layers: int = 99,
                  n_ctx: Optional[int] = None,
@@ -1076,14 +772,7 @@ class IsolatedEmbedder(VramSizingMixin):
         self._reload()
 
     def _preflight_vram(self) -> None:
-        """Refuse a load that cannot fit BEFORE spawning a child. The
-        multi-GPU split case needs its own per-device check distinct from
-        VramSizingMixin._check_vram() (which budgets the split's COMBINED
-        capacity - see _split_free_total_bytes - so one device's
-        proportional share can be individually short while its aggregate
-        passes) - see gpu_split_shortfall's docstring (discover.py) for the
-        full rationale. The single-GPU case (the common one) used to have
-        NO real check at all; _check_vram() closes that gap."""
+        """Refuse a load that cannot fit BEFORE spawning a child."""
         from localm.config import load_config
         from localm.discover import applied_split_device_count, gpu_split_shortfall
         cfg = load_config()
@@ -1117,15 +806,7 @@ class IsolatedEmbedder(VramSizingMixin):
             self._check_vram()
 
     def _reload(self) -> None:
-        """(Re)run preflight and spawn a fresh child that loads the model.
-        Used both by __init__ and by embed()'s auto-respawn after a crash -
-        VRAM may have changed since the last load, so preflight re-runs too.
-
-        cpu_only is passed once gpu_fallback_reason is set (a prior crash
-        already forced n_gpu_layers to 0 - see embed()): n_gpu_layers=0 alone
-        does not guarantee no GPU backend involvement (see
-        _embedder_runner.py's cpu_only handling), so every reload from that
-        point on re-asserts the guarantee, not just the first one."""
+        """(Re)run preflight and spawn a fresh child that loads the model."""
         self._preflight_vram()
         from ._embedder_runner import EmbedderRunner
         # Same parent-pins-worker-consumes contract as GgufBackend._load_native:
@@ -1159,26 +840,7 @@ class IsolatedEmbedder(VramSizingMixin):
         self._warn_if_mispooled()
 
     def _warn_if_mispooled(self) -> None:
-        """Say so when this model is being pooled against its own training.
-
-        A model declaring LAST-token pooling is a DECODER-based embedder
-        (Qwen3-Embedding, verified 2026-07-15: qwen3.pooling_type=3). Its
-        embeddings are trained to be read off the final token, so pooling it any
-        other way degrades them - silently, because it still returns healthy,
-        normalised, plausible vectors. That silence is the defect; the pooling
-        choice itself stays the user's (embedding_pooling), we just stop hiding
-        the consequence (AGENTS.md rule 5).
-
-        With the untouched default now resolving LAST correctly for a
-        LAST-declaring model (see _effective_pooling), this only fires when the
-        user has EXPLICITLY set embedding_pooling to something else (mean/cls/
-        none) for such a model - their call, but still worth surfacing, not
-        silencing. Only LAST is worth a warning at all: bge declares CLS and is
-        pooled MEAN by default, which measures fine (+0.29 related/unrelated
-        margin) and is what every existing index was built with - warning about
-        that would be noise, not signal, so it stays at debug level in
-        GGUFEmbedder.
-        """
+        """Say so when this model is being pooled against its own training."""
         declared, effective = self.declared_pooling, self.effective_pooling
         if declared != _POOLING_LAST or effective == _POOLING_LAST:
             return
@@ -1193,26 +855,7 @@ class IsolatedEmbedder(VramSizingMixin):
             pooling_name(effective), pooling_name(effective))
 
     def embed(self, texts: List[str]) -> List[List[float]]:
-        """Embed *texts* via the isolated worker, transparently respawning it
-        first if a PRIOR call's crash left it dead - so one transient native
-        fault does not permanently disable embeddings for the rest of the
-        process's life (mirrors Engine.chat_stream's auto-reload after a
-        chat-backend crash). A crash DURING this call is still raised to the
-        caller (rule 5: never silently swallowed) - only the NEXT call
-        recovers automatically, EXCEPT for the GPU-crash-once case below,
-        which retries inline so a batch already in progress does not fall
-        back to lexical-only for the rest of its run while a perfectly usable
-        CPU path sits unused.
-
-        Pinned via ``active_requests`` for the whole call (including a
-        respawn), not just the RPC itself - a ``reset_embedder()`` arriving
-        mid-respawn would free the very runner this call is about to use.
-
-        Serialized on ``_rpc_lock`` (see __init__): the respawn check and the
-        RPC together, so concurrent callers can neither swap responses on the
-        correlation-free queue pair nor both respawn and orphan a worker. The
-        pin is taken BEFORE the lock, so a caller merely queued behind another
-        still counts as in-flight and keeps this embedder from being freed."""
+        """Embed *texts* via the isolated worker, transparently respawning it first if a PRIOR call's crash left it dead - so one transient native fault does not permanently disable embeddings for the rest of the process's life (mirrors Engine.chat_stream's auto-reload after a chat-backend crash)."""
         self.active_requests += 1
         try:
             with self._rpc_lock:
@@ -1375,16 +1018,7 @@ _LAST_RESOLVE_WARNED: Optional[str] = None
 
 
 def _explicit_embedder_gpu_layers(cfg: dict) -> Optional[int]:
-    """The user's EXPLICIT GPU-layer choice for the embedder, or None when the
-    automatic placement below should decide.
-
-    ``embedding_gpu_layers`` (the dedicated key) wins outright. Failing that,
-    a global ``n_gpu_layers`` moved off its "everything" default (99) is
-    inherited exactly as get_embedder() always did - someone who set -g 24 or
-    -g 0 globally expressed an offload preference this load keeps honoring
-    (never silently override an explicit selection). A bool sneaking in via a
-    hand-edited config is not an int choice; malformed values fall through to
-    auto rather than crashing the load."""
+    """The user's EXPLICIT GPU-layer choice for the embedder, or None when the automatic placement below should decide."""
     raw = cfg.get("embedding_gpu_layers")
     if isinstance(raw, int) and not isinstance(raw, bool):
         return int(raw)
@@ -1399,41 +1033,7 @@ def _explicit_embedder_gpu_layers(cfg: dict) -> Optional[int]:
 
 def _choose_embedder_gpu_layers(path: str, cfg: dict, *,
                                 read_free=None) -> "tuple[int, Optional[str]]":
-    """Pick the embedder's ``n_gpu_layers``: ``(layers, reason)`` where
-    *reason* is a user-facing explanation only when automatic placement chose
-    CPU over a GPU that cannot hold the model.
-
-    Why this exists: the pre-load eviction (``_maybe_swap_for_embedder``)
-    cannot free room when the chat engine is pinned by an in-flight request -
-    which is the NORMAL case, since per-turn memory recall fires during one.
-    The embedder then force-loaded all layers onto a full card anyway, and
-    Windows/WDDM paged the overcommit to system RAM, thrashing the resident
-    chat model (measured live 2026-07-18: 34 -> 5.0 tok/s; the same load
-    placed on CPU ran at 21 and left chat's VRAM untouched). Degrading THIS
-    load to CPU is the right trade: embeds get slower, the chat model the
-    user is actively talking to does not.
-
-    An explicit user choice (see _explicit_embedder_gpu_layers) is honored
-    verbatim, tight VRAM or not. Unmeasurable free VRAM (including a probe
-    that did not complete fresh this call - see the freshness note below) or
-    an unreadable model file keep the historical full-offload attempt - the
-    load preflight still warns there, so nothing is hidden, and a guess of
-    CPU on a healthy box would silently slow every embed for no reason.
-
-    Freshness, not scope, is what read_free()'s default checks (AGENTS.md
-    rule 5): a GPU_PROBE_TIMEOUT/BUSY reading is a frozen last-known-good
-    value, not this call's own measurement, so it is treated the same as
-    "unmeasurable" above. Deliberately does NOT gate on free_scope: a
-    PROCESS-scoped reading over-states free the same way
-    discover.gpu_split_shortfall's own docstring explains, so the ONLY
-    place that matters here is the branch below that already fires when
-    the (possibly inflated) free reads as INSUFFICIENT - if even an
-    over-stated free comes up short, the real free is shorter still, so
-    that verdict only ever under-states the problem, never invents one.
-    Gating this on scope instead would make free read as permanently
-    unmeasurable on every Windows + AMD ROCm/HIP box, silently reverting to
-    the risky full-GPU-offload default this function exists to avoid on
-    exactly that platform."""
+    """Pick the embedder's ``n_gpu_layers``: ``(layers, reason)`` where *reason* is a user-facing explanation only when automatic placement chose CPU over a GPU that cannot hold the model."""
     explicit = _explicit_embedder_gpu_layers(cfg)
     if explicit is not None:
         return explicit, None
@@ -1468,24 +1068,7 @@ def _choose_embedder_gpu_layers(path: str, cfg: dict, *,
 
 
 def _maybe_swap_for_embedder(path: str, n_gpu_layers: int) -> None:
-    """Before the embedder's native load, evict a resident chat model when it
-    would not otherwise fit - the SAME VRAM-aware swap the image/music/video
-    plugins run before their own model load (see ``localm.vram.decide_media_swap``),
-    generalized here via ``decide_embedder_swap``/``evict_chat_for_embedder``.
-
-    This is complementary to, not redundant with, IsolatedEmbedder's own
-    ``_preflight_vram()`` (below): that check only REFUSES a load that will
-    not fit (fail fast, no child spawned). It never makes room. This function
-    is what actually frees VRAM by evicting the resident chat model first -
-    the same swap-before-load the image/music/video plugins already do -
-    so the preflight then has a real chance of succeeding instead of just
-    failing faster.
-
-    A CPU-only embedder load (``n_gpu_layers <= 0``) never contends for VRAM,
-    so it is skipped. Best-effort: any failure to read the file size or decide
-    the swap leaves the load path exactly as before this check existed (never
-    blocks a legitimate load - the swap is an optimization, not a
-    correctness requirement of the load itself)."""
+    """Before the embedder's native load, evict a resident chat model when it would not otherwise fit - the SAME VRAM-aware swap the image/music/video plugins run before their own model load (see ``localm.vram.decide_media_swap``), generalized here via ``decide_embedder_swap``/``evict_chat_for_embedder``."""
     if n_gpu_layers <= 0:
         return
     try:
@@ -1508,10 +1091,7 @@ def _maybe_swap_for_embedder(path: str, n_gpu_layers: int) -> None:
 
 
 def _emit_stage(on_progress: Optional[Callable[[str], None]], msg: str) -> None:
-    """Best-effort coarse stage announcement for get_embedder()'s caller (ADR-0004
-    Unit B: the "warm up the embedder" job). Mirrors managed_comfy_provision._emit
-    - a raising sink must never abort a load. Parent-side only: this never touches
-    the isolated embedder child's own load/embed IPC protocol."""
+    """Best-effort coarse stage announcement for get_embedder()'s caller (ADR-0004 Unit B: the 'warm up the embedder' job)."""
     if on_progress is None:
         return
     try:
@@ -1522,32 +1102,7 @@ def _emit_stage(on_progress: Optional[Callable[[str], None]], msg: str) -> None:
 
 def get_embedder(*, on_progress: Optional[Callable[[str], None]] = None
                   ) -> Optional[IsolatedEmbedder]:
-    """The shared embedder, loading the configured model on first use. Returns None
-    when no embedding model can be resolved - callers then fall back to lexical
-    retrieval. A missing model is re-checked on every call (so a mid-session
-    ``localm setup-embeddings`` is picked up without a restart); only a genuine
-    load FAILURE is cached. Loading holds the engine's process-global load lock so
-    it cannot race a chat-model load onto the GPU.
-
-    *on_progress*, if given, receives coarse human-readable stage announcements
-    (resolving/downloading/evicting/loading/ready) - purely additive, every
-    existing caller is unaffected. Added for the explicit "warm up the embedder"
-    job (ADR-0004 Unit B) so a cold server's first load - up to two 300s timeout
-    windows (VRAM eviction wait + child spawn/native-load) - is not silent.
-
-    The pre-load swap check (``_maybe_swap_for_embedder``) deliberately runs
-    OUTSIDE ``_LOCK`` (double-checked locking below), not inside a single held
-    lock the way the rest of this function is structured. It can evict a
-    resident chat model via ``vram.evict_chat_for_embedder``, which submits
-    ``http_server.unload_all_models()`` onto the SERVER'S event-loop thread and
-    blocks THIS thread waiting for it - and that coroutine calls
-    ``loaded_dim()``, which itself needs ``_LOCK``. Since ``_LOCK`` is a plain
-    ``threading.RLock`` (thread-owned, not reentrant across threads), holding
-    it here while blocking on that coroutine is a genuine cross-thread
-    deadlock: this thread waits on the coroutine, the coroutine (on the event
-    loop) waits on this thread's lock. Confirmed via live reproduction
-    (2026-07-14 review) - the event loop stayed blocked for the full
-    eviction timeout before either side could proceed."""
+    """The shared embedder, loading the configured model on first use."""
     global _EMBEDDER, _LOAD_FAILED_SPEC, _TRIED_DOWNLOAD, _LAST_ERROR
     cur_spec = None   # lazily computed below, only once _EMBEDDER is confirmed unset -
                        # the hot "already loaded" path stays a free dict lookup, no I/O.
@@ -1689,109 +1244,39 @@ def embed_texts(texts: List[str]) -> Optional[List[List[float]]]:
 
 
 def loaded_dim() -> Optional[int]:
-    """Dimension of the currently-loaded embedder, or None if none is loaded.
-    Does NOT trigger a load - safe for a cheap status probe (GUI picker)."""
+    """Dimension of the currently-loaded embedder, or None if none is loaded."""
     with _LOCK:
         return _EMBEDDER.dim if _EMBEDDER is not None else None
 
 
 def gpu_fallback_reason() -> Optional[str]:
-    """Why the currently-loaded embedder dropped from GPU to CPU after a native
-    crash (see IsolatedEmbedder.embed), or None when it hasn't (still on GPU,
-    or configured for CPU from the start). Does NOT trigger a load - for the
-    GUI picker to surface this instead of leaving it as a log-only fact.
-
-    Path-scrubbed for the same reason as ``last_error`` below."""
+    """Why the currently-loaded embedder dropped from GPU to CPU after a native crash (see IsolatedEmbedder.embed), or None when it hasn't (still on GPU, or configured for CPU from the start)."""
     with _LOCK:
         raw = _EMBEDDER.gpu_fallback_reason if _EMBEDDER is not None else None
     return pathscrub.scrub_paths(raw) if raw else raw
 
 
 def loaded_path() -> Optional[str]:
-    """Filesystem path of the currently-loaded embedder, or None if none is
-    loaded. Does NOT trigger a load. Lets a caller outside this module (the
-    Models page, the targeted unload route) recognise a registered model
-    entry as "this is the resident embedder" - it never appears in
-    ``http_server._engines``, so that is otherwise invisible - by comparing
-    against the entry's own resolved path. Pairs with ``loaded_dim()``."""
+    """Filesystem path of the currently-loaded embedder, or None if none is loaded."""
     with _LOCK:
         return _EMBEDDER.model_path if _EMBEDDER is not None else None
 
 
 def active_requests() -> int:
-    """In-flight embed() calls on the currently-loaded embedder, or 0 if none is
-    loaded. Mirrors ``Engine.active_requests`` - checked by http_server.py's
-    unload-all/targeted-unload/shutdown/restart paths before releasing this
-    embedder, exactly like a pinned chat Engine is skipped by
-    unload_all_models/unload_one_model (AUDIT-CRIT-1): without this, any of
-    those paths could free the embedder - and the isolated worker process a
-    request is waiting on - out from under an in-flight embed() call."""
+    """In-flight embed() calls on the currently-loaded embedder, or 0 if none is loaded."""
     with _LOCK:
         return _EMBEDDER.active_requests if _EMBEDDER is not None else 0
 
 
 def last_error() -> Optional[str]:
-    """Why the last embedding-model LOAD or RESOLVE failed (e.g. the model is not
-    an embedding model, or the configured spec resolves to a HuggingFace-format
-    directory rather than a GGUF file), or None. For the GUI picker to tell the
-    user what went wrong - resolve_embedding_model_path records a failure here on
-    every call, not only when a load is actually attempted (see
-    _record_resolve_failure), so GET /api/rag/embedding can explain a broken
-    embedding_model without anyone having to trigger an embed first.
-
-    PATH-SCRUBBED on the way out. The stored message is the raw exception text,
-    which for a load failure reads "failed to load embedding model:
-    <absolute path>" and crosses the isolated-child boundary intact - so it
-    carries the data dir, and with it the OS account name. Every caller of this
-    is an HTTP response (``GET /api/rag/embedding``, the 422 in routes/chat.py,
-    the rag job log), i.e. potentially a rag-scoped or non-owner reader, and
-    ``rag`` is deliberately NOT a privileged scope.
-
-    Scrubbed on READ, not at the assignment: the WARNING logged at the failure
-    site keeps the full path, so the local operator diagnosing this in the debug
-    log loses nothing. Per AGENTS.md rule 5 the CAUSE is preserved verbatim -
-    only the directory prefix is replaced - because muting the reason would
-    leave the user with a broken embedder and no way to find out why."""
+    """Why the last embedding-model LOAD or RESOLVE failed (e.g. the model is not an embedding model, or the configured spec resolves to a HuggingFace-format directory rather than a GGUF file), or None."""
     with _LOCK:
         raw = _LAST_ERROR
     return pathscrub.scrub_paths(raw) if raw else raw
 
 
 def reset_embedder(*, force: bool = True) -> bool:
-    """Drop the cached embedder and its negative caches (tests / a model
-    change). Returns True if an embedder was actually cleared, False if none
-    was loaded or (``force=False``) one was loaded but pinned.
-
-    ``force=False`` checks ``active_requests() == 0`` and clears the embedder
-    in the SAME ``_LOCK`` acquisition, atomically. Every caller that means to
-    skip a BUSY embedder (unload_all_models, _unload_embedder_if_matches,
-    switch_engine's own VRAM-shortfall eviction) used to do that check via a
-    SEPARATE, unlocked ``active_requests()`` call before calling this
-    function unconditionally - a real TOCTOU window, since
-    ``IsolatedEmbedder.embed()`` pins ``active_requests`` without taking
-    ``_LOCK``: a concurrent embed() could start in that window and have its
-    worker torn out from under it by the ``close()`` below. Folding the check
-    into this one locked critical section (no ``await`` between the read and
-    the close - both run synchronously inside a single executor hop) closes
-    that window instead of narrowing it per call site.
-
-    ``force=True`` (the default) keeps the original unconditional-clear
-    behavior, for callers that must tear down regardless of a pin (e.g. an
-    explicit model-selection change) and for the many existing bare
-    ``reset_embedder()`` call sites (tests, the RAG embedding-model-setup
-    route) that predate the pin-aware option and rightly don't need it.
-    ``release_for_exit()`` deliberately does NOT go through this function at
-    all - see its own docstring (taking ``_LOCK`` there risks hanging a
-    stop/restart behind an in-progress load).
-
-    A pinned (``force=False``, busy) embedder is a full no-op, including the
-    negative caches: nothing actually changed, so nothing is cleared.
-    Otherwise ``_LOAD_FAILED_SPEC``/``_TRIED_DOWNLOAD``/``_LAST_ERROR``/
-    ``_LAST_RESOLVE_WARNED`` are always cleared alongside ``_EMBEDDER`` - even
-    when no embedder was loaded at all (only a cached load FAILURE), matching
-    the original unconditional behavior: a caller resetting a failed-load state
-    expects the next ``get_embedder()`` to retry fresh, not keep returning the
-    stale cached failure (or a suppressed re-warn of it)."""
+    """Drop the cached embedder and its negative caches (tests / a model change)."""
     global _EMBEDDER, _LOAD_FAILED_SPEC, _TRIED_DOWNLOAD, _LAST_ERROR, _LAST_RESOLVE_WARNED
     with _LOCK:
         if not force and _EMBEDDER is not None and _EMBEDDER.active_requests > 0:
@@ -1808,37 +1293,7 @@ def reset_embedder(*, force: bool = True) -> bool:
 
 
 def release_for_exit() -> bool:
-    """Release the isolated embedder worker for a caller that is about to
-    ``os._exit()`` / ``os.execv()``. Returns True if a worker was released.
-
-    Both of those bypass ``atexit`` - and multiprocessing's daemon-child
-    reclamation IS an atexit hook (``multiprocessing.util._exit_function``) - so
-    a worker left running does NOT die with the parent: it survives as an orphan
-    still holding its model in VRAM until killed by hand, and the restarted
-    server spawns a second one next to it. Verified live (2026-07-15): a daemon
-    child is reclaimed on a normal interpreter exit, but survives BOTH os._exit
-    and os.execv.
-
-    This is the WHOLE exit-path decision on purpose, because every other way to
-    make it takes ``_LOCK``: ``active_requests()`` does, and ``reset_embedder()``
-    does. ``get_embedder()`` holds ``_LOCK`` for the FULL duration of an
-    embedding-model load (up to its load timeout), so a stop or restart issued
-    during a load would block on the guard itself and hang the very action the
-    user asked for - never reaching the teardown, and leaving exactly the orphan
-    this function exists to prevent. Nothing here touches ``_LOCK``: the
-    singleton is snapshotted directly, which is a best-effort read the exiting
-    caller can afford (a hard exit racing a load that has not yet published its
-    embedder is inherent to any hard exit).
-
-    A BUSY worker (a request is mid-``embed()``) is terminated WITHOUT waiting:
-    the pinned request cannot be answered either way once the process exits, so
-    there is nothing left to protect, and the polite "shutdown" command would
-    only queue behind the in-flight embed and stall the exit for the grace
-    period. An IDLE worker gets the polite command first, so the child frees the
-    model cleanly before it goes.
-
-    The module singleton is deliberately NOT cleared (that is reset_embedder()'s
-    job, and it needs ``_LOCK``): the process is going away regardless."""
+    """Release the isolated embedder worker for a caller that is about to ``os._exit()`` / ``os.execv()``."""
     emb = _EMBEDDER
     if emb is None:
         return False

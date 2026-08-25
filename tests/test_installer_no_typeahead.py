@@ -1,24 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""setup must never let TYPE-AHEAD answer a question the user has not seen.
-
-Setup runs long steps between questions (a uv download, a Python download, a venv
-build, a backend provision). Anything typed while one of those runs sits in the
-terminal's input queue and is delivered to the NEXT prompt - so one stray Enter
-silently accepts a default, and a double Enter accepts two questions in a row.
-Reported by the maintainer after accidentally acking two questions in one run.
-
-This is SETUP-2 again. That fix only swapped a single `choice` for a `set /p` at
-one site, so the confirming Enter belonged to its own prompt - it never emptied the
-queue, so anything typed DURING a long step still leaked, and the remaining
-`choice` prompts consume a buffered keypress outright. The queue must be emptied
-right before each question.
-
-Static assertions, deliberately: the real failure needs a terminal with keystrokes
-queued during a multi-second download, which no unit test can stage. What CAN be
-pinned mechanically is that every prompt is preceded by the drop, so a prompt added
-later cannot quietly reintroduce it - a comment saying "remember to flush" is what
-failed the first time.
-"""
+"""setup must never let TYPE-AHEAD answer a question the user has not seen."""
 
 from __future__ import annotations
 
@@ -73,8 +54,7 @@ class TestBatchFlushesBeforeEveryPrompt:
             "the flush must actually empty the console input queue"
 
     def test_the_flush_can_never_block_an_install(self):
-        """Best-effort by design: with no console (piped/CI) it must no-op, not
-        error out and abort setup."""
+        """Best-effort by design: with no console (piped/CI) it must no-op, not error out and abort setup."""
         body = "\n".join(_bat_lines())
         start = body.index("\n:flush\n")
         sub = body[start:start + 500]
@@ -82,15 +62,13 @@ class TestBatchFlushesBeforeEveryPrompt:
         assert ">nul 2>nul" in sub, "a flush must not print noise into the install"
 
     def test_there_is_at_least_one_prompt_to_guard(self):
-        """Guards the guard: if the greps ever stop matching, the test above would
-        pass vacuously over zero prompts."""
+        """Guards the guard: if the greps ever stop matching, the test above would pass vacuously over zero prompts."""
         assert sum(1 for ln in _bat_lines() if _is_prompt(ln)) >= 10
 
 
 class TestShellDrainsBeforeEveryPrompt:
     def test_every_prompt_goes_through_ask(self):
-        """setup.sh funnels all prompts through ask(), so the drain lives in one
-        place. A bare `read -r -p` outside ask() would bypass it."""
+        """setup.sh funnels all prompts through ask(), so the drain lives in one place."""
         stray = [ln.strip() for ln in _sh().split("\n")
                  if re.search(r"^\s*read\s+-r\s+-p", ln)]
         # exactly one: the read inside ask() itself
@@ -107,8 +85,7 @@ class TestShellDrainsBeforeEveryPrompt:
         assert drain < prompt, "ask() must drain type-ahead BEFORE it prompts"
 
     def test_the_drain_is_terminal_only(self):
-        """Piped input is deliberate (a script feeding answers); draining it would
-        eat the caller's real answers."""
+        """Piped input is deliberate (a script feeding answers); draining it would eat the caller's real answers."""
         src = _sh()
         start = src.index("ask() {")
         body = src[start:src.index("\n}", start)]
@@ -116,8 +93,7 @@ class TestShellDrainsBeforeEveryPrompt:
             "the drain must only run when stdin is a terminal"
 
     def test_yes_mode_never_reaches_the_drain(self):
-        """--yes returns the default before any read, so a non-interactive install
-        is untouched."""
+        """--yes returns the default before any read, so a non-interactive install is untouched."""
         src = _sh()
         start = src.index("ask() {")
         body = src[start:src.index("\n}", start)]

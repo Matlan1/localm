@@ -1,30 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The CLI can now drive ComfyUI's process and cancel a server operation.
-
-Four capabilities existed only in the GUI: whether ComfyUI is alive and whether
-localm launched it, starting it without generating, stopping/restarting it, and
-cancelling one in-flight operation. `/api/activity` was already handing the CLI
-a per-operation id and a `cancellable` flag and `_print_activity` was dropping
-both, so a terminal could WATCH a two-hour re-embed with no verb to stop it.
-
-Everything here is about the honesty of the seams, because that is where this
-change can go wrong:
-
-  - `launched_by_localm` is only knowable inside the process holding the
-    subprocess handle (`comfy_client._spawned_procs` is a process-local module
-    global). With no server to ask, the answer is UNKNOWN. Printing "no" would
-    be inventing a negative out of not having asked.
-  - The stop/restart routes answer HTTP 200 with `{"ok": false}` for a refusal
-    they handled cleanly, so a 2xx is not by itself success.
-  - A 404 means "this server has no such route" on `/v1/comfy/status` and "no
-    such job" on `/api/jobs/<id>/cancel`. One status code, two unrelated
-    answers. And a POST to a path the server does not serve is 405, not 404 -
-    measured, after the first version of this file assumed otherwise and the
-    bug reached a live run.
-  - Cancelling an operation that already finished must not report "cancelling",
-    which is what a blind POST would produce (the route returns the same body
-    either way).
-"""
+"""The CLI can now drive ComfyUI's process and cancel a server operation."""
 
 from __future__ import annotations
 
@@ -56,12 +31,7 @@ class _Resp:
 
 
 class _Server:
-    """A fake localm server: records every request and answers from a route map.
-
-    Recording the calls is the point. Several assertions below are about a
-    request NOT being made (a blind cancel, a launch that would abort a live
-    render), and "it printed the right thing" cannot express that.
-    """
+    """A fake localm server: records every request and answers from a route map."""
 
     def __init__(self, routes: dict):
         self.routes = routes
@@ -114,9 +84,7 @@ def test_a_404_defaults_to_the_route_being_absent(monkeypatch):
 
 
 def test_a_404_can_mean_the_object_is_absent_instead(monkeypatch):
-    """THE ONE THAT MATTERS. Without this parameter a mistyped job id reports
-    "this server predates the feature", which sends the reader to entirely the
-    wrong conclusion."""
+    """THE ONE THAT MATTERS."""
     monkeypatch.setattr(requests, "request", lambda *a, **k: _Resp(404, {}))
     state, _ = server_call("http://x", {}, "POST", "/api/jobs/abc/cancel",
                            not_found="missing")
@@ -134,17 +102,14 @@ def test_the_two_404_meanings_do_not_print_the_same_sentence(capsys):
 
 
 def test_an_unserved_post_path_reports_405_as_no_such_route(monkeypatch):
-    """MEASURED on a real server: a POST to a path it does not serve answers
-    405, not 404. Treating only 404 as "no such route" is what made `comfy
-    start` fail on a server with no media plugin instead of falling back."""
+    """MEASURED on a real server: a POST to a path it does not serve answers 405, not 404."""
     monkeypatch.setattr(requests, "request", lambda *a, **k: _Resp(405, {}))
     state, _ = server_call("http://x", {}, "POST", "/api/imagine/comfy-launch")
     assert state == "unsupported"
 
 
 def test_405_is_never_read_as_a_missing_object(monkeypatch):
-    """not_found only ever reinterprets a 404. A 405 is a statement about the
-    path and method and can never mean "the job you named is gone"."""
+    """not_found only ever reinterprets a 404."""
     monkeypatch.setattr(requests, "request", lambda *a, **k: _Resp(405, {}))
     state, _ = server_call("http://x", {}, "POST", "/api/jobs/abc/cancel",
                            not_found="missing")
@@ -194,9 +159,7 @@ def test_a_running_operation_now_shows_the_id_you_would_cancel(monkeypatch, caps
 
 
 def test_no_cancel_hint_when_nothing_is_cancellable(monkeypatch, capsys):
-    """A hint offering to cancel a finished operation is a false affordance:
-    `localm cancel` would correctly refuse it, so the hint promises something
-    that cannot happen."""
+    """A hint offering to cancel a finished operation is a false affordance: `localm cancel` would correctly refuse it, so the hint promises something that cannot happen."""
     _activity(monkeypatch, [{"id": "abc123abc123", "kind": "pull",
                              "label": "Model pull", "status": "done",
                              "created_at": 940.0, "finished_at": 990.0,
@@ -206,8 +169,7 @@ def test_no_cancel_hint_when_nothing_is_cancellable(monkeypatch, capsys):
 
 
 def test_an_operation_with_no_id_does_not_produce_a_cancel_hint(monkeypatch, capsys):
-    """An older server can report an operation without an id. Offering to
-    cancel something that cannot be named is the same false affordance."""
+    """An older server can report an operation without an id."""
     _activity(monkeypatch, [{"kind": "pull", "label": "Model pull",
                              "status": "running", "created_at": 940.0,
                              "cancellable": True}])
@@ -220,8 +182,7 @@ def test_an_operation_with_no_id_does_not_produce_a_cancel_hint(monkeypatch, cap
 # --------------------------------------------------------------------------
 
 def test_an_exact_id_wins_over_a_prefix_that_also_matches_another():
-    """`abc` is both an exact id and a prefix of `abcdef`. Treating that as
-    ambiguous would make a correct, complete id unusable."""
+    """`abc` is both an exact id and a prefix of `abcdef`."""
     ops = [{"id": "abc"}, {"id": "abcdef"}]
     op, err = models_cli._match_operation(ops, "abc")
     assert err is None and op["id"] == "abc"
@@ -259,8 +220,7 @@ def _cancel_server(ops, cancel=_Resp(200, {"status": "cancelling"})):
 
 
 def test_cancelling_a_running_operation_posts_to_its_full_id(monkeypatch):
-    """A PREFIX is accepted, but the POST must carry the FULL id - the route
-    matches on the whole id, so a prefix there would 404."""
+    """A PREFIX is accepted, but the POST must carry the FULL id - the route matches on the whole id, so a prefix there would 404."""
     srv = _install(monkeypatch, models_cli, _cancel_server([_RUNNING_OP]))
     result = _run(models_cli.cancel_cmd, ["7f3a"])
     assert result.exit_code == 0, result.output
@@ -269,9 +229,7 @@ def test_cancelling_a_running_operation_posts_to_its_full_id(monkeypatch):
 
 
 def test_it_says_cancelling_not_cancelled(monkeypatch):
-    """The server sets a cooperative flag and terminates any subprocess; an
-    in-process job stops at its next checkpoint. "Cancelled" would be a state
-    this command never observed."""
+    """The server sets a cooperative flag and terminates any subprocess; an in-process job stops at its next checkpoint. 'Cancelled' would be a state this command never observed."""
     _install(monkeypatch, models_cli, _cancel_server([_RUNNING_OP]))
     out = _run(models_cli.cancel_cmd, ["7f3a"]).output.lower()
     assert "cancelling" in out
@@ -279,10 +237,7 @@ def test_it_says_cancelling_not_cancelled(monkeypatch):
 
 
 def test_a_finished_operation_is_not_posted_to_and_is_not_claimed_cancelled(monkeypatch):
-    """THE CENTRAL HONESTY TEST. POST /api/jobs/<id>/cancel answers
-    {"status": "cancelling"} for a job that finished hours ago exactly as it
-    does for a live one, so a command that posted blind would report a
-    cancellation that never happened."""
+    """THE CENTRAL HONESTY TEST."""
     srv = _install(monkeypatch, models_cli, _cancel_server([_DONE_OP]))
     result = _run(models_cli.cancel_cmd, [_DONE_OP["id"]])
     assert result.exit_code == 0, result.output
@@ -328,8 +283,7 @@ def test_a_cancel_that_the_server_refuses_is_not_reported_as_done(monkeypatch):
 
 
 def test_a_job_that_vanished_between_the_read_and_the_post_says_so(monkeypatch):
-    """404 on the cancel route, having already resolved the id from a live
-    activity listing. That is an evicted job, not a server without the route."""
+    """404 on the cancel route, having already resolved the id from a live activity listing."""
     _install(monkeypatch, models_cli,
              _cancel_server([_RUNNING_OP], cancel=_Resp(404, {})))
     result = _run(models_cli.cancel_cmd, ["7f3a"])
@@ -363,9 +317,7 @@ def test_status_reports_alive_and_whether_localm_launched_it(monkeypatch):
 
 
 def test_status_without_a_server_reports_unknown_never_no(monkeypatch):
-    """THE CENTRAL ONE. Only the process holding the subprocess handle knows
-    whether localm launched ComfyUI. With no server to ask, "no" would be a
-    claim; the honest word is "unknown"."""
+    """THE CENTRAL ONE."""
     _install(monkeypatch, comfy_cli, _status_server(), discovered=False)
     _no_direct_comfy(monkeypatch, alive=True)
     result = _run(comfy_cli.comfy_status)
@@ -375,8 +327,7 @@ def test_status_without_a_server_reports_unknown_never_no(monkeypatch):
 
 
 def test_status_that_could_not_ask_the_server_still_never_says_no(monkeypatch):
-    """Same rule one layer over: a server that refuses the question has told
-    us nothing about who launched ComfyUI."""
+    """Same rule one layer over: a server that refuses the question has told us nothing about who launched ComfyUI."""
     _install(monkeypatch, comfy_cli,
              _status_server(status_resp=_Resp(401, {})))
     _no_direct_comfy(monkeypatch, alive=True)
@@ -410,9 +361,7 @@ def test_stop_posts_to_the_stop_route(monkeypatch):
 
 
 def test_a_200_saying_ok_false_is_a_failure_not_a_success(monkeypatch):
-    """The routes handle a refusal cleanly and answer 200 with ok=false, so
-    reading only the status code would report a failed stop as done - the
-    discarded-return-value shape."""
+    """The routes handle a refusal cleanly and answer 200 with ok=false, so reading only the status code would report a failed stop as done - the discarded-return-value shape."""
     _install(monkeypatch, comfy_cli, _Server(
         {("POST", "/v1/comfy/stop"):
          _Resp(200, {"ok": False, "message": "Could not stop the ComfyUI localm launched."})}))
@@ -437,9 +386,7 @@ def test_restart_posts_to_the_restart_route(monkeypatch):
 
 
 def test_the_client_waits_longer_than_the_server_will(monkeypatch):
-    """A client that gives up first reports a failure the server never had.
-    The restart route budgets 90s for the stop half plus the configured launch
-    wait, so the client's own budget must exceed that sum."""
+    """A client that gives up first reports a failure the server never had."""
     from localm.media.comfy_client import comfy_launch_wait_seconds
     cfg = {"comfy_launch_timeout": 600}
     server_budget = 90.0 + comfy_launch_wait_seconds(cfg) + 30.0
@@ -457,10 +404,7 @@ _LAUNCHED = _Resp(200, {"ok": True, "message": "ComfyUI is up."})
 
 
 def test_start_never_touches_a_comfyui_that_is_already_running(monkeypatch):
-    """The no-media-plugin fallback is POST /v1/comfy/restart, whose stop half
-    ABORTS the in-flight render. On an already-running ComfyUI that would
-    destroy work the user never asked to interrupt, so start has to establish
-    it is down before it can reach any launch route."""
+    """The no-media-plugin fallback is POST /v1/comfy/restart, whose stop half ABORTS the in-flight render."""
     srv = _install(monkeypatch, comfy_cli,
                    _Server({("GET", "/v1/comfy/status"): _ALIVE,
                             ("POST", "/v1/comfy/restart"): _LAUNCHED,
@@ -482,9 +426,7 @@ def test_start_uses_the_media_plugins_own_launch_route(monkeypatch):
 
 
 def test_start_falls_back_to_the_kernel_route_when_no_media_plugin_exists(monkeypatch):
-    """All three per-plugin routes 404 because no media plugin is installed.
-    That is a missing ROUTE, not a failed launch, so it must not be reported as
-    one - and the kernel route can still start ComfyUI from the global config."""
+    """All three per-plugin routes 404 because no media plugin is installed."""
     srv = _install(monkeypatch, comfy_cli,
                    _Server({("GET", "/v1/comfy/status"): _DEAD,
                             ("POST", "/v1/comfy/restart"): _LAUNCHED}))
@@ -496,14 +438,7 @@ def test_start_falls_back_to_the_kernel_route_when_no_media_plugin_exists(monkey
 
 
 def test_the_render_aborting_fallback_is_never_used_on_an_unconfirmed_comfyui(monkeypatch):
-    """A server too old to answer /v1/comfy/status has told us nothing about
-    whether a render is in flight. The per-plugin launch routes are safe there
-    (they only bring ComfyUI up), but /v1/comfy/restart aborts the running
-    prompt, so it must not be reached on a guess.
-
-    Relying on "those three routes shipped together, so an old server has
-    neither" would make this safe by accident of release history rather than by
-    construction."""
+    """A server too old to answer /v1/comfy/status has told us nothing about whether a render is in flight."""
     srv = _install(monkeypatch, comfy_cli,
                    _Server({("GET", "/v1/comfy/status"): _Resp(404, {}),
                             ("POST", "/v1/comfy/restart"): _LAUNCHED}))
@@ -515,9 +450,7 @@ def test_the_render_aborting_fallback_is_never_used_on_an_unconfirmed_comfyui(mo
 
 
 def test_an_explicitly_named_missing_plugin_never_falls_back(monkeypatch):
-    """--media music asks for THAT plugin's ComfyUI settings. Silently
-    launching from the global config instead would answer a question the user
-    did not ask."""
+    """--media music asks for THAT plugin's ComfyUI settings."""
     srv = _install(monkeypatch, comfy_cli,
                    _Server({("GET", "/v1/comfy/status"): _DEAD,
                             ("POST", "/v1/comfy/restart"): _LAUNCHED}))
@@ -529,8 +462,7 @@ def test_an_explicitly_named_missing_plugin_never_falls_back(monkeypatch):
 
 
 def test_start_stops_when_it_cannot_establish_comfyui_is_down(monkeypatch):
-    """An unauthorized status read tells us nothing about whether a render is
-    in flight, so proceeding to a route that aborts one is not available."""
+    """An unauthorized status read tells us nothing about whether a render is in flight, so proceeding to a route that aborts one is not available."""
     srv = _install(monkeypatch, comfy_cli,
                    _Server({("GET", "/v1/comfy/status"): _Resp(401, {}),
                             ("POST", "/api/imagine/comfy-launch"): _LAUNCHED}))
@@ -559,10 +491,7 @@ class _Comfy:
 
 
 def test_ctrl_c_tells_comfyui_to_abort_the_render_and_free_vram(monkeypatch):
-    """Before this, Ctrl-C ended localm while ComfyUI kept rendering and kept
-    its VRAM. interrupt_comfy/free_comfy_vram are plain HTTP, so they work from
-    any process - unlike stop_comfy, which needs a handle only the launching
-    process has."""
+    """Before this, Ctrl-C ended localm while ComfyUI kept rendering and kept its VRAM. interrupt_comfy/free_comfy_vram are plain HTTP, so they work from any process - unlike stop_comfy, which needs a handle only the launching process has."""
     comfy = _Comfy().install(monkeypatch)
 
     def _boom():
@@ -575,9 +504,7 @@ def test_ctrl_c_tells_comfyui_to_abort_the_render_and_free_vram(monkeypatch):
 
 
 def test_an_abort_comfyui_did_not_accept_is_not_reported_as_stopped(monkeypatch, capsys):
-    """interrupt_comfy swallows its own transport errors and returns False.
-    That is "I could not tell it to stop", and printing "render aborted" there
-    would be the exact failure this whole change is about."""
+    """interrupt_comfy swallows its own transport errors and returns False."""
     _Comfy(accepted=False).install(monkeypatch)
 
     def _boom():

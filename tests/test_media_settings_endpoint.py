@@ -1,13 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Tests for the per-plugin media config: GET/POST /v1/media/config + the
-settings_schema helpers behind them.
-
-Each media plugin (image/music/video) keeps its OWN config block under
-config["plugins"][name], so the three are configured INDEPENDENTLY. The GUI
-"Media" section reads the resolved values (block value, else the shared global
-comfy_* fallback) and writes a plugin's block deep-merged (other fields and the
-other plugins untouched). A blank field clears the override.
-"""
+"""Tests for the per-plugin media config: GET/POST /v1/media/config + the settings_schema helpers behind them."""
 
 import os
 
@@ -251,8 +243,7 @@ def test_write_requires_config_write_scope(client, monkeypatch):
 
 @pytest.fixture
 def env(tmp_path, monkeypatch):
-    """Same isolated data dir as `client`, but WITHOUT a pre-built app/client,
-    so a test can put the server in protected mode (LOCALM_API_KEY) itself."""
+    """Same isolated data dir as `client`, but WITHOUT a pre-built app/client, so a test can put the server in protected mode (LOCALM_API_KEY) itself."""
     monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
@@ -265,12 +256,7 @@ def env(tmp_path, monkeypatch):
 
 
 def test_get_hides_launch_cmd_and_api_url_from_a_config_read_only_key(env):
-    """Regression for pentest finding LM-PT-002: a config:read-scoped,
-    non-owner key (part of the app's own suggested 'Full' key preset) must not
-    learn a media backend's launch_cmd (a shell command) or api_url (a render
-    target) from GET /v1/media/config, even though it may legitimately read
-    every other field. The write side already refuses this key the ability to
-    SET either field (REC-MEDIA-CMD); the read side must match."""
+    """Regression for pentest finding LM-PT-002: a config:read-scoped, non-owner key (part of the app's own suggested 'Full' key preset) must not learn a media backend's launch_cmd (a shell command) or api_url (a render target) from GET /v1/media/config, even though it may legitimately read every other fie..."""
     from localm import auth, scopes
 
     auth.set_api_key("owner-secret-media-123")                # protected mode
@@ -301,10 +287,7 @@ def test_get_hides_launch_cmd_and_api_url_from_a_config_read_only_key(env):
 
 
 def test_post_response_hides_launch_cmd_and_api_url_from_a_scoped_writer(env):
-    """The write endpoint's own response echoes the plugin's resolved fields
-    back too (e.g. after saving workdir) - same leak, same fix: a config:write
-    key that is not an owner must not have launch_cmd/api_url's value echoed
-    back even for a save that never touched either field."""
+    """The write endpoint's own response echoes the plugin's resolved fields back too (e.g. after saving workdir) - same leak, same fix: a config:write key that is not an owner must not have launch_cmd/api_url's value echoed back even for a save that never touched either field."""
     from localm import auth, scopes
 
     auth.set_api_key("owner-secret-media-456")
@@ -325,16 +308,7 @@ def test_post_response_hides_launch_cmd_and_api_url_from_a_scoped_writer(env):
 
 
 def test_generic_config_get_does_not_leak_per_plugin_media_secrets(env):
-    """The owner gate on launch_cmd/api_url/workdir must not be defeated by
-    reading them off the GENERIC route.
-
-    GET /v1/media/config hides those three from a non-owner, but the media
-    plugins keep their OWN copy at cfg["plugins"][<plugin>]["comfy"][...]. That
-    subtree lives under the `plugins` key, which is engine_managed - a WRITE
-    gate only, never popped from a read - so before the scrub a plain
-    config:read key could fetch from /v1/config exactly what /v1/media/config
-    refused it. Same generic-outranks-specific shape as X8, on the read side.
-    """
+    """The owner gate on launch_cmd/api_url/workdir must not be defeated by reading them off the GENERIC route."""
     from localm import auth, scopes
     from localm.config import update_config
 

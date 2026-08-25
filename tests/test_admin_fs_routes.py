@@ -1,25 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Admin filesystem routes: UNC/device rejection, allowlist-before-syscall, and
-the cross-origin refusal for the host browser (CodeQL 3 and 10).
-
-WHY THE ASSERTIONS LOOK LIKE THIS. The defect is not the HTTP response, it is the
-SYSCALL that happens on the way to it. ``Path.resolve`` on Windows calls
-``_getfinalpathname`` (CreateFileW) plus a stat, so a UNC path aimed at an
-attacker's SMB server makes an outbound connection that Windows AUTO-AUTHENTICATES,
-surrendering the host's net-NTLMv2 credential - and that completes before any
-allowlist check downstream can return its 403. Both branches returning the same
-403 is exactly why an earlier reading called this harmless; the exfiltration
-channel is the connection, not the response body.
-
-It also blocks: measured on a Windows box, a UNC path to a non-routable RFC5737
-address stalled 271.33 SECONDS before WinError 64, and an unresolvable UNC
-hostname 9.88s - inside an ``async def``, i.e. the whole event loop, per request.
-
-So the tests assert on the CODE PATH (no filesystem call is ever made on an
-unsanitized UNC string), not on wall clock alone. Wall clock is Windows-specific
-and a Linux CI run cannot reproduce the stall, so a timing-only test would
-silently prove nothing there.
-"""
+"""Admin filesystem routes: UNC/device rejection, allowlist-before-syscall, and the cross-origin refusal for the host browser (CodeQL 3 and 10)."""
 
 from __future__ import annotations
 
@@ -71,30 +51,13 @@ _FS_METHODS = ("resolve", "is_dir", "is_file", "exists", "stat", "iterdir")
 
 
 def _is_unc(s: str) -> bool:
-    """The spy's forbidden-prefix rule, kept IDENTICAL to the product contract in
-    pathsafe.reject_unsafe_path_string. ``\\\\`` is UNC/device syntax everywhere;
-    ``//`` is UNC on Windows only, because on POSIX a leading ``//`` is a legal
-    path prefix equivalent to ``/``. If the spy used the stricter rule on POSIX it
-    would fail the suite on Linux CI for a path the product correctly allows."""
+    """The spy's forbidden-prefix rule, kept IDENTICAL to the product contract in pathsafe.reject_unsafe_path_string. ``\\\\`` is UNC/device syntax everywhere; ``//`` is UNC on Windows only, because on POSIX a leading ``//`` is a legal path prefix equivalent to ``/``."""
     return s.startswith("\\\\") or (os.name == "nt" and s.startswith("//"))
 
 
 @pytest.fixture
 def fs_spy(monkeypatch):
-    """Record every path string that reaches a filesystem call, and hard-fail the
-    call when the path is UNC/device syntax.
-
-    Guarding ALL of _FS_METHODS rather than just resolve() is what makes this
-    test suite safe to run. MEASURED: with the fix reverted and only resolve()
-    guarded, this file ran past a 10-MINUTE timeout - because the unguarded
-    is_dir() went on to make the real SMB dial to the RFC5737 address, exactly
-    the 271-second stall the unit is about. A regression must fail in
-    milliseconds with a clear message, never hang CI.
-
-    Recording AND raising is deliberate: the handlers wrap their bodies in
-    ``except Exception -> HTTPException(500)``, so a raise alone could be
-    swallowed into a 500 that a status assertion might tolerate. The recorded
-    list is checked independently and cannot be swallowed."""
+    """Record every path string that reaches a filesystem call, and hard-fail the call when the path is UNC/device syntax."""
     seen: list = []
     reals = {m: getattr(Path, m) for m in _FS_METHODS}
 
@@ -124,8 +87,7 @@ def _unc_calls(seen) -> list:
 
 @pytest.fixture
 def fs_app(tmp_path, monkeypatch):
-    """GUI stack on a throwaway home. Mirrors tests/test_fs_picker.py so the two
-    files exercise the same wiring."""
+    """GUI stack on a throwaway home."""
     home = tmp_path / ".localm"
     monkeypatch.setenv("LOCALM_HOME", str(home))
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
@@ -154,8 +116,7 @@ def _host_key():
 
 
 def _cfgwrite_key():
-    """config:write is a PRIVILEGED scope, so minting it needs the owner-equivalent
-    allow_privileged flag (same convention as tests/test_auth.py)."""
+    """config:write is a PRIVILEGED scope, so minting it needs the owner-equivalent allow_privileged flag (same convention as tests/test_auth.py)."""
     from localm import auth
     return auth.create_key("w", [S.CONFIG_WRITE], allow_privileged=True,
                            fs_access="host")["key"]
@@ -183,10 +144,7 @@ class TestFsDirsRejectsUncBeforeAnySyscall:
         assert elapsed < _NO_DIAL_SECONDS, f"took {elapsed:.2f}s"
 
     def test_forward_slash_unc_refused_on_windows(self, fs_app, fs_spy):
-        """``//host/share`` is an equivalent UNC spelling on Windows. On POSIX a
-        leading ``//`` is a legal path prefix equivalent to ``/``, so it is NOT
-        rejected there and the picker keeps working - the assertion is
-        platform-split on purpose, not skipped."""
+        """``//host/share`` is an equivalent UNC spelling on Windows."""
         with TestClient(fs_app) as c:
             r = c.get("/api/fs/dirs", params={"path": UNC_FWD},
                       headers=_hdr(_host_key()))
@@ -197,9 +155,7 @@ class TestFsDirsRejectsUncBeforeAnySyscall:
             assert r.status_code == 404, r.text   # a plain missing local path
 
     def test_ordinary_directory_still_lists(self, fs_app, tmp_path):
-        """The picker's whole purpose is browsing the host disk unconstrained -
-        only the UNC/device form is refused. A regression that over-blocks would
-        break the folder picker outright."""
+        """The picker's whole purpose is browsing the host disk unconstrained - only the UNC/device form is refused."""
         d = tmp_path / "data"
         d.mkdir()
         (d / "sub").mkdir()
@@ -211,17 +167,7 @@ class TestFsDirsRejectsUncBeforeAnySyscall:
         assert "sub" in r.json()["dirs"]
 
     def test_empty_path_still_lists_roots(self, fs_app, tmp_path, monkeypatch):
-        """An empty path lists the roots - drive letters on Windows, the
-        filesystem root on POSIX.
-
-        The POSIX branch is pointed at a DISPOSABLE fixture root, never the
-        machine's real "/". Listing "/" stats every child (/opt, /etc, /usr),
-        which is a real system-path touch and is exactly what the guard in
-        tests/conftest.py fails a test for. An earlier revision of this test did
-        exactly that: it passed on Windows, where the roots are drive letters,
-        and reddened master on the ubuntu CI leg - a platform blind spot rather
-        than a logic error, and the reason single-platform local green is a
-        weaker gate than it looks."""
+        """An empty path lists the roots - drive letters on Windows, the filesystem root on POSIX."""
         from localm.plugins.gui.routes import admin as admin_routes
         fake_root = tmp_path / "fakeroot"
         (fake_root / "alpha").mkdir(parents=True)
@@ -278,9 +224,7 @@ class TestCreateLauncherAllowlistsBeforeResolving:
 
     def test_unlisted_local_dir_is_refused_without_resolving_it(
             self, fs_app, tmp_path, fs_spy):
-        """The core of the fix: the RAW string is matched against the configured
-        allowlist first, so no syscall ever touches an unlisted path. Before the
-        fix this path was resolved (two filesystem opens) and only then refused."""
+        """The core of the fix: the RAW string is matched against the configured allowlist first, so no syscall ever touches an unlisted path."""
         configured = tmp_path / "comfy"
         configured.mkdir()
         self._configure(configured)
@@ -300,9 +244,7 @@ class TestCreateLauncherAllowlistsBeforeResolving:
 
     def test_relative_workdir_is_refused_without_resolving_it(
             self, fs_app, tmp_path, fs_spy):
-        """A relative workdir would resolve against the SERVER's cwd, which is
-        not a path the caller can be said to have named. The raw-string allowlist
-        refuses it before any syscall, so it never reaches resolve()."""
+        """A relative workdir would resolve against the SERVER's cwd, which is not a path the caller can be said to have named."""
         wd = tmp_path / "comfy"
         wd.mkdir()
         self._configure(wd)
@@ -315,12 +257,7 @@ class TestCreateLauncherAllowlistsBeforeResolving:
 
     def test_configured_unc_workdir_is_not_broken_by_the_fix(
             self, fs_app, tmp_path, monkeypatch):
-        """A ComfyUI workdir on a network share is a REAL setup, so the fix must
-        not refuse a UNC path the user configured themselves. Dialling a path the
-        user chose is not the attack; dialling an UNLISTED one is. Asserted at
-        the gate rather than end-to-end - there is no SMB server here, so the
-        check is that the request gets PAST the allowlist (it then fails on the
-        directory not existing, not on a refusal)."""
+        """A ComfyUI workdir on a network share is a REAL setup, so the fix must not refuse a UNC path the user configured themselves."""
         # Inject the config directly rather than through save_config: the point
         # of this test is the ALLOWLIST's verdict, so it must not depend on
         # whatever validation the config writer may or may not apply to a UNC
@@ -357,8 +294,7 @@ class TestCreateLauncherAllowlistsBeforeResolving:
         assert r.status_code == 400 and "not a valid directory" in r.text
 
     def test_configured_workdir_still_writes_the_launcher(self, fs_app, tmp_path):
-        """The happy path, byte for byte: the allowlist prefilter must not break
-        the legitimate caller, and the script content must be unchanged."""
+        """The happy path, byte for byte: the allowlist prefilter must not break the legitimate caller, and the script content must be unchanged."""
         wd = tmp_path / "comfy"
         wd.mkdir()
         self._configure(wd)
@@ -384,9 +320,7 @@ class TestCreateLauncherAllowlistsBeforeResolving:
 
     def test_equivalent_spelling_of_the_configured_workdir_is_accepted(
             self, fs_app, tmp_path):
-        """The prefilter is normcase+normpath, so a trailing separator or a "."
-        segment - both of which a GUI can legitimately send - still match. If
-        this breaks, the prefilter is too strict and the feature is broken."""
+        """The prefilter is normcase+normpath, so a trailing separator or a '.' segment - both of which a GUI can legitimately send - still match."""
         wd = tmp_path / "comfy"
         wd.mkdir()
         self._configure(wd)
@@ -403,8 +337,7 @@ class TestCreateLauncherAllowlistsBeforeResolving:
 # --------------------------------------------------------------------------- #
 
 def test_logs_export_rejects_unc_destination(fs_app, fs_spy):
-    """export_logs stats a caller-supplied destination and then runs a whole
-    shutil.copy2 loop. Same UNC dial, same event-loop stall."""
+    """export_logs stats a caller-supplied destination and then runs a whole shutil.copy2 loop."""
     with TestClient(fs_app) as c:
         t0 = time.perf_counter()
         r = c.post("/api/logs/export", json={"dest": UNC},
@@ -423,12 +356,7 @@ class TestFsMkdir:
 
     @pytest.fixture
     def browse_dir(self, tmp_path):
-        """A dedicated subdirectory to browse/create into, kept separate from
-        tmp_path's root: fs_app points LOCALM_HOME at tmp_path/".localm", so
-        minting a key (every test here needs one for auth) side-effect-creates
-        that folder directly under tmp_path the first time it is touched. A
-        test that lists/compares tmp_path's own contents would see that
-        unrelated directory and misattribute it to the mkdir under test."""
+        """A dedicated subdirectory to browse/create into, kept separate from tmp_path's root: fs_app points LOCALM_HOME at tmp_path/'.localm', so minting a key (every test here needs one for auth) side-effect-creates that folder directly under tmp_path the first time it is touched."""
         d = tmp_path / "browse"
         d.mkdir()
         return d
@@ -538,8 +466,7 @@ class TestFsMkdir:
         assert "permission" in r.text.lower()
 
     def test_config_read_only_key_is_refused(self, fs_app, browse_dir):
-        """A key that can browse but not write must not be able to mkdir - the
-        same CONFIG_WRITE gate as export_logs/create_comfy_launcher."""
+        """A key that can browse but not write must not be able to mkdir - the same CONFIG_WRITE gate as export_logs/create_comfy_launcher."""
         with TestClient(fs_app) as c:
             r = c.post("/api/fs/mkdir", json={"path": str(browse_dir), "name": "x"},
                        headers=_hdr(_host_key()))
@@ -547,8 +474,7 @@ class TestFsMkdir:
         assert not (browse_dir / "x").exists()
 
     def test_config_write_without_host_fs_access_is_refused(self, fs_app, browse_dir):
-        """CONFIG_WRITE alone is not enough - the target is an arbitrary host
-        path, same as fs_dirs, so require_fs_host applies too."""
+        """CONFIG_WRITE alone is not enough - the target is an arbitrary host path, same as fs_dirs, so require_fs_host applies too."""
         from localm import auth
         key = auth.create_key("w-mkdir", [S.CONFIG_WRITE], allow_privileged=True,
                               fs_access="none")["key"]
@@ -650,16 +576,7 @@ class TestFsRename:
 
     def test_never_overwrites_even_if_the_os_rename_call_would_silently_succeed(
             self, fs_app, tmp_path, monkeypatch):
-        """POSIX rename(2) SILENTLY REPLACES an existing FILE target instead of
-        raising - that is documented rename(2) behavior, unlike Windows, which
-        refuses on its own. The two test_never_overwrites_* tests above pass on
-        THIS platform (Windows) regardless of whether fs_rename's explicit
-        `new_path.exists()` pre-check is present, because Path.rename() itself
-        already refuses here - so they cannot tell the pre-check apart from
-        incidental OS behavior (measured: removing the pre-check left them
-        green). This test makes Path.rename behave like POSIX's rename(2) on
-        EVERY platform, so only the explicit pre-check - never the OS call - can
-        be what refuses the overwrite."""
+        """POSIX rename(2) SILENTLY REPLACES an existing FILE target instead of raising - that is documented rename(2) behavior, unlike Windows, which refuses on its own."""
         src = tmp_path / "source.txt"
         src.write_text("SOURCE", encoding="utf-8")
         dst = tmp_path / "target.txt"
@@ -742,12 +659,7 @@ class TestFsRename:
 # --------------------------------------------------------------------------- #
 
 class TestFsBrowserRefusedCrossOrigin:
-    """/api/fs/* enumerates the user's disk and is a GET, so it is exempt from
-    the CSRF gate (unsafe methods only) and from the open-mode shell-token gate.
-    The generic /api,/v1 metadata-GET gate does cover it, but only inside the
-    ``not any_key_configured()`` branch - so in PROTECTED mode a
-    cookie-authenticated cross-origin GET would execute. SameSite=strict does not
-    help: "site" ignores port, so any other loopback-port page is same-site."""
+    """/api/fs/* enumerates the user's disk and is a GET, so it is exempt from the CSRF gate (unsafe methods only) and from the open-mode shell-token gate."""
 
     @staticmethod
     def _app(tmp_path, monkeypatch, *, with_key: bool):
@@ -790,9 +702,7 @@ class TestFsBrowserRefusedCrossOrigin:
 
     def test_same_origin_not_refused_by_the_origin_guard(
             self, tmp_path, monkeypatch):
-        """The legitimate loopback GUI shell must still reach the picker. It can
-        still be refused by AUTH (that is a different gate and a different
-        message); what must not happen is a cross-origin refusal."""
+        """The legitimate loopback GUI shell must still reach the picker."""
         app = self._app(tmp_path, monkeypatch, with_key=False)
         c = TestClient(app)
         r = c.get("/api/fs/dirs",
@@ -802,8 +712,7 @@ class TestFsBrowserRefusedCrossOrigin:
         assert "cross-origin" not in str(detail).lower()
 
     def test_ordinary_api_get_unaffected(self, tmp_path, monkeypatch):
-        """Only /api/fs/* is added to the all-mode refusal; the prefix must not
-        leak onto neighbouring routes."""
+        """Only /api/fs/* is added to the all-mode refusal; the prefix must not leak onto neighbouring routes."""
         app = self._app(tmp_path, monkeypatch, with_key=True)
         c = TestClient(app)
         r = c.get("/health", headers={"Origin": "http://127.0.0.1:3000"})
@@ -825,9 +734,7 @@ def _set_allow_network_drives(value: bool) -> None:
 
 @pytest.fixture
 def fake_remote_z(monkeypatch):
-    """Makes GetDriveTypeW report Z: as DRIVE_REMOTE, everything else as
-    DRIVE_FIXED - a real Win32 call, not a stand-in for one, so this exercises
-    the actual pathsafe.is_mapped_network_drive code path end to end."""
+    """Makes GetDriveTypeW report Z: as DRIVE_REMOTE, everything else as DRIVE_FIXED - a real Win32 call, not a stand-in for one, so this exercises the actual pathsafe.is_mapped_network_drive code path end to end."""
     import ctypes
     monkeypatch.setattr(
         ctypes.windll.kernel32, "GetDriveTypeW",
@@ -846,9 +753,7 @@ class TestNetworkDriveToggle:
         assert r.status_code == 400, r.text
 
     def test_fs_dirs_allows_network_drive_by_default(self, fs_app, fake_remote_z):
-        """The default (setting untouched) must reproduce the exact
-        pre-existing behaviour: navigating into Z: fails only because the
-        fixture has no real Z: drive to list, never because of the gate."""
+        """The default (setting untouched) must reproduce the exact pre-existing behaviour: navigating into Z: fails only because the fixture has no real Z: drive to list, never because of the gate."""
         with TestClient(fs_app) as c:
             r = c.get("/api/fs/dirs", params={"path": r"Z:\shared"},
                       headers=_hdr(_host_key()))
@@ -858,8 +763,7 @@ class TestNetworkDriveToggle:
 
     def test_root_listing_hides_a_disallowed_network_drive(
             self, fs_app, fake_remote_z, monkeypatch):
-        """The empty-path root listing must not even OFFER a disallowed
-        network drive as clickable, not merely refuse navigating into it."""
+        """The empty-path root listing must not even OFFER a disallowed network drive as clickable, not merely refuse navigating into it."""
         _set_allow_network_drives(False)
         real_is_dir = Path.is_dir
 
@@ -895,10 +799,7 @@ class TestNetworkDriveToggle:
 
     def test_fs_places_hides_a_disallowed_network_drive(
             self, fs_app, fake_remote_z, monkeypatch):
-        """The Places rail's own drive listing (a separate endpoint from
-        fs_dirs, with its own A-Z probe) must apply the same policy - a
-        disallowed network drive must not be offered there either, even
-        though clicking it would still be refused by fs_dirs downstream."""
+        """The Places rail's own drive listing (a separate endpoint from fs_dirs, with its own A-Z probe) must apply the same policy - a disallowed network drive must not be offered there either, even though clicking it would still be refused by fs_dirs downstream."""
         _set_allow_network_drives(False)
         real_is_dir = Path.is_dir
 
@@ -952,10 +853,7 @@ class TestNetworkDriveToggle:
 
     def test_logs_export_refuses_network_drive_dest_when_disallowed(
             self, fs_app, fake_remote_z):
-        """export_logs returns 400 for BOTH the network-drive gate AND a
-        destination that is not a directory (there is no real Z: drive on
-        this box), so status code alone cannot tell them apart - assert on
-        the detail message, which is what actually distinguishes them."""
+        """export_logs returns 400 for BOTH the network-drive gate AND a destination that is not a directory (there is no real Z: drive on this box), so status code alone cannot tell them apart - assert on the detail message, which is what actually distinguishes them."""
         _set_allow_network_drives(False)
         with TestClient(fs_app) as c:
             r = c.post("/api/logs/export", json={"dest": r"Z:\shared"},
@@ -965,8 +863,7 @@ class TestNetworkDriveToggle:
 
     def test_ordinary_local_path_unaffected_when_disallowed(
             self, fs_app, tmp_path, fake_remote_z):
-        """Control: a real, ordinary local folder must keep working exactly
-        as before, whether or not network drives are disallowed."""
+        """Control: a real, ordinary local folder must keep working exactly as before, whether or not network drives are disallowed."""
         _set_allow_network_drives(False)
         d = tmp_path / "data"
         d.mkdir()

@@ -1,23 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Oracle for the managed-ComfyUI re-offer: the __func__ regression re-offers
-localm's own managed ComfyUI ONCE.
-
-When T1's ``__func__`` detection fires AND no managed ComfyUI is installed AND
-localm has not already made this offer, localm ALSO surfaces a one-time offer to
-set up its OWN managed, patched ComfyUI (``localm comfy setup``) as the durable
-fix, alongside T1's fix-this-run shim offer. Each check carries a built-in
-negative case so it fails on known-bad work:
-
-  - GATE: offered only for the known __func__ regression, only when NO managed
-    instance is installed, only when not already offered.
-  - ONCE: the persisted ``comfy_managed_setup_offered`` flag makes it never nag.
-  - MOOT: a managed instance already installed -> no offer at all.
-  - T1 INTACT: the shim intro + prompt still fire; the addition does not break it.
-
-Config + managed-comfy paths are pinned to a throwaway LOCALM_HOME so no test
-touches real data (config.py freezes CONFIG_FILE at import; managed_comfy uses
-the lazy home_dir()).
-"""
+"""Oracle for the managed-ComfyUI re-offer: the __func__ regression re-offers localm's own managed ComfyUI ONCE."""
 
 import pytest
 
@@ -28,8 +10,7 @@ _UNRELATED = "ComfyUI execution failed: CUDA out of memory (node KSampler)"
 
 @pytest.fixture
 def home(tmp_path, monkeypatch):
-    """A throwaway LOCALM_HOME with config.py's frozen paths redirected to it, so
-    load_config/save_config AND managed_comfy_paths() resolve to the same tmp dir."""
+    """A throwaway LOCALM_HOME with config.py's frozen paths redirected to it, so load_config/save_config AND managed_comfy_paths() resolve to the same tmp dir."""
     import localm.config as cfg
     h = tmp_path / ".localm"
     h.mkdir(parents=True, exist_ok=True)
@@ -41,10 +22,7 @@ def home(tmp_path, monkeypatch):
 
 
 def _install_managed():
-    """Create the on-disk markers is_managed_comfy_installed() checks (main.py +
-    the managed venv interpreter + the completion marker - #621 follow-up: the
-    first two alone mean "still installing"), so the REAL detector reports
-    installed - no mock of the thing under test."""
+    """Create the on-disk markers is_managed_comfy_installed() checks (main.py + the managed venv interpreter + the completion marker - #621 follow-up: the first two alone mean 'still installing'), so the REAL detector reports installed - no mock of the thing under test."""
     from localm.media.managed_comfy import managed_comfy_paths
     from localm.media.managed_comfy_provision import MARKER_FILENAME
     p = managed_comfy_paths()
@@ -98,8 +76,7 @@ def test_offer_message_points_at_the_setup_command():
 # ------------------------------ CLI offer point -----------------------------------
 
 def _drive_cli(monkeypatch, answer, message, *, spawned_pid=None):
-    """Run _maybe_apply_func_shim_and_retry with an interactive console, capturing
-    everything printed and whether the shim prompt (console.input) was shown."""
+    """Run _maybe_apply_func_shim_and_retry with an interactive console, capturing everything printed and whether the shim prompt (console.input) was shown."""
     from localm.cli import media
     from localm.media import comfy_client as cc
     cc._func_shim_once = False

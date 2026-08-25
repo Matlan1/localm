@@ -1,20 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Vectors must actually get written, not merely be writable.
-
-`MemoryStore.backfill_vectors` is bounded (64/call) and had exactly ONE caller:
-the consolidation pass. Its own docstring claimed "a regular background pass
-calls this so coverage climbs" - there was no such pass. On an install where
-auto-consolidation never ran, records written before an embedder existed kept no
-vector forever, `_vector_status` stayed `low_coverage`, and recall fell back to
-promoting profile facts by IMPORTANCE rather than relevance.
-
-That is what produced the 2026-08-14 report: "Greet my friend Memo" answered by
-recalling an unrelated person, with the log reading
-
-    memory recall: injected 2 record(s), degrade=low_coverage
-
-and `setup-embeddings` had told the user "Memory now retrieves semantically".
-"""
+"""Vectors must actually get written, not merely be writable."""
 
 from pathlib import Path
 
@@ -41,9 +26,7 @@ def _seed(root: Path, principal: str, n: int) -> None:
 
 
 def test_backfill_reaches_every_namespace_including_key_scoped(tmp_path):
-    """A key-scoped namespace's principal is a bearer-key hash that cannot be
-    reconstructed from disk, so a backfill that rebuilt paths from known
-    principals would silently skip it. This walks the root instead."""
+    """A key-scoped namespace's principal is a bearer-key hash that cannot be reconstructed from disk, so a backfill that rebuilt paths from known principals would silently skip it."""
     root = tmp_path / "memory"
     _seed(root, "owner", 5)
     _seed(root, "abc123keyhash", 3)
@@ -60,8 +43,7 @@ def test_backfill_reaches_every_namespace_including_key_scoped(tmp_path):
 
 
 def test_backfill_runs_to_completion_past_the_per_call_bound(tmp_path):
-    """backfill_vectors caps at 64 per call on purpose. The point of this module
-    is that a caller wanting COMPLETION gets it, rather than 64 and a promise."""
+    """backfill_vectors caps at 64 per call on purpose."""
     root = tmp_path / "memory"
     _seed(root, "owner", 150)                       # > 2 bounded passes
 
@@ -72,8 +54,7 @@ def test_backfill_runs_to_completion_past_the_per_call_bound(tmp_path):
 
 
 def test_no_embedder_is_a_no_op_not_a_claim(tmp_path):
-    """With no embedder there is nothing to do, and it must not report having
-    done it."""
+    """With no embedder there is nothing to do, and it must not report having done it."""
     root = tmp_path / "memory"
     _seed(root, "owner", 4)
     res = backfill_all(root, None)
@@ -82,8 +63,7 @@ def test_no_embedder_is_a_no_op_not_a_claim(tmp_path):
 
 
 def test_vectors_clear_the_low_coverage_degrade(tmp_path):
-    """The whole point: below VEC_COVERAGE the semantic gate is unusable and the
-    importance-ordered fallback opens. After a backfill it must not be."""
+    """The whole point: below VEC_COVERAGE the semantic gate is unusable and the importance-ordered fallback opens."""
     root = tmp_path / "memory"
     _seed(root, "owner", 10)
     st = MemoryStore.open_file(_namespaces(root)[0])
@@ -107,10 +87,7 @@ def test_vectors_clear_the_low_coverage_degrade(tmp_path):
 # --------------------------------------------------------------------------- #
 
 def _write_unreadable_namespace(root: Path, agent: str = "chat") -> Path:
-    """A namespace file whose bytes are not valid UTF-8, so MemoryStore._load's
-    ``self._file.read_text(encoding="utf-8")`` raises UnicodeDecodeError before
-    the per-line tolerant JSON parsing (which only guards json.loads) ever
-    runs."""
+    """A namespace file whose bytes are not valid UTF-8, so MemoryStore._load's ``self._file.read_text(encoding='utf-8')`` raises UnicodeDecodeError before the per-line tolerant JSON parsing (which only guards json.loads) ever runs."""
     ns_dir = root / agent
     ns_dir.mkdir(parents=True, exist_ok=True)
     bad_path = ns_dir / ("0" * 16 + ".jsonl")
@@ -119,10 +96,7 @@ def _write_unreadable_namespace(root: Path, agent: str = "chat") -> Path:
 
 
 def test_unreadable_namespace_fault_actually_fires(tmp_path):
-    """Precondition for the tests below: prove the corrupt fixture really makes
-    MemoryStore.open_file raise, rather than silently decoding. A fixture that
-    happens to decode injects no fault at all, and every test below would pass
-    with the bug fully in place."""
+    """Precondition for the tests below: prove the corrupt fixture really makes MemoryStore.open_file raise, rather than silently decoding."""
     root = tmp_path / "memory"
     bad_path = _write_unreadable_namespace(root)
     with pytest.raises(UnicodeDecodeError):
@@ -130,8 +104,7 @@ def test_unreadable_namespace_fault_actually_fires(tmp_path):
 
 
 def test_backfill_all_counts_an_unreadable_namespace_not_silently(tmp_path):
-    """A root whose only namespace cannot be opened must report that shortfall,
-    not read as a clean pass with nothing left to do."""
+    """A root whose only namespace cannot be opened must report that shortfall, not read as a clean pass with nothing left to do."""
     root = tmp_path / "memory"
     _write_unreadable_namespace(root)
 
@@ -145,8 +118,7 @@ def test_backfill_all_counts_an_unreadable_namespace_not_silently(tmp_path):
 
 
 def test_backfill_all_embeds_the_good_namespace_despite_a_bad_sibling(tmp_path):
-    """One namespace failing to open must not stop the rest of the root from
-    being backfilled in full."""
+    """One namespace failing to open must not stop the rest of the root from being backfilled in full."""
     root = tmp_path / "memory"
     _seed(root, "owner", 5)
     _write_unreadable_namespace(root)
@@ -160,8 +132,7 @@ def test_backfill_all_embeds_the_good_namespace_despite_a_bad_sibling(tmp_path):
 
 
 def test_vectorless_scan_reports_unreadable_separately_from_total(tmp_path):
-    """vectorless_scan is what lets a caller distinguish 'nothing left to
-    embed' from 'could not even check' - vectorless_total alone cannot."""
+    """vectorless_scan is what lets a caller distinguish 'nothing left to embed' from 'could not even check' - vectorless_total alone cannot."""
     root = tmp_path / "memory"
     _seed(root, "owner", 3)
     _write_unreadable_namespace(root)

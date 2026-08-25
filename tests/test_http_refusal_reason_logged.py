@@ -1,29 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""A refused request must record WHY, not just the status.
-
-The 0.1.4 release candidate produced this, at DEBUG, as the complete record of
-a user-visible chat failure:
-
-    DEBUG   localm: POST /v1/chat/completions -> 400 (9 ms, loop_lag=0.00s)
-
-Status and timing and nothing else. The HTTPException detail - the one field
-that says which check refused the request - reached only the client, so the
-cause was unrecoverable from the log and two separate diagnoses of that single
-line reached opposite wrong answers. AGENTS.md rule 5: a user-facing failure
-whose cause cannot be learned from a debug log is a hidden problem.
-
-FIXTURE PREMISE (diff-review-discipline.md item 19): these tests assert that
-``debug_enabled()`` is genuinely ON, because that is the condition the bug lived
-in - the complaint was never "no log without --debug", it was "--debug was on
-and STILL said nothing". A fixture that left debug off could not express the
-failing case and would pass no matter what the handler did.
-
-Both an EARLY refusal (before the engine is resolved) and a LATE one (past
-get_engine and past the chat pipeline) are covered. The real 0.1.4 refusal was a
-late one - its log line was preceded by the memory plugin's inlet record, which
-proves the request had already reached the pipeline - so a test that only ever
-exercised an early refusal would miss the shape that actually happened.
-"""
+"""A refused request must record WHY, not just the status."""
 
 from __future__ import annotations
 
@@ -64,16 +40,14 @@ def _debug_on(monkeypatch):
 
 @pytest.fixture
 def client():
-    """A server WITH a model, so a request can be served and a late check can
-    be the thing that refuses it."""
+    """A server WITH a model, so a request can be served and a late check can be the thing that refuses it."""
     _reset_globals()
     return TestClient(create_app(_mock_engine()))
 
 
 @pytest.fixture
 def client_no_model(monkeypatch):
-    """A server with nothing loaded and nothing resolvable - where an unnamed
-    request is still refused up front, on the route's first line."""
+    """A server with nothing loaded and nothing resolvable - where an unnamed request is still refused up front, on the route's first line."""
     monkeypatch.setattr("localm.config.load_registry", lambda: {})
     _reset_globals()
     return TestClient(create_app(None))
@@ -113,8 +87,7 @@ def test_early_refusal_records_the_reason(_debug_on, client_no_model, caplog):
 
 
 def test_late_refusal_records_the_reason(_debug_on, client, caplog):
-    """The shape the 0.1.4 report actually had: refused near the END of the
-    route, past get_engine and past the pipeline inlet."""
+    """The shape the 0.1.4 report actually had: refused near the END of the route, past get_engine and past the pipeline inlet."""
     caplog.set_level(logging.DEBUG, logger="localm")
 
     r = _bad_grammar(client)
@@ -128,8 +101,7 @@ def test_late_refusal_records_the_reason(_debug_on, client, caplog):
 
 
 def test_the_response_itself_is_unchanged(_debug_on, client_no_model, caplog):
-    """The handler is a LOGGING seam. It delegates to fastapi's own handler, so
-    the body and status a client sees must be exactly what they were before."""
+    """The handler is a LOGGING seam."""
     caplog.set_level(logging.DEBUG, logger="localm")
 
     r = _empty_model(client_no_model)
@@ -139,8 +111,7 @@ def test_the_response_itself_is_unchanged(_debug_on, client_no_model, caplog):
 
 
 def test_no_reason_line_when_debug_is_off(client, caplog, monkeypatch):
-    """The gate is real, not incidental. Operational text only, and only when the
-    user asked for a debug log."""
+    """The gate is real, not incidental. Operational text only, and only when the user asked for a debug log."""
     monkeypatch.delenv("LOCALM_DEBUG", raising=False)
     assert not debuglog.debug_enabled(), "test premise: --debug must be OFF"
     caplog.set_level(logging.DEBUG, logger="localm")

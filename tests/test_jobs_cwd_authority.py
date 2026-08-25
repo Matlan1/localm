@@ -1,30 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""A jobs-scoped key must not choose an arbitrary working directory.
-
-The coder ROUTE already draws this line deliberately: a restricted caller is
-forced into the project root, "ignoring req.cwd, so a scoped key cannot point the
-(confined) file tools at arbitrary paths" (builtin/coder/plug.py). The SCHEDULER
-had no equivalent - ``cwd`` was validated only for UNC/device SHAPE, never for who
-chose it - so a plain ``jobs``-scoped key got read plus confined-write on any
-directory on the server simply by scheduling a coder job there.
-
-Two gates, deliberately both: the route CONFINES on the way in, and the runner
-CONFINES again at run time because the route is not the only writer - the CLI and
-rows persisted by older builds reach the scheduler without passing through it.
-
-Confined rather than REFUSED, which is the opposite of how ``allow_shell`` is
-handled at the same route, and the asymmetry is deliberate: ``allow_shell`` is an
-optional opt-in, so refusing it still leaves a working job. ``cwd`` is MANDATORY
-for a coder job (Job.validate), so refusing it would not restrict the capability,
-it would delete it. The first draft of this fix did exactly that, and the test
-below named for it is what caught it.
-
-The run-time answer is RE-DERIVED, not stamped, which is the opposite choice from
-the neighbouring ``owner_is_owner_key``. That is deliberate and better here: unlike
-"was this the owner key", "may this principal choose a directory" is still
-answerable later, so narrowing or revoking a key removes the freedom on the next
-tick instead of leaving a months-old grant stamped on the row.
-"""
+"""A jobs-scoped key must not choose an arbitrary working directory."""
 
 from __future__ import annotations
 
@@ -78,8 +53,7 @@ def _post_job(app, key, cwd, **over):
 
 
 def _fake_agent_capture(monkeypatch):
-    """Capture the cwd the Agent is actually constructed with - the observable
-    that decides where the file tools can reach."""
+    """Capture the cwd the Agent is actually constructed with - the observable that decides where the file tools can reach."""
     from localm.plugins.builtin.jobs import runner
     captured: dict = {}
 
@@ -106,9 +80,7 @@ def _fake_agent_capture(monkeypatch):
 
 def test_a_jobs_only_keys_directory_is_confined_to_the_project_root(jobs_app,
                                                                      tmp_path):
-    """CONFINED, not refused. cwd is MANDATORY for a coder job, so refusing it
-    would remove the capability from a jobs-scoped key rather than restrict it -
-    the opposite of allow_shell, which is an optional opt-in and IS refused."""
+    """CONFINED, not refused. cwd is MANDATORY for a coder job, so refusing it would remove the capability from a jobs-scoped key rather than restrict it - the opposite of allow_shell, which is an optional opt-in and IS refused."""
     from localm import auth
     from localm.instances import resolve_root_dir
     victim = tmp_path / "elsewhere"
@@ -151,9 +123,7 @@ def test_a_coder_full_key_may_still_choose_one(jobs_app, tmp_path):
 
 
 def test_a_jobs_only_key_can_still_schedule_a_coder_job_at_all(jobs_app, tmp_path):
-    """The capability must SURVIVE the gate. This is the test that caught the
-    first draft: it refused the cwd outright, and because Job.validate requires a
-    cwd for a coder job, a jobs-scoped key could then not schedule one at all."""
+    """The capability must SURVIVE the gate."""
     from localm import auth
     work = tmp_path / "proj"
     work.mkdir()
@@ -182,8 +152,7 @@ def test_a_non_coder_job_is_unaffected(jobs_app):
 
 
 def test_the_update_route_is_gated_too(jobs_app, tmp_path):
-    """PUT is the second write path into cwd; without the same gate the create
-    check is simply routed around with an update."""
+    """PUT is the second write path into cwd; without the same gate the create check is simply routed around with an update."""
     from localm import auth
     victim = tmp_path / "elsewhere"
     victim.mkdir()
@@ -208,8 +177,7 @@ def test_the_update_route_is_gated_too(jobs_app, tmp_path):
 # --------------------------------------------------------------------------- #
 
 def _scoped_job(auth, cwd, scopes_list, *, privileged=False):
-    """A job persisted DIRECTLY into the store (as the CLI, an older build, or a
-    pre-gate row does), owned by a key holding *scopes_list*."""
+    """A job persisted DIRECTLY into the store (as the CLI, an older build, or a pre-gate row does), owned by a key holding *scopes_list*."""
     from localm.plugins.builtin.jobs.store import Job, JobStore
     created = auth.create_key("bot", scopes_list, allow_privileged=privileged)
     job = Job(name="x", task_kind="coder", prompt="p", cwd=str(cwd),
@@ -221,8 +189,7 @@ def _scoped_job(auth, cwd, scopes_list, *, privileged=False):
 
 def test_the_runner_confines_a_jobs_only_keys_job_to_the_project_root(
         home, tmp_path, monkeypatch):
-    """The authoritative half: a row that never passed the route must still not
-    reach an arbitrary directory."""
+    """The authoritative half: a row that never passed the route must still not reach an arbitrary directory."""
     from localm import auth
     from localm.instances import resolve_root_dir
     runner, captured = _fake_agent_capture(monkeypatch)
@@ -240,8 +207,7 @@ def test_the_runner_confines_a_jobs_only_keys_job_to_the_project_root(
 
 def test_the_confinement_is_surfaced_not_silent(home, tmp_path, monkeypatch,
                                                 caplog):
-    """Rule 5: the run did something narrower than configured, so it must say so
-    in the log AND in the job's own output, where a user actually looks."""
+    """Rule 5: the run did something narrower than configured, so it must say so in the log AND in the job's own output, where a user actually looks."""
     from localm import auth
     runner, _captured = _fake_agent_capture(monkeypatch)
     victim = tmp_path / "elsewhere"
@@ -289,10 +255,7 @@ def test_an_owner_created_job_keeps_its_directory(home, tmp_path, monkeypatch):
 
 def test_an_owner_session_job_keeps_its_directory_across_a_key_roll(
         home, tmp_path, monkeypatch):
-    """Reuses the REG-509 stamp rather than adding a second field. This is the
-    one case run-time re-derivation cannot reach: after a roll the recorded hash
-    matches nothing, so without the stamp the owner's own job would be confined -
-    exactly the silent degrade REG-509 was about."""
+    """Reuses the REG-509 stamp rather than adding a second field."""
     from localm import auth
     from localm.plugins.builtin.jobs.store import Job
     runner, captured = _fake_agent_capture(monkeypatch)
@@ -310,8 +273,7 @@ def test_an_owner_session_job_keeps_its_directory_across_a_key_roll(
 
 
 def test_an_unowned_open_mode_job_keeps_its_directory(home, tmp_path, monkeypatch):
-    """owner=None is a tokenless / open-mode creation, which IS the loopback
-    owner, so there is no lesser principal to confine."""
+    """owner=None is a tokenless / open-mode creation, which IS the loopback owner, so there is no lesser principal to confine."""
     from localm.plugins.builtin.jobs.store import Job
     runner, captured = _fake_agent_capture(monkeypatch)
     work = tmp_path / "proj"
@@ -330,9 +292,7 @@ def test_an_unowned_open_mode_job_keeps_its_directory(home, tmp_path, monkeypatc
 
 def test_revoking_the_key_removes_the_directory_freedom_on_the_next_run(
         home, tmp_path, monkeypatch):
-    """The payoff of re-deriving instead of stamping: a coder:full job that was
-    legitimately allowed a directory loses it the moment its key is revoked,
-    rather than keeping a grant recorded at creation."""
+    """The payoff of re-deriving instead of stamping: a coder:full job that was legitimately allowed a directory loses it the moment its key is revoked, rather than keeping a grant recorded at creation."""
     from localm import auth
     from localm.instances import resolve_root_dir
     runner, captured = _fake_agent_capture(monkeypatch)
@@ -354,10 +314,7 @@ def test_revoking_the_key_removes_the_directory_freedom_on_the_next_run(
 
 def test_an_unreadable_keystore_does_not_grant_the_freedom(home, tmp_path,
                                                            monkeypatch):
-    """Fails CLOSED. _load_keystore() fails OPEN (returns [] on OSError), so
-    scopes_for_key_hash answers None, and None must never read as a grant - the
-    same trap that produced two privilege escalations in the neighbouring
-    owner-key check."""
+    """Fails CLOSED. _load_keystore() fails OPEN (returns [] on OSError), so scopes_for_key_hash answers None, and None must never read as a grant - the same trap that produced two privilege escalations in the neighbouring owner-key check."""
     from localm import auth
     from localm.instances import resolve_root_dir
     runner, captured = _fake_agent_capture(monkeypatch)
@@ -373,8 +330,7 @@ def test_an_unreadable_keystore_does_not_grant_the_freedom(home, tmp_path,
 
 
 def test_scopes_for_key_hash_answers_none_for_an_expired_key(home):
-    """The by-hash sibling of verify() must share its liveness rules, or the
-    runner would honour a key the bearer path already rejects."""
+    """The by-hash sibling of verify() must share its liveness rules, or the runner would honour a key the bearer path already rejects."""
     import time
     from localm import auth
     auth.set_api_key(KEY_ONE)

@@ -1,8 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The standalone rollback (scripts/rollback_update.py): restore the previous build
-after a bad update WITHOUT importing the (possibly broken) localm package. Every test
-runs against a THROWAWAY install + home, never the real repo, and fails loud paths
-must return non-zero and keep the backup (do-not-hide-problems)."""
+"""The standalone rollback (scripts/rollback_update.py): restore the previous build after a bad update WITHOUT importing the (possibly broken) localm package."""
 
 from __future__ import annotations
 
@@ -23,8 +20,7 @@ def _load_rb():
 
 
 def _stage(tmp_path, monkeypatch, *, manifest, with_helper=True):
-    """A fake install (existing.txt replaced by the update, brand_new/ added) and a
-    fake home whose updates/backup holds the pre-apply existing.txt."""
+    """A fake install (existing.txt replaced by the update, brand_new/ added) and a fake home whose updates/backup holds the pre-apply existing.txt."""
     inst = tmp_path / "install"
     inst.mkdir()
     if with_helper:   # the stdlib-only restore helper, loaded by file path
@@ -71,8 +67,7 @@ def test_rollback_no_backup_exits_1(tmp_path, monkeypatch):
 
 
 def test_rollback_missing_helper_exits_2_and_keeps_backup(tmp_path, monkeypatch):
-    """A build so broken the restore helper cannot even load must fail loud (exit 2),
-    keep the backup, and NOT touch the install - never a false success."""
+    """A build so broken the restore helper cannot even load must fail loud (exit 2), keep the backup, and NOT touch the install - never a false success."""
     rb = _load_rb()
     inst, home = _stage(tmp_path, monkeypatch, manifest=["existing.txt"], with_helper=False)
     assert rb.main(["--yes"], install_root=inst) == 2
@@ -81,8 +76,7 @@ def test_rollback_missing_helper_exits_2_and_keeps_backup(tmp_path, monkeypatch)
 
 
 def test_rollback_restore_failure_exits_2_and_keeps_backup(tmp_path, monkeypatch):
-    """If a restore step fails mid-way, fail loud (exit 2) and keep the backup - never
-    report a clean rollback over a still-broken install."""
+    """If a restore step fails mid-way, fail loud (exit 2) and keep the backup - never report a clean rollback over a still-broken install."""
     rb = _load_rb()
     inst, home = _stage(tmp_path, monkeypatch, manifest=["existing.txt"])
 
@@ -97,8 +91,7 @@ def test_rollback_restore_failure_exits_2_and_keeps_backup(tmp_path, monkeypatch
 
 
 def test_read_names_warns_on_corrupt_manifest(tmp_path, capsys):
-    """A corrupt applied_names.json is surfaced (stderr), not silently collapsed to the
-    backup-dir listing, so the user knows brand-new entries will not be removed."""
+    """A corrupt applied_names.json is surfaced (stderr), not silently collapsed to the backup-dir listing, so the user knows brand-new entries will not be removed."""
     rb = _load_rb()
     updates = tmp_path / "updates"
     backup = updates / "backup"
@@ -118,8 +111,7 @@ def test_detect_home_honors_localm_home(tmp_path, monkeypatch):
 
 
 def test_shims_invoke_the_rollback_script():
-    """The root shims must actually run scripts/rollback_update.py (else the recovery
-    entry points are dead)."""
+    """The root shims must actually run scripts/rollback_update.py (else the recovery entry points are dead)."""
     bat = (REPO / "rollback.bat").read_text(encoding="utf-8")
     sh = (REPO / "rollback.sh").read_text(encoding="utf-8")
     assert "scripts\\rollback_update.py" in bat

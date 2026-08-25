@@ -1,35 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""
-Multi-model residency policy, shared by every serving layer.
-
-Both the HTTP server (``http_server.switch_engine``) and the MCP server plugin
-(``plugins.mcpserver.server.EngineCache``) decide the same two questions:
-
-    1. ADMIT: can this model load ALONGSIDE the already-resident ones, with no
-       eviction at all?
-    2. EVICT: if not, which resident peer is the safe one to free first?
-
-The rules used to live only inside ``switch_engine``, so the MCP server had no
-way to reach them and shipped single-resident instead. They live here now so the
-two cannot drift: a change to the admit margin or the victim-safety conditions
-lands in one place and both servers get it.
-
-The policy is deliberately conservative in the PERMIT direction. Stacking a
-second model on top of a resident one is only allowed on a reading that was
-actually taken (``probe_ok``), that the box can actually produce (``free_vram is
-not None``), that counts every process's VRAM rather than just the caller's own
-(``not is_process_scoped``), and that clears the model's requirement plus a fixed
-headroom, with no per-device split shortfall. Anything else falls back to
-single-resident. See ``fits_alongside_residents`` for why each of those is
-load-bearing: the failure mode of a wrong PERMIT is a native OOM or a driver TDR,
-not a graceful error.
-
-Two optional knobs sit on top of the VRAM arithmetic, both OFF by default so a
-tight-VRAM box behaves exactly as it did before this module existed:
-
-    max_resident_models  cap the number of concurrent resident chat models
-    pinned_models        names that are never chosen as an eviction victim
-"""
+"""Multi-model residency policy, shared by every serving layer."""
 
 from __future__ import annotations
 
@@ -61,10 +31,7 @@ _FOOTPRINT_MAX_FILES = 10_000
 
 
 def model_footprint_bytes(model_path: Any) -> int:
-    """On-disk size of a model: a single GGUF file, or a sharded HF directory.
-
-    The directory walk is bounded (see _FOOTPRINT_MAX_FILES).
-    """
+    """On-disk size of a model: a single GGUF file, or a sharded HF directory."""
     from localm.debuglog import logger     # function-scoped, as elsewhere here
     p = Path(model_path)
     if p.is_file():
@@ -114,40 +81,7 @@ def fits_alongside_residents(
     shortfall: Sequence = (),
     is_process_scoped: bool = False,
 ) -> bool:
-    """
-    True when the model may load with ZERO eviction, alongside resident peers.
-
-    Every condition is a PERMIT-direction guard, and each one has already cost
-    somebody a bad load:
-
-    ``probe_ok``      the reading was actually taken. A frozen last-known-good
-                      that happens to read HIGH would otherwise admit a load on
-                      top of resident peers and OOM. (The same stale value in
-                      the LOW direction only costs a spurious refusal, which is
-                      why the REFUSE direction can be laxer than this.)
-    ``free_vram``     is not None: the box can report free VRAM at all. A
-                      CPU-only / GGUF-only box reports nothing, and "nothing"
-                      must never read as "plenty".
-    ``is_process_scoped`` the reading counts only the CALLING process's own
-                      VRAM allocations, not the whole device (see
-                      ``discover.FREE_SCOPE_PROCESS``). Every resident model
-                      lives in its OWN isolated worker subprocess
-                      (backends/gguf.py) - so a process-scoped reading is blind
-                      to exactly the VRAM this check exists to account for, and
-                      can only ever OVER-report free space, never under. Treated
-                      the same as "cannot measure": a number that is
-                      structurally incapable of seeing a resident peer's memory
-                      is not evidence the model fits alongside it.
-    ``+ headroom``    the requirement alone is not enough of a margin.
-    ``not shortfall`` aggregate free can clear the bar while ONE device of a
-                      configured split is short, because the GGUF backend
-                      divides a model by a static ratio with no live per-device
-                      check of its own. See ``discover.gpu_split_shortfall``.
-
-    Callers that cannot measure, whose probe was inconclusive, or whose reading
-    is process-scoped, get False and should fall back to single-resident rather
-    than stacking until the driver OOMs.
-    """
+    """True when the model may load with ZERO eviction, alongside resident peers."""
     if not probe_ok or free_vram is None or is_process_scoped:
         return False
     if shortfall:
@@ -162,20 +96,7 @@ def pick_eviction_victim(
     requested: Optional[str] = None,
     pinned: Iterable[str] = (),
 ) -> Optional[str]:
-    """
-    Least-recently-used resident model that is SAFE to evict, or None.
-
-    ``lru`` is least-recently-used first. A candidate is skipped when it is:
-
-    - the model being loaded (never evict what we are here to make room for);
-    - pinned by the user;
-    - serving requests (``active_requests``); or
-    - already mid-unload (``unloading``). Another unload path keeps its entry
-      listed until the native free completes, so without this guard eviction can
-      call ``unload()`` a SECOND time on one native context - a double free that
-      the per-model semaphore does not serialise, because eviction takes no lock
-      on its victim. ``active_requests == 0`` alone does not catch it.
-    """
+    """Least-recently-used resident model that is SAFE to evict, or None."""
     pinned_set = set(pinned)
     for candidate in lru:
         if requested is not None and candidate == requested:
@@ -194,18 +115,7 @@ def pick_eviction_victim(
 
 
 def resident_cap(config: Optional[Mapping] = None) -> Optional[int]:
-    """
-    ``max_resident_models``, or None for "no cap" (the default).
-
-    None means the VRAM arithmetic alone decides how many models stay resident,
-    which is the behaviour that shipped before the knob existed. A cap of 1
-    restores strict single-resident on a box whose owner does not want localm
-    using the headroom the arithmetic says is there.
-
-    An unusable value (not an int, or < 1) is IGNORED with a warning rather than
-    silently coerced: a typo that quietly became "cap 1" would look like a
-    performance regression with no way to trace it.
-    """
+    """``max_resident_models``, or None for 'no cap' (the default)."""
     cfg = _config(config)
     raw = cfg.get("max_resident_models")
     if raw is None:
@@ -220,14 +130,7 @@ def resident_cap(config: Optional[Mapping] = None) -> Optional[int]:
 
 
 def pinned_model_names(config: Optional[Mapping] = None) -> frozenset:
-    """
-    ``pinned_models``: display names never chosen as an eviction victim.
-
-    Pinning only PROTECTS; it never loads anything on its own. A non-list value,
-    or a non-string entry, is dropped with a warning (an ignored pin that
-    silently failed to protect is exactly the kind of hidden problem rule 5 is
-    about).
-    """
+    """``pinned_models``: display names never chosen as an eviction victim."""
     cfg = _config(config)
     raw = cfg.get("pinned_models")
     if not raw:
@@ -249,12 +152,7 @@ def pinned_model_names(config: Optional[Mapping] = None) -> frozenset:
 def exceeds_resident_cap(
     resident: Iterable[str], requested: str, cap: Optional[int]
 ) -> bool:
-    """
-    True when admitting ``requested`` would leave more models resident than the
-    cap allows, so a peer must be evicted even though VRAM may well fit.
-
-    Reloading a model that is ALREADY resident never exceeds the cap.
-    """
+    """True when admitting ``requested`` would leave more models resident than the cap allows, so a peer must be evicted even though VRAM may well fit."""
     if cap is None:
         return False
     names = set(resident)

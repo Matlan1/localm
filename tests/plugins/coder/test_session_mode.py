@@ -1,15 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""
-Tests for localm.plugins.coder.audit session-mode logic and agent integration.
-
-Covers:
-  - SessionMode enum / parse_mode()
-  - NullAuditLog (no-op, no files created)
-  - AuditLog (writes JSONL)
-  - make_audit_log() factory
-  - Agent.close() - privacy: no files; log: closes JSONL; full: writes markdown
-  - _write_session_markdown content
-"""
+"""Tests for localm.plugins.coder.audit session-mode logic and agent integration."""
 
 import json
 import pytest
@@ -130,8 +120,7 @@ class TestAuditLog:
         assert llm_evts[0]["data"]["tokens"] == 500
 
     def test_llm_event_records_reasoning_separately(self, tmp_path):
-        """AUD-HIGH-17-3: a thinking model's reasoning is stored in its OWN
-        field, never appended to the visible-answer 'content' field."""
+        """AUD-HIGH-17-3: a thinking model's reasoning is stored in its OWN field, never appended to the visible-answer 'content' field."""
         with patch("localm.plugins.coder.audit._SESSIONS_DIR", tmp_path):
             log = AuditLog(label="t")
         log.llm("The answer.", tokens=10, reasoning="because reasons")
@@ -142,8 +131,7 @@ class TestAuditLog:
         assert llm_evts[0]["data"]["reasoning"] == "because reasons"
 
     def test_llm_event_without_reasoning_arg_is_empty_string(self, tmp_path):
-        """Back-compat: a caller that never passes reasoning= still gets a
-        well-formed (empty) field, not a missing key."""
+        """Back-compat: a caller that never passes reasoning= still gets a well-formed (empty) field, not a missing key."""
         with patch("localm.plugins.coder.audit._SESSIONS_DIR", tmp_path):
             log = AuditLog(label="t")
         log.llm("plain answer")
@@ -274,9 +262,7 @@ class TestAgentClose:
         assert "out.py" in content
 
     def test_full_markdown_summarises_a_fenced_json_tool_call(self, tmp_path):
-        """```json fences are one of the 5 shapes parse_tool_calls recognises
-        (name-gated); before this fix the raw fence markers and JSON leaked
-        verbatim into the transcript instead of being summarised."""
+        """```json fences are one of the 5 shapes parse_tool_calls recognises (name-gated); before this fix the raw fence markers and JSON leaked verbatim into the transcript instead of being summarised."""
         agent = _make_agent(tmp_path, SessionMode.FULL)
         agent._messages = [
             {"role": "assistant", "content": (
@@ -295,8 +281,7 @@ class TestAgentClose:
         assert '"name"' not in content
 
     def test_full_markdown_summarises_a_bare_json_tool_call(self, tmp_path):
-        """A bare top-level {"name":...,"args":...} object with no wrapper at
-        all is the other shape that used to leak raw JSON into the transcript."""
+        """A bare top-level {'name':...,'args':...} object with no wrapper at all is the other shape that used to leak raw JSON into the transcript."""
         agent = _make_agent(tmp_path, SessionMode.FULL)
         agent._messages = [
             {"role": "assistant", "content": (
@@ -313,10 +298,7 @@ class TestAgentClose:
         assert '"args"' not in content
 
     def test_full_markdown_shows_placeholder_for_a_malformed_tool_call(self, tmp_path):
-        """A <tool_call> block whose JSON body never parsed (loop.py's repair
-        path persists the raw attempt to history before the repair succeeds)
-        must still render the same generic placeholder it always has, not
-        leak raw XML."""
+        """A <tool_call> block whose JSON body never parsed (loop.py's repair path persists the raw attempt to history before the repair succeeds) must still render the same generic placeholder it always has, not leak raw XML."""
         agent = _make_agent(tmp_path, SessionMode.FULL)
         agent._messages = [
             {"role": "assistant", "content": (
@@ -334,9 +316,7 @@ class TestAgentClose:
         assert "<tool_call>" not in content
 
     def test_full_markdown_header_renders_for_a_purely_malformed_tool_call(self, tmp_path):
-        """No prose survives at all, only the malformed block - the header
-        line must still appear (via `calls or malformed`), matching what the
-        old strip_xml_tool_calls-only code path did for the same shape."""
+        """No prose survives at all, only the malformed block - the header line must still appear (via `calls or malformed`), matching what the old strip_xml_tool_calls-only code path did for the same shape."""
         agent = _make_agent(tmp_path, SessionMode.FULL)
         agent._messages = [
             {"role": "assistant", "content": (

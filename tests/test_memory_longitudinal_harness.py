@@ -1,37 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Longitudinal memory verification harness (memory fix campaign, P2: the
-campaign's own DONE oracle - see dev-notes/memory-fix-campaign/PLAN.md section 4).
-
-An N-session SCRIPTED SIMULATION that replays real chat sessions through the REAL
-memory pipeline - real MemoryStore, real run_consolidation/synthesize_memory
-(localm.plugins.builtin.memory.plug), a real bge embedding model, and a real GGUF
-chat model for extract/decide/summarize - and asserts memory COMPOUNDS across
-sessions rather than in a single shot:
-
-  1. facts stated in early sessions accumulate and are recalled SEMANTICALLY in a
-     later, paraphrased query (not exact keyword match);
-  2. a paraphrased contradiction across two sessions does not linger as two
-     unresolved, permanently-coexisting facts;
-  3. the store stays BOUNDED: prune() (real code) forgets decayed synthetic
-     clutter even on a zero-fact consolidation round, archives it
-     recoverably, and a user-typed fact seeded alongside it survives;
-  4. recall precision: an off-topic query injects nothing, an on-topic
-     paraphrase recalls with the semantic signal active;
-  5. per-session episodic capture: one episode per session, watermarked so
-     a re-run with no new session adds zero;
-  6. no '<think' substring ever reaches the store (C1 regression guard).
-
-No mocks of the pipeline under test - only the OUTER HTTP/CLI plumbing is
-skipped (session files are written directly in the exact on-disk shape
-AuditLog produces, which is what a real second server run would create).
-
-@integration + @real_gguf (same precedent as test_gguf_smoke_integration.py) so
-the default `pytest -m "not integration"` full-suite run is unaffected; run this
-explicitly with `pytest -m real_gguf tests/test_memory_longitudinal_harness.py -v`
-(the GPU is a shared resource, so serialise this against any other GPU
-workload on the same machine before running it). Skips cleanly (never fails) when the native runtime or
-network is unavailable.
-"""
+"""Longitudinal memory verification harness (memory fix campaign, P2: the campaign's own DONE oracle - see dev-notes/memory-fix-campaign/PLAN.md section 4)."""
 
 from __future__ import annotations
 
@@ -108,13 +76,7 @@ def chat_backend(native_runtime):
 
 @pytest.fixture(scope="module")
 def real_embedder(native_runtime):
-    """The real bge GGUFEmbedder instance (not just its bound ``.embed``): the
-    test monkeypatches ``localm.inference.embedder.get_embedder`` to return
-    this SAME instance, so ``plug._embed_fn()`` (the real consolidation path)
-    and the test's own ``recall()`` checks share one embedder/vector space
-    instead of ``get_embedder()`` resolving nothing in the throwaway
-    LOCALM_HOME (no config.json, no models/embeddings/ dir) and every
-    consolidation-added record silently landing with no vector."""
+    """The real bge GGUFEmbedder instance (not just its bound ``.embed``): the test monkeypatches ``localm.inference.embedder.get_embedder`` to return this SAME instance, so ``plug._embed_fn()`` (the real consolidation path) and the test's own ``recall()`` checks share one embedder/vector space instead of..."""
     from huggingface_hub import hf_hub_download
 
     from localm.inference.embedder import KNOWN_EMBEDDING_MODELS
@@ -163,8 +125,7 @@ def _make_complete(backend, think_seen: dict):
 
 
 def _raw_reply(backend, user_text: str) -> str:
-    """The assistant's RAW reply to one user turn, exactly as AuditLog would
-    persist it (unstripped) - think-stripping happens later, at consumption."""
+    """The assistant's RAW reply to one user turn, exactly as AuditLog would persist it (unstripped) - think-stripping happens later, at consumption."""
     return "".join(backend.chat_stream(
         [{"role": "user", "content": user_text}],
         max_tokens=256, temperature=0.0, seed=7,

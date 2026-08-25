@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Context + LLM management: token/fill estimation, history compaction, tool-call
-stream hiding, the LLM call wrapper (with the auth-retry loop), usage accounting,
-and message assembly. Mixed into Agent."""
+"""Context + LLM management: token/fill estimation, history compaction, tool-call stream hiding, the LLM call wrapper (with the auth-retry loop), usage accounting, and message assembly."""
 
 from __future__ import annotations
 
@@ -20,28 +18,7 @@ _JSON_WS = " \t\r\n"
 
 
 class _NameKeyGate:
-    """Incremental scanner for ONE name-gated fence body: does this object
-    have a top-level ``"name"`` key, and does its value prefix-match a
-    registered tool?
-
-    Finds ``"name"`` wherever it appears among the object's top-level keys
-    (not only as the first key), correctly SKIPPING every other key's value
-    - string, number, bool, null, or a nested object/array (depth-tracked,
-    string/escape-aware, mirroring parser.py's ``_object_end_from``) - so a
-    JSON example whose first key happens to be something else (the common
-    case: almost no legitimate example is shaped exactly like a tool call)
-    is not mistaken for one just because it starts with an unrelated key.
-
-    ``pos`` is the ONLY cursor and it only ever moves forward through the
-    body text supplied to :func:`_advance_name_key_gate` call after call -
-    every sub-step (skip whitespace, match a literal, accumulate a value) is
-    its OWN persistent state, resumed from exactly where the previous call
-    left off. A call that returns ``None`` (need more data) MUST leave every
-    field in a state such that the next call, given more text appended to
-    the SAME buffer, continues correctly - collapsing two sequential
-    sub-steps into one state is exactly the bug this design already caught
-    once (see the class-level comment above ``_advance_name_key_gate``).
-    """
+    """Incremental scanner for ONE name-gated fence body: does this object have a top-level ``'name'`` key, and does its value prefix-match a registered tool?"""
 
     __slots__ = ("state", "pos", "key_buf", "name_val", "depth", "in_str", "esc",
                 "for_name")
@@ -58,34 +35,7 @@ class _NameKeyGate:
 
 
 def _advance_name_key_gate(g: "_NameKeyGate", buf: str, tool_names) -> "str | None":
-    """Advance *g* as far as *buf* (the fence body, from right after its
-    opening ``{``) allows. Returns:
-
-    - ``None`` - need more data.
-    - ``"confirmed"`` - a top-level ``"name"`` key's value is an EXACT match
-      in *tool_names*. The caller still runs the real, authoritative
-      ``_try_parse_body`` once the fence closes (args must parse too); this
-      only says the name half is settled.
-    - ``"release"`` - definitively not a call (object closed with no "name"
-      key, or "name" is present but not a string, or its value can never
-      become any registered tool name).
-    - ``"fallback"`` - something this scanner does not model (malformed
-      JSON, or a value shape it does not recognise). The caller falls back
-      to buffering to the fence close and deciding there, exactly as if
-      this gate had never run - NEVER a way to guess towards releasing a
-      real call early.
-
-    BUG THIS DESIGN ALREADY CAUGHT ONCE, so the shape is not repeated
-    elsewhere: the four steps between a key's closing quote and its value's
-    first significant character (skip ws, expect ':', skip ws, look at the
-    value) were originally one state that assumed it could complete all
-    four before ever needing to return None. A call that ran out of data
-    right after consuming the colon, before any post-colon whitespace had
-    arrived, resumed by re-checking "is the next character a colon" against
-    a character that came AFTER the colon already consumed, and wrongly
-    fell back on ordinary JSON that had done nothing wrong. Each of those
-    four steps is its own state below for exactly this reason.
-    """
+    """Advance *g* as far as *buf* (the fence body, from right after its opening ``{``) allows."""
     n = len(buf)
     while True:
         if g.state == "seek_key":
@@ -266,16 +216,7 @@ def _advance_name_key_gate(g: "_NameKeyGate", buf: str, tool_names) -> "str | No
 
 class _ContextMixin:
     def _ctx_window_tokens(self) -> int:
-        """The context window to budget history against, in tokens.
-
-        Prefers the server's RESOLVED ceiling (backend.context_capacity() reads
-        /v1/config's effective_ctx_max, VRAM-derived under ctx_auto). The old
-        code used the static config n_ctx - the INITIAL window (default 4096) -
-        so the coder measured fill against ~4096 while the model could actually
-        hold 64k, and over-compacted at roughly 5% of real capacity, throwing
-        away context the model had room for (memory-audit 2026-07-02 F10). Falls
-        back to the configured n_ctx, then the default, when no capacity is
-        reported (a non-localm backend / server not reachable)."""
+        """The context window to budget history against, in tokens."""
         cap = None
         try:
             get_cap = getattr(self.backend, "context_capacity", None)
@@ -297,15 +238,7 @@ class _ContextMixin:
         return estimated / max(1, self._ctx_window_tokens())
 
     def compact(self) -> bool:
-        """
-        Summarise old conversation history into a single condensed exchange.
-
-        Keeps the 4 most recent messages verbatim (= last 2 full turns) so
-        the agent retains immediate context.  Everything older is replaced by
-        a summary produced by a direct backend call (no tools, no loop).
-
-        Returns True if compaction happened, False if there was nothing to compact.
-        """
+        """Summarise old conversation history into a single condensed exchange."""
         return self._compact_history()
 
     # GBNF grammar for structured compaction output.
@@ -431,12 +364,7 @@ ws     ::= [ \t\n\r]*
     _COMPRESS_TAIL_CHARS = 1000   # kept from the end (errors usually live here)
 
     def _compress_results(self, blocks: list[str]) -> list[str]:
-        """
-        Shrink oversized tool-result blocks once the context window is more
-        than half full. Keeps the head (context) and tail (errors, summaries)
-        of each block and marks the elision, so the agent knows output was
-        dropped and can re-read specific files if it needs the middle.
-        """
+        """Shrink oversized tool-result blocks once the context window is more than half full."""
         if self._fill_ratio() < self._COMPRESS_FILL_RATIO:
             return blocks
         compressed = []
@@ -495,66 +423,7 @@ ws     ::= [ \t\n\r]*
 
     @classmethod
     def _stream_hiding_tool_calls(cls, pieces, tool_names=None):
-        """
-        Yield displayable text tokens from a stream, silently buffering
-        tool-call blocks so raw call syntax never hits the terminal or the
-        GUI's live "token" events.
-
-        Hides, unconditionally (the wrapper itself signals intent, same as
-        parse_tool_calls treats them - see parser.py's docstring):
-          - canonical <tool_call>...</tool_call> and mangled <|tool_call>
-            marker dialects
-          - an explicit ```tool_call / ```tool_code fence
-
-        Hides, only when *tool_names* is given and a top-level key of the
-        object equals ``"name"`` with a value that matches one of them
-        (mirrors parse_tool_calls' own name-gate, via the SAME
-        _try_parse_body it uses for the final decision - not a second,
-        drifting copy of the check):
-          - any OTHER fenced block (```json, a bare ```, or even an
-            unrelated lang tag) whose body is JSON-object-shaped
-
-        DECIDED INCREMENTALLY, not by buffering the whole body to the fence
-        close: a name-gated fence's body is scanned key by key as it
-        arrives (see _NameKeyGate), releasing the moment the answer is
-        knowable rather than always holding text back until the fence
-        closes. A JSON example that is not a call is typically released
-        within the first few characters of wherever its actual content
-        diverges from being a real call (a "name" key whose value cannot
-        match any registered tool - the overwhelming common shape a
-        coding assistant would show), or at worst once the OBJECT itself
-        closes (a plain data object with no "name" key at all, e.g. a list
-        of records) - never later than that, and never later than a
-        buffer-to-close design would have taken. Only a body that turns out
-        to genuinely be a call is held all the way to the fence close,
-        which is the harness executing it anyway. The scanner falls back to
-        buffering-to-close only when it hits something it does not cleanly
-        model (malformed JSON) - it never guesses towards an early release
-        of a real call.
-
-        A fence is only ever buffered while it might still be a call: an
-        explicit ``` tool_call/```tool_code fence is held unconditionally
-        (the wrapper itself signals intent); anything else is only even
-        considered when the body's first non-whitespace character is ``{``,
-        so an ordinary ```python/```diff/etc. explanatory fence (the
-        overwhelming majority of fences a coding assistant emits) is
-        released immediately, never delayed at all.
-
-        There is no way to hide a bare, un-fenced top-level JSON object (the
-        last of parser.py's five recognised shapes): with no fence marker to
-        anchor on, every ``{`` in ordinary prose or code would have to be
-        treated as a candidate, which would delay far more ordinary text
-        than it would ever protect. That shape is not hidden here; loop.py's
-        post-parse "assistant_text" correction (agent/loop.py) is the
-        backstop for it in the GUI. A CLI terminal has no equivalent - it
-        cannot un-print - so that one narrow shape can still flash raw in
-        the CLI. See coder-display-vs-execution-two-detectors in project
-        memory for the full reasoning and the measured release-latency
-        numbers for the shapes above.
-
-        Yields (token, is_hidden) pairs where is_hidden=True means the token
-        belongs to a tool-call block and should not be displayed.
-        """
+        """Yield displayable text tokens from a stream, silently buffering tool-call blocks so raw call syntax never hits the terminal or the GUI's live 'token' events."""
         def _find_first(haystack, needles, offset=0):
             best = -1
             best_len = 0
@@ -567,10 +436,7 @@ ws     ::= [ \t\n\r]*
         _FENCE = "```"
 
         def _partial_opener_at_end(haystack):
-            """Length of a trailing fragment that could grow into a
-            <tool_call>-family opener OR a bare ``` fence marker, whichever is
-            longer - a chunk boundary landing mid-marker must never be misread
-            as ordinary text."""
+            """Length of a trailing fragment that could grow into a <tool_call>-family opener OR a bare ``` fence marker, whichever is longer - a chunk boundary landing mid-marker must never be misread as ordinary text."""
             max_keep = max(max(len(n) for n in cls._TC_OPENERS), len(_FENCE)) - 1
             for k in range(min(max_keep, len(haystack)), 0, -1):
                 tail = haystack[-k:]
@@ -580,11 +446,7 @@ ws     ::= [ \t\n\r]*
             return 0
 
         def _fence_header(buf, fence_start):
-            """(lang, body_start) once buf[fence_start:] holds a COMPLETE
-            fence-open line (```[lang]\\n). (None, -1) if more data is needed.
-            (None, -2) if this ``` definitely does not open a fence at all
-            (the header line is implausibly long, or contains a character a
-            real lang tag never would)."""
+            """(lang, body_start) once buf[fence_start:] holds a COMPLETE fence-open line (```[lang]\\n). (None, -1) if more data is needed. (None, -2) if this ``` definitely does not open a fence at all (the header line is implausibly long, or contains a character a real lang tag never would)."""
             hdr_from = fence_start + len(_FENCE)
             nl = buf.find("\n", hdr_from)
             if nl == -1:
@@ -747,30 +609,7 @@ ws     ::= [ \t\n\r]*
             yield buf, in_call or (fence_state == "explicit")
 
     def _tool_call_grammar(self, *, forced: bool = False) -> Optional[tuple]:
-        """(grammar, trigger_patterns) for tool-call enforcement, or None.
-
-        Returns ``(gbnf.TOOL_CALLS_ONLY, [gbnf.TOOL_CALL_TRIGGER])`` when the
-        ``coder_tool_grammar`` config flag is on (the default since 2026-07-02,
-        REC-CODER-GRAMMAR) AND the backend can enforce grammar. LAZY semantics:
-        thinking and prose flow unconstrained; the grammar engages only when the
-        model itself starts a <tool_call>, from which point the call must be
-        structurally valid JSON. Live-verified on the bundled runtime. External
-        API backends report supports_grammar=False and are unaffected.
-
-        With *forced*, returns ``(gbnf.TOOL_CALLS_AFTER_THINK, None)`` instead:
-        no trigger, so the grammar binds from the FIRST token and the response
-        cannot be anything but an optional reasoning block followed by a real
-        tool call. That is the difference that matters for
-        NEW-CODER-NO-TOOLCALL-SILENT - the lazy form engages only once the model
-        starts a <tool_call>, i.e. it is gated on the model already doing the
-        exact thing it is failing to do, so it can never rescue a turn that
-        produced no call at all.
-
-        The ``coder_tool_grammar`` flag gates the forced form too. Turning it
-        off is an explicit user choice to leave sampling unconstrained, and
-        quietly re-imposing a grammar on the rescue path would override that
-        choice silently; the caller reports that forcing is unavailable and why
-        instead."""
+        """(grammar, trigger_patterns) for tool-call enforcement, or None."""
         if not getattr(self.backend, "supports_grammar", False):
             return None
         if getattr(self, "_grammar_confirmed_unsupported", False):
@@ -793,54 +632,11 @@ ws     ::= [ \t\n\r]*
             return None
 
     def can_force_tool_calls(self) -> bool:
-        """True when this backend + config can bind the tool-call grammar from
-        the first token (the escalation ladder's forcing rung). Pure query: it
-        builds nothing and mutates nothing, so a caller may ask before deciding
-        whether the rung exists without that question having a side effect."""
+        """True when this backend + config can bind the tool-call grammar from the first token (the escalation ladder's forcing rung)."""
         return self._tool_call_grammar(forced=True) is not None
 
     def _disable_grammar_on_unsupported(self, e: Exception) -> bool:
-        """React to a ``CoderServerError`` caused by the SERVER refusing a
-        grammar-bearing request outright. True when the caller should retry
-        the same turn immediately (now unconstrained); False when *e* is
-        unrelated and must propagate.
-
-        HTTPBackend advertises ``supports_grammar=True`` for ANY localm
-        server (see http.py) because it has no way to know which backend is
-        actually loaded server-side - a GGUF model always honours a grammar,
-        an HF model only when the optional ``[grammar]`` extra is installed.
-        Before #1215 a request against an incapable backend was silently
-        answered unconstrained with a 200; #1215 made that an honest 400
-        (GrammarUnsupportedError) instead. That is correct on the server's
-        side, but it means the FIRST grammar-bearing call this Agent makes
-        against such a server - which could be an ordinary turn's lazy
-        tool-call grammar, not only the rung-2 forced one - now crashes the
-        whole task instead of degrading.
-
-        Trust the server's authoritative answer over our own backend's
-        advertised flag from here on: latch ``_grammar_confirmed_unsupported``
-        so ``_tool_call_grammar`` stops offering ANY grammar (lazy or forced)
-        for the rest of this Agent's life, clear a one-shot forcing attempt in
-        flight, and notice it (AGENTS.md rule 5 - this must not go silent).
-        The caller retries the same turn, which now omits the grammar kwarg
-        entirely, restoring the pre-#1215 unconstrained behaviour but openly
-        recorded instead of silently swallowed by the server.
-
-        A LAZY-specific refusal is handled separately and more narrowly. A server
-        that cannot apply a grammar LAZILY may still apply one strictly (an HF
-        backend with the ``[grammar]`` extra is exactly that: xgrammar has no
-        trigger mode, but it constrains fine from the first token). Latching the
-        blanket flag there would throw away the FORCED rung - the one that exists
-        to rescue a turn that produced no tool call at all - on a backend that can
-        still serve it. So the lazy refusal latches only the lazy form, leaving
-        ``can_force_tool_calls()`` true.
-
-        Matched on the exact refusal message rather than on exception type:
-        CoderServerError also wraps InvalidGrammarError (OUR OWN grammar
-        failing to parse), which is a real internal bug and must NOT be
-        silently swallowed the same way. The lazy message is tested BEFORE the
-        general one and the two are asserted mutually non-containing, so a
-        substring overlap can never route a lazy refusal into the blanket latch."""
+        """React to a ``CoderServerError`` caused by the SERVER refusing a grammar-bearing request outright."""
         from localm.inference.backends.base import (
             GRAMMAR_LAZY_UNSUPPORTED_MESSAGE,
             GRAMMAR_UNSUPPORTED_MESSAGE,
@@ -870,15 +666,7 @@ ws     ::= [ \t\n\r]*
         return True
 
     def _llm_kwargs(self) -> dict:
-        """gen_kwargs for an LLM call, adding the tool-call grammar when enabled
-        (see :meth:`_tool_call_grammar`).
-
-        ``_force_tool_grammar`` selects the FORCED variant for a single turn.
-        Reading it here is deliberately side-effect free - the flag is set and
-        cleared by the escalation ladder in loop.py, which owns the one-shot
-        semantics. Clearing it here would make an ordinary kwargs build mutate
-        turn state, so anything that assembled kwargs twice (a retry, a test, a
-        future caller) would silently consume the escalation."""
+        """gen_kwargs for an LLM call, adding the tool-call grammar when enabled (see :meth:`_tool_call_grammar`)."""
         kw = dict(self.gen_kwargs)
         pair = self._tool_call_grammar(
             forced=bool(getattr(self, "_force_tool_grammar", False)))
@@ -892,24 +680,7 @@ ws     ::= [ \t\n\r]*
 
     def _stream_and_record(self, messages: list[dict], *, on_token, on_reasoning,
                            on_interrupt=None) -> str:
-        """
-        Consume backend.chat_stream, hiding tool-call blocks from *on_token*,
-        routing reasoning deltas to *on_reasoning*, honouring a mid-stream stop
-        request, then recording usage/audit.
-
-        Shared by ``_call_llm``'s event-sink and interactive branches (CODER-3)
-        - previously each duplicated this entire consume-and-record loop, a
-        divergence that already caused a real bug once (see the historical note
-        on the lazy tool-call grammar at the interactive call site below). Being
-        shared also means the tool-call hiding fix below reaches BOTH: a call
-        written in a name-gated fence is hidden from the terminal exactly as it
-        is from the GUI, not just the surface that happened to report the leak.
-
-        *on_interrupt*, when given, is called on a ``KeyboardInterrupt`` raised
-        mid-stream instead of letting it propagate (the interactive terminal's
-        "(interrupted)" display); the partial text streamed so far is still
-        recorded and returned, matching the original interactive behaviour.
-        """
+        """Consume backend.chat_stream, hiding tool-call blocks from *on_token*, routing reasoning deltas to *on_reasoning*, honouring a mid-stream stop request, then recording usage/audit."""
         full = ""
         reasoning_parts: list[str] = []
 
@@ -1033,22 +804,7 @@ ws     ::= [ \t\n\r]*
             self._last_turn_tokens += n
 
     def _build_messages(self) -> list[dict]:
-        """Build the full message list with system prompt prepended.
-
-        Called once per turn, right before the LLM call - the one place
-        guaranteed to run before the model sees anything again, which makes it
-        the right spot to catch up on a project map a run_shell command marked
-        dirty (see ProjectMap.mark_dirty / execution._refresh_map_for_tool).
-        Rebuilding only `if dirty` (rather than unconditionally every turn)
-        keeps a clean turn free: _rebuild_system_prompt's own cost, plus the
-        map's stat-diff rescan it triggers, only pays when something actually
-        needs reconciling.
-
-        The check is `is True`, not plain truthiness: a test that mocks
-        ProjectMap wholesale gets a MagicMock back for `.dirty` when nothing
-        set it explicitly, and a MagicMock is truthy - `is True` is false for
-        it, so those tests are not left spuriously rebuilding every turn.
-        """
+        """Build the full message list with system prompt prepended."""
         if self._project_map.dirty is True:
             self._rebuild_system_prompt()
         return [

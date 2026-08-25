@@ -1,22 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""A malformed registry.json entry must never crash the REMAINING registry
-consumers that #562 left unguarded.
-
-#562 added the shared `_entry_path()` helper (exported from
-`localm.model_manager`) and routed registry.py's own consumers + the MCP
-`list_models` through it, so a single JSON-valid-but-wrong-shape entry is SKIPPED
-or shown corrupt rather than crashing. But four other registry-iterating consumers
-still crashed on the same entry (plus a fifth, same-file lookup found while
-completing the sweep). Each test below drives the real consumer with a good model
-plus one malformed sibling and asserts it does not 500 / raise.
-
-Sites covered (see dev-notes/registry-corruption-consumers-2026-07-11.md):
-  1. GET /api/models            (plugins/gui/routes/models.py list loop)
-  2. GET /v1/models/{id}        (inference/routes/models.py model_detail)
-  3. _pull_hf_snapshot dedup    (model_manager/pull.py "same repo?" scan)
-  4. scan_comfy_models          (model_manager/scan.py existing_paths build)
-  5. GET /api/vram-estimate     (plugins/gui/routes/models.py, same file as #1)
-"""
+"""A malformed registry.json entry must never crash the REMAINING registry consumers that #562 left unguarded."""
 
 import os
 from unittest.mock import MagicMock, patch
@@ -65,8 +48,7 @@ def _gui_app():
 
 @pytest.mark.parametrize("bad_key,bad_val", _BAD)
 def test_gui_models_list_survives_malformed_entry(bad_key, bad_val):
-    """Site 1: GET /api/models must 200 and still list the good model; the
-    malformed entry is skipped (never a 500 that blanks the whole Models page)."""
+    """Site 1: GET /api/models must 200 and still list the good model; the malformed entry is skipped (never a 500 that blanks the whole Models page)."""
     app = _gui_app()
     reg = {"good": _GOOD, bad_key: bad_val}
     with patch("localm.config.load_registry", return_value=reg):
@@ -92,9 +74,7 @@ def test_gui_models_list_good_survives_bad_sibling_with_type_filter(bad_key, bad
 
 @pytest.mark.parametrize("bad_key,bad_val", _BAD)
 def test_gui_vram_estimate_survives_malformed_named_entry(bad_key, bad_val):
-    """Site 5: GET /api/vram-estimate?model=<corrupt> must 200 with model_bytes 0,
-    never a 500 from entry.get(...) / Path(None) on the corrupt entry (the route's
-    own try/except only catches OSError, so the crash escaped it)."""
+    """Site 5: GET /api/vram-estimate?model=<corrupt> must 200 with model_bytes 0, never a 500 from entry.get(...) / Path(None) on the corrupt entry (the route's own try/except only catches OSError, so the crash escaped it)."""
     app = _gui_app()
     reg = {"good": _GOOD, bad_key: bad_val}
     # vram_capacity(return_status=True) returns (info, status), not a bare
@@ -130,10 +110,7 @@ def _inf_client():
 
 @pytest.mark.parametrize("bad_key,bad_val", _BAD)
 def test_model_detail_malformed_entry_never_500(bad_key, bad_val):
-    """Site 2: model_detail on a corrupt id must never 500. A non-dict / null value
-    is 404 (not a usable model record); a dict with a missing / null / non-string /
-    empty path renders as a pathless model (path="", size None) - the same BUG-3
-    contract that test_model_detail_empty_path_does_not_walk_cwd pins down."""
+    """Site 2: model_detail on a corrupt id must never 500."""
     client = _inf_client()
     reg = {"good": _GOOD, bad_key: bad_val}
     with patch("localm.config.load_registry", return_value=reg):
@@ -149,9 +126,7 @@ def test_model_detail_malformed_entry_never_500(bad_key, bad_val):
 
 @pytest.mark.parametrize("bad_key,bad_val", _BAD)
 def test_model_detail_good_model_with_malformed_sibling(bad_key, bad_val):
-    """The `aliases` scan iterates EVERY entry, so a malformed SIBLING must not
-    crash a detail lookup for a healthy model (non-dict sibling -> AttributeError
-    pre-fix)."""
+    """The `aliases` scan iterates EVERY entry, so a malformed SIBLING must not crash a detail lookup for a healthy model (non-dict sibling -> AttributeError pre-fix)."""
     client = _inf_client()
     reg = {"good": _GOOD, bad_key: bad_val}
     with patch("localm.config.load_registry", return_value=reg):
@@ -165,8 +140,7 @@ def test_model_detail_good_model_with_malformed_sibling(bad_key, bad_val):
 # --------------------------------------------------------------------------- #
 
 def _offline_hfapi(monkeypatch):
-    """Force the repo-listing fetch down its offline fallback (caught + logged),
-    so no network is dialled and the dedup scan is still reached."""
+    """Force the repo-listing fetch down its offline fallback (caught + logged), so no network is dialled and the dedup scan is still reached."""
     import huggingface_hub
 
     class _NoNetApi:
@@ -191,8 +165,7 @@ def _seed_pull(monkeypatch, tmp_path, reg):
 @pytest.mark.parametrize("bad_key,bad_val", _BAD)
 def test_pull_hf_dedup_survives_malformed_sibling(tmp_path, monkeypatch,
                                                   bad_key, bad_val):
-    """Site 3: the pull-dedup scan iterates every entry; a malformed sibling must
-    not crash `localm pull owner/repo`. The good same-repo dir is still detected."""
+    """Site 3: the pull-dedup scan iterates every entry; a malformed sibling must not crash `localm pull owner/repo`."""
     from localm.model_manager import pull as pull_mod
 
     repo_id = "owner/repo"
@@ -210,9 +183,7 @@ def test_pull_hf_dedup_survives_malformed_sibling(tmp_path, monkeypatch,
 
 
 def test_pull_hf_dedup_survives_bad_path_on_matching_source(tmp_path, monkeypatch):
-    """The Path(info.get("path","")) leg of the scan: a sibling whose source DOES
-    match the repo but whose path is null must not TypeError (only reachable once
-    the source check passes, so BAD_ENTRIES' non-matching-source shapes miss it)."""
+    """The Path(info.get('path','')) leg of the scan: a sibling whose source DOES match the repo but whose path is null must not TypeError (only reachable once the source check passes, so BAD_ENTRIES' non-matching-source shapes miss it)."""
     from localm.model_manager import pull as pull_mod
 
     repo_id = "owner/repo"
@@ -235,9 +206,7 @@ def test_pull_hf_dedup_survives_bad_path_on_matching_source(tmp_path, monkeypatc
 @pytest.mark.parametrize("bad_key,bad_val", _BAD)
 def test_scan_comfy_models_survives_malformed_entry(tmp_path, monkeypatch,
                                                     bad_key, bad_val):
-    """Site 4: the launch/GUI-button scan builds existing_paths from every entry;
-    a null entry (`"path" in None`) or a null/int path (`Path(...)`) once crashed
-    the whole scan. It must complete (nothing to add here) instead."""
+    """Site 4: the launch/GUI-button scan builds existing_paths from every entry; a null entry (`'path' in None`) or a null/int path (`Path(...)`) once crashed the whole scan."""
     import localm.model_manager.scan as scan_mod
 
     workdir = tmp_path / "comfy"

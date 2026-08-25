@@ -1,22 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Rename routes for the music and video galleries.
-
-Image has had ``/api/imagine/file/{name}/rename`` since the gallery was built;
-music and video did not, so the Studio detail view could not offer the action
-without a backend half. These routes mirror image's exactly, which means they
-inherit its two guards, and BOTH are asserted here rather than assumed from the
-shared shape:
-
-  * ``gallery.require_owner`` on the SOURCE - another principal gets 404, the
-    same code a missing file returns (no existence oracle).
-  * ``confined_name`` on the CALLER-SUPPLIED DESTINATION - owning the source
-    proves nothing about where it may be written, so traversal is rejected.
-
-Every assertion reads the FILESYSTEM before the status code. A rename bug's
-symptom is a file in the wrong place or gone; the status code is a proxy, and
-leading with the proxy is how "409 != 200" gets "fixed" by editing the
-assertion instead of the code.
-"""
+"""Rename routes for the music and video galleries."""
 
 import json
 from pathlib import Path
@@ -58,8 +41,7 @@ def _app(tmp_path, monkeypatch, plugin):
 
 
 def _seed(kind, stem, sidecar=True):
-    """Put a file (and optionally its sidecar) in the gallery dir, unowned so
-    every principal may reach it. Returns (path, sidecar_path)."""
+    """Put a file (and optionally its sidecar) in the gallery dir, unowned so every principal may reach it."""
     d = media_paths.gallery_dir(MEDIA[kind]["dir"])
     d.mkdir(parents=True, exist_ok=True)
     p = d / (stem + MEDIA[kind]["ext"])
@@ -177,8 +159,7 @@ class TestMediaRename:
 
 @pytest.mark.parametrize("kind", ["music", "video"])
 def test_another_principal_cannot_rename(kind, tmp_path, monkeypatch):
-    """Holding the scope is not owning the artifact: B renaming A's file gets
-    the same 404 a missing file returns, and A's file keeps its name."""
+    """Holding the scope is not owning the artifact: B renaming A's file gets the same 404 a missing file returns, and A's file keeps its name."""
     app = _app(tmp_path, monkeypatch, kind)
     from localm import auth
     from localm.media import gallery

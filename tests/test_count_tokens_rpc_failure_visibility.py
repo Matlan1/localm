@@ -1,15 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""GgufBackend.count_messages_tokens's RPC-failure warning (found sweeping for
-siblings of the chatml-fallback visibility bug, see
-tests/test_chatml_fallback_visibility.py) had the identical shape: the
-in-code comment states the intent is to surface a permanently-failing worker
-RPC "without ever saying so above --debug (rule 5)", but the only call was
-`_dbg.warning(...)` (debuglog.logger), invisible without --debug. Fixed by
-adding a console.print alongside the existing debug-log line, guarded by the
-same once-per-process latch.
-
-These tests assert visibility WITHOUT --debug - that is the exact condition
-the bug lived in."""
+"""GgufBackend.count_messages_tokens's RPC-failure warning (found sweeping for siblings of the chatml-fallback visibility bug, see tests/test_chatml_fallback_visibility.py) had the identical shape: the in-code comment states the intent is to surface a permanently-failing worker RPC 'without ever saying..."""
 
 from __future__ import annotations
 
@@ -22,10 +12,7 @@ from localm.inference.backends.llamacpp._runner import RunnerBusy
 
 
 class _FakeRunnerRaises:
-    """count_messages_tokens fails, but plain count_tokens still succeeds -
-    the realistic shape per gguf.py's own comment: "the super() return...
-    calls self.count_tokens(text)... a real, untemplated tokenizer count
-    when the worker can still answer plain count_tokens"."""
+    """count_messages_tokens fails, but plain count_tokens still succeeds - the realistic shape per gguf.py's own comment: 'the super() return... calls self.count_tokens(text)... a real, untemplated tokenizer count when the worker can still answer plain count_tokens'."""
 
     def __init__(self, exc: Exception):
         self._exc = exc
@@ -53,11 +40,7 @@ def _backend() -> GgufBackend:
 
 @pytest.fixture(autouse=True)
 def _debug_is_off_and_latch_reset(monkeypatch):
-    """The test's own premise: --debug must genuinely be off. Also reset the
-    MODULE-level once-per-process latch (not per-instance, unlike
-    _grammar_unsupported/_chatml_fallback - see the comment above
-    _count_messages_tokens_rpc_warned in gguf.py) so test order/repetition
-    cannot mask the warning behind an earlier test's trip of the same latch."""
+    """The test's own premise: --debug must genuinely be off."""
     monkeypatch.delenv("LOCALM_DEBUG", raising=False)
     assert not debuglog.debug_enabled(), "test premise: --debug must be OFF"
     monkeypatch.setattr(gguf_mod, "_count_messages_tokens_rpc_warned", False)
@@ -89,8 +72,7 @@ def test_rpc_failure_warns_once_per_process(capsys):
 
 
 def test_a_transient_busy_worker_stays_silent(capsys):
-    """RunnerBusy (a live stream in progress, HON-02) is expected and
-    transient - it must never trip the permanent-failure console notice."""
+    """RunnerBusy (a live stream in progress, HON-02) is expected and transient - it must never trip the permanent-failure console notice."""
     backend = _backend()
     backend._runner = _FakeRunnerBusy()
 

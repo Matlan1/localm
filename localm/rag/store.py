@@ -1,31 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""
-Persistent document collections ("knowledge bases").
-
-Layout - one directory per collection under ``<data dir>/rag/``:
-
-    rag/<name>/meta.json      {"name", "created",
-                               "docs": {path: {mtime, size, chunks}},
-                               "roots": {folder: {"added": ts}}}
-    rag/<name>/chunks.jsonl   one chunk per line: {"source", "pos", "text"}
-    rag/<name>/vectors.json   optional: {"dim", "vectors": [[...]|null, ...]}
-                              aligned with chunks.jsonl line order
-
-``roots`` records the FOLDERS that were indexed, alongside the per-file ``docs``
-entries the folder walk produced. Without it an index can only ever be refreshed
-over the files it already knows, so a file ADDED to (or DELETED from) an indexed
-folder after the fact is invisible - which is exactly the drift a folder re-sync
-exists to catch. ``resync()`` re-walks these roots through the ordinary
-incremental path.
-
-Collections are explicit user data (like generated images): indexing writes
-to disk in every session mode. Rewrites are whole-file + atomic rename -
-corpora here are home-scale (thousands of chunks, not millions).
-
-Retrieval is hybrid: BM25 always; when vectors exist for (almost) all chunks
-and the caller can embed the query, scores become an equal blend of
-max-normalised BM25 and cosine similarity.
-"""
+"""Persistent document collections ('knowledge bases')."""
 
 from __future__ import annotations
 
@@ -89,24 +63,7 @@ _NUMPY_IS_STUB = _numpy is not None and getattr(_numpy, "__file__", None) is Non
 
 
 def _warn_numpy_degrade(exc: Exception, operation: str) -> None:
-    """Announce the pure-Python fallback ONCE per process, saying which case it is.
-
-    THREE states, three branches, and the count is the point:
-
-    1. numpy ABSENT      - routine. The default install has no numpy, so this is
-                           the intended path. Debug level, no warning.
-    2. numpy is a STUB   - the install is BROKEN. Something put a bare 'numpy'
-                           directory on sys.path; it will equally break anything
-                           else here that imports numpy. Name the artefact so it
-                           can be deleted.
-    3. numpy present but
-       otherwise UNUSABLE - genuinely unexpected. Say so.
-
-    "numpy unavailable, using the pure-Python path" reads as routine and would bury
-    case 2. But the reverse error is just as bad and is the one that shipped:
-    folding case 1 into case 3 told every ordinary user their install was broken.
-    Getting the hard case right is not the same as getting them all right.
-    """
+    """Announce the pure-Python fallback ONCE per process, saying which case it is."""
     if _NUMPY_DEGRADE_LOGGED:
         return
     _NUMPY_DEGRADE_LOGGED.add(True)
@@ -175,26 +132,13 @@ def _first_dim(vectors: list) -> Optional[int]:
 
 
 def _well_formed_vectors(vectors) -> bool:
-    """Cheap (O(n)) structural check that *vectors* is what ``_save`` writes: a
-    list whose entries are each a null placeholder (a missing embedding) or a
-    list/tuple. A hand-corrupted or truncated vectors.json can hold scalars or
-    strings that pass JSON parsing but crash cosine scoring at QUERY time with an
-    opaque error (``object of type 'int' has no len()``); catch that at load and
-    degrade to BM25 with a reason instead of shipping a delayed crash."""
+    """Cheap (O(n)) structural check that *vectors* is what ``_save`` writes: a list whose entries are each a null placeholder (a missing embedding) or a list/tuple."""
     return isinstance(vectors, list) and all(
         (not v) or isinstance(v, (list, tuple)) for v in vectors)
 
 
 def _vectors_finite(vectors) -> bool:
-    """True when every component of every present vector is a FINITE number.
-
-    A single NaN/inf component makes ``_cosine`` return ``nan``; the blended query
-    score is then ``nan``, and ``nan > 0`` is False, so the chunk is SILENTLY
-    dropped from results (a query for a word that IS indexed returns everything
-    except the matching chunk) with no error and no degrade reason. A non-finite
-    or non-numeric vector store must therefore degrade to BM25 with a surfaced
-    reason, never be trusted (AGENTS rule 5). Structure is already validated by
-    ``_well_formed_vectors``; this checks the values."""
+    """True when every component of every present vector is a FINITE number."""
     try:
         np = _numpy
         if np is None:
@@ -289,21 +233,7 @@ _MAX_WALK_DEPTH = 50
 
 
 def _walk_files(root: Path, *, max_depth: int = _MAX_WALK_DEPTH):
-    """Yield files under *root* without following linked DIRECTORIES, bounded by
-    depth and a visited-realpath set.
-
-    ``rglob('*')`` follows NTFS junctions - which report ``is_symlink() == False``,
-    so pathlib's symlink-loop guard misses them - and a self-referential junction
-    makes the walk spin until the path length overflows (a folder-index DoS, B3).
-    This manual walk never descends into a linked directory (junction OR
-    bind-mount OR symlink) and refuses to revisit a resolved directory, so no
-    directory cycle can hang indexing. ``_SKIP_DIRS`` are pruned during descent.
-
-    A linked FILE **is** yielded (REG-569): only a directory can cycle, so a link
-    to a file is a terminal node the guard does not need to exclude, and dropping
-    those silently lost real documents that ``rglob`` used to index. Confinement
-    (a link escaping an allowed root) is enforced by ``_expand``'s confine loop,
-    not here."""
+    """Yield files under *root* without following linked DIRECTORIES, bounded by depth and a visited-realpath set."""
     reparse_flag = getattr(_stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
     seen: set = set()
     stack: list = [(root, 0)]
@@ -373,11 +303,7 @@ def _walk_files(root: Path, *, max_depth: int = _MAX_WALK_DEPTH):
 
 
 class ConfinementError(ValueError):
-    """A path may not be indexed. ``reason`` tells the caller WHY, so the API can
-    offer 'add and continue' for a fixable whitelist miss (``outside_allowed``)
-    but hard-refuse the rest (``credential`` / ``secret_file`` / ``denied`` /
-    ``invalid`` / ``unc_or_device``). Subclasses ``ValueError`` so existing
-    ``except ValueError`` sites keep catching it."""
+    """A path may not be indexed. ``reason`` tells the caller WHY, so the API can offer 'add and continue' for a fixable whitelist miss (``outside_allowed``) but hard-refuse the rest (``credential`` / ``secret_file`` / ``denied`` / ``invalid`` / ``unc_or_device``)."""
 
     def __init__(self, message: str, *, path: Path, reason: str):
         super().__init__(message)
@@ -390,27 +316,7 @@ _INDEX_MODES = ("whitelist", "blacklist")
 
 def indexing_policy(cfg: Optional[dict] = None,
                     key_roots: Optional[list] = None) -> dict:
-    """The current RAG indexing confinement policy, read from config.
-
-    ``mode`` is ``whitelist`` (index only your home folder, the working directory,
-    and the ``rag_allowed_roots`` you added) or ``blacklist`` (index anywhere
-    EXCEPT the ``rag_denied_roots`` you listed). In BOTH modes the localm data dir
-    and credential folders are still refused - a hard floor that
-    ``confine_index_path`` enforces separately and no mode can turn off. Returns
-    resolved ``Path`` lists so callers compare like-for-like.
-
-    *key_roots* is an optional PER-KEY folder allowlist (``auth.rag_roots_for`` /
-    ``http_server.effective_rag_roots`` - empty/None for the owner or a key that
-    never had one set). When non-empty it OVERRIDES the config-driven policy
-    entirely: the returned policy is forced to ``whitelist`` with ``allowed`` set
-    to exactly the resolved *key_roots* and a ``key_scoped`` flag set, so
-    ``confine_index_path`` does NOT also imply the home directory, the working
-    directory, or the global ``rag_allowed_roots`` on top of it - "each key gets
-    its own explicit folder allowlist", not an addition to everyone else's reach.
-    The hard floor (credential folders, secret files, UNC/device paths) still
-    applies underneath this exactly as it does for the global policy; only the
-    whitelist SET changes.
-    """
+    """The current RAG indexing confinement policy, read from config."""
     # Loaded ONCE, before the key_roots branch too: allow_network_drives is a
     # WHOLE-MACHINE preference (see the comment on the return below), not
     # part of the per-key folder scoping key_roots exists for, so a key-scoped
@@ -481,12 +387,7 @@ def indexing_policy(cfg: Optional[dict] = None,
 
 
 def _network_drives_allowed_fresh() -> bool:
-    """One-off config read for confine_index_path's ``policy=None`` callers
-    (settings_schema.py's PATHLIST save-time validation, and the bare CLI),
-    which have no ``indexing_policy()`` dict to read the value off. Mirrors
-    indexing_policy()'s own cfg-load-with-fallback: a config we cannot load
-    resolves to the same True default a normal read would (not a security
-    floor - see config.py's DEFAULT_CONFIG comment for allow_network_drives)."""
+    """One-off config read for confine_index_path's ``policy=None`` callers (settings_schema.py's PATHLIST save-time validation, and the bare CLI), which have no ``indexing_policy()`` dict to read the value off."""
     try:
         from localm.config import load_config
         cfg = load_config()
@@ -496,46 +397,7 @@ def _network_drives_allowed_fresh() -> bool:
 
 
 def confine_index_path(p, policy: Optional[dict] = None) -> Path:
-    """Resolve *p* and verify it may be indexed, raising ``ConfinementError`` (a
-    ``ValueError``) otherwise.
-
-    The HARD FLOOR is enforced ALWAYS, even when *policy* is None: well-known
-    credential folders (``.ssh``, ``.aws``, ...) are never indexable - wherever
-    they appear in the resolved path, so a nested ``~/proj/.ssh`` or a symlink
-    into one is caught too. A UNC/device path is refused unconditionally too
-    (see the ``is_unc_or_device_path`` check below). A mapped Windows network
-    drive (``Z:\\...``) is refused the same way, ALSO unconditionally by
-    caller kind, but only when the ``allow_network_drives`` config setting is
-    off (default on - preference, not a security floor; see
-    ``pathsafe.is_mapped_network_drive``'s docstring for why it is a separate
-    question from the UNC check).
-
-    The localm data directory (LOCALM_HOME) is NOT refused, at all: localm is a
-    local, single-user tool, and it is not localm's place to block the owner
-    from indexing their own files, including config.json/registry.json/auth.json
-    if they explicitly choose to - they already have direct filesystem access to
-    every one of them. Keeping documents in (or portably alongside, as one
-    self-contained folder) the data directory is a legitimate choice, not
-    something to guard against.
-
-    With a *policy* (the HTTP API passes ``indexing_policy()``):
-      - ``whitelist``: *p* must be within your home folder, the working directory,
-        or a ``rag_allowed_roots`` entry, else ``reason='outside_allowed'`` (the
-        route may offer the owner to add it and continue) - this applies to
-        LOCALM_HOME exactly like any other folder outside the defaults, not as a
-        special case;
-      - ``blacklist``: *p* is allowed unless it is within a ``rag_denied_roots``
-        entry, then ``reason='denied'``;
-      - a KEY-SCOPED policy (``indexing_policy(key_roots=...)``, marked
-        ``policy["key_scoped"]``) replaces the whitelist SET entirely: *p* must
-        be within one of the key's own explicit roots, and the home
-        directory/working directory/global ``rag_allowed_roots`` are NOT also
-        allowed on top of it - a per-key allowlist exists to confine a
-        credential to less than the owner's own reach.
-
-    ``policy=None`` means hard-floor only: the local CLI operator, who can already
-    read their own files, is otherwise unconfined.
-    """
+    """Resolve *p* and verify it may be indexed, raising ``ConfinementError`` (a ``ValueError``) otherwise."""
     try:
         rp = Path(p).expanduser()
     except (OSError, ValueError):
@@ -679,13 +541,7 @@ def confine_index_path(p, policy: Optional[dict] = None) -> Path:
 
 
 def check_collection_name(name: str) -> str:
-    """Validate a collection name, returning it, or raise ``ValueError``.
-
-    Public because callers OUTSIDE this package need the same rule before a
-    collection is touched: the jobs store validates a scheduled re-sync job's
-    ``collection`` at definition time, so a typo is rejected when the job is
-    created rather than failing silently on every unattended tick.
-    """
+    """Validate a collection name, returning it, or raise ``ValueError``."""
     if not _NAME_RE.match(name or ""):
         raise ValueError(
             "Collection names must be 1-64 letters, digits, '-' or '_'")
@@ -708,14 +564,7 @@ def collection_names(base: Optional[Path] = None) -> list[str]:
 
 def delete_collection(name: str, base: Optional[Path] = None,
                       on_wait: Optional[Callable[[str], None]] = None) -> bool:
-    """Delete a collection, waiting for any in-flight write to finish first.
-
-    Deleting IS a write, so it takes the same locks as one. Without them a
-    delete could land in the middle of another process's indexing run and leave
-    the collection half-rebuilt by that run's final _save() - a collection the
-    user believes they deleted, holding a subset of its documents. Raises
-    ``CollectionLockedError`` if that other run does not finish in time, rather
-    than deleting underneath it."""
+    """Delete a collection, waiting for any in-flight write to finish first."""
     import shutil
     base = base or rag_dir()
     path = base / _check_name(name)
@@ -855,44 +704,13 @@ class Collection:
         return (self.dir / "meta.json").is_file()
 
     def _write_lock(self, op: str, on_progress: Optional[ProgressFn] = None):
-        """The CROSS-PROCESS write lock for this collection.
-
-        Every read-modify-write entry point takes it INSIDE the per-process
-        ``_collection_lock``, never the other way round, for two reasons. It is
-        one consistent order everywhere, so the pair cannot deadlock; and it
-        means at most one thread of this process is ever at the lock file, so a
-        second thread of the same process waits on the in-process lock instead
-        of meeting its own process's lock file (which the file lock, like
-        config's, can only read as a nested call - a bug - since a file lock
-        cannot tell one thread from another).
-
-        The two halves have DIFFERENT waiting rules, on purpose. Writers inside
-        one process QUEUE for as long as it takes: the holder is a thread of
-        this process that is demonstrably making progress, so waiting always
-        ends and always does the work - refusing there would break something
-        that works today (a second GUI index of a collection whose first index
-        runs for ten minutes). A writer in ANOTHER process cannot be trusted
-        that way, since it may be hung or gone, so that half is bounded and
-        ends in a refusal. ``delete_collection`` is the one caller that bounds
-        both (see its docstring).
-
-        The wait is reported through the caller's existing progress channel, so
-        a CLI or a job stream says why it is waiting instead of looking hung.
-        """
+        """The CROSS-PROCESS write lock for this collection."""
         return collection_write_lock(
             lock_path_for(self.dir), collection=self.name, op=op,
             on_wait=on_progress)
 
     def create(self) -> "Collection":
-        """Create the collection if it does not exist yet.
-
-        Under the write lock, and re-checking existence inside it: creating is a
-        write too. Without it, a `rag add` that finds no collection can drop a
-        fresh meta.json into a directory another process is part-way through
-        deleting - which both resurrects a collection the user deleted and
-        fails that delete's final rmdir on a directory that grew entries after
-        it was listed. The fast path (already exists) takes no lock at all, so
-        the usual add pays nothing."""
+        """Create the collection if it does not exist yet."""
         if self.exists():
             return self
         with _collection_lock(self.name), self._write_lock("a create"):
@@ -1217,19 +1035,7 @@ class Collection:
         self._atomic_write("meta.json", json.dumps(self._meta, indent=2))
 
     def _stats_cache_block(self) -> dict:
-        """The ``_stats_cache`` block for meta.json, computed from THIS
-        instance's current in-memory state and a FRESH fingerprint of
-        chunks.jsonl/vectors.json taken right now (see ``_file_fingerprint``).
-
-        Factored out of ``_save()`` so ``load_and_maybe_backfill()`` below can
-        write the identical shape from a load that never rewrote those files -
-        one definition, so the two cannot drift apart. Both callers share the
-        same precondition this method does not itself enforce: it is only
-        SAFE to call while holding this collection's write lock (``_save()``'s
-        callers all do; ``load_and_maybe_backfill()`` acquires it itself
-        before ever constructing the ``Collection`` this method runs on) -
-        without that, the fingerprint could describe files a concurrent
-        writer is mid-way through replacing."""
+        """The ``_stats_cache`` block for meta.json, computed from THIS instance's current in-memory state and a FRESH fingerprint of chunks.jsonl/vectors.json taken right now (see ``_file_fingerprint``)."""
         return {
             "n_chunks": len(self._chunks),
             "has_vectors": self._has_vectors(self._chunks, self._vectors),
@@ -1247,13 +1053,7 @@ class Collection:
         }
 
     def _vector_index_complete(self) -> bool:
-        """True when every chunk currently has a usable vector.
-
-        The all-clear condition for a set-aside sidecar, and deliberately
-        stricter than "a vectors.json exists": partial coverage is a legitimate
-        state (a collection mid-embed), but it is not a REBUILD, so it must not
-        clear a recorded fault. Empty chunks is not "complete" - there is nothing
-        to be complete about, and that case is handled on its own."""
+        """True when every chunk currently has a usable vector."""
         return bool(self._chunks) and (
             self._vectors is not None
             and len(self._vectors) == len(self._chunks)
@@ -1268,12 +1068,7 @@ class Collection:
             return []
 
     def _discard_rejected_vectors(self, why: str) -> None:
-        """Delete set-aside sidecars, saying why.
-
-        The ONLY place they are ever removed, and only when they have become
-        unrecoverable rather than merely inconvenient. Announced at warning level
-        because deleting preserved evidence is exactly the kind of thing that
-        must never happen quietly (AGENTS rule 5)."""
+        """Delete set-aside sidecars, saying why."""
         for p in self._rejected_vector_files():
             try:
                 p.unlink()
@@ -1285,23 +1080,7 @@ class Collection:
                          "%s - %s.", self.name, p.name, why)
 
     def _quarantine_rejected_vectors(self) -> None:
-        """Set a rejected vectors.json aside as ``vectors.json.rejected``.
-
-        Preserving the file in place would be enough to keep the data and the
-        evidence, but not enough to keep it SAFE: the caller has just rewritten
-        chunks.jsonl, and ``_load`` decides a vectors sidecar is usable partly by
-        comparing its length to the chunk count. A rejected file left in place can
-        therefore be silently RE-ADOPTED once an unrelated change happens to make
-        the counts agree again (index 2 documents, truncate vectors.json to the
-        second document's vector, remove the first document: one vector, one
-        chunk, structurally valid, and every semantic score from then on is
-        computed against the wrong chunk). Trading one silent fault for another is
-        not a fix (AGENTS rule 5).
-
-        Renaming solves both at once: the bytes are still on disk for recovery and
-        for anyone diagnosing what happened, and no loader will ever pair them with
-        chunks again. ``_load`` reports the set-aside file as a degrade for as long
-        as it exists, so the fault stays visible rather than becoming folklore."""
+        """Set a rejected vectors.json aside as ``vectors.json.rejected``."""
         src = self.dir / "vectors.json"
         if not src.is_file():
             return
@@ -1334,21 +1113,7 @@ class Collection:
         self._prune_rejected_vectors()
 
     def _prune_rejected_vectors(self) -> None:
-        """Keep only the newest ``_MAX_REJECTED_KEPT`` set-aside indexes.
-
-        Each set-aside file is a full copy of the vector index, so an unbounded
-        pile is a disk leak: one real install had vectors.json.rejected,
-        .rejected.2 and .rejected.3 totalling 88 MB, and the allocator would have
-        gone on to twenty. Preserving the evidence is the rule; preserving every
-        generation of it forever is not what that rule asks for, and the OLDEST
-        copies are the least diagnostic.
-
-        Ordered by MTIME, deliberately not by name: ``_rejected_vector_files``
-        sorts lexicographically, which puts ``.rejected.20`` before ``.rejected.3``
-        and would make "oldest" wrong the moment a collection passed nine
-        rejections. Deletion is announced at WARNING level for the same reason
-        ``_discard_rejected_vectors`` announces its own - removing preserved
-        evidence must never happen quietly."""
+        """Keep only the newest ``_MAX_REJECTED_KEPT`` set-aside indexes."""
         files = self._rejected_vector_files()
         if len(files) <= _MAX_REJECTED_KEPT:
             return
@@ -1373,18 +1138,7 @@ class Collection:
                          self.name, p.name, size / 1048576.0, _MAX_REJECTED_KEPT)
 
     def _free_rejected_name(self):
-        """An unused ``vectors.json.rejected[.N]`` path, or None if there is none.
-
-        A collection can degrade more than once (it can be repaired back to
-        health and break again; and _save writes meta, chunks and vectors as
-        three independent atomic writes, so an ill-timed crash is a repeatable
-        route to a second rejection). ``os.replace`` overwrites its destination
-        without a word, so a fixed name meant the SECOND incident destroyed the
-        first preserved copy while this very function logged "Nothing was
-        deleted" - a false safety statement on top of real data loss. Numbering
-        keeps every copy. The cap is not a limit on preservation but a limit on
-        silently filling a disk: past it we keep the file where it is and say so,
-        which loses only the re-adoption guard, never the bytes."""
+        """An unused ``vectors.json.rejected[.N]`` path, or None if there is none."""
         first = self.dir / _REJECTED_VECTORS
         if not first.exists():
             return first
@@ -1395,21 +1149,7 @@ class Collection:
         return None
 
     def _save_meta(self) -> None:
-        """Persist meta.json ONLY, leaving chunks.jsonl / vectors.json alone.
-
-        For a change that touches nothing but metadata (a newly recorded root, a
-        missing/restored flag), this is both sufficient and strictly safer than a
-        full ``_save()``: ``_save`` rewrites chunks.jsonl and decides the fate of
-        vectors.json from ``self._vectors``, which ``_load`` sets to None on
-        purpose when it finds a corrupt or stale vector sidecar
-        (``vector_degrade_reason``). A metadata-only write must not turn that
-        recoverable state into real data loss. ``_save`` now refuses that
-        particular deletion itself (it sets a rejected file aside before any
-        branch can write or unlink that filename), but the two guards are
-        deliberately independent: this one keeps a metadata write from touching
-        chunks or vectors AT ALL, which is the property callers here actually
-        want. Chunks are untouched, so the cached
-        BM25 index stays valid too."""
+        """Persist meta.json ONLY, leaving chunks.jsonl / vectors.json alone."""
         self.dir.mkdir(parents=True, exist_ok=True)
         self._atomic_write("meta.json", json.dumps(self._meta, indent=2))
 
@@ -1426,14 +1166,7 @@ class Collection:
     @staticmethod
     def _expand(paths: list,
                 policy: Optional[dict] = None) -> list[Path]:
-        """Resolve files + recursive folder contents to indexable files.
-
-        When *policy* is given, files that fail confinement (system paths,
-        credential dirs, denied roots, symlinks escaping an allowed folder, or a
-        model-weight / binary / credential FILE) are dropped by the confine loop
-        below - add_paths already validated the top-level inputs, so this catches
-        nested escapes and the per-file secret filter. With no policy (the CLI)
-        explicit picks are unfiltered: the local operator is unconfined."""
+        """Resolve files + recursive folder contents to indexable files."""
         out: list[Path] = []
         for p in paths:
             p = Path(p).expanduser()
@@ -1463,18 +1196,7 @@ class Collection:
         return kept
 
     def _record_roots(self, paths: list) -> bool:
-        """Persist the FOLDER roots among *paths*. Returns True if anything new
-        was recorded.
-
-        Only directories are recorded. An individually added FILE is already
-        tracked by its own ``docs`` entry, which ``resync`` re-checks directly;
-        recording its parent folder would silently widen the index to every
-        sibling file the user never asked for.
-
-        Called from ``_add_paths_locked`` AFTER the confinement check, so a folder
-        the policy refuses never becomes a persisted root that a later unattended
-        re-sync would walk.
-        """
+        """Persist the FOLDER roots among *paths*."""
         roots = self._meta.setdefault("roots", {})
         if not isinstance(roots, dict):
             # A hand-edited / externally written meta.json could hold anything
@@ -1504,12 +1226,7 @@ class Collection:
         return changed
 
     def roots(self) -> list:
-        """The folders indexed into this collection, resolved and sorted.
-
-        These are what ``resync`` re-walks. Empty for a collection built only
-        from individually named files or uploads, and for one whose meta.json was
-        corrupt (the roots cannot be reconstructed from chunk sources the way the
-        docs map can - re-add the folder to restore them)."""
+        """The folders indexed into this collection, resolved and sorted."""
         return self._roots_from_meta(self._meta)
 
     @staticmethod
@@ -1524,25 +1241,7 @@ class Collection:
                   policy: Optional[dict] = None,
                   force: bool = False,
                   model_name: Optional[str] = None) -> dict:
-        """
-        Index files/folders. Unchanged files (same mtime+size+content hash) are
-        skipped; changed ones are re-indexed in place. Pass ``force=True`` to
-        re-index every file regardless (``localm rag add --force`` / repair).
-        Returns counters plus per-file failures. embed_fn failures degrade to
-        lexical-only, never abort.
-
-        When *policy* is given (the HTTP API passes ``indexing_policy()``), an
-        out-of-bounds top-level path raises ``ValueError`` and nested escapes are
-        dropped (C2). CLI callers omit it and stay unconfined. Indexing with an
-        embedding model whose dimensionality differs from the collection's also
-        raises ``ValueError`` rather than corrupting the vectors with mixed
-        dimensions (C3).
-
-        *model_name*, like ``reembed()``'s, is the EMBEDDING model's name, only
-        recorded (as ``embedding_model()``) the first time this collection is
-        actually embedded - passing it when *embed_fn* is None is harmless, it is
-        simply never reached.
-        """
+        """Index files/folders."""
         # Serialise the whole read-modify-write per collection AND re-sync with the
         # latest committed state under the lock, so a concurrent add_paths() that
         # finished first is not read-stale-then-overwritten (CHK-RAG-LOCK). The
@@ -1563,8 +1262,7 @@ class Collection:
                           policy: Optional[dict] = None,
                           force: bool = False,
                           model_name: Optional[str] = None) -> dict:
-        """The add_paths read-modify-write body. MUST run under
-        _collection_lock(self.name) after a fresh _load() (see add_paths)."""
+        """The add_paths read-modify-write body."""
         say = on_progress or (lambda _t: None)
         if policy is not None:
             # ACT ON WHAT WAS CHECKED. confine_index_path returns the RESOLVED
@@ -1748,48 +1446,7 @@ class Collection:
                force: bool = False,
                prune_missing: bool = False,
                model_name: Optional[str] = None) -> dict:
-        """Bring the index back in line with the folders it was built from.
-
-        Re-walks every persisted root through the ORDINARY incremental path
-        (``add_paths``): a file ADDED to an indexed folder since the last run is
-        picked up, a CHANGED file is re-indexed, an unchanged file is skipped by
-        content hash. Individually indexed files are re-checked too. This is what
-        a scheduled ``rag`` job calls; it is also ``localm rag resync``.
-
-        DELETION SEMANTICS (deliberate, and the reason this is not just
-        ``add_paths(roots)``). A document whose file has VANISHED is FLAGGED
-        (``missing: True`` + ``missing_since``), not dropped: its chunks stay
-        indexed and stay searchable. This mirrors how the model registry treats a
-        model file that disappears (``model_manager/registry.py`` sync_models_dir:
-        "a moved file, unplugged drive, sync hiccup is not silently forgotten") -
-        an unattended job that ran while a network share was mounting must not be
-        able to destroy an index. The flag CLEARS by itself when the file comes
-        back. Actual deletion happens only when the caller passes
-        ``prune_missing=True``.
-
-        Two guards keep a transient condition from being read as deletion at all:
-        a root that is not currently an available directory (deleted, unmounted,
-        unreadable, or replaced by a file) is REPORTED and skipped whole, and
-        every document underneath it is left completely untouched - not indexed,
-        not flagged, not pruned. The same holds for a root the current
-        ``policy`` refuses.
-
-        *policy* is applied exactly as in ``add_paths``: a scheduled re-sync must
-        never index a path an interactive add would refuse, including a root that
-        was legal when it was added but is outside the owner's allowed folders
-        now. Callers that run unattended (the jobs runner) always pass one.
-
-        *model_name*: see ``add_paths()`` - forwarded to the same first-embed
-        recording, so a collection built via resync also ends up with its
-        embedding model on record.
-
-        Returns the ``add_paths`` counters plus ``missing`` (newly flagged),
-        ``missing_total``, ``restored``, ``pruned``, ``roots``,
-        ``unavailable_roots`` and ``blocked_roots`` (each ``{root, reason}``), and
-        ``vector_degrade_reason`` (why semantic search is degraded after this run,
-        None when it is fine), so the caller can report honestly what the run did
-        and did NOT do, and over what state.
-        """
+        """Bring the index back in line with the folders it was built from."""
         with _collection_lock(self.name), self._write_lock("a re-sync", on_progress):
             self._load()
             return self._resync_locked(
@@ -1801,7 +1458,7 @@ class Collection:
     def _resync_locked(self, *, embed_fn, classify_fn, describe_image_fn,
                        on_progress, policy, force, prune_missing,
                        model_name=None) -> dict:
-        """The resync body. MUST run under _collection_lock after _load()."""
+        """The resync body."""
         say = on_progress or (lambda _t: None)
         available, unavailable, blocked = self._partition_roots(policy, say)
         # Roots we could not judge. Nothing under them is indexed, flagged, or
@@ -1861,13 +1518,7 @@ class Collection:
         return result
 
     def _partition_roots(self, policy: Optional[dict], say: ProgressFn):
-        """Split the persisted roots into (available, unavailable, blocked).
-
-        Availability is checked FIRST and reported, never assumed: an
-        unreachable root is the single most likely reason a re-sync would
-        otherwise conclude that every file under it was deleted. ``is_dir()``
-        answers most of that, but not all of it - see ``_unmounted_reason`` for
-        the case it cannot see."""
+        """Split the persisted roots into (available, unavailable, blocked)."""
         available: list = []
         unavailable: list = []
         blocked: list = []
@@ -1900,27 +1551,7 @@ class Collection:
         return available, unavailable, blocked
 
     def _unmounted_reason(self, root: Path) -> Optional[str]:
-        """Why *root* looks like an UNMOUNTED mount point, or None if it is fine.
-
-        ``is_dir()`` cannot see this on POSIX: unmounting leaves the mount point
-        behind as an ordinary, existing, EMPTY directory. The root then passes the
-        availability check above, every document under it fails ``p.exists()`` in
-        the missing pass, and an explicit ``resync --prune-missing`` run during
-        the unmount window deletes the entire index for that folder - the exact
-        outcome the "an unplugged drive cannot destroy the index" promise rules
-        out. (The scheduled path never prunes, so only a hand-run prune could
-        reach it.)
-
-        All three conditions are required and none is sufficient alone.
-        ``os.path.ismount`` by itself would skip a volume that is mounted and was
-        legitimately indexed (a NAS share, a second drive); "empty" by itself
-        would break the user who really did empty an indexed folder and wants
-        --prune-missing to act on it. A mount point that is empty WHILE we hold
-        documents indexed under it is the specific shape of a drive that went
-        away, and skipping it is recoverable (remove the entries with
-        ``localm rag rm`` if the folder really is empty for good), where pruning
-        a mounted-away drive is not.
-        """
+        """Why *root* looks like an UNMOUNTED mount point, or None if it is fine."""
         try:
             if not os.path.ismount(root):
                 return None
@@ -1937,10 +1568,7 @@ class Collection:
                 "share appears to be unmounted")
 
     def _has_docs_under(self, root: Path) -> bool:
-        """True when at least one indexed document's source lives under *root*.
-
-        Uploads are excluded: an ``upload:`` key is not a filesystem path, so it
-        can neither be under a root nor be evidence that one lost its contents."""
+        """True when at least one indexed document's source lives under *root*."""
         return any(
             not str(key).startswith("upload:") and _path_within(Path(key), root)
             for key in self._meta.get("docs", {})
@@ -1948,13 +1576,7 @@ class Collection:
 
     def _resyncable_files(self, skipped_roots: list, policy: Optional[dict],
                           say: ProgressFn) -> list:
-        """Existing document source files that are safe to re-index this run.
-
-        Uploads have no source file (``upload:`` keys) and are skipped. So is
-        anything under a skipped root, and anything the current policy refuses -
-        the latter must be filtered HERE rather than handed to
-        ``_add_paths_locked``, whose top-level confinement check raises and would
-        abort the entire re-sync over one now-out-of-bounds file."""
+        """Existing document source files that are safe to re-index this run."""
         out: list = []
         for key in sorted(self._meta.get("docs", {})):
             if str(key).startswith("upload:"):
@@ -1978,16 +1600,7 @@ class Collection:
 
     def _reconcile_missing(self, skipped_roots: list, *, was_missing: set,
                            prune_missing: bool, say: ProgressFn):
-        """Flag documents whose file has vanished, clear the flag on ones that
-        came back, and prune only when explicitly asked. Returns
-        (newly_missing, restored, pruned) as lists of doc keys.
-
-        *was_missing* is the flagged set as it stood BEFORE this run indexed
-        anything: a document that came back CHANGED has already been re-indexed
-        (which rewrites its entry and drops the flag), so the live entry can no
-        longer tell us it was ever missing.
-
-        Mutates ``self._meta`` / ``self._chunks`` in place; the caller saves."""
+        """Flag documents whose file has vanished, clear the flag on ones that came back, and prune only when explicitly asked."""
         docs = self._meta.get("docs", {})
         newly_missing: list = []
         restored: list = []
@@ -2038,27 +1651,7 @@ class Collection:
                     on_progress: Optional[ProgressFn] = None,
                     force: bool = False,
                     model_name: Optional[str] = None) -> dict:
-        """Index documents UPLOADED from the caller's own device (the per-device
-        path for a client that cannot browse the server disk).
-
-        Each item is ``{"filename": str, "data": bytes}``. Extraction runs in
-        memory (``extract_bytes`` - same zip-bomb / encoding guards as chat
-        attachments); the resulting chunks and optional vectors ARE persisted,
-        because a knowledge base is explicit user data like ``add_paths``. There is
-        deliberately NO filesystem confinement here: nothing on the server disk is
-        read, so the whitelist/blacklist policy does not apply - the bytes are the
-        caller's own device content. Docs are keyed ``upload:<filename>`` and
-        deduped by content hash, so re-uploading an unchanged file is skipped.
-        Returns the same counters as ``add_paths``.
-
-        The uploaded BYTES are not retained (only the extracted chunks/vectors), so
-        an ``upload:<name>`` doc cannot be re-read from disk: ``localm rag repair``
-        simply skips these keys (Path('upload:x') is not a file) - their chunks
-        persist and are never lost, they just cannot be re-embedded from source.
-
-        *model_name*: see ``add_paths()`` - the embedding model's name, recorded
-        the first time this collection is actually embedded.
-        """
+        """Index documents UPLOADED from the caller's own device (the per-device path for a client that cannot browse the server disk)."""
         with _collection_lock(self.name), self._write_lock("an upload", on_progress):
             self._load()
             return self._add_uploads_locked(
@@ -2073,13 +1666,7 @@ class Collection:
                             on_progress: Optional[ProgressFn] = None,
                             force: bool = False,
                             model_name: Optional[str] = None) -> dict:
-        """The add_uploads body. MUST run under _collection_lock after _load().
-
-        Mirrors the per-document body of _add_paths_locked (chunk -> embed ->
-        replace-prior-chunks -> record meta), but sourced from in-memory bytes with
-        a hash-only dedup (no fs mtime/size). Kept as a separate loop rather than
-        refactoring the battle-tested path loop, so the server-disk path is
-        untouched."""
+        """The add_uploads body."""
         # The no-op accepts **_ because `_finished` below passes the structured
         # keywords ProgressFn now carries. A one-positional lambda would raise
         # TypeError on every caller that passes no callback at all, which is most
@@ -2093,24 +1680,7 @@ class Collection:
         n_total = len(uploads)
 
         def _finished(n: int, text: str) -> None:
-            """Report one item DONE, whatever its outcome.
-
-            Called on every exit from the loop body, including the two that
-            `continue`. Progress is about how far the LOOP got, not how many
-            succeeded: a run of duplicate skips is real work being done, and a
-            bar that freezes through it is the "is it stuck?" this reports exist
-            to remove.
-
-            **This is the fragile shape and it is chosen deliberately.** A tick
-            placed after the body would need no repetition, but the body has
-            three exits, so it would simply never run for two of them. Ticking
-            BEFORE each item avoids the repetition too, but the line and the
-            structured event travel together on this channel, so that would emit
-            a "starting X" line per file on top of the outcome line. Three call
-            sites it is - and the regression test asserts the done-SEQUENCE is
-            exactly 1..n_total, which is what fails if a future branch adds a
-            fourth exit and forgets one.
-            """
+            """Report one item DONE, whatever its outcome."""
             say(text, phase="indexing uploads", done=n, total=n_total,
                 unit="files")
 
@@ -2194,15 +1764,7 @@ class Collection:
                 "failed": failed, "chunks": len(self._chunks)}
 
     def _dim_mismatch_message(self, new_dim: int) -> str:
-        """The refusal a user actually sees when they change embedding model.
-
-        It used to say "Rebuild it (delete and re-add)" - telling someone to DELETE
-        their collection, while naming neither the collection nor a command that
-        works. Worse, the two remedies it implied both failed: `rag repair --embed`
-        and the GUI reindex button hit this very guard, because neither reset
-        _vec_dim. Now it names the collection, both models where known, and the one
-        command that does the job without touching the source files.
-        """
+        """The refusal a user actually sees when they change embedding model."""
         was = self.embedding_model()
         built = f" with {was}" if was else ""
         return (
@@ -2217,26 +1779,7 @@ class Collection:
     def reembed(self, *, embed_fn: EmbedFn, model_name: Optional[str] = None,
                 on_progress: Optional[ProgressFn] = None,
                 batch: int = 32) -> dict:
-        """Recompute EVERY vector from the stored chunk text, with a new model.
-
-        This is the answer to "I changed the embedding model, now my collection
-        refuses everything". The chunk text is already on disk in chunks.jsonl, so
-        nothing needs re-reading, re-chunking, or even to still exist: a collection
-        whose sources moved, were deleted, or arrived as uploads re-embeds exactly
-        the same as one whose files are all present. That is the difference from
-        ``rag repair --embed``, which re-indexes FROM THE ORIGINAL SOURCE FILES and
-        therefore cannot help when they are gone - and which could not help anyway,
-        because it never reset ``_vec_dim`` and so tripped the very dimension guard
-        it was supposed to resolve.
-
-        Crash-safe by construction: every vector is computed into a LOCAL list
-        first, and ``self._vectors`` is only replaced once the whole set is in hand
-        and validated. A failing embedder (model unloaded, VRAM gone, a bad batch)
-        therefore leaves the previous index exactly as it was, rather than a
-        half-dimension index that would mis-score every later query. The cost is
-        holding one full vector set in memory during the run, which is the same
-        order as the file it is about to write.
-        """
+        """Recompute EVERY vector from the stored chunk text, with a new model."""
         with _collection_lock(self.name), self._write_lock("reembed", on_progress):
             self._load()
             if not self._chunks:
@@ -2324,9 +1867,7 @@ class Collection:
 
     def query(self, text: str, k: int = 4,
               embed_fn: Optional[EmbedFn] = None) -> list[dict]:
-        """Top-*k* chunks for *text*: max-normalised BM25, blended 50/50 with
-        cosine similarity when vectors cover the corpus and the query can be
-        embedded."""
+        """Top-*k* chunks for *text*: max-normalised BM25, blended 50/50 with cosine similarity when vectors cover the corpus and the query can be embedded."""
         if not text.strip() or not self._chunks:
             return []
         if self._bm25 is None:
@@ -2355,24 +1896,7 @@ class Collection:
         ]
 
     def _note_vector_degrade(self, reason: str, *, warn: bool) -> None:
-        """Record WHY semantic (vector) scoring is unavailable and surface it once.
-
-        We do not hide problems (AGENTS rule 5): a corrupt, stale, or dimensionally
-        mismatched vectors index must not silently vanish into BM25-only. Recording
-        the reason (exposed via ``stats()``) and logging genuine corruption once is
-        the right altitude: the lexical fallback still works, but the fault stays
-        discoverable.
-
-        "Once" has to mean once per PROCESS, not once per instance. This method was
-        already idempotent against ``self.vector_degrade_reason``, but ``_load``
-        runs from ``__init__`` and every request builds a FRESH Collection, so the
-        guard reset on each one and the same sentence was logged on essentially
-        every /api/rag call - measured at 25+ identical WARNING lines in one
-        session, several twice within a single request. The instance field is still
-        set unconditionally, so ``stats()`` and the GUI's "needs repair" state stay
-        exactly as accurate as before; only the duplicate LOG LINE is suppressed.
-        A genuinely NEW reason for the same collection still warns, so a fault that
-        changes shape is never hidden behind an earlier one."""
+        """Record WHY semantic (vector) scoring is unavailable and surface it once."""
         self.vector_degrade_reason = reason
         if not warn:
             return
@@ -2446,16 +1970,7 @@ class Collection:
 
     @staticmethod
     def _has_vectors(chunks: list, vectors: Optional[list]) -> bool:
-        """"Has vectors" = whether query() will actually blend embeddings: the
-        same >=80% coverage threshold _vector_scores uses, NOT "every chunk
-        embedded". A partially-embedded collection (80-99%) still does hybrid
-        retrieval, so the retrieval-mode label must not under-report it (rule 5).
-
-        A shared staticmethod (not inlined in stats()) because _save() ALSO
-        needs this exact formula, to cache it into meta.json - see the block
-        comment at the end of _save(). Two independent copies of "0.8" is
-        precisely the kind of second derivation that silently drifts the day
-        only one of them is changed (diff-review-discipline #10)."""
+        """'Has vectors' = whether query() will actually blend embeddings: the same >=80% coverage threshold _vector_scores uses, NOT 'every chunk embedded'."""
         present = [v for v in (vectors or []) if v]
         return bool(present) and len(present) >= 0.8 * len(chunks)
 
@@ -2487,19 +2002,7 @@ class Collection:
         }
 
     def vector_dim(self) -> Optional[int]:
-        """The dimensionality of THIS collection's currently stored vectors, or
-        None when it cannot be established: no usable vectors are stored at all
-        (see ``stats()["has_vectors"]``), or ``_load()`` found the file present
-        but unusable for a reason ``vector_degrade_reason`` names.
-
-        Reads the same ``_vec_dim`` the C3 add-time consistency guard already
-        trusts as this collection's dimension (``self._vec_dim is not None and
-        new_dim != self._vec_dim`` above) - not a second, independently-derived
-        notion of "the dim" that could silently disagree with it. ``_load()``
-        computes it as ``data.get("dim") or _first_dim(vectors)``, so a legacy
-        vectors.json written before the "dim" field existed still resolves it
-        from the first stored vector rather than reporting unknown for no
-        reason; only a genuinely unusable/empty index falls through to None."""
+        """The dimensionality of THIS collection's currently stored vectors, or None when it cannot be established: no usable vectors are stored at all (see ``stats()['has_vectors']``), or ``_load()`` found the file present but unusable for a reason ``vector_degrade_reason`` names."""
         return self._vec_dim
 
     def docs(self) -> list[dict]:
@@ -2517,16 +2020,7 @@ class Collection:
     # ------------------------------------------------------------- #
 
     def _file_fingerprint(self) -> dict:
-        """(mtime_ns, size) for chunks.jsonl and vectors.json (None for
-        either that does not exist) - a cheap (stat only, no content read)
-        signature of the two files the ``_stats_cache`` block is derived
-        from. Written by _save() right after both files were rewritten above,
-        and checked by ``_fingerprint_matches`` before the cache is ever
-        trusted, so a file that changed WITHOUT going through this class
-        (external tampering, a crash between this save's own two writes, a
-        hand-restored backup) is detected and the cache refused rather than
-        trusted stale. See the block comment in _save() for the concrete
-        failure this closes."""
+        """(mtime_ns, size) for chunks.jsonl and vectors.json (None for either that does not exist) - a cheap (stat only, no content read) signature of the two files the ``_stats_cache`` block is derived from."""
         def _stat(name: str) -> "list[int] | None":
             try:
                 st = (self.dir / name).stat()
@@ -2537,11 +2031,7 @@ class Collection:
 
     @staticmethod
     def _fingerprint_matches(coll_dir: Path, recorded) -> bool:
-        """True when *recorded* (the cache's "fingerprint" value) still
-        matches chunks.jsonl and vectors.json on disk RIGHT NOW. Duplicates
-        the same two os.stat() calls as _file_fingerprint() rather than
-        sharing an instance method, because this runs from peek_stats()
-        BEFORE any Collection exists - there is nothing to call it on."""
+        """True when *recorded* (the cache's 'fingerprint' value) still matches chunks.jsonl and vectors.json on disk RIGHT NOW."""
         if not isinstance(recorded, dict):
             return False
         def _stat(name: str) -> "list[int] | None":
@@ -2556,12 +2046,7 @@ class Collection:
     @classmethod
     def _peek_meta(cls, name: str, base: Optional[Path] = None
                     ) -> "tuple[str, Path, dict] | None":
-        """(checked name, collection dir, parsed meta.json), or None when
-        there is nothing here the lazy path can trust enough to skip the full
-        load: an invalid name, no meta.json, or one that fails to parse. A
-        caller falling back to the real ``Collection(name)`` on None gets
-        EXACTLY today's behaviour (including its corrupt-meta.json recovery),
-        never a second, weaker copy of that recovery logic."""
+        """(checked name, collection dir, parsed meta.json), or None when there is nothing here the lazy path can trust enough to skip the full load: an invalid name, no meta.json, or one that fails to parse."""
         try:
             checked_name = _check_name(name)
         except ValueError:
@@ -2581,17 +2066,7 @@ class Collection:
     @classmethod
     def _stats_from_meta(cls, checked_name: str, coll_dir: Path,
                          meta: dict) -> Optional[dict]:
-        """stats()-shaped dict from an already-parsed meta.json, using ONLY the
-        cache _save() writes (see its block comment) - never a re-derivation of
-        has_vectors/vector_degrade_reason from a partial read of chunks.jsonl /
-        vectors.json, which would be exactly the "answers wrong instead of not
-        at all" failure this needs to avoid. None when the cache is absent,
-        its recorded file fingerprint no longer matches chunks.jsonl /
-        vectors.json on disk (see ``_fingerprint_matches`` - the file changed
-        without going through this class since the cache was written), or it
-        otherwise does not look like this class wrote it (a collection never
-        saved under this code, or a hand-edited meta.json) - the caller must
-        fall back to the full, authoritative Collection(name).stats()."""
+        """stats()-shaped dict from an already-parsed meta.json, using ONLY the cache _save() writes (see its block comment) - never a re-derivation of has_vectors/vector_degrade_reason from a partial read of chunks.jsonl / vectors.json, which would be exactly the 'answers wrong instead of not at all' failure..."""
         cache = meta.get(_STATS_CACHE_KEY)
         if not isinstance(cache, dict) or not isinstance(cache.get("n_chunks"), int):
             return None
@@ -2625,12 +2100,7 @@ class Collection:
 
     @classmethod
     def peek_stats(cls, name: str, base: Optional[Path] = None) -> Optional[dict]:
-        """``stats()`` without constructing a full ``Collection`` - reads
-        meta.json alone and trusts its cached derived fields, never
-        chunks.jsonl or vectors.json. None means "cannot answer cheaply and
-        correctly" (see ``_stats_from_meta``); the caller MUST fall back to
-        the real ``Collection(name).stats()`` in that case - which stays
-        exactly as correct, and exactly as expensive, as it always was."""
+        """``stats()`` without constructing a full ``Collection`` - reads meta.json alone and trusts its cached derived fields, never chunks.jsonl or vectors.json."""
         found = cls._peek_meta(name, base)
         if found is None:
             return None
@@ -2639,8 +2109,7 @@ class Collection:
 
     @classmethod
     def peek_detail(cls, name: str, base: Optional[Path] = None) -> Optional[dict]:
-        """``peek_stats()`` plus the docs list, for the collection-detail route -
-        both read meta.json exactly once. Same None contract as peek_stats()."""
+        """``peek_stats()`` plus the docs list, for the collection-detail route - both read meta.json exactly once."""
         found = cls._peek_meta(name, base)
         if found is None:
             return None
@@ -2653,59 +2122,7 @@ class Collection:
     @classmethod
     def load_and_maybe_backfill(cls, name: str, base: Optional[Path] = None
                                 ) -> "Collection":
-        """The COLD-fallback path for ``peek_stats()``/``peek_detail()``: a
-        full, authoritative load of *name* (identical to plain ``Collection(
-        name, base)``), with an opportunistic attempt to backfill its
-        ``_stats_cache`` so future listings of this SAME collection stop
-        paying the full-load cost - closing the gap named in ``rag_collections``'s
-        own docstring: ``_load()`` never calls ``_save()``, so a collection
-        written once and only ever LISTED afterward stayed on this fallback
-        forever, not just once.
-
-        ORDERING IS THE WHOLE POINT: the write lock is acquired FIRST, and the
-        load happens INSIDE it - never load-then-lock. Loading first and
-        locking only to persist would reopen exactly the race this exists to
-        avoid: a concurrent writer could rewrite chunks.jsonl/vectors.json in
-        the gap between our read and our lock acquisition, and we would cache
-        OUR now-stale snapshot with a fingerprint that (taken after their
-        write) matches the NEW files - so the next ``peek_stats()`` would
-        trust stale counts with full confidence, the "answers wrong instead
-        of not at all" failure this whole cache design exists to avoid.
-        Acquiring first makes that gap not exist at all: nothing else can
-        write to this collection while we hold its lock (every real writer -
-        ``create``/``add_paths``/etc - takes the SAME file lock before
-        touching disk), so whatever ``_load()`` reads while we hold it IS
-        current for as long as we hold it, and the fingerprint taken from
-        that same held state (still inside the lock, before it is released)
-        can never describe anything but what was just read. Same ordering
-        ``_save()`` itself already uses - its fingerprint is taken from what
-        THAT call just wrote, under a lock its own callers already hold -
-        just applied to a read instead of a write.
-
-        Deliberately takes ONLY the cross-process file lock, not the
-        in-process ``_collection_lock`` every real writer also holds (see
-        ``create()``). ``_collection_lock`` exists for two IN-PROCESS writers
-        each loading, mutating DIFFERENTLY, and each ``_save()``-ing - a
-        lost-update hazard between two MUTATIONS. This method never mutates
-        anything (no add/delete/embed): it only re-derives a cache from bytes
-        it read under the file lock, and every real writer takes that SAME
-        file lock before touching disk, so a genuine writer and a concurrent
-        backfill attempt are already fully serialised by it alone. The worst
-        possible interleaving is this method's cache write being immediately
-        superseded by a real writer's own subsequent ``_save()`` (which runs
-        after, on the same lock, with its own fresher fingerprint) - never
-        data loss, never a wrong answer surfacing.
-
-        ``timeout=0``: this is an OPPORTUNISTIC path serving a READ (a
-        collections listing or detail view), not a real write with something
-        worth waiting for. A collection whose lock is busy is, BY
-        CONSTRUCTION, one currently being written - and a write always ends
-        in its own ``_save()``, which caches it anyway. So the collections
-        this method cannot backfill are exactly the ones that do not need
-        it: refusing to wait costs nothing a moment would have bought back.
-        On a busy lock this returns exactly what today's uncached fallback
-        already returns - a fully loaded, fully correct ``Collection``, just
-        without a cache written this time."""
+        """The COLD-fallback path for ``peek_stats()``/``peek_detail()``: a full, authoritative load of *name* (identical to plain ``Collection( name, base)``), with an opportunistic attempt to backfill its ``_stats_cache`` so future listings of this SAME collection stop paying the full-load cost - closing the..."""
         base = base or rag_dir()
         checked_name = _check_name(name)
         coll_dir = base / checked_name
@@ -2723,30 +2140,7 @@ class Collection:
 
 
 def collection_provenance_report() -> list:
-    """Every collection that currently has vectors, with its recorded 'built
-    with' model (``Collection.embedding_model()``, None if never recorded)
-    and chunk count - the pre-switch, new-model-dimension-free report used by
-    every writer of the ``embedding_model`` config key (the RAG picker's
-    ``POST /api/rag/embedding``, ``PATCH /v1/config``, and
-    ``localm setup-embeddings``) to warn what an embedding-model switch is
-    about to invalidate, before it happens.
-
-    Deliberately does NOT assert whether a given collection's dimension will
-    actually change - that needs the CANDIDATE model's own dimension, which
-    means resolving and loading it (a real fetch/VRAM-load, not a free
-    probe), and no caller of this report may take that step before the user
-    has confirmed. So this reports what CAN be known for free from disk
-    alone: which collections have semantic search today, and what they were
-    built with. Honest under-claiming (AGENTS rule 5: never assert a
-    dimension nobody has measured) rather than a confident but fabricated
-    per-collection verdict.
-
-    Best-effort per collection: one that fails to even construct is still
-    named, with the failure NOTED (not silently dropped from the count).
-    The exception's own text is logged server-side only, never placed in the
-    field this function returns - a caller (an HTTP route) may serialize the
-    return value straight into a response body, and the raw message can
-    carry a filesystem path or other implementation detail (CWE-209)."""
+    """Every collection that currently has vectors, with its recorded 'built with' model (``Collection.embedding_model()``, None if never recorded) and chunk count - the pre-switch, new-model-dimension-free report used by every writer of the ``embedding_model`` config key (the RAG picker's ``POST /api/rag/..."""
     out: list = []
     for name in collection_names():
         try:
@@ -2766,10 +2160,7 @@ def collection_provenance_report() -> list:
 
 
 def collection_provenance_note(model: str, affected: list) -> str:
-    """The human-readable note accompanying a ``collection_provenance_report()``
-    result, shared by every writer of ``embedding_model`` (the RAG picker,
-    ``PATCH /v1/config``, ``localm setup-embeddings``) so the wording a user
-    sees does not drift between which surface they switched from."""
+    """The human-readable note accompanying a ``collection_provenance_report()`` result, shared by every writer of ``embedding_model`` (the RAG picker, ``PATCH /v1/config``, ``localm setup-embeddings``) so the wording a user sees does not drift between which surface they switched from."""
     if affected:
         return (
             f"Switching to '{model}' may invalidate the semantic search of "

@@ -1,25 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The GGUF backend's per-load sizing/preflight must budget an applied
-multi-GPU split against the split's COMBINED free/total, not the main GPU
-alone (VramSizingMixin._split_free_total_bytes + its four consumers:
-_auto_gpu_layers, _check_vram, _auto_ctx_max, _check_context_fit - see
-llamacpp/_sizing.py), with vram_capacity(combined_only=True) as the single
-summing source (discover.py).
-
-The regression these tests pin (functional audit 2026-07-21, gpu-split scope):
-the admission gate (vram_capacity + gpu_split_shortfall) learned to sum across
-a split long ago, but the backend's own deeper preflight stayed split-blind -
-on a simulated 2x16 GB box with a 20 GB model and gpu_split_indices=[0, 1],
-_auto_gpu_layers picked a silent partial offload (21/32 layers), _check_vram
-hard-refused a pinned load with a factually wrong "cannot fit regardless", and
-_auto_ctx_max collapsed the growth ceiling to n_ctx despite ~11 GB combined
-headroom.
-
-Style mirrors tests/test_auto_gpu_layers.py and tests/test_gpu_split_wiring.py:
-the REAL methods run; only the VRAM readings (localm.discover.list_gpus /
-the single-device probe pair), localm.config.load_config, and the model
-size/layer count are faked.
-"""
+"""The GGUF backend's per-load sizing/preflight must budget an applied multi-GPU split against the split's COMBINED free/total, not the main GPU alone (VramSizingMixin._split_free_total_bytes + its four consumers: _auto_gpu_layers, _check_vram, _auto_ctx_max, _check_context_fit - see llamacpp/_sizing.p..."""
 
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -48,9 +28,7 @@ def _model(tmp_path, size_bytes, *, n_gpu_layers=99, auto=True, n_ctx=4096,
 
 
 def _vram(free, total):
-    """Deterministic SINGLE-DEVICE reading, all three real paths patched
-    together - copied from tests/test_auto_gpu_layers.py (see its docstring
-    for why each of the three patches is required on a GPU-equipped box)."""
+    """Deterministic SINGLE-DEVICE reading, all three real paths patched together - copied from tests/test_auto_gpu_layers.py (see its docstring for why each of the three patches is required on a GPU-equipped box)."""
     from contextlib import ExitStack
 
     stack = ExitStack()
@@ -65,19 +43,14 @@ def _vram(free, total):
 
 
 def _gpus_double(gpus, status=GPU_PROBE_OK):
-    """A list_gpus stand-in honouring the status-aware contract the combined
-    path opts into (return_status=True, wait_for_inflight=True)."""
+    """A list_gpus stand-in honouring the status-aware contract the combined path opts into (return_status=True, wait_for_inflight=True)."""
     def fake(**kw):
         return (list(gpus), status) if kw.get("return_status") else list(gpus)
     return fake
 
 
 def _split_box(monkeypatch, per_gpu, *, indices=(0, 1), status=GPU_PROBE_OK):
-    """A box with gpu_split_indices configured and list_gpus() seeing the
-    given [(free, total), ...] devices. Also pins native_lib_loaded() False
-    (we model the PARENT process; an earlier test in this worker could have
-    loaded the native lib, which would honestly - but nondeterministically -
-    disable the combined path) and gives every listed device an index/name."""
+    """A box with gpu_split_indices configured and list_gpus() seeing the given [(free, total), ...] devices."""
     monkeypatch.setattr("localm.config.load_config",
                         lambda: {"gpu_split_indices": list(indices)})
     gpus = [{"index": i, "name": f"GPU {i}", "free": f, "total": t}
@@ -93,14 +66,7 @@ def _forbidden_list_gpus(**kw):
 
 def _implicit_box(monkeypatch, per_gpu, *, vulkan=False, status=GPU_PROBE_OK,
                   dev_types=None):
-    """A box with NO gpu_split_indices, where llama.cpp's own default layer
-    split spreads the load over the given [(free, total), ...] devices.
-
-    Pins _native_backend_has_vulkan explicitly rather than letting it read this
-    machine: the vulkan branch reads the ggml registry (native_gpu_devices) and
-    the other reads torch's view (list_gpus), so an unpinned value silently
-    decides WHICH double is consulted - and on a box where the other one is
-    live, a test can pass without its own fixture ever being read."""
+    """A box with NO gpu_split_indices, where llama.cpp's own default layer split spreads the load over the given [(free, total), ...] devices."""
     monkeypatch.setattr("localm.config.load_config", lambda: {})
     monkeypatch.setattr(_loader, "native_lib_loaded", lambda: False)
     monkeypatch.setattr("localm.discover._native_backend_has_vulkan",
@@ -467,10 +433,7 @@ MODEL_45GB = 45 * GB
 
 
 def _shares(free_by_device):
-    """llama.cpp's own default split fractions: splits[i] = free_i, cumulative,
-    normalised (llama-model.cpp, the all_zero branch). So device i receives
-    free_i / SUM(free) of the offloaded layers, and their KV with them - the KV
-    cache follows its layer's device."""
+    """llama.cpp's own default split fractions: splits[i] = free_i, cumulative, normalised (llama-model.cpp, the all_zero branch)."""
     total = sum(free_by_device)
     return [f / total for f in free_by_device]
 
@@ -623,9 +586,7 @@ class TestImplicitSplitSizing:
 
 
 class TestSingleGpuPathUnchanged:
-    """The regression that matters most: one card is the field's commonest
-    configuration and it works today. Every number below is the FLAT-overhead
-    arithmetic that shipped before the implicit-split change."""
+    """The regression that matters most: one card is the field's commonest configuration and it works today."""
 
     def test_layer_sizing_is_byte_identical_on_one_card(self, tmp_path,
                                                         monkeypatch):
@@ -666,14 +627,7 @@ class TestSingleGpuPathUnchanged:
 
 
 class TestImplicitSplitDecisionIsRecorded:
-    """The combined budget must leave a trace naming the figures it used.
-
-    Rule 5, surface the decision - the same contract resolve_auto_split_ratios
-    states for its own INFO line. Until this existed only the DECLINE path
-    logged, so a bug report about a wrongly-sized load could not distinguish a
-    budget taken across the whole board from one taken against a single card,
-    which is exactly the defect implicit_split_capacity was added to fix.
-    """
+    """The combined budget must leave a trace naming the figures it used."""
 
     def test_combined_budget_logs_the_devices_and_the_figures(
             self, tmp_path, monkeypatch, caplog):

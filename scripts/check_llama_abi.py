@@ -1,50 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Cross-check localm's ctypes struct layouts against an upstream ``llama.h``.
-
-This is a VERIFIER, not a generator. It parses the by-value structs localm passes
-across the FFI boundary (``llama_model_params``, ``llama_context_params``) plus
-``llama_batch`` out of a real ``llama.h``, computes each field's byte offset under
-natural 64-bit alignment, and diffs those offsets against
-``localm.inference.backends.llamacpp._structs``. It is the tripwire to run when
-bumping the bundled llama.cpp build: a mid-struct REORDER or insertion (the
-dangerous, memory-corrupting kind of drift) makes a named field's offset move and
-this exits non-zero; a purely trailing field ADDITION is reported as a note (it
-is absorbed safely by the structs' reserved pad and the default_params round-trip,
-but is worth naming).
-
-IT ALSO CHECKS ENUM DOMAINS, AND THAT IS A SEPARATE QUESTION FROM LAYOUT. An
-offset check reads WHERE a field sits; it is structurally blind to WHICH VALUES
-are legal in it. Upstream added ``LLAMA_LOAD_MODE_AUTO = -1`` between b10361 and
-b10373 and made it the new default, so ``llama_model_default_params()`` began
-returning -1 into a field whose offset had not moved by one byte. localm's own
-``_VALID_LOAD_MODES`` did not list -1, so localm refused every build from b10373
-on. The layout gate was GREEN throughout, and it was not broken: it was answering
-an adjacent question. Hence the rule this file now enforces - "passes the ABI
-gate" is not the definition of a confirmed build.
-
-The two enum outcomes are deliberately DISTINCT, and collapsing them would be the
-defect rather than the fix:
-
-  * a NEW member appearing upstream is ADDITIVE. Reported loudly, exit code
-    unchanged. It only becomes dangerous when it becomes the DEFAULT, which a
-    header cannot show - see ``_check_enum``.
-  * a CHANGED VALUE for a member localm already binds is the corrupting class.
-    Hard fail.
-
-It complements the runtime guard ``_abi.verify_abi`` (which validates whatever DLL
-is actually loaded on a user's machine) and the CI load test: this one catches
-header-level drift before a build is even shipped.
-
-Usage:
-    python scripts/check_llama_abi.py                 # fetch the pinned ref's header
-    python scripts/check_llama_abi.py --ref b9740     # a specific tag/commit/branch
-    python scripts/check_llama_abi.py --header path/to/llama.h   # a local header
-
-Stdlib only (urllib + re + ctypes), so it runs anywhere without extra installs.
-A fuller cross-check with clang2py/ctypeslib2 is possible but needs libclang; for
-these few POD structs the lightweight parse here is sufficient and dependency-free.
-"""
+"""Cross-check localm's ctypes struct layouts against an upstream ``llama.h``."""
 
 from __future__ import annotations
 
@@ -79,14 +35,7 @@ _STRUCTS = ("llama_model_params", "llama_context_params", "llama_batch")
 
 
 class _EnumBinding(NamedTuple):
-    """One upstream enum whose DOMAIN localm binds, and where it binds it.
-
-    The member VALUES are never restated here - they are read live out of the
-    localm module named below. A second copy of an upstream enumerator list is a
-    second thing to forget to update, and forgetting it once already cost a live
-    outage (see the module docstring). This registry records only WHERE localm's
-    copy lives, so the verifier reads the same constants the runtime does.
-    """
+    """One upstream enum whose DOMAIN localm binds, and where it binds it."""
     c_enum: str      # the enum type's name in llama.h
     module: str      # the localm module holding the bound constants
     prefix: str      # localm-side constant prefix; the suffix is the member name
@@ -140,8 +89,7 @@ _ENUM_BINDINGS = (
 # --------------------------------------------------------------------------- #
 
 def _resolve_ref(ref: str) -> str:
-    """Resolve ``latest`` to the newest upstream release tag (for CI drift checks);
-    any other value is used as-is. Falls back to the pin if the lookup fails."""
+    """Resolve ``latest`` to the newest upstream release tag (for CI drift checks); any other value is used as-is."""
     if ref != "latest":
         return ref
     import json
@@ -186,13 +134,7 @@ def _strip_comments(text: str) -> str:
 
 
 def _extract_block_body(header: str, keyword: str, name: str):
-    """Brace body of ``<keyword> <name> { ... }``, or None if there is no such block.
-
-    Requiring a ``{`` is what keeps this off the many non-definition mentions of
-    the same name - ``enum llama_load_mode load_mode;`` inside a struct, and
-    ``llama_load_mode_from_str(...)`` in a prototype, both match the name and
-    neither is a definition.
-    """
+    """Brace body of ``<keyword> <name> { ... }``, or None if there is no such block."""
     m = re.search(keyword + r"\s+" + re.escape(name) + r"\s*\{", header)
     if not m:
         return None
@@ -277,20 +219,13 @@ def _layout(fields):
 # --------------------------------------------------------------------------- #
 
 def _header_model_params_layout(header: str) -> str:
-    """Which llama_model_params layout a header carries: 'v1' or 'v2'.
-
-    Keyed on the field that defines the split rather than on a version number,
-    so an arbitrary --ref or --header is classified by what it actually says."""
+    """Which llama_model_params layout a header carries: 'v1' or 'v2'."""
     body = _strip_comments(_extract_struct_body(header, "llama_model_params"))
     return "v2" if re.search(r"\bload_mode\b", body) else "v1"
 
 
 def _header_context_params_layout(header: str) -> str:
-    """Which llama_context_params layout a header carries: 'v1' or 'v2'.
-
-    Independent axis from the model_params split above (see _structs' module
-    docstring) - keyed on n_outputs_max_per_seq, the field upstream inserted
-    directly before n_threads sometime between lemonade b1307 and b10360."""
+    """Which llama_context_params layout a header carries: 'v1' or 'v2'."""
     body = _strip_comments(_extract_struct_body(header, "llama_context_params"))
     return "v2" if re.search(r"\bn_outputs_max_per_seq\b", body) else "v1"
 
@@ -325,13 +260,7 @@ def _localm_layout(struct_name: str, layout: str):
 # --------------------------------------------------------------------------- #
 
 def _parse_enum_members(body: str):
-    """({member: value}, {members whose value could not be read}) for an enum body.
-
-    C enumerators may omit ``= N`` and take previous+1. An unreadable value
-    therefore poisons every implicit member after it, so the running counter is
-    dropped rather than guessed - a guessed value would be indistinguishable
-    from a read one and could manufacture a false FAIL or a false ok.
-    """
+    """({member: value}, {members whose value could not be read}) for an enum body."""
     members = {}
     unreadable = set()
     nxt = 0
@@ -364,12 +293,7 @@ def _parse_enum_members(body: str):
 
 
 def _localm_enum_binding(binding: _EnumBinding):
-    """({member suffix: value}, {suffixes the module names but this registry does not}).
-
-    Values are read live out of the localm module, never restated in the
-    registry, so this verifier compares against the same constants the runtime
-    uses rather than against a copy that can drift from them.
-    """
+    """({member suffix: value}, {suffixes the module names but this registry does not})."""
     _ensure_localm_importable()
     mod = importlib.import_module(binding.module)
     bound = {}
@@ -402,16 +326,7 @@ def _localm_enum_binding(binding: _EnumBinding):
 
 
 def _check_enum(binding: _EnumBinding, header: str, additive: list) -> int:
-    """Diff one bound enum's DOMAIN against *header*; return the problem count.
-
-    Additive findings are APPENDED to *additive* instead of counted, which is the
-    whole point of this function: a new upstream enumerator is safe on its own,
-    and hard-failing on it would train people to widen localm's accept-sets to
-    silence the gate - destroying the misaligned-read tripwire that reads them.
-    A changed value for a name localm already binds is counted, because that one
-    means localm is passing or accepting a number that no longer means what it
-    used to.
-    """
+    """Diff one bound enum's DOMAIN against *header*; return the problem count."""
     gate_struct, gate_field = binding.gate
     struct_body = _extract_block_body(header, "struct", gate_struct)
     gated_in = struct_body is not None and re.search(

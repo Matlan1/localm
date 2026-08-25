@@ -1,10 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Provenance tagging (R19 / AutoJack #2): results from untrusted (network / MCP)
-tools are re-framed as data-not-instructions with a hardened boundary, so a
-fetched page or external server cannot inject instructions into the coder's model
-loop (indirect prompt injection). The outer <tool_result> tag is preserved so the
-rest of the agent is unaffected.
-"""
+"""Provenance tagging (R19 / AutoJack #2): results from untrusted (network / MCP) tools are re-framed as data-not-instructions with a hardened boundary, so a fetched page or external server cannot inject instructions into the coder's model loop (indirect prompt injection)."""
 
 from __future__ import annotations
 

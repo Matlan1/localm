@@ -1,35 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""localm-owned in-memory compatibility shim for a ComfyUI CORE regression.
-
-This file is a plain ``sitecustomize.py`` living in a localm-owned directory.
-localm adds that directory to the PYTHONPATH of a ComfyUI process localm ITSELF
-spawns, so Python auto-imports this module at interpreter startup and it patches
-the regression in memory. It touches NOTHING localm did not spawn: it writes no
-file into the user's ComfyUI install and does not change how the user launches
-ComfyUI. If the user starts ComfyUI their own way, this file is simply not on the
-path and nothing here runs.
-
-The regression: ``comfy_api/internal/__init__.py::make_locked_method_func`` does
-``getattr(type_obj, func).__func__``, assuming a node's FUNCTION is a bound method.
-A node whose FUNCTION resolves to a plain function (the core audio VAEDecodeAudio,
-used by native ACE-Step) has no ``.__func__`` -> ``AttributeError: 'function'
-object has no attribute '__func__'``. Refs: Comfy-Org/ComfyUI #12116,
-patientx/ComfyUI-Zluda #424. The fix makes that one access tolerant of a plain
-function; everything else is a faithful copy of the upstream body.
-
-Hard rules for this file (do not relax):
-- It MUST NOT import localm - it runs inside the ComfyUI interpreter, not localm's.
-- It MUST NEVER raise: every path is wrapped so a failure becomes a silent no-op
-  and can never break ComfyUI startup.
-- It is conservative: it patches ONLY when make_locked_method_func exists AND has
-  the exact known signature AND still does the fragile UNGUARDED ``.__func__``
-  access. On any unexpected or already-fixed shape it no-ops, so it self-expires
-  the moment upstream ships its own fix.
-- It prints ONE line, only when it actually patches, so a real patch is
-  discoverable (localm captures the ComfyUI launcher output to a log). We do not
-  hide problems, and we do not claim a fix we did not apply.
-- It best-effort chains any pre-existing sitecustomize it shadowed on the path.
-"""
+"""localm-owned in-memory compatibility shim for a ComfyUI CORE regression."""
 
 # Deliberately no `from __future__ import annotations` and no localm imports: this
 # module is executed by the ComfyUI interpreter as a bare top-level sitecustomize.
@@ -38,11 +8,7 @@ _TARGET = "comfy_api.internal"
 
 
 def _build_tolerant(mod):
-    """Return a faithful, plain-function-tolerant ``make_locked_method_func`` bound
-    to *mod*'s ``lock_class``, or None when *mod* is not the exact known-buggy shape.
-
-    Conservative by construction: any mismatch (missing name, wrong signature,
-    already tolerant, source unavailable) returns None so the caller no-ops."""
+    """Return a faithful, plain-function-tolerant ``make_locked_method_func`` bound to *mod*'s ``lock_class``, or None when *mod* is not the exact known-buggy shape."""
     import asyncio
     import inspect
 
@@ -98,8 +64,7 @@ def _build_tolerant(mod):
 
 
 def _patch_module(mod):
-    """Swap the tolerant function onto *mod*. Return True iff it patched. Never
-    raises. Prints one discoverable INFO line only on a real patch."""
+    """Swap the tolerant function onto *mod*."""
     try:
         tolerant = _build_tolerant(mod)
         if tolerant is None:
@@ -119,9 +84,7 @@ def _patch_module(mod):
 
 
 def _install():
-    """Patch comfy_api.internal now if it is already imported; otherwise arrange to
-    patch it right after ComfyUI imports it, WITHOUT importing it ourselves (so we
-    add no early-import cost and no side effects). Never raises."""
+    """Patch comfy_api.internal now if it is already imported; otherwise arrange to patch it right after ComfyUI imports it, WITHOUT importing it ourselves (so we add no early-import cost and no side effects)."""
     import sys
     try:
         mod = sys.modules.get(_TARGET)
@@ -134,9 +97,7 @@ def _install():
         import importlib.util
 
         class _ComfyFuncShimFinder:
-            """A meta_path finder that wraps the real loader for exactly one module,
-            runs our patch after its exec, then removes itself. Returns None for
-            everything else, so it never interferes with any other import."""
+            """A meta_path finder that wraps the real loader for exactly one module, runs our patch after its exec, then removes itself."""
 
             def find_spec(self, name, path=None, target=None):
                 if name != _TARGET:
@@ -174,8 +135,7 @@ def _install():
 
 
 def _chain_previous_sitecustomize():
-    """Best-effort: run the next sitecustomize.py our directory shadowed on
-    sys.path, so a user's own environment customization still runs. Never raises."""
+    """Best-effort: run the next sitecustomize.py our directory shadowed on sys.path, so a user's own environment customization still runs."""
     try:
         import importlib.util
         import os

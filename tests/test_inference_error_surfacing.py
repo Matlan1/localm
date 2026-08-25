@@ -1,15 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""An inference failure in a streaming SSE generator must reach the client as a
-clean '[inference error: ...]' chunk, NOT crash the daemon generation thread
-(which fires a crash report and looks to the user like an empty reply).
-
-Regression guard for R16: the n_ctx-overflow RuntimeError (a conversation that
-outgrew the context window) used to kill the /v1/completions generation thread -
-its _generate() had a try/finally with no except, so the exception escaped the
-thread. The chat path caught it but then called traceback.print_exc(), which was
-the historical WinError-6 console crash source on Windows. Both paths must now
-surface the error to the client and keep the server alive.
-"""
+"""An inference failure in a streaming SSE generator must reach the client as a clean '[inference error: ...]' chunk, NOT crash the daemon generation thread (which fires a crash report and looks to the user like an empty reply)."""
 
 from unittest.mock import MagicMock
 

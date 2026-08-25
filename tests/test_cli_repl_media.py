@@ -1,12 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""REPL media-generation parity (rec#437): /generate-music and /generate-video
-mirror /generate-image - they unload the chat model, resolve the configured
-ComfyUI api_url (not a hardcoded default), and honour the privacy contract by
-suppressing the on-disk sidecar in privacy mode.
-
-These mirror tests/plugins/coder/test_image_tool.py's /generate-image tests so
-the three media commands stay behaviourally identical.
-"""
+"""REPL media-generation parity (rec#437): /generate-music and /generate-video mirror /generate-image - they unload the chat model, resolve the configured ComfyUI api_url (not a hardcoded default), and honour the privacy contract by suppressing the on-disk sidecar in privacy mode."""
 
 from unittest.mock import MagicMock, patch
 
@@ -15,8 +8,7 @@ import pytest
 
 def _run_repl_media(command: str, generate_target: str, *, mode, api_url,
                     home_dir, engine=None):
-    """Drive cli._handle_command(command) with the generator patched, returning
-    the kwargs the generator was called with (empty dict if never called)."""
+    """Drive cli._handle_command(command) with the generator patched, returning the kwargs the generator was called with (empty dict if never called)."""
     from localm import cli
 
     if engine is None:
@@ -88,8 +80,7 @@ def test_repl_media_logmode_keeps_sidecar(tmp_path, monkeypatch, command, target
     ("/generate-video x", "localm.video_gen.comfy.generate_video"),
 ])
 def test_repl_media_no_engine_is_graceful(tmp_path, monkeypatch, command, target):
-    """With no engine (e.g. model-less chat) the command must decline cleanly
-    and never reach the generator."""
+    """With no engine (e.g. model-less chat) the command must decline cleanly and never reach the generator."""
     from localm import cli
 
     monkeypatch.setattr(cli, "HOME_DIR", tmp_path)
@@ -106,8 +97,7 @@ def test_repl_media_no_engine_is_graceful(tmp_path, monkeypatch, command, target
 ])
 def test_repl_media_no_arg_shows_usage_no_unload(tmp_path, monkeypatch,
                                                  command, target):
-    """An argument-less invocation prints usage and must NOT unload the model
-    or call the generator."""
+    """An argument-less invocation prints usage and must NOT unload the model or call the generator."""
     from localm import cli
 
     monkeypatch.setattr(cli, "HOME_DIR", tmp_path)

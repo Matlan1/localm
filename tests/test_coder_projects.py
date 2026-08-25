@@ -1,10 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The coder project registry, and above all what it must NOT record.
-
-The privacy test comes first on purpose. It is the rule the whole module exists
-under, and a registry that quietly recorded a privacy-mode project would defeat
-that mode while every other signal said it was honoured.
-"""
+"""The coder project registry, and above all what it must NOT record."""
 
 import json
 
@@ -15,13 +10,7 @@ from localm.plugins.coder import projects
 
 @pytest.fixture(autouse=True)
 def _isolated_store(tmp_path, monkeypatch):
-    """Point home_dir at a throwaway directory.
-
-    Patched where `projects` RESOLVES it (localm.config.home_dir), not on the
-    projects module: the functions import it inside the call, so patching a name on
-    `projects` would leave the real home untouched and the test would write into the
-    developer's actual data directory while appearing to pass.
-    """
+    """Point home_dir at a throwaway directory."""
     import localm.config as cfg
     monkeypatch.setattr(cfg, "home_dir", lambda: tmp_path)
     monkeypatch.setattr(cfg, "load_config", lambda: {})
@@ -29,7 +18,7 @@ def _isolated_store(tmp_path, monkeypatch):
 
 
 class TestPrivacyModeIsNeverRecorded:
-    """THE rule of this module. Not configurable, so there is no arm where it is."""
+    """THE rule of this module."""
 
     def test_a_privacy_session_writes_no_entry(self, tmp_path):
         assert projects.record_project(tmp_path, "privacy") is False

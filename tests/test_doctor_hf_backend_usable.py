@@ -1,21 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""`localm doctor` must prove the HF (transformers) backend is actually USABLE,
-not merely importable - found during the 0.1.2 release verification: transformers
-5.14 hard-imports `distributed/fsdp.py` on the ordinary
-`transformers.AutoTokenizer` attribute access (transformers is a LAZY module, so
-`import transformers` alone never touches that path), and fsdp needs
-`torch._C._distributed_c10d`, absent from the pinned ROCm/Windows torch build. That
-made EVERY HF model load die at "loading processor..." while `localm doctor`
-reported both `torch` and `transformers` OK - a version/presence probe, not a
-usability one (see tests/test_gpu_extra_pins.py for the version-pin guard this
-backs up with a functional check of doctor's OWN diagnosis).
-
-These tests exercise `_check_hf_backend_usable` directly (real success path,
-against whatever transformers/torch is actually installed in this venv - skipped
-if absent) and via a synthetic broken lazy-import chain (the regression shape,
-reproduced without needing to actually install a broken transformers/torch
-combo), plus the full `cli.doctor` wiring end to end.
-"""
+"""`localm doctor` must prove the HF (transformers) backend is actually USABLE, not merely importable - found during the 0.1.2 release verification: transformers 5.14 hard-imports `distributed/fsdp.py` on the ordinary `transformers.AutoTokenizer` attribute access (transformers is a LAZY module, so `imp..."""
 
 from __future__ import annotations
 
@@ -38,21 +22,7 @@ _FAIL = "✗"
 
 
 class _BrokenLazyModule(types.ModuleType):
-    """Stands in for transformers' `_LazyModule` when attribute resolution hits
-    the exact 0.1.2 regression shape: a chain of `ModuleNotFoundError("Could not
-    import module 'X'") from <next layer down>`, several layers deep, bottoming
-    out in the real cause (`torch._C._distributed_c10d` missing). Reproduces the
-    shape verified against transformers 5.13.1's actual `_LazyModule.__getattr__`
-    source (`raise ModuleNotFoundError(...) from e`), without needing a real
-    broken transformers/torch install.
-
-    A REAL ModuleType subclass (not a bare object): a plain object's
-    `__getattr__` would also intercept dunder lookups like `__spec__` that
-    `importlib.import_module` itself needs when a name is already cached in
-    `sys.modules`, raising before doctor's own code is ever reached. Setting a
-    real `__spec__` here means only the Auto* names doctor actually touches
-    fall through to `__getattr__` - the same way the real `_LazyModule` only
-    intercepts names it does not already have as a normal attribute."""
+    """Stands in for transformers' `_LazyModule` when attribute resolution hits the exact 0.1.2 regression shape: a chain of `ModuleNotFoundError('Could not import module 'X'') from <next layer down>`, several layers deep, bottoming out in the real cause (`torch._C._distributed_c10d` missing)."""
 
     def __init__(self):
         super().__init__("transformers")
@@ -85,21 +55,7 @@ def _run_check_capturing_output(monkeypatch, torch_mod, transformers_mod):
 # --------------------------------------------------------------------------- #
 
 def test_reports_ok_for_the_real_installed_combo(monkeypatch):
-    """Against whatever torch/transformers is genuinely installed in THIS venv,
-    the check must actually resolve AutoTokenizer/AutoProcessor/
-    AutoModelForCausalLM and report OK - not just that they import.
-
-    Skips rather than crashes when llama.cpp's native runtime is already
-    loaded in this process (test_doctor_gpu_verdict.py's own real
-    compute-device probe does this in-process when run earlier in the same
-    pytest worker): a FRESH `import torch` here is the documented
-    known-doomed DLL-identity conflict
-    (VramSizingMixin._free_total_vram_bytes's docstring), which
-    `pytest.importorskip` cannot turn into a skip - it only catches
-    ImportError, and this raises OSError: [WinError 127] instead, failing the
-    test outright rather than an environmental skip. Genuinely reproducing
-    this test's own subject (the REAL installed combo) is not possible under
-    this precondition; a targeted single-file run is unaffected."""
+    """Against whatever torch/transformers is genuinely installed in THIS venv, the check must actually resolve AutoTokenizer/AutoProcessor/ AutoModelForCausalLM and report OK - not just that they import."""
     from localm.inference.backends.llamacpp import _loader
     if _loader.native_lib_loaded():
         pytest.skip("llama.cpp's native runtime is already loaded in this "
@@ -121,11 +77,7 @@ def test_reports_ok_for_the_real_installed_combo(monkeypatch):
 # --------------------------------------------------------------------------- #
 
 def test_reports_fail_and_digs_to_the_real_root_cause(monkeypatch):
-    """The exact 0.1.2 regression: transformers imports fine, but resolving
-    AutoTokenizer dies several layers down. Doctor must report FAIL (not the
-    silent OK a mere `import transformers` would give) and must surface the
-    REAL bottom-of-chain cause, not just the generic top-level wrapper message
-    that hid this regression in the first place."""
+    """The exact 0.1.2 regression: transformers imports fine, but resolving AutoTokenizer dies several layers down."""
     torch_stub = object()
     out = _run_check_capturing_output(monkeypatch, torch_stub, _BrokenLazyModule())
 
@@ -138,8 +90,7 @@ def test_reports_fail_and_digs_to_the_real_root_cause(monkeypatch):
 
 
 def test_root_cause_digging_stops_on_self_referencing_chain(monkeypatch):
-    """Defensive: a pathological exception chain that cycles back on itself must
-    not hang doctor in an infinite loop - the walk must terminate."""
+    """Defensive: a pathological exception chain that cycles back on itself must not hang doctor in an infinite loop - the walk must terminate."""
 
     class _CyclicModule:
         def __getattr__(self, name):
@@ -164,9 +115,7 @@ def test_root_cause_digging_stops_on_self_referencing_chain(monkeypatch):
     (object(), None),
 ])
 def test_silent_when_either_package_not_installed(monkeypatch, torch_mod, transformers_mod):
-    """torch/transformers are OPTIONAL; when either did not import at all,
-    `_check_packages` already reported that (not installed) - this check must
-    add nothing, not a spurious FAIL for a backend nobody opted into."""
+    """torch/transformers are OPTIONAL; when either did not import at all, `_check_packages` already reported that (not installed) - this check must add nothing, not a spurious FAIL for a backend nobody opted into."""
     out = _run_check_capturing_output(monkeypatch, torch_mod, transformers_mod)
     assert out == ""
 
@@ -176,10 +125,7 @@ def test_silent_when_either_package_not_installed(monkeypatch, torch_mod, transf
 # --------------------------------------------------------------------------- #
 
 def _fake_working_torch():
-    """A stand-in torch with no CUDA device - just enough for the unrelated
-    `_check_vram_torch` probe elsewhere in `doctor()` to run without crashing;
-    this test is not about torch's own state, only about wiring the HF-backend
-    usability check through to the real transformers module."""
+    """A stand-in torch with no CUDA device - just enough for the unrelated `_check_vram_torch` probe elsewhere in `doctor()` to run without crashing; this test is not about torch's own state, only about wiring the HF-backend usability check through to the real transformers module."""
     import types
 
     mod = types.ModuleType("torch")
@@ -194,9 +140,7 @@ def _fake_working_torch():
 
 
 def test_doctor_cli_surfaces_broken_hf_backend_end_to_end(cli_runner, monkeypatch):
-    """Wire the broken-chain scenario through the REAL `localm doctor` command
-    (not just the unit-level check), proving `_check_packages`'s returned module
-    handles actually reach `_check_hf_backend_usable`."""
+    """Wire the broken-chain scenario through the REAL `localm doctor` command (not just the unit-level check), proving `_check_packages`'s returned module handles actually reach `_check_hf_backend_usable`."""
     import subprocess
 
     def _no_smi(*a, **k):
@@ -220,24 +164,7 @@ def test_doctor_cli_surfaces_broken_hf_backend_end_to_end(cli_runner, monkeypatc
 
 def test_missing_dist_metadata_does_not_turn_a_broken_module_into_not_installed(
         monkeypatch):
-    """_check_packages must keep the module HANDLE when only the VERSION lookup
-    fails, or the usability check above never gets to run.
-
-    The failure this pins is environment-dependent, which is exactly why it
-    needs its own test. _check_packages reads the version from dist metadata
-    first and falls back to ``getattr(m, "__version__", "")``. That fallback
-    only runs when metadata is ABSENT - so on a machine with transformers
-    genuinely installed it is never reached and the end-to-end test above passes
-    regardless. Where transformers is NOT installed (CI, and any lean install),
-    the fallback runs, _LazyModule.__getattr__ raises ModuleNotFoundError for
-    __version__, getattr's default does not suppress it because it is not an
-    AttributeError, and it lands in the `except ImportError` that means "not
-    installed". doctor then reported an imported module as missing and said
-    nothing at all about the breakage.
-
-    Simulated here on EVERY platform by forcing PackageNotFoundError, so the
-    path is covered whether or not this venv has transformers.
-    """
+    """_check_packages must keep the module HANDLE when only the VERSION lookup fails, or the usability check above never gets to run."""
     broken = _BrokenLazyModule()
     monkeypatch.setitem(sys.modules, "transformers", broken)
 

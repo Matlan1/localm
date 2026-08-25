@@ -1,17 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""In-process, adversarial unit tests for the portmux HTTP->HTTPS layer.
-
-The existing tests/test_portmux.py drives portmux in a SUBPROCESS (real uvicorn),
-which exercises the happy paths but (a) registers no coverage in this process and
-(b) never probes the security-sensitive parsing adversarially. This module calls
-the pure functions DIRECTLY with fake asyncio streams, so it both covers the code
-and pins the open-redirect / header-injection / scheme-confusion defences that the
-module docstring promises ("a crafted Host cannot turn the redirect into an open
-redirect / header smuggle").
-
-No subprocess, no uvicorn: portmux imports uvicorn lazily inside run_server, so the
-pure redirect/routing/throttle helpers are importable and testable on their own.
-"""
+"""In-process, adversarial unit tests for the portmux HTTP->HTTPS layer."""
 from __future__ import annotations
 
 import asyncio
@@ -56,9 +44,7 @@ class _FakeWriter:
 
 
 def _run_redirect(request: bytes, public_port: int = 8443) -> bytes:
-    """Drive _redirect_to_https with *request* and return the raw response bytes.
-    The first byte is split off (as _handle_conn does) and passed separately; the
-    reader is fed the remainder."""
+    """Drive _redirect_to_https with *request* and return the raw response bytes."""
     async def go() -> bytes:
         reader = asyncio.StreamReader()
         reader.feed_data(request[1:])
@@ -186,8 +172,7 @@ def test_garbage_request_line_falls_back_to_root_path():
 # --------------------------------------------------------------------------- #
 
 def _drive_handle(handler, first_byte: bytes, monkeypatch, *, plain: bool):
-    """Run a connection handler with _relay / _redirect / _note stubbed to record
-    which branch fired. Returns the set of branch names that were called."""
+    """Run a connection handler with _relay / _redirect / _note stubbed to record which branch fired."""
     called: set = set()
 
     async def fake_relay(first, cr, cw, internal_port):
@@ -555,8 +540,7 @@ def test_safe_close_closes_a_real_writer():
 
 @pytest.fixture
 def _cold_stable_stream(monkeypatch):
-    """Force _get_stable_stream's module-level cache back to its unresolved
-    state for the duration of one test, regardless of test order."""
+    """Force _get_stable_stream's module-level cache back to its unresolved state for the duration of one test, regardless of test order."""
     monkeypatch.setattr(portmux, "_stable_resolved", False)
     monkeypatch.setattr(portmux, "_stable_stream", None)
 

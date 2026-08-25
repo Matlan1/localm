@@ -1,17 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The shared embedder's release paths must honor the in-flight-request pin
-(AUDIT-CRIT-1), exactly like the chat-engine unload paths already do (see
-test_unload_honors_pin.py). unload_all_models, unload_one_model (via
-_unload_embedder_if_matches), _do_shutdown, and _do_restart all call
-embedder.reset_embedder() unconditionally - previously with no pin check, so
-any of the four could free the embedder (and the isolated worker process a
-request is mid-embed() on) out from under it, turning a losing race into a
-plain 500 instead of being skipped like a pinned chat Engine.
-
-IsolatedEmbedder.active_requests (mirroring Engine.active_requests) plus the
-new embedder.active_requests() accessor close that gap; these tests pin that
-the four call sites now skip a pinned embedder instead of releasing it.
-"""
+"""The shared embedder's release paths must honor the in-flight-request pin (AUDIT-CRIT-1), exactly like the chat-engine unload paths already do (see test_unload_honors_pin.py). unload_all_models, unload_one_model (via _unload_embedder_if_matches), _do_shutdown, and _do_restart all call embedder.reset_..."""
 
 import asyncio
 import os
@@ -57,9 +45,7 @@ def test_active_requests_reflects_loaded_embedder(monkeypatch):
 
 
 def test_embed_pins_and_unpins_around_the_call():
-    """IsolatedEmbedder.embed() must increment active_requests before the RPC
-    and decrement it afterward, so a concurrent active_requests() check sees
-    the pin exactly while the call is in flight, never before or after."""
+    """IsolatedEmbedder.embed() must increment active_requests before the RPC and decrement it afterward, so a concurrent active_requests() check sees the pin exactly while the call is in flight, never before or after."""
     e = emb.IsolatedEmbedder.__new__(emb.IsolatedEmbedder)
     e.active_requests = 0
     e._rpc_lock = threading.RLock()   # normally __init__'s; see embed() (REG-643)
@@ -81,11 +67,7 @@ def test_embed_pins_and_unpins_around_the_call():
 
 
 def test_embed_unpins_even_on_failure():
-    """The pin must release on a losing/crashed embed() too (rule 5: never
-    leave a stuck pin that would wedge every future unload/shutdown). Records
-    the value DURING the failing call, not just after - active_requests is 0
-    both before and after regardless of whether embed() pins at all, so only
-    observing a mid-call value of 1 actually proves the pin was taken."""
+    """The pin must release on a losing/crashed embed() too (rule 5: never leave a stuck pin that would wedge every future unload/shutdown)."""
     e = emb.IsolatedEmbedder.__new__(emb.IsolatedEmbedder)
     e.active_requests = 0
     e._rpc_lock = threading.RLock()   # normally __init__'s; see embed() (REG-643)
@@ -111,12 +93,7 @@ def test_embed_unpins_even_on_failure():
 # --------------------------------------------------------------------------- #
 
 def test_unload_all_models_skips_pinned_embedder(isolated, monkeypatch):
-    """reset_embedder(force=False) now makes the busy/idle decision atomically
-    (see embedder.reset_embedder's docstring - AUDIT-CRIT-1 for the embedder
-    used to be a separate, unlocked active_requests() check before an
-    unconditional reset_embedder() call, a real TOCTOU window); the fake here
-    simulates a pinned embedder by returning False, exactly like the real
-    function would when active_requests() > 0 under the lock."""
+    """reset_embedder(force=False) now makes the busy/idle decision atomically (see embedder.reset_embedder's docstring - AUDIT-CRIT-1 for the embedder used to be a separate, unlocked active_requests() check before an unconditional reset_embedder() call, a real TOCTOU window); the fake here simulates a pin..."""
     monkeypatch.setattr(emb, "loaded_dim", lambda: 384)
     calls = []
 
@@ -135,8 +112,7 @@ def test_unload_all_models_skips_pinned_embedder(isolated, monkeypatch):
 
 
 def test_unload_all_models_releases_idle_embedder(isolated, monkeypatch):
-    """Negative control: an idle (unpinned) embedder is still released exactly
-    as before - the pin check must not regress the existing happy path."""
+    """Negative control: an idle (unpinned) embedder is still released exactly as before - the pin check must not regress the existing happy path."""
     monkeypatch.setattr(emb, "loaded_dim", lambda: 384)
     calls = []
 
@@ -153,11 +129,7 @@ def test_unload_all_models_releases_idle_embedder(isolated, monkeypatch):
 
 
 def test_unload_one_model_skips_pinned_matching_embedder(isolated, monkeypatch):
-    """The ATOMIC layer catches a pin that arrives AFTER the cheap
-    active_requests() precheck (below) already passed - the narrow race
-    window that precheck alone cannot close, which is exactly why
-    reset_embedder(force=False) still makes the authoritative decision under
-    embedder._LOCK rather than the precheck being trusted on its own."""
+    """The ATOMIC layer catches a pin that arrives AFTER the cheap active_requests() precheck (below) already passed - the narrow race window that precheck alone cannot close, which is exactly why reset_embedder(force=False) still makes the authoritative decision under embedder._LOCK rather than the preche..."""
     monkeypatch.setattr("localm.config.load_registry",
                         lambda: {"emb-model": {"path": "Z:/models/emb.gguf"}})
     monkeypatch.setattr(emb, "loaded_path", lambda: "Z:/models/emb.gguf")
@@ -178,21 +150,7 @@ def test_unload_one_model_skips_pinned_matching_embedder(isolated, monkeypatch):
 
 def test_unload_one_model_precheck_skips_pinned_embedder_without_probing_vram(
         isolated, monkeypatch):
-    """Regression: _unload_embedder_if_matches must decide busy/idle via the
-    cheap active_requests() precheck BEFORE paying for _vram_free_reading()'s
-    hardware probe, not after. A round-2 review caught that folding the busy
-    check entirely into reset_embedder(force=False) - called AFTER the probe
-    - meant a busy embedder started paying for that probe on every targeted
-    unload, where the original code never reached it at all. That probe is
-    NOT executor-offloaded and can block the whole single-threaded event loop
-    for up to discover._GPU_PROBE_DEADLINE seconds - the identical hazard
-    class test_embedder_event_loop_freeze.py exists to catch, just via a
-    different call shape (an unconditional call instead of a synchronous one)
-    that file's own tests do not cover.
-
-    MUTATION ORACLE: move the active_requests() precheck to after
-    _vram_free_reading() (or delete it and rely on reset_embedder(force=False)
-    alone) and only this test goes red - probe_calls becomes 1."""
+    """Regression: _unload_embedder_if_matches must decide busy/idle via the cheap active_requests() precheck BEFORE paying for _vram_free_reading()'s hardware probe, not after."""
     monkeypatch.setattr("localm.config.load_registry",
                         lambda: {"emb-model": {"path": "Z:/models/emb.gguf"}})
     monkeypatch.setattr(emb, "loaded_path", lambda: "Z:/models/emb.gguf")
@@ -249,14 +207,7 @@ def _spy_exit_release(monkeypatch):
 
 
 def test_do_shutdown_releases_the_embedder_without_the_load_lock(monkeypatch):
-    """The exit paths deliberately do NOT go through reset_embedder() (nor the
-    active_requests() guard that used to gate it): both take the embedder's load
-    lock, which get_embedder() holds for a whole embedding-model load, so a stop
-    issued mid-load blocked there and never reached the worker teardown. They
-    call the lock-free release_for_exit() instead, which makes the busy/idle
-    decision itself - see tests/test_embedder_worker_reaped_on_exit.py for that
-    full contract (busy -> terminate at once, idle -> polite close, never blocks
-    on _LOCK, and the worker really does die)."""
+    """The exit paths deliberately do NOT go through reset_embedder() (nor the active_requests() guard that used to gate it): both take the embedder's load lock, which get_embedder() holds for a whole embedding-model load, so a stop issued mid-load blocked there and never reached the worker teardown."""
     reset_calls, released = _spy_exit_release(monkeypatch)
     monkeypatch.setattr(os, "_exit", lambda code: (_ for _ in ()).throw(SystemExit(code)))
 
@@ -270,9 +221,7 @@ def test_do_shutdown_releases_the_embedder_without_the_load_lock(monkeypatch):
 
 
 def test_do_restart_releases_the_embedder_without_the_load_lock(monkeypatch):
-    """Same contract as shutdown above: os.execv replaces this process image but
-    not the worker child, so the release must run - and must not be able to hang
-    on the embedder load lock."""
+    """Same contract as shutdown above: os.execv replaces this process image but not the worker child, so the release must run - and must not be able to hang on the embedder load lock."""
     reset_calls, released = _spy_exit_release(monkeypatch)
     monkeypatch.setattr(os, "execv", lambda exe, argv: (_ for _ in ()).throw(SystemExit(0)))
 

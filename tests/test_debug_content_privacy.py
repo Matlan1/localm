@@ -1,8 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Chat CONTENT must never reach the debug log in privacy mode, even when the
-debug log is on (via --debug or the keep_diagnostics toggle). debug_content_enabled()
-is the gate the GGUF backend's "raw model output" line and the jobs web-tool arg
-line both use; operational lines stay on the looser debug_enabled()."""
+"""Chat CONTENT must never reach the debug log in privacy mode, even when the debug log is on (via --debug or the keep_diagnostics toggle). debug_content_enabled() is the gate the GGUF backend's 'raw model output' line and the jobs web-tool arg line both use; operational lines stay on the looser debug_..."""
 
 from localm import debuglog
 

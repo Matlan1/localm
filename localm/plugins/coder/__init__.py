@@ -1,8 +1,2 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""
-localm coder plugin - offline AI coding agent.
-
-Install with:  pip install "localm[coder]"
-Invoke via:    localm coder --model <name>
-               localcoder --model <name>   (backward-compat alias)
-"""
+"""localm coder plugin - offline AI coding agent."""

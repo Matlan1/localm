@@ -1,24 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Contract & client-asset guards over EVERY shipped builtin plugin.
-
-These are invariant guards, not feature tests. They enumerate the builtins from
-the bundled store and assert the cross-cutting rules that are easy to break and
-invisible from any single file:
-
-  * every builtin's manifest parses, targets the supported api_version, and
-    declares a capability scope + a register entry (contract conformance); and a
-    declared client_entry lives under a declared assets_dir and exists on disk;
-  * every builtin whose [surface] declares a client_entry actually SERVES that
-    module at /plugins/<name>/<entry> with a JS MIME once enabled, and 404s once
-    disabled - so a client_entry plugin can never silently 404 again (the jobs
-    regression that motivated this suite).
-
-The lists are built at import time by parsing each builtin's plugin.toml (no
-module import), so a new builtin - or a new client_entry plugin - is covered
-automatically the moment it ships, with no edit here.
-
-Open-mode (no API key) so the mounted, auto-scoped routes are reachable.
-"""
+"""Contract & client-asset guards over EVERY shipped builtin plugin."""
 
 from __future__ import annotations
 
@@ -62,8 +43,7 @@ def env(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- #
 
 def test_builtins_are_discoverable():
-    """Sanity: the store shelf is non-empty (so the parametrized guards below
-    actually run against real plugins, not an empty list)."""
+    """Sanity: the store shelf is non-empty (so the parametrized guards below actually run against real plugins, not an empty list)."""
     assert _SPECS, "no builtin plugins found in the store"
 
 
@@ -91,10 +71,7 @@ def test_builtin_manifest_conforms_to_contract(spec):
                     reason="no builtin declares a client_entry")
 @pytest.mark.parametrize("spec", _CLIENT_ENTRY, ids=[s.name for s in _CLIENT_ENTRY])
 def test_builtin_client_entry_is_served(env, spec):
-    """An enabled client_entry builtin serves its module at /plugins/<name>/...
-    with a JS module MIME, and stops serving it once disabled. This is the
-    outcome guard for the silent-404 bug class, regardless of whether the asset
-    is mounted explicitly by the plugin or auto-mounted by the engine."""
+    """An enabled client_entry builtin serves its module at /plugins/<name>/... with a JS module MIME, and stops serving it once disabled."""
     from localm.plugins.engine import attach_engine
     app = FastAPI()
     attach_engine(app)                          # default roots = the real builtins

@@ -1,27 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""POST /api/models/scan: the workdir-override / dry-run guided-import surface.
-
-- SECURITY: scanning is equivalent capability to the host file/folder browser
-  (/api/fs/dirs) - it walks a host directory and writes the absolute paths it
-  finds into registry.json - so EVERY form of this call requires host filesystem
-  access (owner / open mode / a key minted with fs_access="host"). A
-  models:write-only key that lacks host fs access must not reach it.
-- `dry_run` returns a preview shape and must never register anything.
-
-REVISED CONTRACT (CodeQL WS2). This file used to assert the opposite for the
-bodyless form: "the OLD Scan button sends a POST with NO body at all. That call
-path must still need only models:write, exactly as before - this is the one
-invariant the whole feature must not break." That invariant was the bug. The
-route gated on `if workdir: require_fs_host(request)`, so the bodyless form
-skipped the check entirely and scanned `get_comfy_workdir()` - and
-`comfy_workdir` is a plain Widget.FOLDER with no admin_only, settable by any
-config:write key. A key with fs_access="none", the very configuration
-require_fs_host exists to constrain, could therefore point the scanner at any
-folder on the server and plant arbitrary absolute or UNC paths in registry.json,
-which every consumer then re-stats on every launch. Where the folder NAME came
-from (a request body or the config file) was never the thing that made the scan
-safe; host filesystem reach is. The tests below now encode that.
-"""
+"""POST /api/models/scan: the workdir-override / dry-run guided-import surface."""
 
 import time
 from pathlib import Path
@@ -36,11 +14,7 @@ from localm.plugins.gui.web import attach_gui
 
 
 def _wait_job(app, job_id, timeout=10.0):
-    """Poll a real (non-dry-run) scan's background job until it leaves
-    'running' - mirrors test_start_fn_outcome_honesty.py's _wait_for_terminal.
-    A real scan is now job-based (see gui_scan_models), so every test that used
-    to read added/skipped/method straight off the POST response now starts the
-    job, waits here, then reads the same fields off its final progress event."""
+    """Poll a real (non-dry-run) scan's background job until it leaves 'running' - mirrors test_start_fn_outcome_honesty.py's _wait_for_terminal. A real scan is now job-based (see gui_scan_models), so every test that used to read added/skipped/method straight off the POST response now starts the job, waits..."""
     job = app.state.jobs.get(job_id)
     assert job is not None, f"job {job_id} was never registered"
     deadline = time.monotonic() + timeout
@@ -53,8 +27,7 @@ def _wait_job(app, job_id, timeout=10.0):
 
 @pytest.fixture
 def scan_app(tmp_path, monkeypatch):
-    """Full stack (engine + GUI) on a throwaway home. No owner key by default,
-    so a minted key's own scopes/fs_access govern what it can reach."""
+    """Full stack (engine + GUI) on a throwaway home."""
     home = tmp_path / ".localm"
     monkeypatch.setenv("LOCALM_HOME", str(home))
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
@@ -78,8 +51,7 @@ def _hdr(key):
 
 
 def _writer_key():
-    """models:write only, default fs_access ('none') - must not reach ANY form of
-    the scan, configured-workdir or override."""
+    """models:write only, default fs_access ('none') - must not reach ANY form of the scan, configured-workdir or override."""
     from localm import auth
     return auth.create_key("writer", [S.MODELS_WRITE])["key"]
 
@@ -101,8 +73,7 @@ def comfy_tree(tmp_path):
 
 
 class TestBodylessFormAlsoRequiresHostFsAccess:
-    """The form the old Scan button sends: POST with no body key at all. It used
-    to skip the gate outright; it does not any more."""
+    """The form the old Scan button sends: POST with no body key at all."""
 
     def test_bodyless_post_403s_for_a_models_write_only_key(self, scan_app):
         with TestClient(scan_app) as c:
@@ -115,11 +86,7 @@ class TestBodylessFormAlsoRequiresHostFsAccess:
             assert r.status_code == 403, r.text
 
     def test_bodyless_post_succeeds_for_a_host_fs_access_key(self, scan_app):
-        """The gate is fs_access, not the body: a host-fs key still gets the
-        ordinary configured-workdir scan, unchanged. A REAL scan (dry_run
-        absent/false) is job-based now, so the immediate response is a job id;
-        wait for it and read the final progress event for the same "method"
-        that used to come back synchronously."""
+        """The gate is fs_access, not the body: a host-fs key still gets the ordinary configured-workdir scan, unchanged."""
         with TestClient(scan_app) as c:
             r = c.post("/api/models/scan", headers=_hdr(_host_writer_key()))
             assert r.status_code == 200, r.text
@@ -135,8 +102,7 @@ class TestBodylessFormAlsoRequiresHostFsAccess:
             assert job._last_progress["skipped"] == 0
 
     def test_bodyless_post_succeeds_in_open_mode(self, scan_app):
-        """No key configured at all -> loopback owner -> host access implied, so
-        the GUI's own Scan button is unaffected."""
+        """No key configured at all -> loopback owner -> host access implied, so the GUI's own Scan button is unaffected."""
         with TestClient(scan_app) as c:
             assert c.post("/api/models/scan").status_code == 200
 
@@ -207,8 +173,7 @@ class TestDryRunNeverRegisters:
 
 @pytest.fixture
 def comfy_tree_multi(tmp_path):
-    """Three files across three SUBFOLDER_MAPPING conventions - big enough to
-    prove a real "N of M" progression, not just a single 1-of-1 tick."""
+    """Three files across three SUBFOLDER_MAPPING conventions - big enough to prove a real 'N of M' progression, not just a single 1-of-1 tick."""
     d = tmp_path / "comfy"
     for sub, fname in (("unet", "flux.safetensors"),
                        ("clip", "clip_l.safetensors"),
@@ -220,10 +185,7 @@ def comfy_tree_multi(tmp_path):
 
 
 class TestRealScanReportsProgress:
-    """The concrete gap this file's route change closes: a real (non-dry-run)
-    scan used to run synchronously with zero feedback until the whole batch
-    finished. It is job-based now and must report a real "registering model N
-    of M" count as it goes, not just a start/end pair."""
+    """The concrete gap this file's route change closes: a real (non-dry-run) scan used to run synchronously with zero feedback until the whole batch finished."""
 
     def test_progress_events_carry_an_increasing_done_of_a_fixed_total(
             self, scan_app, comfy_tree_multi):
@@ -249,10 +211,7 @@ class TestRealScanReportsProgress:
 
     def test_final_progress_event_carries_added_skipped_method(
             self, scan_app, comfy_tree_multi):
-        """The route's docstring promise: the final progress event (phase
-        "done") carries the same added/skipped/method fields the old
-        synchronous response body used to return directly, so the GUI can
-        build its existing scanResultMessage() toast unchanged."""
+        """The route's docstring promise: the final progress event (phase 'done') carries the same added/skipped/method fields the old synchronous response body used to return directly, so the GUI can build its existing scanResultMessage() toast unchanged."""
         with TestClient(scan_app) as c:
             with patch("requests.get", side_effect=Exception("offline")):
                 r = c.post("/api/models/scan", headers=_hdr(_host_writer_key()),
@@ -267,13 +226,7 @@ class TestRealScanReportsProgress:
                                        "hybrid (folder-walk + /object_info)")
 
     def test_a_genuine_scan_failure_still_marks_the_job_failed(self, scan_app, comfy_tree_multi):
-        """Root-cause path: an exception during registration must not report a
-        false "done" - the job fails, matching the old route's HTTPException(500).
-
-        The scan runs in a JobManager background thread now (start_fn), so the
-        patch must stay active for the whole wait, not just the POST - the POST
-        only spawns the thread and returns immediately; unpatching right after
-        it races the thread and (measured) lets the unpatched real function win."""
+        """Root-cause path: an exception during registration must not report a false 'done' - the job fails, matching the old route's HTTPException(500)."""
         with TestClient(scan_app) as c:
             with patch("requests.get", side_effect=Exception("offline")), \
                  patch("localm.model_manager.scan._existing_registered_paths",

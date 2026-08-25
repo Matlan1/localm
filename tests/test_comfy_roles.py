@@ -1,12 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Role-based ComfyUI node resolution (I3 / MEDIA-1).
-
-These pin the contract that injection resolves nodes by class_type + graph edges
-rather than hardcoded ids, so a user's own exported graph - with arbitrary node
-ids - is driven correctly. The end-to-end test runs generate_video against a fully
-RENUMBERED Wan graph and proves the prompt/seed/latent/fps still land in the right
-places.
-"""
+"""Role-based ComfyUI node resolution (I3 / MEDIA-1)."""
 
 import json
 from unittest.mock import MagicMock, patch
@@ -185,8 +178,7 @@ def _fake_video_urlopen(captured):
 
 class TestVideoRobustness:
     def test_two_sampler_graph_seeds_every_stage(self, tmp_path):
-        """A two-stage graph must get the seed on BOTH samplers (regression: a fixed
-        template seed on the second stage made 'random' output partly deterministic)."""
+        """A two-stage graph must get the seed on BOTH samplers (regression: a fixed template seed on the second stage made 'random' output partly deterministic)."""
         from localm.video_gen import comfy as vcomfy
         graph = dict(RENUMBERED_WAN)
         # A second sampling stage that refines the first stage's latent.
@@ -211,8 +203,7 @@ class TestVideoRobustness:
         assert wf["ks2"]["inputs"]["seed"] == 99      # the second stage too
 
     def test_malformed_latent_node_returns_clean_error_not_crash(self, tmp_path):
-        """A user graph whose latent node has no inputs dict must return a clean
-        (False, msg), not raise KeyError - and must not unload the chat model."""
+        """A user graph whose latent node has no inputs dict must return a clean (False, msg), not raise KeyError - and must not unload the chat model."""
         from localm.video_gen import comfy as vcomfy
         bad = {
             "lat": {"class_type": "Wan22ImageToVideoLatent"},   # no "inputs" key

@@ -1,19 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""AGENTS.md rule 5: POST /v1/models/load reported unqualified success even
-when the backend's own sizing (_auto_gpu_layers, llamacpp/_sizing.py)
-deferred to a partial or zero GPU offload (a model too big to fully fit VRAM
-still loads, deliberately, but entirely on CPU or split CPU/GPU) - the API
-caller had no way to tell that apart from a full GPU load.
-
-GgufBackend now records gpu_layers_offloaded/gpu_layers_total in
-_load_native (mirroring how applied_gpu_split is recorded, see
-test_gpu_split_status_display.py, whose _load() helper this borrows), so
-Engine.gpu_placement (tests/test_engine.py), switch_engine's returned dict,
-and the /v1/models/load response (tests/test_http_server.py) can all report
-it. This file tests the backend-level recording itself: the exact arithmetic
-against the model's TRUE layer count reported back by the native worker this
-load, not a re-guess.
-"""
+"""AGENTS.md rule 5: POST /v1/models/load reported unqualified success even when the backend's own sizing (_auto_gpu_layers, llamacpp/_sizing.py) deferred to a partial or zero GPU offload (a model too big to fully fit VRAM still loads, deliberately, but entirely on CPU or split CPU/GPU) - the API calle..."""
 
 import asyncio
 from unittest.mock import patch
@@ -30,11 +16,7 @@ def _backend(tmp_path, *, n_gpu_layers=99, n_gpu_layers_auto=False):
 
 
 def _load(backend, *, n_layers):
-    """Drive _load_native() for real, stubbing only the two boundaries
-    test_gpu_split_status_display.py already stubs for the same method: the
-    VRAM-delta console print (no real GPU needed) and the isolated worker
-    process (spawn_and_load), whose canned response reports the model's true
-    layer count exactly as the real native worker would."""
+    """Drive _load_native() for real, stubbing only the two boundaries test_gpu_split_status_display.py already stubs for the same method: the VRAM-delta console print (no real GPU needed) and the isolated worker process (spawn_and_load), whose canned response reports the model's true layer count exactly a..."""
     with patch("localm.discover.list_gpus", return_value=([], "ok")), \
          patch("localm.inference.backends.llamacpp._runner.ModelRunner."
                "spawn_and_load",
@@ -134,10 +116,7 @@ class TestBackendRecordsGpuPlacement:
 
 
 class _FakeEngine:
-    """Minimal switch_engine-compatible Engine stand-in - the same shape as
-    test_model_switch_preempt.py's FakeEngine, plus a settable gpu_placement
-    (the real Engine exposes this as a property over its backend; a plain
-    attribute here is equivalent for switch_engine's getattr-based read)."""
+    """Minimal switch_engine-compatible Engine stand-in - the same shape as test_model_switch_preempt.py's FakeEngine, plus a settable gpu_placement (the real Engine exposes this as a property over its backend; a plain attribute here is equivalent for switch_engine's getattr-based read)."""
 
     def __init__(self, name, gpu_placement=None):
         self.display_name = name
@@ -160,9 +139,7 @@ class _FakeEngine:
 
 
 class TestSwitchEngineReportsGpuPlacement:
-    """switch_engine (localm.inference.http_server) merges Engine.gpu_placement
-    into its returned dict for both the "loaded" and "already_active" success
-    statuses."""
+    """switch_engine (localm.inference.http_server) merges Engine.gpu_placement into its returned dict for both the 'loaded' and 'already_active' success statuses."""
 
     def setup_method(self):
         hs._engines = {}

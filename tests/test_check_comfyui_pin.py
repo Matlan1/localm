@@ -1,21 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Offline tests for scripts/check_comfyui_pin.py.
-
-No real network calls: the GitHub releases API is either driven through the
-injectable ``opener`` seam on ``_fetch_releases`` (unit tests of the fetch
-wrapper itself) or, for the two end-to-end tests, by monkeypatching only the
-true leaf dependency ``_fetch_releases_http`` - the one function that actually
-opens a socket - so ``main()`` and the real ``_fetch_releases`` try/except
-logic still run for real.
-
-Proves: (a) a stale pin is reported with the correct behind-count and the
-actual latest tag, (b) a current pin is reported as current, (c) version
-comparison is numeric, not lexical (a plain string sort would get a
-v0.9.2-vs-v0.31.1 comparison backwards), (d) draft/prerelease releases never
-count as "latest" or toward "behind", (e) an unreachable API is reported as
-"could not check" and never as "up to date", and (f) the script always exits 0
-regardless of outcome.
-"""
+"""Offline tests for scripts/check_comfyui_pin.py."""
 
 from __future__ import annotations
 
@@ -65,9 +49,7 @@ def test_parse_version_rejects_suffixed_and_non_version_tags():
 
 
 def test_version_ordering_is_numeric_not_lexical():
-    """'v0.9.2' > 'v0.31.1' as strings ('9' > '3'), which would wrongly report
-    a 22-releases-stale pin as current. This is the exact bug the pinned
-    constant sat undetected behind for five weeks."""
+    """'v0.9.2' > 'v0.31.1' as strings ('9' > '3'), which would wrongly report a 22-releases-stale pin as current."""
     assert "v0.9.2" > "v0.31.1"  # sanity: the lexical trap is real
     assert pincheck._parse_version("v0.9.2") < pincheck._parse_version("v0.31.1")
 
@@ -102,11 +84,7 @@ def test_compare_reports_stale_with_exact_behind_count():
 
 
 def test_minor_version_is_an_integer_not_a_decimal_fraction():
-    """0.10.0 reads, misleadingly, like it could be 'point-one-zero' < 'point-
-    nine' if compared as decimal fractions - it is not: minor version 10 comes
-    after minor version 9, same as 1.10 > 1.9 in ordinary semver. A comparator
-    that parsed each dotted component as one float (0.9 vs 0.10) would get
-    this backwards; tuple-of-ints must not."""
+    """0.10.0 reads, misleadingly, like it could be 'point-one-zero' < 'point- nine' if compared as decimal fractions - it is not: minor version 10 comes after minor version 9, same as 1.10 > 1.9 in ordinary semver."""
     assert pincheck._parse_version("v0.10.0") > pincheck._parse_version("v0.9.2")
     result = pincheck._compare("v0.9.2", [_release("v0.10.0")])
     assert result == {"status": "stale", "latest": "v0.10.0", "behind": 1, "capped": False}
@@ -126,9 +104,7 @@ def test_compare_excludes_draft_and_prerelease_from_latest_and_count():
 
 
 def test_compare_no_eligible_releases_is_no_data_not_current():
-    """An API response with nothing usable in it must never be read as 'the
-    pin is current' - that would be a false positive, the exact failure mode
-    constraint 2 in the brief forbids."""
+    """An API response with nothing usable in it must never be read as 'the pin is current' - that would be a false positive, the exact failure mode constraint 2 in the brief forbids."""
     assert pincheck._compare("v0.31.1", [])["status"] == "no_data"
     assert pincheck._compare(
         "v0.31.1", [_release("nightly"), {"tag_name": None}]

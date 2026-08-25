@@ -1,18 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""registry.model_vision_capability: the TRI-STATE behind the Models page's
-vision pill.
-
-The whole point of the function is the third state. ``vision_capable_models()``
-is positive-membership only, so an entry whose path sits on an unmounted drive
-or a dead UNC share is simply absent from it - byte-identical to a genuine
-text-only model. Anything that renders a badge from that has to be able to tell
-"we checked and it cannot" from "we could not check", which is exactly the
-distinction F8-PERSIST-ARCH-AND-EXPERT-COUNT draws for expert_count.
-
-These drive the REAL function against a REAL filesystem (tmp_path), not a mock
-of the thing under test: the answer comes from stat/glob/JSON reads, so mocking
-those out would test the mock.
-"""
+"""registry.model_vision_capability: the TRI-STATE behind the Models page's vision pill."""
 import json
 from pathlib import Path
 
@@ -27,13 +14,7 @@ from localm.model_manager.registry import (
 
 @pytest.fixture
 def models(tmp_path):
-    """A registry covering every branch, on disk.
-
-    Each GGUF gets its OWN folder: find_sibling_mmproj globs the whole parent
-    directory, so a text-only model parked beside someone else's projector
-    resolves that projector and is (correctly, per that function) vision. One
-    shared folder would silently make the negative case unbuildable.
-    """
+    """A registry covering every branch, on disk."""
     vis = tmp_path / "vis"
     vis.mkdir()
     (vis / "gemma.gguf").write_bytes(b"x")
@@ -87,11 +68,7 @@ def test_vision_capability_is_a_real_tristate(models, name, expected):
 
 
 def test_unknown_is_not_false(models):
-    """The single assertion this module exists for, stated on its own so a
-    future edit that collapses the two cannot pass by tweaking a parametrize
-    row. An unreachable entry and a confirmed text-only entry must NOT compare
-    equal - if they ever do, every caller badging from this is lying about a
-    model it never read."""
+    """The single assertion this module exists for, stated on its own so a future edit that collapses the two cannot pass by tweaking a parametrize row."""
     unreachable = model_vision_capability("gone-drive", reg=models)
     text_only = model_vision_capability("gguf-text", reg=models)
     assert text_only is False
@@ -104,14 +81,7 @@ def test_a_name_absent_from_the_registry_is_unknown(models):
 
 
 def test_recorded_projector_wins_over_an_unreachable_model_path(tmp_path, models):
-    """ORDERING, and it is load-bearing rather than incidental.
-
-    get_model_mmproj resolves a RECORDED projector without needing the model
-    file, so an entry with one answers True even when its own path is
-    unreachable. That ordering is what keeps vision_capable_models()'s True set
-    byte-identical across this change - None only ever replaces a former,
-    possibly-wrong False, never a former True. Invert it and image ROUTING
-    silently loses a model."""
+    """ORDERING, and it is load-bearing rather than incidental."""
     proj = tmp_path / "vis" / "mmproj-gemma-f16.gguf"
     entry = {"path": "Z:/nonexistent/gone2.gguf", "source": "local",
              "model_type": "llm", "mmproj": str(proj)}
@@ -120,19 +90,7 @@ def test_recorded_projector_wins_over_an_unreachable_model_path(tmp_path, models
 
 @pytest.fixture
 def raising_stat(monkeypatch):
-    """Inject the OSError a dead UNC share produces, DETERMINISTICALLY.
-
-    A live ``//no-such-host/share`` was the obvious fixture and it is the wrong
-    one, twice over. MEASURED on this box: the first run RAISED WinError 64
-    ("network name is no longer available") immediately, and a later run
-    RETURNED False after an 8 SECOND redirector timeout - so the trigger is
-    decided by DNS/redirector state, not by the test. It is also a real,
-    uncontrolled network call from a unit test, and it cost this file 105s.
-
-    So the fault is injected instead, and the fixture ASSERTS IT TOOK: a fault
-    injector that silently fails to fire looks exactly like a guard correctly
-    finding nothing to catch.
-    """
+    """Inject the OSError a dead UNC share produces, DETERMINISTICALLY."""
     fired = []
     real_stat = reg_mod.os.stat
 
@@ -152,12 +110,7 @@ def raising_stat(monkeypatch):
 
 
 def test_an_oserror_during_the_probe_is_unknown_not_false(models, raising_stat):
-    """pathlib swallows only the "not found"-ish subset of OSError, so a path
-    probe can RAISE rather than return False. Unguarded that took out the whole
-    caller - the /api/models row loop (where every neighbouring syscall is
-    already wrapped) and vision_capable_models(), which has always called
-    is_dir() on operator-supplied paths. An interrupted inspection is exactly
-    "we do not know", and must never fall through to False."""
+    """pathlib swallows only the 'not found'-ish subset of OSError, so a path probe can RAISE rather than return False."""
     entry = {"path": "Z:/unreadable/x.gguf", "source": "local", "model_type": "llm"}
     got = model_vision_capability("boom", reg={**models, "boom": entry})
     assert raising_stat, "the probe never reached the injected stat"
@@ -173,13 +126,7 @@ def test_an_oserror_does_not_take_down_the_whole_listing(models, raising_stat):
 
 
 def test_an_unreachable_entry_skips_the_projector_probes(models, monkeypatch):
-    """The cost guard, asserted from OUTSIDE the call with a counting mock
-    rather than a raising side_effect - defensive code catches an
-    AssertionError as an input and the test then passes both ways.
-
-    An unreachable path with no RECORDED projector cannot produce anything but
-    None from get_model_mmproj, so calling it only buys more multi-second
-    timeouts on exactly the row that is already slowest."""
+    """The cost guard, asserted from OUTSIDE the call with a counting mock rather than a raising side_effect - defensive code catches an AssertionError as an input and the test then passes both ways."""
     from unittest.mock import MagicMock
     spy = MagicMock(return_value=None)
     monkeypatch.setattr(reg_mod, "get_model_mmproj", spy)
@@ -197,12 +144,7 @@ def test_an_unreachable_entry_skips_the_projector_probes(models, monkeypatch):
 
 
 def vision_capable_models_for(registry):
-    """vision_capable_models() with a supplied registry.
-
-    It reads the package attribute localm.model_manager.load_registry, which is
-    a DIFFERENT binding from localm.config.load_registry even though both hold
-    the same function object - so patching the config one would not reach it.
-    """
+    """vision_capable_models() with a supplied registry."""
     import localm.model_manager as mm
     original = mm.load_registry
     mm.load_registry = lambda: registry
@@ -213,16 +155,12 @@ def vision_capable_models_for(registry):
 
 
 def test_vision_capable_models_true_set_is_unchanged(models):
-    """The positive-membership contract this refactor must not move. It is a
-    LOAD-ROUTING primitive (vision_input_guidance offers these names to switch
-    to), so a name dropping out of it is a behaviour change in image handling,
-    not a display detail."""
+    """The positive-membership contract this refactor must not move."""
     assert vision_capable_models_for(models) == ["gguf-vision", "hf-vision"]
 
 
 def test_vision_capable_models_reads_the_registry_once(models, monkeypatch):
-    """One snapshot per call, threaded down. Two reads a moment apart could
-    answer from two different states of registry.json for one listing."""
+    """One snapshot per call, threaded down."""
     import localm.model_manager as mm
     calls = []
 
@@ -237,8 +175,7 @@ def test_vision_capable_models_reads_the_registry_once(models, monkeypatch):
 
 @pytest.fixture
 def one_folder(tmp_path):
-    """Two models and one projector sharing ONE folder - the normal shape of a
-    models directory, and the shape the dir_cache exists for."""
+    """Two models and one projector sharing ONE folder - the normal shape of a models directory, and the shape the dir_cache exists for."""
     d = tmp_path / "models"
     d.mkdir()
     (d / "gemma.gguf").write_bytes(b"x")
@@ -257,9 +194,7 @@ def one_folder(tmp_path):
 
 
 def test_dir_cache_changes_the_cost_not_the_answer(one_folder):
-    """The cache is an optimisation, so the ONLY thing that may differ is time.
-    Asserted against the uncached answers rather than against hand-written
-    expectations, so this cannot drift away from what the real path returns."""
+    """The cache is an optimisation, so the ONLY thing that may differ is time."""
     _d, reg = one_folder
     uncached = {n: model_vision_capability(n, reg=reg) for n in reg}
     cache: dict = {}
@@ -273,9 +208,7 @@ def test_dir_cache_changes_the_cost_not_the_answer(one_folder):
 
 
 def test_dir_cache_lists_each_folder_once(one_folder, monkeypatch):
-    """Asserted from OUTSIDE with a counting spy, not by timing: a wall-clock
-    assertion on a shared box measures the box. Three models in one folder must
-    produce ONE listing, or the quadratic this exists to remove is still there."""
+    """Asserted from OUTSIDE with a counting spy, not by timing: a wall-clock assertion on a shared box measures the box."""
     _d, reg = one_folder
     globbed = []
     real_glob = Path.glob
@@ -302,8 +235,7 @@ def test_dir_cache_lists_each_folder_once(one_folder, monkeypatch):
 
 
 def test_probe_failure_is_logged_not_silent(models, raising_stat, caplog):
-    """AGENTS.md rule 5: the tri-state is the surfaced signal, and the CAUSE is
-    still recorded rather than swallowed."""
+    """AGENTS.md rule 5: the tri-state is the surfaced signal, and the CAUSE is still recorded rather than swallowed."""
     import logging
     entry = {"path": "Z:/unreadable/x.gguf", "source": "local", "model_type": "llm"}
     with caplog.at_level(logging.DEBUG, logger=reg_mod.logger.name):

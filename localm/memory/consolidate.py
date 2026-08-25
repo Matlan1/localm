@@ -1,31 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""
-The memory WRITE path: extract durable facts, then consolidate them into the
-store with an ADD / UPDATE / DELETE / NO_OP loop (the Mem0-style loop the research
-names as what keeps a store from drifting and bloating).
-
-This runs OUT OF BAND (a jobs task / an explicit route), never in the per-turn
-chat hot path: an LLM extraction + per-candidate decision is far too heavy to sit
-in a chat turn. Both LLM steps take an injected ``complete(prompt) -> str`` (the
-caller binds it to the model; tests pass a deterministic fake), so the logic here
-is unit-testable without a model.
-
-Guardrails, because localm runs small local models that hallucinate and confuse
-synonyms, and because session text is UNTRUSTED (a message can try to launder an
-instruction into memory):
-  - hardened prompts: session text is DATA, never instructions to follow.
-  - a synth candidate may NEVER overwrite or delete a user-typed ("source=user")
-    memory  -> downgraded to NO_OP (RULE: never let untrusted content rewrite a
-    high-trust fact unchecked).
-  - prefer ADD over UPDATE when the model is unsure (confidence < 0.7): keeping
-    both is safe; a wrong UPDATE silently loses a true fact.
-  - synth importance is capped (SYNTH_IMP_CAP); only user-confirmed facts reach 1.0.
-  - near-duplicates short-circuit to NO_OP deterministically (no LLM call).
-  - idempotent: same input + deterministic ``complete`` (temperature 0) -> same
-    ChangeSet; all changes applied in ONE atomic batch (crash-safe).
-  - the whole loop is gated at ENTRY on ``writes_allowed(surface)``: in privacy
-    mode ``complete`` is NEVER called and nothing is written (it returns skipped).
-"""
+"""The memory WRITE path: extract durable facts, then consolidate them into the store with an ADD / UPDATE / DELETE / NO_OP loop (the Mem0-style loop the research names as what keeps a store from drifting and bloating)."""
 
 from __future__ import annotations
 
@@ -104,10 +78,7 @@ _DECIDE_PROMPT = (
 # --------------------------------------------------------------------------- #
 
 def _parse_json_object(raw: str) -> dict:
-    """Best-effort parse of a JSON object out of a model reply that may wrap it in
-    prose or a ``` fence. Returns {} when nothing parseable is found (mirrors the
-    coder's episodes._extract_json - small models are not airtight even under a
-    grammar)."""
+    """Best-effort parse of a JSON object out of a model reply that may wrap it in prose or a ``` fence."""
     # Reasoning channels are stripped by the callers before parsing, but strip
     # again here so no future caller can regress the C1 store-poisoning bug (a
     # brace inside a <think> block broke the first-{-to-last-} scavenge below,
@@ -146,11 +117,7 @@ def _parse_json_object(raw: str) -> dict:
 
 
 def _balanced_spans(text: str, limit: int = 16) -> list[str]:
-    """Top-level brace-balanced ``{...}`` substrings of *text*, in order, at
-    most *limit* (a hostile reply full of braces must not turn parsing into
-    O(n^2) json.loads attempts). Depth counting ignores string escapes, which
-    is fine for a best-effort fallback: a span that is not real JSON simply
-    fails json.loads and is skipped."""
+    """Top-level brace-balanced ``{...}`` substrings of *text*, in order, at most *limit* (a hostile reply full of braces must not turn parsing into O(n^2) json.loads attempts)."""
     spans: list[str] = []
     depth, start = 0, -1
     for i, ch in enumerate(text):
@@ -170,10 +137,7 @@ def _balanced_spans(text: str, limit: int = 16) -> list[str]:
 
 def extract(complete: Complete, session_text: str, *,
             max_candidates: int = MAX_CANDIDATES) -> list[dict]:
-    """Distil ``[{"text","confidence"}]`` durable-fact candidates from *session_text*.
-
-    Never raises (a model/parse failure yields []); bounds every field so a hostile
-    session cannot flood or bloat the store."""
+    """Distil ``[{'text','confidence'}]`` durable-fact candidates from *session_text*."""
     if not (session_text or "").strip():
         return []
     try:
@@ -240,10 +204,7 @@ _EPISODE_BAD_PREFIXES = (
 
 
 def summarize_session(complete: Complete, session_text: str) -> str:
-    """A one-sentence episodic summary of a session ('what we talked about'), for
-    episodic recall. Never raises; returns '' on any model/parse failure. Hardened
-    against instruction-laundering (the conversation is data, not commands) and
-    against a weak model echoing the prompt or narrating itself as a 'summary'."""
+    """A one-sentence episodic summary of a session ('what we talked about'), for episodic recall."""
     if not (session_text or "").strip():
         return ""
     try:
@@ -263,9 +224,7 @@ def summarize_session(complete: Complete, session_text: str) -> str:
 
 
 def _is_usable_summary(line: str) -> bool:
-    """A stored episodic line must be a real summary sentence, not an empty
-    token, a prompt echo, or the model narrating the task. Cheap and
-    deterministic (no model call)."""
+    """A stored episodic line must be a real summary sentence, not an empty token, a prompt echo, or the model narrating the task."""
     if not line or len(line) < 8 or not any(c.isalpha() for c in line):
         return False                         # degenerate: "{}", "[]", a stray token
     if line[0] in "{[":
@@ -286,14 +245,7 @@ def _is_usable_summary(line: str) -> bool:
 # --------------------------------------------------------------------------- #
 
 def _nearest(candidate: str, records: list[MemoryRecord]) -> tuple:
-    """(index, ratio) of the most textually-similar existing record, or (-1, 0).
-
-    Uses an ABSOLUTE difflib ratio (not normalized BM25): a normalized score is
-    meaningless on a tiny store (a single existing record always normalizes to
-    1.0 and would spuriously "match" every candidate). Ratio is size-independent
-    and directly meaningful, which is what the ADD-vs-decide gate needs. Texts are
-    short (<= MAX_TEXT_LEN) and the store is capped, so O(n) ratios per candidate
-    is cheap for an out-of-band job."""
+    """(index, ratio) of the most textually-similar existing record, or (-1, 0)."""
     lo = candidate.lower()
     best_i, best_r = -1, 0.0
     for i, r in enumerate(records):
@@ -304,9 +256,7 @@ def _nearest(candidate: str, records: list[MemoryRecord]) -> tuple:
 
 
 def _decide(complete: Complete, candidate: str, existing: str) -> tuple:
-    """Ask the model ADD/UPDATE/DELETE/NO_OP for *candidate* vs *existing*.
-    Returns (decision, confidence); defaults to NO_OP (safe: touch nothing) on any
-    parse/model failure."""
+    """Ask the model ADD/UPDATE/DELETE/NO_OP for *candidate* vs *existing*."""
     prompt = (_DECIDE_PROMPT + f"EXISTING: {existing}\nCANDIDATE: {candidate}\n"
               "\nJSON:")
     try:
@@ -333,25 +283,7 @@ def run_consolidation(store: MemoryStore, session_text: str, complete: Complete,
                       embed_fn: Optional[EmbedFn] = None, surface: str = "chat",
                       max_candidates: int = MAX_CANDIDATES,
                       now: Optional[float] = None) -> dict:
-    """Extract facts from *session_text* and fold them into *store*.
-
-    Gated at entry on ``writes_allowed(surface)``; in privacy mode ``complete`` is
-    never called and nothing is written. Applies all decisions in ONE atomic batch.
-    Returns ``{status, added, updated, deleted, noop, [reason]}``.
-
-    CHK-MEM-LOCK: the ADD/UPDATE/DELETE decision loop below reads a SNAPSHOT
-    (``store.all()``) and then makes potentially many slow LLM calls
-    (``_decide()`` per candidate) before the final ``store.replace()`` overwrites
-    the whole namespace with that snapshot's outcome. A per-call lock inside
-    ``replace()`` alone cannot protect this: it would still silently discard
-    anything a concurrent add/update/delete committed during the decide loop, the
-    exact data loss CHK-MEM-LOCK exists to prevent (the debounced auto-consolidate
-    background pass and the manual POST /api/memory/consolidate route can race
-    each other, and either can race a plain memory_append/memory_delete request).
-    So the WHOLE read-decide-write sequence holds the namespace lock: a
-    concurrent writer blocks until this consolidation finishes and then runs
-    against the fresh post-consolidation state, rather than racing it and losing
-    its write."""
+    """Extract facts from *session_text* and fold them into *store*."""
     counts = {"status": "ok", "added": 0, "updated": 0, "deleted": 0, "noop": 0,
               "proposed": 0}
     if not writes_allowed(surface):
@@ -414,18 +346,7 @@ def run_consolidation(store: MemoryStore, session_text: str, complete: Complete,
 def _decide_changeset(store: MemoryStore, snapshot: list, candidates: list,
                       complete: Complete, *, embed_fn: Optional[EmbedFn], now: float,
                       counts: dict) -> tuple:
-    """The DECIDE half of run_consolidation (REG-520), run OFF the namespace lock
-    against *snapshot* (= a lock-snapshot of store.all()). Holds NO lock and makes
-    NO store write; only reads store._vectors (via semantic_nearest) and mutates its
-    OWN snapshot copies.
-
-    Returns ``(working, updated_ids, proposals)``: *working* is the intended
-    post-consolidation record set derived from the snapshot (kept/NO_OP snapshot
-    objects, in-place-UPDATEd snapshot objects, minus DELETEd ones, plus new ADD
-    records); *updated_ids* the ids whose text changed; *proposals* the trusted-fact
-    supersession proposals. The caller MERGES these deltas onto a fresh reload under
-    the lock (see _merge_changeset), so a concurrent write during the lock-free
-    decide window is not lost."""
+    """The DECIDE half of run_consolidation (REG-520), run OFF the namespace lock against *snapshot* (= a lock-snapshot of store.all())."""
     working = list(snapshot)
     processed: set = set()
     updated_ids: set = set()
@@ -500,22 +421,7 @@ def _decide_changeset(store: MemoryStore, snapshot: list, candidates: list,
 
 def _merge_changeset(fresh: list, working: list, snapshot_ids: set,
                      updated_ids: set, now: float) -> tuple:
-    """MERGE the decided changeset (from _decide_changeset, computed OFF the lock
-    against a snapshot) onto the FRESH under-lock state, keyed by record id
-    (REG-520 / CHK-MEM-LOCK).
-
-    Every FRESH record survives by DEFAULT, so a write another thread committed
-    during the lock-free decide window - a concurrent add, OR a last_used/uses
-    reinforce bump on a NO_OP'd record - is preserved, EXCEPT records consolidation
-    decided to DELETE (a snapshot id no longer in *working*) or UPDATE (in
-    *updated_ids*), which are applied onto the matching fresh record. New ADD
-    records (working ids not in the snapshot) are appended. A snapshot record a
-    concurrent writer already deleted is simply absent from *fresh*, so a decided
-    UPDATE/DELETE on it is a no-op (never a resurrection).
-
-    Returns ``(merged_records, invalidate_ids)`` - *invalidate_ids* are the UPDATEd
-    ids still present, whose stale vector replace() must drop so it re-embeds the
-    new text."""
+    """MERGE the decided changeset (from _decide_changeset, computed OFF the lock against a snapshot) onto the FRESH under-lock state, keyed by record id (REG-520 / CHK-MEM-LOCK)."""
     working_by_id = {r.id: r for r in working}
     add_records = [r for r in working if r.id not in snapshot_ids]
     deleted_ids = snapshot_ids - set(working_by_id)
@@ -538,11 +444,7 @@ def _merge_changeset(fresh: list, working: list, snapshot_ids: set,
 
 
 def _with_eviction_note(counts: dict, store: MemoryStore) -> dict:
-    """Fold any user-typed facts the last prune evicted (size cap) into the
-    result. Silently hard-deleting a fact the user themselves entered is exactly
-    the data loss the audit flagged (rule 5); they are archived to
-    .forgotten.jsonl and reported here. Runs for BOTH the fact-producing and the
-    no-fact prune paths (F8 decoupling)."""
+    """Fold any user-typed facts the last prune evicted (size cap) into the result."""
     evicted_user = getattr(store, "last_evicted_user", [])
     if evicted_user:
         counts["evicted_user"] = len(evicted_user)

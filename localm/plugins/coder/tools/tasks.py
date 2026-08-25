@@ -1,31 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The model-owned task list: a small, deterministic state store the model writes
-its own plan into.
-
-Why it exists: the conversation is the only place a long task could hold its
-plan, and the conversation is exactly what gets compacted (agent/context.py
-summarises everything but the last 4 messages at 90% fill), so the plan is the
-first thing lost. The list lives on the Agent, OUTSIDE ``_messages``, so
-compaction cannot touch it, and it rides along in the existing resume checkpoint
-(HOME/checkpoints/<digest>.json) so it also survives a pause/resume.
-
-This is a state store, not a planner: it holds exactly what the model wrote, in
-the order the model wrote it. Nothing here schedules, approves, or reasons about
-the plan.
-
-Item format is one line per task, so a small model can produce it without nested
-JSON:
-
-    "[ ] read the failing test"   pending
-    "[>] fix the parser"          in progress
-    "[x] run the suite"           done
-
-Parsing is deliberately forgiving about the shapes a model actually emits (a
-``- `` bullet, ``1. `` numbering, ``[X]``/``[*]``, a newline-joined string
-instead of an array, or the ``{"text": ..., "status": ...}`` dict form) and
-deliberately strict about the result: every item ends up as
-``{"text": str, "status": one of _STATUSES}``.
-"""
+"""The model-owned task list: a small, deterministic state store the model writes its own plan into."""
 
 from __future__ import annotations
 
@@ -72,11 +46,7 @@ def _clean_text(value: str) -> str:
 
 
 def _parse_line(raw: str) -> dict | None:
-    """Parse one ``[m] text`` line into a todo dict, or None if it has no text.
-
-    Strips a leading list bullet (``- ``, ``* ``, ``1. ``) before reading the
-    status marker, because a model asked for a list very often writes one.
-    """
+    """Parse one ``[m] text`` line into a todo dict, or None if it has no text."""
     line = str(raw).strip()
     if not line:
         return None
@@ -124,14 +94,7 @@ def _parse_item(item) -> dict | None:
 
 
 def normalize_todos(raw) -> list[dict]:
-    """Canonicalise *raw* into ``[{"text": str, "status": <one of _STATUSES>}]``.
-
-    The single entry point for every source of todos: the tool's own argument,
-    and the ``todos`` key read back out of a checkpoint file (which is plain
-    user-writable JSON, so it must be treated as untrusted shape). Unparseable
-    items are DROPPED, never crash - the count difference is what the caller
-    reports, so a partly-bad write is visible rather than silent.
-    """
+    """Canonicalise *raw* into ``[{'text': str, 'status': <one of _STATUSES>}]``."""
     if raw is None:
         return []
     if isinstance(raw, str):
@@ -165,13 +128,7 @@ def todos_summary(todos: list[dict]) -> str:
 
 
 def _session_todos(_session):
-    """The agent whose task list this call operates on, or an error result.
-
-    There is no module-level fallback store on purpose: a set_todos that wrote
-    into a scratch dict nobody reads would report success while losing the plan
-    (AGENTS.md rule 5). The dispatcher injects the session for these tools
-    (agent/execution.py), so this only fires on direct misuse.
-    """
+    """The agent whose task list this call operates on, or an error result."""
     if _session is None or not hasattr(_session, "get_todos"):
         return ToolResult.error(
             "The task list needs an agent session and none was supplied - "
@@ -180,12 +137,7 @@ def _session_todos(_session):
 
 
 def tool_set_todos(cwd: Path, items=None, _session=None) -> ToolResult:
-    """
-    Replace the session task list with *items*.
-
-    Whole-list replace (not append) so the model's latest call is always the
-    complete truth and there is no partial-update state to reason about.
-    """
+    """Replace the session task list with *items*."""
     err = _session_todos(_session)
     if err is not None:
         return err

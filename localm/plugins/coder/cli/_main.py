@@ -1,21 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""
-localcoder CLI entry point.
-
-Commands
---------
-  localcoder                     Interactive chat (auto-starts localm serve)
-  localcoder "task"              Single-shot task (non-interactive)
-  localcoder --model X           Specify model
-  localcoder --url URL           Point at any OpenAI-compatible server
-  localcoder --no-server         Don't start localm serve (connect to existing)
-
-This module owns the ``main`` Click command (the localcoder entry point). The
-goal-mode loop, estimate mode, and the interactive REPL live in sibling modules
-(goal / estimate / repl); the heavy phases of ``main`` are split into the
-``_handle_episode_flags`` / ``_resolve_session_config`` / ``_build_backend``
-helpers below.
-"""
+"""localcoder CLI entry point."""
 
 from __future__ import annotations
 
@@ -69,14 +53,7 @@ def _complete_model(ctx, param, incomplete):
 
 
 def _warn_unfinished_background(agent) -> None:
-    """Report background sub-agents this one-shot run is about to abandon.
-
-    The turn-boundary drain only fires at the START of a turn, so a child that is
-    still running (or that finished after the final turn) is never folded in, and
-    a one-shot process then exits and takes its daemon threads with it. Exiting
-    silently would drop work the user explicitly asked for. What survives is
-    stated exactly: a committed branch does, a running child does not.
-    """
+    """Report background sub-agents this one-shot run is about to abandon."""
     try:
         from ..background import get_registry
         registry = get_registry()
@@ -258,23 +235,7 @@ def main(
     restore_episode_id, consolidate_episodes,
     until_cmd, goal_max_iters, verify_cmd, no_verify,
 ):
-    """
-    Offline AI coding agent powered by local LLMs.
-
-    \b
-    Quick start:
-      localcoder --model gemma4-4b
-      localcoder --model gemma4-4b "add type hints to utils.py"
-
-    \b
-    Point at any running OpenAI-compat server:
-      localcoder --url http://localhost:11434/v1 --model llama3.2 --no-server
-
-    \b
-    Use OpenAI or Anthropic (requires API keys):
-      localcoder --online --model gpt-4o "review this code"
-      localcoder --anthropic --model claude-opus-4-5 "add tests"
-    """
+    """Offline AI coding agent powered by local LLMs."""
     # The coder is an optional plugin (Phase 3); it ships uninstalled. Running
     # `localm coder` / `localcoder` before it is installed+enabled gets a clear
     # refusal rather than a half-working agent.
@@ -480,9 +441,7 @@ def _handle_episode_flags(work_dir: Path, show_episodes: bool,
                           forget_episodes: bool, forget_episode_id=None,
                           show_archive: bool = False,
                           restore_episode_id=None) -> bool:
-    """Inspect or edit the episodic memory for *work_dir*, returning True if a flag
-    was handled (so main can exit). No model/server needed - the user can always
-    see, prune, and recover what the coder remembers. Split out of main."""
+    """Inspect or edit the episodic memory for *work_dir*, returning True if a flag was handled (so main can exit)."""
     if not (show_episodes or forget_episodes or forget_episode_id
             or show_archive or restore_episode_id):
         return False
@@ -571,11 +530,7 @@ def _handle_episode_flags(work_dir: Path, show_episodes: bool,
 
 
 def _run_episode_consolidation(work_dir: Path, backend) -> None:
-    """Run the OPT-IN model merge of related lessons and REPORT what it did.
-
-    Reporting is the point: memory that rewrites itself without saying so is how a
-    bad merge becomes invisible. Groups whose merge came back unusable are left
-    untouched and counted."""
+    """Run the OPT-IN model merge of related lessons and REPORT what it did."""
     from localm.textnorm import strip_think
     from localm.plugins.coder.episodes import EpisodeStore, consolidate
 
@@ -599,13 +554,7 @@ def _run_episode_consolidation(work_dir: Path, backend) -> None:
 
 
 def _detect_verify(work_dir: Path):
-    """The project's obvious check command for an interactive session, or None.
-
-    Best-effort: detection reads project files, and a failure to read them is a
-    reason to run no oracle, not to refuse the session. It is reported rather
-    than swallowed silently, because a check the user expected to run and that
-    quietly did not is exactly the kind of hidden problem that wastes their
-    time."""
+    """The project's obvious check command for an interactive session, or None."""
     try:
         from ..verify import command_text, detect_verify_command
         cmd = detect_verify_command(work_dir)
@@ -621,10 +570,7 @@ def _detect_verify(work_dir: Path):
 
 def _resolve_session_config(work_dir, model, max_turns, max_tokens, temperature,
                             seed, yes, interactive_confirm, mode, ci, provider):
-    """Resolve CI defaults, project config (.localcoder/config.toml, CLI flags
-    override), the session mode + privacy setup, and the LLM gen kwargs. Returns
-    (model, max_turns, yes, always_confirm, session_mode, gen_kw). Split out of
-    main; exits (2 under --ci, else 1) on an invalid mode."""
+    """Resolve CI defaults, project config (.localcoder/config.toml, CLI flags override), the session mode + privacy setup, and the LLM gen kwargs."""
     # CI mode setup
     if ci:
         yes = True          # never prompt
@@ -715,9 +661,7 @@ def _resolve_session_config(work_dir, model, max_turns, max_tokens, temperature,
 
 def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
                    force_new, work_dir, ci):
-    """Build the LLM backend for the chosen provider / explicit URL / offline path.
-    Returns backend. Split out of main; exits
-    (2 under --ci, else 1) on a missing required option or a failed server start."""
+    """Build the LLM backend for the chosen provider / explicit URL / offline path."""
     # Live-attribute access so a test patching cli.make_localm_backend is honoured
     # (the name moved into this submodule when cli.py became a package).
     make_localm_backend = _cli.make_localm_backend
@@ -883,11 +827,7 @@ def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
                     kwargs["start_new_session"] = True
 
                 def _child_log_tail(limit: int = 2000) -> str:
-                    """Best-effort tail of the captured child output; '' when
-                    nothing was captured (TTY mode, or the child wrote nothing
-                    before dying). Read failures are non-fatal by design: the
-                    log is diagnostic garnish on an error path that already
-                    reports the exit code either way."""
+                    """Best-effort tail of the captured child output; '' when nothing was captured (TTY mode, or the child wrote nothing before dying)."""
                     if not child_log_path:
                         return ""
                     try:
@@ -953,9 +893,7 @@ def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
 
 
 def _warn_sensitive_changes(agent: Agent) -> None:
-    """Surface test / CI-config edits so a green check over rewritten tests is
-    reviewed, not trusted (R19, agentic code review). Best-effort: never let this
-    advisory break the session."""
+    """Surface test / CI-config edits so a green check over rewritten tests is reviewed, not trusted (R19, agentic code review)."""
     try:
         from ..review_guard import classify_sensitive_changes, render_warning
         message = render_warning(classify_sensitive_changes(agent.changed_files()))
@@ -966,12 +904,7 @@ def _warn_sensitive_changes(agent: Agent) -> None:
 
 
 def console_main() -> None:
-    """The ``localcoder`` console-script entry point (pyproject [project.scripts]).
-
-    Guards that we are inside the project venv, then runs the coder command. Kept
-    SEPARATE from ``main`` so the ``localm coder`` route and the test suite invoke
-    the command directly, without the venv gate; only a stray global ``localcoder``
-    (a separate ``pip install``) hits it (NEW-J / NEW-J-CODER)."""
+    """The ``localcoder`` console-script entry point (pyproject [project.scripts])."""
     from localm._venvguard import require_venv
     require_venv()
     main()

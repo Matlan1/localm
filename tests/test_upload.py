@@ -1,11 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""R37: a phone (or browser) uploads files INTO <home>/uploads/ so models and
-tools can read them, beyond transient chat attachments. The endpoints are
-scope-gated (CONFIG_WRITE to write/delete, CONFIG_READ to list) because writing
-host files is privileged - a restricted shared key must not be able to drop files
-on the host. File names are basename-confined so they cannot traverse out of the
-uploads dir.
-"""
+"""R37: a phone (or browser) uploads files INTO <home>/uploads/ so models and tools can read them, beyond transient chat attachments."""
 
 import os
 from pathlib import Path
@@ -164,8 +158,7 @@ def test_upload_routes_are_scope_gated(scoped_app):
 
 
 def _raw_multipart(filename: bytes, data: bytes, boundary: bytes = b"BoUnDaRy"):
-    """Build a multipart body with an arbitrary (possibly hostile) filename - httpx
-    would sanitize it, so we hand-craft to exercise the server's own guard."""
+    """Build a multipart body with an arbitrary (possibly hostile) filename - httpx would sanitize it, so we hand-craft to exercise the server's own guard."""
     body = (b"--" + boundary + b"\r\n"
             b'Content-Disposition: form-data; name="file"; filename="' + filename + b'"\r\n'
             b"Content-Type: application/octet-stream\r\n\r\n" + data + b"\r\n"
@@ -231,26 +224,7 @@ def test_upload_bare_device_name_does_not_lose_data(scoped_app):
 
 
 class TestConfinedUploadPathAliasSubstitution:
-    """DELETE /api/uploads/{name} is the one route in this file that resolves a
-    raw, caller-supplied name directly against an EXISTING file (every other
-    route either writes through _unique_upload_target's non-clobbering
-    retry-with-counter, or folds the name into an already-unique synthesized
-    one - see share.py). An OS-level alias - an NTFS 8.3 short name is the
-    live-confirmed case (this session; also #1068's own finding against a
-    DIFFERENT validator) - can pass basename/character checks while resolving
-    to a pre-existing, DIFFERENTLY-NAMED real file: 'LONGMO~1.GGU' resolving
-    to 'LongModelNameThatIsVeryLong.gguf'. Before pathsafe.confined_name was
-    wired in here, _confined_upload_path only checked containment
-    (target.is_relative_to(base)), which the alias satisfies (it stays inside
-    uploads/) - so a delete request naming an alias the caller never uploaded
-    would have unlinked someone else's real file.
-
-    8dot3 short-name generation is volume/config-dependent (this session
-    measured it enabled on this box's C: and disabled on D:, matching
-    #1068's own test_pull_local_path.py finding), so this simulates the
-    alias condition directly via Path.resolve rather than depending on the
-    OS having actually generated one - deterministic regardless of which
-    volume runs this test."""
+    """DELETE /api/uploads/{name} is the one route in this file that resolves a raw, caller-supplied name directly against an EXISTING file (every other route either writes through _unique_upload_target's non-clobbering retry-with-counter, or folds the name into an already-unique synthesized one - see shar..."""
 
     def test_alias_name_is_rejected_by_the_validator(self, scoped_app, monkeypatch):
         up = scoped_app.state._home / "uploads"
@@ -274,8 +248,7 @@ class TestConfinedUploadPathAliasSubstitution:
 
     def test_alias_delete_request_does_not_remove_the_victim_end_to_end(
             self, scoped_app, monkeypatch):
-        """Same scenario, through the real HTTP DELETE route - proves the
-        route-level behavior, not just the validator in isolation."""
+        """Same scenario, through the real HTTP DELETE route - proves the route-level behavior, not just the validator in isolation."""
         up = scoped_app.state._home / "uploads"
         up.mkdir(parents=True, exist_ok=True)
         victim = up / "LongModelNameThatIsVeryLong.gguf"
@@ -297,8 +270,7 @@ class TestConfinedUploadPathAliasSubstitution:
         assert victim.read_bytes() == b"VICTIM-CONTENT"
 
     def test_same_name_delete_of_the_real_file_still_works(self, scoped_app):
-        """The alias check must not reject the ordinary, legitimate case of
-        deleting a file by its own exact, on-disk name."""
+        """The alias check must not reject the ordinary, legitimate case of deleting a file by its own exact, on-disk name."""
         up = scoped_app.state._home / "uploads"
         up.mkdir(parents=True, exist_ok=True)
         (up / "LongModelNameThatIsVeryLong.gguf").write_bytes(b"content")

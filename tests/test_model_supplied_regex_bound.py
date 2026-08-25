@@ -1,40 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Bounds for the one place the REGEX ITSELF is attacker-supplied.
-
-Every other ReDoS fix in this tree de-ambiguates a pattern WE wrote against
-hostile text. `grep` and `search_replace` are the inverse: the model hands us
-the pattern, and you cannot de-ambiguate one you did not write. So they are
-bounded instead, with two mechanisms that are not interchangeable:
-
-  * a per-match TIMEOUT, which is the only thing that can stop a match already
-    running - stdlib ``re`` cannot be interrupted at any price;
-  * hard INPUT CAPS, so the common path never reaches the timeout and an
-    attacker cannot burn the full budget once per file in a glob.
-
-The reason both are needed is measured, not assumed. Swapping stdlib ``re`` for
-``regex`` is NOT itself the fix, because the two engines have DIFFERENT
-catastrophic sets, neither containing the other:
-
-    (\\s*)*x  on 26 spaces   stdlib 7.0044s   regex 0.0001s
-    (a|a)*$  on 30 a's       stdlib 2.3561s   regex 6.4100s
-
-``regex`` is immune to the first and ~2.7x WORSE on the second - the textbook
-alternation shape a model writes by accident when searching for alternatives.
-An engine swap alone would have MOVED the vulnerability while looking like a fix.
-
-A THIRD failure mode joined these two when the `regex` dependency was bumped
-from 2026.7.10 to 2026.7.19 (#967): a pathological recursive/possessive pattern
-that used to SEGFAULT the process now raises a catchable ``MemoryError``
-instead - a strict improvement, but ``_run_model_regex`` originally caught only
-``regex.error`` and ``TimeoutError``, so the new, catchable ``MemoryError`` fell
-through uncaught into each caller's GENERIC exception handler and was
-misattributed: `grep` reported it as an unreadable FILE ("N file(s) could not
-be read"), and `search_replace` let it escape to the tool-dispatch layer's
-``except Exception as e: ToolResult.error(f"Tool error: {e}")`` as a bare,
-empty ``"Tool error: "`` (``str(MemoryError())`` is ``''``). Both are wrong for
-the same reason the first two failure modes are handled specially: the fact is
-about the PATTERN, not the file.
-"""
+"""Bounds for the one place the REGEX ITSELF is attacker-supplied."""
 
 from __future__ import annotations
 
@@ -92,9 +57,7 @@ def hostile_repo(tmp_path):
 
 
 def test_grep_aborts_a_runaway_pattern_and_says_why(hostile_repo):
-    """Without this, a guard that never fires and a broken guard are the same
-    green run. The message has to name the SHAPE, because "too slow" alone
-    leaves the model with no idea what to change."""
+    """Without this, a guard that never fires and a broken guard are the same green run."""
     result, elapsed = _timed(tool_grep, hostile_repo, _ENGINE_KILLER)
     assert result.ok is False, "a runaway pattern must not report success"
     assert elapsed < _MODEL_REGEX_TIMEOUT * 3, f"abort took {elapsed:.2f}s"
@@ -104,9 +67,7 @@ def test_grep_aborts_a_runaway_pattern_and_says_why(hostile_repo):
 
 
 def test_search_replace_aborts_before_writing_anything(hostile_repo):
-    """search_replace MUTATES, so a partial sweep is worse than none: half a glob
-    rewritten and the rest not is a state nobody asked for and the caller cannot
-    tell from success."""
+    """search_replace MUTATES, so a partial sweep is worse than none: half a glob rewritten and the rest not is a state nobody asked for and the caller cannot tell from success."""
     before = (hostile_repo / "a.txt").read_text(encoding="utf-8")
     result, elapsed = _timed(tool_search_replace, hostile_repo, _ENGINE_KILLER,
                              "REPLACED", glob="**/*")
@@ -117,8 +78,7 @@ def test_search_replace_aborts_before_writing_anything(hostile_repo):
 
 
 def test_the_timeout_is_what_stops_it_not_luck():
-    """Asserts the MECHANISM. A test that only checked wall-clock would pass if
-    the pattern happened to be fast for some unrelated reason."""
+    """Asserts the MECHANISM."""
     rx = _compile_model_pattern(_ENGINE_KILLER, _model_regex_flags())
     with pytest.raises(_ModelRegexTooSlow):
         _run_model_regex(rx.search, _ENGINE_KILLER_INPUT)
@@ -139,11 +99,7 @@ def memory_hostile_repo(tmp_path):
 
 @_regex_too_old_for_memory_probe
 def test_grep_aborts_a_memory_exhausting_pattern_and_names_the_pattern(memory_hostile_repo):
-    """Before the fix this fell through to the generic per-file handler and was
-    reported as 'N file(s) could not be read and were not searched' - wrong and
-    unactionable, since nothing is wrong with the file. It must also NOT reuse
-    the timeout wording ('took longer than'/'timed out'): that would be false,
-    since this is memory exhaustion on a bounded, non-timed-out match."""
+    """Before the fix this fell through to the generic per-file handler and was reported as 'N file(s) could not be read and were not searched' - wrong and unactionable, since nothing is wrong with the file."""
     result = tool_grep(memory_hostile_repo, _MEMORY_KILLER)
     assert result.ok is False, "a memory-exhausting pattern must not report success"
     message = (result.output or "") + (result.summary or "")
@@ -157,11 +113,7 @@ def test_grep_aborts_a_memory_exhausting_pattern_and_names_the_pattern(memory_ho
 
 @_regex_too_old_for_memory_probe
 def test_search_replace_aborts_before_writing_anything_on_memory_exhaustion(memory_hostile_repo):
-    """Before the fix this escaped tool_search_replace's try block entirely (no
-    handler matched MemoryError) and reached execution.py's generic
-    `except Exception as e: ToolResult.error(f"Tool error: {e}")` - and
-    str(MemoryError()) is '', so it surfaced as a bare, empty 'Tool error: '.
-    search_replace MUTATES, so it must also abort before writing anything."""
+    """Before the fix this escaped tool_search_replace's try block entirely (no handler matched MemoryError) and reached execution.py's generic `except Exception as e: ToolResult.error(f'Tool error: {e}')` - and str(MemoryError()) is '', so it surfaced as a bare, empty 'Tool error: '. search_replace MUTATE..."""
     before = (memory_hostile_repo / "a.txt").read_text(encoding="utf-8")
     result = tool_search_replace(memory_hostile_repo, _MEMORY_KILLER, "REPLACED",
                                  glob="**/*")
@@ -176,10 +128,7 @@ def test_search_replace_aborts_before_writing_anything_on_memory_exhaustion(memo
 
 @_regex_too_old_for_memory_probe
 def test_the_memoryerror_is_what_stops_it_not_luck():
-    """Asserts the MECHANISM, mirroring test_the_timeout_is_what_stops_it_not_luck:
-    a broad `except Exception` would also make this pass without actually
-    distinguishing memory exhaustion from a timeout, which is exactly the bug
-    (both misattributions passed every OTHER test in this file)."""
+    """Asserts the MECHANISM, mirroring test_the_timeout_is_what_stops_it_not_luck: a broad `except Exception` would also make this pass without actually distinguishing memory exhaustion from a timeout, which is exactly the bug (both misattributions passed every OTHER test in this file)."""
     rx = _compile_model_pattern(_MEMORY_KILLER, _model_regex_flags(ignore_case=True))
     with pytest.raises(_ModelRegexTooExpensive):
         _run_model_regex(rx.search, _MEMORY_KILLER_INPUT)
@@ -223,8 +172,7 @@ def test_ordinary_search_replace_still_rewrites(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_an_absurdly_long_line_is_skipped_not_searched(tmp_path):
-    """The per-match budget would stop a runaway on one line, but paying it once
-    per line of a large file is the accumulation the caps exist to prevent."""
+    """The per-match budget would stop a runaway on one line, but paying it once per line of a large file is the accumulation the caps exist to prevent."""
     (tmp_path / "long.txt").write_text(
         "x" * (_MODEL_REGEX_MAX_LINE + 1000) + "\nNEEDLE\n", encoding="utf-8")
     result, elapsed = _timed(tool_grep, tmp_path, "NEEDLE")
@@ -235,16 +183,7 @@ def test_an_absurdly_long_line_is_skipped_not_searched(tmp_path):
 
 
 def test_search_replace_honours_the_file_size_cap(tmp_path, monkeypatch):
-    """`grep` had a per-file size cap and `search_replace` did not, which made
-    the MUTATING tool the more exposed of the two. Same knob, one meaning.
-
-    Patching ``_grep_config`` rather than the module default, because
-    ``_grep_cap`` resolves arg > CONFIG > default and the shipped config sets
-    this key - so patching the default patches a layer that is never consulted.
-    The first version of this test did exactly that, passed a 4 KB file under the
-    real 4 MB config value, and reported the cap broken when it was the test that
-    was aimed at the wrong layer.
-    """
+    """`grep` had a per-file size cap and `search_replace` did not, which made the MUTATING tool the more exposed of the two."""
     import localm.plugins.coder.tools.files as files_mod
     monkeypatch.setattr(files_mod, "_grep_config",
                         lambda: {"coder_grep_max_file_bytes": 1024})
@@ -258,10 +197,7 @@ def test_search_replace_honours_the_file_size_cap(tmp_path, monkeypatch):
 
 
 def test_the_size_cap_test_above_would_fail_without_the_cap(tmp_path, monkeypatch):
-    """Fires-control for the cap test: with the ceiling raised, the same oversized
-    file IS rewritten. Without this, a cap test that patched the wrong layer -
-    which is exactly what the first version did - looks identical to a working
-    cap, because both leave the file untouched for unrelated reasons."""
+    """Fires-control for the cap test: with the ceiling raised, the same oversized file IS rewritten."""
     import localm.plugins.coder.tools.files as files_mod
     monkeypatch.setattr(files_mod, "_grep_config",
                         lambda: {"coder_grep_max_file_bytes": 10 * 1024 * 1024})
@@ -277,9 +213,7 @@ def test_the_size_cap_test_above_would_fail_without_the_cap(tmp_path, monkeypatc
 # ---------------------------------------------------------------------------
 
 def test_regex_is_a_declared_core_dependency():
-    """It arrives transitively via `transformers`, which is OPTIONAL - so a base
-    install would have had no `regex` and this guard would have been absent
-    exactly where nobody was looking. Declared directly, same lesson as certifi."""
+    """It arrives transitively via `transformers`, which is OPTIONAL - so a base install would have had no `regex` and this guard would have been absent exactly where nobody was looking."""
     import pathlib
     import tomllib
     root = pathlib.Path(__file__).resolve().parent.parent
@@ -290,9 +224,7 @@ def test_regex_is_a_declared_core_dependency():
 
 
 def test_there_is_no_fallback_to_the_unbounded_engine():
-    """A fallback to stdlib `re` when `regex` is missing would silently restore
-    the unbounded path while every caller believed it was bounded - a safety step
-    that fails and reports success, which AGENTS.md rule 5 forbids."""
+    """A fallback to stdlib `re` when `regex` is missing would silently restore the unbounded path while every caller believed it was bounded - a safety step that fails and reports success, which AGENTS.md rule 5 forbids."""
     import inspect
 
     import localm.plugins.coder.tools.files as files_mod
