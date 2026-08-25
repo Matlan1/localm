@@ -53,17 +53,13 @@ def age_seconds(updated_at_iso: Optional[str]) -> Optional[float]:
 
 
 def _lock_down_dir(path: Path) -> None:
-    # mkdir failure is allowed to surface: the only caller (write_entry) catches
-    # OSError, logs it, and returns None - so a dir we truly cannot create is not
-    # silently ignored.
+    # A mkdir failure surfaces: write_entry catches OSError, logs it, returns None.
     path.mkdir(parents=True, exist_ok=True)
     try:
         os.chmod(path, 0o700)
     except OSError as e:
-        # 0700 is best-effort hardening. chmod is EXPECTED to no-op/fail on Windows
-        # (POSIX mode bits are not enforced there) and can fail on some
-        # filesystems; the registry still functions without it. Debug-log rather
-        # than swallow (module header: "logged, never silenced (RULE 5)").
+        # 0700 is best-effort: chmod no-ops on Windows and can fail on some
+        # filesystems. The registry still functions without it.
         logger.debug("gpu_registry: could not chmod 0700 %s: %s", path, e)
 
 
@@ -92,13 +88,8 @@ def write_entry(directory, *, instance_id: str, pid: int, port: Optional[int],
             "coordination_token": coordination_token,
         }
         path = entry_path(d, instance_id)
-        # The entry carries the coordination token (LM-DA-044/LM-DA-027): same
-        # Windows-aware restriction as instances.register_instance, not a bare
-        # POSIX-only chmod (a documented no-op on Windows). The shared writer
-        # restricts the TEMP file (os.replace carries its ACL onto the
-        # destination), retries the destination only if that first attempt
-        # failed, and creates the temp at 0600 so the token is never at the
-        # umask default on POSIX.
+        # The entry carries the coordination token, so it gets the same
+        # Windows-aware restriction as instances.register_instance.
         from localm.config import atomic_write_private
         ok = atomic_write_private(path, json.dumps(entry, indent=2))
         if not ok:

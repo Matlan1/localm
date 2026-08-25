@@ -95,17 +95,11 @@ def check_url(url: str) -> None:
             "Network access is disabled (net_mode=off). Enable it with:  "
             "localm config net_mode ask")
 
-    # Parser-differential SSRF guard. urllib.parse and the HTTP client
-    # (requests/urllib3) disagree on backslashes and raw control characters in
-    # the authority: 'http://127.0.0.1\\@public/' parses HERE as host 'public'
-    # (so it clears every gate below) but requests terminates the userinfo at the
-    # backslash and connects to 127.0.0.1 - defeating both this guard AND the
-    # net_allow allowlist. A conformant http(s) URL percent-encodes a backslash
-    # or control char, so we refuse any raw one rather than trust the host
-    # urllib.parse extracts. This is deliberately broader than the authority - a
-    # raw '\\' or control char in the path/query (which requests would otherwise
-    # percent-encode) is refused too; a fail-safe choice for a security guard,
-    # and callers can always pass a properly percent-encoded URL.
+    # Parser-differential SSRF guard: urllib.parse and requests/urllib3 disagree
+    # on backslashes and raw control characters in the authority, so a URL whose
+    # userinfo ends in a backslash parses here as the public host but connects to
+    # 127.0.0.1. Any raw backslash or control character is refused, anywhere in
+    # the URL; a conformant http(s) URL percent-encodes them.
     if "\\" in url or any(ord(c) < 0x20 or ord(c) == 0x7F for c in url):
         raise NetworkPolicyError(
             "URL contains a backslash or control character; refusing it "
@@ -136,11 +130,9 @@ def check_url(url: str) -> None:
         _check_public_address(host)
 
 
-# Special-use ranges that the stdlib marks is_global=True (so neither
-# ``not is_global`` nor any is_* flag catches them) yet are not ordinary public
-# hosts. The deprecated 6to4 relay anycast prefix (RFC 7526) sends packets to
-# whatever 6to4 relay the local network advertises - an internal/edge device on
-# some networks - so it does not belong on the reachable-public list.
+# Special-use ranges the stdlib marks is_global=True but which are not ordinary
+# public hosts. The deprecated 6to4 relay anycast prefix routes to whatever 6to4
+# relay the local network advertises.
 _EXTRA_BLOCKED_NETS = (
     ipaddress.ip_network("192.88.99.0/24"),   # 6to4 relay anycast (deprecated)
     ipaddress.ip_network("2002::/16"),         # 6to4
@@ -335,10 +327,9 @@ class _HTMLStripper(html.parser.HTMLParser):
 
     _SKIP = {"script", "style", "head", "meta", "link", "noscript", "svg",
              "template"}
-    # Void elements have no end tag. They must NOT move the skip counter:
-    # a <meta>/<link> in <head> would otherwise increment it with no matching
-    # decrement, leaving _skip > 0 forever so the whole <body> is dropped and
-    # html_to_text returns "" for every normal page.
+    # Void elements have no end tag and must not move the skip counter: an
+    # increment with no matching decrement would leave _skip > 0 forever and drop
+    # the whole body.
     _VOID = {"area", "base", "br", "col", "embed", "hr", "img", "input",
              "link", "meta", "param", "source", "track", "wbr"}
     _BLOCK = {"p", "br", "div", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6"}
@@ -382,10 +373,8 @@ def html_to_text(markup: str) -> str:
     try:
         stripper.feed(markup)
     except Exception:
-        # Best-effort text extraction: HTMLParser can choke on malformed markup.
-        # Return whatever was parsed before the error rather than failing - a
-        # partial scrape is more useful than none, and the caller treats this as
-        # untrusted text anyway.
+        # Best-effort: HTMLParser can choke on malformed markup, so whatever was
+        # parsed before the error is returned.
         pass
     return stripper.get_text()
 
@@ -431,8 +420,7 @@ def web_search(query: str, max_results: int = 5) -> list[dict]:
 def _refuse_redirect(resp, backend: str) -> None:
     """The search backends call check_url ONCE on the request URL, so - unlike safe_fetch - they cannot re-validate a redirect target per hop. requests follows redirects by default, which would let a 3xx from the search host bounce the GET into 127.0.0.1 / 169.254.169.254 / an RFC1918 service with no polic..."""
     # getattr default: a real requests.Response always exposes these properties;
-    # the False default only applies to minimal test doubles, which stand in for
-    # a normal 200 - so production redirect detection is unchanged.
+    # the default only applies to minimal test doubles standing in for a 200.
     if getattr(resp, "is_redirect", False) or \
             getattr(resp, "is_permanent_redirect", False):
         raise NetworkPolicyError(
@@ -533,10 +521,8 @@ def _ddg_search(query: str, max_results: int) -> list[dict]:
     try:
         parser.feed(text)
     except Exception:
-        # Best-effort parse: if the results HTML is malformed, return whatever
-        # results were parsed so far instead of failing the whole search. The HTTP
-        # status was already checked (raise_for_status above), so this only guards
-        # the lenient HTML scrape, not network errors.
+        # Best-effort: on malformed results HTML, return whatever parsed. The HTTP
+        # status was already checked above, so this guards only the scrape.
         pass
     out = []
     for item in parser.results[:max_results]:

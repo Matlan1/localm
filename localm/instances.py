@@ -34,13 +34,9 @@ def _version() -> str:
         from importlib.metadata import version
         return version("localm")
     except Exception:
-        # Both the live VERSION file and dist-info are unreadable. Return the
-        # honest "unknown" sentinel (already used by read_version above), NOT a
-        # hardcoded version literal: /whoami's version gates the post-update health
-        # watchdog by EQUALITY (LM-DA-011), so a stale literal that ever equalled
-        # the expected version would false-PASS a build whose version machinery is
-        # actually broken. "unknown" can never equal a real target -> fails safe
-        # (the watchdog rolls back).
+        # Both the live VERSION file and dist-info are unreadable, so report the
+        # "unknown" sentinel rather than a literal: /whoami's version gates the
+        # post-update health watchdog by equality, and "unknown" never matches.
         logger.debug("instances: version undetermined; reporting 'unknown'",
                      exc_info=True)
         return "unknown"
@@ -139,14 +135,9 @@ def register_instance(home: Path, *, instance_id: str, port: int, host: str,
         "token": token,
     }
     path = registry_path(home, instance_id)
-    # The entry carries the per-instance attach token (LM-DA-044/LM-DA-027):
-    # restrict it the same Windows-aware way as auth.key, so the token is not
-    # readable by another local account on Windows the way a bare chmod would
-    # leave it. atomic_write_private restricts the TEMP file (os.replace carries
-    # its ACL onto the destination) and retries the destination only if that
-    # first attempt failed, and it CREATES the temp at 0600 via os.open rather
-    # than write_text, closing the residual POSIX window where the token existed
-    # at the umask default between the create and the chmod.
+    # The entry carries the per-instance attach token, so it is restricted the
+    # same Windows-aware way as auth.key. atomic_write_private restricts the temp
+    # file before the rename and creates it at 0600.
     from localm.config import atomic_write_private
     atomic_write_private(path, json.dumps(entry, indent=2))
     return path
@@ -232,9 +223,8 @@ def pid_alive(pid: int) -> bool:
             import psutil
             return psutil.pid_exists(pid)
         except Exception as e:
-            # Conservative: keep returning True (a broken psutil must never reap a
-            # live instance), but log so --debug users can see WHY stale entries
-            # are persisting rather than silently disabling reaping.
+            # Conservative: a broken psutil must never reap a live instance, so
+            # this keeps returning True and logs the reason.
             logger.debug("psutil check failed (%s); assuming pid alive - reaping disabled", e)
             return True   # cannot determine -> assume alive (do not reap)
     try:
@@ -277,10 +267,8 @@ def reap_stale(home: Path, *, self_id: Optional[str] = None,
     d = run_dir(home)
     if not d.is_dir():
         return []
-    # `or -1` so a null/empty pid (a malformed entry) reads as a dead process and
-    # is reaped, consistent with find_attachable(); without it int(None) raises a
-    # TypeError that the probe-guard below swallows, KEEPING the corrupt entry
-    # forever (it would never be cleaned and never be attachable).
+    # `or -1` so a null or empty pid reads as a dead process and is reaped;
+    # without it int(None) raises and the corrupt entry is kept forever.
     alive = is_alive or (lambda e: pid_alive(int(e.get("pid", -1) or -1)))
     removed: list[str] = []
     for f in sorted(d.glob("*.json")):
@@ -379,9 +367,8 @@ def find_attachable(home: Path, root_dir: str,
             alive = False
         if alive:
             return entry
-        # Not verified live. Reap only if the process is also gone; never delete a
-        # live entry on a transient/identity probe miss (an impostor on a live PID
-        # simply lingers, harmless - it is never attached to).
+        # Reap only when the process is also gone; never delete a live entry on a
+        # transient or identity probe miss.
         try:
             pid_gone = not pid_alive(int(entry.get("pid", -1) or -1))
         except (TypeError, ValueError):
@@ -457,11 +444,9 @@ def advertise(app, home: Path, *, host: str, port: int, mode: str,
     # self-url when it mounts a surface on demand (phase 5 on-demand GUI mount).
     app.state.instance_port = port
     app.state.instance_scheme = scheme
-    # Exposed so OTHER discovery-shaped features (e.g. the cross-install GPU/
-    # VRAM coordination registry) can honour --isolated too: instance_id above
-    # is set even when isolated (so /whoami still answers), but isolated means
-    # "invisible to discovery" - a test/throwaway instance must not register
-    # itself anywhere discoverable, in ANY registry, not just this one.
+    # Exposed so other discovery-shaped features can honour --isolated too.
+    # instance_id is still set when isolated, so /whoami answers, but the
+    # instance registers itself in no registry.
     app.state.instance_isolated = isolated
 
     path = None

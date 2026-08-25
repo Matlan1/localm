@@ -196,10 +196,8 @@ def _posix_on_path(bindir: Path) -> bool:
 
 def _posix_ensure_on_path(bindir: Path, prepend: bool = False):
     """If *bindir* is not already on PATH, append an export line to the user's shell rc (pipx ``ensurepath`` style). ``~/.local/bin`` is usually already on PATH, so this is usually a no-op."""
-    # With *prepend* the rc line is written even when bindir is already on
-    # PATH: that line puts it FIRST, which is the only way to out-rank a
-    # `localm` an earlier PATH entry already provides. Only ever reached
-    # because the user picked it at the conflict prompt.
+    # With *prepend* the rc line is written even when bindir is already on PATH,
+    # since that line puts it first.
     if _posix_on_path(bindir) and not prepend:
         return False, None
     line = f'\n{_RC_MARK}\nexport PATH="$HOME/.local/bin:$PATH"\n'

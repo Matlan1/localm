@@ -13,12 +13,10 @@ class LogRecord(TypedDict):
     lines: List[str]
 
 
-# The logger group starts with `[^:\s]`, not `[^:]`. Whitespace is a SUBSET of
-# `[^:]`, so `\s+([^:]+)` let both quantifiers claim the same run and a log line
-# with a long space run and no colon after it cost O(n^2): measured 0.011 / 0.185
-# / 0.838s at 1,000 / 4,000 / 8,000 spaces. Requiring the logger's FIRST
-# character to be neither a colon nor whitespace removes the overlap without
-# narrowing what matches - a logger name never begins with a space.
+# The logger group excludes whitespace from its first character as well as the
+# colon. Whitespace is a subset of "not a colon", so both quantifiers could
+# otherwise claim the same run and a long space run with no following colon cost
+# O(n^2). A logger name never begins with a space.
 _LOG_LINE_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} (\w+)\s+([^:\s][^:]*): (.*)$"
 )
@@ -26,17 +24,11 @@ _NUMERIC_RE = re.compile(r"\d+(?:\.\d+)?")
 _ERROR_LEVELS = frozenset({"WARNING", "ERROR", "CRITICAL"})
 _TRACEBACK_MARKER = "Traceback (most recent call last)"
 
-# Raw native (ggml/CUDA/HIP) stderr is appended straight into the debug log fd by
-# debuglog.py's dedup_native_stderr()/_write_debug() with NO "TIMESTAMP LEVEL NAME:"
-# prefix of its own, so parse_records() has no choice but to attach it as a
-# CONTINUATION of whichever record precedes it - almost always a routine
-# DEBUG-level poll, given how dense e.g. GET /api/stats logging is. The literal
-# traceback marker alone misses this entirely: a crash line like "CUDA error:
-# operation not permitted when stream is capturing" contains none of it, so the
-# combined record inherited the benign DEBUG level and was eligible for
-# collapse_records' near-duplicate collapsing - which silently discarded it
-# (see _CONTINUATION_ERROR_SIGNAL_RE's use in is_error_record). This is a second,
-# broader net alongside the exact traceback marker, not a replacement for it.
+# Raw native (ggml/CUDA/HIP) stderr is appended to the debug log with no
+# "TIMESTAMP LEVEL NAME:" prefix, so parse_records() attaches it as a
+# continuation of the preceding record, usually a routine DEBUG poll. This is a
+# broader net alongside the exact traceback marker, so a crash line carrying no
+# traceback marker is not collapsed away as a benign near-duplicate.
 _CONTINUATION_ERROR_SIGNAL_RE = re.compile(
     r"\b(?:error|exception|fatal|crash(?:ed)?|segfault|segmentation fault|"
     r"core dumped|assert(?:ion)?\s+fail\w*|panic|abort(?:ed)?)\b",
@@ -47,33 +39,22 @@ _CONTINUATION_ERROR_SIGNAL_RE = re.compile(
 # saves nothing and just makes a short, already-readable log harder to follow.
 _MIN_RUN_TO_COLLAPSE = 3
 
-# Debug-level writes gated on localm.debuglog.debug_content_enabled() - i.e.
-# they carry raw CHAT CONTENT (a model reply, an embed-failure snippet of a
-# memory record, a web-tool query derived from the user's prompt) rather than
-# operational data. A bug report must NEVER include chat content (the privacy
-# promise the report form itself makes), so a record matching any of these is
-# dropped whole in build_digest, before collapsing or error-promotion ever see
-# it - see is_content_record. Each pattern anchors to a KNOWN write site's own
-# stable prefix, not to prose content, so it does not rot into a scrubber
-# arms race against arbitrary generated text:
+# Debug-level writes gated on debuglog.debug_content_enabled(), i.e. carrying raw
+# chat content rather than operational data. A record matching any of these is
+# dropped whole in build_digest, before collapsing or error-promotion. Each
+# pattern anchors to a known write site's stable prefix, not to prose content.
 _CONTENT_MARKER_RES = (
-    # llama.py's _decode_stream(): logger.debug("raw model output:\n%s", ...).
-    # The message's own newline puts nothing else after the marker on the
-    # header line - the reply itself rides in as unleveled CONTINUATION
-    # lines - so anchoring to end-of-line is exact, not a substring guess.
+    # llama.py's _decode_stream() logs "raw model output:" and the reply. The
+    # reply rides in as unleveled continuation lines, so anchoring to
+    # end-of-line is exact.
     re.compile(r"raw model output:\s*$"),
-    # memory/store.py's _embed_one(): the content-bearing branch of that log
-    # statement is "memory embed_one failed for %r: %s" (the snippet is
-    # inline on the header line). Its privacy-mode sibling logs an entirely
-    # different, content-free message ("...failed (content withheld: privacy
-    # mode..."), so this prefix can only match the content-bearing branch.
+    # memory/store.py's _embed_one(): the content-bearing branch logs
+    # "memory embed_one failed for %r: %s" with the snippet inline. Its
+    # privacy-mode sibling logs a different, content-free message.
     re.compile(r"\bmemory embed_one failed for "),
-    # jobs/webtool.py's scheduled web-tool loop: the content-bearing branch is
-    # "jobs web tool: %s %s" (tool name + the model-derived args dict, e.g. the
-    # search query); the privacy-mode sibling logs the tool name ALONE with
-    # nothing after it ("jobs web tool: %s"). Matched structurally - a known
-    # tool name immediately followed by the start of the args dict's repr -
-    # rather than by content, so only the args-carrying branch has a "{" here.
+    # jobs/webtool.py's scheduled web-tool loop: the content-bearing branch logs
+    # "jobs web tool: %s %s" (tool name plus the model-derived args dict); the
+    # privacy-mode sibling logs the tool name alone. Matched structurally.
     re.compile(r"\bjobs web tool: \S+ \{"),
 )
 

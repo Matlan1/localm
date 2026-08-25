@@ -35,10 +35,8 @@ def _config() -> dict:
         from localm.config import load_config
         return load_config()
     except Exception:
-        # Best-effort: if config cannot be read, name-based callers fall back to
-        # the built-in default label ("localm"). mdns_enabled() treats this
-        # sentinel as OFF (below), so a transiently unreadable config errs toward
-        # NOT advertising, never toward more. A note beats crashing the bind.
+        # Best-effort: an unreadable config falls back to the default label, and
+        # mdns_enabled() treats this sentinel as OFF.
         logger.debug("netname: config unreadable; using defaults", exc_info=True)
         return _UnreadableConfig()
 
@@ -309,11 +307,9 @@ def start_advertiser(port: int, *, tls: bool,
     from localm import tls as _tls
     ips = [ip for ip in (addresses or []) if ip]
     if not ips:
-        # companion_addresses()'s "lan" pick, not the raw _primary_lan_ip()
-        # probe directly: it already falls back across multiple probes and
-        # excludes a VPN's virtual tunnel adapter, so <name>.local keeps
-        # advertising the real, phone-reachable LAN address even when a VPN
-        # is active and has become this machine's default route.
+        # companion_addresses()'s "lan" pick rather than the raw _primary_lan_ip()
+        # probe: it falls back across several probes and excludes a VPN tunnel
+        # adapter.
         prim = _tls.companion_addresses().get("lan") or ""
         if prim:
             ips.append(prim)

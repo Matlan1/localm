@@ -10,9 +10,8 @@ import threading
 from pathlib import Path
 from typing import Optional
 
-# Set once, inside a worker process, when the parent-death watchdog thread is
-# running. Module-level so a second call in the same process is a cheap no-op;
-# each spawned worker is a fresh process, so it always starts False there.
+# Set inside a worker process once the parent-death watchdog thread is running,
+# so a second call in the same process is a no-op.
 _parent_death_watchdog_installed = False
 
 # Set once SetErrorMode has been applied in this process. Same per-process
@@ -20,20 +19,8 @@ _parent_death_watchdog_installed = False
 _native_error_dialogs_suppressed = False
 
 
-# Windows has no signals for this: a hard native fault surfaces as an NTSTATUS
-# value in the process exit code. Only codes that are unambiguous and actually
-# reachable from a native crash are listed - a wrong name here would be worse
-# than a bare number, because a reader would act on it.
-#
-# 0xC0000409 is confirmed empirically, not just from documentation: os.abort()
-# under this project's own CRT exits with 3221226505 (measured 2026-08-11 while
-# building the worker crash-trace capture).
-#
-# 0xC0000139 earns its place twice over - it is the documented signature of the
-# torch/HIP DLL-identity conflict this codebase already guards against (see
-# discover.py's _torch_gpu_probe_known_doomed and _loader.native_lib_loaded), so
-# decoding it makes a future report self-identifying instead of needing the same
-# root-cause session again.
+# NTSTATUS exit codes a native crash produces on Windows, where there are no
+# signals. Only unambiguous, reachable codes are listed.
 _NTSTATUS_CRASH_NAMES = {
     0xC0000005: "access violation",
     0xC000001D: "illegal instruction",
@@ -46,25 +33,11 @@ _NTSTATUS_CRASH_NAMES = {
 }
 
 
-# The crash-relevant POSIX signals, resolved WITHOUT the host's own signal enum.
-#
-# MEASURED 2026-08-11, and this is not a portability nicety - the host enum is
-# actively WRONG for this job when the host is Windows:
-#
-#     Windows signal.Signals:  SIGILL 4, SIGFPE 8, SIGSEGV 11, SIGABRT 22
-#     Linux   signal.Signals:  SIGILL 4, SIGFPE 8, SIGSEGV 11, SIGABRT  6,
-#                              SIGKILL 9, SIGBUS 7
-#
-# So a POSIX -6 looked up in the Windows enum raises (6 is absent), and a POSIX
-# -22 would come back "SIGABRT" when Linux 22 is really SIGTTOU. A code that
-# reached us from a POSIX child must therefore be decoded with POSIX numbering,
-# not with whatever enum this interpreter happens to ship.
-#
-# Only signals whose numbers are IDENTICAL across Linux and the BSD/macOS family
-# are listed, so the table cannot itself become the wrong answer. SIGBUS is
-# deliberately ABSENT: it is 7 on Linux but 10 on macOS, so it is left to the
-# host enum below, which is authoritative when the host is the POSIX box in
-# question (the production case - parent and child are always the same platform).
+# Crash-relevant POSIX signal numbers, resolved without the host's signal enum:
+# a code from a POSIX child must be decoded with POSIX numbering, and the Windows
+# enum numbers SIGABRT differently and lacks several entries. Only signals whose
+# numbers are identical across Linux and the BSD/macOS family are listed. SIGBUS
+# is absent (7 on Linux, 10 on macOS) and is left to the host enum.
 _POSIX_CRASH_SIGNALS = {
     4: "SIGILL",
     6: "SIGABRT",
@@ -102,17 +75,14 @@ def describe_exit_code(code, *, posix: Optional[bool] = None) -> str:
         return str(code)
 
     if posix:
-        # POSIX: multiprocessing reports -N when the child was killed by signal
-        # N. A NON-negative code is an ordinary exit status and means nothing
-        # about signals, so it is left alone.
+        # POSIX: multiprocessing reports -N for death by signal N. A non-negative
+        # code is an ordinary exit status and is left alone.
         if code < 0:
             return f"{code} (killed by signal {_posix_signal_name(-code)})"
         return str(code)
 
-    # Windows: a negative code is NOT a signal. Python's own
-    # Process.terminate() calls TerminateProcess(handle, -1), so reading -1 as
-    # "SIGHUP" would actively mislead - which is the whole reason the branches
-    # are split rather than sharing the negative-means-signal rule.
+    # Windows: a negative code is not a signal. Process.terminate() calls
+    # TerminateProcess(handle, -1), so -1 must not decode as a signal name.
     unsigned = code & 0xFFFFFFFF
     name = _NTSTATUS_CRASH_NAMES.get(unsigned)
     if name:
@@ -162,8 +132,7 @@ def interpreter_for_localm_children() -> str:
         if p.name.lower() != "site-packages":
             continue
         # Windows: <venv>/Lib/site-packages (2 levels up); POSIX:
-        # <venv>/lib/pythonX.Y/site-packages (3 levels up). pyvenv.cfg marks
-        # the venv root either way.
+        # <venv>/lib/pythonX.Y/site-packages (3 levels up). pyvenv.cfg marks the root.
         for root in list(p.parents)[:3]:
             if (root / "pyvenv.cfg").is_file():
                 cand = (root / "Scripts" / "python.exe"
@@ -189,10 +158,8 @@ def install_parent_death_watchdog() -> bool:
         try:
             parent.join()   # blocks on the kernel sentinel until the parent dies
         except Exception:
-            # Could not wait on the parent sentinel. Do NOT assume the parent
-            # died - leave the worker running (no watchdog) rather than kill a
-            # worker whose parent is still alive. This keeps the "degrade safely,
-            # never disrupt a normal worker" contract literally true.
+            # Could not wait on the parent sentinel: leave the worker running
+            # rather than kill one whose parent may still be alive.
             return
         # The parent is gone; exit now so this process (and its VRAM) does not
         # outlive it. os._exit, never a clean shutdown - see the docstring.

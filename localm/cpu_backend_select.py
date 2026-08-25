@@ -15,15 +15,13 @@ from typing import List, Optional
 
 from localm.debuglog import logger
 
-# The marker recording a completed selection. Same sibling-dotfile convention as
-# setup_llama.py's ".localm-backend" (_BACKEND_MARKER) - a tiny JSON file, never
-# loaded as code, read back cheaply on every load_lib() call.
+# Marker recording a completed selection: a small JSON file, never loaded as
+# code, read on every load_lib() call.
 _MARKER_NAME = ".localm-cpu-tier"
 _MARKER_SCHEMA = 1
 
-# Rejected tiers are renamed with this prefix. Deliberately does NOT start with
-# "libggml", so it falls outside both this module's own candidate glob AND
-# _loader.py's _ggml_glob() ("libggml*.so*") - neither will ever find it again.
+# Prefix for a rejected tier. It does not start with "libggml", so it falls
+# outside this module's candidate glob and _loader.py's _ggml_glob().
 _UNUSED_PREFIX = "_unused-"
 
 _CANDIDATE_GLOB = "libggml-cpu-*.so"
@@ -33,10 +31,9 @@ _LOCK_OWNER_FILE = "owner.json"
 _LOCK_WAIT_SECONDS = 45.0
 _LOCK_POLL_SECONDS = 0.5
 
-# Isolated per-candidate probe: loads exactly ONE .so (no siblings visible to
-# THIS process), calls its own ggml_backend_score(), reports the result. Mirrors
-# scripts/confirm_llama_runtime.py's _run_probe shape (env-var-driven target,
-# a "@@VERDICT@@<json>" last-line convention) rather than inventing a new one.
+# Isolated per-candidate probe: loads exactly one .so with no siblings visible in
+# that process, calls its ggml_backend_score(), and reports the result on a
+# "@@VERDICT@@<json>" last line.
 _SCORE_PROBE = r'''
 import ctypes, json, os, sys
 
@@ -138,10 +135,9 @@ def _marker_is_current(lib_dir: Path) -> bool:
         return False
     if data.get("fingerprint") != _cpu_fingerprint():
         return False
-    # A marker is only trustworthy if nothing OTHER than the recorded winner
-    # still matches the un-pruned candidate glob - otherwise a partially
-    # completed prior prune (e.g. interrupted mid-run) would read as "done"
-    # while the actual collision hazard is still present on disk.
+    # A marker is trustworthy only when nothing other than the recorded winner
+    # still matches the candidate glob; a partially completed prune would
+    # otherwise read as done.
     remaining = _candidates(lib_dir)
     return remaining == [lib_dir / tier]
 
@@ -176,10 +172,8 @@ def _lock(lib_dir: Path):
         except OSError:
             break
     if not acquired:
-        # Timed out or could not take the lock at all. Proceed unlocked rather
-        # than fail the load outright - worst case this run races another
-        # selection and a later load_lib() call redoes/corrects it; that is a
-        # smaller risk than refusing to load a model because a lock was busy.
+        # Timed out or could not take the lock: proceed unlocked rather than fail
+        # the load. A later load_lib() call redoes the selection.
         logger.warning(
             "could not take the CPU-tier selection lock in %s; proceeding "
             "without it", lib_dir)
@@ -231,9 +225,8 @@ def ensure_cpu_tier_selected(lib_dir: Path) -> Optional[str]:
 
     with _lock(lib_dir) as did_acquire:
         if not did_acquire:
-            # Either another process just finished (marker now current) or we
-            # are proceeding unlocked as a last resort - either way, re-check
-            # once more before doing any work, to avoid a redundant prune.
+            # Another process may have finished, or we are unlocked: re-check
+            # before doing any work.
             if _marker_is_current(lib_dir):
                 data = _read_marker(lib_dir)
                 return data["tier"] if data else None

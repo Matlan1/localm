@@ -16,34 +16,14 @@ VENDORS = ("nvidia", "amd", "intel")
 class Detection:
     """What was found, and a LEGACY backend guess (see ``recommended``)."""
     vendors: list = field(default_factory=list)   # subset of VENDORS, in priority order
-    # LEGACY. NOT the installer's answer - call recommended_install_backend().
-    #
-    # This only ever holds "vulkan" or "cpu"; it predates the CUDA/ROCm-aware
-    # policy and cannot express "cuda", "amd-rocm" or "metal". The name is the
-    # whole problem: it answers "which of the two universally-safe backends
-    # applies", while every reader has heard "the backend this machine should
-    # install". Those agree on most hardware and diverge exactly where it costs
-    # the most - the vendor-optimised paths.
-    #
-    # THREE separate sites have already reached for it and been wrong, which is
-    # why this is a warning rather than a description: bugreport.py (#833),
-    # updater.py (where it would have silently swapped a user's ROCm install to
-    # Vulkan during `localm update`), and the release-verification cold install
-    # (which was therefore verifying a backend real users do not get). All three
-    # now call recommended_install_backend(); every remaining mention of this
-    # field in the tree is a comment saying not to use it.
-    #
-    # MEASURED 2026-08-05 on a Windows AMD RX 6900 XT (gfx1030): this field reads
-    # "vulkan" while recommended_install_backend() reads "amd-rocm".
-    # test_hwdetect_recommended_is_legacy.py pins that divergence on purpose, so
-    # nobody "simplifies" the two into one and quietly reopens all three bugs.
+    # LEGACY. Holds only "vulkan" or "cpu" and cannot express "cuda",
+    # "amd-rocm" or "metal". Call recommended_install_backend() instead.
     recommended: str = "cpu"
     source: str = ""                               # how we decided (for messaging)
     gpu_names: str = ""                            # raw adapter name(s), lowercased
 
-    # Whether the adapter enumeration actually RAN. False means the question was
-    # never answered (the tool is missing, timed out, or exited non-zero), which
-    # is NOT the same fact as "it answered and found no GPU" - see gpu_state.
+    # Whether the adapter enumeration ran. False means the question was never
+    # answered, which is not the same as "it answered and found no GPU".
     probe_ok: bool = True
     probe_error: str = ""                          # short reason when probe_ok is False
 
@@ -116,10 +96,8 @@ def detect() -> Detection:
         if "arm64" in machine:
             return Detection(vendors=["apple"], recommended="metal", source="apple silicon")
         if not uname_ok:
-            # uname could not answer. Returning the "macos intel" branch here
-            # ASSERTS an Intel Mac, and on an Apple Silicon box that is both
-            # wrong and expensive: it costs the Metal recommendation. Say
-            # unknown instead - same conservative cpu default, honest label.
+            # uname could not answer, so the architecture is unknown rather than
+            # Intel. Same cpu default, honest label.
             return Detection(vendors=[], recommended="cpu", source="macos, arch unknown",
                              probe_ok=False, probe_error="uname did not run")
         return Detection(vendors=[], recommended="cpu", source="macos intel")
@@ -138,12 +116,9 @@ def detect() -> Detection:
     # Priority order, de-duplicated.
     ordered = [v for v in VENDORS if v in found]
     recommended = "vulkan" if ordered else "cpu"
-    # probe_ok/probe_error describe THE ENUMERATION, not the conclusion: they are
-    # recorded whenever it failed, even if shutil.which (nvidia-smi / rocm-smi /
-    # rocminfo) identified a vendor anyway. gpu_state is what resolves the two
-    # into an answer, and it lets that positive proof win. Keeping the fields
-    # purely factual is what stops the next reader having to guess whether an
-    # empty probe_error means "it ran" or "it failed but we found something".
+    # probe_ok/probe_error describe the enumeration, not the conclusion, and are
+    # recorded even when shutil.which identified a vendor anyway. gpu_state
+    # resolves the two into an answer.
     return Detection(vendors=ordered, recommended=recommended, source=src,
                      gpu_names=names, probe_ok=probe_ok,
                      probe_error=("" if probe_ok
@@ -208,10 +183,8 @@ def recommended_torch_variant(backend: str, det: "Detection | None" = None) -> s
         return "xpu"          # explicit Intel GGUF pick -> Intel HF torch (xpu)
     if b == "cpu":
         return "none"
-    # vulkan / own / metal / unknown / empty: vendor-neutral runtime choice. Route the HF
-    # torch by the DETECTED GPU: NVIDIA -> cuda, Intel -> xpu (both clean pip wheels that
-    # self-provision; the xpu wheels carry the oneAPI runtime). Never ROCm on a neutral
-    # pick. No GPU signal -> none.
+    # Vendor-neutral runtime choice: route the HF torch by the detected GPU.
+    # NVIDIA -> cuda, Intel -> xpu, never rocm. No GPU signal -> none.
     d = det or detect()
     if "nvidia" in d.vendors:
         return "cuda"
@@ -220,14 +193,11 @@ def recommended_torch_variant(backend: str, det: "Detection | None" = None) -> s
     return "none"
 
 
-# PyTorch wheel index URLs by variant. Centralised so setup.bat / setup.sh never
-# drift on the source. cu126 = current CUDA line, the broadly-compatible default;
-# cuda-blackwell = the line needed for Blackwell-and-newer NVIDIA architectures,
-# whose kernels are absent from the cu126 wheels (see pytorch_index_url); xpu =
-# Intel (the wheels carry the oneAPI runtime); rocm-linux = upstream ROCm wheels
-# (broad gfx); rocm-win = AMD's Windows ROCm wheels (public preview, RDNA3/RDNA4).
-# AMD-on-Windows is resolved PER gfx family in torch_pip_args - gfx103X uses
-# localm's bundled self-contained build.
+# PyTorch wheel index URLs by variant, shared by setup.bat and setup.sh.
+# cu126 is the broadly-compatible CUDA line; cuda-blackwell is needed for
+# Blackwell-and-newer architectures; xpu is Intel; rocm-linux is upstream;
+# rocm-win is AMD's Windows preview. AMD-on-Windows resolves per gfx family in
+# torch_pip_args.
 _TORCH_INDEX = {
     "cuda": "https://download.pytorch.org/whl/cu126",
     "cuda-blackwell": "https://download.pytorch.org/whl/cu130",
@@ -237,11 +207,9 @@ _TORCH_INDEX = {
     "cpu": "https://download.pytorch.org/whl/cpu",
 }
 
-# Mirrors setup_llama._BLACKWELL_MIN_CAP exactly and intentionally: data-center
-# Blackwell (B100/B200) is compute capability 10.x, consumer/workstation
-# Blackwell (RTX 50-series, RTX PRO Blackwell) is 12.x - (10, 0) is the lower
-# bound so both are covered by one threshold, same reasoning as the llama.cpp
-# cuda_line split this mirrors.
+# Mirrors setup_llama._BLACKWELL_MIN_CAP. Data-center Blackwell is compute
+# capability 10.x and consumer/workstation Blackwell is 12.x, so (10, 0) is the
+# lower bound covering both.
 _CUDA_BLACKWELL_MIN_CAP = (10, 0)
 
 
@@ -272,9 +240,8 @@ def torch_pip_args(backend: str, det: "Detection | None" = None) -> str:
     """The exact ``uv pip install -p .venv <ARGS>`` arguments to provision the HF PyTorch stack for *backend* on THIS machine - or '' when no verified prebuilt exists and the installer should skip and guide the user."""
     variant = recommended_torch_variant(backend, det)
     if variant == "cuda":
-        # Routes through pytorch_index_url so the Blackwell-aware detection
-        # lives in exactly one place (also used by the managed-ComfyUI fresh
-        # install) rather than being duplicated here.
+        # Routes through pytorch_index_url so the Blackwell detection lives in
+        # one place.
         return f"torch torchvision --index-url {pytorch_index_url('cuda')}"
     if variant == "xpu":
         return f"torch torchvision --index-url {_TORCH_INDEX['xpu']}"

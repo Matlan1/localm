@@ -131,10 +131,8 @@ def _copy_replacing_possibly_running_exe(src: Path, dst: Path) -> bool:
             dst.rename(old)
             shutil.copy2(src, dst)
         except OSError:
-            # Surface the ORIGINAL failure (why the fallback was needed at
-            # all) as the primary error; Python's implicit chaining still
-            # attaches the fallback's own error as __context__, so neither is
-            # hidden if this ever reaches a full traceback.
+            # Surface the original failure as the primary error; the fallback's
+            # own error rides along as __context__.
             raise copy_err
         try:
             old.unlink()
@@ -157,11 +155,9 @@ def make_windows_launcher(*, force: bool = False) -> LauncherResult:
         if not force and dst.is_file():
             notes.append(f"{dst.name} already present (use --force to refresh)")
             return LauncherResult(ok=True, path=dst, notes=notes)
-        # base is always a different file than dst (the base interpreter never
-        # lives under dst's own <venv>/localm-app/ dir) - but when rebuilding
-        # via --force from the already-running LocaLM.exe, dst IS this
-        # process's own executing image, so the copy needs the running-exe
-        # fallback below rather than a plain shutil.copy2.
+        # When rebuilding via --force from the already-running LocaLM.exe, dst is
+        # this process's own executing image, so the copy needs the running-exe
+        # fallback rather than a plain shutil.copy2.
         replaced_running = _copy_replacing_possibly_running_exe(base, dst)
         dlls = _copy_runtime_dlls(base.parent, dst.parent)
         notes.append(f"built {dst.name} from {base.name} + {len(dlls)} runtime DLL(s)"
@@ -274,9 +270,8 @@ def _stamp_exe_icon(exe: Path, ico: str) -> bool:
                 ok = _update(RT_ICON, idx, img) and ok
             ok = _update(RT_GROUP_ICON, 1, _build_group_icon(entries)) and ok
         finally:
-            # Always close the BeginUpdateResource handle - commit on full success,
-            # else discard - so an exception mid-update never leaks it or leaves a
-            # half-written resource directory behind.
+            # Always close the BeginUpdateResource handle: commit on full success,
+            # otherwise discard, so no half-written resource directory is left.
             committed = bool(k32.EndUpdateResourceW(h, not ok))
         return ok and committed
     except Exception:
@@ -302,12 +297,9 @@ def apply_window_identity(*, app_id: str = APP_USER_MODEL_ID) -> bool:
         ico = ico_path()
         if ico:
             applied = _set_console_icon(ico) or applied
-        # If we ARE the dedicated LocaLM.exe launcher and we own our console (a
-        # double-click / the launcher's CREATE_NEW_CONSOLE, not a shared terminal),
-        # opt into the console-less background-app behavior: winconsole.hide_console
-        # fires on LOCALM_OWN_CONSOLE once the server is up, so the LocaLM.exe
-        # shortcut matches the launcher's console-less experience. A dev running
-        # LocaLM.exe inside a terminal shares that console, so it is left visible.
+        # When this process is the LocaLM.exe launcher and owns its own console,
+        # opt into the console-less background-app behaviour. A shared terminal
+        # (a dev running LocaLM.exe inside one) is left visible.
         if (os.path.basename(sys.executable).lower() == "localm.exe"
                 and _owns_console()
                 and not os.environ.get("LOCALM_DEBUG")
@@ -344,11 +336,9 @@ def _set_console_icon(ico: str) -> bool:
         user32.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT,
                                         wintypes.WPARAM, wintypes.LPARAM]
 
-        # These HICONs are owned by the console window for its (process) lifetime:
-        # WM_SETICON does not copy them, so we intentionally do NOT DestroyIcon here
-        # (that would blank the icon we just set). apply_window_identity runs once per
-        # process, so this is at most two handles held until exit and reclaimed by the
-        # OS then - not an accumulating leak.
+        # WM_SETICON does not copy the HICONs, so they are not destroyed here.
+        # apply_window_identity runs once per process, so at most two handles are
+        # held until exit.
         big = user32.LoadImageW(None, ico, IMAGE_ICON, 0, 0,
                                 LR_LOADFROMFILE | LR_DEFAULTSIZE)
         small = user32.LoadImageW(None, ico, IMAGE_ICON, 16, 16, LR_LOADFROMFILE)
@@ -383,9 +373,8 @@ def _desktop_entry_text(*, exec_path: Path, workdir: Path,
         "Comment=Local AI, offline",
         f"Exec={exec_path} -m localm gui",
         f"Path={workdir}",
-        # Terminal=false to match setup.sh's menu entry: the GUI opens in the
-        # browser, so no terminal window is needed (and a copied LocaLM.desktop then
-        # behaves the same as the setup-installed one).
+        # Terminal=false matches setup.sh's menu entry: the GUI opens in the
+        # browser, so no terminal window is needed.
         "Terminal=false",
         "Categories=Utility;Development;",
     ]

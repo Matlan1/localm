@@ -14,28 +14,21 @@ from typing import Optional
 from localm.auth import ct_equal
 from localm.debuglog import logger
 
-# Absolute lifetime: matches the browser cookie cap (~400 days) so a session that
-# the browser still remembers is still honoured by the server (SEAMLESS: stay
-# signed in across a browser/PWA/server restart). Idle lifetime: a session unused
-# for this long is pruned, so an abandoned device does not stay valid forever. On
-# loopback a fresh session is re-minted transparently (auto-seed / launch grant),
-# so idle expiry is invisible there; it only asks a LAN/phone client to re-pair.
+# Absolute lifetime matches the browser cookie cap (~400 days). Idle lifetime
+# prunes a session unused for that long. On loopback a fresh session is re-minted
+# transparently, so idle expiry only asks a LAN client to re-pair.
 _ABS_TTL_S = 400 * 24 * 3600
 _IDLE_TTL_S = 30 * 24 * 3600
 
-# Serialises the read-modify-write of the store (create/revoke/last_used), exactly
-# as auth._KEYSTORE_LOCK does for the keystore, so two concurrent writers cannot
-# lose each other's change.
+# Serialises the read-modify-write of the store (create/revoke/last_used).
 _LOCK = threading.Lock()
 
-# mtime-keyed cache so the hot path (lookup runs on EVERY cookie-authed request)
-# does not re-parse the file each time; invalidated automatically whenever the file
-# is written (create/revoke/last_used bump its mtime).
+# mtime-keyed cache for the hot lookup path; invalidated whenever the file is
+# written.
 _CACHE: dict = {"mtime": None, "records": None}
 
-# last_used write throttle (per process): lookup runs constantly, so stamp a
-# session's last_used at most once per this many seconds instead of rewriting the
-# store on every request.
+# Per-process throttle: a session's last_used is stamped at most once per this
+# many seconds.
 _LAST_USED_THROTTLE_S = 300
 _last_used_writes: dict = {}
 
@@ -78,18 +71,9 @@ def _save(records: list) -> None:
     ensure_dirs()
     path = sessions_file()
     path.parent.mkdir(parents=True, exist_ok=True)
-    # Restrict the TEMP file, not the destination: it already holds the full
-    # digest payload, so a crash between the write and the rename would
-    # otherwise leave an unrestricted copy behind. Doing it there also means ONE
-    # icacls spawn instead of two, which matters because this runs on the
-    # asyncio event loop (session_login, create_key_ep, _gui_index). MEASURED:
-    # os.replace carries the source's ACL onto the destination, so the
-    # restriction survives the rename; atomic_write_private retries the
-    # destination for the case where it did not happen at all.
-    #
-    # The shared writer also CREATES the temp at 0600 via os.open rather than
-    # write_text, which closes the residual POSIX window where the digest
-    # payload existed at the umask default between the create and the chmod.
+    # The temp file is restricted rather than the destination: it already holds
+    # the full digest payload, and os.replace carries its ACL onto the
+    # destination. atomic_write_private also creates the temp at 0600.
     from localm.config import atomic_write_private
     atomic_write_private(path, json.dumps(records, indent=2))
     # Refresh the cache to the just-written content so the next lookup is warm and
@@ -166,9 +150,8 @@ def lookup(sid: Optional[str]) -> Optional[dict]:
                        "until it is repaired", e)
         return None
     for r in records:
-        # ct_equal, not compare_digest: both sides are normally hexdigests, but a
-        # hand-edited or corrupted store row could hold a non-ASCII "id_hash" and
-        # must simply fail to match, not 500 every cookie lookup that reaches it.
+        # ct_equal, not compare_digest: a corrupted row could hold a non-ASCII
+        # id_hash, which must fail to match rather than raise.
         rh = r.get("id_hash", "")
         if ct_equal(rh, h):
             if _expired(r, now):
@@ -178,12 +161,9 @@ def lookup(sid: Optional[str]) -> Optional[dict]:
                     "key_hash": r.get("key_hash"),
                     "fs_access": r.get("fs_access", "none"),
                     "rag_roots": list(r.get("rag_roots", []) or []),
-                    # `is True`, not bool(): create() only ever writes a real
-                    # bool, so anything else in the file is a record written
-                    # before this field existed, or a hand-edited/corrupted store.
-                    # A truthy string must NOT read as the owner stamp, and an
-                    # absent field must read as False - a session cannot acquire
-                    # this retroactively, only by proving it at mint time.
+                    # `is True`, not bool(): create() writes a real bool, so any
+                    # other value is a record predating this field or a corrupted
+                    # store, and must not read as the owner stamp.
                     "owner_key_minted": r.get("owner_key_minted") is True,
                     "label": r.get("label", "")}
     return None
@@ -213,10 +193,8 @@ def _touch_last_used(id_hash: str) -> None:
         logger.debug("session last_used stamp failed (non-fatal): %s", e)
 
 
-# The path-free label a caller may put on a NETWORK surface when revocation could
-# not complete. Mirrors auth.clear_api_key's ``what`` vocabulary, and lives here so
-# both the HTTP route and the CLI name the same thing: the store PATH carries the
-# account name (rule 2) and must never ride out on a response.
+# Path-free label for a network surface when revocation could not complete. The
+# store path carries the account name and must not appear in a response.
 REVOKE_FAILURE_LABEL = "browser sessions (some devices may still be signed in)"
 
 

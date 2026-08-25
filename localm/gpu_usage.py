@@ -16,15 +16,8 @@ _ADL_VENDOR_AMD = 1002        # decimal, NOT 0x1002 - ADL reports it in base 10
 
 # ADL's PMLog sensor array is a fixed 256 slots, each a (supported, value) pair.
 _ADL_PMLOG_MAX_SENSORS = 256
-# ADL_PMLOG_INFO_ACTIVITY_GFX. MEASURED on this driver rather than taken from a
-# header, because a wrong index reads a DIFFERENT sensor and still returns a
-# plausible 0-100 number - a silent wrong answer, not an error. The whole
-# supported-sensor set was dumped and identified by INTERNAL CONSISTENCY against
-# physical reality: 1=GFXCLK 2564MHz and 2=MEMCLK 1988MHz (a 6900 XT's real
-# clocks), 14=FAN_RPM 692 alongside 15=FAN_PERCENT 20 (a matching pair),
-# 8=TEMP_EDGE 67C below 27=TEMP_HOTSPOT 73C (hotspot is always the higher of the
-# two), 23=ASIC_POWER 91W. Index 19 moved 0->99 across a load change while power
-# tracked it 41W->91W and the clock 0->2570MHz, which no unrelated sensor would.
+# ADL_PMLOG_INFO_ACTIVITY_GFX. The index is measured against this driver: a wrong
+# index reads a different sensor and still returns a plausible 0-100 number.
 _ADL_PMLOG_ACTIVITY_GFX = 19
 
 _lock = threading.Lock()
@@ -76,9 +69,8 @@ def _adl_open() -> dict:
     try:
         dll = ctypes.WinDLL("atiadlxx.dll")
     except Exception as e:
-        # No atiadlxx.dll (any non-AMD box) is the ordinary case, not a fault, and it
-        # is PERMANENT: latch off so we never re-attempt the throwing load. The PDH
-        # path still covers this box.
+        # No atiadlxx.dll (any non-AMD box) is permanent, so latch off and never
+        # re-attempt the throwing load. The PDH path still covers this box.
         logger.debug("gpu_usage: ADL unavailable: %s", e)
         _adl_state = {}
         return _adl_state
@@ -166,9 +158,8 @@ def _adl_activity_by_bus() -> Dict[int, float]:
         for info in arr:
             if not info.iPresent or info.iVendorID != _ADL_VENDOR_AMD:
                 continue
-            # ADL reports several LOGICAL adapters per physical card (7 for the one
-            # here), so dedupe on the PCI triple exactly as _adl_used_by_bus does -
-            # otherwise one card is counted repeatedly.
+            # ADL reports several logical adapters per physical card, so dedupe on
+            # the PCI triple as _adl_used_by_bus does.
             key = (info.iBusNumber, info.iDeviceNumber, info.iFunctionNumber)
             if key in seen:
                 continue
@@ -244,13 +235,9 @@ def _pdh_adapter_used() -> list:
             totals[key] = int(val)
         return [v for v in totals.values()]
     except Exception as e:
-        # A RUNTIME query failure (a momentary CollectQueryData/GetFormattedCounterValue
-        # hiccup, a transient driver state) - NOT proof the source is permanently
-        # unusable. Leave _pdh_state as the open query so the NEXT call retries, rather
-        # than poisoning it to {} and silently losing the correction for the whole
-        # process lifetime (the missing-vs-corrupt collapse AGENTS.md rule 5 warns
-        # against). Only the win32pdh ImportError above - a genuinely permanent
-        # condition - sets the sticky {}.
+        # A runtime query failure is not proof the source is permanently unusable,
+        # so the open query is kept and the next call retries. Only the win32pdh
+        # ImportError above sets the sticky {}.
         logger.debug("gpu_usage: PDH query failed (will retry next call): %s", e)
         return []
 
@@ -307,9 +294,7 @@ def adapter_utilisation() -> Dict[str, float]:
             out[luid] = max(out.get(luid, 0.0), pct)
         return {k: min(100.0, round(v, 1)) for k, v in out.items()}
     except Exception as e:
-        # Same reasoning as _pdh_adapter_used: a runtime hiccup is not proof the
-        # source is permanently gone, so the open query is kept for the next call
-        # rather than latched off for the whole process lifetime.
+        # A runtime hiccup is not proof the source is gone; keep the open query.
         logger.debug("gpu_usage: PDH utilisation query failed (will retry): %s", e)
         return {}
 
@@ -354,12 +339,8 @@ def raw_reading_is_process_scoped() -> bool:
             if probe_may_be_mid_import:
                 return _known_blind_without_torch("a GPU probe may be mid-import")
             if _discover._torch_gpu_probe_known_doomed():
-                # The same known-doomed fresh import _list_gpus_probe skips
-                # (see that predicate's docstring): attempting it here can
-                # only fault - printing the same stderr trace - so the
-                # resident-runtime signal answers instead. Reached with the
-                # native lib loaded and torch not resident, e.g. the GGUF
-                # worker's sizing gate (_sizing._device_global_free_bytes).
+                # A fresh torch import here is the known-doomed DLL conflict, so
+                # the resident-runtime signal answers instead.
                 return _known_blind_without_torch(
                     "a fresh torch import here is the known-doomed DLL conflict")
             try:
@@ -397,25 +378,11 @@ def device_global_used_bytes(gpus: list) -> Dict[int, int]:
                 return mapped
             if (not any_bus_answered and len(by_bus) == 1 and len(gpus) == 1
                     and (raw_reading_is_process_scoped() or _gpu_is_amd(gpus[0]))):
-                # Fire the single-adapter pairing when EITHER signal says the one
-                # detected GPU is the one AMD adapter ADL sees:
-                #   - raw_reading_is_process_scoped(): the platform's raw reading
-                #     is the measured-blind HIP source (torch ROCm, or a resident
-                #     bundled HIP runtime IN THIS process); or
-                #   - _gpu_is_amd(gpus[0]): the detected GPU is itself an AMD card.
-                # The second authorises the pairing where the first legitimately
-                # answers False: a torch-less process (torch absent, HIP runtime
-                # not resident because GGUF loads out-of-process, #606) on an AMD
-                # box. The concrete caller is discover.vram_info's registry tier,
-                # which on a GGUF-only install is the ONLY VRAM source (list_gpus()
-                # is empty there) and passes the adapter's registry name so this
-                # can recognise the card; that is what lets a torch-less build
-                # recover a device-global free instead of showing total-only. This
-                # gate alone does not change the meter - it is the authorisation
-                # the vram_info wiring depends on. ADL enumerates ONLY AMD adapters,
-                # so a single ADL adapter + a single detected AMD GPU is
-                # unambiguous; a non-AMD detected GPU (the NVIDIA-dGPU-beside-an-
-                # idle-AMD-iGPU hazard) still declines.
+                # Pair the single AMD adapter with the single detected GPU when
+                # either the raw reading is the process-scoped HIP source or the
+                # detected GPU is itself an AMD card. ADL enumerates only AMD
+                # adapters, so one adapter plus one AMD GPU is unambiguous; a
+                # non-AMD detected GPU declines.
                 only_bus, only_used = next(iter(by_bus.items()))
                 logger.debug(
                     "gpu_usage: pairing the single AMD adapter (bus %d) with the "
