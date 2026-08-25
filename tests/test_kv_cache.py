@@ -6,7 +6,7 @@ The native DLL is never loaded - the api module is mocked throughout.
 """
 
 import threading
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
@@ -58,12 +58,30 @@ def _bare_llama() -> LlamaCpp:
     llm._ctx_capacity = 4096
     llm._kv_supported = None
     llm._vram_check = None
+    # __init__ always sets this (None when the model has no MTP heads), and
+    # twelve call sites read it directly. A hand-built instance that omits it
+    # is not a LlamaCpp.
+    llm._mtp_ctx_ptr = None
     # Native-call serialization primitives normally set up in __init__.
     llm._gen_lock = threading.RLock()
     llm._stop = threading.Event()
     llm._inference_lock = threading.Lock()
     _LIVE_FAKES.append(llm)
     return llm
+
+
+@pytest.fixture(autouse=True)
+def _no_native_mrope_probe():
+    """_can_reuse_kv asks the model whether it uses M-RoPE, and that probe is a
+    REAL native call. Handed this file's fake integer model pointer it loads the
+    llama.cpp runtime and faults on a bad address, so answering it here is what
+    keeps the module docstring's promise that the DLL is never touched. Tests
+    that care about the M-RoPE branch patch it themselves."""
+    with patch(
+        "localm.inference.backends.llamacpp.llama.api.llama_model_has_mrope",
+        return_value=False,
+    ):
+        yield
 
 
 @pytest.fixture(autouse=True)
@@ -116,6 +134,17 @@ class TestCanReuseKv:
         ):
             assert llm._can_reuse_kv(100) is False
         assert llm._kv_supported is False
+
+    def test_no_reuse_for_mrope_models(self):
+        """M-RoPE positions tokens on a multi-dimensional coordinate grid that
+        sequence removal cannot rewind, so the context must start clean."""
+        llm = _bare_llama()
+        llm._kv_supported = True
+        with patch(
+            "localm.inference.backends.llamacpp.llama.api.llama_model_has_mrope",
+            return_value=True,
+        ):
+            assert llm._can_reuse_kv(100) is False
 
     def test_probe_result_cached(self):
         llm = _bare_llama()
@@ -207,25 +236,27 @@ class TestPrefillWithReuse:
         with ctx:
             llm._prefill_with_reuse([1, 2, 3])
 
-        mock_api.llama_memory_seq_rm.assert_called_once_with(333, 0, 0, -1)
+        mock_api.llama_memory_clear.assert_called_once_with(333, True)
+        mock_api.llama_memory_seq_rm.assert_not_called()
         # Full prompt decoded from position 0 after the wipe.
         args = mock_api.llama_batch_init.call_args[0]
         assert args[0] == 3
         assert llm._cached_tokens == [1, 2, 3]
 
-    def test_empty_cache_seq_rm_failure_falls_back_to_clear(self):
-        """Same empty-bookkeeping case, but partial removal is unsupported: fall
-        back to a full clear so the stale native KV is still wiped."""
+    def test_zero_prefix_also_clears_the_draft_context_memory(self):
+        """A model with MTP heads keeps a second KV cache for its draft context.
+        Wiping only the main one leaves the draft still holding the previous
+        turn, so the two disagree about what has been seen."""
         llm = _bare_llama()
         llm._cached_tokens = []
-        ctx, mock_api = self._patch_api(
-            llama_memory_seq_rm=MagicMock(return_value=False))
+        llm._mtp_ctx_ptr = 444
+        ctx, mock_api = self._patch_api()
+        mock_api.llama_get_memory.side_effect = {222: 333, 444: 555}.__getitem__
         with ctx:
             llm._prefill_with_reuse([1, 2, 3])
 
-        mock_api.llama_memory_clear.assert_called_once()
-        args = mock_api.llama_batch_init.call_args[0]
-        assert args[0] == 3
+        assert mock_api.llama_memory_clear.call_args_list == [
+            call(333, True), call(555, True)]
         assert llm._cached_tokens == [1, 2, 3]
 
     def test_decode_failure_wipes_cache_state(self):

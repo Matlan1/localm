@@ -1965,8 +1965,9 @@ class LlamaCpp:
         # decode failure both leave the NATIVE KV populated while _cached_tokens is [].
         # Without this branch the guard is 0 < 0 (False), the wipe is skipped, and the
         # new prompt decodes onto stale KV at shifted positions (U-1: "sees earlier
-        # text out of order"). When empty, prefix is 0, so seq_rm(0, 0, -1) drops the
-        # residual and the suffix decodes cleanly from position 0.
+        # text out of order"). A zero prefix clears the memory outright instead of
+        # removing a range: recurrent and M-RoPE state cannot be partially rewound,
+        # so a range removal can leave them stale.
         if prefix == 0:
             api.llama_memory_clear(mem, True)
             if self._mtp_ctx_ptr is not None:
