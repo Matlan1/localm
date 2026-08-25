@@ -739,6 +739,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   backend, is no longer installed.** CVE-2026-59890 is a flaw in how versions
   before 83.0.0 build source packages; localm never builds one itself, but
   the floor is now raised above the fix regardless.
+- **The uninstaller's data-directory guard now refuses a delete it cannot
+  fully check, instead of letting it through.** Before `--purge-data` removes
+  a folder, several checks confirm it is not your home directory, the
+  filesystem root, or the repository itself. If the home-directory check
+  could not run, it was silently skipped rather than treated as a refusal.
+  It now refuses whenever that check cannot be completed, matching how every
+  other check in the same guard already behaved.
 
 ## [0.1.5rc3] - 2026-08-13
 
