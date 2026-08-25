@@ -38,23 +38,25 @@ def benchmark(model, gen_tokens, prompts, ctx, gpu_layers):
     """
     import time as _time
 
+    from rich.markup import escape
+
     # allow_direct_path: operator-typed on the command line (`localm bench <path>`).
     info = get_model_info(model, allow_direct_path=True)
     if info is None:
-        console.print(f"[red]Model not found:[/red] {model}")
+        console.print(f"[red]Model not found:[/red] {escape(model)}")
         sys.exit(1)
     model_path, _hint = info
 
     try:
         sizes = [int(s) for s in prompts.split(",") if s.strip()]
     except ValueError:
-        console.print(f"[red]Invalid --prompts:[/red] {prompts}")
+        console.print(f"[red]Invalid --prompts:[/red] {escape(prompts)}")
         sys.exit(1)
 
     from ..inference.engine import Engine
     engine = Engine(str(model_path), n_ctx=ctx, n_gpu_layers=gpu_layers,
                     display_name=model)
-    console.print(f"Loading [cyan]{model}[/cyan]…")
+    console.print(f"Loading [cyan]{escape(model)}[/cyan]…")
     engine.load()
 
     pad_block = (
@@ -95,7 +97,7 @@ def benchmark(model, gen_tokens, prompts, ctx, gpu_layers):
         engine.unload()
 
     from rich.table import Table
-    table = Table(title=f"benchmark - {model}")
+    table = Table(title=f"benchmark - {escape(model)}")
     table.add_column("prompt tok", justify="right")
     table.add_column("gen tok", justify="right")
     table.add_column("TTFT ms", justify="right")
@@ -190,6 +192,8 @@ def search_cmd(query, limit, list_files):
       localm search bartowski/Qwen2.5-7B-Instruct-GGUF --files
     """
     from rich.console import Console
+    from rich.markup import escape
+
     from ..discover import (DiscoverError, fit_label, hf_gguf_files,
                            hf_search, vram_capacity)
     console = Console()
@@ -223,23 +227,26 @@ def search_cmd(query, limit, list_files):
                          "tight": "[yellow]tight[/yellow]",
                          "too-big": "[red]too big[/red]"}.get(fit, "")
                 parts = f" ({f['n_parts']} parts)" if f["n_parts"] > 1 else ""
+                # quant/file: parsed from a remote repo's own filenames (hf_gguf_files),
+                # not restricted to a safe character class.
                 console.print(
-                    f"  [cyan]{f['quant'] or '?':10}[/cyan] "
+                    f"  [cyan]{escape(f['quant'] or '?'):10}[/cyan] "
                     f"{f['size_bytes'] / 1024**3:6.1f} GB{parts}  {badge}  "
-                    f"[dim]{f['file']}[/dim]")
-            console.print(f"\n[dim]pull one:  localm pull {text}:<file>[/dim]")
+                    f"[dim]{escape(f['file'])}[/dim]")
+            console.print(f"\n[dim]pull one:  localm pull {escape(text)}:<file>[/dim]")
         else:
             results = hf_search(text, limit=limit)
             if not results:
                 console.print("[dim](no GGUF repos found)[/dim]")
                 return
             for r in results:
-                console.print(f"[cyan]{r['id']}[/cyan]  "
+                # r['id']: a remote HF repo id, not restricted to a safe charset.
+                console.print(f"[cyan]{escape(r['id'])}[/cyan]  "
                               f"[dim]⬇ {r['downloads']:,}  ♥ {r['likes']:,}[/dim]")
             console.print("\n[dim]list quants:  localm search <repo> "
                           "--files[/dim]")
     except DiscoverError as e:
-        console.print(f"[red]{e}[/red]")
+        console.print(f"[red]{escape(str(e))}[/red]")
         sys.exit(1)
 
 
@@ -264,7 +271,11 @@ def list_cmd(type):
             bits.append(f"{result.pruned} pruned")
         console.print(f"[dim]Models folder synced: {', '.join(bits)}.[/dim]")
     if result.note:
-        console.print(f"[yellow]{result.note}[/yellow]")
+        # note is built from registry model names (sanitized to a safe charset)
+        # plus fixed counts/literal text - escaped anyway rather than relying on
+        # that chain holding across a future change.
+        from rich.markup import escape
+        console.print(f"[yellow]{escape(result.note)}[/yellow]")
     list_models(type_filter=type)
 
 
@@ -448,6 +459,7 @@ def _rename_on_running_server(old_name: str, new_name: str):
     import os
 
     import requests
+    from rich.markup import escape
 
     from .. import instances, tls
     from ..auth import resolve_bearer_headers
@@ -472,7 +484,8 @@ def _rename_on_running_server(old_name: str, new_name: str):
         # altitude it deserves and fall back, rather than refusing a rename
         # because of a dead entry. (ConnectTimeout subclasses this, and it
         # belongs here: no connection means no request.)
-        console.print(f"[dim]No reachable server at {show_url(url)} ({e}) - "
+        # show_url() already escapes its own argument; only `e` needs it here.
+        console.print(f"[dim]No reachable server at {show_url(url)} ({escape(str(e))}) - "
                       f"renaming locally.[/dim]")
         return None
     except requests.RequestException as e:
@@ -488,21 +501,21 @@ def _rename_on_running_server(old_name: str, new_name: str):
         safe = _sanitize_name(new_name)
         reg = load_registry()
         if safe in reg and old_name not in reg:
-            console.print(f"[green]✓[/green] Renamed [bold]{old_name}[/bold] -> "
-                          f"[bold]{safe}[/bold]")
-            console.print(f"[dim](no reply from the server: {e} - but the rename "
+            console.print(f"[green]✓[/green] Renamed [bold]{escape(old_name)}[/bold] -> "
+                          f"[bold]{escape(safe)}[/bold]")
+            console.print(f"[dim](no reply from the server: {escape(str(e))} - but the rename "
                           f"itself completed)[/dim]")
             return True
-        console.print(f"[yellow]No reply from {show_url(url)} ({e}); the rename does not "
+        console.print(f"[yellow]No reply from {show_url(url)} ({escape(str(e))}); the rename does not "
                       f"appear to have been applied - doing it locally.[/yellow]")
         return None
 
     if resp.ok:
         data = resp.json()
-        console.print(f"[green]✓[/green] Renamed [bold]{old_name}[/bold] -> "
-                      f"[bold]{data.get('new_name', new_name)}[/bold]")
+        console.print(f"[green]✓[/green] Renamed [bold]{escape(old_name)}[/bold] -> "
+                      f"[bold]{escape(str(data.get('new_name', new_name)))}[/bold]")
         for note in data.get("notes") or []:
-            console.print(f"[dim]{note}[/dim]")
+            console.print(f"[dim]{escape(str(note))}[/dim]")
         return True
 
     detail = ""
@@ -521,14 +534,14 @@ def _rename_on_running_server(old_name: str, new_name: str):
         # The server's own verdict on the rename itself. Renaming locally would
         # fail identically, so report it and stop rather than going behind its
         # back.
-        console.print(f"[red]{detail}[/red]")
+        console.print(f"[red]{escape(detail)}[/red]")
         return False
     # Anything else (401 without a key, a server too old to have the route, a
     # 5xx) leaves the rename undone, and the user asked for a rename. Do it
     # locally and say plainly what the running server now believes - a silent
     # fallback here is how the server ends up serving an orphaned name.
     console.print(f"[yellow]The running server declined the rename "
-                  f"({resp.status_code}{': ' + detail if detail else ''}).[/yellow]")
+                  f"({resp.status_code}{': ' + escape(detail) if detail else ''}).[/yellow]")
     console.print("[yellow]Renaming locally; that server will keep the model "
                   "loaded under its old name until it is restarted or the "
                   "model is unloaded ([bold]localm unload[/bold]).[/yellow]")
@@ -583,18 +596,30 @@ def models():
 @main.command()
 def info():
     """Show paths and current configuration."""
+    from rich.markup import escape
+
     cfg = load_config()
     binary_dir = find_binary_dir()
 
-    console.print(f"  [bold]models dir[/bold]   {HOME_DIR / 'models'}")
-    console.print(f"  [bold]registry   [/bold]   {HOME_DIR / 'registry.json'}")
-    console.print(f"  [bold]config     [/bold]   {HOME_DIR / 'config.json'}")
-    console.print(f"  [bold]binaries   [/bold]   {binary_dir or '[dim]not found[/dim]'}")
+    # HOME_DIR is wherever LOCALM_HOME/config points, and a config VALUE is
+    # whatever the user or a hand-edited config.json set it to - neither is
+    # restricted to a safe character class.
+    console.print(f"  [bold]models dir[/bold]   {escape(str(HOME_DIR / 'models'))}")
+    console.print(f"  [bold]registry   [/bold]   {escape(str(HOME_DIR / 'registry.json'))}")
+    console.print(f"  [bold]config     [/bold]   {escape(str(HOME_DIR / 'config.json'))}")
+    binaries_s = escape(str(binary_dir)) if binary_dir else "[dim]not found[/dim]"
+    console.print(f"  [bold]binaries   [/bold]   {binaries_s}")
     console.print()
     for k, v in sorted(cfg.items()):
+        # `cfg` is DEFAULT_CONFIG overlaid with the raw contents of config.json
+        # (_merge_stored_config: `cfg.update(stored)`), so BOTH the key and the
+        # value can be arbitrary text from a hand-edited or newer-version file,
+        # not just the fields this build's schema knows about.
         if v is None:
-            v = "[dim](auto)[/dim]"
-        console.print(f"  {k:<22} {v}")
+            v_s = "[dim](auto)[/dim]"
+        else:
+            v_s = escape(str(v))
+        console.print(f"  {escape(str(k)):<22} {v_s}")
 
 
 
@@ -607,6 +632,7 @@ def ps_cmd():
     instead of double-loading the model. This shows them: which directory each
     serves, its address and surface (api = bare OpenAI API, full = API + GUI),
     and whether it answers a liveness probe."""
+    from rich.markup import escape
     from rich.table import Table
 
     from localm import instances
@@ -630,12 +656,18 @@ def ps_cmd():
         # wildcard bind), only bracketed now so an IPv6 literal is legible.
         # Deliberately NOT self_connect_host: this column answers "what did this
         # instance bind", and the sibling `localm status` line says the same.
+        # show_url() already escapes its own argument for Rich markup.
         addr = show_url(f"{scheme}://"
                         f"{url_host(r.get('host') or '127.0.0.1')}"
                         f":{r.get('port', '?')}")
+        # Table cell strings go through the same markup parsing as
+        # console.print() - instance_id, mode, and root_dir all come from the
+        # on-disk instance registry (mode is always "api"/"full" today, but
+        # escaped anyway rather than relying on that staying true).
         table.add_row(
-            str(r.get("instance_id", ""))[:8], status, str(r.get("mode", "?")),
-            addr, str(r.get("pid", "?")), str(r.get("root_dir", "")))
+            escape(str(r.get("instance_id", ""))[:8]), status,
+            escape(str(r.get("mode", "?"))),
+            addr, str(r.get("pid", "?")), escape(str(r.get("root_dir", ""))))
     console.print(table)
     console.print("[dim]Stop one with[/dim] localm stop <id>  [dim]or[/dim]  "
                   "localm stop --all")
@@ -660,6 +692,8 @@ def _fmt_age(seconds) -> str:
 def _print_activity(scheme: str, port, instance_token=None,
                     bind_host=None) -> None:
     """Render what the server is doing, or why that could not be determined."""
+    from rich.markup import escape
+
     state, payload = read_activity(scheme, port, instance_token, bind_host)
     console.print()
     if state == "unreachable":
@@ -709,6 +743,10 @@ def _print_activity(scheme: str, port, instance_token=None,
             age = _fmt_age(now - op["created_at"])
         age_s = f"  [dim]{age}[/dim]" if age else ""
         status = op.get("status") or "?"
+        # `colour` is picked from a fixed whitelist (never printed itself as
+        # content - it forms the tag name), so it needs no escaping; `status`
+        # IS shown as text below and is not guaranteed to be one of the four
+        # known values, so it is escaped there.
         colour = {"running": "cyan", "done": "green",
                   "failed": "red", "cancelled": "yellow"}.get(status, "white")
         # The id and the cancellable flag were both already in this payload and
@@ -716,10 +754,11 @@ def _print_activity(scheme: str, port, instance_token=None,
         # WATCH a two-hour re-embed and unable to name it, let alone stop it.
         # Job ids are 12 hex chars, short enough to print whole and type.
         op_id = op.get("id")
-        id_s = f"  [dim]{op_id}[/dim]" if op_id else ""
+        id_s = f"  [dim]{escape(str(op_id))}[/dim]" if op_id else ""
         if op.get("cancellable") and op_id:
             cancellable = True
-        console.print(f"  [{colour}]{status:<9}[/{colour}] {label}{pct_s}{age_s}{id_s}")
+        status_s = escape(str(status))
+        console.print(f"  [{colour}]{status_s:<9}[/{colour}] {escape(str(label))}{pct_s}{age_s}{id_s}")
     if cancellable:
         console.print("[dim]Cancel one with[/dim] localm cancel <id>")
 
@@ -729,24 +768,27 @@ def _print_activity(scheme: str, port, instance_token=None,
               help="Check this directory instead of the current one.")
 def status_cmd(project):
     """Show the localm server serving this directory, and what it is doing."""
+    from rich.markup import escape
+
     from localm import instances
     from localm.config import home_dir
     root = instances.resolve_root_dir(override=project)
     entry = instances.find_attachable(home_dir(), root)
     if entry is None:
-        console.print(f"[dim]No localm server is serving[/dim] {root}")
+        console.print(f"[dim]No localm server is serving[/dim] {escape(root)}")
         console.print("[dim]Start one with[/dim] localm gui  [dim]or[/dim]"
                       "  localm serve <model>")
         return
     scheme = entry.get("scheme", "http")
-    console.print(f"  [bold]directory[/bold]  {root}")
+    console.print(f"  [bold]directory[/bold]  {escape(root)}")
+    # show_url() already escapes its own argument.
     console.print("  [bold]address  [/bold]  "
                   + show_url(f"{scheme}://"
                              f"{url_host(entry.get('host') or '127.0.0.1')}"
                              f":{entry.get('port')}"))
-    console.print(f"  [bold]surface  [/bold]  {entry.get('mode')}")
+    console.print(f"  [bold]surface  [/bold]  {escape(str(entry.get('mode')))}")
     console.print(f"  [bold]pid      [/bold]  {entry.get('pid')}")
-    console.print(f"  [bold]version  [/bold]  {entry.get('version')}")
+    console.print(f"  [bold]version  [/bold]  {escape(str(entry.get('version')))}")
     # The one place a terminal can learn what a running server is actually
     # doing. Everything above is read from the on-disk instance registry and is
     # fixed at process start; none of it can tell you a model pull is halfway
@@ -792,6 +834,8 @@ def cancel_cmd(operation_id):
     Scheduled jobs are a different thing under a different id space - use
     `localm job` for those.
     """
+    from rich.markup import escape
+
     server = running_server()
     if server is None:
         no_server_message("cancelling an operation")
@@ -811,20 +855,21 @@ def cancel_cmd(operation_id):
     ops = (payload or {}).get("operations") or []
     op, err = _match_operation(ops, operation_id)
     if err == "ambiguous":
-        console.print(f"[red]{operation_id!r} matches more than one operation "
+        console.print(f"[red]{escape(repr(operation_id))} matches more than one operation "
                       "- be more specific:[/red]")
         for o in ops:
             if str(o.get("id") or "").startswith(operation_id):
-                console.print(f"  {o.get('id')}  {o.get('label') or o.get('kind')}")
+                console.print(f"  {escape(str(o.get('id')))}  "
+                              f"{escape(str(o.get('label') or o.get('kind')))}")
         sys.exit(1)
     if err == "none":
-        console.print(f"[red]No operation matches[/red] {operation_id!r}")
+        console.print(f"[red]No operation matches[/red] {escape(repr(operation_id))}")
         console.print("[dim]See[/dim] localm status [dim]for what this server is "
                       "doing. Finished operations are forgotten after a while.[/dim]")
         sys.exit(1)
     if not op.get("cancellable"):
-        console.print(f"[dim]{op.get('id')} is not running (status: "
-                      f"{op.get('status') or '?'}) - nothing to cancel.[/dim]")
+        console.print(f"[dim]{escape(str(op.get('id')))} is not running (status: "
+                      f"{escape(str(op.get('status') or '?'))}) - nothing to cancel.[/dim]")
         return
 
     # not_found="missing": a 404 HERE means the job is gone (finished and
@@ -841,7 +886,8 @@ def cancel_cmd(operation_id):
     # terminates any subprocess, and an in-process job stops at its next
     # checkpoint. Claiming it is already stopped would be a state this command
     # never observed.
-    console.print(f"[green]Cancelling[/green] {label} [dim]({op['id']})[/dim]")
+    console.print(f"[green]Cancelling[/green] {escape(str(label))} "
+                  f"[dim]({escape(str(op['id']))})[/dim]")
     console.print("[dim]Confirm with[/dim] localm status")
 
 
@@ -858,6 +904,8 @@ def config_cmd(key, value):
       localm config temperature 0.7
       localm config main_gpu_index 1
     """
+    from rich.markup import escape
+
     from localm.settings_schema import validate_update
     try:
         validated = validate_update({key: value})
@@ -867,7 +915,12 @@ def config_cmd(key, value):
     # (a bare load_config()/save_config() pair has an unlocked window where a
     # concurrent config write can be silently lost).
     update_config(lambda cfg: cfg.update(validated))
-    console.print(f"[green]✓[/green] {key} = {validated[key]}")
+    # `key` only reaches here after validate_update() proved it is one of
+    # DEFAULT_CONFIG's own keys (raises otherwise) - provably safe today, same
+    # as rag.py's collection names, escaped anyway rather than relying on that
+    # chain holding. `value` (a free-text setting like mdns_name) has no such
+    # guarantee.
+    console.print(f"[green]✓[/green] {escape(str(key))} = {escape(str(validated[key]))}")
 
 
 @main.command("gpus")
@@ -885,9 +938,15 @@ def gpus_cmd():
     \b
       localm config gpu_split_indices 0,1
     """
+    from rich.markup import escape
+
     from .. import discover, gpu_usage
 
     cfg = load_config()
+    # main_gpu_index/gpu_split_indices are schema-validated to an int / list of
+    # ints (settings_schema.py), so `configured`/`split` below are provably
+    # numeric and are printed unescaped (an int or a list of ints can never
+    # start a "[...]" span with the letter/#/@/\\ Rich's tag parser requires).
     configured = cfg.get("main_gpu_index")
     split = cfg.get("gpu_split_indices") or []
     # A one-shot CLI must wait out a slow COLD GPU driver init (the first
@@ -949,8 +1008,11 @@ def gpus_cmd():
             free_s = ""
             note = ("  [yellow](free VRAM reading unavailable on this "
                     "platform)[/yellow]" if untrusted else "")
+        # g['name'] is a driver/OS-reported device description, not restricted
+        # to a safe character class.
+        name_s = escape(str(g.get("name") or "?"))
         console.print(
-            f"  [cyan]{g['index']}[/cyan]  {g.get('name') or '?':<30} "
+            f"  [cyan]{g['index']}[/cyan]  {name_s:<30} "
             f"{free_s}{g['total'] / 1024**3:.1f} GB total{marker}{note}")
     if configured is not None and not any(g["index"] == configured for g in gpus):
         console.print(
@@ -980,6 +1042,7 @@ def unload_cmd(model):
     import os
 
     import requests
+    from rich.markup import escape
 
     from .. import instances, tls
     from ..auth import resolve_bearer_headers
@@ -1010,7 +1073,8 @@ def unload_cmd(model):
                              params={"model": model} if model else None,
                              timeout=180, verify=tls.requests_verify(url))
     except requests.RequestException as e:
-        console.print(f"[red]Could not reach {show_url(url)}:[/red] {e}")
+        # show_url() already escapes its own argument; only `e` needs it here.
+        console.print(f"[red]Could not reach {show_url(url)}:[/red] {escape(str(e))}")
         sys.exit(1)
 
     if resp.status_code == 401:
@@ -1022,7 +1086,8 @@ def unload_cmd(model):
             detail = resp.json().get("detail", "")
         except Exception:
             pass
-        console.print(f"[red]Unload failed ({resp.status_code}):[/red] {detail or resp.text}")
+        console.print(f"[red]Unload failed ({resp.status_code}):[/red] "
+                      f"{escape(str(detail or resp.text))}")
         sys.exit(1)
 
     data = resp.json()
@@ -1030,7 +1095,8 @@ def unload_cmd(model):
         # A targeted unload on a registered-but-not-loaded model is a no-op
         # success (idempotent, matches the unload-everything "nothing to do"
         # case) - say so plainly rather than claiming something was unloaded.
-        console.print(f"[dim]'{data.get('model', model)}' was not loaded - nothing to do.[/dim]")
+        console.print(f"[dim]'{escape(str(data.get('model', model)))}' was not "
+                      "loaded - nothing to do.[/dim]")
         return
     unloaded = data.get("unloaded_models")
     if unloaded is None:
@@ -1047,7 +1113,10 @@ def unload_cmd(model):
     if not unloaded:
         console.print("[dim]Nothing was loaded.[/dim]")
     else:
-        console.print(f"[green]✓[/green] unloaded: {', '.join(unloaded)}")
+        # unloaded holds server-reported model names (plus the literal
+        # "embedding model"), not a safe charset.
+        console.print(f"[green]✓[/green] unloaded: "
+                      f"{', '.join(escape(str(u)) for u in unloaded)}")
 
 
 @main.command("stop")
@@ -1073,6 +1142,7 @@ def stop_cmd(instance_id, stop_all, timeout):
     import time
 
     import requests
+    from rich.markup import escape
 
     from .. import instances, tls
     from ..auth import resolve_bearer_headers
@@ -1095,21 +1165,21 @@ def stop_cmd(instance_id, stop_all, timeout):
         targets = [e for e in entries
                    if str(e.get("instance_id", "")).startswith(instance_id)]
         if not targets:
-            console.print(f"[red]No running instance matches[/red] {instance_id!r}")
+            console.print(f"[red]No running instance matches[/red] {escape(repr(instance_id))}")
             console.print("[dim]See[/dim] localm ps [dim]for the running instances.[/dim]")
             sys.exit(1)
         if len(targets) > 1:
-            console.print(f"[red]{instance_id!r} matches {len(targets)} instances "
+            console.print(f"[red]{escape(repr(instance_id))} matches {len(targets)} instances "
                           f"- be more specific:[/red]")
             for e in targets:
-                console.print(f"  {str(e.get('instance_id', ''))[:8]}  "
-                              f"{e.get('root_dir', '')}")
+                console.print(f"  {escape(str(e.get('instance_id', ''))[:8])}  "
+                              f"{escape(str(e.get('root_dir', '')))}")
             sys.exit(1)
     else:
         root = instances.resolve_root_dir()
         entry = instances.find_attachable(home, root)
         if entry is None:
-            console.print(f"[dim]No localm server is serving[/dim] {root}")
+            console.print(f"[dim]No localm server is serving[/dim] {escape(root)}")
             console.print("[dim]Pass an id (see[/dim] localm ps[dim]) or --all.[/dim]")
             sys.exit(1)
         targets = [entry]
@@ -1154,7 +1224,7 @@ def stop_cmd(instance_id, stop_all, timeout):
 
         if not stopped:
             if graceful_denied:
-                console.print(f"[dim]{iid}:[/dim] server declined an "
+                console.print(f"[dim]{escape(iid)}:[/dim] server declined an "
                               f"unauthenticated shutdown request (set "
                               f"LOCALM_API_KEY for a clean model-unload "
                               f"shutdown) - ending the process directly.")
@@ -1180,9 +1250,10 @@ def stop_cmd(instance_id, stop_all, timeout):
             instances.unregister_instance(path)
 
         if stopped:
-            console.print(f"[green]stopped[/green]  {iid}  {root}")
+            console.print(f"[green]stopped[/green]  {escape(iid)}  {escape(root)}")
         else:
-            console.print(f"[red]{iid}:[/red] could not confirm it stopped (pid {pid})")
+            console.print(f"[red]{escape(iid)}:[/red] could not confirm it "
+                          f"stopped (pid {pid})")
             any_failed = True
 
     if any_failed:
