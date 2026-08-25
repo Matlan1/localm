@@ -755,6 +755,19 @@ permanent public record of what shipped and are never rewritten; the in-progress
   reply could contain text the schema forbids and feeding such a token back
   could abort generation outright. Constrained requests now generate one token
   at a time; ordinary chat keeps the speedup.
+- **The coder's shell tools can now actually launch npm, yarn and npx on
+  Windows.** `run_shell` and `run_shell_background` previously handed Windows
+  the bare command name, which it cannot start directly for these three -
+  even with npm installed and on PATH, any coder-run `npm test` or manual
+  `npm`/`npx` command failed immediately with "the system cannot find the
+  file specified". They now resolve to the real, launchable path first.
+- **A coder sub-agent dispatched to its own worktree (`spawn_agent_background`,
+  `dispatch_parallel`) now has its changes checked before being reported as
+  finished.** Such a sub-agent's diff previously sat in a separate worktree
+  that nothing ever verified, so it could be reported as done even when its
+  change did not actually work. It now runs the project's own check (or
+  whichever one you configured) against its own worktree, and a failing
+  check is reported as a failure rather than a success.
 
 ### Security
 - **Turning network access off no longer left the voice model able to

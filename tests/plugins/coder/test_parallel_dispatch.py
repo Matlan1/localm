@@ -11,6 +11,7 @@ cleanup) is exercised for real, not mocked.
 from __future__ import annotations
 
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -109,6 +110,7 @@ class DummyParent:
         self.disabled_tools = frozenset()
         self.scope = kw.get("scope")
         self._interactive = kw.get("interactive", False)
+        self.verify_cmd = kw.get("verify_cmd")
 
 
 # --------------------------------------------------------------------------
@@ -523,6 +525,93 @@ def test_child_is_confined_to_its_worktree_and_knows_where_it_is(repo):
     assert captured["scope"] == "src/**"
     # The child can report which worktree/branch its diff belongs to.
     assert captured["worktree_path"] and captured["branch"]
+
+
+# --------------------------------------------------------------------------
+# An isolated child's diff lands in a tree the parent's own verify_cmd (if
+# any) never sees, so it needs an oracle of its own - see
+# tools/agents.py:_isolated_verify_cmd.
+# --------------------------------------------------------------------------
+
+def test_isolated_child_inherits_an_explicit_parent_verify_cmd(repo):
+    """An explicit choice at the parent must not be silently replaced by a
+    different auto-detected command for the child."""
+    parent = DummyParent(repo, verify_cmd="pytest tests/only_this.py -x")
+    captured = {}
+
+    def record(agent):
+        captured["verify_cmd"] = agent.verify_cmd
+        return "ok"
+
+    FakeAgent.behaviour = {"child1": record}
+    par.tool_dispatch_parallel(repo, tasks=["a"], _parent_agent=parent)
+
+    assert captured["verify_cmd"] == "pytest tests/only_this.py -x"
+
+
+def test_isolated_child_without_parent_verify_cmd_detects_its_own(repo):
+    """The common case: a one-shot task-mode parent never sets verify_cmd at
+    all (see core.py's constructor comment), so "inherit only" would leave
+    every isolated child exactly as unverified as today. The child must still
+    get a real oracle, detected against ITS OWN worktree."""
+    (repo / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
+    _run(repo, "git", "add", "-A")
+    _run(repo, "git", "commit", "-m", "add a pytest marker")
+
+    parent = DummyParent(repo)          # verify_cmd defaults to None
+    captured = {}
+
+    def record(agent):
+        captured["verify_cmd"] = agent.verify_cmd
+        return "ok"
+
+    FakeAgent.behaviour = {"child1": record}
+    par.tool_dispatch_parallel(repo, tasks=["a"], _parent_agent=parent)
+
+    cmd = captured["verify_cmd"]
+    assert cmd is not None, "isolated child got no verify_cmd at all"
+    assert "pytest" in " ".join(str(part) for part in cmd)
+
+
+def test_isolated_child_verify_failure_is_reported_as_error_not_ok(repo):
+    """The severity of the defect: a child whose diff fails verification must
+    be reported as an error, never as ok (which the GUI shows as SUCCESS).
+
+    FakeAgent's own run_task is a full stand-in, so this hook plays the part
+    of the real Agent's own pre-done gate (loop.py's _run_verify_gate) -
+    running the SAME verify_cmd this fix threads to the child and setting
+    last_run_ok from its real exit code, exactly as loop.py does on exhausted
+    retries. Before this fix verify_cmd was always None here, so a child could
+    never even attempt this and always fell back to reporting ok.
+
+    The precondition is asserted OUTSIDE the hook, on the main thread, after
+    dispatch returns - never by raising inside the hook itself. A raise there
+    runs on the pool worker, where dispatch_parallel's own exception handler
+    (its `except Exception as exc: outcome.seal("error", ...)`) catches it and
+    reports the identical "[error]" symptom this test is trying to prove for a
+    real verification failure - so an assertion inside the hook cannot tell
+    "verify_cmd reached the child and failed" from "the hook itself crashed
+    for an unrelated reason", which defeats the whole point of the test.
+    """
+    captured = {}
+
+    def fails_its_own_verification(agent):
+        captured["verify_cmd"] = agent.verify_cmd
+        if agent.verify_cmd is not None:
+            from localm.plugins.coder import verify as _verify
+            code, _out = _verify.run_verify(agent.verify_cmd, agent.cwd)
+            agent.last_run_ok = (code == 0)
+        return "child claims done"
+
+    FakeAgent.behaviour = {"child1": fails_its_own_verification}
+    parent = DummyParent(
+        repo, verify_cmd=[sys.executable, "-c", "import sys; sys.exit(1)"])
+    res = par.tool_dispatch_parallel(repo, tasks=["a"], _parent_agent=parent)
+
+    assert captured.get("verify_cmd") is not None, "no verify_cmd reached the child"
+    assert "[error]" in res.output, res.output
+    assert "[ok]" not in res.output, res.output
+    assert res.ok is False
 
 
 # --------------------------------------------------------------------------

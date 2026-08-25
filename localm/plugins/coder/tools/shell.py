@@ -95,15 +95,26 @@ def _shell_argv(command: str) -> "list[str] | str":
         # Malformed quoting - fall back to shell
         return platform_shell(command)
     # Shell builtins (echo, dir, type, …) have no executable on disk -
-    # argument-list mode would fail with "file not found". Detect via
-    # PATH lookup and route those through the shell instead. This lookup is why
-    # _split_command must remove quotes: which() of a still-quoted token is
-    # None, so a quoted absolute executable used to fall through to the shell
-    # route and be mangled there rather than run directly.
-    import shutil as _shutil
-    if not argv or _shutil.which(argv[0]) is None:
+    # argument-list mode would fail with "file not found". Resolve via
+    # resolve_runner() and route unresolvable names through the shell instead.
+    # This lookup is why _split_command must remove quotes: a still-quoted
+    # token resolves to None, so a quoted absolute executable used to fall
+    # through to the shell route and be mangled there rather than run
+    # directly.
+    #
+    # resolve_runner(), not a bare shutil.which() truthiness check: npm, yarn
+    # and npx ship as .CMD shims on Windows, and this argv list is launched
+    # via CreateProcess, which cannot start a bare "npm" even though which()
+    # finds npm.CMD on PATH - only the resolved path (with its extension)
+    # does (see resolve_runner's own docstring). Substituting the resolved
+    # path as argv[0] is what makes those actually launchable here, instead
+    # of always falling through to the shell fallback.
+    if not argv:
         return platform_shell(command)
-    return argv
+    resolved = resolve_runner(argv[0])
+    if resolved is None:
+        return platform_shell(command)
+    return [resolved, *argv[1:]]
 
 
 def _privacy_env(_privacy: bool) -> dict | None:

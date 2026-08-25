@@ -51,6 +51,39 @@ def _inherited_confirm_handler(parent: Any):
     return None
 
 
+def _isolated_verify_cmd(parent: Any, child_cwd: Path):
+    """The exit-code oracle a worktree-isolated child should run at its own
+    pre-done boundary, or None to leave it unverified.
+
+    DESIGN CHOICE (stated, not silent): prefer the parent's own EXPLICIT
+    verify_cmd when it has one, never override it with a different
+    auto-detected command - that would be exactly the silent override of a
+    user's own choice this project's own rule forbids. Only when the parent
+    has none does this detect fresh against the CHILD's own worktree.
+
+    Detecting fresh, rather than leaving it at None, is the load-bearing half:
+    ``Agent.verify_cmd`` is None by default and STAYS None for the most common
+    way a child gets spawned at all - a one-shot task-mode CLI session never
+    sets it regardless of any flag (cli/_main.py keeps that case on its own
+    outer ``--until`` loop instead; core.py's constructor comment says so).
+    "Inherit only" would therefore leave most isolated children exactly as
+    unverified as they are today. Detecting against the CHILD's tree, not the
+    parent's, also matters on its own: that is where its diff actually lands,
+    and its tooling (installed deps, config) can differ from the parent's.
+
+    Best-effort: a child that cannot be given a verify_cmd should still be
+    spawned rather than fail the whole dispatch over this convenience.
+    """
+    inherited = getattr(parent, "verify_cmd", None)
+    if inherited is not None:
+        return inherited
+    try:
+        from ..verify import detect_verify_command
+        return detect_verify_command(child_cwd)
+    except Exception:                                          # noqa: BLE001
+        return None
+
+
 def inherited_child_kwargs(
     parent: Any,
     *,
@@ -61,6 +94,7 @@ def inherited_child_kwargs(
     confirm_handler: Any,
     scope: Any = _INHERIT,
     role: Any = None,
+    verify_cmd: Any = None,
 ) -> dict:
     """The kwargs every child Agent is constructed with, in one place.
 
@@ -92,9 +126,12 @@ def inherited_child_kwargs(
     everything derived from *parent* is INHERITED (and read with getattr AND a
     default, because *parent* is whatever the caller passed and a duck-typed or
     partial parent must fall back rather than raise). Everything else - backend,
-    cwd, name, max_turns, confirm_handler, role - is PER-SPAWN and belongs to the
-    individual call. *role* in particular is an argument of spawn_agent, not a
-    property of the parent, so it has no getattr form.
+    cwd, name, max_turns, confirm_handler, role, verify_cmd - is PER-SPAWN and
+    belongs to the individual call. *role* and *verify_cmd* in particular are
+    arguments of the caller, not properties of the parent this helper can read
+    with a bare getattr: *verify_cmd* differs by whether the child is
+    worktree-isolated (see :func:`_isolated_verify_cmd`), which only the
+    caller knows, so it is computed there and simply carried through here.
 
     This helper only ASSEMBLES kwargs. It deliberately does no toolset resolution:
     a role's narrowing is applied inside ``Agent`` after ``_apply_restricted_toolset``
@@ -141,6 +178,7 @@ def inherited_child_kwargs(
         # registry on top of the inherited disabled set, never in place of it, so
         # this line can only ever take capability away from the child.
         role=role,
+        verify_cmd=verify_cmd,
     )
 
 
@@ -156,6 +194,7 @@ def _prepare_child(
     *,
     confirm_handler: Any,
     tool: str,
+    isolated: bool = False,
 ):
     """Build the child Agent and its full task, shared by BOTH spawn paths.
 
@@ -168,6 +207,16 @@ def _prepare_child(
     construction site is precisely how the scope hole and then the role hole
     were introduced, so the background variant reuses this rather than
     assembling its own kwargs.
+
+    *isolated* gates whether this child gets its own exit-code oracle (see
+    :func:`_isolated_verify_cmd`). Only ``spawn_agent_background`` sets it: a
+    worktree-isolated child's diff lands in a tree the PARENT's own pre-done
+    verify_cmd (if any) never sees, so without an oracle of its own it can
+    finish and report ok on a diff nothing ever checked. The synchronous
+    ``spawn_agent`` child shares the parent's cwd, so whatever the parent
+    itself verifies at ITS pre-done boundary already covers the child's
+    writes too - giving it a second, redundant oracle would only run the same
+    check twice for no gain.
     """
     from ..roles import resolve_role
     try:
@@ -213,6 +262,7 @@ def _prepare_child(
     child = Agent(**inherited_child_kwargs(
         parent, backend=backend, cwd=cwd, name=name, max_turns=max_turns,
         confirm_handler=confirm_handler, role=role,
+        verify_cmd=_isolated_verify_cmd(parent, cwd) if isolated else None,
     ))
     return child, full_task
 
@@ -484,6 +534,7 @@ def tool_spawn_agent_background(
         child, prepared = _prepare_child(
             child_cwd, task, name, files, model, max_turns, role, _parent_agent,
             confirm_handler=explicit_handler, tool="spawn_agent_background",
+            isolated=True,
         )
         if child is None:
             git_worktree_remove(info["repo"], info["worktree"])
