@@ -473,6 +473,11 @@ class TestPowerShellReporterFailsSafeUnattended:
         out = (proc.stdout or "") + (proc.stderr or "")
         assert proc.returncode == 0, f"script exited {proc.returncode}: {out}"
         assert "Sent to the maintainer" not in out, out
+        # The specific message only the fixed early-exit path prints - without
+        # this, the confirm's empty-string answer falls through and is read
+        # as consent, which happens to still fail safe in this test only
+        # because no endpoint is reachable here (exit 1, different message).
+        assert "Not a terminal" in out, out
         saved = list((ps1.parent.parent / "home" / "bug-reports").glob("bug-*.md"))
         assert saved, f"nothing was saved locally: {out}"
 
