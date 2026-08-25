@@ -7,6 +7,7 @@ the runtime loaded left the install with 14 of 24 libraries and 0 of 995 rocBLAS
 kernels, while every existing check still reported it healthy.
 """
 
+import contextlib
 import ctypes
 import shutil
 import sys
@@ -267,41 +268,74 @@ def test_blas_ignores_a_path_that_is_not_a_directory(tmp_path):
 #  provisioning notice wording
 # --------------------------------------------------------------------------- #
 
-@pytest.mark.parametrize("have,want,expect,forbid", [
-    ("amd-rocm", "amd-rocm", "Re-downloading the amd-rocm build (", "with amd-rocm"),
-    ("amd-rocm", "auto",     "with the auto-detected backend",    "with auto."),
-    ("vulkan",   "cuda",     "Replacing vulkan build with cuda", None),
-    (None,       "cuda",     "Replacing unrecorded build with cuda", None),
+class _StoppedBeforeProvisioning(Exception):
+    """Raised by the patched provisioning lock so a test observes the notice
+    text `main()` actually printed without letting it reach the network or
+    the disk - see _invoke_provision_notice."""
+
+
+def _invoke_provision_notice(monkeypatch, tmp_path, capsys, *, have, have_build, want):
+    """Drive the REAL `main()` "already provisioned" notice logic up to, but
+    not through, the point where it would mutate the target or touch the
+    network, and return what it printed.
+
+    have/have_build fake the marker `_provisioned_backend`/`_provisioned_build`
+    would read back; want is the requested --backend. The interactive confirm
+    gate (`want == "auto" or have == want`) is always satisfied (a fake tty
+    plus a patched click.confirm), since both cases it guards are needed to
+    reach every branch of the notice below it."""
+    monkeypatch.setattr(setup_llama, "_repo_runtime_lib", lambda: tmp_path)
+    monkeypatch.setattr(setup_llama, "_provisioned_backend", lambda target: have)
+    monkeypatch.setattr(setup_llama, "_provisioned_build", lambda target: have_build)
+    monkeypatch.setattr(setup_llama.click, "confirm", lambda *a, **k: True)
+
+    class _FakeTTYStdin:
+        def isatty(self):
+            return True
+
+    monkeypatch.setattr(setup_llama.sys, "stdin", _FakeTTYStdin())
+    (tmp_path / setup_llama._lib_name()).write_bytes(b"\x00")
+
+    @contextlib.contextmanager
+    def _refuse_to_provision(target):
+        raise _StoppedBeforeProvisioning()
+        yield  # pragma: no cover - the raise above always fires first
+
+    monkeypatch.setattr(setup_llama, "_provisioning_lock", _refuse_to_provision)
+
+    with pytest.raises(_StoppedBeforeProvisioning):
+        setup_llama.main.callback(
+            from_dir=None, backend=want, url=None, sha256=None,
+            force=False, tag=None, rollback=False, assume_yes=False,
+        )
+    return " ".join(capsys.readouterr().out.split())
+
+
+@pytest.mark.parametrize("have,have_build,want,expect,forbid", [
+    ("amd-rocm", None,     "amd-rocm", "Re-downloading the amd-rocm build (", "with amd-rocm"),
+    ("amd-rocm", None,     "auto",     "with the auto-detected backend",    "with auto."),
+    ("vulkan",   None,     "cuda",     "Replacing vulkan build with cuda", None),
+    (None,       None,     "cuda",     "Replacing unrecorded build with cuda", None),
 ])
-def test_provision_notice_reads_sensibly(have, want, expect, forbid, capsys):
+def test_provision_notice_reads_sensibly(monkeypatch, tmp_path, capsys,
+                                         have, have_build, want, expect, forbid):
     """`--force` on an already-provisioned box used to announce "Replacing
     amd-rocm build with amd-rocm" (it is a re-download) or "...with auto" (auto
-    is not a backend, it is how one gets picked)."""
-    from localm.setup_llama import console
-    if not have:
-        console.print(f"[yellow]Replacing unrecorded build with {want}.[/yellow]")
-    elif want == "auto":
-        console.print(f"[yellow]Replacing {have} build with the "
-                      f"auto-detected backend.[/yellow]")
-    elif have == want:
-        tag = f" ({setup_llama._ROCM_TAG})" if want == "amd-rocm" else ""
-        console.print(f"[yellow]Re-downloading the {have} build{tag}.[/yellow]")
-    else:
-        console.print(f"[yellow]Replacing {have} build with {want}.[/yellow]")
-    out = " ".join(capsys.readouterr().out.split())
+    is not a backend, it is how one gets picked). Drives the real main()
+    branch instead of a hand-written copy of it."""
+    out = _invoke_provision_notice(monkeypatch, tmp_path, capsys,
+                                   have=have, have_build=have_build, want=want)
     assert expect in out
     if forbid:
         assert forbid not in out
 
 
-def test_redownload_names_the_build_it_is_fetching(capsys):
+def test_redownload_names_the_build_it_is_fetching(monkeypatch, tmp_path, capsys):
     """"Re-downloading the amd-rocm build" alone reads as a no-op; the case this
-    came from was a real b1288 -> b1307 upgrade. The OLD version cannot be named
-    (the marker records the backend only), so naming the target is the honest
-    maximum - and only for amd-rocm, whose tag is a pinned constant. The upstream
-    backends resolve theirs with a network call, which a print statement does not
-    get to make."""
-    from localm.setup_llama import console, _ROCM_TAG
-    console.print(f"[yellow]Re-downloading the amd-rocm build ({_ROCM_TAG}).[/yellow]")
-    out = " ".join(capsys.readouterr().out.split())
-    assert _ROCM_TAG in out and _ROCM_TAG.startswith("b")
+    came from was a real build upgrade. Drives the real main() branch with a
+    recorded build tag that differs from the pinned one, so it must announce
+    the upgrade rather than a bare re-download."""
+    old_tag = f"not-{setup_llama._ROCM_TAG}"
+    out = _invoke_provision_notice(monkeypatch, tmp_path, capsys,
+                                   have="amd-rocm", have_build=old_tag, want="amd-rocm")
+    assert f"Upgrading the amd-rocm build: {old_tag} -> {setup_llama._ROCM_TAG}." in out

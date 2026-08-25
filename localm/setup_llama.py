@@ -121,6 +121,15 @@ DEFAULT_URL_SHA256 = (
 # schemes collide; see inference/backends/llamacpp/_structs.py.)
 _ROCM_TAG = "b1307"
 
+# Maps hwdetect.amd_gfx_family()'s return value to the lemonade-sdk asset name
+# fragment for the self-contained amd-rocm build of that family. Only the three
+# families amd_gfx_family() can currently distinguish are listed; an
+# unrecognised card (empty string) falls back to gfx103X, the only build
+# verified on real hardware. _PINNED_FALLBACK_SHA256 also carries entries for
+# gfx1150/gfx1151/gfx908/gfx90a, but there is no adapter-name heuristic for
+# those families yet, so they stay unreachable until one exists.
+_AMD_ROCM_ASSET_TAG = {"gfx103x": "gfx103X", "gfx110x": "gfx110X", "gfx120x": "gfx120X"}
+
 # Upstream llama.cpp prebuilts (ggml-org/llama.cpp).
 _UPSTREAM_REPO = "ggml-org/llama.cpp"
 
@@ -1143,24 +1152,42 @@ def _resolve_backend_asset(backend: str, cuda_line: Optional[str] = None,
                 "use --backend hip (needs ROCm) or build with --from.")
         # Try to resolve dynamically first
         tag = _ROCM_TAG
+        try:
+            from localm import hwdetect
+            fam = hwdetect.amd_gfx_family(hwdetect.detect().gpu_names)
+        except Exception as e:
+            # Best-effort like _auto_backend's own detection call: a hiccup
+            # here must not block an explicit --backend amd-rocm request. ""
+            # is the same conservative default amd_gfx_family() itself returns
+            # for an unrecognised card, and it resolves to gfx103X below.
+            logger.debug("AMD gfx-family detection failed (%s); defaulting to gfx103X", e)
+            fam = ""
+        asset_tag = _AMD_ROCM_ASSET_TAG.get(fam, "gfx103X")
+        if asset_tag == "gfx103X":
+            fallback_url, fallback_sha = DEFAULT_URL, DEFAULT_URL_SHA256
+        else:
+            asset_name = f"llama-{tag}-windows-rocm-{asset_tag}-x64.zip"
+            fallback_url = ("https://github.com/lemonade-sdk/llamacpp-rocm/releases/"
+                            f"download/{tag}/{asset_name}")
+            fallback_sha = _PINNED_FALLBACK_SHA256.get(asset_name)
         assets = _release_assets(tag, repo="lemonade-sdk/llamacpp-rocm")
         for a in assets:
-            if "windows-rocm-gfx103X" in a.get("name", ""):
-                url = a.get("browser_download_url") or DEFAULT_URL
+            if f"windows-rocm-{asset_tag}" in a.get("name", ""):
+                url = a.get("browser_download_url") or fallback_url
                 digest = a.get("digest")
                 sha = digest.split("sha256:")[-1].strip() if digest and "sha256:" in digest else None
                 if not sha:
-                    sha = DEFAULT_URL_SHA256
+                    sha = fallback_sha
                 return url, sha, None
         # Surface the fallback so the user knows the build may not be current
         # (the lemonade-sdk release lookup was unreachable, or this release is
-        # missing the expected gfx103X asset); mirrors the visible-fallback
-        # warning in the general (non-ROCm) path below instead of silently
-        # handing back a possibly-stale pinned URL/checksum.
+        # missing the expected asset for this GPU family); mirrors the
+        # visible-fallback warning in the general (non-ROCm) path below
+        # instead of silently handing back a possibly-stale pinned URL/checksum.
         console.print("[yellow]Could not find a lemonade-sdk/llamacpp-rocm release asset "
-                      f"for {tag}; using pinned amd-rocm build - rerun later for the "
-                      "latest.[/yellow]")
-        return DEFAULT_URL, DEFAULT_URL_SHA256, None
+                      f"for {tag} ({asset_tag}); using pinned amd-rocm build - rerun later "
+                      "for the latest.[/yellow]")
+        return fallback_url, fallback_sha, None
 
     if backend == "cuda" and _platform_key() == "linux":
         # Upstream (ggml-org/llama.cpp) publishes no bare Linux CUDA binary at
