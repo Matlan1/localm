@@ -300,7 +300,15 @@ class TestComfyUpdateMarkupEscaping:
                                             message="done", installed_packages=0,
                                             custom_nodes_copied=0))
 
-        bracket_commit = "abc123[bold red]def456"
+        # The complete "[bold]" tag must fall WITHIN the first 12 characters -
+        # commit[:12] truncates before interpolation, so a bracket pair that
+        # only closes past index 12 (e.g. "abc123[bold red]def456") is cut
+        # into an unclosed "[bold " fragment that Rich never parses as markup
+        # at all, silently defeating this test (confirmed empirically: an
+        # unclosed "[" is printed as plain literal text either way, escaped
+        # or not - the fires-control caught this on the first version of this
+        # test, which passed with escape() removed for the wrong reason).
+        bracket_commit = "ab[cd]ef1234567890"
         result = cli_runner.invoke(comfy_cli.comfy_update, ["--commit", bracket_commit])
         assert result.exit_code == 0, result.output
         preview_line = next(l for l in result.output.splitlines()
