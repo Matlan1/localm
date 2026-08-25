@@ -743,6 +743,18 @@ permanent public record of what shipped and are never rewritten; the in-progress
   manual `localm setup-embeddings` re-run to become semantically searchable
   again. A background pass now catches them up on its own while you use
   localm, so semantic recall keeps improving without a manual step.
+- **Stopping a reply, or running out of memory as one starts, now tells you what
+  actually happened.** Pressing Stop, unloading the model mid-reply, or asking
+  for a context window that does not fit in free memory reported an internal
+  error about a missing variable, instead of either stopping quietly or showing
+  the out-of-memory message that tells you to start a new chat or lower
+  `n_ctx_max`. The real reason now reaches you.
+- **Structured replies from multi-token-prediction models no longer break their
+  own format.** On a model with MTP heads, a JSON-schema, GBNF or tool-calling
+  request drafted tokens ahead using a sampler that ignored the grammar, so the
+  reply could contain text the schema forbids and feeding such a token back
+  could abort generation outright. Constrained requests now generate one token
+  at a time; ordinary chat keeps the speedup.
 
 ### Security
 - **Turning network access off no longer left the voice model able to

@@ -1441,7 +1441,12 @@ class LlamaCpp:
             _t0 = time.monotonic()
             tokens_generated = 0
             in_decode = False
+            # Both handles are freed in the finally below, which is reachable
+            # before either is bound: the _stop check right after the lock, and
+            # any raise out of prefill, both exit early. Binding one inside the
+            # try loses the real error to an UnboundLocalError.
             sampler = None
+            draft_sampler = None
             try:
                 # One contiguous suppression scope covering context work and
                 # prefill. The ROCm lazy-buffer verification messages fire
@@ -1477,7 +1482,18 @@ class LlamaCpp:
                     grammar_lazy=grammar_lazy,
                     grammar_triggers=grammar_triggers,
                 )
-                draft_sampler = api.llama_sampler_init_greedy() if self._mtp_ctx_ptr is not None else None
+                # Drafting samples with a plain greedy sampler and then pushes the
+                # winning token into the main chain. With a grammar in that chain
+                # the token was chosen without the grammar's mask, so it can be one
+                # the grammar forbids, and accepting it advances the parse stacks
+                # out of step - the same mis-sequenced accept documented below,
+                # which throws across the C ABI. Constrained requests therefore
+                # take the single-token path.
+                draft_sampler = (
+                    api.llama_sampler_init_greedy()
+                    if self._mtp_ctx_ptr is not None and grammar is None
+                    else None
+                )
 
                 pos = n_prompt
                 # Why generation ended, read by callers as self.last_finish_reason.
@@ -1525,7 +1541,32 @@ class LlamaCpp:
                         yield token   # consumer runs here; an unload can interleave
                         tokens_generated += 1
 
+                        # Coarse heartbeat, OUTSIDE the lock above (never add
+                        # work to a native-call-holding region). DEBUG, not
+                        # INFO: the file-side ring-buffer precedent this whole
+                        # scheme follows (discover.py) is explicit that INFO is
+                        # for a decision made once per call, not a recurring
+                        # tick - the always-on ring buffer holds 400 records
+                        # SHARED across everything the server logs, and an
+                        # INFO line here is spent on every generation forever.
+                        # Only the phase BOUNDARIES (prefill start/complete,
+                        # decode entered, complete/aborted - roughly four per
+                        # generation) are affordable at that level; this one
+                        # still reaches the shared debug-log file once --debug
+                        # is on, which is where a stalled-vs-hung decode is
+                        # actually diagnosed.
+                        if (tokens_generated
+                                and tokens_generated % _DECODE_PROGRESS_INTERVAL == 0):
+                            logger.debug(
+                                "gguf generate: decode progress, %d token(s) in %.2fs",
+                                tokens_generated, time.monotonic() - _decode_t0)
+
                         if max_new_tokens > 0 and tokens_generated >= max_new_tokens:
+                            # The while/else below only runs when the loop exits by
+                            # CONDITION, and this break skips it, so the reason is
+                            # set here too. Callers read it to tell a reply that ran
+                            # out of budget from one the model chose to end.
+                            self.last_finish_reason = "length"
                             # Final token budget reached, update KV cache bookkeeping
                             with self._gen_lock:
                                 if not (self._stop.is_set() or self._ctx_ptr is None):
@@ -1653,25 +1694,6 @@ class LlamaCpp:
                                     # _prefill_fresh_context above raises mid-growth.
                                     if batch is not None:
                                         api.llama_batch_free(batch)
-                        # Coarse heartbeat, OUTSIDE the lock above (never add
-                        # work to a native-call-holding region). DEBUG, not
-                        # INFO: the file-side ring-buffer precedent this whole
-                        # scheme follows (discover.py) is explicit that INFO is
-                        # for a decision made once per call, not a recurring
-                        # tick - the always-on ring buffer holds 400 records
-                        # SHARED across everything the server logs, and an
-                        # INFO line here is spent on every generation forever.
-                        # Only the phase BOUNDARIES (prefill start/complete,
-                        # decode entered, complete/aborted - roughly four per
-                        # generation) are affordable at that level; this one
-                        # still reaches the shared debug-log file once --debug
-                        # is on, which is where a stalled-vs-hung decode is
-                        # actually diagnosed.
-                        if (tokens_generated
-                                and tokens_generated % _DECODE_PROGRESS_INTERVAL == 0):
-                            logger.debug(
-                                "gguf generate: decode progress, %d token(s) in %.2fs",
-                                tokens_generated, time.monotonic() - _decode_t0)
                     else:
                         # Budget exhausted without the model finishing its turn
                         self.last_finish_reason = "length"
@@ -1960,8 +1982,9 @@ class LlamaCpp:
         # decode failure both leave the NATIVE KV populated while _cached_tokens is [].
         # Without this branch the guard is 0 < 0 (False), the wipe is skipped, and the
         # new prompt decodes onto stale KV at shifted positions (U-1: "sees earlier
-        # text out of order"). When empty, prefix is 0, so seq_rm(0, 0, -1) drops the
-        # residual and the suffix decodes cleanly from position 0.
+        # text out of order"). A zero prefix clears the memory outright instead of
+        # removing a range: recurrent and M-RoPE state cannot be partially rewound,
+        # so a range removal can leave them stale.
         if prefix == 0:
             api.llama_memory_clear(mem, True)
             if self._mtp_ctx_ptr is not None:

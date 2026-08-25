@@ -883,7 +883,17 @@ def llama_model_has_mrope(model: ctypes.c_void_p) -> bool:
             rtype = _bind("llama_model_rope_type", ctypes.c_int32, LlamaModel)(model)
             if rtype in (3, 4):
                 return True
-        except Exception:
+        except (AttributeError, TypeError):
+            # Only a binding-shape problem is recoverable here: the symbol went
+            # missing between the hasattr above and the bind, or ctypes rejected
+            # the argument. Both mean "this probe is unusable", and the metadata
+            # fallback below can still answer.
+            #
+            # An OSError must NOT be caught. ctypes surfaces a native access
+            # violation as one, which means *model* is not a live model pointer -
+            # and the fallback path dereferences that same pointer again, so
+            # swallowing the first fault only buys a second, worse one reported
+            # from the generic metadata reader instead of from here.
             pass
     if has_model_meta_api():
         arch = llama_model_meta_val_str(model, "general.architecture")
