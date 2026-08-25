@@ -110,6 +110,8 @@ def setup_embeddings(model, yes=False):
     and never touches an already-registered or user-pointed model."""
     from pathlib import Path
 
+    from rich.markup import escape
+
     from ..config import load_config, update_config
     from ..inference.embedder import (DEFAULT_EMBEDDING_MODEL,
                                       KNOWN_EMBEDDING_MODELS,
@@ -128,11 +130,12 @@ def setup_embeddings(model, yes=False):
             affected = collection_provenance_report()
             if affected:
                 console.print(
-                    f"[yellow]{collection_provenance_note(model, affected)}[/yellow]")
+                    f"[yellow]{escape(collection_provenance_note(model, affected))}[/yellow]")
                 for c in affected:
-                    built = f" (built with {c['built_with']})" if c.get("built_with") else ""
+                    built = (f" (built with {escape(c['built_with'])})"
+                             if c.get("built_with") else "")
                     chunks = f" - {c['n_chunks']} chunks" if c.get("n_chunks") is not None else ""
-                    console.print(f"  - {c['name']}{built}{chunks}")
+                    console.print(f"  - {escape(c['name'])}{built}{chunks}")
                 if not yes:
                     # Deliberately NOT abort=True (REG-589's shape, cli/rag.py):
                     # nothing here is destroyed by proceeding - a collection's
@@ -154,7 +157,7 @@ def setup_embeddings(model, yes=False):
                         raise click.Abort()
         update_config(lambda c: c.update({"embedding_model": model}))
     name = str(load_config().get("embedding_model") or DEFAULT_EMBEDDING_MODEL)
-    console.print(f"Installing embedding model: [bold cyan]{name}[/bold cyan]")
+    console.print(f"Installing embedding model: [bold cyan]{escape(name)}[/bold cyan]")
     path = resolve_embedding_model_path(allow_download=True)
     if not path:
         console.print(
@@ -177,7 +180,7 @@ def setup_embeddings(model, yes=False):
             if not find_aliases_by_path(p, load_registry()):
                 reg_name = _sanitize_name(f"embedding-{name}")
                 _register(reg_name, p, source="setup-embeddings", model_type="embedding")
-                synced_note = (f"\nRegistered as [bold]{reg_name}[/bold] "
+                synced_note = (f"\nRegistered as [bold]{escape(reg_name)}[/bold] "
                                "(type 'embedding') - visible in `localm list` / the GUI.")
     except Exception as e:
         # Best-effort visibility sync only - the embedding model itself is
@@ -232,7 +235,7 @@ def setup_embeddings(model, yes=False):
                     "recall stays lexical for them until this succeeds.")
 
     console.print(
-        f"[green]Embedding model ready:[/green] {path}{synced_note}{mem_note}\n"
+        f"[green]Embedding model ready:[/green] {escape(str(path))}{synced_note}{mem_note}\n"
         "New memory items are embedded as they are written. Existing RAG "
         "collections stay lexical (BM25) until re-embedded: run `localm rag reembed "
         "<name>` for each (works from the chunk text already stored, no original "
@@ -257,9 +260,10 @@ def make_launcher_cmd(force: bool, quiet: bool) -> None:
     compiled binary; it stays inside this clone's venv. Re-runnable; setup runs it
     for you."""
     from localm import applaunch
+    from rich.markup import escape
     res = applaunch.make_launcher(force=force)
     for note in res.notes:
-        console.print(f"  [dim]-[/dim] {note}")
+        console.print(f"  [dim]-[/dim] {escape(note)}")
     if not res.ok:
         console.print("[yellow]Could not build the native launcher.[/yellow] "
                       "`localm gui` still works.")
@@ -267,11 +271,11 @@ def make_launcher_cmd(force: bool, quiet: bool) -> None:
     if quiet:
         return
     if res.path:
-        console.print(f"[green]App executable ready:[/green] {res.path}")
+        console.print(f"[green]App executable ready:[/green] {escape(str(res.path))}")
     if res.desktop_file:
-        console.print(f"[dim]Desktop entry:[/dim] {res.desktop_file}")
+        console.print(f"[dim]Desktop entry:[/dim] {escape(str(res.desktop_file))}")
     if sys.platform == "win32" and res.path:
-        console.print(f'[dim]Launch it:[/dim] "{res.path}" -m localm gui')
+        console.print(f'[dim]Launch it:[/dim] "{escape(str(res.path))}" -m localm gui')
 
 
 @main.command("bug-report")
@@ -309,6 +313,7 @@ def bug_report_cmd(message: str, expected: str, happened: str,
     to skip the menu and send it immediately. No GitHub account is ever
     needed."""
     from localm import bugreport
+    from rich.markup import escape
     interactive = bool(getattr(sys.stdin, "isatty", lambda: False)())
     description, what_expected, what_happened = message, expected, happened
     if interactive:
@@ -331,7 +336,7 @@ def bug_report_cmd(message: str, expected: str, happened: str,
         return
 
     summary = bugreport.report_title("", what_happened, description)
-    console.print(f"[bold]Filing a bug report:[/bold] {summary}")
+    console.print(f"[bold]Filing a bug report:[/bold] {escape(summary)}")
     # The reporter's server may have hung in a DIFFERENT process (this CLI is not
     # it), so its captured freeze trace can only be found via the live instance
     # registry, not this process's pid (REG-736).
@@ -340,7 +345,8 @@ def bug_report_cmd(message: str, expected: str, happened: str,
         description, what_i_expected=what_expected, what_happened=what_happened,
         include_log=not no_log, extra_hang_trace=hang)
     if path is not None:
-        console.print(f"[dim]A bug report was saved (edit it before sending):[/dim] {path}")
+        console.print(
+            f"[dim]A bug report was saved (edit it before sending):[/dim] {escape(str(path))}")
     else:
         console.print("[yellow]Could not save a report file; you can still copy the "
                       "details above.[/yellow]")
@@ -366,12 +372,13 @@ def update_cmd(check_only: bool, yes: bool, do_rollback: bool) -> None:
     configured (the bug-report proxy with an update token); see tools/bugreport-proxy/."""
     from localm import updater
     from localm.bugreport import LocalmError
+    from rich.markup import escape
 
     if do_rollback:
         try:
             updater.rollback_last()
         except LocalmError as e:
-            console.print(f"[yellow]{e.summary}[/yellow] ({e.reason}).")
+            console.print(f"[yellow]{escape(e.summary)}[/yellow] ({escape(e.reason)}).")
             return
         console.print("[green]Rolled back.[/green] Restart localm to load the previous build.")
         return
@@ -383,26 +390,30 @@ def update_cmd(check_only: bool, yes: bool, do_rollback: bool) -> None:
     try:
         info = updater.check()
     except LocalmError as e:
-        console.print(f"[yellow]Could not check for updates:[/yellow] {e.summary} ({e.reason}).")
+        console.print(
+            f"[yellow]Could not check for updates:[/yellow] {escape(e.summary)} "
+            f"({escape(e.reason)}).")
         return
 
     cur, latest = info["current"], info["latest"]
     if not latest:
-        console.print(f"[dim]No releases published yet. You are on {cur}.[/dim]")
+        console.print(f"[dim]No releases published yet. You are on {escape(cur)}.[/dim]")
         return
     if not info["newer"]:
         if not info.get("comparable", True):
             console.print(
-                f"[yellow]Could not tell whether {latest} is newer than your "
-                f"version {cur}[/yellow] (unrecognized version format) - "
+                f"[yellow]Could not tell whether {escape(latest)} is newer than your "
+                f"version {escape(cur)}[/yellow] (unrecognized version format) - "
                 "check the release notes yourself before assuming you are up to date.")
         else:
-            console.print(f"[green]localm is up to date[/green] (running {cur}; latest {latest}).")
+            console.print(f"[green]localm is up to date[/green] "
+                          f"(running {escape(cur)}; latest {escape(latest)}).")
         return
 
-    console.print(f"[bold]Update available:[/bold] {latest}  [dim](you have {cur})[/dim]")
+    console.print(f"[bold]Update available:[/bold] {escape(latest)}  "
+                  f"[dim](you have {escape(cur)})[/dim]")
     if info.get("notes"):
-        console.print(f"[dim]{str(info['notes'])[:500]}[/dim]")
+        console.print(f"[dim]{escape(str(info['notes'])[:500])}[/dim]")
     if check_only:
         console.print("[dim]Run `localm update` to apply it.[/dim]")
         return
@@ -416,14 +427,14 @@ def update_cmd(check_only: bool, yes: bool, do_rollback: bool) -> None:
         console.print("[dim]Not applied.[/dim]")
         return
 
-    console.print(f"[dim]Downloading and applying {latest} ...[/dim]")
+    console.print(f"[dim]Downloading and applying {escape(latest)} ...[/dim]")
     try:
         res = updater.apply(asset["id"], signature=info.get("signature"))
     except LocalmError as e:
         # apply() already rolled back; surface honestly, never a false success.
-        console.print(f"[red]Update failed:[/red] {e.summary} ({e.reason}).")
+        console.print(f"[red]Update failed:[/red] {escape(e.summary)} ({escape(e.reason)}).")
         return
-    console.print(f"[green]Updated to {res['version']}[/green] "
+    console.print(f"[green]Updated to {escape(res['version'])}[/green] "
                   f"({updater.class_summary(res['klass'])}).")
     if res["klass"] == "setup":
         console.print("[yellow]This update needs setup.bat re-run (a Python/venv change) "
@@ -450,6 +461,7 @@ def issues_cmd(number, state) -> None:
     configured."""
     from localm import issue_tracker
     from localm.bugreport import LocalmError
+    from rich.markup import escape
 
     if not issue_tracker.available():
         console.print("[yellow]The issues tracker is not configured.[/yellow]")
@@ -461,13 +473,20 @@ def issues_cmd(number, state) -> None:
                 console.print(f"[yellow]Issue #{number} not found.[/yellow]")
                 return
             st = it.get("state", "?")
-            console.print(f"[bold]#{it.get('number')}[/bold] {st}: {it.get('title', '')}")
+            # number/state/title come straight from the GitHub API via the proxy
+            # (issue_tracker.get_issue's own docstring: "trimmed", not sanitized),
+            # so they are attacker-controlled content, not local/trusted text -
+            # escaped so a bracketed issue title cannot be parsed as markup.
+            console.print(
+                f"[bold]#{escape(str(it.get('number')))}[/bold] {escape(str(st))}: "
+                f"{escape(str(it.get('title', '')))}")
             if it.get("html_url"):
-                console.print(f"[dim]{it['html_url']}[/dim]")
+                console.print(f"[dim]{escape(str(it['html_url']))}[/dim]")
             return
         issues = issue_tracker.list_issues(state)
     except LocalmError as e:
-        console.print(f"[yellow]Could not load issues:[/yellow] {e.summary} ({e.reason}).")
+        console.print(
+            f"[yellow]Could not load issues:[/yellow] {escape(e.summary)} ({escape(e.reason)}).")
         return
 
     if not issues:
@@ -477,6 +496,10 @@ def issues_cmd(number, state) -> None:
         st = it.get("state", "?")
         color = "green" if st == "closed" else "yellow"
         # No literal square brackets around dynamic text - rich would parse them as
-        # markup tags and drop them.
-        console.print(f"  [{color}]#{it.get('number')} {st}[/{color}]  {it.get('title', '')}")
+        # markup tags and drop them. The interpolated data (number/state/title) is
+        # externally sourced (the GitHub API via the proxy) and is escaped so it
+        # cannot be parsed as markup either, regardless of what it contains.
+        console.print(
+            f"  [{color}]#{escape(str(it.get('number')))} {escape(str(st))}[/{color}]  "
+            f"{escape(str(it.get('title', '')))}")
     console.print(f"[dim]{len(issues)} issue(s). Detail: localm issues <number>.[/dim]")
