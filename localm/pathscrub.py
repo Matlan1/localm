@@ -44,24 +44,38 @@ from typing import Callable, List, Tuple
 # Path.home() - a different account, or any path under the well-known user
 # roots that an exact-prefix replacement would miss.
 #
+# The Windows separator is matched 1-OR-2 backslashes, never just one: a path
+# that reaches this scrubber after passing through repr() or json.dumps() (an
+# exception's %r-formatted filename, a dict rendered with str()) has every
+# backslash doubled by that escaping, and a single-backslash-only pattern does
+# not match the doubled form at all - the account name then survives intact.
+# Forward slashes are untouched by both encodings, so they stay single.
+#
 # Kept as a PATTERN STRING, not a pre-compiled object: the flags depend on
 # sys.platform, and compiling at import time would freeze them, so a test that
 # patches sys.platform to exercise the Windows branch would silently get the
 # case-SENSITIVE regex. The original implementation this replaces read
 # sys.platform per call, and this stays byte-identical to it. re caches compiled
 # patterns, so there is no per-call compile cost.
-_USER_ROOT_PATTERN = r"([A-Za-z]:[\\/]Users[\\/]|/home/|/Users/)[^\\/\r\n]+"
+_USER_ROOT_PATTERN = r"([A-Za-z]:(?:\\{1,2}|/)Users(?:\\{1,2}|/)|/home/|/Users/)[^\\/\r\n]+"
 
 
 def _sub_prefix(text: str, prefix: str, replacement: str) -> str:
-    """Replace *prefix* in BOTH separator forms (and case-insensitively on
-    Windows). A value entered with forward slashes does not match the native
-    backslash form, and on Windows a lowercased drive/segment is the same
-    directory - a plain case-sensitive ``str.replace`` leaks on those variants.
+    """Replace *prefix* in every separator form it can appear in (and
+    case-insensitively on Windows). A value entered with forward slashes does
+    not match the native backslash form, and on Windows a lowercased
+    drive/segment is the same directory - a plain case-sensitive
+    ``str.replace`` leaks on those variants. A THIRD form matters just as
+    much: text that has passed through repr() or json.dumps() before reaching
+    here (an exception's ``%r``-formatted filename, a log line built from
+    ``str(some_dict)``) has every backslash doubled, and neither of the other
+    two variants matches that. On a prefix with no backslash (a POSIX home)
+    the doubled variant is identical to *prefix* and the set below simply
+    dedupes it away - no extra work, no extra risk.
     """
     if not prefix:
         return text
-    for variant in {prefix, prefix.replace("\\", "/")}:
+    for variant in {prefix, prefix.replace("\\", "/"), prefix.replace("\\", "\\\\")}:
         if sys.platform == "win32":
             text = re.sub(re.escape(variant), replacement, text,
                           flags=re.IGNORECASE)
