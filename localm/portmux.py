@@ -16,13 +16,11 @@ from localm.netlisten import create_listen_socket
 # file handler + the fd-2-stable console handler from debuglog #220).
 _log = logging.getLogger("localm.portmux")
 
-# A TLS record (and therefore the ClientHello that opens any HTTPS connection)
-# begins with the handshake content-type byte 0x16. A plaintext HTTP request
-# begins with an ASCII method letter ("G", "P", ...). One byte distinguishes them.
+# A TLS record begins with the handshake content-type byte 0x16; a plaintext
+# HTTP request begins with an ASCII method letter. One byte distinguishes them.
 _TLS_FIRST_BYTE = 0x16
 
-# Accept only a sane Host header before reflecting it into a redirect, so a
-# crafted Host cannot turn the redirect into an open redirect / header smuggle.
+# Host header shapes accepted before being reflected into a redirect:
 # host[:port] for a DNS name or IPv4, or [v6]:port for IPv6.
 _HOST_RE = re.compile(r"^[A-Za-z0-9.\-]+(:\d+)?$")
 _HOST6_RE = re.compile(r"^\[[0-9A-Fa-f:]+\](:\d+)?$")
@@ -45,18 +43,9 @@ def run_server(
     import uvicorn
 
     from localm import bugreport
-    # SRV-3: report a prior HARD crash (the last run died without a clean
-    # shutdown - native fault / OS kill / force-closed window) now, then arm the
-    # crash guard so THIS run is caught the same way if it dies hard. Disarmed in
-    # the finally on a clean exit so a normal stop is never reported as a crash.
-    # instance_id (set on app.state by instances.advertise(), which always runs
-    # before this) scopes the marker to THIS instance, so a second instance
-    # sharing the same LOCALM_HOME is never mistaken for a crash - see
-    # bugreport.py's per-instance-scoping note. *app* is a generic ASGI
-    # callable here, not guaranteed to be a FastAPI instance with a `.state`
-    # (test_portmux.py drives this with a bare ASGI function) - getattr on
-    # app itself first, so a plain callable degrades to no instance_id
-    # instead of raising AttributeError before the server ever binds.
+    # Report a prior hard crash, then arm the crash guard for this run. Disarmed
+    # in the finally on a clean exit. instance_id scopes the marker to this
+    # instance. *app* is a generic ASGI callable, so .state is read via getattr.
     instance_id = getattr(getattr(app, "state", None), "instance_id", None)
     bugreport.check_and_report_prior_crash()
     bugreport.arm_crash_guard(context={"host": host, "port": port,
@@ -65,22 +54,15 @@ def run_server(
 
     try:
         if not ssl_certfile:
-            # Plain-HTTP bind (the loopback default, or a network bind without
-            # TLS). Front it with the SAME first-byte peek the TLS path uses, so a
-            # client that wrongly opens a TLS/HTTPS connection on this HTTP port -
-            # a browser that cached an HTTPS upgrade for this address (HSTS, a
-            # service worker, or HTTPS-First/Only mode) - is handled at the socket
-            # layer (closed cleanly, surfaced once) instead of feeding a TLS
-            # ClientHello into uvicorn's HTTP parser, which rejects every such
-            # connection as an "Invalid HTTP request" (the R45 console flood).
+            # Plain-HTTP bind. Fronted with the same first-byte peek the TLS path
+            # uses, so a TLS connection opened on this HTTP port is closed at the
+            # socket layer instead of reaching uvicorn's HTTP parser.
             try:
                 asyncio.run(_serve_async_plain(app, host, port, log_level))
             except KeyboardInterrupt:
                 pass
             except Exception:   # pragma: no cover - defensive fallback
-                # Never leave the user without a server because the peek layer
-                # failed: fall back to a direct uvicorn.run (the flood would then
-                # recur, which is no worse than before this layer existed).
+                # Fall back to a direct uvicorn.run if the peek layer fails.
                 import traceback
                 traceback.print_exc()
                 _run_uvicorn_on_socket(uvicorn, app, host, port,
@@ -93,9 +75,7 @@ def run_server(
         except KeyboardInterrupt:
             pass
         except Exception:   # pragma: no cover - defensive fallback
-            # Never leave the user without a server because the convenience layer
-            # failed: fall back to a direct TLS bind. The http-typo case then just
-            # is not caught, which is no worse than before this module existed.
+            # Fall back to a direct TLS bind if the peek layer fails.
             import traceback
             traceback.print_exc()
             _run_uvicorn_on_socket(uvicorn, app, host, port,
@@ -166,10 +146,9 @@ async def _serve_async(app, host, port, ssl_certfile, ssl_keyfile, log_level) ->
     def _on_conn(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         _track_conn_task(inflight, _handle_conn(reader, writer, internal_port, port))
 
-    # Family-aware, dual-stack-where-it-matters listening socket. NOT
-    # `start_server(host=..., port=...)`: asyncio forces IPV6_V6ONLY on every
-    # AF_INET6 socket it builds, which would turn `-H ::` into an IPv6-only
-    # server. See netlisten.create_listen_socket for the measurement.
+    # Family-aware listening socket, not start_server(host=..., port=...):
+    # asyncio forces IPV6_V6ONLY on every AF_INET6 socket it builds, which would
+    # make `-H ::` IPv6-only.
     _lsock = create_listen_socket(host, port)
     try:
         demux = await asyncio.start_server(_on_conn, sock=_lsock)
@@ -191,12 +170,9 @@ async def _serve_async(app, host, port, ssl_certfile, ssl_keyfile, log_level) ->
         if wakeup_task:
             wakeup_task.cancel()
         demux.close()
-        # Cancel the in-flight connections BEFORE wait_closed(), not after: on
-        # this asyncio version Server.wait_closed() blocks until every accepted
-        # connection's protocol has detached (_active_count reaches 0), which
-        # never happens on its own for a connection parked mid-_relay/_pump -
-        # calling it first would deadlock shutdown forever on exactly the
-        # connection this function exists to clean up.
+        # Cancel in-flight connections BEFORE wait_closed(): it blocks until every
+        # accepted connection has detached, which never happens on its own for one
+        # parked mid-_relay/_pump.
         await _cancel_inflight_conns(inflight)
         try:
             await demux.wait_closed()
@@ -228,10 +204,9 @@ async def _serve_async_plain(app, host, port, log_level) -> None:
         _track_conn_task(
             inflight, _handle_conn_plain(reader, writer, internal_port, port, state))
 
-    # Family-aware, dual-stack-where-it-matters listening socket. NOT
-    # `start_server(host=..., port=...)`: asyncio forces IPV6_V6ONLY on every
-    # AF_INET6 socket it builds, which would turn `-H ::` into an IPv6-only
-    # server. See netlisten.create_listen_socket for the measurement.
+    # Family-aware listening socket, not start_server(host=..., port=...):
+    # asyncio forces IPV6_V6ONLY on every AF_INET6 socket it builds, which would
+    # make `-H ::` IPv6-only.
     _lsock = create_listen_socket(host, port)
     try:
         demux = await asyncio.start_server(_on_conn, sock=_lsock)
@@ -253,10 +228,7 @@ async def _serve_async_plain(app, host, port, log_level) -> None:
         if wakeup_task:
             wakeup_task.cancel()
         demux.close()
-        # See _serve_async's matching comment: cancel in-flight connections
-        # BEFORE wait_closed(), which on this asyncio version blocks until
-        # every accepted connection has detached - never true on its own for
-        # one parked mid-_relay/_pump.
+        # Cancel in-flight connections BEFORE wait_closed(); see _serve_async.
         await _cancel_inflight_conns(inflight)
         try:
             await demux.wait_closed()
@@ -270,9 +242,8 @@ async def _handle_conn_plain(reader, writer, internal_port, public_port, state) 
     try:
         first = await reader.readexactly(1)
         if first[0] == _TLS_FIRST_BYTE:
-            # We cannot complete a TLS handshake on a plain-HTTP port, so just
-            # close: an HTTPS-First browser then falls back to http://. The cause
-            # is surfaced once (not muted) without a per-connection flood.
+            # A TLS handshake cannot be completed on a plain-HTTP port, so the
+            # connection is closed and the cause surfaced once.
             _note_tls_on_http(public_port, state)
         else:
             await _relay(first, reader, writer, internal_port)
@@ -286,9 +257,8 @@ def _note_tls_on_http(public_port, state) -> None:
     """Surface a wrong-scheme (HTTPS-on-the-HTTP-port) connection honestly without flooding: one prominent notice with the cause + fix, the rest counted at debug level."""
     state["count"] += 1
     if state["warned"]:
-        # Already surfaced once this run; keep counting in the debug log only so a
-        # persistent browser does not flood the console (the file handler, when in
-        # debug mode, still records every occurrence - nothing is hidden).
+        # Already surfaced once this run; further occurrences are counted at debug
+        # level only.
         try:
             _log.debug("TLS handshake on the plain-HTTP port %d again (count=%d)",
                        public_port, state["count"])
@@ -385,10 +355,9 @@ async def _redirect_to_https(first, c_reader, c_writer, public_port) -> None:
 
     location = None
     if _HOST_RE.match(host_header) or _HOST6_RE.match(host_header):
-        # The client reached us ON public_port; if the Host header omits the port
-        # (a non-compliant client), append it so the redirect targets the right
-        # port - these binds use a non-standard port, so a bare host would resolve
-        # to :443 and fail. IPv6 keeps its port after the closing bracket.
+        # Append the port when the Host header omits it, so the redirect targets
+        # this non-standard port rather than :443. IPv6 keeps its port after the
+        # closing bracket.
         bracketed = host_header.startswith("[")
         has_port = ("]:" in host_header) if bracketed else (":" in host_header)
         authority = host_header if has_port else f"{host_header}:{public_port}"

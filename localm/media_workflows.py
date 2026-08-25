@@ -15,27 +15,11 @@ from typing import Optional
 MEDIA_TYPES = ("image", "music", "video")
 
 # Per-media mutual exclusion for the four workflow routes (list/upload/select/
-# delete). Before the routes were offloaded to run_in_threadpool (event-loop-
-# blocking fix), their synchronous, zero-`await` bodies ran atomically for
-# free: uvicorn is single-process/single-worker, so the event loop could never
-# preempt one handler mid-body to run another's. Moving the whole body onto a
-# real OS thread (anyio's worker pool) removed that for free serialization
-# without replacing it - two requests for the SAME media can now genuinely
-# interleave, and every check-then-act sequence here (is_file() then stat(),
-# a "not currently selected" check then unlink(), a successful save then an
-# is_file() check before recording the selection) assumed the atomicity that
-# no longer holds. Confirmed live (adversarial review, 2026-08-05): a
-# concurrent delete racing a listing produced an unhandled 500; concurrent
-# uploads to the same name corrupted the saved JSON in 59-74% of trials;
-# delete-vs-select races left the config pointing at a workflow file that no
-# longer exists.
-#
-# One lock PER MEDIA (not one global lock): image/music/video are independent
-# directory trees and independent config blocks, so serializing across all
-# three would only add contention with no correctness benefit. Acquired
-# INSIDE the run_in_threadpool-dispatched closure (on the worker thread), so
-# waiting on it never blocks the event loop - the property the original
-# offload fix exists to protect stays intact.
+# delete). The route bodies run on a threadpool worker, so two requests for the
+# same media can interleave, and every check-then-act sequence here needs
+# serialising. One lock per media: image/music/video are independent directory
+# trees and independent config blocks. Acquired inside the threadpool closure,
+# so waiting on it never blocks the event loop.
 _media_locks: dict[str, threading.Lock] = {}
 _media_locks_guard = threading.Lock()
 
@@ -48,33 +32,13 @@ def _lock_for(media: str) -> threading.Lock:
         return lock
 
 
-# Budget for run_in_threadpool_bounded() in make_workflow_router's four
-# routes below (follow-up to #1057) - module-level, not a router-local
-# variable, so a test can monkeypatch it down for a fast timeout simulation.
+# Budget for run_in_threadpool_bounded() in the four routes below. Module-level
+# so a test can monkeypatch it down.
 #
-# _WORKFLOW_OWN_WORK_TIMEOUT_S is the ceiling for how long a SINGLE holder's
-# own real work (file I/O, update_config's atomic write) should legitimately
-# take - genuinely large workflow uploads on a slow disk are the rare case
-# this is meant to eventually catch, not the common one it should ever fire
-# for.
-#
-# _WORKFLOW_RMW_TIMEOUT_S - the actual value passed to run_in_threadpool_
-# bounded - MUST exceed 2x that ceiling, not just match it. All four routes
-# share ONE _lock_for(media) lock, and the lock acquisition happens INSIDE
-# the bounded closure - so a request's own clock also covers however long it
-# waits behind another holder. If both used the SAME single-holder ceiling,
-# a writer that legitimately finishes just under ITS OWN budget could still
-# push a concurrently-queued, otherwise-instant reader (e.g. the GUI's own
-# list poll) past ITS budget purely from queueing, even though nothing ever
-# hung - CONFIRMED by direct reproduction during review: a writer at 1.3x its
-# budget (not hung, still completes) starved a queued no-op reader sharing
-# the identical constant. Budgeting 2x the single-holder ceiling guarantees
-# any request queued behind exactly one other NON-HUNG worst-case holder
-# still has a full ceiling's worth of margin left for its own (typically
-# trivial) work. A holder that is genuinely stuck well past its own ceiling
-# can still eventually starve a queued request - that residual is accepted,
-# matching _lock_for's own "queues behind it rather than racing it" design;
-# this fix only closes the ORDINARY-slowness case, not a genuine hang.
+# _WORKFLOW_OWN_WORK_TIMEOUT_S is the ceiling for one holder's own work.
+# _WORKFLOW_RMW_TIMEOUT_S is what the routes pass, and is 2x that: all four
+# routes share one _lock_for(media) lock acquired inside the bounded closure, so
+# a request's clock also covers the time it waits behind another holder.
 _WORKFLOW_OWN_WORK_TIMEOUT_S = 30.0
 _WORKFLOW_RMW_TIMEOUT_S = 2 * _WORKFLOW_OWN_WORK_TIMEOUT_S
 

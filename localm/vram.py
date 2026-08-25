@@ -7,22 +7,14 @@ from typing import Any, Callable, Optional
 
 _VALID_POLICIES = ("auto", "always", "never")
 
-# Single source of truth for the fixed VRAM headroom a GGUF load reserves beyond
-# model weights: KV cache + compute buffers. The GGUF backend (its _check_vram /
-# _auto_ctx_max / _auto_gpu_layers preflights), the GUI VRAM estimate
-# (sysstats.estimate_vram) and the discover fit badge (discover.fit_label) all
-# reason about "does it fit" and MUST use the same number, or a badge and the
-# loader can disagree on the same model. They keep their own module/class-level
-# name (so existing monkeypatch targets like GgufBackend._VRAM_OVERHEAD_BYTES
-# stay patchable) but derive its value from here.
+# Fixed VRAM headroom a GGUF load reserves beyond model weights: KV cache plus
+# compute buffers. The GGUF backend preflights, sysstats.estimate_vram and
+# discover.fit_label all derive their value from here.
 VRAM_OVERHEAD_BYTES = int(1.5e9)
-# Weights rarely load at exactly their on-disk size; a small safety factor the
-# fit badge applies (discover.fit_label). Kept here alongside the overhead so the
-# two "fit math" knobs live in one place.
+# Safety factor the fit badge applies to on-disk weight size.
 VRAM_WEIGHT_FACTOR = 1.10
 
-# A free-VRAM rise of at least this much after unload counts as "the model was
-# actually freed" (guards against a tiny transient fluctuation reading as freed).
+# Minimum free-VRAM rise after unload that counts as the model having been freed.
 _MIN_RELEASE_RISE = int(256e6)  # 256 MB
 # Safety margin added on top of the media estimate before we call a fit "safe".
 _DEFAULT_HEADROOM = int(1.0e9)  # 1 GB
@@ -56,12 +48,8 @@ def resolve_swap_policy(plugin_block: dict, full_config: dict) -> str:
     return "auto"
 
 
-# Conservative per-backend VRAM estimates (GB) for the media model, used by the
-# 'auto' swap decision when the user has not set plugins.<name>.vram_estimate_gb.
-# Deliberately generous so 'auto' errs toward swapping on a small card; a large
-# card still keeps chat hot when free VRAM clearly exceeds the estimate + headroom.
-# Self-calibrating measurement from the real ComfyUI model files is a Phase 1.5
-# follow-up; a fixed estimate keeps the Phase-1 decision deterministic + testable.
+# Per-backend VRAM estimates (GB) for the media model, used by the 'auto' swap
+# decision when plugins.<name>.vram_estimate_gb is unset.
 DEFAULT_MEDIA_VRAM_GB = {"image": 14.0, "music": 12.0, "video": 16.0}
 
 
@@ -97,12 +85,8 @@ def media_single_device_shortfall(settings: dict, *,
     from localm.discover import (GPU_PROBE_OK, applied_split_device_count,
                                  list_gpus, resolve_preferred_device)
     cfg = config if config is not None else load_config()
-    # applied_split_device_count (loader truth), NOT split_device_count: whether a
-    # split is ACTIVE for chat/embeddings is a load-time fact, and on vulkan the
-    # detected count would wrongly report < 2 for a live split (GPU-SPLIT-VKINDEX).
-    # On a torch-blind box resolve_preferred_device() below still returns None, so
-    # this stays a no-op there; on a mixed box it measures torch space, which is
-    # where media actually runs.
+    # applied_split_device_count is loader truth; the detected count reports < 2
+    # for a live split on vulkan.
     if applied_split_device_count(cfg) < 2:
         return None
     gpus, status = list_gpus(return_status=True)
@@ -148,11 +132,8 @@ def media_split_notice(config: Optional[dict] = None, *,
                 "cannot be divided across cards, but its components can be spread. Chat "
                 "and embeddings use the full split.")
 
-    # applied_split_device_count (loader truth), NOT split_device_count: the user
-    # CONFIGURED this split and it IS active for chat/embeddings, so the notice must
-    # fire even on the vulkan build, where the detected count wrongly collapses to
-    # < 2 and would suppress the notice entirely (GPU-SPLIT-VKINDEX) - the exact
-    # user-visible Q2 miss #704 closes.
+    # applied_split_device_count is loader truth; the detected count collapses to
+    # < 2 on vulkan and would suppress the notice.
     n = applied_split_device_count(cfg)
     if n < 2:
         return None
@@ -196,15 +177,9 @@ def evict_chat_for_embedder(*, timeout_s: float = 300.0) -> str:
                      "model safely; loading the embedder alongside it (may be "
                      "tight on VRAM)")
         return "skipped"
-    # BUG #648: if this call is ALREADY running on the server loop's own thread
-    # (an async route resolved get_embedder() synchronously without offloading),
-    # the run_coroutine_threadsafe(...).result() below would DEADLOCK - the loop
-    # thread would block waiting for a coroutine only it can run, freezing the
-    # whole server for the full timeout, then swallowing the TimeoutError. Detect
-    # that and skip the guarded eviction: the embedder loads alongside the resident
-    # chat model (degraded, logged - never a freeze, and never silent per rule 5).
-    # Callers should offload to an executor so the eviction can actually run (the
-    # memory routes now do; this is the belt-and-braces guard for any other caller).
+    # Running on the server loop's own thread would deadlock on the
+    # run_coroutine_threadsafe(...).result() below, so skip the guarded eviction
+    # and load the embedder alongside the resident chat model.
     try:
         running = asyncio.get_running_loop()
     except RuntimeError:
@@ -266,9 +241,7 @@ def wait_for_vram_release(
         if final is not None and final - before_bytes >= min_rise_bytes:
             return (True, final)
         if monotonic() >= deadline:
-            # Poll to the deadline first (a slow probe may recover and still show
-            # the rise); only the reading we actually END on decides. An
-            # unmeasurable one proves nothing either way.
+            # Poll to the deadline first; only the reading we end on decides.
             return ((False, final) if final is not None else (None, final))
         sleep(poll_s)
         final = read_free()
@@ -278,11 +251,9 @@ def wait_for_vram_release(
 #  Chat<->media VRAM handoff (shared by the image/music/video plugins)         #
 # --------------------------------------------------------------------------- #
 #
-# The three media plugins swap the chat model out before generating and back in
-# after, each via the same self-authenticated HTTP round trip to this server's
-# own /v1/models/unload and /v1/models/load. Only the progress-message wording
-# (which backend is "the image/music/video backend") differs between them, so it
-# lives here once instead of copy-pasted per plugin.
+# Each media plugin swaps the chat model out before generating and back in after,
+# via a self-authenticated round trip to /v1/models/unload and /v1/models/load.
+# Only the progress-message wording differs between them.
 
 def unload_chat_for_media(job: Any, self_url: str, media_label: str,
                           instance_token: Optional[str] = None) -> bool:
@@ -301,26 +272,17 @@ def unload_chat_for_media(job: Any, self_url: str, media_label: str,
         try:
             data = resp.json()
         except Exception:
-            # resp.ok already confirmed the server accepted the unload, so a body
-            # that does not parse is non-fatal: fall through with empty data to
-            # the generic "Chat model unloaded." message below.
+            # resp.ok already confirmed the unload was accepted, so an unparsable
+            # body falls through to the generic message below.
             pass
         if data.get("status") == "already_unloaded":
             job.push({"type": "line", "text":
                       "No chat model was loaded - VRAM already free."})
             return True
         if data.get("status") == "in_use":
-            # unload_all_models() never races the in-flight-request pin
-            # (AUDIT-CRIT-1): a chat engine mid-generation is reported "in_use"
-            # and left resident rather than freed out from under that request,
-            # exactly like unload_one_model()'s own pinned-engine check. Without
-            # this branch that status fell through to the generic "Chat model
-            # unloaded." below - a false success (rule 5) that told the media
-            # backend VRAM was free when the chat model was still fully
-            # resident, which is the exact driver-hang hazard this module
-            # exists to prevent. Treat it like the resp.ok/exception failures
-            # above: report it honestly and let the caller fall back to its own
-            # conservative swap handling.
+            # "in_use" means a chat engine mid-generation was left resident, so
+            # VRAM was not freed. Reported as a failure so the caller falls back
+            # to its own conservative swap handling.
             job.push({"type": "line", "text":
                       "Chat model is busy (still generating a reply) and could "
                       f"not be unloaded - the {media_label} backend may run low "
@@ -328,16 +290,9 @@ def unload_chat_for_media(job: Any, self_url: str, media_label: str,
             return False
         skipped = [str(m) for m in (data.get("skipped_in_use") or [])]
         if skipped:
-            # "unloaded" means SOMETHING was freed (an idle sibling engine, the
-            # embedding model), not that the chat model was: released_anything
-            # wins the status in unload_all_models(), so a pinned chat engine
-            # still lands in skipped_in_use under status "unloaded". For this
-            # caller only the chat model matters - falling through to "Chat
-            # model unloaded." here was the same rule-5 false success the
-            # "in_use" branch above closes for the nothing-freed shape, just
-            # hidden behind a freed bystander. Report what actually happened;
-            # the caller falls back to its conservative swap handling, exactly
-            # as for "in_use".
+            # "unloaded" means something was freed, not necessarily the chat
+            # model: a pinned chat engine lands in skipped_in_use under that same
+            # status. Reported as a failure for this caller.
             job.push({"type": "line", "text":
                       "Freed what could be freed, but still in use and NOT "
                       f"unloaded: {', '.join(skipped)} - the {media_label} "
@@ -347,10 +302,7 @@ def unload_chat_for_media(job: Any, self_url: str, media_label: str,
         uncertain = bool(data.get("vram_reading_uncertain"))
         if uncertain:
             # The server flagged its own reading as possibly stale, so neither a
-            # GB figure nor "has not dropped yet" is a claim we may pass on to the
-            # user as fact - both would be arithmetic on a number the server just
-            # said it could not stand behind. This branch is checked BEFORE them
-            # for exactly that reason (rule 5).
+            # GB figure nor "has not dropped yet" is reported. Checked first.
             job.push({"type": "line", "text":
                       "Chat model unloaded - could not confirm how much VRAM was "
                       "freed - continuing."})
