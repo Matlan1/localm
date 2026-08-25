@@ -2203,6 +2203,124 @@ def resolve_deletion_target(path) -> Optional[Path]:
     return None
 
 
+class ModelFileHold(NamedTuple):
+    """Why removing a model must be refused, and which loaded engine is the reason.
+
+    *reason* is None when that engine is PROVEN to hold the file (both paths
+    resolved and named the same file). Otherwise it says why holding could not
+    be ruled out. Reads as a sentence fragment after "'<key>' is loaded and ".
+    """
+    key: str
+    reason: str | None = None
+
+
+def engine_holding_model_file(
+        model: str, registry: dict,
+        candidates) -> Optional["ModelFileHold"]:
+    """Whether removing registry entry *model* would delete a file one of
+    *candidates* is holding. Returns None only when that is POSITIVELY RULED
+    OUT; otherwise a :class:`ModelFileHold` naming the candidate responsible.
+
+    *candidates* is an iterable of ``(key, model_path)`` pairs describing what
+    is resident RIGHT NOW - already filtered to loaded engines by the caller.
+    Taking pairs rather than engine objects is what lets one policy serve
+    processes that keep their residents in different places: the HTTP server's
+    ``_engines`` map and the MCP server's own ``EngineCache`` are different
+    containers answering the same question, and a second implementation of the
+    comparison would be free to disagree with the first about a deletion.
+
+    IDENTITY BY FILE PATH, NOT BY NAME. A name-keyed check answers the same
+    question only for as long as every renamer re-keys the resident map, and
+    ``localm rename`` runs in a SEPARATE PROCESS and cannot reach into another
+    one's memory. After a CLI rename the engine is still keyed on the old name,
+    a name-keyed guard misses, and the removal deletes the GGUF out from under
+    a live engine. That is not recoverable.
+
+    IT FAILS CLOSED. The question is not "do these two paths compare equal" but
+    "can I establish that nothing live is using this file", and those differ on
+    every input where the comparison cannot be made at all: a candidate with no
+    recorded path, or a path whose resolution raises (a UNC share momentarily
+    unreachable, a permission error, an embedded NUL). Each is "I could not
+    tell", and each REFUSES. A refused delete costs the user one command; a
+    deleted model file is gone.
+
+    The refusal is scoped rather than blanket: with nothing resident, nothing
+    can be holding the file, so the answer is a certain None however
+    unresolvable the paths are.
+
+    Alias-aware, mirroring :func:`remove_model`: while another registered name
+    still points at the file, the removal keeps the bytes and only drops the
+    name, so there is nothing to refuse.
+
+    Does filesystem I/O (``Path.resolve`` on registry paths, which can block on
+    a UNC entry), so a caller on an event loop runs it in an executor.
+    """
+    entry = registry.get(model)
+    if not isinstance(entry, dict):
+        return None
+    epath = _entry_path(entry)
+    if epath is None:
+        # A corrupt entry has no usable path, and remove_model's corrupt-entry
+        # branch drops the NAME without touching any file. No deletion means
+        # nothing to guard - certain, not unknown.
+        return None
+    path = Path(epath)
+
+    resident = [(k, p) for k, p in candidates]
+    if not resident:
+        # Answered FIRST, with certainty, before any filesystem work below can
+        # fail and force a cautious refusal - so a flaky network share never
+        # blocks tidying the library on a box with nothing loaded.
+        return None
+
+    # Stands ahead of both filesystem users below: find_aliases_by_path
+    # resolves too and does not catch for the path it was handed, so calling it
+    # first turns an unresolvable path into a crash out of a guard whose whole
+    # job is to answer a question calmly.
+    try:
+        path.resolve()
+    except (OSError, ValueError):
+        # resolve_deletion_target answers None for THREE situations -
+        # unresolvable, not under <data dir>/models, already gone - and only
+        # this one is an unknown. That collapse is correct for remove_model,
+        # which does not delete in any of them, and wrong here, where None
+        # means "go ahead". So the unknown is separated out first.
+        return ModelFileHold(
+            resident[0][0],
+            "this model's registered file path could not be resolved")
+    if any(a != model for a in find_aliases_by_path(path, registry)):
+        return None
+    target = resolve_deletion_target(path)
+    if target is None:
+        # Reached only for the two CERTAIN cases now: the file is outside
+        # <data dir>/models, or it is already gone. Either way the removal
+        # drops the name and deletes nothing.
+        return None
+
+    want = os.path.normcase(str(target))
+    unknown: Optional[ModelFileHold] = None
+    for key, mpath in resident:
+        if not mpath:
+            unknown = unknown or ModelFileHold(
+                key, "it has no recorded model file path")
+            continue
+        try:
+            held = Path(mpath).resolve()
+        except (OSError, ValueError):
+            unknown = unknown or ModelFileHold(
+                key, "its model file path could not be resolved")
+            continue
+        # normcase because the two paths reach here by different routes (one
+        # from the registry, one from whatever the engine was constructed with)
+        # and on Windows those can differ in case or separator.
+        if os.path.normcase(str(held)) == want:
+            return ModelFileHold(key)
+    # A proven holder outranks an unknown one: both refuse, but only the first
+    # can say truthfully which engine has the file. Hence the full pass rather
+    # than returning the first unknown as soon as it is seen.
+    return unknown
+
+
 def remove_model(name: str) -> None:
     reg = _mm.load_registry()
     if name not in reg:

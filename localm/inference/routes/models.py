@@ -254,3 +254,44 @@ def register(app: FastAPI, ctx) -> None:
         # success).
         return {"status": status, "model": engine.display_name,
                 **_hs._gpu_placement_fields(engine)}
+
+    @app.get("/v1/models/{model_id}/hold", include_in_schema=False,
+             dependencies=[Depends(require_scope(scopes.MODELS_READ))])
+    async def model_file_hold(model_id: str):
+        """Whether a LOADED engine in THIS server is holding the file that
+        removing *model_id* would delete.
+
+        Exists for a caller in ANOTHER PROCESS. ``localm rm`` and the MCP
+        ``remove_model`` tool delete registry entries without ever contacting a
+        running server, and the guard that answers this question reads this
+        process's own engine map, so no amount of care in the other process can
+        reach it. Asking over HTTP is the only way those callers can find out,
+        and the answer has to come from here rather than be re-derived there: a
+        second opinion about whether a file is in use is free to disagree with
+        this one, and the disagreement is only ever discovered by a user whose
+        model file is gone.
+
+        ``held`` is a tri-state, and the third state is the load-bearing one.
+        true/false are answers; ``reason`` non-null alongside ``held: true``
+        means holding could not be RULED OUT rather than proven, which the
+        guard treats as a refusal. A caller must not collapse those two into
+        one message: "your model is in use" and "I could not establish that it
+        is not" send a user looking in different places.
+
+        Not in the OpenAPI schema: this is internal coordination between two
+        localm processes, not part of the OpenAI-compatible surface.
+        """
+        from localm.config import load_registry
+        registry = load_registry()
+        if model_id not in registry:
+            raise HTTPException(404, f"Model not registered: {model_id}")
+        # Off the event loop: the guard resolves registry paths, and a UNC
+        # entry blocks in the SMB redirector (same reason model_detail offloads
+        # its stat/rglob).
+        loop = asyncio.get_running_loop()
+        hold = await loop.run_in_executor(
+            get_plugin_executor(), _hs.loaded_engine_holding_model_file,
+            model_id, registry)
+        if hold is None:
+            return {"held": False}
+        return {"held": True, "key": hold.key, "reason": hold.reason}

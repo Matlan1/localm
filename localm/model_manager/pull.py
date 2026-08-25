@@ -5,10 +5,12 @@ resumable downloads, hashing-on-the-wire, and GUI progress streaming."""
 import localm.model_manager as _mm  # read package-patchable names at call time
 
 import contextlib
+import json
 import os
 import shutil
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import List
 from typing import Optional
@@ -1407,6 +1409,132 @@ def _ssrf_resolve_final_url(url: str) -> str:
     return current
 
 
+class PullInFlight(Exception):
+    """Another process is already downloading to this destination."""
+
+
+def _part_lock_dir(filename: str) -> Path:
+    """Where the lock for ``<filename>.part`` lives.
+
+    BESIDE the models dir, never inside it. A lock directory under
+    ``models/`` would sit in the path of the very thing it guards:
+    ``sync_models_dir`` walks that tree three levels deep looking for GGUFs,
+    and a future tidy-up of stray files there would be free to delete a live
+    lock. The filename has already been through ``_safe_models_filename``, so
+    it is a single path component and cannot escape this directory.
+    """
+    return _mm.MODELS_DIR.parent / "locks" / ("pull-" + filename + ".lock")
+
+
+def _part_lock_owner(d: Path):
+    """The recorded holder of lock *d*, or None when that cannot be read."""
+    try:
+        rec = json.loads((d / "owner.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return rec if isinstance(rec, dict) else None
+
+
+def _part_lock_holder_is_gone(d: Path) -> bool:
+    """True only when the recorded holder is PROVEN dead.
+
+    Staleness is decided by PID LIVENESS, never by elapsed time. Any fixed
+    timeout eventually reclaims a live holder's lock and recreates the exact
+    corruption this exists to prevent, and a large model on a slow link is
+    precisely the download that outlives a generous timeout.
+
+    Every uncertainty KEEPS the lock: an owner record that cannot be read (a
+    half-written lock, a permission error) is not evidence its owner died.
+    ``instances.pid_alive`` is conservative in the same direction - it reports
+    True when it genuinely cannot tell - so this composes rather than
+    re-deciding.
+    """
+    from localm import instances
+    rec = _part_lock_owner(d)
+    if rec is None:
+        return False
+    try:
+        pid = int(rec.get("pid", -1))
+    except (TypeError, ValueError):
+        return False
+    # Our OWN pid is alive by definition, so a lock recording it is held, not
+    # stale - including when the holder is another thread of this process.
+    # Reading it as "a previous run died and the pid was not reused" would let
+    # a second acquisition inside one process steal the first one's lock, which
+    # is the corruption this guards against rather than a recovery from it.
+    return not instances.pid_alive(pid)
+
+
+@contextlib.contextmanager
+def _part_lock(filename: str):
+    """Serialise everything writing ``<filename>.part``, ACROSS PROCESSES.
+
+    The contenders are separate processes, not threads: the GUI starts a pull
+    by spawning ``localm pull`` as a child, and a user can run the same command
+    in a terminal at the same time. A ``threading.Lock`` would serialise
+    nothing here while reading, in review, exactly like a correct fix.
+
+    ``mkdir`` is the primitive because it is ATOMIC - the OS either creates the
+    directory or refuses, with nothing in between. A "does the lock exist"
+    check followed by a create is two steps, and two callers can both pass the
+    first one.
+
+    Without this, two pulls of the same URL open one ``.part`` concurrently and
+    the second one's ``already_have`` read decides append-or-truncate from a
+    size the first is still changing: they interleave writes into a single
+    file, and the result passes the download but fails its hash - or, with no
+    ``--sha256`` to check it against, gets registered as a working model.
+
+    Raises :class:`PullInFlight` when someone else holds it.
+    """
+    d = _part_lock_dir(filename)
+    d.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        d.mkdir()
+    except FileExistsError:
+        if not _part_lock_holder_is_gone(d):
+            rec = _part_lock_owner(d) or {}
+            who = rec.get("pid", "unknown")
+            raise PullInFlight(
+                f"{filename} is already being downloaded by process {who}. "
+                f"Wait for it to finish, or - if you are certain no download "
+                f"is running - remove {d}.")
+        # Proven dead. Reclaim, then take the lock through the same atomic
+        # mkdir: whoever else is reclaiming concurrently, exactly one wins.
+        shutil.rmtree(d, ignore_errors=True)
+        try:
+            d.mkdir()
+        except OSError:
+            raise PullInFlight(
+                f"{filename} is already being downloaded by another process.")
+    except OSError as e:
+        raise PullInFlight(f"could not take the download lock for {filename}: {e}")
+
+    # `started` is recorded for the MESSAGE a human reads, never for the
+    # staleness decision - see _part_lock_holder_is_gone.
+    try:
+        (d / "owner.json").write_text(
+            json.dumps({"pid": os.getpid(), "filename": filename,
+                        "started": time.time()}),
+            encoding="utf-8")
+    except OSError:
+        # A lock nobody can identify would be un-reclaimable after a crash, so
+        # do not hold one. Release and refuse rather than wedge the dest.
+        shutil.rmtree(d, ignore_errors=True)
+        raise PullInFlight(
+            f"could not record ownership of the download lock for {filename}")
+    try:
+        yield
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+        if d.exists():
+            # Rule 5: a lock we failed to drop blocks every later pull of this
+            # file until our pid dies, so it is reported rather than swallowed.
+            logger.warning(
+                "could not release the download lock at %s - a later pull of "
+                "%s will refuse until this directory is removed", d, filename)
+
+
 def _pull_url(
     url: str,
     name: str,
@@ -1414,10 +1542,13 @@ def _pull_url(
     redownload: bool = False,
     model_type: str = "llm",
 ) -> bool:
-    """Download a model from a direct URL with resumable .part file support."""
-    import requests
-    from localm.netpolicy import NetworkPolicyError
+    """Download a model from a direct URL with resumable .part file support.
 
+    Derives the destination name, then hands the whole download to
+    :func:`_pull_url_locked` under a cross-process lock on that name. The
+    derivation stays here so the lock is keyed on exactly the name the download
+    will write, rather than on a second derivation that could disagree with it.
+    """
     stem = _stem_from_url(url)
     if not stem:
         console.print(
@@ -1439,6 +1570,31 @@ def _pull_url(
         )
         return False
     filename = safe
+
+    try:
+        with _part_lock(filename):
+            return _pull_url_locked(url, name, filename, expected_sha256,
+                                    redownload, model_type)
+    except PullInFlight as e:
+        console.print(f"[red]Download already in progress:[/red] {e}")
+        return False
+
+
+def _pull_url_locked(
+    url: str,
+    name: str,
+    filename: str,
+    expected_sha256: Optional[str] = None,
+    redownload: bool = False,
+    model_type: str = "llm",
+) -> bool:
+    """The body of :func:`_pull_url`, run holding the lock on *filename*.
+
+    Split out so the lock can wrap every exit path through a single ``with``
+    instead of a ``try/finally`` wrapped around the whole download.
+    """
+    import requests
+    from localm.netpolicy import NetworkPolicyError
 
     dest      = _mm.MODELS_DIR / filename
     part_file = _mm.MODELS_DIR / (filename + ".part")
