@@ -550,6 +550,28 @@ export function confirmWebRequest(call) {
 }
 window.confirmWebRequest = confirmWebRequest;
 
+// Lazy tool-call grammar: once the model starts a <tool_call>, force it to be
+// valid tool-call JSON; free text and thinking stay unconstrained. Mirrors
+// localm/inference/gbnf.py's TOOL_CALLS_ONLY/TOOL_CALL_TRIGGER byte for byte -
+// tests/test_jobs_web_search.py pins the two copies together so they cannot
+// silently drift apart. String.raw so no character here needs re-escaping to
+// match the Python raw string it mirrors.
+export const TOOL_CALLS_ONLY = String.raw`
+root       ::= opt-ws tool-block+ opt-ws
+tool-block ::= "<tool_call>" opt-ws json-obj opt-ws "</tool_call>" opt-ws
+json-obj   ::= "{" ws "\"name\"" ws ":" ws string ws "," ws "\"args\"" ws ":" ws object ws "}"
+object     ::= "{" ws (member ws ("," ws member ws)*)? "}"
+member     ::= string ws ":" ws value
+value      ::= object | array | string | number | "true" | "false" | "null"
+array      ::= "[" ws (value ws ("," ws value ws)*)? "]"
+string     ::= "\"" ([^\"\\\x7F\x00-\x1F] | "\\" (["\\/bfnrt] | "u" [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F]))* "\""
+number     ::= "-"? ([0-9] | [1-9] [0-9]*) ("." [0-9]+)? ([eE] [+-]? [0-9]+)?
+ws         ::= ([ \t\n\r])*
+opt-ws     ::= [ \t\n\r]? [ \t\n\r]? [ \t\n\r]?
+`.trim();
+
+export const TOOL_CALL_TRIGGER = String.raw`(<tool_call>[\s\S]*)`;
+
 export const WEB_TOOL_PROMPT =
   "You can access the internet through tools. For current or uncertain " +
   "info (news, prices, versions, anything after your training cutoff), " +
@@ -1837,7 +1859,14 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
                    "max_tokens", "seed"]) {
     if (params[k] !== null && !Number.isNaN(params[k])) body[k] = params[k];
   }
-  if (params.grammar) body.grammar = params.grammar;
+  if (params.grammar) {
+    body.grammar = params.grammar;
+  } else if (webEnabled && chat.toolGrammar && !chat.toolGrammarUnsupported) {
+    // Once the model starts a <tool_call>, force it to be valid tool-call JSON.
+    body.grammar = TOOL_CALLS_ONLY;
+    body.grammar_lazy = true;
+    body.grammar_triggers = [TOOL_CALL_TRIGGER];
+  }
 
   const box = $("chat-messages");
   const { body: liveBody } = addMessageRow(box, "assistant", "");
@@ -1865,11 +1894,12 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   let visionRejected = false;
   let requestFailed = false;   // a generic (non-vision, non-abort) send failure
   let memUsed = null;   // F11: server's "used N memories" summary (X-Localm-Memory)
-  try {
+
+  async function postChatCompletions(reqBody) {
     const r = await fetch("/v1/chat/completions", {
       method: "POST",
       headers: authHeaders(),
-      body: JSON.stringify(body),
+      body: JSON.stringify(reqBody),
       signal: chat.abort.signal,
     });
     if (!r.ok) {
@@ -1887,7 +1917,31 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
       const data = await r.json().catch(() => ({}));
       const err = new Error(`${r.status}: ${data.detail || r.statusText}`);
       err.status = r.status;   // so the catch can recover an image-reject 400
+      err.detail = data.detail || "";
       throw err;
+    }
+    return r;
+  }
+
+  try {
+    let r;
+    try {
+      r = await postChatCompletions(body);
+    } catch (e) {
+      // The backend refused the grammar itself (this exact wording is shared by
+      // GRAMMAR_UNSUPPORTED_MESSAGE and GRAMMAR_LAZY_UNSUPPORTED_MESSAGE in
+      // localm/inference/backends/base.py, and by neither of the route's other
+      // grammar 400s) - retry this turn unconstrained, and stop asking for the
+      // rest of this page's session.
+      if (e.status === 400 && body.grammar_lazy && String(e.detail).includes("would be ignored")) {
+        chat.toolGrammarUnsupported = true;
+        delete body.grammar;
+        delete body.grammar_lazy;
+        delete body.grammar_triggers;
+        r = await postChatCompletions(body);
+      } else {
+        throw e;
+      }
     }
     memUsed = parseMemoryHeader(r);   // F11: read before the body stream
     await readSSE(r, (payload) => {

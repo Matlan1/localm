@@ -35,7 +35,8 @@ const content = (s) => [
 ];
 
 /** Drive runCompletion with a queue of streamed rounds (one per recursion). */
-async function runChat({ web, rounds, webResults = [{ title: "T", url: "https://example.com/", snippet: "S" }] }) {
+async function runChat({ web, rounds, webResults = [{ title: "T", url: "https://example.com/", snippet: "S" }],
+                          grammar = "" }) {
   const { impl, calls } = recordingFetch(webResults);
   const { window } = loadApp({ fetchImpl: impl });
   window.maybeCompactConversation = async () => {};
@@ -48,6 +49,7 @@ async function runChat({ web, rounds, webResults = [{ title: "T", url: "https://
   doc.getElementById("p-speak").checked = false;
   doc.getElementById("p-memory").checked = false;       // isolate the system prompt to the floor
   doc.getElementById("p-web").checked = !!web;
+  doc.getElementById("p-grammar").value = grammar;
   const conv = { id: "c1", title: "t", messages: [{ role: "user", content: "hi" }] };
   await window.runCompletion(conv);
   const completions = calls.filter((c) => c.url === "/v1/chat/completions");
@@ -184,6 +186,112 @@ test("web ON: the model is taught the tools and the honesty rule", async () => {
   const sys = systemOf(completions[0]);
   assert.match(sys, /access the internet through tools/);
   assert.match(sys, /never invent search results/i);
+});
+
+// ---------------------------------------------------------------------------
+//  Grammar-constrained tool calls: the system prompt above ASKS for the
+//  <tool_call>{"name":...,"args":{...}}</tool_call> protocol; these pin that a
+//  lazy GBNF grammar also ENFORCES it once web access is on.
+// ---------------------------------------------------------------------------
+
+test("web ON: the request is grammar-constrained for tool calls", async () => {
+  const { completions, window } = await runChat({ web: true, rounds: [content("hello")] });
+  // TOOL_CALLS_ONLY/TOOL_CALL_TRIGGER are top-level const in the injected
+  // settings-perf.js classic script - part of the jsdom realm's shared global
+  // lexical environment, not a window property and not reachable from this
+  // Node module scope directly. Bridge them out the same way the harness's
+  // own runScript doc prescribes for reading realm-local state.
+  runScript(window, "window.__gbnf = { TOOL_CALLS_ONLY, TOOL_CALL_TRIGGER };");
+  const { TOOL_CALLS_ONLY, TOOL_CALL_TRIGGER } = window.__gbnf;
+  assert.ok(completions[0].body.grammar, "no grammar was sent");
+  assert.equal(completions[0].body.grammar_lazy, true);
+  assert.deepEqual(completions[0].body.grammar_triggers, [TOOL_CALL_TRIGGER]);
+  assert.equal(completions[0].body.grammar, TOOL_CALLS_ONLY);
+});
+
+test("web OFF: no grammar is sent (nothing taught, nothing to enforce)", async () => {
+  const { completions } = await runChat({ web: false, rounds: [content("hello")] });
+  assert.ok(!("grammar" in completions[0].body));
+  assert.ok(!("grammar_lazy" in completions[0].body));
+  assert.ok(!("grammar_triggers" in completions[0].body));
+});
+
+test("web ON: an explicit persona grammar overrides the web-tool grammar", async () => {
+  const { completions } = await runChat({
+    web: true, rounds: [content("hello")], grammar: "root ::= \"ok\"",
+  });
+  assert.equal(completions[0].body.grammar, "root ::= \"ok\"");
+  assert.ok(!("grammar_lazy" in completions[0].body),
+    "the web-tool lazy/triggers pair must not ride along with a persona's own grammar");
+  assert.ok(!("grammar_triggers" in completions[0].body));
+});
+
+test("web ON: a backend that refuses the grammar falls back to unconstrained and stops asking", async () => {
+  const detail = "This model cannot constrain generation to a grammar, so the "
+    + "requested grammar would be ignored and the reply would not match it.";
+  let chatCalls = 0;
+  const calls = [];
+  const impl = async (url, opts = {}) => {
+    let body = null;
+    try { body = opts.body ? JSON.parse(opts.body) : null; } catch (e) { body = opts.body; }
+    calls.push({ url: String(url), body });
+    if (String(url) === "/v1/chat/completions") {
+      chatCalls += 1;
+      if (chatCalls === 1) {
+        return { ok: false, status: 400, json: async () => ({ detail }),
+                 text: async () => JSON.stringify({ detail }) };
+      }
+    }
+    return jsonResp({});
+  };
+  const { window } = loadApp({ fetchImpl: impl });
+  window.maybeCompactConversation = async () => {};
+  const queue = [content("2 + 2 = 4."), content("second turn, plain answer")];
+  window.readSSE = async (_r, onData) => {
+    const deltas = queue.shift() || [{ choices: [{ delta: {}, finish_reason: "stop" }] }];
+    for (const d of deltas) onData(JSON.stringify(d));
+  };
+  const doc = window.document;
+  doc.getElementById("p-speak").checked = false;
+  doc.getElementById("p-memory").checked = false;
+  doc.getElementById("p-web").checked = true;
+
+  await window.runCompletion({ id: "c1", title: "t", messages: [{ role: "user", content: "2+2?" }] });
+  await window.runCompletion({
+    id: "c1", title: "t",
+    messages: [{ role: "user", content: "2+2?" }, { role: "assistant", content: "2 + 2 = 4." },
+               { role: "user", content: "and again?" }],
+  });
+
+  const completions = calls.filter((c) => c.url === "/v1/chat/completions");
+  assert.equal(completions.length, 3,
+    "turn 1: refused attempt + unconstrained retry; turn 2: no grammar attempt at all");
+  assert.equal(completions[0].body.grammar_lazy, true, "the first attempt asked for the grammar");
+  assert.ok(!("grammar" in completions[1].body), "the retry omitted the grammar entirely");
+  assert.ok(!("grammar" in completions[2].body),
+    "a later turn must not repeat a grammar this backend already refused");
+});
+
+test("web ON: the periodic /v1/config poll (refreshCtxLimit) does not resurrect a refused grammar", async () => {
+  // chat.toolGrammar mirrors the server's config PREFERENCE and is refreshed
+  // by refreshCtxLimit on a 30s poll for the tab's whole lifetime (chat.js).
+  // chat.toolGrammarUnsupported is a separate, sticky RUNTIME fact about this
+  // backend. A poll landing after a refusal must not undo the second because
+  // it refreshed the first - proving that needs an ACTUAL poll call, not just
+  // the accidental race the fallback test above happens to exercise.
+  const impl = async (url) => {
+    if (String(url) === "/v1/config") return jsonResp({ chat_tool_grammar: true });
+    return jsonResp({});
+  };
+  const { window } = loadApp({ fetchImpl: impl });
+  runScript(window, "chat.toolGrammarUnsupported = true;");
+
+  await window.refreshCtxLimit();
+
+  runScript(window, "window.__unsupported = chat.toolGrammarUnsupported; window.__pref = chat.toolGrammar;");
+  assert.equal(window.__pref, true, "the poll DID refresh the preference from config");
+  assert.equal(window.__unsupported, true,
+    "a config poll must never clear the runtime refusal latch");
 });
 
 // ---------------------------------------------------------------------------
