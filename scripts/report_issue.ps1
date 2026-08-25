@@ -66,8 +66,20 @@ Write-Host ''
 Write-Host '  LocaLM - report a problem (PowerShell fallback; no Python found)'
 Write-Host ''
 
-if (-not $summary) { $summary = Read-Host '  One line - what went wrong?' }
-if (-not $detail)  { $detail  = Read-Host '  Any more detail (optional, Enter to skip)' }
+# Mirrors report_issue.py's `interactive = sys.stdin.isatty()` gate. Against
+# redirected/closed stdin, Read-Host either throws (-NonInteractive) or
+# returns an empty string that is indistinguishable from a real Enter
+# keypress - and an empty confirm answer means "yes" for a real user at the
+# console. So an unattended run must never reach Read-Host at all, or it
+# sends the report with no one having reviewed or confirmed it.
+$interactive = -not [Console]::IsInputRedirected
+
+if (-not $summary -and $interactive) {
+  try { $summary = Read-Host '  One line - what went wrong?' } catch { $summary = '' }
+}
+if (-not $detail -and $interactive) {
+  try { $detail = Read-Host '  Any more detail (optional, Enter to skip)' } catch { $detail = '' }
+}
 if (-not $summary) { $summary = 'localm would not start' }
 
 $os = [System.Environment]::OSVersion.VersionString
@@ -102,8 +114,20 @@ function Save-Local {
 
 $send = $yes
 if (-not $send) {
-  $ans = Read-Host '  Send this to the maintainer now? [Y/n]'
-  $send = -not ($ans -match '^[Nn]')
+  if (-not $interactive) {
+    # No one is here to confirm it: fail safe, same as a "no" answer, and
+    # say so rather than sending a report nobody reviewed.
+    $p = Save-Local
+    Write-Host "  Not a terminal, so nothing was sent. Saved at $p."
+    Write-Host "  Send it by running report-issue again, or email $email."
+    exit 0
+  }
+  try {
+    $ans = Read-Host '  Send this to the maintainer now? [Y/n]'
+    $send = -not ($ans -match '^[Nn]')
+  } catch {
+    $send = $false
+  }
 }
 if (-not $send) {
   $p = Save-Local
