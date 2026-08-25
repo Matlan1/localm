@@ -68,13 +68,10 @@ def _cpu_ram() -> dict:
         return {}
     out: dict = {}
     try:
-        # Derive CPU% from OUR own previous snapshot over a real window, not from
-        # psutil's fragile since-last-call global (see _CpuMeter). Non-blocking:
-        # cpu_times() is an instantaneous read, so the request never stalls. The
-        # first poll has no baseline yet -> pct is None -> omit the CPU field this
-        # once; the frontend renders only the sections it receives, so it shows the
-        # rest and the CPU figure appears (correct) on the next 2.5s poll, rather
-        # than a fabricated 0 or 100.
+        # CPU% is derived from our own previous snapshot over a real window, not
+        # from psutil's since-last-call global. Non-blocking: cpu_times() is an
+        # instantaneous read. The first poll has no baseline, so pct is None and
+        # the CPU field is omitted rather than fabricated.
         pct = _cpu_meter.percent(psutil.cpu_times(), time.monotonic())
         if pct is not None:
             out["cpu"] = {"percent": pct}
@@ -100,49 +97,27 @@ def _vram_reading_trusted(info: dict, status) -> bool:
             and info.get("free") is not None)
 
 
-# VRAM enumeration is throttled/single-flighted exactly like GPU utilisation
-# below, and for a stronger reason: discover.list_gpus() deliberately carries
-# NO TTL cache of its own (see the module note above it in discover.py) -
-# switch_engine's eviction-wait loop polls it for a LIVE "free" reading, and a
-# stale value there would defeat that guard and over-evict. So the cache
-# cannot live inside list_gpus()/vram_capacity() itself; it has to sit here,
-# scoped to this one best-effort status-bar reading, leaving every other
-# caller of list_gpus()/vram_capacity() untouched. Without it, every GUI poll
-# paid the full out-of-process torch probe cost synchronously (measured
-# 2.1-3.5s typical, up to the 15s cold-init-tolerant deadline on a wedged
-# driver) on the shared plugin executor (localm.executor) - roughly one probe
-# per poll in the field, and each one occupies a worker thread that RAG/web/
-# voice/coder tool calls also depend on.
-_VRAM_REFRESH_INTERVAL_S = 10.0   # Deliberately much longer than
-                                  # _GPU_UTIL_REFRESH_INTERVAL_S: that probe is
-                                  # a cheap nvidia-smi call (<200ms), this one
-                                  # is 10-20x more expensive AND its answer
-                                  # (GPU count/capacity) changes on the
-                                  # timescale of plugging in hardware, not of a
-                                  # ~2.5s UI poll - a hot-plugged GPU still
-                                  # shows up within one refresh window, never
-                                  # permanently stale.
+# VRAM enumeration is throttled and single-flighted here rather than inside
+# list_gpus()/vram_capacity(), which carry no TTL cache of their own because
+# switch_engine's eviction-wait loop needs a live reading. Without this cache
+# every GUI poll paid the full out-of-process torch probe on the shared plugin
+# executor.
+_VRAM_REFRESH_INTERVAL_S = 10.0   # much longer than _GPU_UTIL_REFRESH_INTERVAL_S:
+                                  # this probe is 10-20x more expensive and its
+                                  # answer changes on the timescale of plugging in
+                                  # hardware, not of a ~2.5s UI poll.
 
 _vram_lock = threading.Lock()
 _vram_inflight = False
-_vram_last: dict | None = None      # last COMPLETED reading. May legitimately
-                                     # be {} ("looked, found nothing"); None
-                                     # means no attempt has ever landed yet
-                                     # ("could not look" - see _vram_probe).
-                                     # Those two must stay distinguishable
-                                     # (AGENTS.md rule 5), so a FAILED attempt
-                                     # never writes into this.
-_vram_last_at: float | None = None  # monotonic time of the last COMPLETED
-                                     # attempt, success or failure - throttles
-                                     # a persistently failing probe too, not
-                                     # just successful readings (mirrors
-                                     # _gpu_util_last_at).
-_vram_ready = threading.Event()     # set once, after the FIRST completed
-                                     # attempt (success or failure) ever
-                                     # lands - never cleared afterward. Lets a
-                                     # one-shot caller (see wait_first on
-                                     # _vram()) block for a real reading
-                                     # instead of spin-polling _vram_last.
+_vram_last: dict | None = None      # last COMPLETED reading. May be {} (looked,
+                                    # found nothing); None means no attempt has
+                                    # landed yet. A FAILED attempt never writes here.
+_vram_last_at: float | None = None  # monotonic time of the last COMPLETED attempt,
+                                    # success or failure, so a persistently failing
+                                    # probe is throttled too.
+_vram_ready = threading.Event()     # set once, after the first completed attempt
+                                    # lands; never cleared. Lets a one-shot caller
+                                    # block for a real reading.
 
 
 def _compute_vram() -> dict:
@@ -180,25 +155,16 @@ def _compute_vram() -> dict:
     # is confidently wrong is worse than an absent one, since the whole point of
     # showing it per card is to be able to act on it.
     try:
-        # last_known_gpus(), NOT list_gpus(): vram_capacity() above has just
-        # driven a probe, and list_gpus has no TTL cache, so calling it here would
-        # spawn a SECOND torch subprocess for data the first one already produced.
-        # Measured: that doubled _compute_vram's wall time and broke this module's
-        # own probe-timing tests.
-        # SOURCE ORDER MATTERS, and it is the whole reason this is not just
-        # last_known_gpus(). That reading comes from list_gpus(), which enumerates
-        # ONLY via torch.cuda (CUDA, or HIP under a ROCm torch) or nvidia-smi - it
-        # never calls the Vulkan loader, so it is STRUCTURALLY BLIND to any device
-        # only visible through Vulkan (discover._native_backend_has_vulkan spells
-        # this out; GPU-SPLIT-VKINDEX confirmed it live, where it reported a
-        # non-empty but VULKAN-INCOMPLETE list). On a vulkan build - which is how
-        # Intel Arc and plenty of AMD boards run - showing that list per card would
-        # present a partial inventory as the whole one.
+        # last_known_gpus(), not list_gpus(): vram_capacity() above has just driven
+        # a probe, and list_gpus has no TTL cache, so calling it here would spawn a
+        # second torch subprocess for data already produced.
         #
-        # native_device_inventory() is the ggml runtime's OWN registry, so it sees
-        # whatever backend is actually loaded, Vulkan included. It is the fallback
-        # rather than the primary only because it needs the native lib resident,
-        # which in the server it already is.
+        # Source order matters. last_known_gpus() comes from list_gpus(), which
+        # enumerates only via torch.cuda or nvidia-smi and never calls the Vulkan
+        # loader, so it cannot see a device visible only through Vulkan.
+        # native_device_inventory() is the ggml runtime's own registry and sees
+        # whatever backend is loaded, Vulkan included; it is the fallback because it
+        # needs the native lib resident.
         raw = last_known_gpus()
         if not raw:
             try:
@@ -206,13 +172,10 @@ def _compute_vram() -> dict:
                 from localm.inference.backends.llamacpp._loader import (
                     native_device_inventory)
                 raw = list(native_device_inventory() or [])
-                # The registry hands back a RAW driver `free` with NO free_scope
-                # tag, and on Windows + AMD that number counts only THIS process's
-                # allocations. Measured on a real board while writing this: the raw
-                # reading said 0.2 GB in use where the desktop alone held 1.6 GB.
-                # _apply_device_global_free both corrects it and tags the scope, so
-                # the per-card gate below has something true to read - without this
-                # the fallback would report a comfortable card that is not.
+                # The registry returns a raw driver `free` with no free_scope tag,
+                # and on Windows with AMD that counts only this process's
+                # allocations. _apply_device_global_free corrects it and tags the
+                # scope, so the per-card gate below has something true to read.
                 _apply_device_global_free(raw)
             except Exception:
                 raw = []
@@ -224,18 +187,12 @@ def _compute_vram() -> dict:
             d = {"index": g.get("index"), "total": int(t)}
             if g.get("name"):
                 d["name"] = g["name"]
-            # BOTH halves, because they answer different questions and dropping
-            # either one shows a number that cannot be stood behind:
-            #   `trusted`  - is the reading FRESH (a probe actually completed, not
-            #                a served last-known-good frozen from an earlier state).
-            #                It is a property of the probe, so it is board-wide.
-            #   free_scope - does THIS CARD's free count every process, or only the
-            #                calling one. It is per device, and the aggregate flag
-            #                cannot stand in for it: a device list from the native
-            #                registry never went through vram_capacity at all.
-            # Measured on a real board: a process-scoped reading said 0.2 GB in use
-            # where 1.6 GB was, so scope alone decides whether a per-card figure is
-            # honest, and freshness alone decides whether it is current.
+            # Both halves are required:
+            #   `trusted`  - the reading is fresh, i.e. a probe completed rather
+            #                than a last-known-good value being served. Board-wide.
+            #   free_scope - whether THIS card's free counts every process. Per
+            #                device; a device list from the native registry never
+            #                went through vram_capacity at all.
             if (g.get("free") is not None and trusted
                     and g.get("free_scope") == _FREE_SCOPE_DEVICE):
                 u = max(0, int(t) - int(g["free"]))
@@ -246,10 +203,8 @@ def _compute_vram() -> dict:
         if len(devices) > 1:
             vram["devices"] = devices
     except Exception as e:
-        # Never let the per-device extra cost the aggregate: the single number is
-        # the load-bearing one and was already computed above (rule 5 - this is a
-        # best-effort enrichment, and its failure is visible as a missing
-        # breakdown rather than a missing readout, not a silenced problem).
+        # The per-device breakdown never costs the aggregate, which was already
+        # computed above. Its failure shows as a missing breakdown.
         from localm.debuglog import logger
         logger.debug("_vram: per-device breakdown unavailable: %s", e)
     return {"vram": vram}
@@ -291,18 +246,15 @@ def _vram(wait_first: bool = False) -> dict:
                              daemon=True).start()
             probe_running = True
         except Exception as e:
-            # Could not spawn the probe thread: never leave the in-flight guard
-            # stuck True with nothing left to clear it - a LATER call must be
-            # able to retry (mirrors _gpu_util() and discover.py's list_gpus()
-            # handling of the identical failure).
+            # Could not spawn the probe thread: clear the in-flight guard so a
+            # later call can retry.
             from localm.debuglog import logger
             logger.debug("_vram: could not start probe thread: %s", e)
             with _vram_lock:
                 _vram_inflight = False
     if last is None and wait_first and probe_running:
-        # Only wait when a probe is genuinely running - if thread spawn just
-        # failed above, no probe will ever set _vram_ready and waiting would
-        # just burn the full deadline for nothing.
+        # Only wait when a probe is genuinely running: if the thread spawn failed,
+        # nothing will ever set _vram_ready.
         from localm.discover import _GPU_PROBE_DEADLINE
         if _vram_ready.wait(timeout=_GPU_PROBE_DEADLINE + 1.0):
             with _vram_lock:
@@ -316,9 +268,8 @@ _gpu_util_lock = threading.Lock()
 _gpu_util_inflight = False
 _gpu_util_last: float | None = None      # last successfully read percent
 _gpu_util_last_at: float | None = None   # monotonic time of the last COMPLETED
-                                          # attempt (success or failure) - throttles
-                                          # retries on a no-nvidia-smi box too, not
-                                          # just successful readings
+                                         # attempt, success or failure, so a
+                                         # no-nvidia-smi box is throttled too
 
 
 def _gpu_util_probe() -> None:
@@ -360,45 +311,23 @@ def _gpu_util() -> dict:
             threading.Thread(target=_gpu_util_probe, name="localm-gpu-util-probe",
                               daemon=True).start()
         except Exception as e:
-            # Could not spawn the probe thread (e.g. OS thread exhaustion): the
-            # thread that would have cleared _gpu_util_inflight never ran, so
-            # clear it here - never leave it stuck True with nothing left to
-            # reset it (a LATER call must be able to retry). Mirrors discover.py's
-            # list_gpus() handling of the identical failure, minus its epoch
-            # gate: that gate exists to fence out a late write from a probe
-            # thread ABANDONED after overrunning its deadline (a thread that IS
-            # still running and could write after a caller gives up on it).
-            # There is no such thread here - Thread.start() itself raised, so
-            # no thread was ever created, and nothing can write into
-            # _gpu_util_last/_gpu_util_last_at after this reset. An epoch would
-            # be dead machinery implying a retirement mechanism this module
-            # does not have. Surfaced at debug (AGENTS.md rule 5) rather than
-            # propagating, matching this module's documented "NEVER raises"
-            # contract.
+            # Could not spawn the probe thread: clear _gpu_util_inflight here so a
+            # later call can retry. No epoch gate is needed - Thread.start() itself
+            # raised, so no thread exists that could write a late reading.
             from localm.debuglog import logger
             logger.debug("_gpu_util: could not start probe thread: %s", e)
             with _gpu_util_lock:
                 _gpu_util_inflight = False
     if last is None:
         # Vendor-neutral WDDM fallback: works on AMD and Intel, and on NVIDIA when
-        # nvidia-smi is absent. Reads the busiest engine on the MAIN GPU's adapter.
-        # Cheap: a persistent PDH query, ~0.02 ms, no subprocess (see
-        # gpu_usage.adapter_utilisation). Returns {} on its first ever call, since
-        # a rate counter has nothing to rate against yet - omitted, never a fake 0%.
-        # AMD FIRST, and it is not a preference: the fold below does not track
-        # this card. MEASURED 2026-08-20 on an RX 6900 XT in a controlled
-        # idle/load/idle A/B - parked at 46 W and 39 MHz, and boosted to 87 W and
-        # 2574 MHz, the fold reported 7.1-7.2% BOTH TIMES, because that figure
-        # was a screen-streaming process's video encoder rather than the GPU.
-        # The card's own sensor read 6% and 99% across those same two states
-        # (correlation with core clock +0.971, against -0.010 for the fold).
-        # ADL reads that sensor - the one AMD's control panel and GPU-Z show - so
-        # the figure covers every workload on the board whoever caused it.
+        # nvidia-smi is absent. Reads the busiest engine on the main GPU's adapter
+        # via a persistent PDH query. Returns {} on its first call, since a rate
+        # counter has nothing to rate against yet.
         #
-        # NOTE the fold is unreliable here, NOT dead: under a 295 W pure-compute
-        # load it did read 93-100%. It is right often enough to look sound, which
-        # is why it is demoted rather than deleted. See
-        # gpu_usage.amd_whole_gpu_activity for the entry-point evidence.
+        # ADL is tried first on AMD: the WDDM fold does not track that card's
+        # actual load and can report an unrelated process's video encoder instead.
+        # The fold is unreliable there rather than dead, so it is demoted, not
+        # removed.
         try:
             from localm.gpu_usage import amd_whole_gpu_activity
             amd = amd_whole_gpu_activity()
@@ -411,24 +340,16 @@ def _gpu_util() -> dict:
             from localm.gpu_usage import adapter_utilisation
             per_adapter = adapter_utilisation()
             if per_adapter:
-                # Non-AMD Windows boards (Intel especially), where there is no ADL
-                # and this is the only device-global source localm has. Also the
-                # runtime safety net if ADL is present but momentarily refuses.
+                # Non-AMD Windows boards, where there is no ADL and this is the
+                # only device-global source, and the fallback when ADL refuses.
                 #
-                # No LUID->device mapping is attempted here: localm's payload
-                # carries ONE system-wide gpu.percent, so a card has to be picked,
-                # and inventing a LUID->device mapping that has not been measured
-                # would be a guess dressed as a fact. A multi-card breakdown
-                # belongs with the per-card VRAM rows, which key off the device
-                # list rather than the LUID.
+                # No LUID->device mapping is attempted: the payload carries one
+                # system-wide gpu.percent, and the LUID carries no device identity.
+                # The per-card breakdown keys off the device list instead.
                 #
-                # KNOWN LIMIT, stated rather than assumed away: this is the
-                # busiest ENGINE TYPE, so it under-reports any compute a vendor
-                # does not publish through the WDDM counters, and can be carried
-                # by an unrelated process's engine when it does. That is exactly
-                # what it did on AMD before the branch above existed. It is kept
-                # because a partial vendor-neutral reading beats no reading on the
-                # boards that have nothing else, not because it is equivalent.
+                # This is the busiest ENGINE TYPE, so it under-reports compute a
+                # vendor does not publish through the WDDM counters and can be
+                # carried by an unrelated process's engine.
                 return {"gpu": {"percent": max(per_adapter.values())}}
         except Exception as e:
             from localm.debuglog import logger
@@ -448,13 +369,10 @@ def system_stats(*, wait_first_vram: bool = False) -> dict:
 
 
 # VRAM footprint estimate -------------------------------------------------- #
-# Single-sourced from localm.vram (the same constant GgufBackend._check_vram and
-# discover.fit_label use) for the overhead term. The KV-cache term prefers the
-# exact per-token cost read from the model's own GGUF header
-# (gguf_kv_bytes_per_token - the same attention-shape source
-# VramSizingMixin._kv_bytes_per_token uses before a load) and falls back to
-# GgufBackend._bytes_per_token's size-class rule only when the caller could not
-# read a header. Approximate by nature - callers should label it an estimate.
+# The overhead term comes from localm.vram. The KV-cache term prefers the exact
+# per-token cost read from the model's GGUF header and falls back to
+# GgufBackend._bytes_per_token's size-class rule when no header could be read.
+# Approximate: callers should label it an estimate.
 from localm.vram import VRAM_OVERHEAD_BYTES as _VRAM_OVERHEAD_BYTES
 
 

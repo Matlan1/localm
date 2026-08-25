@@ -17,33 +17,16 @@ from localm import _version
 _ORDER = ("reboot", "deps", "runtime", "setup")
 
 # ---------------------------------------------------------------------------
-#  CHK-UPDATER-INTEGRITY (signature half): pinned release-signing key(s)
+#  Pinned release-signing public key(s)
 # ---------------------------------------------------------------------------
-# Applying an update EXTRACTS and EXECUTES the downloaded build, so authenticity
-# matters. Two layers protect it, and BOTH are on by default:
-#   - the download is HTTPS-pinned (see download(); no http downgrade) and the release
-#     channel is a PRIVATE repo behind a server-side token; AND
-#   - each release build.zip is SIGNED with the Ed25519 private key whose PUBLIC half
-#     is pinned below. apply() verifies the signature against these pinned key(s)
-#     BEFORE anything is extracted, so a build served by a COMPROMISED release channel
-#     (a leaked proxy/GitHub token, a tampered release, a same-channel checksum) is
-#     rejected: the attacker controls the build but not the pinned key.
+# Each release build.zip is signed with an Ed25519 private key whose public half
+# is pinned here. apply() verifies the signature against these keys BEFORE
+# anything is extracted. The list allows a key to be rotated in before an old one
+# is retired.
 #
-# The PRIVATE key is held by the release signer and used only to sign releases; it is
-# never in the repo, the proxy, or CI. (A compromise of the signing machine itself is
-# out of scope - at that point the whole toolchain is owned regardless.) The PUBLIC key
-# ships in source: public data an attacker cannot forge, pinned so it cannot be swapped.
-# It is a LIST so a key can be rotated in before an old one is retired.
-#
-# BEHAVIOUR (mirrors localm's auth model): with a key pinned the updater ENFORCES - a
-# missing, unsigned, malformed, or non-matching signature is refused before any swap.
-# If this tuple were ever EMPTY the updater fails OPEN (applies on transport trust) so
-# an accidentally keyless build is not bricked, but the shipped default pins a key and
-# test_updater_signature guards that it stays non-empty.
-#
-# Release flow: scripts/make_release.py -> build_release.py assembles the build.zip,
-# sign_release.py signs it with the private key, and the update proxy serves the base64
-# signature in its /update JSON (check() reads it -> apply() verifies it here).
+# With a key pinned the updater enforces: a missing, unsigned, malformed or
+# non-matching signature is refused before any swap. An EMPTY tuple fails open
+# (transport trust only); test_updater_signature guards that it stays non-empty.
 _UPDATE_PUBKEYS: tuple = (
     "3501b23eb1ab6ec245b5e9d9c6a70b522ca89d6250d13060a9642ce1c8868ecf",
 )
@@ -80,10 +63,8 @@ def verify_signature(data: bytes, signature_b64) -> None:
                 "refusing to apply an update: no pinned signing key is usable",
                 reason=f"{len(_UPDATE_PUBKEYS)} key(s) are pinned in _UPDATE_PUBKEYS "
                        "but none parses as an Ed25519 public key hex")
-        # UNCONFIGURED (no key pinned): signing is optional hardening that is not
-        # turned on, so allow the update - like auth.py with no key set. The default,
-        # documented fail-open posture (transport-trusted, not signature-verified);
-        # not a silenced failure.
+        # No key pinned: allow the update on transport trust alone. The
+        # documented fail-open posture, not a silenced failure.
         return
     if not signature_b64:
         raise LocalmError(
@@ -177,11 +158,8 @@ def check(*, opener=None) -> dict:
     current = _version.read_version()
     latest = data.get("version") if isinstance(data, dict) else None
     newer = bool(latest) and _version.is_newer(latest, current)
-    # Whether "not newer" above actually means anything: is_newer() silently
-    # returns False both for a genuine tie/older release AND for a tag it could
-    # not parse as a version at all (see _version.comparable's docstring). No
-    # candidate at all (latest falsy - "no releases published") is not this
-    # function's problem to flag; the caller already branches on that first.
+    # Whether "not newer" means anything: is_newer() returns False both for a
+    # genuine tie or older release and for a tag it could not parse as a version.
     comparable = (not latest) or _version.comparable(latest, current)
     return {
         "current": current,
@@ -238,11 +216,9 @@ def read_manifest(staged_dir) -> dict:
         if p.is_file():
             return _json.loads(p.read_text(encoding="utf-8")) or {}
     except Exception:
-        # Absent is handled by the is_file() guard; this path is the corrupt or
-        # unreadable manifest. Fall back to {} so classify() relies on its own
-        # tree auto-detection (the conservative default). A bad manifest can only
-        # LOSE a `needs` escalation hint, never weaken the update - the heavier
-        # action is the escalation, so the fallback is the safe direction.
+        # Absent is handled by the is_file() guard; this path is a corrupt or
+        # unreadable manifest. Falling back to {} makes classify() rely on its own
+        # tree auto-detection, which can only lose an escalation hint.
         pass
     return {}
 
@@ -295,22 +271,17 @@ def download(asset_id, dest, *, timeout: float = 120.0, opener=None) -> Path:
     import urllib.error
     import urllib.parse
     import urllib.request
-    # CHK-UPDATER-INTEGRITY (transport half): a code-update download must stay on
-    # HTTPS end to end. Refuse a non-HTTPS endpoint, and refuse a redirect that
-    # downgrades to http, so a MITM / redirect cannot serve the update in cleartext
-    # (or pivot it). Redirects that STAY https are still followed (the proxy may
-    # hand off to a release CDN). The signature half is separate and ENFORCED in
-    # apply(): verify_signature() checks the build against the pinned Ed25519 key
-    # (fail-closed) BEFORE it is extracted or run.
+    # A code-update download stays on HTTPS end to end: a non-HTTPS endpoint is
+    # refused, and so is a redirect that downgrades to http. Redirects that stay
+    # https are followed. The signature is verified separately in apply(), before
+    # the build is extracted.
     if urllib.parse.urlparse(url).scheme != "https":
         raise LocalmError("refusing a non-HTTPS update download",
                           reason="the update endpoint must be https")
 
-    # verified_urlopen (see localm/http_ssl.py): the download follows a 302 to the
-    # GitHub release CDN and verifies both hops, native cert store first, certifi
-    # as fallback. The https-only-redirect guard that used to be defined here is
-    # now http_ssl.HttpsOnlyRedirect, installed by DEFAULT for every outbound
-    # caller - this download was one of only two sites that had one.
+    # verified_urlopen follows the 302 to the GitHub release CDN and verifies both
+    # hops, native cert store first, certifi as fallback. The https-only-redirect
+    # guard is http_ssl.HttpsOnlyRedirect, installed by default.
     from localm.http_ssl import RedirectDowngradeRefused, verified_urlopen
     req = urllib.request.Request(url, headers=headers, method="GET")
     try:
@@ -327,9 +298,8 @@ def download(asset_id, dest, *, timeout: float = 120.0, opener=None) -> Path:
     except urllib.error.HTTPError as e:
         raise LocalmError("the update download failed", reason=f"HTTP {e.code}")
     except RedirectDowngradeRefused as e:
-        # Ahead of the URLError clause below (it is a URLError subclass): a
-        # refused downgrade is a rejected attempt to serve the update in
-        # cleartext, not a network problem, and must not be reported as one.
+        # Ahead of the URLError clause below, which it subclasses: a refused
+        # downgrade is not a network problem and must not be reported as one.
         raise LocalmError("the update download tried to downgrade to http",
                           reason=str(getattr(e, "reason", e)))
     except (urllib.error.URLError, OSError) as e:
@@ -348,14 +318,10 @@ def _updates_dir(*, create: bool = True) -> Path:
     return d
 
 
-# SEC-UPDATE-RACE: fallback-only threshold, used ONLY when a lock's holder PID
-# could not be determined at all (an older-format lock, or a crash in the
-# narrow window between mkdir and writing the pid file - see
-# _apply_lock_is_stale). Generous on purpose, for the same reason it always
-# was: a "runtime"-class apply re-provisions the native llama.cpp binaries
-# (post_swap_command -> setup-llama), which can legitimately take several
-# minutes on a slow connection. It is NOT the primary staleness signal - see
-# _apply_lock_is_stale for why elapsed time alone cannot be trusted for that.
+# Fallback-only threshold, used ONLY when a lock's holder PID could not be
+# determined at all. Generous because a "runtime"-class apply re-provisions the
+# native llama.cpp binaries, which can take several minutes. Not the primary
+# staleness signal - see _apply_lock_is_stale.
 _APPLY_LOCK_STALE_S = 1800.0
 
 
@@ -389,10 +355,8 @@ def _apply_lock(what: str = "update"):
         lock_dir.mkdir()
     except FileExistsError:
         if _apply_lock_is_stale(lock_dir):
-            # Reclaim an orphaned lock. If we lose a race to reclaim it (someone
-            # else's mkdir wins first), our own mkdir below raises FileExistsError
-            # again, and we report that exactly like a live lock - safe either way,
-            # since that means a genuinely concurrent, non-stale caller now holds it.
+            # Reclaim an orphaned lock. Losing the race to reclaim it makes our own
+            # mkdir below raise FileExistsError again, reported like a live lock.
             with contextlib.suppress(OSError):
                 shutil.rmtree(lock_dir)
         try:
@@ -403,9 +367,8 @@ def _apply_lock(what: str = "update"):
                 f"another {what} is already being applied",
                 reason="wait for it to finish, then try again")
     # Record who holds it, so a future caller's staleness check can ask
-    # instances.pid_alive() instead of guessing from elapsed time. Best-effort:
-    # a failed write just means the next check falls back to age (see
-    # _apply_lock_is_stale) - never the reason this apply itself fails.
+    # instances.pid_alive() instead of using elapsed time. Best-effort: a failed
+    # write means the next check falls back to age.
     try:
         (lock_dir / "pid").write_text(str(os.getpid()), encoding="utf-8")
     except OSError:
@@ -469,15 +432,12 @@ def apply(asset_id, *, signature=None, installed=None, download_opener=None,
             shutil.rmtree(run_dir, ignore_errors=True)
             raise
 
-        # A STALE applied_names.json from a PREVIOUS update would mis-describe THIS one: the
-        # updates dir persists across updates and this file is only ever overwritten below,
-        # so a failed write would leave the prior update's names and a later rollback would
-        # then remove/restore the WRONG top-level set (stranding a file THIS build dropped -
-        # silent install data loss reported as rolled_back:True). Remove it BEFORE the swap
-        # so that, once backup/ is replaced, a stale manifest can never coexist with a fresh
-        # backup: a failed write (or a crash) then degrades to the backup-dir listing
-        # (correct for pre-existing names), never to stale data. Placed AFTER download/verify/
-        # extract so an early abort there leaves the previous update's manifest intact.
+        # Remove any stale applied_names.json from a previous update before the
+        # swap: the updates dir persists across updates, so a failed write would
+        # otherwise leave the prior update's names and a later rollback would
+        # restore the wrong set. Removing it first means a failed write degrades to
+        # the backup-dir listing. Placed after download/verify/extract so an early
+        # abort leaves the previous manifest intact.
         manifest_path = updir / "applied_names.json"
         try:
             manifest_path.unlink()
@@ -488,31 +448,25 @@ def apply(asset_id, *, signature=None, installed=None, download_opener=None,
                         "the new one below also fails, a later rollback may use stale names",
                         manifest_path, e)
 
-        # swap_with_backup backs up to run_backup_dir FIRST, then swaps - if the swap
-        # itself fails it rolls back using run_backup_dir and re-raises. On failure we
-        # deliberately do NOT touch run_dir: its error message may point a human at
-        # run_backup_dir for manual recovery (if the rollback ALSO failed), and deleting
-        # it here would destroy the one thing that message tells them to restore from.
+        # swap_with_backup backs up to run_backup_dir first, then swaps, rolling
+        # back from it and re-raising on failure. run_dir is deliberately left in
+        # place on failure: its error message may point a human at run_backup_dir.
         names = au.swap_with_backup(root, target, run_backup_dir)
-        # This run's swap succeeded: promote its backup to the stable path BEFORE
-        # anything downstream (the manifest write, the post-swap command's own
-        # rollback) touches `backup_dir`, so both keep using the exact same fixed
-        # path rollback_last() expects - unchanged from before this function grew
-        # per-run scratch directories.
+        # Promote this run's backup to the stable path before the manifest write or
+        # the post-swap command's own rollback touches `backup_dir`, so both use the
+        # fixed path rollback_last() expects.
         _promote_backup(run_backup_dir, backup_dir)
         shutil.rmtree(run_dir, ignore_errors=True)   # zip/staging no longer needed
 
-        # Record the FULL swap set (including brand-new top-level entries, which the backup
-        # dir does NOT contain because they had nothing to back up) so a later manual
-        # `update --rollback` removes them too, matching the pre-apply state. Without this,
-        # rollback_last() sees only backed-up (pre-existing) names and would strand new files.
+        # Record the full swap set, including brand-new top-level entries the backup
+        # dir does not contain, so a later `update --rollback` removes them too.
         try:
             import json
             manifest_path.write_text(json.dumps(sorted(names)), encoding="utf-8")
         except OSError as e:
-            # Best-effort, but a failed write is now VISIBLE: the manifest was unlinked above,
-            # so a later rollback falls back to the backup-dir listing (correct for pre-existing
-            # names) and cannot remove brand-new top-level entries this update added. Say so.
+            # A failed write is visible: the manifest was unlinked above, so a later
+            # rollback falls back to the backup-dir listing and cannot remove
+            # brand-new top-level entries this update added.
             _apply_warn("could not record the update manifest %s: %s; a later "
                         "`update --rollback` will fall back to the backup listing and cannot "
                         "remove brand-new top-level entries this update added", manifest_path, e)
@@ -562,14 +516,9 @@ def _installed_backend() -> str:
 
 # ------------------------- post-restart health watchdog -------------------
 
-# LM-DA-011: defaults for the detached post-restart health watchdog. TIMEOUT
-# budgets the WHOLE restarted process coming back up and answering /whoami (which
-# does NOT wait on model load) - importing localm's full chain plus unloading a
-# previously-loaded engine plus rebinding the port can run into the tens of
-# seconds on a cold disk / first import. 90s leaves comfortable margin without
-# leaving a genuinely broken build undetected for long; this runs unattended in
-# the background after the update button has already returned 200, so nothing
-# user-facing is blocked waiting on it.
+# Defaults for the detached post-restart health watchdog. TIMEOUT budgets the
+# whole restarted process coming back up and answering /whoami, which does not
+# wait on model load. Runs unattended after the update button has returned 200.
 WATCHDOG_TIMEOUT_S = 90.0
 WATCHDOG_POLL_INTERVAL_S = 2.0
 WATCHDOG_REQUEST_TIMEOUT_S = 3.0
@@ -605,10 +554,8 @@ def spawn_health_watchdog(*, host: str, port, scheme: str, expect_version: str,
                "--request-timeout", str(request_timeout),
                "--log-file", str(log_file)]
         env = os.environ.copy()
-        # So the watchdog's rollback call (on failure) re-derives the SAME data
-        # home this server was actually using, via rollback_update.py's own
-        # _detect_home() LOCALM_HOME-env precedence - no home-dir logic duplicated
-        # here or in the watchdog itself.
+        # So the watchdog's rollback call re-derives the same data home this server
+        # was using, via rollback_update.py's own _detect_home() precedence.
         env["LOCALM_HOME"] = str(home)
         kwargs = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                       stderr=subprocess.DEVNULL, env=env, close_fds=True)
