@@ -273,6 +273,11 @@ Changelog = "https://github.com/Matlan1/localm/blob/master/CHANGELOG.md"
 
 [tool.uv]
 exclude-newer-package = { rocm = false, rocm-sdk-core = false, rocm-sdk-libraries-gfx103x-all = false, torch = false, torchvision = false, transformers = false }
+# ctranslate2's win32/darwin wheel metadata resolves an older setuptools than its
+# Linux wheel does (CVE-2026-59890, sdist MANIFEST.in exclusion bypass, fixed in
+# 83.0.0) even though ctranslate2 itself declares no upper bound - force the floor
+# on every platform rather than only where the wheel metadata already allows it.
+override-dependencies = ["setuptools>=83.0.0"]
 
 [[tool.uv.index]]
 name = "rocm-gfx1030"

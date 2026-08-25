@@ -715,6 +715,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   projector and embedding download now pins the real HuggingFace address
   explicitly, so a stray `HF_ENDPOINT` can no longer change where your
   models come from.
+- **A vulnerable version of `setuptools`, pulled in by the speech-to-text
+  backend, is no longer installed.** CVE-2026-59890 is a flaw in how versions
+  before 83.0.0 build source packages; localm never builds one itself, but
+  the floor is now raised above the fix regardless.
 
 ## [0.1.5rc3] - 2026-08-13
 
