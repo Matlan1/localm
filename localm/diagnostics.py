@@ -1,48 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Active self-checks, as a callable core no surface owns.
-
-``localm doctor`` grew five ACTIVE probes - checks that go and try the thing
-rather than read a version string - and every one of them lived inside a
-function that printed rich markup to a terminal. That made them reachable from
-exactly one surface. This module holds the probes; ``localm/cli/doctor.py``
-renders them for a terminal and ``localm/plugins/gui/routes/doctor.py`` renders
-them for a browser, so neither surface can drift from the other and neither has
-to parse the other's output. ADR-0001 named this refactor as a follow-up and
-named the alternative too: "parsing doctor's console output would be a facade".
-
-The five, and why each is here rather than in the read-only status routes:
-
-  llama_lib      a provisioned llama library that EXISTS but is 0 bytes or
-                 truncated, plus rocBLAS/hipBLASLt kernel data missing next to
-                 a library that loads fine (the silent one - chat works and the
-                 crash arrives on the first GEMM)
-  native_abi     the struct-layout self-check against the actual DLL
-  worker_spawn   a real multiprocessing "spawn" round trip (#617: a plain
-                 subprocess probe passes when this is broken)
-  venv           a real ``-m venv`` plus a pip-landed check (#621)
-  hf_backend     transformers' lazy classes really resolve (0.1.2: `import
-                 transformers` succeeded while every model load died)
-
-The narrower reads a surface already had - VRAM, the GPU list, the installed
-backend, plugin pip extras, the Python version, package versions - are
-deliberately NOT here. They have GUI equivalents already, and duplicating them
-would create the second source of truth this module exists to remove.
-
-NOTHING IN THIS MODULE PRINTS, and nothing here imports click or rich: a caller
-renders findings, and a caller that cannot render markup (a JSON route) must not
-have to strip it. Findings carry plain text plus the two decorations the
-terminal renderer needs (an inline ``note``, indented ``hints``), so the CLI can
-reproduce its old output character for character while the GUI shows the same
-sentences without markup.
-
-RUNNING THIS IN A SERVER PROCESS IS NOT THE SAME AS RUNNING IT IN A FRESH ONE.
-``check_hf_backend`` imports torch and transformers, which on this project's
-Windows + AMD ROCm build is the known-doomed DLL-identity conflict once
-llama.cpp's native runtime is already loaded in the same process (see
-VramSizingMixin._free_total_vram_bytes). ``run_report_isolated`` therefore runs
-the whole set in a child interpreter, which is also what makes a GUI answer
-comparable to a terminal ``localm doctor`` run - that is a fresh process too.
-"""
+"""Active self-checks, as a callable core no surface owns."""
 
 from __future__ import annotations
 
@@ -81,14 +38,7 @@ PROGRESS_PREFIX = "LOCALM_DIAGNOSTICS_PROGRESS:"
 
 @dataclass(frozen=True)
 class Finding:
-    """One line a check produced.
-
-    ``text`` is a whole sentence in plain prose. ``note`` is a short
-    parenthetical the terminal prints dim on the same line (a struct layout, a
-    captured reason); ``hints`` are extra lines printed dim underneath. Both are
-    kept apart from ``text`` so a non-terminal surface can lay them out its own
-    way instead of unpicking markup.
-    """
+    """One line a check produced."""
 
     status: str
     text: str
@@ -113,14 +63,7 @@ class Finding:
 
 @dataclass(frozen=True)
 class CheckResult:
-    """One check's verdict plus every line it produced.
-
-    ``findings`` may be EMPTY, and that is meaningful rather than a bug: a check
-    that did not run has nothing to say to a terminal, which is exactly what
-    ``localm doctor`` has always done for an absent optional backend. ``summary``
-    still carries the reason, because a compact surface has room for one line and
-    rendering nothing at all would be the least honest option.
-    """
+    """One check's verdict plus every line it produced."""
 
     key: str
     label: str
@@ -130,10 +73,7 @@ class CheckResult:
 
     @property
     def healthy(self) -> bool:
-        """True only for a clean pass. A warning is not a pass: every caller of
-        the old ``_check_llama_lib`` return value used it to decide whether it
-        was safe to load-test the runtime, and a truncated library is precisely
-        the case that must answer no."""
+        """True only for a clean pass."""
         return self.status == OK
 
     def as_dict(self) -> dict:
@@ -187,13 +127,7 @@ def _worst(statuses) -> str:
 
 def _result(key: str, label: str, findings, *, summary: str = "",
             status: str = "") -> CheckResult:
-    """Assemble a CheckResult from its findings.
-
-    The summary defaults to the first finding that carries the check's OWN
-    verdict, not simply the first finding: ``check_llama_lib`` reports a green
-    "found" line and then the BLAS failures underneath it, so leading with
-    findings[0] would hand a compact surface the reassuring half of a failure.
-    """
+    """Assemble a CheckResult from its findings."""
     findings = tuple(findings)
     status = status or _worst(f.status for f in findings)
     if not summary:
@@ -231,14 +165,7 @@ def worst_case_run_seconds() -> float:
 
 def run_probe_subprocess(code: str, prefix: str, *,
                          timeout: float = PROBE_TIMEOUT_S) -> Optional[dict]:
-    """Run *code* in a fresh subprocess and parse the one stdout line starting
-    with *prefix* as JSON, e.g. ``"GPU_PROBE:{...}"``.
-
-    Returns None on ANY failure (timeout, crash, no matching line). That None is
-    load-bearing and callers must keep it distinct from a parsed result: it means
-    the probe never reported, which is a different fact from the probe running
-    and saying it could not check. See ``check_native_abi``.
-    """
+    """Run *code* in a fresh subprocess and parse the one stdout line starting with *prefix* as JSON, e.g. ``'GPU_PROBE:{...}'``."""
     try:
         r = subprocess.run([sys.executable, "-c", code],
                            capture_output=True, text=True, timeout=timeout)
@@ -261,20 +188,7 @@ _LIB_LABEL = "llama.cpp library"
 
 
 def _blas_findings(binary_dir) -> list:
-    """Report a ROCm/HIP install whose BLAS kernel data is missing.
-
-    A found-and-loadable llama.dll is NOT the same as a usable install. rocBLAS
-    resolves its GPU-arch GEMM kernels at runtime from a data directory next to
-    the DLL, so an install can pass every check above with ZERO kernels and then
-    hard-crash the native process (uncatchable from Python) the first time a
-    workload dispatches through Tensile - the embedder's batch encode.
-
-    That state is reachable two ways, and this catches both: the original defect
-    where the provision copied the library and dropped its data, and a provision
-    interrupted part-way (a locked file on a machine with the runtime open).
-
-    FAIL rather than WARN, because the failure it predicts is a hard process
-    crash, and because the remedy is one command."""
+    """Report a ROCm/HIP install whose BLAS kernel data is missing."""
     from localm.setup_llama import blas_kernel_problems
     return [Finding(FAIL, f"{p} - GPU matrix ops will crash the native "
                           f"process; re-run 'localm setup-llama --force'")
@@ -282,17 +196,7 @@ def _blas_findings(binary_dir) -> list:
 
 
 def check_llama_lib(find_binary_dir: Optional[Callable] = None) -> CheckResult:
-    """Is a provisioned llama library present, non-empty and complete.
-
-    Existence alone is not health: a zeroed or truncated llama.dll exists but
-    cannot load, and a rocBLAS install can ship the library without the kernel
-    data it resolves at runtime. Both are read off the filesystem, so this check
-    loads nothing and cannot crash.
-
-    ``find_binary_dir`` is injected rather than imported so ``doctor`` can pass
-    the accessor it resolved from ``localm.cli`` at call time (which is what
-    tests monkeypatch); the default is the real one.
-    """
+    """Is a provisioned llama library present, non-empty and complete."""
     if find_binary_dir is None:
         from localm.config import find_binary_dir as _fbd
         find_binary_dir = _fbd
@@ -348,9 +252,7 @@ _ABI_LABEL = "Native ABI"
 
 
 def check_native_abi() -> CheckResult:
-    """Native ABI self-check (struct layout vs the actual DLL). Runs in a
-    SUBPROCESS (like setup-llama's load test) so a broken/incompatible DLL can
-    never crash the caller, and so the GPU runtime is loaded out-of-process."""
+    """Native ABI self-check (struct layout vs the actual DLL)."""
     # Kept separately from the `or {}` fallback below: None means the PROBE never
     # ran (subprocess timed out, crashed, or printed no matching line - see
     # run_probe_subprocess), which is a different fact from the probe running
@@ -407,11 +309,7 @@ _SPAWN_LABEL = "Worker process spawn"
 
 
 def _worker_spawn_probe(conn) -> None:
-    """Target of the spawn self-check below - runs ONLY in the spawned child.
-    Module-level (not a closure): the "spawn" start method re-imports the
-    target by its module path + name in the child, which only works for a
-    plain top-level function. Does nothing but confirm it started; the point
-    is proving the spawn ITSELF works, not anything the child does afterward."""
+    """Target of the spawn self-check below - runs ONLY in the spawned child."""
     try:
         conn.send("ok")
     finally:
@@ -419,18 +317,7 @@ def _worker_spawn_probe(conn) -> None:
 
 
 def check_worker_spawn() -> CheckResult:
-    """Verify localm can actually spawn its isolated worker process - the SAME
-    ``multiprocessing.get_context("spawn")`` mechanism every GGUF model load and
-    the voice/STT engine depend on (see localm/_mp_spawn.py, #617).
-
-    The native-ABI and GPU-probe checks isolate via a PLAIN subprocess
-    (``run_probe_subprocess``), a different code path - that proves the native
-    library loads and computes correctly, but it does NOT exercise
-    multiprocessing's own spawn machinery, which on Windows redirects the
-    child's executable under conditions a renamed launcher (LocaLM.exe) can
-    break. That gap is exactly why #617 (every GGUF load failing with
-    "[WinError 2] The system cannot find the file specified") passed a doctor
-    run showing everything green. This check would have caught it."""
+    """Verify localm can actually spawn its isolated worker process - the SAME ``multiprocessing.get_context('spawn')`` mechanism every GGUF model load and the voice/STT engine depend on (see localm/_mp_spawn.py, #617)."""
     label = _SPAWN_LABEL
     try:
         from localm._mp_spawn import ensure_spawn_uses_venv_python
@@ -480,25 +367,7 @@ _VENV_LABEL = "Nested venv creation"
 
 
 def check_venv_creation() -> CheckResult:
-    """Verify localm can actually create a nested venv via ``-m venv`` using
-    ``real_base_python()`` - the SAME mechanism the managed-ComfyUI installer
-    depends on (managed_comfy_fresh.py, #621). Creates and immediately discards a
-    throwaway venv under a temp dir; never touches LOCALM_HOME or any real install.
-
-    A DIFFERENT code path from the worker-spawn check above (that exercises
-    multiprocessing's spawn machinery; this exercises stdlib venv's own basename-
-    matching + mandatory ensurepip bootstrap): #621 (managed ComfyUI setup
-    silently failing with "[WinError 2]") passed a doctor run showing everything
-    green precisely because nothing probed this. This check would have caught it.
-
-    Also probes that pip actually landed inside the new venv (NEW-MANAGED-COMFY-
-    VENV-MISSING-PIP): ``-m venv`` can report success - return code 0, the
-    interpreter file present - while its own mandatory ensurepip bootstrap
-    silently failed (a base Python with ensurepip stripped, or a broken
-    install). The managed-ComfyUI installer pip-installs into a venv it just
-    created with no ``--without-pip`` fallback, so a pip-less venv here would
-    read as doctor-green right up until provisioning fails deep inside with an
-    opaque "No module named pip"."""
+    """Verify localm can actually create a nested venv via ``-m venv`` using ``real_base_python()`` - the SAME mechanism the managed-ComfyUI installer depends on (managed_comfy_fresh.py, #621)."""
     import tempfile
     from pathlib import Path
 
@@ -559,18 +428,7 @@ _HF_LABEL = "HF (transformers) backend"
 
 
 def _import_hf_modules():
-    """Import torch and transformers for ``check_hf_backend``, or report why not.
-
-    Returns ``(torch_mod, transformers_mod, reason)``; a None module always comes
-    with a reason, because "the optional backend is not installed" and "importing
-    it would crash this process" are different facts and only the second is
-    something to act on.
-
-    The native_lib_loaded() guard is the same one doctor applies at its own torch
-    call sites: once llama.cpp's native runtime is resident, ``import torch`` on
-    this project's Windows + AMD ROCm build reliably hits
-    STATUS_ENTRYPOINT_NOT_FOUND. A torch ALREADY in sys.modules is a plain cache
-    hit and cannot trigger it, so that case is kept."""
+    """Import torch and transformers for ``check_hf_backend``, or report why not."""
     torch_mod = None
     reason = ""
     if "torch" in sys.modules:
@@ -604,31 +462,7 @@ def _import_hf_modules():
 def check_hf_backend(torch_mod: Any = None, transformers_mod: Any = None, *,
                      skip_reason: str = "", resolved: bool = False
                      ) -> CheckResult:
-    """Prove the HF (transformers) backend is actually USABLE, not merely
-    importable. ``localm/inference/backends/hf.py`` loads models through
-    ``transformers.AutoTokenizer`` / ``AutoProcessor`` / ``AutoModelForCausalLM``,
-    which transformers resolves through a LAZY module: ``import transformers``
-    only sets up that machinery, and a heavy submodule (e.g. distributed/fsdp)
-    is imported for real only on the FIRST attribute access that needs it. So
-    ``import transformers`` can succeed - and a package-version line reports a
-    clean version - while every one of those classes is dead.
-
-    This exact gap shipped in 0.1.2: transformers 5.14 hard-imports fsdp on the
-    tokenizer path, which needs ``torch._C._distributed_c10d`` - absent from the
-    pinned ROCm/Windows torch build - so EVERY HF model load died at "loading
-    processor..." while ``localm doctor`` printed both packages OK (found during
-    the 0.1.2 release verification; see tests/test_gpu_extra_pins.py for the
-    version-pin guard this backs up with a functional one).
-
-    *resolved* says the caller already resolved the two modules and a None means
-    absent, so this must not go importing them itself. ``doctor`` passes the
-    handles its own package check produced; a standalone run leaves it False and
-    lets ``_import_hf_modules`` do the work.
-
-    Produces NO findings when the backend is absent: an optional backend that is
-    not installed is not a fault, and the terminal has always stayed silent about
-    it. The reason still reaches ``summary`` for a surface that shows a row per
-    check."""
+    """Prove the HF (transformers) backend is actually USABLE, not merely importable. ``localm/inference/backends/hf.py`` loads models through ``transformers.AutoTokenizer`` / ``AutoProcessor`` / ``AutoModelForCausalLM``, which transformers resolves through a LAZY module: ``import transformers`` only sets..."""
     if not resolved and torch_mod is None and transformers_mod is None:
         torch_mod, transformers_mod, skip_reason = _import_hf_modules()
     if torch_mod is None or transformers_mod is None:
@@ -684,11 +518,7 @@ CHECK_KEYS = tuple(CHECK_LABELS)
 
 
 def skipped_native_abi() -> CheckResult:
-    """The ABI check's stand-in when there is no healthy library to check.
-
-    Its own named result rather than an omission: a surface that renders one row
-    per check must be able to say the row was not run and why, and a missing row
-    reads as a check that passed."""
+    """The ABI check's stand-in when there is no healthy library to check."""
     return CheckResult(
         key="native_abi", label=_ABI_LABEL, status=SKIPPED,
         summary="not checked - there is no healthy llama.cpp library to check "
@@ -697,25 +527,7 @@ def skipped_native_abi() -> CheckResult:
 
 
 def run_checks(on_check_start: Optional[Callable] = None) -> list:
-    """Run all five active checks in THIS process and return their results.
-
-    ``check_native_abi`` is skipped, not run, when the library is not healthy:
-    load-testing a runtime already known to be truncated tells nobody anything
-    and costs a 120s subprocess timeout. That is the same ordering ``doctor``
-    has always used.
-
-    *on_check_start*, when given, is called as
-    ``(key, label, done, total)`` immediately BEFORE each check, where ``done``
-    is how many have actually finished. Reported before rather than after so a
-    watching surface can name the check that is currently taking the time, and
-    so ``done`` is never a number nothing has earned yet (ADR-0008 R1: an
-    operation with no established denominator is at an unknown percentage, not
-    at 0%). A callback that raises must not cost the caller its report, so it is
-    guarded - but the failure is logged rather than swallowed.
-
-    See the module docstring before calling this from a long-lived process: it
-    imports torch and transformers.
-    """
+    """Run all five active checks in THIS process and return their results."""
     results: list = []
     total = len(CHECK_KEYS)
 
@@ -748,11 +560,7 @@ def run_checks(on_check_start: Optional[Callable] = None) -> list:
 
 
 def verdict(checks) -> str:
-    """The aggregate for a surface that leads with one word.
-
-    Deliberately NOT a claim about the machine as a whole: it aggregates these
-    five checks and nothing else, so a caller must say WHICH checks it ran
-    rather than render it as "everything is fine"."""
+    """The aggregate for a surface that leads with one word."""
     return _worst(c.status for c in checks) or OK
 
 
@@ -779,37 +587,7 @@ _CHILD_CODE = "import localm.diagnostics as d; d.main_json()"
 def run_report_isolated(*, timeout: Optional[float] = None,
                         on_progress: Optional[Callable] = None
                         ) -> DiagnosticsReport:
-    """Run the checks in a FRESH child interpreter and parse its one JSON line.
-
-    This is what a server surface must use. Three reasons, and the first alone
-    settles it:
-
-      * ``check_hf_backend`` imports torch and transformers. In a process that
-        has already loaded llama.cpp's native runtime that is the known-doomed
-        DLL-identity conflict, and the alternative (skip it) would mean the GUI
-        can never answer the question the check exists to answer.
-      * ``check_venv_creation`` takes up to 90 seconds and ``check_worker_spawn``
-        starts a process; neither belongs on a request path.
-      * a terminal ``localm doctor`` is itself a fresh process, so this is the
-        only way the two surfaces can be expected to agree.
-
-    *on_progress* is called as ``(key, label, done, total)`` each time the child
-    starts a check, so a caller can report which one is in flight rather than
-    show two minutes of nothing.
-
-    A child that times out, crashes or prints nothing parseable yields an ERROR
-    verdict naming what happened - never an empty report, which would render as
-    a clean bill of health.
-
-    Read line by line rather than with ``subprocess.run`` because progress that
-    only arrives at the end is not progress. That costs the built-in timeout, so
-    a watchdog timer kills the child at the deadline and the read loop ends when
-    its stdout closes. NOTE what the kill does NOT reach: the child's own
-    grandchildren (the ABI probe, the venv probe). Each of those carries its own
-    shorter timeout (120s, 60s, 30s), so they self-terminate rather than leak
-    indefinitely - stated rather than glossed, because "the parent was killed"
-    and "everything it started is gone" are not the same claim on any platform.
-    """
+    """Run the checks in a FRESH child interpreter and parse its one JSON line."""
     import threading
 
     if timeout is None:
@@ -898,10 +676,7 @@ def run_report_isolated(*, timeout: Optional[float] = None,
 
 
 def main_json() -> None:
-    """Entry point for the isolated run: progress lines then one result line.
-
-    Any exception becomes an ERROR report rather than a traceback and a silent
-    parent, so the caller always gets a verdict it can render."""
+    """Entry point for the isolated run: progress lines then one result line."""
     def _emit(key, label, done, total):
         sys.stdout.write(PROGRESS_PREFIX + json.dumps(
             {"key": key, "label": label, "done": done, "total": total}) + "\n")

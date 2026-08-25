@@ -1,17 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""
-Windows console hardening for long-running server processes.
-
-Windows consoles default to QuickEdit mode: a single stray click into the
-window starts a text selection, which suspends every write to the console -
-the next ``print()`` blocks, and with it whatever the server was doing
-(model loading, inference, downloads) until someone presses a key. That is
-fine for interactive shells and disastrous for servers.
-
-``disable_quickedit()`` clears QuickEdit for the current console. Text can
-still be copied: right-click the title bar → Edit → Mark (or re-enable
-QuickEdit in the console properties for that window).
-"""
+"""Windows console hardening for long-running server processes."""
 
 from __future__ import annotations
 
@@ -39,15 +27,12 @@ _console_handlers: list = []
 
 
 def _is_terminating_event(ctrl_type: int) -> bool:
-    """True for a console event that hard-terminates the process (close / logoff
-    / shutdown), so cleanup must run inside the handler."""
+    """True for a console event that hard-terminates the process (close / logoff / shutdown), so cleanup must run inside the handler."""
     return ctrl_type in _TERMINATING_EVENTS
 
 
 def _dispatch(ctrl_type: int, cleanup) -> bool:
-    """Run *cleanup* for a terminating console event; pass everything else
-    through. Always returns False so the OS default handler still proceeds.
-    Pure routing, separated from the ctypes plumbing so it can be tested."""
+    """Run *cleanup* for a terminating console event; pass everything else through."""
     if _is_terminating_event(ctrl_type):
         try:
             cleanup()
@@ -57,14 +42,7 @@ def _dispatch(ctrl_type: int, cleanup) -> bool:
 
 
 def register_console_handler(cleanup) -> bool:
-    """On Windows, run *cleanup* when the console window is closed (or the user
-    logs off / shuts down) - events that terminate the process WITHOUT running
-    Python finally/atexit, which otherwise leaves native model/GPU contexts to be
-    freed during interpreter teardown (a segfault on exit). *cleanup* must be
-    quick and not raise; Windows allows only a few seconds before killing the
-    process. Ctrl+C / Ctrl+Break fall through to Python's default handler so the
-    normal KeyboardInterrupt stop still runs. Returns True if installed; no-op
-    (False) off Windows or when no console is attached."""
+    """On Windows, run *cleanup* when the console window is closed (or the user logs off / shuts down) - events that terminate the process WITHOUT running Python finally/atexit, which otherwise leaves native model/GPU contexts to be freed during interpreter teardown (a segfault on exit). *cleanup* must be..."""
     if sys.platform != "win32":
         return False
     try:
@@ -88,11 +66,7 @@ def register_console_handler(cleanup) -> bool:
 
 
 def disable_quickedit() -> None:
-    """Stop a stray click from freezing this process's console output.
-
-    No-op on non-Windows platforms and when there is no console attached
-    (pythonw, redirected stdio, services).
-    """
+    """Stop a stray click from freezing this process's console output."""
     if sys.platform != "win32":
         return
     try:
@@ -114,23 +88,14 @@ def disable_quickedit() -> None:
 
 
 def _sanitize_title(title: str) -> str:
-    """A safe console-title string: printable characters only (so a model name or
-    path can never inject a control / escape sequence into the terminal), trimmed,
-    capped, and never empty."""
+    """A safe console-title string: printable characters only (so a model name or path can never inject a control / escape sequence into the terminal), trimmed, capped, and never empty."""
     text = "".join(ch for ch in (title or "") if ch.isprintable())
     text = text.strip()[:200]
     return text or "LocaLM"
 
 
 def set_console_title(title: str) -> bool:
-    """Set the console / terminal window title, so the server window reads
-    'LocaLM ...' instead of a python.exe path.
-
-    Windows uses SetConsoleTitleW; other platforms emit an OSC title escape, but
-    ONLY when stdout is a real terminal (never into a redirected file, a pipe, or
-    a service log). Best-effort and fully guarded: the title is purely cosmetic,
-    so a failure never blocks startup. Returns True if a title was set.
-    """
+    """Set the console / terminal window title, so the server window reads 'LocaLM ...' instead of a python.exe path."""
     text = _sanitize_title(title)
     try:
         if sys.platform == "win32":
@@ -147,11 +112,7 @@ def set_console_title(title: str) -> bool:
 
 
 def hide_console() -> bool:
-    """Hide THIS process's own console window (Windows), so a launcher-spawned
-    server runs like a background app - just its tray + status window, no raw
-    console. Only the caller knows it is safe (the console is ours, not a user's
-    interactive terminal), so this is opt-in via that caller. No-op off Windows or
-    when there is no console. Best-effort; returns True if a window was hidden."""
+    """Hide THIS process's own console window (Windows), so a launcher-spawned server runs like a background app - just its tray + status window, no raw console."""
     if sys.platform != "win32":
         return False
     try:

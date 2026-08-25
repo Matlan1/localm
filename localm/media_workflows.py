@@ -1,28 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Per-plugin workflow management for the media plugins (image / music / video).
-
-A user can upload ComfyUI workflows (in ComfyUI: Save -> API format) and pick
-which one a plugin uses, straight from the plugin's page. Files live under
-``home_dir()/workflows/<media>/``; the selected file is recorded per-plugin in
-``config["plugins"][<media>]["workflow"]``.
-
-The generators resolve the active workflow in this order, so an existing setup
-keeps working untouched:
-  1. the SELECTED file in ``home_dir()/workflows/<media>/`` (this module), then
-  2. the legacy personal override committed next to the generator
-     (flux_workflow.json / ace_workflow_local.json / wan_workflow_local.json), then
-  3. the committed example template.
-
-Tier 2 is superseded: a self-update whole-tree-replaces the ``localm/`` package
-dir, so an override left there is destroyed on update. ``migrate_legacy_override``
-(called once from each media plugin's ``register()``) moves any such file up into
-tier 1 - which lives under the updater's NEVER_TOUCH ``home/`` and survives -
-selecting it so the user's active workflow is unchanged.
-
-Backend-agnostic: this only reads/writes files + the config marker. Path-safety
-is enforced with ``localm.pathsafe`` so an uploaded/selected name can never escape
-the per-media directory.
-"""
+"""Per-plugin workflow management for the media plugins (image / music / video)."""
 
 from __future__ import annotations
 
@@ -117,18 +94,7 @@ def workflows_dir(media: str) -> Path:
 
 
 def _confined(media: str, name: str) -> Path:
-    """A path-safe handle inside the media dir. Raises ValueError on a
-    traversal/invalid name.
-
-    confined_name() itself raises fastapi.HTTPException by design (pathsafe.py
-    documents it as being for HTTP call sites only) - but this module claims to
-    be framework-free (see the module docstring) and now has a non-HTTP caller
-    (the CLI), so normalize here. Every function in this module already
-    documents "Raises ValueError" for its own bad-name case; without this, that
-    was only true when the failure came from the name-not-found checks below,
-    never from confinement itself. make_workflow_router's routes already catch
-    ValueError and convert it to HTTPException(400, str(e)) themselves, so the
-    HTTP response (400, "Invalid file name") is unchanged."""
+    """A path-safe handle inside the media dir."""
     from fastapi import HTTPException
     from localm.pathsafe import confined_name
     try:
@@ -146,9 +112,7 @@ def selected_name(media: str) -> Optional[str]:
 
 
 def active_workflow_path(media: str) -> Optional[Path]:
-    """The selected workflow FILE for *media*, or None when none is selected (or
-    the selected file has gone). The generators fall back to their own
-    legacy/example template when this is None, so selection is purely additive."""
+    """The selected workflow FILE for *media*, or None when none is selected (or the selected file has gone)."""
     name = selected_name(media)
     if not name:
         return None
@@ -160,23 +124,14 @@ def active_workflow_path(media: str) -> Optional[Path]:
 
 
 def is_workflow_json(data) -> bool:
-    """A ComfyUI API-format workflow is a non-empty dict of node-id -> object,
-    where at least one node carries a ``class_type`` (what ComfyUI's Save (API
-    format) emits). This rejects a random JSON file pasted in by mistake."""
+    """A ComfyUI API-format workflow is a non-empty dict of node-id -> object, where at least one node carries a ``class_type`` (what ComfyUI's Save (API format) emits)."""
     if not isinstance(data, dict) or not data:
         return False
     return any(isinstance(v, dict) and "class_type" in v for v in data.values())
 
 
 def list_workflows(media: str, *, active=_UNSET) -> list:
-    """Every uploaded workflow for *media*, newest first, with active/default
-    flags so the page can show which one is in use.
-
-    *active*: pass an already-resolved ``selected_name(media)`` (None is a
-    valid value here - "nothing selected") to skip this function's own config
-    load - see ``_list_and_selected`` below, the shape every caller that needs
-    both actually wants. Omit it (the default, the _UNSET sentinel) to resolve
-    it internally, unchanged for a caller that only wants the list."""
+    """Every uploaded workflow for *media*, newest first, with active/default flags so the page can show which one is in use."""
     d = workflows_dir(media)
     if active is _UNSET:
         active = selected_name(media)
@@ -202,21 +157,13 @@ def list_workflows(media: str, *, active=_UNSET) -> list:
 
 
 def _list_and_selected(media: str) -> tuple:
-    """(list_workflows(media), selected_name(media)) from ONE config load.
-    Every route in make_workflow_router needs both together; calling them
-    independently (the previous shape) loaded config.json TWICE per request -
-    real cost on Windows, where a config read can hit the documented ~1s
-    antivirus/indexer retry (config.py's _replace_atomic doc)."""
+    """(list_workflows(media), selected_name(media)) from ONE config load."""
     active = selected_name(media)
     return list_workflows(media, active=active), active
 
 
 def save_workflow(media: str, name: str, content: bytes) -> str:
-    """Validate + store an uploaded workflow. Returns the stored filename.
-
-    Raises ValueError when the body is not JSON or not a ComfyUI API-format
-    workflow, so a bad upload is rejected with a clear reason rather than silently
-    accepted and then failing every generation."""
+    """Validate + store an uploaded workflow."""
     try:
         data = json.loads(content.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as e:
@@ -239,9 +186,7 @@ def save_workflow(media: str, name: str, content: bytes) -> str:
 
 
 def select_workflow(media: str, name: Optional[str]) -> Optional[str]:
-    """Set the active workflow for *media* (None/"" clears it -> fall back to the
-    legacy/example template). Returns the selected name or None. Raises ValueError
-    when *name* does not exist."""
+    """Set the active workflow for *media* (None/'' clears it -> fall back to the legacy/example template)."""
     from localm.config import update_config
     chosen: Optional[str] = None
     if name:
@@ -267,9 +212,7 @@ def select_workflow(media: str, name: Optional[str]) -> Optional[str]:
 
 
 def delete_workflow(media: str, name: str) -> None:
-    """Delete an uploaded workflow. Refuses to delete the ACTIVE one (select
-    another first) so a generation is never left pointing at a missing file.
-    Raises ValueError when it does not exist or is active."""
+    """Delete an uploaded workflow."""
     p = _confined(media, name)
     if not p.is_file():
         raise ValueError(f"no such workflow: {name}")
@@ -297,10 +240,7 @@ _LEGACY_OVERRIDES = {
 
 
 def _dedup_name(dest_dir: Path, name: str) -> Path:
-    """A path inside *dest_dir* whose name does not collide with an existing file
-    (``x.json`` -> ``x-1.json`` -> ``x-2.json`` ...), so migrating a legacy
-    override can never clobber a differently-authored workflow the user already
-    saved under the same name."""
+    """A path inside *dest_dir* whose name does not collide with an existing file (``x.json`` -> ``x-1.json`` -> ``x-2.json`` ...), so migrating a legacy override can never clobber a differently-authored workflow the user already saved under the same name."""
     stem, suffix = Path(name).stem, Path(name).suffix
     candidate = dest_dir / name
     i = 1
@@ -311,10 +251,7 @@ def _dedup_name(dest_dir: Path, name: str) -> Path:
 
 
 def _existing_copy(dest_dir: Path, legacy: Path) -> Optional[Path]:
-    """An existing workflow in *dest_dir* whose bytes already match *legacy* (this
-    override was migrated on an earlier run, possibly under a dedup name), or None.
-    Scanning by CONTENT - not just the base name - means a persistently
-    unremovable in-package original cannot spawn a fresh dedup copy every startup."""
+    """An existing workflow in *dest_dir* whose bytes already match *legacy* (this override was migrated on an earlier run, possibly under a dedup name), or None."""
     if not dest_dir.is_dir():
         return None
     for p in sorted(dest_dir.glob("*.json")):
@@ -327,18 +264,7 @@ def _existing_copy(dest_dir: Path, legacy: Path) -> Optional[Path]:
 
 
 def _finalize_migration(media: str, legacy: Path, dest: Path) -> tuple:
-    """Keep the migrated *dest* the active workflow, then remove the in-package
-    *legacy* original. Returns ``(ok, note)``.
-
-    Auto-select is gated on ``active_workflow_path`` (the EFFECTIVE resolution),
-    not merely on a selection marker: when no valid workflow is active the legacy
-    file WAS the active one (resolution is selected -> legacy -> example, and a
-    selection whose file has gone falls through to the legacy), so the moved copy
-    must become the selection or generation would silently drop to the example.
-
-    Fail-safe (AGENTS.md rule 5): the original is removed ONLY once the override
-    is safely active from home, so a failed select/remove never silently
-    deactivates or loses the user's workflow."""
+    """Keep the migrated *dest* the active workflow, then remove the in-package *legacy* original. Returns ``(ok, note)``."""
     if active_workflow_path(media) is None:
         try:
             select_workflow(media, dest.name)
@@ -356,10 +282,7 @@ def _finalize_migration(media: str, legacy: Path, dest: Path) -> tuple:
 
 
 def _migrate_one(media: str, legacy: Path) -> Optional[tuple]:
-    """Move one media's legacy in-package override into home/workflows/<media>/.
-    Returns None when there is nothing to migrate, else ``(ok, note)``. Pure with
-    respect to the configured home (the caller injects the source path), so it is
-    unit-testable without touching the real repo checkout."""
+    """Move one media's legacy in-package override into home/workflows/<media>/."""
     if not legacy.is_file():
         return None
     dest_dir = workflows_dir(media)
@@ -378,18 +301,7 @@ def _migrate_one(media: str, legacy: Path) -> Optional[tuple]:
 
 
 def migrate_legacy_override(media: str) -> Optional[str]:
-    """Startup entry point (called from each media plugin's ``register()``): move
-    *media*'s legacy in-package workflow override to the update-surviving
-    home/workflows location, once. A no-op when there is nothing to migrate.
-
-    Skipped under the automated test suite - in-process via ``"pytest" in
-    sys.modules``, and inside a localm SUBPROCESS a test spawns (where pytest is
-    absent) via the ``LOCALM_SKIP_LEGACY_WORKFLOW_MIGRATION`` flag conftest sets
-    and children inherit. The in-package sources are the real repository checkout,
-    NOT the test's tmp home, so migrating there would move a developer's personal
-    workflow out of their working tree. (The migration logic itself is exercised
-    directly via ``_migrate_one`` on temp paths.) Logs and returns the outcome
-    note (None when nothing happened)."""
+    """Startup entry point (called from each media plugin's ``register()``): move *media*'s legacy in-package workflow override to the update-surviving home/workflows location, once."""
     if "pytest" in sys.modules or os.environ.get("LOCALM_SKIP_LEGACY_WORKFLOW_MIGRATION"):
         return None
     legacy = _LEGACY_OVERRIDES.get(media)
@@ -409,13 +321,7 @@ def migrate_legacy_override(media: str) -> Optional[str]:
 
 
 def make_workflow_router(media: str):
-    """Build the list / upload / select / delete routes for one media plugin.
-
-    Mounted by each media plugin's register() via its own host, so the routes are
-    auto-scoped to that plugin's capability. fastapi is imported lazily here so
-    the generators (which import this module) stay framework-free. Upload takes
-    the already-parsed workflow JSON as a body field, so there is no multipart /
-    python-multipart dependency."""
+    """Build the list / upload / select / delete routes for one media plugin."""
     from fastapi import APIRouter, HTTPException
 
     from localm.inference._threadpool_timeout import (

@@ -1,18 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""
-In-app model discovery: search HuggingFace for GGUF models and judge,
-per quantization, whether a file fits this machine's VRAM.
-
-Discovery is a user-initiated prelude to ``localm pull`` and sits in the same
-policy category (explicit user action - see docs/network.md): it is not
-routed through the net_allow/net_deny domain rules, but ``net_mode = off``
-still blocks it, so the one kill switch keeps its promise.
-
-"Fits your VRAM" badges compare against TOTAL VRAM, not currently-free VRAM:
-the active chat model occupies the GPU while you browse, and it will be
-unloaded before the new one loads. The estimate mirrors the GGUF backend's
-preflight: weights + ~1.5 GB overhead for KV cache and compute buffers.
-"""
+"""In-app model discovery: search HuggingFace for GGUF models and judge, per quantization, whether a file fits this machine's VRAM."""
 
 from __future__ import annotations
 
@@ -98,8 +85,7 @@ _SPLIT_RE = re.compile(r"^(?P<stem>.+)-(?P<part>\d{5})-of-(?P<total>\d{5})\.gguf
 
 
 class DiscoverError(Exception):
-    """Discovery failed - network off, HF unreachable, or repo unusable.
-    Messages are safe to show in the GUI."""
+    """Discovery failed - network off, HF unreachable, or repo unusable."""
 
 
 def _ensure_online() -> None:
@@ -111,15 +97,7 @@ def _ensure_online() -> None:
 
 
 def _get(url: str, params: Optional[dict] = None) -> object:
-    """Policy-checked GET returning parsed JSON.
-
-    Routes through ``netpolicy.safe_fetch_bytes`` so the request is pinned to the
-    validated IP and EVERY redirect hop is re-checked against the network policy
-    (SSRF-REBIND): a DNS-rebind of the HF host, or a redirect from the HF API,
-    cannot bounce discovery into a loopback / link-local / private address. This
-    is the same protection the model-pull path already uses; a raw ``requests.get``
-    here previously bypassed it (an owner-initiated fetch, so low severity, but the
-    inconsistency is closed)."""
+    """Policy-checked GET returning parsed JSON."""
     import json as _json
     import urllib.parse
 
@@ -147,61 +125,7 @@ _EMBEDDING_TAGS = frozenset({"feature-extraction", "sentence-similarity"})
 
 def classify_hf_metadata(pipeline_tag: Optional[str], library_name: Optional[str],
                           tags, architecture: Optional[str] = None) -> str:
-    """Classify a model_manager.registry MODEL_TYPES value from HARD HF metadata
-    (pipeline_tag, library_name, exact tag tokens, GGUF architecture) - no
-    network, pure function.
-
-    ``architecture`` is the repo's ``gguf.architecture`` (or, for a non-GGUF
-    result, ``config.model_type``) expand field - the model's OWN declared
-    architecture, read from the file/config itself rather than a repo author's
-    free-text tags. Optional and defaults to None so every existing 3-arg call
-    site (``_hf_pipeline_tag_to_type``, which does not fetch it) is unaffected.
-
-    Matching is EXACT, never substring: a tag that merely CONTAINS 'vae' / 'lora' /
-    'clip' (e.g. 'exploration' contains 'lora') must NOT be misclassified (MED-15).
-
-    Order matters:
-
-    - The exact-tag checks (vae/lora/text-encoder) run BEFORE every other check.
-      A repo can carry a diffusion-flavored pipeline_tag (inherited from its base
-      model) AND an exact 'lora'/'vae' tag at the same time - e.g. a FLUX LoRA has
-      pipeline_tag=text-to-image (from the base checkpoint) and tags including
-      'lora'. The tag is the more specific signal and must win, or every
-      diffusion LoRA misclassifies as a full diffusion-unet.
-    - ``architecture`` is checked next, before pipeline_tag/tagset: it is read
-      straight from the model's own header, the single hardest signal this
-      function has, so it outranks a pipeline_tag or tag a repo author set (or
-      left stale/absent). Checked against the SAME verified embedding-only
-      architecture allowlist a post-download GGUF header read uses
-      (``localm.model_manager.gguf._GGUF_EMBEDDING_ARCHITECTURES``) - an exact
-      allowlist membership test, so an architecture string that fails to match
-      (a different naming convention, e.g. a non-GGUF config.model_type) just
-      falls through to the pipeline_tag/tagset checks below rather than
-      misclassifying anything. Deliberately POSITIVE-EMBEDDING ONLY - there is
-      no matching "these architectures mean llm" list, because that allowlist
-      would be unbounded and unverifiable (every causal-decoder architecture
-      nobody thought to add yet), where a confidently wrong guess is worse
-      than abstaining and falling through to the tag layer.
-
-    KNOWN FAILURE MODE of the architecture check: ``_GGUF_EMBEDDING_ARCHITECTURES``
-    was built (and is verified) against llama.cpp's OWN ``LLM_ARCH_NAMES`` strings,
-    read by this codebase's local post-download header parse. At search time,
-    ``architecture`` instead comes from HF's SERVER-SIDE parse of the same GGUF
-    header (the ``gguf.architecture`` expand field) - a different parser reading
-    the same bytes. If HF ever normalizes that string differently from
-    llama.cpp's own naming (case, punctuation, a renamed architecture), the exact
-    match below fails SILENTLY: no exception, no wrong classification - just an
-    abstain that falls through to the pipeline_tag/tagset checks, so a real
-    embedding model would classify by tag alone instead of by its header
-    architecture. No test goes red for this, because abstaining is an
-    intentionally legal outcome; "why did this classify by tag instead of
-    architecture" is the only symptom to chase. Verified live for the 8 real
-    repos this parameter was added for (see the tests below), not proven in
-    general - HF's parser and llama.cpp's naming could drift apart independently
-    at any time.
-
-    Returns the 'unknown' sentinel - not a silent 'llm' - when no hard signal
-    resolves, so an ambiguous result is never guessed into the wrong bucket."""
+    """Classify a model_manager.registry MODEL_TYPES value from HARD HF metadata (pipeline_tag, library_name, exact tag tokens, GGUF architecture) - no network, pure function."""
     tag = pipeline_tag
     library = (library_name or "").strip().lower()
     # Exact, lowercased tag tokens - a set so membership is equality, not
@@ -234,10 +158,7 @@ def classify_hf_metadata(pipeline_tag: Optional[str], library_name: Optional[str
 
 
 def _hf_pipeline_tag_to_type(repo_id: str) -> str:
-    """Classify a HuggingFace repo's model type by fetching its metadata and
-    running it through classify_hf_metadata(). Returns 'unknown' - not a silent
-    'llm' - on a failed/offline query, so an ambiguous pull is registered
-    honestly and is not auto-loaded as the chat model."""
+    """Classify a HuggingFace repo's model type by fetching its metadata and running it through classify_hf_metadata()."""
     try:
         data = _get(f"{HF_API}/api/models/{repo_id}", {"full": "false"})
         if isinstance(data, dict):
@@ -250,17 +171,7 @@ def _hf_pipeline_tag_to_type(repo_id: str) -> str:
 
 
 def hf_param_bytes(safetensors: Optional[dict]) -> Optional[int]:
-    """Estimated GPU weight footprint in bytes for an HF model, from its
-    safetensors param metadata (the ``safetensors`` expand field of the HF models
-    API: ``{"total": <param count>, "parameters": {...}}``).
-
-    localm's HF backend loads in bf16 on GPU with no on-load quantization (see
-    inference/backends/hf.py), so the footprint is ``total_params * 2`` regardless
-    of the STORED dtype - the loader casts to bf16. This is the weight size only;
-    fit_label() adds KV-cache / compute overhead, the same way it does for a GGUF
-    file size. Returns None when the repo has no usable param count so the GUI can
-    show "size unknown" rather than a guessed badge (do-not-hide-problems: an
-    unknown is surfaced as unknown, not silently treated as zero/fits)."""
+    """Estimated GPU weight footprint in bytes for an HF model, from its safetensors param metadata (the ``safetensors`` expand field of the HF models API: ``{'total': <param count>, 'parameters': {...}}``)."""
     if not isinstance(safetensors, dict):
         return None
     total = safetensors.get("total")
@@ -283,13 +194,7 @@ _MOE_NAME_RE = re.compile(r"(?i)\bmoe\b|\b\d+x\d+b\b|\ba\d+b\b")
 
 
 def _moe_signal(architecture: Optional[str], repo_id: str) -> Optional[str]:
-    """MoE-ness for a search-result row: ``"confirmed"`` (the model's own
-    ``architecture`` string says so - reliable, see the module note above),
-    ``"likely"`` (name pattern only - a guess, must be labelled as such in the
-    GUI), or ``None`` (no evidence either way). Deliberately never returns a
-    "dense" verdict - the absence of a MoE signal does not prove the model is
-    dense, the same abstain-rather-than-guess discipline classify_hf_metadata
-    already applies to model type."""
+    """MoE-ness for a search-result row: ``'confirmed'`` (the model's own ``architecture`` string says so - reliable, see the module note above), ``'likely'`` (name pattern only - a guess, must be labelled as such in the GUI), or ``None`` (no evidence either way)."""
     if architecture and "moe" in str(architecture).lower():
         return "confirmed"
     if _MOE_NAME_RE.search(repo_id):
@@ -298,16 +203,7 @@ def _moe_signal(architecture: Optional[str], repo_id: str) -> Optional[str]:
 
 
 def _param_count(row_fmt: str, gguf_meta: object, safetensors_meta: object) -> Optional[int]:
-    """Total parameter count for a classified row, or None when unavailable.
-
-    ``gguf.total`` (gguf-format rows) and ``safetensors.total`` (hf-format
-    rows, the same field hf_param_bytes() already reads) are both VERIFIED
-    live to be the model's total parameter count, not a byte size: three
-    different quantizations of the same repo report ``gguf.total`` within
-    0.002% of each other while their file sizes differ by 6x. Same
-    isinstance/positive guard as hf_param_bytes - a malformed/adversarial
-    expand field must degrade this row's count to None, not crash the rest of
-    the search."""
+    """Total parameter count for a classified row, or None when unavailable."""
     src = gguf_meta if row_fmt == "gguf" else safetensors_meta
     if not isinstance(src, dict):
         return None
@@ -319,22 +215,7 @@ def _param_count(row_fmt: str, gguf_meta: object, safetensors_meta: object) -> O
 
 def _rows_from_items(data: object, limit: int, *, fmt: Optional[str],
                       classify: bool) -> list[dict]:
-    """Build result rows from a raw HF /api/models list response.
-
-    ``fmt`` given (bucket A / legacy path): every row is tagged with that one
-    format, matching today's behavior exactly. ``fmt=None`` (bucket B/C, no
-    format-split query): the format is derived from the item's OWN raw tags -
-    the Hub-assigned "gguf" tag is a mechanical marker ("this repo contains
-    .gguf files"), reliable independent of semantic classification.
-
-    ``classify``: attach a ``detected_type`` (localm.model_manager.registry
-    MODEL_TYPES value, or "unknown") from the item's pipeline_tag/library_name/
-    tags fields for DISPLAY ONLY - never used to exclude a result. Also attaches
-    ``architecture`` (the raw gguf.architecture/config.model_type string),
-    ``moe`` ("confirmed"/"likely"/None, see _moe_signal), and ``param_count``
-    (see _param_count) - all display-only, all omitted entirely when False, so
-    a non-type-scoped caller's response shape is byte-for-byte what it was
-    before type-scoped search existed."""
+    """Build result rows from a raw HF /api/models list response."""
     if not isinstance(data, list):
         raise DiscoverError("Unexpected response from HuggingFace search")
     out = []
@@ -383,17 +264,7 @@ def _rows_from_items(data: object, limit: int, *, fmt: Optional[str],
 
 
 def _type_fmt_filter(model_type: Optional[str], fmt: str) -> dict:
-    """HF query narrowing (a params fragment: ``filter=`` and/or
-    ``pipeline_tag=``) for one (model_type, format) pair.
-
-    ``model_type is None`` is the LEGACY path (CLI ``localm search`` / MCP
-    ``search_models``): the plain per-format library tag, byte-for-byte what
-    shipped before type-scoped search - gguf -> "gguf", hf -> "transformers".
-
-    Otherwise the gguf side is the reliable, type-independent "gguf" Hub tag
-    (diffusion additionally ANDs "diffusers" so a gguf search isn't drowned by
-    unrelated gguf repos), and the hf (safetensors) side narrows per type where
-    HF exposes a reliable signal, else the plain "safetensors" format tag."""
+    """HF query narrowing (a params fragment: ``filter=`` and/or ``pipeline_tag=``) for one (model_type, format) pair."""
     if model_type is None:
         return {"filter": _FORMAT_FILTER[fmt]}
     if fmt == "gguf":
@@ -407,12 +278,7 @@ def _type_fmt_filter(model_type: Optional[str], fmt: str) -> dict:
 
 def _run_query(query: str, limit: int, fmt: str, model_type: Optional[str],
                 classify: bool) -> list[dict]:
-    """One HF /api/models query for a single (format, type), rows tagged *fmt*.
-
-    ``classify`` requests the pipeline_tag/library_name/tags expand fields and
-    attaches a ``detected_type`` badge to each row (display only, never used to
-    exclude a result). Off for the legacy CLI/MCP path so its response shape is
-    unchanged."""
+    """One HF /api/models query for a single (format, type), rows tagged *fmt*."""
     params: dict = {"sort": "downloads", "direction": "-1", "limit": str(limit)}
     if query.strip():
         params["search"] = query.strip()
@@ -447,10 +313,7 @@ def _run_query(query: str, limit: int, fmt: str, model_type: Optional[str],
 
 
 def _spec_key(model_type: Optional[str], fmt: str):
-    """Hashable identity of the HF request a (type, fmt) pair resolves to, so
-    two selected types that produce the SAME query (e.g. vae + text-encoder both
-    -> filter=safetensors on the hf side) fire ONE call, not two. Safe because a
-    result's badge comes from its own metadata, not the query's type."""
+    """Hashable identity of the HF request a (type, fmt) pair resolves to, so two selected types that produce the SAME query (e.g. vae + text-encoder both -> filter=safetensors on the hf side) fire ONE call, not two."""
     frag = _type_fmt_filter(model_type, fmt)
     return (fmt, tuple(sorted(
         (k, tuple(v) if isinstance(v, list) else v) for k, v in frag.items())))
@@ -459,27 +322,7 @@ def _spec_key(model_type: Optional[str], fmt: str):
 def hf_search(query: str = "", limit: int = 20, formats: Sequence[str] = ("gguf",),
               model_type: Optional[str] = None,
               model_types: Optional[Sequence[str]] = None) -> list[dict]:
-    """Search HF for model repos. Empty query = most downloaded.
-
-    Two independent axes, both from explicit GUI controls:
-
-    - *formats*: a subset of {"gguf", "hf"} ("hf" == the non-gguf / safetensors
-      world). One HF query runs per requested format.
-    - *model_types*: which registry types to search for (a subset of
-      _ALL_SEARCHABLE_TYPES). Each is narrowed server-side where HF exposes a
-      reliable signal, and every result is badged with its detected type. When
-      ALL searchable types are selected it collapses to the widest reliable
-      format filter (2 queries), not a fan-out. *model_type* (singular) is the
-      back-compat alias for a single-element *model_types*.
-
-    Results across every (type, format) query are merged de-duped by repo id and
-    round-robin interleaved so no single query crowds the others out of *limit*.
-
-    Returns [{id, downloads, likes, updated, formats, size_bytes?, detected_type?}].
-    ``detected_type`` is present only when a type was requested (display only,
-    never used to exclude). With NEITHER *model_types* nor *model_type* (the CLI
-    ``localm search`` / MCP ``search_models`` default) the query shape and
-    response are byte-for-byte what shipped before type-scoped search existed."""
+    """Search HF for model repos."""
     _ensure_online()
     limit = max(1, min(int(limit), 50))
 
@@ -564,14 +407,7 @@ def hf_search(query: str = "", limit: int = 20, formats: Sequence[str] = ("gguf"
 
 
 def hf_backend_available() -> bool:
-    """True when the HF/transformers runtime can actually RUN a model here: both
-    torch and transformers are importable. Uses importlib.util.find_spec, a cheap
-    capability probe with no heavy import side effect.
-
-    When False, an HF (transformers-format) model can still be DOWNLOADED via
-    pull - it simply cannot be loaded until the ``.[gpu]`` extra (torch +
-    transformers) is installed. The GUI surfaces exactly that, and does NOT block
-    the download (a user may only want the files)."""
+    """True when the HF/transformers runtime can actually RUN a model here: both torch and transformers are importable."""
     import importlib.util
     try:
         return bool(importlib.util.find_spec("torch")
@@ -583,12 +419,7 @@ def hf_backend_available() -> bool:
 
 
 def hf_gguf_files(repo: str) -> list[dict]:
-    """
-    List the GGUF files of *repo* with size and quant label. Split files
-    (``-00001-of-0000N``) are grouped into one logical entry whose ``file``
-    is the first part (what ``localm pull repo:file`` expects) and whose
-    size is the sum of all parts. Sorted smallest-first.
-    """
+    """List the GGUF files of *repo* with size and quant label."""
     _ensure_online()
     repo = repo.strip().strip("/")
     if not re.match(r"^[\w.-]+/[\w.-]+$", repo):
@@ -633,13 +464,7 @@ def hf_gguf_files(repo: str) -> list[dict]:
 
 
 def _quant_of(name: str) -> str:
-    """The single quant label for *name*, preferring an MXFP4/MXFP4_MOE match
-    over any earlier one in the string. A mixed-precision MoE export commonly
-    names the non-expert tensor precision FIRST (e.g.
-    '...-bf16_MXFP4_MOE.gguf'), which would otherwise win under plain
-    re.search - it returns the LEFTMOST match regardless of alternation
-    order - misreporting the actual expert quantization as a plain
-    unquantized BF16/F16 dtype."""
+    """The single quant label for *name*, preferring an MXFP4/MXFP4_MOE match over any earlier one in the string."""
     matches = _QUANT_RE.findall(name)
     if not matches:
         return ""
@@ -744,37 +569,12 @@ _gpu_probe_epoch = 0
 
 
 def last_known_gpus() -> list:
-    """The most recent SUCCESSFUL :func:`list_gpus` reading, WITHOUT probing.
-
-    ``list_gpus`` deliberately has no TTL cache - every call re-probes so a live
-    ``free`` is never stale - which makes it the wrong thing to call for a second,
-    incidental use right after something else has already probed. On this box a
-    probe spawns a torch-importing subprocess and costs seconds.
-
-    This is for exactly that case: a caller that has JUST driven a probe (e.g. via
-    :func:`vram_capacity`) and wants the per-device detail behind the number it
-    already has. Returns ``[]`` when no probe has ever succeeded - never a
-    fabricated or partial reading, and never a fresh probe.
-
-    NOT a substitute for ``list_gpus`` when the reading must be current: the value
-    here is as fresh as whatever last probed, and nothing about it says when.
-    """
+    """The most recent SUCCESSFUL :func:`list_gpus` reading, WITHOUT probing."""
     return list(_gpu_last_good or [])
 
 
 def _reset_gpu_probe_cache() -> None:
-    """Test hook: drop the last-known-good GPU reading + in-flight flag, and
-    INVALIDATE any probe still in flight so it cannot bleed into the next test.
-
-    Clearing the globals is not enough on its own: an overrunning probe is
-    abandoned, not cancelled (a wedged native call cannot be interrupted from
-    Python), so that thread outlives this reset and would otherwise write its
-    reading into _gpu_last_good AFTERWARDS. Measured: a cold ROCm/CUDA init takes
-    ~6.5s and overruns _GPU_PROBE_DEADLINE, so the abandoned thread lands its
-    write several seconds later, inside whichever test is running by then - which
-    made the GPU tests fail intermittently with THIS machine's real card where
-    they assert a fake or empty reading. Bumping the epoch makes that late write
-    a no-op (see _run), which the clears alone provably could not do."""
+    """Test hook: drop the last-known-good GPU reading + in-flight flag, and INVALIDATE any probe still in flight so it cannot bleed into the next test."""
     global _gpu_last_good, _gpu_probe_inflight, _gpu_probe_epoch
     global _gpu_probe_done, _gpu_probe_result, _isolated_torch_unavailable
     global _isolated_torch_broken_warned
@@ -797,75 +597,13 @@ def _reset_gpu_probe_cache() -> None:
 
 def list_gpus(*, deadline: float = _GPU_PROBE_DEADLINE, return_status: bool = False,
               wait_for_inflight: bool = False):
-    """Every GPU device visible right now: ``[{"index", "name", "total",
-    "free"}, ...]``, or ``[]`` when nothing is measurable.
-
-    Safe by construction: the real driver probe (:func:`_list_gpus_probe`) runs on
-    a helper thread with a hard ``deadline``-second timeout, so this call NEVER
-    blocks its caller for longer than ``deadline`` even if the GPU driver wedges.
-    Every call re-probes (see the module note above: no TTL cache, so a live
-    "free" reading is never stale); on an overrun the last-known-good value (or
-    ``[]``) is returned and the stuck probe thread is abandoned. The default
-    ``deadline`` is deliberately generous enough to wait out a legitimate COLD
-    driver init rather than misreport it (see the module note above); override it
-    only in tests, or where a caller genuinely wants a faster degraded answer
-    (:data:`_GPU_PROBE_CLI_DEADLINE` is a historical alias of the default).
-
-    When ``return_status`` is True, returns ``(gpus, status)`` where ``status`` is
-    :data:`GPU_PROBE_OK` (a fresh probe completed - an empty ``gpus`` then means
-    genuinely no measurable GPU), :data:`GPU_PROBE_TIMEOUT` (the probe exceeded
-    ``deadline`` - typically a cold ROCm/CUDA driver init that has not finished, so
-    an empty ``gpus`` is INCONCLUSIVE and a retry with a longer deadline may
-    succeed), :data:`GPU_PROBE_BUSY` (another probe is already inflight or the
-    probe thread could not start; no fresh reading was taken), or
-    :data:`GPU_PROBE_INCONCLUSIVE` (the probe completed, but the isolated torch
-    enumeration could not be asked this round and nvidia-smi - the only other
-    source - also found nothing; unlike TIMEOUT, a longer deadline will not help,
-    since nvidia-smi's answer does not change with time). A caller that renders a
-    user-facing "no GPU" message MUST branch on this so a slow cold probe, or an
-    inconclusive one, is not misreported as "no torch / no GPU" (AGENTS.md rule 5).
-    ``return_status`` defaults to False, preserving the bare-list contract every
-    existing caller and the ~28 test modules that patch this function rely on.
-
-    Tries torch first (CUDA/ROCm - torch's ROCm build aliases torch.cuda.* to
-    HIP under the hood, so an AMD card enumerates through the exact same API,
-    no special-casing needed) since it also gives a device name; falls back to
-    a name-aware ``nvidia-smi`` listing (ALL devices, not just the first) for
-    the GGUF-only install that has no torch.
-
-    ``wait_for_inflight`` (opt-in, default False) changes ONLY what happens when a
-    probe is already in flight: instead of returning :data:`GPU_PROBE_BUSY` at once
-    with the last-known-good reading, this call JOINS the running probe and waits on
-    its completion, bounded by its own ``deadline``. This is what makes a longer
-    ``deadline`` actually help on a cold box: there the FIRST probe (typically the
-    GUI's /api/stats heartbeat, executor-offloaded, historically at a 4s cap before
-    the deadlines were unified) holds the in-flight slot for the entire ~4.6s cold
-    ROCm/CUDA init, so a model-load probe arriving in that window would otherwise
-    short-circuit on BUSY without ever probing - the identical 0.0000s no-op a
-    long-deadline RETRY hits on the same guard. Set it ONLY together with a
-    long ``deadline`` and ONLY off the event loop: like the long deadline itself, a
-    joining wait can block the caller up to ``deadline`` seconds, which must never
-    land on the server's single loop (PR #541). It never spawns a second probe, so
-    it cannot pile onto a wedged driver; a permanent wedge still just times the
-    joiner out at its own ``deadline``.
-
-    Deliberately does NOT fall back to the Windows display-adapter registry:
-    that tier (see vram_info()) can only report one aggregate "largest
-    adapter" number with no per-device identity, so it cannot support GPU
-    *selection* - only vram_info()'s single-number "total VRAM for fit
-    badges" use case. That is a scope boundary, not an oversight."""
+    """Every GPU device visible right now: ``[{'index', 'name', 'total', 'free'}, ...]``, or ``[]`` when nothing is measurable."""
     gpus, status = _list_gpus_with_status(deadline, wait_for_inflight)
     return (gpus, status) if return_status else gpus
 
 
 def _list_gpus_with_status(deadline: float, wait_for_inflight: bool = False) -> tuple:
-    """The real probe driver behind :func:`list_gpus`, returning ``(gpus, status)``
-    where status is one of :data:`GPU_PROBE_OK` / :data:`GPU_PROBE_TIMEOUT` /
-    :data:`GPU_PROBE_BUSY` / :data:`GPU_PROBE_INCONCLUSIVE`. Split out so
-    ``list_gpus`` can expose the status opt-in without duplicating the thread +
-    deadline machinery. ``wait_for_inflight``: see
-    :func:`list_gpus` - a patient off-loop caller JOINS a probe already in flight
-    (bounded by ``deadline``) rather than short-circuiting on BUSY."""
+    """The real probe driver behind :func:`list_gpus`, returning ``(gpus, status)`` where status is one of :data:`GPU_PROBE_OK` / :data:`GPU_PROBE_TIMEOUT` / :data:`GPU_PROBE_BUSY` / :data:`GPU_PROBE_INCONCLUSIVE`."""
     global _gpu_last_good, _gpu_probe_inflight, _gpu_probe_done, _gpu_probe_result
     global _probe_deadline_at   # published with the slot for #697's cold-budget check
     join_done = None
@@ -1036,32 +774,7 @@ def _list_gpus_with_status(deadline: float, wait_for_inflight: bool = False) -> 
 
 
 def native_hip_runtime_resident() -> bool:
-    """True when llama.cpp's bundled HIP-linked runtime is resident IN THIS
-    process on Windows: the native lib has been loaded (``_loader.load_lib``)
-    and the resolved runtime ships a HIP ggml backend (same shipped-DLL-set
-    authority as :func:`_native_backend_has_vulkan`).
-
-    This is the platform signal for TWO distinct conclusions, each taken by its
-    own caller with its own extra narrowing:
-
-    - :func:`_torch_gpu_probe_known_doomed` below: a FRESH ``import torch``
-      here collides with the resident HIP DLLs (it adds the torch-absence and
-      ``rocm_sdk`` conditions on top).
-    - ``gpu_usage.raw_reading_is_process_scoped``: the raw free-VRAM readings
-      this process can take are HIP-sourced - and the HIP runtime's reading on
-      Windows is the MEASURED-blind one (``ggml_backend_dev_memory`` and
-      torch's ``mem_get_info`` were measured byte-identical and equally blind;
-      see gpu_usage's module docstring and
-      dev-notes/vram-cross-process-blindness.md) - so blindness can be
-      answered truthfully even where torch itself cannot be consulted at all
-      (the GGUF worker).
-
-    Fails closed (False) when the check itself errors: both callers treat
-    False as "no special handling", today's behavior. The glob re-resolves
-    ``runtime_binary_dir()`` at check time, which could in principle drift
-    from the dir the resident lib actually loaded from; no current caller
-    both holds a resident lib and repoints the runtime dir mid-process, so
-    that drift window is theoretical today (same note as the vulkan check)."""
+    """True when llama.cpp's bundled HIP-linked runtime is resident IN THIS process on Windows: the native lib has been loaded (``_loader.load_lib``) and the resolved runtime ships a HIP ggml backend (same shipped-DLL-set authority as :func:`_native_backend_has_vulkan`)."""
     import sys
     if sys.platform != "win32":
         return False
@@ -1079,64 +792,7 @@ def native_hip_runtime_resident() -> bool:
 
 
 def _torch_gpu_probe_known_doomed() -> bool:
-    """True when :func:`_list_gpus_probe`'s ``import torch`` attempt below is
-    KNOWN, ahead of time, to fail in this exact process state - so the probe
-    skips it at the root instead of triggering the failure and catching the
-    aftermath.
-
-    THE DOOMED COMBINATION (root-caused live, and documented with the same
-    skip in ``_loader.native_lib_loaded`` / ``_sizing._free_total_vram_bytes``):
-    on Windows, once llama.cpp's bundled HIP-linked runtime has been loaded
-    into this process (anything that reaches ``_loader.load_lib()`` -
-    ``compute_devices()`` / ``has_max_devices()``, a worker, a mixed test
-    run), its bundled ROCm/HIP DLLs are resident under the same names a
-    ROCm-for-Windows torch resolves during import via its ``rocm_sdk``
-    preload. The OS loader hands torch the already-resident, ABI-incompatible
-    copies and the import fails with STATUS_ENTRYPOINT_NOT_FOUND (0xc0000139).
-    The failure is caught below and the probe degrades to nvidia-smi, but each
-    attempt prints a "Windows fatal exception" faulthandler trace to stderr,
-    and Python evicts the faulted module from ``sys.modules`` - and list_gpus
-    deliberately re-probes on every call (see the no-TTL note above), so the
-    doomed import re-runs and re-traces for the rest of the process's life
-    (reproduced 2026-07-21: 6 traces from one mixed pytest run). A concurrent
-    second import can even hard-crash the process outright
-    (``gpu_usage.raw_reading_is_process_scoped``); never starting the doomed
-    import removes that trigger as well.
-
-    WHY NARROWER THAN _sizing's blanket ``native_lib_loaded()`` skip (the
-    trade-off, weighed rather than copied): _sizing could skip torch outright
-    because its fallback, ``gpu_memory_isolated()``, answers exactly as well.
-    THIS probe's fallback is nvidia-smi, which cannot see AMD devices, so a
-    blanket skip would trade away real, working torch enumeration on every
-    setup where torch and a resident native runtime coexist. Each condition
-    below narrows the skip to the PROVEN-doomed combination - where the torch
-    attempt fails every time, so skipping provably loses nothing - and any
-    setup outside it keeps today's behavior, torch attempt included:
-
-    - torch not already resident in ``sys.modules``: a resident torch was
-      imported successfully (before the runtime loaded, or on a setup where
-      the two coexist) and importing it again is a free cache hit - no
-      preload runs, nothing can fault, and its working enumeration is kept.
-    - :func:`native_hip_runtime_resident` (Windows + the native lib loaded +
-      the resolved runtime ships a HIP ggml backend): the conflict is Windows
-      OS-loader same-name resolution against resident HIP DLLs. Nothing
-      resident yet means no conflict - a fresh process (the common probe
-      context) keeps its torch enumeration - and a vulkan/cpu/cuda build
-      leaves no HIP DLLs resident for torch's preload to collide with. If
-      the shipped-DLL-set authority ever proves wrong for some exotic build,
-      the cost is today's pre-guard noise, never a lost probe.
-    - ``rocm_sdk`` is importable: the failing preload belongs to the
-      ROCm-for-Windows torch; a CPU/CUDA torch (or no torch at all) never
-      runs it. Importability is necessary, not sufficient (the rocm-sdk
-      wheels also serve the HIP llama build itself), but firing with a
-      non-ROCm torch loses nothing material: a CPU torch enumerates no
-      CUDA devices, and a CUDA torch's NVIDIA devices are exactly what the
-      nvidia-smi fallback reports anyway.
-
-    Fails OPEN: if the detector itself errors, the probe proceeds with its
-    normal torch attempt (which catches its own failures) - detection must
-    never break the working path. The skip is surfaced at debug level, not
-    silenced (AGENTS.md rule 5)."""
+    """True when :func:`_list_gpus_probe`'s ``import torch`` attempt below is KNOWN, ahead of time, to fail in this exact process state - so the probe skips it at the root instead of triggering the failure and catching the aftermath."""
     import sys
     if "torch" in sys.modules:
         # A resident torch (imported for real before the runtime loaded, or a
@@ -1200,26 +856,7 @@ _isolated_torch_broken_warned = False
 
 
 def isolated_torch_unavailable() -> bool:
-    """True once the isolated probe has PROVEN, in a child process, that torch
-    cannot finish enumerating on this box (see
-    :func:`_torch_gpus_isolated_once`, which sets the latch this reads).
-
-    Public because the conclusion is not this module's alone to act on. The
-    latch's own contract - "retrying this import IN-PROCESS would reproduce the
-    multi-minute startup hang the isolation exists to prevent, so this one must
-    never fall back that way" - binds every OTHER caller that was about to
-    ``import torch`` on a hot path too, and until this reader existed the only
-    way to honour it was to be inside this module.
-
-    Specifically it binds ``_sizing.VramSizingMixin._free_total_vram_bytes``,
-    which sits on the model-LOAD path: it used to import torch here regardless,
-    with no bound, so a box that had just proven torch wedges went on to wedge
-    the whole load, silently and forever (QA 2026-08-20 item 8).
-
-    False means "not proven unavailable", NOT "torch works" - the probe may
-    simply never have run. It is a reason to SKIP an attempt, never evidence
-    that an attempt will succeed, so a caller still needs its own bound.
-    """
+    """True once the isolated probe has PROVEN, in a child process, that torch cannot finish enumerating on this box (see :func:`_torch_gpus_isolated_once`, which sets the latch this reads)."""
     with _gpu_probe_lock:
         return _isolated_torch_unavailable
 
@@ -1243,33 +880,24 @@ _CHILD_STDERR_LOG_CAP = 2000
 
 
 def _capped_stderr(text: str, limit: int = _CHILD_STDERR_LOG_CAP) -> str:
-    """*text* (child-probe stderr), capped to *limit* chars for a log line.
-    Marks the cut explicitly when it actually truncates - a silently cut
-    diagnostic is the same rule-5 shape as swallowing it outright."""
+    """*text* (child-probe stderr), capped to *limit* chars for a log line."""
     if len(text) <= limit:
         return text
     return text[:limit] + f"... [truncated, {len(text) - limit} more chars]"
 
 
 class _IsolatedTorchWedged(Exception):
-    """The out-of-process torch probe ran but did not finish in time, i.e. TORCH
-    ITSELF is wedging on this box (the sm_120 case). Distinct from the child
-    mechanism being broken, and the distinction decides the fallback: retrying
-    this import IN-PROCESS would reproduce the multi-minute startup hang the
-    isolation exists to prevent, so this one must never fall back that way."""
+    """The out-of-process torch probe ran but did not finish in time, i.e. TORCH ITSELF is wedging on this box (the sm_120 case)."""
 
 
 def _torch_is_resident() -> bool:
-    """True when torch is ALREADY imported in this process, so enumerating here
-    is a free ``sys.modules`` cache hit that takes no OS loader lock."""
+    """True when torch is ALREADY imported in this process, so enumerating here is a free ``sys.modules`` cache hit that takes no OS loader lock."""
     import sys
     return "torch" in sys.modules
 
 
 def _torch_gpus_resident() -> list:
-    """torch's device list, read IN THIS PROCESS. Only safe to call when
-    :func:`_torch_is_resident` - see :mod:`localm._torch_gpu_probe` for why a
-    COLD import here freezes every thread in the process."""
+    """torch's device list, read IN THIS PROCESS."""
     import torch
     if not torch.cuda.is_available():
         return []
@@ -1289,28 +917,7 @@ def _torch_gpus_resident() -> list:
 
 
 def _torch_gpus_isolated() -> "Optional[list]":
-    """torch's device list read from a CHILD process, for the case where torch
-    is not yet resident and importing it HERE would take the Windows OS loader
-    lock and block thread creation process-wide, stalling the event loop
-    (issue #833; full mechanism and measurements in
-    :mod:`localm._torch_gpu_probe`).
-
-    Returns the device list (possibly ``[]``, a real answer meaning torch sees no
-    CUDA/HIP device), or ``None`` when the child COULD NOT ANSWER at all - spawn
-    failure, timeout, or an unusable reply. The caller falls through to nvidia-smi
-    either way, but only ``None`` latches :data:`_isolated_torch_unavailable`, so
-    a box where torch simply has no device is not mistaken for one where torch
-    cannot be asked (AGENTS.md rule 5: do not collapse "nothing there" and
-    "could not look" into one silent path). The child inherits this process's
-    environment, so ``CUDA_VISIBLE_DEVICES`` selects and orders devices
-    identically and the TORCH index space :func:`list_gpus` promises is
-    preserved.
-
-    Spawned via ``interpreter_for_localm_children()``, NOT bare
-    ``sys.executable``: inside a Windows multiprocessing-spawn worker the latter
-    is the BASE interpreter, whose children get no venv context and so cannot
-    import torch or localm at all (the same trap documented on
-    ``_loader._spawn_probe_daemon``)."""
+    """torch's device list read from a CHILD process, for the case where torch is not yet resident and importing it HERE would take the Windows OS loader lock and block thread creation process-wide, stalling the event loop (issue #833; full mechanism and measurements in :mod:`localm._torch_gpu_probe`)."""
     import json
     import subprocess
     from localm._mp_spawn import interpreter_for_localm_children
@@ -1367,60 +974,7 @@ def _torch_gpus_isolated() -> "Optional[list]":
 
 
 def _torch_gpus_isolated_once() -> list:
-    """:func:`_torch_gpus_isolated`, but never retried on a box that has already
-    proven it cannot answer. Returns the device list, or ``[]`` so the caller
-    falls through to nvidia-smi.
-
-    The latch is what keeps a wedged torch from costing the FULL timeout on every
-    single probe: `list_gpus` deliberately re-probes on every call (no TTL, see
-    above), so without this the sm_120 case pays 10s per probe indefinitely and
-    never reaches the fallback inside the caller's 15s deadline.
-
-    TWO FAILURES THAT LOOK ALIKE AND MUST NOT BE TREATED ALIKE:
-
-    - TORCH WEDGES (timeout). Isolation worked and told us torch cannot finish
-      here. Latch, and never retry in-process - that import is precisely the
-      multi-minute hang this whole change exists to remove.
-    - ISOLATION IS BROKEN (cannot spawn, unusable reply). We learned nothing
-      about torch. Falling through to nvidia-smi would SILENTLY LOSE real GPU
-      enumeration on any box nvidia-smi cannot see - every AMD and Intel box -
-      turning "we could not look" into a confident "no GPU". This is not
-      hypothetical: the sibling probe daemon shipped broken for weeks on exactly
-      this seam (``sys.executable`` resolving to the base interpreter inside a
-      spawn worker, found live 2026-07-22), and nothing noticed. So degrade to
-      the IN-PROCESS import, which is what this code did before, and say plainly
-      at WARNING that the isolation was lost and the stall risk is back. A safety
-      net for a genuine runtime failure, not the design.
-
-    FORMERLY A KNOWN GAP, now closed. Once latched, this still returns [] and the
-    probe still falls through to nvidia-smi (unchanged - see below for why). On a
-    box where nvidia-smi ALSO cannot answer - an AMD or Intel card whose torch
-    wedges - the probe used to complete with [] and status GPU_PROBE_OK, which a
-    caller read as "genuinely no GPU", when the honest answer was "could not
-    determine". Closed by propagating the distinction this latch already makes
-    (rather than inventing a new one): :func:`_list_gpus_with_status` reads
-    ``_isolated_torch_unavailable`` once this call returns, and reports
-    :data:`GPU_PROBE_INCONCLUSIVE` instead of :data:`GPU_PROBE_OK` exactly when
-    the reading came back empty AND this latch is set - never for a non-empty
-    reading (nvidia-smi finding real hardware, e.g. the sm_120 case this
-    isolation exists for, is conclusive regardless of the latch).
-
-    This function's OWN return type is deliberately UNCHANGED (still a bare
-    ``list``, never ``None``): every caller of :func:`_list_gpus_probe` - and the
-    ~25 tests across test_discover.py / test_torch_probe_isolation.py /
-    test_gpu_probe_nonblocking.py / test_vram_eviction_safety.py that monkeypatch
-    it as a bare-list-returning double - rely on that contract. The status
-    channel is a separate, additive path through module state, not a change to
-    this function's signature.
-
-    STILL OUT OF SCOPE, documented rather than silently left inconsistent
-    (AGENTS.md rule 5): :func:`_torch_gpu_probe_known_doomed` skips the torch
-    attempt ENTIRELY on its narrower doomed combination (Windows + resident HIP
-    runtime + rocm_sdk torch) without touching this latch, so that skip is not
-    detected as inconclusive here either. Left alone deliberately - it is a
-    different, already-audited code path, and closing it would need
-    :func:`_list_gpus_probe` itself to track conclusiveness across every source
-    it tries, not just this one."""
+    """:func:`_torch_gpus_isolated`, but never retried on a box that has already proven it cannot answer."""
     global _isolated_torch_unavailable
     with _gpu_probe_lock:
         if _isolated_torch_unavailable:
@@ -1467,8 +1021,7 @@ def _torch_gpus_isolated_once() -> list:
 
 
 def _list_gpus_probe() -> list:
-    """The actual (blocking) GPU driver probe. Call :func:`list_gpus`, not this -
-    this one has no timeout and can wedge on a busy/broken driver."""
+    """The actual (blocking) GPU driver probe."""
     if not _torch_gpu_probe_known_doomed():
         try:
             out = _torch_gpus_resident() if _torch_is_resident() \
@@ -1532,30 +1085,7 @@ _probe_deadline_at = None
 
 
 def _apply_device_global_free(gpus: list) -> None:
-    """Correct each entry's ``free`` to a DEVICE-GLOBAL figure where this platform's
-    driver query is not one already, and tag every entry with ``free_scope`` so a
-    caller can tell a whole-board number from a process-local one. Mutates *gpus*.
-
-    WHY (measured, see dev-notes/vram-cross-process-blindness.md): on Windows with an
-    AMD ROCm/HIP torch build, ``torch.cuda.mem_get_info`` reports
-    ``total - the calling process's own allocations`` and is blind to every other
-    process. Measured live: 0.14 GB reported "in use" while 10.53 GB genuinely was.
-    That is not a staleness bug (PR #693's domain - the probe here is FRESH and still
-    wrong), and it is not llama.cpp-specific: a plain torch tensor in a child process
-    is equally invisible. It bites localm hard because every GGUF load is
-    out-of-process (backends/gguf.py, since #606), so the model's own VRAM is ALWAYS
-    in another process from the server measuring it - as is a game or a ComfyUI.
-
-    On Linux, and on NVIDIA, the driver query is device-global BY DOCUMENTATION (CUDA
-    specifies *free as "free according to the OS" and warns that another process can
-    move it), so nothing is corrected there and the reading is tagged
-    :data:`FREE_SCOPE_DEVICE` unchanged.
-
-    When no better source can answer on Windows, the entry keeps the driver's number
-    but is tagged :data:`FREE_SCOPE_PROCESS` rather than silently passing a
-    known-process-local figure off as the board's (AGENTS.md rule 5). That tag is
-    what makes /v1/models/unload say its reading is uncertain instead of asserting a
-    wrong one as fact."""
+    """Correct each entry's ``free`` to a DEVICE-GLOBAL figure where this platform's driver query is not one already, and tag every entry with ``free_scope`` so a caller can tell a whole-board number from a process-local one."""
     import sys
     if sys.platform != "win32":
         for g in gpus:
@@ -1628,28 +1158,7 @@ def _apply_device_global_free(gpus: list) -> None:
 
 
 def _native_backend_has_vulkan() -> bool:
-    """True when the currently-resolved native runtime directory ships the
-    Vulkan ggml backend (a ``ggml-vulkan.*`` file) - i.e. the active install
-    is the ``vulkan`` build.
-
-    Exists because ``list_gpus()`` (above) enumerates ONLY via torch.cuda
-    (CUDA, or HIP under a ROCm-build torch) or nvidia-smi - it never calls the
-    Vulkan loader, so it is structurally blind to any device only visible
-    through Vulkan. On the vulkan build, the REAL device selection at load
-    time happens entirely inside ggml-vulkan/llama.dll's own enumeration, a
-    different index space list_gpus() cannot see or validate against (see
-    GPU-SPLIT-VKINDEX: confirmed live to silently drop a valid configured
-    split device and a valid configured main_gpu_index alike, because
-    list_gpus() reported a non-empty but VULKAN-INCOMPLETE device list rather
-    than an empty one - the two callers below already handle "empty" as
-    "unmeasurable, pass through unchecked"; this handles "non-empty but for
-    the wrong backend" the same way).
-
-    Checks the actual shipped DLL/SO set, NOT the ``.localm-backend``
-    provisioning marker (setup_llama.py): the marker can be absent (a
-    ``--from`` build, an install predating the marker) or generic (e.g.
-    ``"custom"`` for a ``--url``/``--sha256`` provision) - the real file set
-    is always authoritative for which backend will actually be loaded."""
+    """True when the currently-resolved native runtime directory ships the Vulkan ggml backend (a ``ggml-vulkan.*`` file) - i.e. the active install is the ``vulkan`` build."""
     try:
         from localm.inference.backends.llamacpp._loader import (
             runtime_binary_dir, _ggml_glob,
@@ -1663,56 +1172,7 @@ def _native_backend_has_vulkan() -> bool:
 
 
 def _llama_visible_devices(devices: list) -> list:
-    """The subset of a native non-CPU device inventory that llama.cpp will
-    actually place layers on, RENUMBERED into the index space ``mp.main_gpu``
-    and ``mp.tensor_split`` consume - i.e. what a configured ``main_gpu_index``
-    / ``gpu_split_indices`` has to be expressed in to name the card the user
-    meant.
-
-    THE TWO SEQUENCES ARE NOT THE SAME, which is the defect this exists to
-    close. ``_loader.native_device_inventory`` is a faithful registry
-    inventory: it numbers EVERY non-CPU device in raw
-    ``ggml_backend_dev_get`` order. Measured against upstream
-    ``llama_prepare_model_devices`` (``src/llama.cpp`` at b10361),
-    ``model->devices`` is instead built as:
-
-        RPC-backed devices, hoisted to the FRONT
-        + GPU-type devices in registry order, deduplicated by device_id
-        + at most ONE integrated GPU, and ONLY when no discrete GPU was found
-        CPU and ACCEL devices are SKIPPED; META aborts fatally
-
-    So on a box with a discrete card beside integrated graphics - an ordinary
-    laptop, or any desktop CPU with an iGPU - the inventory carries a device
-    llama.cpp's list does not. If the iGPU enumerates first, EVERY index is
-    off by one, and a user who ticked "device 0 and device 1" splits across
-    cards they never chose or names an index the loader has no device for.
-
-    RPC hoisting and device_id dedup cannot arise here, so neither is
-    emulated: ``ggml_backend_rpc_add_server`` is never called anywhere in this
-    project (so the RPC backend registers zero devices even though its library
-    ships and loads), and ggml-vulkan already dedups one physical GPU seen
-    under two drivers by ``deviceUUID``/``deviceLUID`` before it reaches the
-    registry, on a build that provisions one GPU backend at a time.
-
-    ALLOWLIST ``GPU`` RATHER THAN EXCLUDING THE OTHERS BY VALUE, for the same
-    reason ``implicit_split_capacity`` does: the enum has GROWN (IGPU was
-    inserted AHEAD of ACCEL, so the value 2 means ACCEL on a runtime around
-    b6000 and INTEGRATED GPU on anything since roughly b8100), and this module
-    cannot know which llama.cpp is provisioned. ``CPU`` 0 and ``GPU`` 1 have
-    held at every tag sampled, so an allowlist is version-independent where a
-    denylist is not. A device whose type the probe did not report fails the
-    filter rather than being assumed discrete.
-
-    WHEN NO GPU-TYPE DEVICE IS PRESENT THE LIST IS RETURNED UNCHANGED, and
-    that is deliberate rather than an oversight. An iGPU-only box (a very
-    common laptop) has llama.cpp fall back to its single integrated GPU as
-    device 0, which is exactly what this inventory already numbers 0 - the two
-    agree today and a load works. Returning an empty list there would hide a
-    working device behind a "no GPU here" reading, trading a loud bug for a
-    silent one on hardware that was never affected. It cannot be resolved more
-    precisely than this because identifying an IGPU device POSITIVELY needs
-    the unstable enum value above, so this branch declines to guess and leaves
-    behaviour exactly as it was."""
+    """The subset of a native non-CPU device inventory that llama.cpp will actually place layers on, RENUMBERED into the index space ``mp.main_gpu`` and ``mp.tensor_split`` consume - i.e. what a configured ``main_gpu_index`` / ``gpu_split_indices`` has to be expressed in to name the card the user meant."""
     from localm.inference.backends.llamacpp._loader import GGML_DEV_TYPE_GPU
     gpus = [d for d in devices
             if isinstance(d, dict) and d.get("type") == GGML_DEV_TYPE_GPU]
@@ -1722,38 +1182,7 @@ def _llama_visible_devices(devices: list) -> list:
 
 
 def native_gpu_devices() -> Optional[list]:
-    """Selector-shaped devices from the ACTIVE native runtime's OWN registry,
-    read crash-isolated (the probe daemon - ``_loader.gpu_devices_isolated``):
-    ``[{"index", "name", "total"?, "free"?}, ...]``, or ``None`` when the
-    daemon/registry cannot answer this call. An empty list is a real answer
-    (the runtime registers no non-CPU device).
-
-    The ``index`` values are the index space a configured
-    ``gpu_split_indices`` / ``main_gpu_index`` actually means at load time -
-    on the ``vulkan`` build the only source that can express it at all
-    (GPU-SPLIT-VKINDEX; :func:`list_gpus` is structurally blind to it). That
-    is NOT simply the registry's own numbering: llama.cpp drops integrated
-    GPUs whenever a discrete card exists and skips accelerators outright, so
-    the raw inventory from ``_loader.native_device_inventory`` is passed
-    through :func:`_llama_visible_devices` first, which keeps the devices the
-    loader will really use and renumbers them into the space it indexes. See
-    that helper for the measured upstream construction and for why an
-    iGPU-only box is deliberately left untouched. Every consumer here wants
-    that same list: the GUI selectors write these numbers into config,
-    :func:`resolve_auto_split_ratios` pairs a configured index BACK to a
-    device by it, and :func:`implicit_split_capacity` sums over the set.
-
-    This is the enumeration source for the GUI's split/main-GPU SELECTORS on
-    that build. Deliberately
-    NOT merged into :func:`list_gpus`: its torch/nvidia-smi index space feeds
-    the torch-side reads (:func:`vram_capacity`'s per-device sums,
-    :func:`gpu_split_shortfall`), and mixing the two spaces is exactly the bug
-    class VKINDEX documents.
-
-    ``name`` prefers the registry's human description ("AMD Radeon RX 6900
-    XT...") over the backend's terse name ("Vulkan0"). ``total``/``free`` are
-    included only when the registry reported positive bytes - the GUI drops
-    its size suffix for an absent key rather than showing "0.0 GB"."""
+    """Selector-shaped devices from the ACTIVE native runtime's OWN registry, read crash-isolated (the probe daemon - ``_loader.gpu_devices_isolated``): ``[{'index', 'name', 'total'?, 'free'?}, ...]``, or ``None`` when the daemon/registry cannot answer this call."""
     from localm.inference.backends.llamacpp import _loader
     raw = _loader.gpu_devices_isolated()
     if raw is None:
@@ -1785,31 +1214,7 @@ def native_gpu_devices() -> Optional[list]:
 
 
 def resolve_main_gpu_index(configured, *, gpus: Optional[list] = None) -> int:
-    """The GPU device index to actually use, given the user's ``main_gpu_index``
-    config value.
-
-    None (not configured) resolves to device 0 - today's behaviour - with no
-    detection work done at all. An explicitly configured index is validated
-    against the devices ``list_gpus()`` (or the injected *gpus*, for tests)
-    currently sees: an index that does not match any of them is a real
-    problem (silently substituting the wrong GPU, or handing llama.cpp's
-    native loader an index past the end of its device array, is worse than
-    device 0), so it is surfaced as a WARNING and swapped for device 0 rather
-    than trusted blindly (rule 5, do-not-hide-problems).
-
-    An index above ``_MAX_GPU_SPLIT_INDEX`` is rejected unconditionally, the
-    same sanity ceiling :func:`resolve_gpu_split` applies to its indices -
-    checked BEFORE any device-membership branching below, so it still applies
-    when detection is unmeasurable or skipped (see next paragraph).
-
-    When detection itself is unmeasurable (``list_gpus()`` returns nothing -
-    no torch, no nvidia-smi) OR the active native backend is ``vulkan``
-    (whose real device enumeration list_gpus() cannot see at all - see
-    :func:`_native_backend_has_vulkan`), the configured index cannot be
-    cross-checked against a reliable, backend-matching device list either
-    way; it is passed through unchecked (aside from the ceiling above) rather
-    than discarding an explicit user choice we have no way to disprove (the
-    same documented boundary as the Windows-registry VRAM fallback)."""
+    """The GPU device index to actually use, given the user's ``main_gpu_index`` config value."""
     if configured is None:
         return 0
     try:
@@ -1847,11 +1252,7 @@ def resolve_main_gpu_index(configured, *, gpus: Optional[list] = None) -> int:
 
 
 def apply_main_gpu(mp, *, config: Optional[dict] = None) -> None:
-    """Set ``mp.main_gpu`` from the configured ``main_gpu_index``, validated via
-    :func:`resolve_main_gpu_index`. Leaves the native default (0, set by
-    ``llama_model_default_params()``) untouched when unset. Shared by the
-    llama.cpp chat backend and the embedder so both native-load call sites
-    honour the same selection with the same fallback/warning behaviour."""
+    """Set ``mp.main_gpu`` from the configured ``main_gpu_index``, validated via :func:`resolve_main_gpu_index`."""
     from localm.config import load_config
     cfg = config if config is not None else load_config()
     configured = cfg.get("main_gpu_index")
@@ -1895,34 +1296,7 @@ _MAX_GPU_SPLIT_INDEX = 127
 
 def resolve_gpu_split(configured_indices, configured_ratios=None, *,
                        gpus: Optional[list] = None) -> list:
-    """Validate a configured multi-GPU split (``gpu_split_indices`` /
-    ``gpu_split_ratios``) against the devices ``list_gpus()`` (or the injected
-    *gpus*, for tests) currently sees, returning ``[(index, ratio), ...]``
-    ready to write into ``tensor_split``.
-
-    Mirrors :func:`resolve_main_gpu_index`'s posture: an index that does not
-    match a currently-detected device is dropped with a WARNING rather than
-    trusted blindly (rule 5, do-not-hide-problems) - a stale config
-    referencing a since-removed GPU degrades to single-GPU instead of
-    mis-targeting VRAM or crashing a load. Duplicate indices keep their first
-    occurrence. Fewer than 2 valid indices after validation means "no split"
-    (returns ``[]``) - the single-GPU path driven by ``apply_main_gpu`` is
-    unaffected. This validation is SKIPPED (indices pass through unchecked)
-    when the active native backend is ``vulkan`` - see
-    :func:`_native_backend_has_vulkan` and GPU-SPLIT-VKINDEX: ``list_gpus()``
-    cannot see Vulkan-only devices, so on that backend a non-empty result here
-    is not authoritative and previously caused a live, confirmed bug (a
-    configured split silently collapsed to single-device, with the user's
-    ``gpu_split_ratios`` replaced by llama.cpp's own unrelated auto-split).
-
-    ``configured_ratios``, when given, must be the SAME LENGTH as
-    ``configured_indices`` (before validation) to be honoured - a length
-    mismatch is a real misconfiguration (WARNED), not something to silently
-    truncate/pad, so it falls back to an equal split across the surviving
-    indices. ``None`` (or any non-positive entry) also means an equal split;
-    llama.cpp treats tensor_split entries as relative proportions, not values
-    that must sum to 1, so "equal" here is simply the same weight per device.
-    """
+    """Validate a configured multi-GPU split (``gpu_split_indices`` / ``gpu_split_ratios``) against the devices ``list_gpus()`` (or the injected *gpus*, for tests) currently sees, returning ``[(index, ratio), ...]`` ready to write into ``tensor_split``."""
     if not configured_indices:
         return []
     try:
@@ -2003,102 +1377,7 @@ def resolve_gpu_split(configured_indices, configured_ratios=None, *,
 def resolve_auto_split_ratios(config: Optional[dict] = None, *,
                               gpus: Optional[list] = None,
                               wait_for_inflight: bool = False) -> Optional[list]:
-    """Free-VRAM-proportional split ratios for the configured
-    ``gpu_split_indices``, or ``None`` when automatic distribution does not
-    apply - the parent-side decision behind "query free vram from each card,
-    compare and distribute" (the auto-split feature request).
-
-    Returns a list of positive floats aligned 1:1 BY POSITION with
-    ``cfg["gpu_split_indices"]`` (the exact shape a configured
-    ``gpu_split_ratios`` would have, so :func:`resolve_gpu_split`'s
-    re-pair-by-original-position logic applies unchanged), normalized to sum
-    1.0 and proportional to each device's CURRENT free VRAM. Callers pin the
-    result into the isolated load worker (``gguf.py`` -> ``GgufWorker`` ->
-    ``LlamaCpp``; ``IsolatedEmbedder._reload`` -> ``GGUFEmbedder``) via
-    ``apply_gpu_split(ratios_override=...)`` - the worker itself never probes
-    (a torch import inside a native-runtime process is the Windows + AMD DLL
-    conflict #754/#771 exists to prevent, and only the parent has the
-    #697/#700 device-global corrected readings anyway).
-
-    ``None`` (caller keeps today's config-driven behavior, i.e. the equal
-    split) in every case where auto would be dishonest or unwanted:
-
-    - Fewer than 2 configured indices, or non-integer indices: no split will
-      be applied at all (``resolve_gpu_split`` warns/degrades on its own).
-      Answered from config alone, with NO hardware probe.
-    - ``gpu_split_ratios`` is explicitly configured: the user pinned the
-      shares, and an explicit choice is never silently overridden.
-    - Per-device free VRAM is not measurable for EVERY configured device
-      (all-or-nothing, mirroring ``vram_capacity``'s "free" key): guessing a
-      share for a blind device could overload it.
-    - The probe did not complete fresh this call (non-``GPU_PROBE_OK``):
-      distributing by a frozen last-known-good snapshot is the same rule-5
-      gap ``gpu_split_shortfall``'s probe-freshness contract closes.
-    - (``list_gpus()`` path only) any configured device's reading is not
-      device-global (``free_scope != FREE_SCOPE_DEVICE``) - see the
-      TRUSTWORTHINESS section below for why this, unlike
-      ``gpu_split_shortfall``'s use of the same reading, cannot be skipped.
-
-    On the ``vulkan`` build the reading comes from
-    :func:`native_gpu_devices` (the crash-isolated probe daemon's view of
-    ggml's own registry, #768) - the ONLY per-device source in ggml-vulkan's
-    index space, which is the space ``tensor_split`` actually consumes
-    (GPU-SPLIT-VKINDEX; ``list_gpus()`` is structurally blind there and
-    speaks torch's index space). Everywhere else the reading is
-    ``list_gpus()``'s, reusing the caller-injected *gpus* snapshot when given
-    (``gpu_split_shortfall`` passes its own fresh ``GPU_PROBE_OK`` reading,
-    so gate and shares are computed from ONE snapshot).
-
-    TRUSTWORTHINESS (AGENTS.md rule 5), audited per branch rather than copied
-    wholesale from the display surfaces this mirrors - a PROPORTIONAL split
-    is a materially different question from a display or a refuse-only gate,
-    and each branch's own reading has a different, separately-measured
-    trust story:
-
-    * Freshness is a non-issue on BOTH branches, not merely checked on one.
-      The ``list_gpus()`` branch's ``GPU_PROBE_OK`` check above is the
-      explicit form of it; :func:`native_gpu_devices` needs no such check
-      because its contract (see its own and ``_probe_roundtrip``'s
-      docstrings) is fresh-or-``None`` with NO last-known-good caching at
-      all - a non-``None`` reply is this call's own live round-trip to the
-      probe daemon, so there is no "served stale" state to distinguish.
-    * Scope DOES differ by branch, and only one side has evidence backing a
-      check. ``list_gpus()``'s entries are scope-tagged by
-      :func:`_apply_device_global_free`, which MEASURED that Windows + an
-      AMD ROCm/HIP torch build reports free VRAM blind to every other
-      process (dev-notes/vram-cross-process-blindness.md) - so this branch
-      REQUIRES every configured device's ``free_scope`` to be
-      :data:`FREE_SCOPE_DEVICE` before trusting the proportion, unlike
-      ``gpu_split_shortfall``'s refuse-only use of the identical reading
-      (there, an over-stated free only makes a refusal MORE conservative;
-      here, a reading equally blind on every device makes an empty card and
-      a nearly-full one look equally free, which can steer too much of a
-      real split onto the full one - a materially wrong allocation, not
-      merely an imprecise refusal).
-      :func:`native_gpu_devices` carries no such tag, and - unlike the HIP
-      case - NO measurement in this codebase shows ggml-vulkan's own
-      ``ggml_backend_dev_memory`` query is cross-process blind (the
-      confirmed comparison was HIP-vs-HIP: torch's ``mem_get_info`` against
-      llama.cpp's OWN bundled HIP runtime, not against Vulkan). Asserting an
-      unmeasured blindness would be exactly the "spurious uncertainty flag
-      on a number that is actually fine" this same file's own
-      ``raw_reading_is_process_scoped`` docstring warns against for the
-      CUDA case - so the vulkan branch is deliberately left UNGATED on
-      scope pending a real measurement on genuinely distinct multi-GPU
-      Vulkan hardware (this project's own dev box is single-GPU and cannot
-      take that measurement - see tests/test_gpu_split_native_vulkan.py,
-      which DOES exercise this branch for real when that hardware is
-      available).
-
-    A device reporting 0 bytes free keeps a tiny positive share (1-byte
-    floor) instead of a 0.0 ratio: ``resolve_gpu_split`` discards the WHOLE
-    ratio list on any entry <= 0, which would silently hand a completely
-    full card an EQUAL share - the exact overload auto exists to avoid.
-
-    The successful distribution, and a fallback on a configured-but-
-    unmeasurable split, are logged at INFO (the always-on ring buffer is
-    INFO+, so a bug report about a lopsided split shows what was decided
-    and from which readings - rule 5, surface the decision)."""
+    """Free-VRAM-proportional split ratios for the configured ``gpu_split_indices``, or ``None`` when automatic distribution does not apply - the parent-side decision behind 'query free vram from each card, compare and distribute' (the auto-split feature request)."""
     from localm.config import load_config
     cfg = config if config is not None else load_config()
     indices = cfg.get("gpu_split_indices")
@@ -2195,10 +1474,7 @@ def resolve_auto_split_ratios(config: Optional[dict] = None, *,
 
 
 def _tensor_split_capacity(min_len: int) -> int:
-    """Float-slot count to allocate for ``tensor_split``: the native loader's
-    own answer when available (authoritative - see the capacity comment
-    above), else the documented fallback. Never smaller than *min_len* (the
-    caller's highest configured device index + 1)."""
+    """Float-slot count to allocate for ``tensor_split``: the native loader's own answer when available (authoritative - see the capacity comment above), else the documented fallback."""
     try:
         from localm.inference.backends.llamacpp import _api
         if _api.has_max_devices():
@@ -2212,41 +1488,7 @@ def _tensor_split_capacity(min_len: int) -> int:
 
 def apply_gpu_split(mp, *, config: Optional[dict] = None,
                     ratios_override: Optional[list] = None):
-    """Set ``mp.split_mode``/``mp.tensor_split`` from the configured
-    ``gpu_split_indices``/``gpu_split_ratios``, validated via
-    :func:`resolve_gpu_split`. Leaves ``split_mode``/``tensor_split`` at their
-    native defaults when fewer than 2 valid devices are configured. Shared by
-    the llama.cpp chat backend and the embedder, same as ``apply_main_gpu``.
-
-    THOSE NATIVE DEFAULTS ARE NOT A SINGLE-GPU LOAD, which this docstring
-    asserted until 2026-08-11 and which cost the sizing preflight a whole
-    board's capacity in the field. ``llama_model_default_params()`` sets
-    ``split_mode = LLAMA_SPLIT_MODE_LAYER`` with ``tensor_split = NULL``, and
-    llama.cpp confines a load to ``main_gpu`` only under
-    ``LLAMA_SPLIT_MODE_NONE`` - which nothing here ever sets. So leaving the
-    defaults alone yields an IMPLICIT layer split across every registered GPU,
-    distributed by each device's free memory. Anything sizing or budgeting a
-    load must account for that: see :func:`implicit_split_capacity`.
-
-    ``ratios_override`` (when non-empty) replaces the config's
-    ``gpu_split_ratios`` for THIS load: it carries the PARENT's already-
-    resolved effective ratios (:func:`resolve_auto_split_ratios`) into the
-    isolated worker, which must not probe for them itself (see that
-    function's docstring). It takes precedence over a config value read
-    here - the parent's admission gate checked THOSE shares, and a config
-    edited between the parent's read and this one must not produce a split
-    the gate never saw. Validated by the exact same
-    :func:`resolve_gpu_split` path as a configured value (a malformed
-    override degrades to the equal split with a WARNING, never a crash).
-    ``None``/empty keeps the config-driven behavior byte-identical to before
-    the kwarg existed.
-
-    Returns the ctypes float array backing ``mp.tensor_split`` (or ``None``
-    when no split was applied) - the CALLER MUST keep this referenced until
-    after the ``llama_load_model_from_file()`` call that consumes *mp*:
-    llama.cpp copies ``tensor_split``'s contents at load time (it is not held
-    as a live pointer afterward), so the buffer only needs to survive that one
-    call, not the loaded model's lifetime."""
+    """Set ``mp.split_mode``/``mp.tensor_split`` from the configured ``gpu_split_indices``/``gpu_split_ratios``, validated via :func:`resolve_gpu_split`."""
     from localm.config import load_config
     cfg = config if config is not None else load_config()
     ratios = ratios_override if ratios_override else cfg.get("gpu_split_ratios")
@@ -2276,15 +1518,7 @@ def apply_gpu_split(mp, *, config: Optional[dict] = None,
 
 def _list_gpus_kw(*, deadline: Optional[float] = None, return_status: bool = False,
                   wait_for_inflight: bool = False):
-    """Call :func:`list_gpus` passing ONLY the kwargs the caller actually asked for.
-
-    Not a style nicety: ~22 test modules patch list_gpus() with a zero-arg double
-    (``lambda: gpus``), which its documented bare-list contract entitles them to.
-    Forwarding ``deadline=None`` unconditionally would hand those doubles a kwarg
-    they never agreed to accept and raise TypeError in tests with no stake in this
-    change. Omitting it keeps the default call byte-identical, so only a caller
-    that opts in pays for opting in. ``wait_for_inflight`` (#701) is forwarded the
-    same way - only when True."""
+    """Call :func:`list_gpus` passing ONLY the kwargs the caller actually asked for."""
     kw = {}
     if deadline is not None:
         kw["deadline"] = deadline
@@ -2297,37 +1531,7 @@ def _list_gpus_kw(*, deadline: Optional[float] = None, return_status: bool = Fal
 
 def vram_info(*, return_status: bool = False, deadline: Optional[float] = None,
               wait_for_inflight: bool = False):
-    """{"total": bytes, "free"?: bytes} for the CONFIGURED main GPU device (see
-    main_gpu_index / resolve_main_gpu_index), or the largest GPU when none is
-    configured, or {} when not measurable. Tries torch (CUDA/ROCm) then
-    nvidia-smi (both via list_gpus()), then the Windows display-adapter
-    registry - the GGUF-only install has no torch, and the fit badges must
-    still work there (total is all fit_label needs).
-
-    When ``return_status`` is True, returns ``(info, status)`` where ``status``
-    is list_gpus()'s own GPU_PROBE_OK/GPU_PROBE_TIMEOUT/GPU_PROBE_BUSY/
-    GPU_PROBE_INCONCLUSIVE - a caller that will present a specific number as
-    CURRENT FACT (not just a fit
-    ceiling) must check this rather than trust a timed-out probe's stale
-    last-known-good fallback (AGENTS.md rule 5; see the vram_before/after
-    bytes this fed into /v1/models/unload, which is exactly that case).
-    ``return_status`` defaults to False, preserving the plain-dict contract
-    (AND the plain, no-kwarg list_gpus() call) every existing caller and test
-    double relies on - the status-aware call is made ONLY when a caller opts
-    in, never unconditionally.
-
-    ``deadline`` overrides list_gpus()'s default probe deadline (which is already
-    cold-init-tolerant - see :data:`_GPU_PROBE_DEADLINE`; the short 4.0s cap it
-    replaced was retired 2026-07-17). None keeps list_gpus()'s own default, and
-    keeps the call byte-identical for every existing caller. Callers that pass
-    :data:`_GPU_PROBE_CLI_DEADLINE` explicitly do so to PIN their cold-init
-    tolerance against any future default change, not to get a different value.
-
-    ``wait_for_inflight`` (opt-in, #701): when a probe is already running (e.g. the
-    GUI's 2.5s stats heartbeat holds it through a cold init), JOIN it and wait on its
-    result up to ``deadline`` instead of being handed an instant last-known-good/BUSY.
-    Only safe for a caller OFF the event loop. Forwarded, not defaulted, for the same
-    byte-identical-call reason as ``deadline``."""
+    """{'total': bytes, 'free'?: bytes} for the CONFIGURED main GPU device (see main_gpu_index / resolve_main_gpu_index), or the largest GPU when none is configured, or {} when not measurable."""
     from localm.config import load_config
     if return_status:
         gpus, status = _list_gpus_kw(deadline=deadline, return_status=True,
@@ -2451,59 +1655,7 @@ def vram_info(*, return_status: bool = False, deadline: Optional[float] = None,
 def vram_capacity(config: Optional[dict] = None, *, return_status: bool = False,
                   deadline: Optional[float] = None, wait_for_inflight: bool = False,
                   combined_only: bool = False):
-    """{"total": bytes, "free"?: bytes} to weigh a model's fit against - the
-    right ceiling for any "will this model fit" decision (a pre-load refusal
-    gate, a fit badge, a VRAM-estimate readout).
-
-    ``vram_info()`` alone is single-GPU by design (see its docstring) and is
-    the wrong ceiling once a multi-GPU ``gpu_split_indices`` is configured: a
-    model too big for the single main GPU but that fits COMBINED across the
-    configured split devices must not be refused or badged "too-big" just
-    because the capacity check only ever looked at one device (the bug this
-    function fixes - a model refused/mis-badged despite a working split).
-
-    Sums ``total``/``free`` across every device in :func:`resolve_gpu_split`'s
-    validated split (via :func:`list_gpus`) when 2+ valid devices are
-    configured; ``free`` is included only when EVERY split device reports a
-    measurable free value (mirrors vram_info()'s own all-or-nothing "free" key
-    - a partially-measurable split must not silently under-count by treating a
-    missing device's free as 0). Falls back to :func:`vram_info` untouched
-    (single main-GPU number) whenever fewer than 2 valid split devices are
-    configured or GPU detection is unmeasurable (registry-fallback tier) -
-    resolve_gpu_split already warns and degrades a stale/invalid split to
-    single-GPU (rule 5, do-not-hide-problems); this reuses that same
-    validation rather than duplicating it.
-
-    ``return_status``: see :func:`vram_info` - propagated through both the
-    single-GPU short-circuit and the split-summed path, so a caller weighing
-    whether to trust a specific number as CURRENT fact (not just a fit
-    ceiling) can tell a fresh reading from a timed-out/stale one. Made ONLY
-    when a caller opts in (never unconditionally), so every existing caller
-    and test double that patches vram_info()/list_gpus() with a plain, no-kwarg
-    stand-in keeps working exactly as before.
-
-    ``deadline`` / ``wait_for_inflight``: see :func:`vram_info` - forwarded through
-    ALL paths below (the no-split short-circuit, the split-summed path, and the
-    degrade-to-single-device fallback), so a blocking (non-event-loop) caller gets
-    the same longer probe budget and join behaviour whether or not a split is
-    configured. Defaults keep list_gpus()'s own cold-init-tolerant deadline and
-    no-join.
-
-    ``combined_only`` (opt-in): return the summed figure or NOTHING (``{}``) -
-    never the single-device :func:`vram_info` fallback. For a caller budgeting a
-    load that WILL be tensor-split across the configured devices (the GGUF
-    backend's sizing preflight, ``llamacpp/_sizing.py``), the single main-GPU
-    fallback is not a degraded answer but a wrong one: it would silently
-    substitute one device's capacity for the split's, exactly the split-blind
-    bug that layer exists to avoid, and the caller could not tell the two apart
-    from the dict shape alone. With ``combined_only`` the summed dict also
-    carries ``"devices"`` (how many detected split devices were summed), so the
-    caller can require a genuine 2+-device sum; ``{}`` means "no honest combined
-    figure this call" (no split configured, the split degraded to fewer than 2
-    detected devices, or - visible via ``return_status`` - a non-OK probe served
-    stale data). The classic (default) shape is byte-identical to before this
-    kwarg existed; the ``"devices"`` key is added ONLY under ``combined_only``.
-    """
+    """{'total': bytes, 'free'?: bytes} to weigh a model's fit against - the right ceiling for any 'will this model fit' decision (a pre-load refusal gate, a fit badge, a VRAM-estimate readout)."""
     from localm.config import load_config
     cfg = config if config is not None else load_config()
 
@@ -2584,70 +1736,7 @@ def vram_capacity(config: Optional[dict] = None, *, return_status: bool = False,
 
 def implicit_split_capacity(config: Optional[dict] = None, *,
                             wait_for_inflight: bool = False) -> dict:
-    """``{"free", "total", "devices"}`` summed across every GPU device
-    llama.cpp's DEFAULT layer split will spread a load over, or ``{}`` when no
-    implicit split applies or it is not measurable.
-
-    THE IMPLICIT SPLIT IS REAL, AND IT IS NOT WHAT THIS PROJECT ASSUMED. With
-    no ``gpu_split_indices`` configured, :func:`apply_gpu_split` leaves
-    ``split_mode``/``tensor_split`` at ``llama_model_default_params()``'s own
-    values - and those are ``LLAMA_SPLIT_MODE_LAYER`` with ``tensor_split ==
-    NULL``, NOT a single-GPU load. Read from upstream source (llama.cpp's
-    ``llama_prepare_model_devices``): the "remove all except the main GPU"
-    narrowing is gated on ``LLAMA_SPLIT_MODE_NONE`` alone, which localm never
-    sets, so ``main_gpu`` does not confine the load. The device list is every
-    registered discrete GPU (deduped by device id; integrated GPUs only when no
-    discrete one exists). A ``NULL`` ``tensor_split`` then takes llama.cpp's
-    "default split, by free memory": ``splits[i] = free_i``, normalized, with
-    each layer assigned by ``upper_bound`` over the cumulative fractions - and
-    the per-layer KV cache follows its layer's device. See
-    dev-notes/MULTI-GPU-SIZING-split-policy-2026-08-11.md for the quoted source.
-
-    WHY A PLAIN SUM IS THE CORRECT BUDGET AND NOT MERELY A BIGGER ONE, which is
-    the whole reason this helper may exist at all: because the weighting is by
-    FREE MEMORY, device *i* receives the fraction ``free_i / SUM(free)`` of the
-    offloaded layers, so a budget of ``SUM(free)`` places exactly ``free_i`` on
-    device *i*. Every card is filled to its own free memory and no further. That
-    is what makes a HETEROGENEOUS set safe - a 24/24/8 GB board is not treated
-    as 56 GB of anything-goes, the 8 GB card is simply handed a proportionally
-    smaller share. Had llama.cpp split EVENLY, summing would overcommit the
-    smallest card, so this is a consequence of the measured policy and not a
-    property of summing.
-
-    Callers must still charge overhead PER DEVICE (each one carries its own
-    compute buffers) - see ``_sizing.VramSizingMixin._split_overhead_bytes``.
-
-    Deliberately separate from :func:`vram_capacity`, which answers for a
-    CONFIGURED split and feeds the admission gate: this is the sizing question
-    ("how much can this load actually use") and must not silently move a
-    refusal threshold. Answers ``{}``, i.e. "no implicit combined figure - use
-    the single-device reading", in every case where a sum would be dishonest:
-
-    - A ``gpu_split_indices`` IS configured: an explicit ``tensor_split`` is
-      written, the shares are the configured/auto ratios rather than the
-      free-memory default, and :func:`vram_capacity` already owns that case.
-      Answered from config alone, with NO hardware probe.
-    - Fewer than 2 devices are detected: the single-GPU majority, and the case
-      where this must cost nothing and change nothing.
-    - Any device does not report BOTH ``free`` and ``total`` (all-or-nothing,
-      mirroring :func:`vram_capacity`'s own "free" key): a partially-measurable
-      board must not under-count by reading a missing device as 0, nor
-      over-count by assuming a blind device is empty.
-    - (``list_gpus()`` path only) the probe did not complete fresh this call:
-      sizing a load from a frozen last-known-good snapshot is the rule-5 gap
-      :func:`gpu_split_shortfall`'s probe-freshness contract exists to close.
-
-    On the ``vulkan`` build the reading comes from :func:`native_gpu_devices`
-    (the crash-isolated probe daemon's view of ggml's OWN registry), because
-    that is the device space the layers are actually placed in;
-    :func:`list_gpus` speaks torch's space and is structurally blind there
-    (GPU-SPLIT-VKINDEX). A sum needs the right device SET rather than an index
-    correspondence, but taking it from the space that receives the layers is
-    what makes the sum honest. Same branch, same reason, as
-    :func:`resolve_auto_split_ratios`.
-
-    Never raises: a combined reading is an upgrade over the single-device one,
-    and failing to fetch it must never break a load that worked without it."""
+    """``{'free', 'total', 'devices'}`` summed across every GPU device llama.cpp's DEFAULT layer split will spread a load over, or ``{}`` when no implicit split applies or it is not measurable."""
     from localm.config import load_config
     cfg = config if config is not None else load_config()
     if cfg.get("gpu_split_indices"):
@@ -2732,33 +1821,7 @@ def implicit_split_capacity(config: Optional[dict] = None, *,
 
 
 def split_device_count(config: Optional[dict] = None) -> int:
-    """How many DETECTED devices the configured gpu_split resolves to - the
-    DETECTED/labelling signal, NOT a load-safety gate.
-
-    This is the exact signal ``vram_capacity()`` uses to decide whether its total
-    is COMBINED across a split (>= 2) or the single main GPU (< 2): the same
-    ``resolve_gpu_split`` + detected-device re-filter. Callers that LABEL a VRAM
-    number ("combined across N GPUs" vs "your main GPU's") must gate on this, not
-    on the raw ``gpu_split_indices`` length - a stale/typo'd index or a GGUF-only
-    box (no ``list_gpus``) leaves a 2-entry split resolving to one device, where
-    the number is single-GPU and calling it "combined" would mislabel it.
-
-    Do NOT use this to decide "will the loader ACTUALLY apply a multi-device
-    split" (a VRAM preflight, a swap decision, a "your split spans N cards"
-    notice): on the ``vulkan`` build the real split devices live in ggml-vulkan's
-    own index space, which ``list_gpus()`` (torch.cuda / nvidia-smi) is
-    structurally blind to (GPU-SPLIT-VKINDEX), so the detected re-filter here
-    COLLAPSES a live, working 2-way vulkan split to < 2. That is the honest answer
-    for a LABEL (``vram_capacity()`` itself cannot sum a split it cannot measure,
-    so it too falls back to the single-GPU number, and calling that "combined"
-    would lie), but the WRONG answer for a load-safety gate. Use
-    :func:`applied_split_device_count` for the "will a split be applied at load
-    time" question - it mirrors :func:`apply_gpu_split`'s own gate and does not
-    apply the detected re-filter.
-
-    Returns 0 when no split is configured (the common single-GPU path, with no
-    hardware probe); otherwise the count of valid split devices (0/1 = effectively
-    single, 2+ = combined)."""
+    """How many DETECTED devices the configured gpu_split resolves to - the DETECTED/labelling signal, NOT a load-safety gate."""
     from localm.config import load_config
     cfg = config if config is not None else load_config()
     split = cfg.get("gpu_split_indices")
@@ -2771,35 +1834,7 @@ def split_device_count(config: Optional[dict] = None) -> int:
 
 
 def applied_split_device_count(config: Optional[dict] = None) -> int:
-    """How many devices the loader will ACTUALLY tensor_split across for a
-    GGUF/llama.cpp load - the loader-truth counterpart to
-    :func:`split_device_count`'s DETECTED/labelling count.
-
-    Mirrors :func:`apply_gpu_split`'s own gate (``len(resolve_gpu_split(...)) < 2``
-    -> no split), so it answers "will a multi-device split be applied at load
-    time", NOT "can we MEASURE that split's combined VRAM". The two counts differ
-    on exactly one axis: the detected-device re-filter that
-    :func:`split_device_count` / :func:`vram_capacity` apply against
-    :func:`list_gpus` AFTER ``resolve_gpu_split``. That filter is CORRECT for a
-    VRAM LABEL (you cannot honestly call a number "combined across N GPUs" when
-    ``list_gpus()`` only measured one device), but WRONG for a load-safety gate on
-    the ``vulkan`` build, where ``resolve_gpu_split`` passes the configured indices
-    through UNVALIDATED in ggml-vulkan's own index space (GPU-SPLIT-VKINDEX) - a
-    real 2-way split ``list_gpus()`` (torch.cuda / nvidia-smi) is structurally
-    blind to. There this returns 2 while :func:`split_device_count` collapses to
-    < 2. On a NON-vulkan box with a detected device list the two are IDENTICAL
-    (``resolve_gpu_split`` already dropped unknown indices, so that later re-filter
-    is a proven no-op).
-
-    Deliberately does NOT pass ``gpus=`` (so ``resolve_gpu_split`` calls
-    ``list_gpus()`` itself) and does NOT re-filter the result - exactly what
-    :func:`apply_gpu_split` does, which is what makes this the loader truth rather
-    than a measurability check.
-
-    Returns 0 when no split is configured (the common path, no hardware probe);
-    otherwise the count ``resolve_gpu_split`` yields. Domain is {0} U {2, 3, ...}:
-    a single surviving index collapses to 0, same as ``apply_gpu_split`` leaving
-    the native single-GPU default untouched."""
+    """How many devices the loader will ACTUALLY tensor_split across for a GGUF/llama.cpp load - the loader-truth counterpart to :func:`split_device_count`'s DETECTED/labelling count."""
     from localm.config import load_config
     cfg = config if config is not None else load_config()
     if not cfg.get("gpu_split_indices"):
@@ -2810,30 +1845,7 @@ def applied_split_device_count(config: Optional[dict] = None) -> int:
 
 def _list_gpus_reading(deadline: Optional[float] = None, *,
                        wait_for_inflight: bool = False) -> tuple:
-    """``(gpus, status)`` from :func:`list_gpus`, tolerant of a test double patched
-    in as a plain no-kwarg callable - the historical bare-list contract that the
-    ~28 test modules stubbing ``list_gpus`` rely on. A double whose signature does
-    not accept ``return_status`` is called bare and its reading treated as
-    :data:`GPU_PROBE_OK`: it models a completed probe, exactly as a bare stub did
-    before the status channel existed, so only a REAL status-capable probe can ever
-    report itself stale/busy here. Signature-inspected rather than a blanket
-    ``except TypeError`` so a genuine ``TypeError`` raised INSIDE ``list_gpus`` is
-    never mistaken for a rejected kwarg and swallowed (the refinement over
-    ``vram._vram_free_reading``'s try/except that its own author flagged). In
-    production ``list_gpus`` always accepts ``return_status``, so the bare branch is
-    a test-only affordance, never taken by the real probe.
-
-    *deadline* is forwarded to ``list_gpus`` only when given (None leaves its
-    default cap untouched), so an OFF-event-loop caller can spend a longer budget on
-    a cold driver init that overruns the short server cap - the only way to get a
-    FRESH first-load reading (a timed-out probe cannot be retried: it is abandoned,
-    not cancelled, and a retry short-circuits to the frozen last-known-good).
-
-    *wait_for_inflight* (opt-in, off-loop callers only - see :func:`list_gpus`)
-    JOINS a probe another caller already holds (e.g. the GUI's 2.5s stats
-    heartbeat) instead of taking an instant BUSY + stale reading. Forwarded only
-    when the callable's signature can accept it (a named parameter or
-    ``**kwargs``), so a status-capable test double without it keeps working."""
+    """``(gpus, status)`` from :func:`list_gpus`, tolerant of a test double patched in as a plain no-kwarg callable - the historical bare-list contract that the ~28 test modules stubbing ``list_gpus`` rely on."""
     try:
         params = inspect.signature(list_gpus).parameters
         accepts = "return_status" in params
@@ -2856,114 +1868,7 @@ def gpu_split_shortfall(vram_required: int, config: Optional[dict] = None,
                         *, return_status: bool = False,
                         deadline: Optional[float] = None,
                         return_shares_adaptive: bool = False):
-    """``[{"index", "needed", "free"}, ...]`` for every configured split device
-    whose free VRAM, read from a FRESH probe this call (:data:`GPU_PROBE_OK`),
-    cannot cover its proportional share of *vram_required*. Empty when no split is
-    configured, fewer than two split devices resolve, every device has live
-    headroom, OR the live per-device check could not run this call (see the probe
-    freshness contract below). A shortfall entry is emitted ONLY under a fresh
-    ``GPU_PROBE_OK`` reading, so every ``free`` in the result is a current
-    measurement a caller may quote to the user as fact.
-
-    ``vram_capacity()`` is an AGGREGATE check: it proves total combined free VRAM
-    across the split is enough, but with a PINNED ``gpu_split_ratios``,
-    ``apply_gpu_split()`` (the GGUF/llama.cpp backend's tensor_split writer)
-    divides a model by that static per-config ratio with NO live per-device
-    capacity awareness of its own - unlike the HF/transformers backend, whose
-    ``device_map="auto"`` is built from live per-device
-    ``torch.cuda.mem_get_info()`` free VRAM instead (see ``backends/hf.py``'s
-    ``_cuda_device_map``), so it already self-corrects. Without this check, a model
-    too big for one device's actual share could still pass the aggregate check (e.g.
-    another already-loaded model sits asymmetrically on one split device more than
-    another) and reach llama.cpp's native loader with too little room on that device
-    - not always a catchable Python exception, since the native loader can hard-abort
-    the WORKER process rather than return NULL (that abort is contained to the
-    isolated load worker, never the server - PR #606, see
-    ``backends/llamacpp/_runner.py``). Callers should treat a non-empty result on a
-    pinned-ratio split as a hard refusal for a GGUF-backend load (see
-    ``http_server.switch_engine``), not merely a warning.
-
-    With ratios UNSET the loader itself now adapts: the parent pins
-    :func:`resolve_auto_split_ratios`'s free-VRAM-proportional shares into the
-    load, and this gate computes its per-device shares with the SAME auto
-    ratios (from its own fresh reading, below). When those adaptive shares
-    are in effect, the asymmetric-occupancy refusal is structurally
-    impossible (a device's proportional share fits its free whenever the
-    aggregate fits), so a non-empty result means the COMBINED estimate is
-    short - which ``switch_engine`` defers to the backend's split-aware
-    sizing (#770) instead of hard-refusing, the same #753 posture as the
-    single-GPU path. But auto can DECLINE (a configured index not currently
-    detected, a device without a free reading) and fall back to the equal-
-    share math, where that invariant does NOT hold and a non-empty result is
-    exactly the pre-feature per-device hazard - so a caller deciding
-    refuse-vs-defer MUST know which math produced the result, not infer it
-    from the config shape. ``return_shares_adaptive=True`` appends that
-    fact: ``True`` only when live auto ratios were actually used for the
-    shares below; ``False`` for pinned ratios, the equal fallback, and every
-    early return (no split, vulkan skip, non-OK probe - where the list is
-    empty anyway). Appended AFTER ``status`` when both opt-ins are set:
-    ``(shortfall, status, shares_adaptive)``; alone:
-    ``(shortfall, shares_adaptive)``. The bare-call shape is untouched.
-
-    Probe freshness (AGENTS.md rule 5). ``list_gpus()`` is deadline-bounded: on a
-    TIMEOUT/BUSY it serves a FROZEN last-known-good reading. The default deadline
-    now waits out a legitimate cold driver init (see ``_GPU_PROBE_DEADLINE``), but
-    a wedged/contended driver can still overrun it, and a caller passing a short
-    deadline still times out a cold init, so a non-OK status here is possible and
-    is handled, not treated as a fault. This gate
-    therefore does NOT compute a shortfall from a stale reading and does NOT refuse
-    on one (refusing would break every working box's first load); on a non-OK probe
-    it returns ``[]`` (best-effort admit, logged at debug), relying on the isolated
-    worker's contained abort above as the backstop. An empty bare-list result thus
-    cannot, on its own, be told apart from "verified all-clear": a caller that must
-    distinguish "checked, clear" from "could not check" MUST pass
-    ``return_status=True`` to receive ``(shortfall, status)`` carrying the underlying
-    :data:`GPU_PROBE_OK` / :data:`GPU_PROBE_TIMEOUT` / :data:`GPU_PROBE_BUSY`.
-
-    Completeness (the blindness axis) is deliberately NOT gated on here, and the
-    asymmetry is the reason. ``list_gpus`` tags each device :data:`FREE_SCOPE_DEVICE`
-    (the board's number) or :data:`FREE_SCOPE_PROCESS` (counts ONLY this process's own
-    allocations - blind to every other process; Windows + AMD with no device-global
-    source). A PROCESS-scoped reading OVER-states free (``total`` minus only OUR use,
-    missing an out-of-process model's VRAM #606 or another app's), so in the REFUSE
-    direction this gate governs, ignoring the tag is SOUND: if even the over-stated
-    ``free`` is short, the real free is shorter still, and the refusal is correct. Only
-    the quoted figure is imprecise, and it errs by over-stating what is available, so it
-    never talks a user out of a load that would in fact fit.
-
-    Do NOT "fix" this by omitting a PROCESS-scoped device from the check: that trades a
-    SOUND refusal for a permit, and the load then reaches llama.cpp too small and dies
-    in the worker instead of returning a clean 503. That was tried in PR #710 and
-    reverted; this comment is the guard rail.
-
-    The blindness that DOES bite is the PERMIT direction - a blind ``free`` can read
-    comfortable while the board is genuinely full - and it is not detectable from the
-    reading itself, so no per-device tag check here can catch it. A permit-side caution
-    (e.g. prefer single-resident on a PROCESS-scoped reading) belongs with the aggregate
-    gate that owns eviction, not with this per-device fit check.
-
-    Only meaningful for the GGUF/llama.cpp load path - callers should gate on that
-    themselves (e.g. via ``inference.engine._is_gguf``); this function has no way to
-    know which backend a given load will use.
-
-    Deliberately takes no headroom margin of its own (a device with EXACTLY enough
-    free for its proportional share passes) - if a caller wants the same safety
-    margin the aggregate ``vram_capacity()`` check demands, add it to *vram_required*
-    before calling (e.g. ``vram_required + headroom``), so a per-device share is not
-    held to a thinner margin than the aggregate ceiling it composes with.
-
-    With ``return_status=True`` returns ``(shortfall, status)``; otherwise the bare
-    ``shortfall`` list (the historical shape every existing caller relies on).
-
-    *deadline* is forwarded to the underlying ``list_gpus`` probe (None leaves its
-    default). The default is cold-init-tolerant (see ``_GPU_PROBE_DEADLINE``), so a
-    cold driver init completes and yields a FRESH per-device reading instead of
-    timing out into the best-effort admit above; :data:`_GPU_PROBE_CLI_DEADLINE` is
-    a historical alias of it kept for the callers that pass it explicitly. The knob
-    remains for a caller that wants a deliberately shorter wait (it then falls into
-    that admit on a cold first load). An on-loop caller must not probe inline at
-    all - every server call site offloads via ``run_in_executor`` (PR #541).
-    """
+    """``[{'index', 'needed', 'free'}, ...]`` for every configured split device whose free VRAM, read from a FRESH probe this call (:data:`GPU_PROBE_OK`), cannot cover its proportional share of *vram_required*."""
     from localm.config import load_config
     cfg = config if config is not None else load_config()
 
@@ -3076,53 +1981,13 @@ def gpu_split_shortfall(vram_required: int, config: Optional[dict] = None,
 
 
 def _device_choice_configured(cfg: dict) -> bool:
-    """True when the user actually chose a device: a GPU split, or a Main GPU.
-
-    ONE definition of "nothing configured", shared by :func:`resolve_preferred_device`
-    and :func:`visible_device_order`. Both answer ``None`` in that case, and - this is
-    the load-bearing part - neither may probe the driver to find that out: the answer
-    comes from config alone. Keeping the gate in one place is what stops the two from
-    drifting, which is exactly what happened in #688: visible_device_order kept calling
-    list_gpus() eagerly, BEFORE delegating to the gated resolve_preferred_device, so an
-    unconfigured box paid for a GPU probe (torch init, or the nvidia-smi fallback) to
-    compute the same ``None`` the config could have answered for free.
-    """
+    """True when the user actually chose a device: a GPU split, or a Main GPU."""
     return bool(cfg.get("gpu_split_indices")) or cfg.get("main_gpu_index") is not None
 
 
 def resolve_preferred_device(config: Optional[dict] = None, *,
                             gpus: Optional[list] = None) -> Optional[int]:
-    """The device a media workload should DEFAULT to, with every OTHER card left
-    VISIBLE. ``None`` when nothing is configured, or when no torch-visible device can
-    be named honestly.
-
-    NEVER use this to MASK the other cards away. That was a real, shipped bug (see the
-    rename from ``resolve_whole_model_device``): ComfyUI core ships per-component GPU
-    PLACEMENT - ``SelectModelDevice``/``SelectCLIPDevice``/``SelectVAEDevice``
-    (``comfy_extras/nodes_multigpu.py``, registered at ``nodes.py:2440``), which call
-    ``deepclone_multigpu`` to rehome a component onto another card with independent
-    weights. Masking to one device (ComfyUI's ``--cuda-device``, or a bare
-    ``CUDA_VISIBLE_DEVICES=N``) deletes the other cards from torch's view and turns
-    every one of those nodes into a silent no-op. Prefer ComfyUI's ``--default-device``,
-    which reorders rather than masks (``main.py:69-76``), or :func:`visible_device_order`
-    for an install we cannot pass argv to.
-
-    The predicate here is PREFERENCE, not exclusivity: "which card should lead", not
-    "which card is the only one". It is deliberately NOT :func:`resolve_main_gpu_index`,
-    which answers IDENTITY ("which device is primary") and resolves an unset value to
-    device 0 - using that here would silently pick card 0 and ignore the split, the
-    shape of the #661 regression. On a configured split this is a CAPACITY-informed
-    choice: the split device with the MOST live free VRAM.
-
-    INDEX SPACE (this is load-bearing): the answer is always a TORCH device index,
-    because media runs on torch (ComfyUI), and :func:`list_gpus` enumerates via
-    torch.cuda. It must never leak :func:`resolve_gpu_split`'s Vulkan pass-through
-    (GPU-SPLIT-VKINDEX): on the ``vulkan`` llama.cpp build that function returns
-    indices UNVALIDATED, in ggml-vulkan's own index space, which torch does not share.
-    Handing one of those to ComfyUI as a CUDA/HIP id would name the wrong card. So a
-    device is returned only when it is genuinely torch-visible; otherwise ``None``, and
-    ComfyUI keeps its own default.
-    """
+    """The device a media workload should DEFAULT to, with every OTHER card left VISIBLE. ``None`` when nothing is configured, or when no torch-visible device can be named honestly."""
     from localm.config import load_config
     cfg = config if config is not None else load_config()
     split = cfg.get("gpu_split_indices")
@@ -3176,25 +2041,7 @@ def resolve_preferred_device(config: Optional[dict] = None, *,
 
 def visible_device_order(config: Optional[dict] = None, *,
                          gpus: Optional[list] = None) -> Optional[list]:
-    """Every torch-visible device index with the PREFERRED one FIRST, or ``None`` when
-    no device should be named.
-
-    For a ComfyUI localm cannot pass argv to: the user's OWN install, started by their
-    own launcher (possibly ZLUDA-wrapped), where the child env is the only lever. This
-    mirrors exactly what ComfyUI's own ``--default-device`` does at ``main.py:69-76`` -
-    it REORDERS ``CUDA_VISIBLE_DEVICES``/``HIP_VISIBLE_DEVICES`` so the chosen device
-    leads, leaving the rest visible - rather than what ``--cuda-device`` does at
-    ``main.py:78-81``, which masks them away and silently disables core's
-    ``Select*Device`` placement nodes.
-
-    Every index is torch-visible by construction (:func:`resolve_preferred_device` and
-    :func:`list_gpus` share torch's index space), so this never emits a Vulkan-space id.
-
-    NOTE the consequence, which callers must respect: after this reorder the preferred
-    card becomes torch index 0, so a workflow's ``gpu:N`` refers to the REORDERED
-    position, not to localm's own ``list_gpus`` index. Anything emitting ``gpu:N`` into
-    a workflow has to map through this order, not around it.
-    """
+    """Every torch-visible device index with the PREFERRED one FIRST, or ``None`` when no device should be named."""
     from localm.config import load_config
     cfg = config if config is not None else load_config()
     if not _device_choice_configured(cfg):
@@ -3215,40 +2062,7 @@ def visible_device_order(config: Optional[dict] = None, *,
 
 def comfy_gpu_option(device_index: int, config: Optional[dict] = None, *,
                      gpus: Optional[list] = None) -> Optional[str]:
-    """The ``gpu:N`` string ComfyUI will understand for OUR *device_index*, or ``None``
-    when it cannot be named honestly.
-
-    THE INDEX-SPACE GATE. Three coordinate systems meet here and an off-by-one puts a
-    component on the wrong card and STILL RENDERS - a silent wrong answer, not a crash:
-
-    1. localm's own device index (``list_gpus()`` -> ``torch.cuda`` enumeration of the
-       UNMASKED box). This is what ``gpu_split_indices`` and ``main_gpu_index`` mean.
-    2. The VISIBLE ORDER we impose (:func:`visible_device_order`), written into
-       ``CUDA_VISIBLE_DEVICES``/``HIP_VISIBLE_DEVICES`` either by ComfyUI's own
-       ``--default-device`` (``main.py:69-76``) or by us for a ComfyUI we cannot pass
-       argv to.
-    3. ComfyUI's ``gpu:N`` widget value, which is a POSITION, not a device id:
-       ``get_gpu_device_options`` (``model_management.py:246-257``) emits
-       ``gpu:{i} for i in range(len(get_all_torch_devices()))``, and
-       ``get_all_torch_devices`` enumerates torch AFTER the mask/reorder has applied.
-
-    So ``gpu:N`` means "the Nth entry of the visible order", and the mapping is
-    DERIVABLE rather than guessable precisely because localm is the one that imposes
-    that order. This is the whole reason we must never mask: masking collapses the
-    order to one entry and ``get_gpu_device_options`` then emits no ``gpu:N`` at all
-    (it gates on ``len(devices) > 1``), so every placement node silently no-ops.
-
-    Returns ``None`` when no order is established (nothing configured, or no
-    torch-visible device) or when *device_index* is not in it, rather than guessing a
-    position. Callers must treat None as "do not emit a device for this component".
-
-    VERIFY, DO NOT TRUST, at runtime: this mapping is derived from source
-    (``model_management.py:246-257`` read at ComfyUI git 867404b) and is UNPROVEN on a
-    real multi-GPU box - this one has a single card, where the order is trivially
-    ``[0]``. Before placement is enabled by default, confirm against the live server's
-    ``/object_info`` (does ``SelectModelDevice`` actually offer this ``gpu:N``?) and
-    ``/system_stats`` (does that position correspond to the card we meant?).
-    """
+    """The ``gpu:N`` string ComfyUI will understand for OUR *device_index*, or ``None`` when it cannot be named honestly."""
     order = visible_device_order(config, gpus=gpus)
     if not order or device_index not in order:
         return None
@@ -3257,31 +2071,7 @@ def comfy_gpu_option(device_index: int, config: Optional[dict] = None, *,
 
 def plan_media_placement(config: Optional[dict] = None, *,
                          gpu_options: Optional[list] = None) -> Optional[dict]:
-    """Assign media components to cards for a box ComfyUI sees as 2+ GPUs, or ``None`` to
-    keep the single-card floor. Pure: no I/O, no probe of its own.
-
-    *gpu_options* is the LIVE ``gpu:N`` list read from the running ComfyUI's
-    ``/object_info`` device combo (:func:`localm.media.comfy_client.probe_placement_capability`).
-    It is authoritative about how many cards ComfyUI actually enumerates, and it is
-    ComfyUI's OWN index space, so a POSITIONAL policy over it inherits NONE of the
-    localm-index vs ``gpu:N`` translation hazard (:func:`comfy_gpu_option` exists for a
-    future identity-based policy) and never consults ``split_device_count`` (whose Vulkan
-    soundness hole we deliberately do not inherit).
-
-    v1 policy - no free-VRAM read (the live free number is not yet trustworthy, and
-    per-component byte sizes do not exist): keep the big model on the preferred card (the
-    first visible position, where ``--default-device`` already put the most-free card;
-    ``"model": None`` means "no injection", so the GGUF UNet is never moved off its
-    loader default and needs no factory patch), and offload the smaller CLIP text-encoder
-    and VAE to the SECOND visible card. That is the concrete win (the FLUX T5-XXL encoder
-    and the VAE off the compute card free real headroom on card 0) with zero dependency
-    on the lying free-VRAM number or on the GGUF factory.
-
-    Returns ``None`` when fewer than two ``gpu:N`` options exist (single-card floor,
-    unchanged). Placement is capability-driven: it does not require a configured chat
-    ``gpu_split`` - two visible cards is enough for the second one to carry weight. A
-    size-aware spread across 3+ cards is a documented follow-up (SPEC-placement.md).
-    """
+    """Assign media components to cards for a box ComfyUI sees as 2+ GPUs, or ``None`` to keep the single-card floor."""
     _ = config  # reserved for a future size/identity-aware policy; v1 is positional
     gpu = [o for o in (gpu_options or [])
            if isinstance(o, str) and o.startswith("gpu:")]
@@ -3292,25 +2082,7 @@ def plan_media_placement(config: Optional[dict] = None, *,
 
 
 def fit_label(size_bytes: int, total_vram: Optional[int]) -> str:
-    """
-    Capacity badge for one file, against a single-GPU (or combined-split) VRAM
-    ceiling: "fits" / "tight" / "too-big", or "" when VRAM is unknown. "tight"
-    means it should load with little headroom (small context, nothing else on the
-    GPU); "too-big" still runs, with some layers offloaded to system RAM (slower).
-    That partial offload is delivered automatically: with n_gpu_layers_auto on
-    (the default) the loader sizes how many layers fit from free VRAM at load
-    (GgufBackend._auto_gpu_layers), so a "too-big" model loads instead of being
-    refused, rather than only if the user manually lowers -g.
-
-    The need estimate here (weights * safety factor + fixed overhead) is
-    context-agnostic and deliberately a touch more conservative on weights than
-    the loader's exact weights + real-KV + overhead math (GgufBackend._check_vram),
-    so at a normal/default context a "fits" badge is not optimistic. It carries no
-    explicit KV term, so it is a weights-fit signal, not a guarantee for an
-    unusually large -c/n_ctx (whose KV can exceed the weight slack); the loader's
-    own preflight remains the authority. A "tight"/"too-big" model may still load
-    via partial offload.
-    """
+    """Capacity badge for one file, against a single-GPU (or combined-split) VRAM ceiling: 'fits' / 'tight' / 'too-big', or '' when VRAM is unknown. 'tight' means it should load with little headroom (small context, nothing else on the GPU); 'too-big' still runs, with some layers offloaded to system RAM (sl..."""
     if not total_vram or not size_bytes:
         return ""
     need = size_bytes * _WEIGHT_FACTOR + _OVERHEAD_BYTES

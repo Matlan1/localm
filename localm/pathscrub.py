@@ -1,37 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Redact machine-identifying absolute paths out of text that crosses a trust
-boundary (an HTTP response body, a shareable bug report).
-
-Two levels, because two different readers are being protected from two
-different things:
-
-``scrub_user_paths``
-    Drops the user's HOME directory and, as an always-on backstop, the account
-    name in any ``C:\\Users\\<name>`` / ``/home/<name>`` / ``/Users/<name>``
-    path. This is the long-standing bug-report policy - ``bugreport._scrub_home``
-    is now a thin alias for it, so there is exactly ONE implementation of the
-    username rule instead of a copy that can drift.
-
-``scrub_paths``
-    Everything above PLUS the localm data dir (``LOCALM_HOME``), the install
-    root, and the Python environment prefix. A bug report is read by the
-    maintainer and wants the install layout; an API response handed to a
-    lower-privileged or anonymous caller does not, and on a portable install
-    the data dir is often nowhere near ``Path.home()`` so the username rule
-    alone would not catch it.
-
-Both KEEP THE STRUCTURE that makes the text useful - the file name, the line
-number, the reason - and replace only the leading directories. That is the
-point: per AGENTS.md rule 5 these paths are being redacted, never muted. A
-caller who is told "load failed" with the cause removed has been handed a
-mystery; a caller told "not an embedding model" with the path replaced by
-``<data>`` has everything they can act on and nothing they should not see.
-
-Every lookup is guarded INDIVIDUALLY and the username backstop runs
-unconditionally, so a failure to resolve one prefix can never cause the raw
-text to be emitted as though it had been scrubbed (a privacy step that fails
-must not report success).
-"""
+"""Redact machine-identifying absolute paths out of text that crosses a trust boundary (an HTTP response body, a shareable bug report)."""
 
 from __future__ import annotations
 
@@ -54,11 +22,7 @@ _USER_ROOT_PATTERN = r"([A-Za-z]:[\\/]Users[\\/]|/home/|/Users/)[^\\/\r\n]+"
 
 
 def _sub_prefix(text: str, prefix: str, replacement: str) -> str:
-    """Replace *prefix* in BOTH separator forms (and case-insensitively on
-    Windows). A value entered with forward slashes does not match the native
-    backslash form, and on Windows a lowercased drive/segment is the same
-    directory - a plain case-sensitive ``str.replace`` leaks on those variants.
-    """
+    """Replace *prefix* in BOTH separator forms (and case-insensitively on Windows)."""
     if not prefix:
         return text
     for variant in {prefix, prefix.replace("\\", "/")}:
@@ -71,15 +35,7 @@ def _sub_prefix(text: str, prefix: str, replacement: str) -> str:
 
 
 def scrub_user_paths(text: str) -> str:
-    """Drop the home directory (which contains the username) from any paths, so
-    text a stranger may read does not leak the account name; the file/line
-    structure that matters for debugging is kept.
-
-    Guard ONLY the home lookup: if ``Path.home()`` raises or is empty we must
-    NOT ship the raw text as if scrubbed (privacy fail), so fail safe and strip
-    the username with the fallback regex over the common home roots. That
-    backstop ALWAYS runs, even when the home lookup succeeded.
-    """
+    """Drop the home directory (which contains the username) from any paths, so text a stranger may read does not leak the account name; the file/line structure that matters for debugging is kept."""
     if not text:
         return text
     try:
@@ -93,33 +49,11 @@ def scrub_user_paths(text: str) -> str:
 
 
 def _machine_prefixes() -> List[Tuple[str, str]]:
-    """(prefix, replacement) for every directory that names THIS machine's
-    layout, longest first.
-
-    Longest-first matters: the data dir often sits INSIDE the install root (a
-    portable install) or inside the venv prefix. Replacing the parent first
-    would rewrite the head of the child's path and leave the remainder dangling,
-    so the more specific prefix has to win.
-    """
+    """(prefix, replacement) for every directory that names THIS machine's layout, longest first."""
     found: List[Tuple[str, str]] = []
 
     def add(value, label: str) -> None:
-        """Register BOTH the raw value and its resolved form.
-
-        Registering only the resolved form silently no-ops whenever the two
-        differ, and they differ in the SHIPPED configuration: localm provisions
-        its interpreter with uv, whose directory is a version-less alias
-        (``cpython-3.12-windows-x86_64-none``) that ``resolve()`` follows to the
-        versioned real path. Frame text carries the alias, so a resolved-only
-        prefix matched nothing and every stdlib frame came back with a full
-        absolute path while this function reported success. The same trap
-        applies to a data dir reached through a junction or symlink, or to
-        macOS's /tmp -> /private/tmp, where the leak is the data dir and hence
-        the account name.
-
-        Guarded per prefix: one unresolvable location must not cost the others,
-        and a resolve() failure must still leave the raw form registered.
-        """
+        """Register BOTH the raw value and its resolved form."""
         try:
             if not value:
                 return
@@ -154,13 +88,7 @@ def _machine_prefixes() -> List[Tuple[str, str]]:
 
 
 def path_scrubber() -> Callable[[str], str]:
-    """A ``scrub_paths`` bound to the prefixes resolved ONCE.
-
-    ``scrub_paths`` re-resolves the prefix list on every call, which is fine for
-    a one-off string but wasteful for a hot loop - ``/debug/stacks`` scrubs
-    hundreds of frame strings per request, and each ``Path.resolve()`` is a
-    filesystem call on Windows. Callers with many strings should bind once.
-    """
+    """A ``scrub_paths`` bound to the prefixes resolved ONCE."""
     prefixes = _machine_prefixes()
 
     def scrub(text: str) -> str:
@@ -174,13 +102,7 @@ def path_scrubber() -> Callable[[str], str]:
 
 
 def scrub_paths(text: str) -> str:
-    """``scrub_user_paths`` plus the localm data dir, install root and env
-    prefix. Use for anything handed to a caller who is not the local operator.
-
-    Returns *text* unchanged when it is empty or ``None``, so a caller can pass
-    an optional value straight through without a "is there an error at all"
-    check turning into a false positive on an empty string.
-    """
+    """``scrub_user_paths`` plus the localm data dir, install root and env prefix."""
     if not text:
         return text
     return path_scrubber()(text)

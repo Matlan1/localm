@@ -1,27 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""DNS-pinning HTTP transport for the network policy.
-
-Closes the SSRF DNS-rebinding TOCTOU (SSRF-REBIND). ``netpolicy.check_url``
-resolves a hostname and validates the resulting IP, but a plain ``requests.get``
-re-resolves the *same* hostname at connect time - so an attacker running
-authoritative DNS with TTL 0 can answer a public address for the validation and
-an internal one (127.0.0.1, 169.254.169.254, an RFC1918 service) for the actual
-connection. Nothing in between is re-checked.
-
-The fix is to resolve the host ONCE, validate every address it returns, then pin
-the socket to that address so there is no second lookup to poison. The original
-hostname is still presented for TLS SNI, certificate matching and the ``Host``
-header, so pinning is transparent to normal servers (virtual hosts and HTTPS
-keep working).
-
-Mechanism: a ``requests`` transport adapter whose connection pools override
-``_new_conn`` to (1) preserve ``server_hostname`` (SNI + cert hostname) from the
-real host before (2) repointing urllib3's ``_dns_host`` at the validated IP - the
-attribute urllib3 hands to ``socket.create_connection``. The ``Host`` header is
-set explicitly by the caller so virtual-host routing is unaffected. No new
-dependency; no global ``socket`` monkeypatch (thread-safe - the pin lives on the
-per-request adapter, not process-wide state).
-"""
+"""DNS-pinning HTTP transport for the network policy."""
 
 from __future__ import annotations
 
@@ -44,8 +22,7 @@ class _PinnedHTTPConnectionPool(HTTPConnectionPool):
 
 
 class _PinnedHTTPSConnectionPool(HTTPSConnectionPool):
-    """HTTPS pool whose new connections dial a fixed IP while presenting the
-    real hostname for SNI + certificate validation."""
+    """HTTPS pool whose new connections dial a fixed IP while presenting the real hostname for SNI + certificate validation."""
 
     _pinned_ip: str | None = None
 
@@ -79,8 +56,7 @@ class _PinnedPoolManager(PoolManager):
 
 
 class PinnedIPAdapter(HTTPAdapter):
-    """A ``requests`` transport adapter that forces every connection to a single
-    pre-validated IP address (see the module docstring)."""
+    """A ``requests`` transport adapter that forces every connection to a single pre-validated IP address (see the module docstring)."""
 
     def __init__(self, pinned_ip: str, **kwargs):
         self._pinned_ip = pinned_ip
@@ -97,21 +73,7 @@ class PinnedIPAdapter(HTTPAdapter):
 
 
 def pinned_session(pinned_ip: str) -> requests.Session:
-    """A ``requests.Session`` whose http(s) traffic is pinned to ``pinned_ip``.
-
-    The caller owns the session lifetime (use it as a context manager, or close
-    it after a streamed body is fully read) and must send the original hostname
-    as the ``Host`` header so virtual-host routing survives the IP pin.
-
-    ``trust_env`` is disabled: with it on (the ``requests`` default), an
-    HTTP_PROXY/HTTPS_PROXY environment variable routes the connection through
-    that proxy instead of dialling the pinned IP at all - a plain-HTTP request
-    through a proxy is forwarded via a *different* connection pool
-    (``requests.adapters.HTTPAdapter.proxy_manager_for``, unaware of
-    ``_pinned_ip``), so the pin above is bypassed entirely rather than merely
-    weakened. The same flag also stops ``requests`` from auto-attaching
-    ``.netrc`` credentials to a request the caller never asked to authenticate.
-    """
+    """A ``requests.Session`` whose http(s) traffic is pinned to ``pinned_ip``."""
     session = requests.Session()
     session.trust_env = False
     adapter = PinnedIPAdapter(pinned_ip)

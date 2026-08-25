@@ -1,19 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Shared scrubbing of model-internal control markers in chat output.
-
-Some finetunes emit their training-format control markers as plain text:
-harmony-style channel tags (``<|channel|>analysis <|message|>``), the Gemma 4
-turn/tool dialect (``<|turn>model``, ``<|"|>`` quote tokens), or reserved
-vocabulary placeholders (``<unused7>``). These are model internals, not content.
-
-Thinking-channel markers are not dropped but normalised to canonical
-``<think> ... </think>`` so every frontend handles reasoning one way; the rest
-are removed. This lives in one place and is applied once at the engine boundary
-(:meth:`localm.inference.engine.Engine.chat_stream`) so every backend - GGUF, HF,
-or any future one - inherits it instead of each re-implementing (or forgetting)
-it. The functions are idempotent: a second pass over already-scrubbed text is a
-no-op, so a backend that also scrubs internally is safe.
-"""
+"""Shared scrubbing of model-internal control markers in chat output."""
 
 from __future__ import annotations
 
@@ -80,16 +66,7 @@ _THINK_CLOSE = "</think>"
 
 
 def split_think(text: str) -> tuple[str, str]:
-    """Split *text* (already scrubbed to canonical ``<think>...</think>``) into
-    ``(content, reasoning)``: the visible answer with the think block(s) removed,
-    and the concatenated reasoning with the tags removed. An unclosed ``<think>``
-    runs to the end. Multiple blocks are concatenated.
-
-    Linear single pass (AUD-SPLITTHINK): scans with ``str.find`` and slices each
-    segment exactly once, so it stays O(n) even on pathologically interleaved
-    tags. The previous ThinkSplitter path re-sliced its whole buffer per tag
-    (``buf = buf[cut:]`` in a loop) - the classic O(n^2) pattern. ThinkSplitter
-    is still used for the streaming path, where each piece is small."""
+    """Split *text* (already scrubbed to canonical ``<think>...</think>``) into ``(content, reasoning)``: the visible answer with the think block(s) removed, and the concatenated reasoning with the tags removed."""
     content: list[str] = []
     reasoning: list[str] = []
     i, n, in_think = 0, len(text), False
@@ -114,24 +91,12 @@ def split_think(text: str) -> tuple[str, str]:
 
 
 def strip_think(text: str) -> str:
-    """Visible content of *text* with every reasoning channel removed.
-
-    Scrubs dialect markers to canonical ``<think>`` tags first (idempotent on
-    already-scrubbed text), then drops the think channel, including an UNCLOSED
-    trailing block (a truncated thinking reply must never leak scratchpad).
-
-    This is the one helper every INTERNAL consumer of model output must run
-    before storing or parsing a reply (memory consolidation, episodic
-    summaries, job results, compaction summaries, coder reflection). The /v1
-    routes already split reasoning for clients; this covers everything that
-    never passes through them. See dev-notes/memory-audit-2026-07-02.md C1:
-    raw ``<think>`` scratchpad was stored verbatim as durable memory."""
+    """Visible content of *text* with every reasoning channel removed."""
     return split_think(scrub_text(text or ""))[0]
 
 
 def _held_tag_suffix(s: str, tag: str) -> int:
-    """Length of the longest proper prefix of *tag* that is a suffix of *s* -
-    how much of the tail must be held back because it might begin *tag*."""
+    """Length of the longest proper prefix of *tag* that is a suffix of *s* - how much of the tail must be held back because it might begin *tag*."""
     k = min(len(s), len(tag) - 1)
     while k > 0:
         if s.endswith(tag[:k]):
@@ -141,14 +106,7 @@ def _held_tag_suffix(s: str, tag: str) -> int:
 
 
 class ThinkSplitter:
-    """Stateful splitter for a token stream of already-scrubbed text.
-
-    Feed each piece; get ``(content, reasoning)`` for that piece with the
-    ``<think>`` / ``</think>`` tags removed and the reasoning routed out of the
-    visible content. Tags split across pieces are handled by holding back a short
-    tail until the next piece arrives; call :meth:`flush` at end of stream to
-    release any held tail (an unterminated think block flushes as reasoning).
-    """
+    """Stateful splitter for a token stream of already-scrubbed text."""
 
     def __init__(self) -> None:
         self._buf = ""
@@ -184,8 +142,7 @@ class ThinkSplitter:
         return "".join(out_c), "".join(out_r)
 
     def flush(self) -> tuple[str, str]:
-        """Release the held tail at end of stream. A still-open think block
-        flushes its remainder as reasoning; otherwise as content."""
+        """Release the held tail at end of stream."""
         buf, self._buf = self._buf, ""
         if self._in_think:
             return "", buf
@@ -193,14 +150,7 @@ class ThinkSplitter:
 
 
 def scrub_stream(pieces: Iterator[str]) -> Iterator[str]:
-    """Normalise/remove internal model markers in a text stream.
-
-    The trailing ``_MARKER_HOLD`` characters stay buffered because a marker
-    (or its optional role suffix, e.g. ``<|turn>model``) can straddle two
-    pieces - scrubbing them too early would strip the marker head and leak its
-    tail as text. Only the committed region is scrubbed and yielded; the cut
-    never lands inside a potential marker (markers start with ``<``).
-    """
+    """Normalise/remove internal model markers in a text stream."""
     buf = ""
     for piece in pieces:
         buf += piece

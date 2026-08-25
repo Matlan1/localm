@@ -1,20 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""
-Settings schema: typed metadata for every configurable value.
-
-The legacy settings page renders the raw config dict with no metadata, which is
-why it is a flat, unfriendly grid. This module attaches per-field metadata
-(widget, label, help, group, allowed values, secret flag, when-it-applies,
-owner) so the redesigned page can render the right control - a dropdown for a
-fixed set of choices, free text for URLs, a folder picker for directories, a
-masked input for secrets - and so each plugin can contribute its own section.
-
-`owner` records which surface a setting belongs to ("core" or a plugin scope).
-Plugin-owned core keys (comfy_*, net_*, voice_*, coder_*) migrate
-to those plugins in Phase 3 - this field is the migration map.
-
-Phase 0 ships the schema + the core fields. The renderer (GUI) lands in Phase 5.
-"""
+"""Settings schema: typed metadata for every configurable value."""
 
 from __future__ import annotations
 
@@ -1210,10 +1195,7 @@ def _to_str_list(key: str, val):
 
 
 def _validate_key_presets(val):
-    """Validate the key_presets config: a list of {name, scopes} bundles. Each
-    name is a non-empty string and each scopes is a list of KNOWN scope strings
-    (an unknown/typo'd scope is rejected so a preset can never carry a capability
-    that does not exist). Returns the normalized list."""
+    """Validate the key_presets config: a list of {name, scopes} bundles."""
     from localm import scopes as S
     if not isinstance(val, list):
         raise ValueError("key_presets: expected a list of {name, scopes} objects")
@@ -1443,11 +1425,7 @@ def _validate_one(key: str, val, field: "SettingField", default):
 
 
 def validate_update(updates: dict) -> dict:
-    """Coerce + validate a dict of config updates against CORE_FIELDS.
-
-    Returns a new dict of normalized, correctly-typed values. Raises ValueError
-    on an unknown key, a value that cannot be coerced to the field's type, a
-    SELECT value outside its options, or a number outside its min/max."""
+    """Coerce + validate a dict of config updates against CORE_FIELDS."""
     from localm.config import DEFAULT_CONFIG
     fields = _field_map()
     out: dict = {}
@@ -1473,54 +1451,17 @@ def fields_by_owner(owner: str) -> list:
 
 
 def admin_only_keys() -> set:
-    """Config keys flagged owner-only (``admin_only``). A non-ADMIN caller may
-    neither see them in the schema nor write them via PATCH /v1/config, because
-    they widen a trust boundary (e.g. the rag_* indexing settings define which
-    host folders the indexer may read). The single source of truth for both gates."""
+    """Config keys flagged owner-only (``admin_only``)."""
     return {f.key for f in CORE_FIELDS if f.admin_only}
 
 
 def engine_managed_keys() -> set:
-    """Config keys that hold engine/plugin STATE rather than a setting, and that
-    PATCH /v1/config must therefore refuse to a non-ADMIN caller.
-
-    validate_update has no schema for what lives INSIDE these keys, so the HIDDEN
-    branch stores them verbatim (``plugins``) or with only a per-element str()
-    (``plugins_enabled``). Their real write surfaces DO validate, and each guards
-    a boundary the generic settings route knows nothing about:
-
-      - ``plugins``         -> POST /v1/tts/config requires an owner for
-                               library/wasm_paths (a script every browser
-                               imports), and POST /v1/media/config/<name>
-                               requires one for launch_cmd/api_url (a shell
-                               command / a render target).
-      - ``plugins_enabled`` -> POST /api/plugins/<name>/enable requires the
-                               PLUGINS_ADMIN scope, which a config:write key
-                               need not hold.
-
-    Without this gate the generic route outranks the specific one: a non-owner
-    config:write key could write the same state and skip both the value check and
-    the stronger scope (X8, dev-notes/review-drain-merges-2026-07-22.md).
-
-    Unlike admin_only_keys these are WRITE-gated only - the values stay readable,
-    because the finding is an escalation on write and nothing reads them off
-    GET /v1/config anyway. Keep this derived from the flag, not a literal set."""
+    """Config keys that hold engine/plugin STATE rather than a setting, and that PATCH /v1/config must therefore refuse to a non-ADMIN caller."""
     return {f.key for f in CORE_FIELDS if f.engine_managed}
 
 
 def schema_json(values: Optional[dict] = None, *, is_owner: bool = True) -> list:
-    """Serialize the core schema, injecting each non-secret field's current
-    default from DEFAULT_CONFIG (or *values* if given). The GUI renders this.
-
-    When *is_owner* is False, owner-only fields (``admin_only``) are OMITTED, so a
-    non-owner never receives the control (the write is also refused server-side;
-    hiding it here just avoids rendering a field they cannot use). Callers that
-    are not request-scoped (the CLI, tests) default to owner (see everything).
-
-    Auto-detect fields also carry an ``auto`` value: the path localm would
-    resolve when the field is left blank, so the GUI can SHOW it (filled, greyed)
-    instead of an empty box that hides what is actually in use. Today only
-    ``binary_dir`` resolves one (the bundled llama.cpp runtime)."""
+    """Serialize the core schema, injecting each non-secret field's current default from DEFAULT_CONFIG (or *values* if given)."""
     from localm.config import DEFAULT_CONFIG
     base = DEFAULT_CONFIG if values is None else values
     # The GUI's Media section skips group="Media" fields in the flat form and
@@ -1665,26 +1606,13 @@ def media_fields_for(name: str) -> list:
 
 
 def media_admin_only_fields() -> set:
-    """Field keys (across all media plugins) flagged owner-only (today:
-    launch_cmd, api_url). A non-owner config:write key must not set them
-    (set_media_config's REC-MEDIA-CMD gate) and must not see their resolved
-    value either (media_schema_json). The single source of truth for both."""
+    """Field keys (across all media plugins) flagged owner-only (today: launch_cmd, api_url)."""
     return {f.key for f in MEDIA_PLUGIN_FIELDS if f.admin_only}
 
 
 def media_schema_json(name: str, block: Optional[dict], full_config: dict, *,
                        is_owner: bool = True) -> list:
-    """Serialize one media plugin's editable fields with their RESOLVED values.
-
-    ``value`` is the per-plugin block value when set, else the global comfy_*
-    fallback, so the GUI shows what is actually in effect. ``is_override`` flags
-    whether this plugin has its own value (vs inheriting the shared default).
-
-    When *is_owner* is False, admin_only fields (launch_cmd, api_url) are
-    OMITTED entirely, mirroring schema_json's admin_only handling for the core
-    schema: a non-owner config:read caller must not learn a shell command or a
-    render target it is not allowed to set either. Callers that are not
-    request-scoped (the CLI, tests) default to owner (see everything)."""
+    """Serialize one media plugin's editable fields with their RESOLVED values."""
     block = block if isinstance(block, dict) else {}
     out = []
     for f in media_fields_for(name):
@@ -1737,13 +1665,7 @@ def _coerce_media_value(f: "MediaField", val):
 
 
 def _is_http_url(value: str) -> bool:
-    """True if *value* is a well-formed absolute http(s) URL with a host.
-
-    Deliberately shape-only (scheme in http/https + a non-empty host): a
-    scheme-less or hostless value never works as a ComfyUI endpoint anyway
-    (urllib.request.urlopen needs a scheme), so rejecting it loses no working
-    config. SSRF / link-local screening is NOT done here - that stays with
-    sanitize_comfy_url at request time (do not duplicate the SSRF policy)."""
+    """True if *value* is a well-formed absolute http(s) URL with a host."""
     import urllib.parse
     try:
         parsed = urllib.parse.urlparse(value)
@@ -1753,13 +1675,7 @@ def _is_http_url(value: str) -> bool:
 
 
 def validate_media_block(name: str, updates: dict) -> dict:
-    """Coerce + validate a per-plugin media update into a block-merge dict.
-
-    Returns a nested dict shaped like the stored plugin block (e.g.
-    ``{"comfy": {"workdir": ...}, "model_swap_policy": ...}``) ready to DEEP-MERGE
-    into config["plugins"][name]. Raises ValueError on an unknown plugin/field or
-    a bad value. A field set to "" (blank) is written as None, clearing the
-    per-plugin override so the plugin falls back to the shared default."""
+    """Coerce + validate a per-plugin media update into a block-merge dict."""
     if name not in MEDIA_PLUGINS:
         raise ValueError(f"unknown media plugin: {name!r}")
     by_key = {f.key: f for f in media_fields_for(name)}
@@ -1876,11 +1792,7 @@ TTS_FIELDS: list = [
 
 
 def tts_defaults() -> dict:
-    """The tts plugin's shipped template defaults (documentation keys stripped).
-
-    Read through the plugin's own settings module so the template has exactly
-    one reader, shared with the plugin's /api/tts/config.
-    """
+    """The tts plugin's shipped template defaults (documentation keys stripped)."""
     from localm.plugins.builtin.tts.settings import defaults
     return defaults()
 
@@ -1892,33 +1804,19 @@ def known_tts_voices() -> list:
 
 
 def tts_admin_only_fields() -> set:
-    """Block keys a non-owner ``config:write`` key must not set, and must not
-    see the resolved value of either (see tts_schema_json's *is_owner*)."""
+    """Block keys a non-owner ``config:write`` key must not set, and must not see the resolved value of either (see tts_schema_json's *is_owner*)."""
     return {f.key for f in TTS_FIELDS if f.admin_only}
 
 
 def _tts_options(f: "TtsField") -> Optional[list]:
-    """The choices for *f*: static, except voice's, which come from the shipped
-    voice list (empty list -> None, so the validator falls back to a shape
-    check rather than rejecting every voice)."""
+    """The choices for *f*: static, except voice's, which come from the shipped voice list (empty list -> None, so the validator falls back to a shape check rather than rejecting every voice)."""
     if f.key == "voice":
         return known_tts_voices() or None
     return f.options
 
 
 def tts_schema_json(block: Optional[dict], *, is_owner: bool = True) -> list:
-    """Serialize the tts block's editable fields with their RESOLVED values.
-
-    ``value`` is the block value when the user set one, else the shipped
-    template default, so the GUI shows what is actually in effect;
-    ``is_override`` says which. ``gui``/``advanced``/``admin_only`` tell the GUI
-    what to render and where.
-
-    When *is_owner* is False, admin_only fields (library, wasm_paths) are
-    OMITTED entirely (mirrors schema_json's core-schema handling): a non-owner
-    config:read caller must not learn the script/wasm path it is not allowed
-    to set either. Callers that are not request-scoped (the CLI, tests)
-    default to owner (see everything)."""
+    """Serialize the tts block's editable fields with their RESOLVED values."""
     block = block if isinstance(block, dict) else {}
     defaults = tts_defaults()
     out = []
@@ -1945,14 +1843,7 @@ def tts_schema_json(block: Optional[dict], *, is_owner: bool = True) -> list:
 
 
 def _tts_relative_asset(key: str, value: str) -> str:
-    """Validate a library/wasm_paths value: a real path INSIDE the tts plugin's
-    static folder, expressed relatively.
-
-    The browser resolves these against /plugins/tts/, so an absolute, remote, or
-    traversing value would make every client load code from somewhere else. The
-    existence check is deliberate too: a typo here silently breaks text-to-speech
-    for everyone, and a 400 at set time beats a mystery failure later.
-    """
+    """Validate a library/wasm_paths value: a real path INSIDE the tts plugin's static folder, expressed relatively."""
     if ":" in value:
         raise ValueError(
             f"{key}: must be a path relative to the tts plugin's static folder "
@@ -1990,8 +1881,7 @@ def _tts_relative_asset(key: str, value: str) -> str:
 
 
 def _coerce_tts_value(f: "TtsField", val):
-    """Coerce + check one tts field value. Blank/None clears the override (the
-    plugin falls back to the shipped template default)."""
+    """Coerce + check one tts field value."""
     if val is None:
         return None
     if f.widget == Widget.NUMBER:
@@ -2033,12 +1923,7 @@ def _coerce_tts_value(f: "TtsField", val):
 
 
 def validate_tts_block(updates: dict) -> dict:
-    """Coerce + validate a tts settings update into a flat block-merge dict.
-
-    Raises ValueError on an unknown field or a bad value. A field set to ""
-    (blank) is written as None, clearing the override so the plugin falls back
-    to the shipped template default.
-    """
+    """Coerce + validate a tts settings update into a flat block-merge dict."""
     by_key = {f.key: f for f in TTS_FIELDS}
     merge: dict = {}
     for key, val in (updates or {}).items():
@@ -2063,26 +1948,13 @@ def validate_tts_block(updates: dict) -> dict:
 # --------------------------------------------------------------------------- #
 
 def plugin_settings_admin_only_fields(fields) -> set:
-    """Field keys (within ONE plugin's add_settings() fields) flagged
-    owner-only. Mirrors tts_admin_only_fields/media_admin_only_fields - the
-    single source of truth for both the read-side hide (plugin_settings_
-    schema_json) and the write-side gate (POST /v1/plugins/<name>/settings)."""
+    """Field keys (within ONE plugin's add_settings() fields) flagged owner-only."""
     return {f.key for f in fields if f.admin_only}
 
 
 def plugin_settings_schema_json(fields, block: Optional[dict], *,
                                 is_owner: bool = True) -> list:
-    """Serialize one plugin's add_settings() fields with their RESOLVED values
-    (the block's own value when set, else the field's own declared default) -
-    the generic counterpart to tts_schema_json/media_schema_json.
-
-    When *is_owner* is False, admin_only fields are OMITTED entirely (never
-    merely masked), mirroring the tts/media/core schema's owner-only handling:
-    a non-owner config:read caller must not learn a value it is not allowed to
-    set either. A widget=SECRET field's value/default are never included (the
-    widget itself is masked client-side; the value must not round-trip in
-    plaintext at all) - derived from the widget alone, so there is no separate
-    flag a field could forget to set consistently with it."""
+    """Serialize one plugin's add_settings() fields with their RESOLVED values (the block's own value when set, else the field's own declared default) - the generic counterpart to tts_schema_json/media_schema_json."""
     block = block if isinstance(block, dict) else {}
     out = []
     for f in fields:
@@ -2106,10 +1978,7 @@ def plugin_settings_schema_json(fields, block: Optional[dict], *,
 
 
 def _coerce_plugin_field_value(f, val):
-    """Coerce + check one plugin-contributed field value against its widget.
-    Mirrors _coerce_tts_value/_coerce_media_value's shape, generic over the
-    field's `widget` instead of a fixed key list - a third-party plugin's
-    keys are not known ahead of time, only the widget vocabulary is."""
+    """Coerce + check one plugin-contributed field value against its widget."""
     if f.widget == Widget.TOGGLE:
         return _to_bool(f.key, val)
     if val is None:
@@ -2140,10 +2009,7 @@ def _coerce_plugin_field_value(f, val):
 
 
 def validate_plugin_settings_update(fields, updates: dict) -> dict:
-    """Coerce + validate a settings update against ONE plugin's add_settings()
-    fields. Raises ValueError on an unknown key or a bad value. Mirrors
-    validate_tts_block: a field set to "" (blank) is written as None, clearing
-    the override so the plugin falls back to its own declared default."""
+    """Coerce + validate a settings update against ONE plugin's add_settings() fields."""
     by_key = {f.key: f for f in fields}
     merge: dict = {}
     for key, val in (updates or {}).items():
@@ -2205,15 +2071,7 @@ MEDIA_EXTRA_KEYS = ("workflow", "use_config_from")
 
 
 def plugin_config_kind(name: str) -> str:
-    """Which source can describe plugin *name*'s settable settings block.
-
-    ``"media"`` / ``"tts"`` - a static schema in this module, readable offline.
-    ``"runtime"`` - a host.add_settings() block, known only to a process that
-    has actually loaded the plugin, so the caller must ask a running server.
-    Note "runtime" is also the answer for a name that is not a plugin at all;
-    telling those two apart needs the installed-plugin list, which the caller
-    has and this function does not.
-    """
+    """Which source can describe plugin *name*'s settable settings block."""
     if name in MEDIA_PLUGINS:
         return "media"
     if name == TTS_PLUGIN:
@@ -2256,14 +2114,7 @@ def _media_extra_fields(name: str, block: dict) -> list:
 
 
 def local_plugin_config_fields(name: str, cfg: dict) -> list:
-    """Every field ``localm plugin config <name>`` can address, with its
-    RESOLVED value, for a plugin whose schema is static.
-
-    Owner view throughout: a CLI caller on this machine IS the owner, which is
-    the default media_schema_json / tts_schema_json already document for
-    callers that are not request-scoped. Raises ValueError for a
-    runtime-declared plugin, which this function structurally cannot describe.
-    """
+    """Every field ``localm plugin config <name>`` can address, with its RESOLVED value, for a plugin whose schema is static."""
     kind = plugin_config_kind(name)
     plugins = cfg.get("plugins") if isinstance(cfg.get("plugins"), dict) else {}
     block = plugins.get(name) if isinstance(plugins.get(name), dict) else {}
@@ -2285,7 +2136,7 @@ def local_plugin_config_keys(name: str) -> list:
 
 
 def _validate_use_config_from(name: str, value, cfg: dict):
-    """Coerce + check a media plugin's share-config pointer. Blank clears it."""
+    """Coerce + check a media plugin's share-config pointer."""
     from localm.plugins import media_config
     if value is None:
         return None
@@ -2306,9 +2157,7 @@ def _validate_use_config_from(name: str, value, cfg: dict):
 
 
 def _deep_merge_block(dst: dict, src: dict) -> None:
-    """Merge a validated media block into the stored one, nested keys included -
-    the same shape POST /v1/media/config/<name> uses, so a CLI write leaves this
-    plugin's other fields (and the other plugins) exactly as the GUI would."""
+    """Merge a validated media block into the stored one, nested keys included - the same shape POST /v1/media/config/<name> uses, so a CLI write leaves this plugin's other fields (and the other plugins) exactly as the GUI would."""
     for k, v in src.items():
         if isinstance(v, dict) and isinstance(dst.get(k), dict):
             _deep_merge_block(dst[k], v)
@@ -2335,21 +2184,7 @@ def _own_block_mutator(name: str, apply):
 
 
 def apply_local_plugin_config(name: str, key: str, value) -> tuple:
-    """Validate and PERSIST one field of a static-schema plugin's block.
-
-    Returns ``(key, stored_value)``, where a stored None means the override was
-    CLEARED - back to the shared global comfy_* default for a media field, or to
-    the shipped template default for a tts one. Raises ValueError with a usable
-    message on an unknown key or a bad value; the caller reports it and exits
-    non-zero.
-
-    Each key is dispatched to whichever writer already owns its rule, so there
-    stays exactly one definition of each: validate_media_block /
-    validate_tts_block for the schema fields (the same validators the HTTP
-    routes call), and media_workflows.select_workflow for `workflow` (which owns
-    both the does-this-file-exist check and the pop-on-clear that the GUI's own
-    selection route relies on).
-    """
+    """Validate and PERSIST one field of a static-schema plugin's block."""
     from localm.config import update_config
     kind = plugin_config_kind(name)
     if kind == "runtime":

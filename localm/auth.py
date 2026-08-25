@@ -1,27 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""
-Single shared API-key authentication for localm's HTTP surface.
-
-localm has no accounts or login - "auth" is one shared secret (the API key) that
-a client presents as ``Authorization: Bearer <key>`` to reach protected
-endpoints. This module is the single source of truth for that key.
-
-Key resolution precedence (first hit wins):
-
-    1. LOCALM_API_KEY environment variable (non-empty)  - transient override,
-       e.g. injected by the launcher for one run
-    2. <data dir>/auth.key file                         - persistent; written by
-       the launcher's Auth card or ``localm key`` and read by every entry point
-    3. none                                             - open mode (no key)
-
-When no key resolves the server runs open (local/dev) UNLESS auth is *required*
-(``LOCALM_REQUIRE_AUTH`` env var, or config ``"require_auth": true``), in which
-case protected endpoints refuse every request until a key is configured. This is
-the fail-closed switch; without it, loopback installs stay conveniently keyless.
-
-The empty string is treated as "no key" everywhere (so ``LOCALM_API_KEY=""`` and
-an empty file both mean open mode, not a usable empty key).
-"""
+"""Single shared API-key authentication for localm's HTTP surface."""
 
 from __future__ import annotations
 
@@ -61,18 +39,7 @@ _KEY_CHARSET = re.compile(r"\A[A-Za-z0-9_-]+\Z")
 
 
 def ct_equal(presented: Optional[str], expected: Optional[str]) -> bool:
-    """Constant-time compare of two secrets. Safe for ANY input, never raises.
-
-    Use this for every secret comparison rather than calling hmac.compare_digest()
-    on str. compare_digest() raises TypeError if EITHER operand is a non-ASCII str,
-    so an ASCII expected value (a token_urlsafe or a hexdigest) does NOT protect the
-    compare: a bearer/CSRF token reaches us as a latin-1 decoded HTTP header, so any
-    caller can supply a non-ASCII operand and turn a wrong-credential 401/403 into an
-    unhandled 500. Comparing bytes keeps the compare constant-time AND total.
-
-    surrogatepass because os.environ carries lone surrogates on Windows, which a
-    plain utf-8 encode raises on - that would swap one crash for another.
-    """
+    """Constant-time compare of two secrets."""
     # A falsy operand means "no credential presented" / "no secret configured";
     # neither is secret-dependent, so short-circuiting leaks nothing.
     if not presented or not expected:
@@ -82,17 +49,13 @@ def ct_equal(presented: Optional[str], expected: Optional[str]) -> bool:
 
 
 def key_file() -> Path:
-    """Path to the persisted API key, inside the resolved localm data dir.
-
-    Uses the lazy ``home_dir()`` so it honours LOCALM_HOME / portable installs
-    at call time (and lets tests redirect it)."""
+    """Path to the persisted API key, inside the resolved localm data dir."""
     from localm.config import home_dir
     return home_dir() / "auth.key"
 
 
 def generate_key(nbytes: int = 32) -> str:
-    """Return a fresh, URL-safe random key. Not persisted - the caller decides
-    whether to store it (see ``set_api_key`` / ``regenerate_key``)."""
+    """Return a fresh, URL-safe random key."""
     return secrets.token_urlsafe(nbytes)
 
 
@@ -118,30 +81,7 @@ _KEY_OK = "ok"
 
 
 def _read_owner_key_file():
-    """Read auth.key once and report WHICH state it is in: ``(status, text, err)``.
-
-      (_KEY_ABSENT, None, None)     no file -> no owner key, open by design
-      (_KEY_UNREADABLE, None, err)  it exists but cannot be read or decoded: we
-                                    cannot TELL whether a key exists -> callers
-                                    fail CLOSED
-      (_KEY_OK, text, None)         we read it; *text* is what it holds (maybe "")
-
-    THE single place that decides what auth.key contains. The value path
-    (get_api_key) and the in-effect path (any_key_configured) each used to read
-    and judge this file on their own, and REG-579 was precisely those two
-    disagreeing: one read "empty means no key", the other read "the file exists,
-    so a key exists", and the server locked its owner out of it. One reader, one
-    answer, so they cannot drift apart again.
-
-    A transient Windows sharing violation (a concurrent set_api_key replace, an
-    antivirus, the indexer holding it for a microsecond) is ridden out with a
-    bounded retry rather than flapping the owner's auth.
-
-    ``utf-8-sig``, not ``utf-8``: a BOM is what a Windows editor or PowerShell's
-    ``Out-File -Encoding utf8`` writes at the front of a hand-made file, and
-    ``str.strip()`` does NOT remove U+FEFF. Read as plain utf-8, a BOM-only
-    "empty" file would look like a key nobody can present (the REG-579 lockout
-    again), and a BOM + a real key would stop the owner's correct key matching."""
+    """Read auth.key once and report WHICH state it is in: ``(status, text, err)``."""
     path = key_file()
     for attempt in range(_KEY_READ_RETRIES):
         try:
@@ -164,20 +104,12 @@ def _read_owner_key_file():
 
 
 def _key_text_or_none(text: str) -> Optional[str]:
-    """The key *text* holds, or None when it holds none.
-
-    NUL bytes are stripped alongside whitespace: a file truncated by a crash or a
-    sync is padded with NULs, and a run of NULs is not a key anyone could ever
-    present - so it means "no key", exactly like an empty file. Treating it as a
-    key would put auth in effect with nothing to match: the REG-579 lockout."""
+    """The key *text* holds, or None when it holds none."""
     return text.strip().strip("\x00").strip() or None
 
 
 def _read_key_file() -> Optional[str]:
-    """The persisted owner key, or None when the file is absent or persistently
-    unreadable. A persistent unreadable file returns None but is separately
-    treated as auth-in-effect by any_key_configured() (fail closed). A read
-    failure is SURFACED (rule 5), never silently equated with "no key"."""
+    """The persisted owner key, or None when the file is absent or persistently unreadable."""
     status, text, err = _read_owner_key_file()
     if status == _KEY_UNREADABLE:
         logger.warning("owner key file %s exists but is unreadable (%s); "
@@ -190,8 +122,7 @@ def _read_key_file() -> Optional[str]:
 
 
 def get_api_key() -> Optional[str]:
-    """The active key, or None for open mode. Env var (non-empty) wins over the
-    persisted file. Empty / whitespace-only values count as no key."""
+    """The active key, or None for open mode."""
     env = os.environ.get(ENV_VAR)
     if env and env.strip():
         return env.strip()
@@ -199,32 +130,7 @@ def get_api_key() -> Optional[str]:
 
 
 def resolve_bearer_token(instance_token: Optional[str] = None) -> Optional[str]:
-    """The bearer credential value (if any) a self-call or management client
-    should present: the owner key (env, else the persisted ``auth.key``) if
-    one is configured, else *instance_token* in OPEN (keyless) mode, else
-    None.
-
-    This is the precedence every self-authenticated caller of localm's own
-    HTTP surface needs and none may skip: ``_origin_guard``'s open-mode gate
-    (``http_server.py``) requires proof of a local process - a key when one
-    exists, or the per-instance attach token (the 0600 registry file) when it
-    does not - for any unsafe method or metadata GET not listed in
-    ``_CROSS_ORIGIN_OK``; and ``_enforce_request``'s key check (every gated
-    route once a key IS configured) accepts a real key ONLY - it has no
-    notion of instance tokens at all, so presenting one there always 401s.
-    *instance_token* is used ONLY when no key is configured, matching the
-    server's own condition for requiring one at all; a protected-mode server
-    always keeps using the real key.
-
-    THE single place this precedence is decided. ``resolve_bearer_headers``
-    below is a thin wrapper for callers that want a ready-to-use headers
-    dict; callers that build their own request (or, like ``HttpEngine``,
-    store the token and build the header per-call) should call this
-    directly rather than re-deriving ``get_api_key() or instance_token``
-    inline - see ``localm/inference/http_engine.py``'s ``HttpEngine``/
-    ``remote_model_status`` callers (``cli/chat.py``, ``coder/cli/_main.py``)
-    for the pattern.
-    """
+    """The bearer credential value (if any) a self-call or management client should present: the owner key (env, else the persisted ``auth.key``) if one is configured, else *instance_token* in OPEN (keyless) mode, else None."""
     key = get_api_key()
     if key:
         return key
@@ -232,20 +138,7 @@ def resolve_bearer_token(instance_token: Optional[str] = None) -> Optional[str]:
 
 
 def resolve_bearer_headers(instance_token: Optional[str] = None) -> dict:
-    """The ``Authorization`` header (if any) a self-call or management client
-    should send - see ``resolve_bearer_token`` for the precedence. Returns a
-    plain ``dict`` (empty when neither credential is available) rather than
-    mutating a caller-supplied one, so every call site stays a simple
-    ``headers = resolve_bearer_headers(...)``.
-
-    Hoisted out of five independent copies of this precedence: four already
-    implemented it in full (``selfclient.read_activity``/``self_request``,
-    ``cli/models.py``'s ``unload_cmd``/``stop_cmd``); the fifth
-    (``media/comfy_client.py``'s ``_localm_unload``) implemented only the
-    first line (env var, via ``os.environ`` directly rather than
-    ``get_api_key()``) and had no instance_token fallback at all - fixed
-    alongside this extraction rather than ported as-is.
-    """
+    """The ``Authorization`` header (if any) a self-call or management client should send - see ``resolve_bearer_token`` for the precedence."""
     token = resolve_bearer_token(instance_token)
     if token:
         return {"Authorization": f"Bearer {token}"}
@@ -253,14 +146,7 @@ def resolve_bearer_headers(instance_token: Optional[str] = None) -> dict:
 
 
 def set_api_key(key: Optional[str]) -> None:
-    """Persist *key* to ``auth.key`` (atomic write, owner-only perms). An empty
-    or None *key* clears it, returning the server to open mode.
-
-    Raises ValueError if *key* is shorter than MIN_KEY_LEN or uses characters
-    outside _KEY_CHARSET. Both are CONFIG-time guards on what a user may CHOOSE
-    here; they are not a promise about what verify() will see. The LOCALM_API_KEY
-    env var and a hand-edited auth.key both bypass this function entirely, so
-    verify() stays liberal and never raises on whatever it is handed."""
+    """Persist *key* to ``auth.key`` (atomic write, owner-only perms)."""
     if not key or not key.strip():
         clear_api_key()
         return
@@ -312,28 +198,7 @@ def set_api_key(key: Optional[str]) -> None:
 
 
 def clear_api_key() -> list[dict[str, str]]:
-    """Remove the persisted key (open mode). A leftover env var still applies.
-
-    RETURNS the list of things that could NOT be removed. An EMPTY list means the
-    clear genuinely completed; a non-empty one means credentials SURVIVE and the
-    caller must not report success. Each entry is::
-
-        {"what":  "the API key file",        # path-free label, safe anywhere
-         "path":  "<absolute path>",         # LOCAL surfaces only
-         "error": "PermissionError: ..."}    # LOCAL surfaces only
-
-    **A caller on a NETWORK surface must expose only ``what``.** ``path`` is an
-    absolute filesystem path (which carries the account name, so putting it in an
-    HTTP response is a rule-2 disclosure) and ``error`` is raw OS exception text
-    (``py/stack-trace-exposure``). The local CLI prints all three, because there
-    the user owns the machine and needs the path to fix it by hand.
-
-    The return value exists at all because the warnings below go to
-    ``debuglog.logger``, which a user never sees without ``--debug``. That made
-    every caller's "cleared" message unconditional and therefore FALSE whenever a
-    delete failed - the precise thing AGENTS.md rule 5 forbids, since this is a
-    security step and a surviving key STILL GRANTS ACCESS. Warning into a log
-    nobody reads is not surfacing; the caller has to be able to ask."""
+    """Remove the persisted key (open mode)."""
     failures: list[dict[str, str]] = []
     try:
         key_file().unlink(missing_ok=True)
@@ -380,21 +245,7 @@ def regenerate_key(nbytes: int = 32) -> str:
 
 
 def require_auth_enabled() -> bool:
-    """True when the server must refuse requests if no key is configured.
-
-    Enabled via the ``LOCALM_REQUIRE_AUTH`` env var or config
-    ``"require_auth": true``. Default false keeps loopback installs keyless.
-
-    On a config-read failure this resolves to True (LM-DA-021), matching the
-    newer fail-closed precedent this codebase established for the identical
-    "does a security kill-switch fail toward more or less access when config
-    is unreadable" question: netpolicy.network_mode() (HON-2, dbac9e1c) and
-    this module's own _owner_key_present()/any_key_configured() (f9a2ad48)
-    both resolve toward MORE restriction on a read failure, never less - "the
-    exact fail-open a safety toggle must never do". This function used to
-    return False here (reviewed and accepted by the 2026-07-02 security audit
-    at the time) but was left unrevisited when the stricter precedent landed
-    nine days later."""
+    """True when the server must refuse requests if no key is configured."""
     if os.environ.get(REQUIRE_ENV_VAR, "").strip().lower() in _TRUTHY:
         return True
     try:
@@ -419,47 +270,13 @@ def require_auth_enabled() -> bool:
 
 
 def _restrict_perms(path: Path) -> bool:
-    """Best-effort: restrict the key file to the current user. No-op on failure
-    or unsupported platforms - the data dir is already user-scoped. Returns True
-    when the tightening is believed to have happened.
-
-    The implementation moved to ``config.restrict_file_perms`` so sessions.json
-    and jobs.json (which hold the key DIGEST) get the identical treatment as
-    auth.key (which holds the PLAINTEXT); they previously did not on Windows.
-
-    RETAINED although ``_atomic_write_private`` no longer calls it (that moved
-    to ``config.atomic_write_private``, which calls ``restrict_file_perms``
-    itself): this name is the unit-level equivalence point that pins the fix.
-    ``tests/test_auth_kdf.py`` calls it directly against
-    ``sessions._restrict_perms`` and asserts both return the same value and
-    produce the same ACL. Same reasoning as the note on that sibling.
-
-    The bool is PASSED THROUGH rather than discarded so a caller doing the atomic
-    temp+replace dance can restrict the temp file and retry on the destination
-    only when the first attempt failed - the contract the shared writer relies
-    on. Dropping it here made that pattern silently degrade to always retrying."""
+    """Best-effort: restrict the key file to the current user."""
     from localm.config import restrict_file_perms
     return restrict_file_perms(path)
 
 
 def _atomic_write_private(path: Path, text: str) -> None:
-    """Write *text* to *path* atomically, owner-restricted from the moment the
-    bytes first exist on disk. See ``config.atomic_write_private`` for the full
-    reasoning, the two precedents it composes, and the two details that are
-    invisible when they are wrong (do NOT add ``os.O_BINARY``; keep the write
-    loop).
-
-    The implementation moved there once the same dance was needed by
-    sessions.json, the instance registry entry and the GPU coordination entry
-    as well as this module's three credential files - one implementation so a
-    sixth caller cannot get a weaker sixth variant, the same reason
-    ``_restrict_perms`` above delegates rather than reimplementing.
-
-    Kept as a name here because it is referenced throughout this module and by
-    ``tests/test_auth_secret_write_perms.py``. The bool the shared writer
-    returns is deliberately dropped: no caller in this module logs a
-    subsystem-named warning of its own, and reporting the failed tightening is
-    already ``restrict_file_perms``'s job."""
+    """Write *text* to *path* atomically, owner-restricted from the moment the bytes first exist on disk."""
     from localm.config import atomic_write_private
     atomic_write_private(path, text)
 
@@ -555,61 +372,23 @@ def owner_kdf_file() -> Path:
 
 
 def _fast_digest(key: str) -> str:
-    """Unsalted sha256 of a GENERATED 256-bit token. Never call this on a secret
-    a human may have chosen - that is what the KDF path exists for.
-
-    The only value this produces that is ever PERSISTED is a keystore record's
-    hash, and create_key is the only writer of those: every one is
-    secrets.token_urlsafe(32). At 256 bits of CSPRNG entropy no dictionary and no
-    rainbow table applies, so hash speed is irrelevant there.
-
-    surrogatepass for the same reason as ct_equal: a plain utf-8 encode raises
-    UnicodeEncodeError on a lone surrogate, which would move the crash here from
-    the compare. Byte-identical to encode("utf-8") for every key that encodes at
-    all, so no stored digest changes."""
+    """Unsalted sha256 of a GENERATED 256-bit token."""
     return hashlib.sha256(key.encode("utf-8", "surrogatepass")).hexdigest()
 
 
 def _legacy_owner_identity(key: str) -> str:
-    """The digest the owner key USED to be identified by, before the KDF landed.
-
-    Reproducing a historical value is inherently tied to the construction that
-    produced it, so this is the one place a possibly-user-chosen key still meets
-    a fast hash. It is confined to the MIGRATION path and is never persisted: it
-    is used to FIND rows still carrying the old identity so they can be rewritten
-    to the derived one (and, in the jobs plugin, to recognise a job stamped
-    before the upgrade so it is not orphaned). Nothing is stored under it and
-    nothing authenticates from it.
-
-    Separate function from _fast_digest despite the identical body, so the two
-    uses cannot be confused: one is "a generated token's permanent id", this one
-    is "a legacy value we are migrating AWAY from". When no supported install
-    predates the KDF any more, this function and its callers can be deleted
-    outright - _fast_digest cannot."""
+    """The digest the owner key USED to be identified by, before the KDF landed."""
     return _fast_digest(key)
 
 
 def _memo_key(key: str) -> str:
-    """Lookup handle for the in-memory memo: the presented secret's fast digest.
-
-    A keyed HMAC was tried here and REVERTED. It read better in isolation (a
-    scraped memo would mean nothing in another process) but it was wrong twice
-    over: it deviated from the remedy the maintainer specified ("cache the
-    presented secret's fast digest -> verified marker"), and CodeQL models
-    hmac.new(..., sha256) as the SAME weak-password-hash sink, so it turned two
-    traced flows into eight while changing no observable behaviour. It bought a
-    property nobody needed at the cost of the one the design asked for.
-
-    This value is never persisted and never leaves the process; the digest that
-    IS written to disk for the owner key is the scrypt derivation."""
+    """Lookup handle for the in-memory memo: the presented secret's fast digest."""
     return _fast_digest(key)
 
 
 def _scrypt_derive(key: str, salt: bytes, n: int, r: int, p: int,
                    dklen: int) -> str:
-    """Salted scrypt of *key* -> hex. A module-level function (not an inline call)
-    so the memoisation above it can be proven to work: a test patches this and
-    counts the calls."""
+    """Salted scrypt of *key* -> hex."""
     return hashlib.scrypt(key.encode("utf-8", "surrogatepass"), salt=salt,
                           n=n, r=r, p=p, dklen=dklen,
                           maxmem=_SCRYPT_MAXMEM).hex()
@@ -665,21 +444,13 @@ def _cache_put(ck: str, digest: str) -> None:
 
 
 def _forget_cached_digests() -> None:
-    """Drop the memoised derivations. Called whenever the owner key changes, so a
-    rotation takes effect at once instead of serving a stale identity."""
+    """Drop the memoised derivations."""
     with _DIGEST_CACHE_LOCK:
         _digest_cache.clear()
 
 
 def _load_owner_kdf() -> list:
-    """The owner-key verifier records, or [] when there are none.
-
-    A present-but-unreadable/corrupt file returns [] so a fresh record is minted
-    rather than locking the owner out of their own identity - the file is a
-    derivation aid, not a credential: it holds no plaintext, and nothing
-    AUTHENTICATES from it (the owner key is verified by plaintext ct_equal against
-    auth.key). Failing closed here would buy no security and would break a working
-    install, so the damage is SURFACED and repaired instead of being fatal."""
+    """The owner-key verifier records, or [] when there are none."""
     path = owner_kdf_file()
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -713,17 +484,7 @@ def _save_owner_kdf(records: list) -> None:
 
 
 def _owner_kdf_record_for(key: str, records: list) -> Optional[dict]:
-    """The existing verifier record matching *key*, or None.
-
-    Verifies with EACH record's OWN stored parameters, which is what lets the cost
-    parameters be raised later without invalidating a key derived under the old
-    ones. Only ever called for a key already known to be the owner key.
-
-    NOT "once per process": that only holds on the verify() path (_hash_key
-    memoises the result - see _digest_cache). set_api_key calls this again on
-    EVERY set, uncached, so a caller that sets the key repeatedly (an admin
-    route, a rotation loop, a test) pays a full scrypt derivation per kept
-    record, per call. _OWNER_KDF_KEEP is the actual bound on that cost."""
+    """The existing verifier record matching *key*, or None."""
     for r in records:
         if r.get("alg") != _ALG_KDF:
             continue
@@ -741,15 +502,7 @@ def _owner_kdf_record_for(key: str, records: list) -> Optional[dict]:
 
 
 def _owner_digest(key: str) -> str:
-    """The KDF-derived principal identity for the OWNER key *key*.
-
-    Reuses the persisted record for this key when there is one, so the value is
-    stable forever; otherwise mints one (fresh salt, current cost parameters) and
-    migrates any identity previously recorded under the legacy unsalted digest.
-
-    Holds _OWNER_KDF_LOCK across the whole read-derive-write so two callers
-    cannot mint two different salts for the same key (see the lock's comment).
-    Reentrant, so _hash_key may hold it already."""
+    """The KDF-derived principal identity for the OWNER key *key*."""
     with _OWNER_KDF_LOCK:
         return _owner_digest_locked(key)
 
@@ -783,17 +536,7 @@ def _owner_digest_locked(key: str) -> str:
 
 
 def _migrate_legacy_owner_identity(legacy: str, current: str) -> None:
-    """Re-link anything recorded under the owner key's OLD unsalted digest.
-
-    Runs once, when a key's KDF record is first minted (so an upgraded install
-    migrates on the owner's next successful verify, and an install that never
-    re-authenticates is never touched). Best-effort by design: a failure here
-    costs a re-login, never access, so it is surfaced rather than raised.
-
-    jobs.json is deliberately NOT rewritten here - auth.py has no business
-    importing a plugin's store, and that side already has a documented
-    back-compat path that accepts the legacy digest and stamps the job as
-    owner-owned the first time it matches (see jobs.runner)."""
+    """Re-link anything recorded under the owner key's OLD unsalted digest."""
     if not legacy or not current or legacy == current:
         return
     try:
@@ -810,24 +553,12 @@ def _migrate_legacy_owner_identity(legacy: str, current: str) -> None:
 
 
 def _is_owner_key(key: str) -> bool:
-    """True when *key* is the owner key currently in effect. An exact identity
-    check against the live value, NOT a guess from the key's length or alphabet -
-    a user-chosen owner key is indistinguishable from a token by shape."""
+    """True when *key* is the owner key currently in effect."""
     return ct_equal(key, get_api_key())
 
 
 def _hash_key(key: str) -> str:
-    """The stable identity digest for *key*.
-
-    The owner key (user-choosable, possibly human-memorable) gets a salted scrypt
-    derivation; a generated keystore token gets the cheap unsalted digest, which
-    is sound at 256 bits of CSPRNG entropy. The expensive path is memoised per
-    process, so it costs one derivation per key rather than one per request.
-
-    The memo is keyed by a per-process MAC (_memo_key), NOT by a fast hash of the
-    secret: the fast digest is now computed only on the branch that actually
-    returns one, so a possibly-user-chosen owner key never reaches an unsalted
-    hash here."""
+    """The stable identity digest for *key*."""
     ck = _memo_key(key) + "@" + _cache_scope()
     hit = _cache_get(ck)
     if hit is not None:
@@ -850,16 +581,7 @@ def _hash_key(key: str) -> str:
 
 
 def _record_digest_for(record: dict, key: str, fast: Callable[[], str]) -> Optional[str]:
-    """The digest *key* would produce under *record*'s DECLARED construction, or
-    None when the record cannot be evaluated.
-
-    *fast* is a CALLABLE, not a string, so the cheap digest is computed only on
-    the branch that actually returns one. See _find_keystore_record for why.
-
-    A record with no "alg" predates the marker, and create_key was the only writer
-    then, so it is a generated token on the cheap path. An UNKNOWN alg returns
-    None (refuse to match) rather than falling back to the cheap digest: guessing
-    would let a future strong record be matched by a weak comparison."""
+    """The digest *key* would produce under *record*'s DECLARED construction, or None when the record cannot be evaluated."""
     alg = record.get("alg") or _ALG_FAST
     if alg == _ALG_FAST:
         return fast()
@@ -880,20 +602,7 @@ def _record_digest_for(record: dict, key: str, fast: Callable[[], str]) -> Optio
 
 
 def _find_keystore_record(key: str, records: list) -> Optional[dict]:
-    """The keystore record *key* authenticates against, or None.
-
-    The cheap digest is computed LAZILY, on first use, rather than up front. The
-    presented key here may be a human-chosen owner key, and hashing it unsalted
-    just because the loop MIGHT later meet a fast-alg row is the same mistake
-    _owner_identity already avoids on its own branch ("computed only on the
-    branch that actually returns one"); this path had not been given the same
-    treatment. An owner key's record declares the KDF alg, so its fast digest was
-    never the value that authenticated it - it was computed and discarded. Now it
-    is not computed at all unless a record actually declares the fast
-    construction (CodeQL 247).
-
-    Memoised, so a keystore holding many generated-token rows still hashes once
-    per lookup rather than once per row."""
+    """The keystore record *key* authenticates against, or None."""
     _fast_memo: list = []
 
     def fast() -> str:
@@ -914,12 +623,7 @@ def _find_keystore_record(key: str, records: list) -> Optional[dict]:
 
 
 def _mark_record_alg(key_id: Optional[str], alg: str) -> None:
-    """Stamp the construction marker onto a legacy record, in place.
-
-    This is the transparent format upgrade: a store written before the marker
-    existed keeps verifying, and the first successful verify records what it
-    actually is, so the ambiguity is resolved once instead of being re-guessed
-    forever. Best-effort - a read-only store must not break authentication."""
+    """Stamp the construction marker onto a legacy record, in place."""
     if not key_id:
         return
     try:
@@ -970,16 +674,13 @@ FS_ACCESS_LEVELS = ("none", "shared", "host")
 
 
 def norm_fs_access(level: Optional[str]) -> str:
-    """Coerce *level* to a known FS-access level; unknown/blank -> the safe
-    default 'none' (least privilege)."""
+    """Coerce *level* to a known FS-access level; unknown/blank -> the safe default 'none' (least privilege)."""
     lv = (level or "none").strip().lower()
     return lv if lv in FS_ACCESS_LEVELS else "none"
 
 
 def fs_access_for(token: str, default: str = "none") -> str:
-    """The stored host-filesystem-access level for the key behind *token*, or
-    *default* if the key is unknown or has no level recorded (a legacy key minted
-    before this attribute existed defaults to the safe 'none')."""
+    """The stored host-filesystem-access level for the key behind *token*, or *default* if the key is unknown or has no level recorded (a legacy key minted before this attribute existed defaults to the safe 'none')."""
     if not token or not token.strip():
         return default
     rec = _find_keystore_record(token.strip(), _load_keystore())
@@ -989,17 +690,7 @@ def fs_access_for(token: str, default: str = "none") -> str:
 
 
 def norm_rag_roots(roots) -> list:
-    """Coerce *roots* to a clean, order-preserving, de-duplicated list of
-    folder-path strings for a key's per-key RAG-indexing allowlist; anything
-    that is not a non-empty string is dropped. None/blank -> [] (no per-key
-    restriction - the key falls back to the global ``rag_allowed_roots`` policy,
-    see rag/store.py's ``confine_index_path``).
-
-    *roots* must be a list/tuple; a bare string is explicitly REJECTED (as [])
-    rather than iterated - a plain Python string is itself iterable character by
-    character, so without this guard a caller accidentally passing a single path
-    string (instead of ``[path]``) would silently explode it into one
-    single-character "root" per character."""
+    """Coerce *roots* to a clean, order-preserving, de-duplicated list of folder-path strings for a key's per-key RAG-indexing allowlist; anything that is not a non-empty string is dropped."""
     if not roots or not isinstance(roots, (list, tuple)):
         return []
     out: list = []
@@ -1015,12 +706,7 @@ def norm_rag_roots(roots) -> list:
 
 
 def rag_roots_for(token: str, default: Optional[list] = None) -> list:
-    """The stored per-key RAG-indexing folder allowlist for the key behind
-    *token*, or *default* (``[]`` if not given) if the key is unknown or has no
-    list recorded. A legacy key minted before this attribute existed, and any
-    key that never had one set, resolves to the safe default of NO per-key
-    restriction - it falls back to the global policy, same "absent means
-    unrestricted-by-this-field" shape as ``fs_access_for``'s legacy default."""
+    """The stored per-key RAG-indexing folder allowlist for the key behind *token*, or *default* (``[]`` if not given) if the key is unknown or has no list recorded."""
     if default is None:
         default = []
     if not token or not token.strip():
@@ -1046,36 +732,7 @@ def list_keys() -> list:
 def create_key(name: str, scope_list, *, allow_privileged: bool = False,
                expires: Optional[float] = None, fs_access: str = "none",
                rag_roots: Optional[list] = None) -> dict:
-    """Mint a named key with *scope_list*, persist its hash, and return a record
-    INCLUDING the plaintext key once - the caller must surface it now, it cannot
-    be recovered. Raises ValueError on an unknown scope.
-
-    *fs_access* is the host-filesystem reach this key grants ("none" | "shared" |
-    "host"); it defaults to the safe "none" so a new scoped key cannot browse the
-    server disk unless the owner deliberately grants it. The owner/ADMIN key
-    always resolves to "host" regardless of this field (see effective_fs_access).
-
-    *rag_roots* is an optional per-key RAG-indexing folder allowlist, following
-    the exact same shape as *fs_access*: empty/None (the default) grants no
-    per-key restriction, so the key falls back to the global
-    ``rag_allowed_roots`` policy that already applies to every caller
-    (rag/store.py's ``confine_index_path``) - unchanged behavior for every key
-    minted before this field existed. A non-empty list instead CONFINES the key
-    to exactly those folders: the home directory, the working directory and the
-    global allowed-roots list are deliberately not implied on top of it, so a
-    scoped key handed to an integration reaches only what it was explicitly
-    given - "each key gets its own explicit folder allowlist". The owner/ADMIN
-    key is never confined by this field regardless of what is stored (see
-    effective_rag_roots), exactly like fs_access.
-
-    PRIVILEGED_SCOPES (admin / keys:admin / plugins:admin / config:write /
-    coder:full) are refused with PermissionError unless *allow_privileged* is
-    True. Callers must only set that for an owner/ADMIN principal, so a merely
-    keys:admin-scoped key cannot mint itself owner-equivalent access (privilege
-    self-escalation).
-
-    *expires* is an optional epoch-seconds deadline after which verify() rejects
-    the key; None (default) never expires."""
+    """Mint a named key with *scope_list*, persist its hash, and return a record INCLUDING the plaintext key once - the caller must surface it now, it cannot be recovered."""
     from localm import scopes as S
     clean = S.normalize(scope_list)
     bad = [s for s in clean if not S.is_valid_scope(s)]
@@ -1119,13 +776,7 @@ def create_key(name: str, scope_list, *, allow_privileged: bool = False,
 
 
 def revoke_key(key_id: str) -> bool:
-    """Delete a named key by id. Returns True if it existed.
-
-    Also drops any browser SESSIONS minted from that key, so revoking a key cuts
-    off a paired device immediately instead of leaving its cookie session valid
-    until expiry. (The cookie auth path also re-validates a scoped session's key on
-    every request via key_hash_live, so this is belt-and-suspenders cleanup that
-    keeps the session store tidy rather than the sole enforcement.)"""
+    """Delete a named key by id."""
     with _KEYSTORE_LOCK:
         records = _load_keystore()
         target = next((r for r in records if r.get("id") == key_id), None)
@@ -1156,13 +807,7 @@ def revoke_key(key_id: str) -> bool:
 
 
 def key_hash_live(key_hash: Optional[str]) -> bool:
-    """True when a keystore key with this sha256 *key_hash* still exists AND has not
-    expired. Used to tie a scoped-key browser session to its key's lifecycle: the
-    cookie path checks this every request so revoking or expiring the underlying key
-    also invalidates the session, mirroring verify()'s per-request check for a
-    bearer. (Owner/ADMIN sessions are deliberately NOT gated on this - the owner key
-    is not in the keystore, and an owner session is decoupled from the key VALUE so a
-    key roll does not log the owner out.)"""
+    """True when a keystore key with this sha256 *key_hash* still exists AND has not expired."""
     if not key_hash:
         return False
     now = time.time()
@@ -1174,22 +819,7 @@ def key_hash_live(key_hash: Optional[str]) -> bool:
 
 
 def scopes_for_key_hash(key_hash: Optional[str]) -> Optional[set]:
-    """The scopes a LIVE keystore key with this sha256 *key_hash* grants, or None.
-
-    The by-hash sibling of ``verify()``: same liveness rules (a missing or expired
-    record grants nothing), but keyed on the stored digest rather than a presented
-    secret, so a background path that only ever recorded a principal id can still
-    ask what that principal is allowed to do. ``verify()`` cannot serve that - it
-    needs the plaintext key, which is exactly what is never persisted.
-
-    Returns None (not an empty set) when nothing matches, so "no such key" stays
-    distinguishable from "a key that grants nothing". A caller making a privilege
-    decision must treat None as DENY.
-
-    Does NOT resolve the owner key: it is not a keystore entry, so a caller that
-    cares about the owner must compare against ``get_api_key()`` itself. Nor is it
-    a substitute for ``key_hash_live``: a caller wanting only liveness should keep
-    asking that, and this adds the scope question on top."""
+    """The scopes a LIVE keystore key with this sha256 *key_hash* grants, or None."""
     if not key_hash:
         return None
     now = time.time()
@@ -1207,15 +837,7 @@ def scopes_for_key_hash(key_hash: Optional[str]) -> Optional[set]:
 
 
 def _keystore_configured() -> bool:
-    """True when the scoped keystore should count as 'auth in effect'.
-
-    A present-but-UNPARSEABLE or unreadable auth.json counts as configured, so a
-    transient corruption fails CLOSED (every request still needs a key, and the
-    damaged store verifies none, so access is locked) instead of silently
-    dropping to open mode and exposing a scoped-keys-only install. A genuinely
-    absent or empty (``[]``) keystore is NOT configured (a fresh or cleared
-    install runs open by design, matching _load_keystore()'s empty result).
-    """
+    """True when the scoped keystore should count as 'auth in effect'."""
     path = keystore_file()
     try:
         raw = path.read_text(encoding="utf-8")
@@ -1237,33 +859,7 @@ _empty_owner_key_warned = False
 
 
 def _owner_key_present() -> bool:
-    """True when an owner key is in effect: the LOCALM_API_KEY env var is set, OR
-    the auth.key file exists AND is not readably empty.
-
-    A present-but-UNREADABLE file counts as present so auth stays IN EFFECT (fail
-    CLOSED) instead of silently dropping to open/keyless mode when a read glitch
-    (a transient AV/indexer lock, or a persistent permissions/profile change)
-    makes auth.key unreadable to the running process. Only a genuinely ABSENT
-    file, or one we can READ and see holds no key, is "no owner key" -> open by
-    design.
-
-    That empty-means-no-key split is what _keystore_configured already does for
-    the identical question (absent or empty ``[]`` -> not configured; unreadable
-    or corrupt -> fail closed), and what get_api_key()/set_api_key() already do
-    for an empty value. Fail-closed is for "we cannot TELL whether a key exists";
-    a readable empty file is not that case - we can tell, and the answer is no.
-    Treating it as a key put auth in effect with nothing for verify() to match,
-    401ing every request and locking the owner out of their own server with no
-    way back (POST /v1/keys needs auth, and keys.py's loopback auto-seed only
-    fires when the server was_open), for a file that unambiguously means no key
-    (REG-579). localm itself never writes one - set_api_key('') unlinks instead -
-    so an empty file is always an anomaly, and it is surfaced once rather than
-    silently changing the server's security posture.
-
-    Distinct from get_api_key(), which returns the key VALUE (or None when it
-    cannot be read): when the file is present but unreadable this returns True
-    (auth in effect) while verify() matches nothing, so every request is rejected
-    (401 / locked) rather than served open - the safe direction."""
+    """True when an owner key is in effect: the LOCALM_API_KEY env var is set, OR the auth.key file exists AND is not readably empty."""
     global _empty_owner_key_warned
     env = os.environ.get(ENV_VAR)
     if env and env.strip():
@@ -1294,15 +890,7 @@ def _owner_key_present() -> bool:
 
 
 def any_key_configured() -> bool:
-    """True when auth is in effect: an owner key (env, or an auth.key file holding
-    one - see _owner_key_present) OR a configured scoped keystore. When this is
-    False the server runs open (unless require_auth_enabled()). A corrupt/
-    unreadable keystore, and a present-but-unreadable owner key, both count as
-    configured so they fail CLOSED rather than silently open: a keyed install must
-    not lose its auth to a damaged or unreadable credential file (checkup
-    2026-07-11 HIGH). A credential file we CAN read and which holds no key (an
-    empty auth.key, an empty ``[]`` keystore) is not that case - it means exactly
-    what it says, no key (REG-579)."""
+    """True when auth is in effect: an owner key (env, or an auth.key file holding one - see _owner_key_present) OR a configured scoped keystore."""
     return _owner_key_present() or _keystore_configured()
 
 
@@ -1316,8 +904,7 @@ _LAST_USED_LOCK = threading.Lock()
 
 
 def _touch_last_used(key_hash: str) -> None:
-    """Best-effort: stamp a just-verified key's last_used (throttled). Never raises -
-    a usage timestamp is non-essential and must not break verification."""
+    """Best-effort: stamp a just-verified key's last_used (throttled)."""
     if not key_hash:
         return
     now = time.monotonic()
@@ -1348,8 +935,7 @@ def _touch_last_used(key_hash: str) -> None:
 
 
 def verify(presented: Optional[str]) -> Optional[set]:
-    """Resolve a presented bearer token to the set of scopes it grants, or None
-    if it matches nothing. The owner key grants ADMIN (every scope)."""
+    """Resolve a presented bearer token to the set of scopes it grants, or None if it matches nothing."""
     if not presented or not presented.strip():
         return None
     from localm import scopes as S

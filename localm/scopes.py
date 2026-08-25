@@ -1,15 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""
-Capability / permission scopes for localm.
-
-A *scope* is a single capability string that an API key (permission system) can
-be granted, and that a route, plugin, or chat tool can require. Every plugin
-owns a scope equal to its name (the coder plugin -> "coder"); cross-cutting
-kernel capabilities have explicit scopes ("models:write", "config:write", ...).
-
-This module is the single source of truth shared by the permission system, the
-plugin engine, and the chat control surface, so they never drift.
-"""
+"""Capability / permission scopes for localm."""
 
 from __future__ import annotations
 
@@ -78,8 +68,7 @@ def all_known_scopes() -> set[str]:
 
 
 def is_valid_scope(scope: str, *, extra: set[str] | None = None) -> bool:
-    """True if *scope* is a known kernel/first-party scope, a registered
-    third-party scope (*extra*), or a well-formed plugin-name scope."""
+    """True if *scope* is a known kernel/first-party scope, a registered third-party scope (*extra*), or a well-formed plugin-name scope."""
     if not isinstance(scope, str) or not scope:
         return False
     if scope in all_known_scopes():
@@ -91,9 +80,7 @@ def is_valid_scope(scope: str, *, extra: set[str] | None = None) -> bool:
 
 
 def grants(held: set[str], required: str) -> bool:
-    """Does a key holding *held* scopes satisfy *required*? ADMIN implies all;
-    coder:full implies the base coder capability (it is the unrestricted coder,
-    so a coder:full key must also pass routes gated on the plain coder scope)."""
+    """Does a key holding *held* scopes satisfy *required*? ADMIN implies all; coder:full implies the base coder capability (it is the unrestricted coder, so a coder:full key must also pass routes gated on the plain coder scope)."""
     if ADMIN in held or required in held:
         return True
     if required == CODER and CODER_FULL in held:

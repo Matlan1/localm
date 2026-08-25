@@ -1,39 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""
-Session audit log and session-mode control for localm.
-
-Session modes (apply to EVERY surface: terminal chat, API server, web GUI,
-and the coder agent)
---------------------------------------------------------------------------
-privacy (default)
-    Nothing is written to disk automatically - no audit trail, no
-    transcripts, no checkpoints, no generation sidecars.  Anything that
-    would leave a trace must be explicitly toggled (e.g. /save, /export,
-    --debug).
-
-log
-    A JSONL audit trail is appended to
-    ``<data dir>/sessions/<YYYY-MM-DD_HHMMSS>_<pid>_<label>.jsonl``
-    for every session.  One event per line:
-    ``{"t": unix_ms, "turn": int, "type": str, "data": any}``
-
-full
-    Everything in ``log`` mode, plus a human-readable Markdown transcript:
-    - coder:  ``.localcoder/sessions/<ts>.md`` in the project (agent.close())
-    - chat:   ``<data dir>/sessions/<ts>_chat.md``
-    - server: ``<data dir>/sessions/<ts>_server.md`` (per-exchange append)
-
-Mode resolution (``effective_mode(surface)``)
----------------------------------------------
-    coder:   --mode flag > .localcoder/config.toml > config "coder_mode"
-             > config "mode" > privacy
-    chat:    --mode flag > config "chat_mode" > config "mode" > privacy
-    server:  --mode flag > config "mode" > privacy
-
-CLI ``--mode`` flags set the ``LOCALM_MODE`` env var so child processes
-inherit the override.  Switching mid-session is not supported (the JSONL
-file is opened at startup).
-"""
+"""Session audit log and session-mode control for localm."""
 
 from __future__ import annotations
 
@@ -76,14 +42,7 @@ def parse_mode(value: str) -> SessionMode:
 
 
 def effective_mode(surface: str, cwd=None) -> SessionMode:
-    """
-    Resolve the active session mode for *surface* ("chat" | "coder" | "server").
-
-    Precedence: LOCALM_MODE env (set by --mode flags) > (coder only, when *cwd* is
-    given) a project-local ``.localcoder/config.toml`` ``mode`` > per-surface
-    config key ("chat_mode" / "coder_mode") > global config "mode" > privacy.
-    Invalid values fall through to the next level rather than crashing.
-    """
+    """Resolve the active session mode for *surface* ('chat' | 'coder' | 'server')."""
     env = os.environ.get(MODE_ENV_VAR, "").strip().lower()
     if env in _VALID_MODES:
         return SessionMode(env)
@@ -135,12 +94,7 @@ def effective_mode(surface: str, cwd=None) -> SessionMode:
 # ---------------------------------------------------------------------------
 
 class NullAuditLog:
-    """
-    Drop-in replacement for AuditLog that writes nothing to disk.
-
-    Every method is a silent no-op so calling code is identical regardless
-    of the active session mode.
-    """
+    """Drop-in replacement for AuditLog that writes nothing to disk."""
 
     @property
     def path(self) -> Path | None:
@@ -187,15 +141,7 @@ def _sessions_dir() -> Path:
 
 
 class AuditLog:
-    """
-    Append-only JSONL session log.
-
-    Each line is a self-contained JSON object:
-    {"t": <unix_ms>, "turn": <int>, "type": <str>, "data": <any>}
-
-    Used in ``log`` and ``full`` modes.  In ``privacy`` mode, a
-    ``NullAuditLog`` is used instead.
-    """
+    """Append-only JSONL session log."""
 
     def __init__(self, label: str = "") -> None:
         ts = time.strftime("%Y-%m-%d_%H%M%S")
@@ -219,10 +165,7 @@ class AuditLog:
         self._write("user", {"content": content[:2000]})
 
     def llm(self, content: str, tokens: int = 0, reasoning: str = "") -> None:
-        """Record one LLM turn. ``reasoning`` (H4 ``reasoning_content``, when the
-        caller's backend/consumer separates it - AUD-HIGH-17-3) is stored in its
-        OWN field, never appended to ``content``, so the visible-answer field
-        stays exactly what was shown/resent."""
+        """Record one LLM turn. ``reasoning`` (H4 ``reasoning_content``, when the caller's backend/consumer separates it - AUD-HIGH-17-3) is stored in its OWN field, never appended to ``content``, so the visible-answer field stays exactly what was shown/resent."""
         self._write("llm", {
             "content": content[:2000],
             "reasoning": reasoning[:2000] if reasoning else "",
@@ -237,18 +180,10 @@ class AuditLog:
         self._write("tool_result", {"name": name, "ok": ok, "summary": summary[:200]})
 
     def notice(self, kind: str, message: str) -> None:
-        """Record a session-level condition that is neither a turn nor a tool call.
-
-        The trail could previously only describe user/llm/tool events, so a
-        safety-relevant condition with no tool behind it (a self-review that
-        crashed, a scope that does not confine shell execution) had nowhere to be
-        recorded and went unlogged. ``kind`` groups them for later reading."""
+        """Record a session-level condition that is neither a turn nor a tool call."""
         self._write("notice", {"kind": kind, "message": str(message)[:500]})
     def episodes_recalled(self, episodes: list) -> None:
-        """Record WHICH past lessons were injected into this session (id + the
-        lesson text, which the injected prompt already carries verbatim into the
-        ``user`` entry above). Makes a lesson that steered a run badly traceable
-        afterwards, and gives the user the id to forget it by."""
+        """Record WHICH past lessons were injected into this session (id + the lesson text, which the injected prompt already carries verbatim into the ``user`` entry above)."""
         self._write("episodes_recalled", {"episodes": [
             {"id": str(e.get("id", ""))[:64],
              "outcome": str(e.get("outcome", ""))[:32],
@@ -286,13 +221,7 @@ class AuditLog:
 # ---------------------------------------------------------------------------
 
 class MarkdownTranscript:
-    """
-    Append-only human-readable transcript for ``full`` mode.
-
-    The coder agent writes its own richer transcript in ``agent.close()``;
-    this lightweight variant serves the chat REPL and the HTTP server,
-    appending one exchange at a time (the server has no clean session end).
-    """
+    """Append-only human-readable transcript for ``full`` mode."""
 
     def __init__(self, label: str = "chat") -> None:
         ts = time.strftime("%Y-%m-%d_%H%M%S")
@@ -305,12 +234,7 @@ class MarkdownTranscript:
         return self._path
 
     def exchange(self, user: str, assistant: str) -> None:
-        """Append one user/assistant exchange. Best-effort, never raises.
-
-        The model's ``<think>`` reasoning (H4) is separated from the answer and
-        written to a collapsed ``<details>`` block after it, so the transcript
-        reads as the conversation while still preserving the reasoning instead of
-        dumping the raw tags inline."""
+        """Append one user/assistant exchange."""
         from localm.textnorm import split_think
         answer, reasoning = split_think(assistant)
         try:
@@ -335,13 +259,7 @@ AuditLogT = Union[AuditLog, NullAuditLog]
 
 
 def make_audit_log(mode: SessionMode, label: str = "") -> AuditLogT:
-    """
-    Return an appropriate audit log object for the given session mode.
-
-    ``privacy`` → NullAuditLog (no disk writes)
-    ``log``     → AuditLog (JSONL in <data dir>/sessions/)
-    ``full``    → AuditLog (JSONL; markdown is the caller's concern)
-    """
+    """Return an appropriate audit log object for the given session mode."""
     if mode == SessionMode.PRIVACY:
         return NullAuditLog()
     return AuditLog(label=label)

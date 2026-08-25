@@ -1,19 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Opaque server-side browser sessions for localm's GUI (decouple session <-> key).
-
-The browser used to authenticate with a cookie whose VALUE WAS THE RAW API KEY, so
-rolling the key invalidated every live session and the durable secret sat in cookie
-jars for ~400 days. Instead, on login (or the loopback auto-seed / one-time launch
-grant) the server mints a random opaque session id, records a HASH of it (never the
-id) plus a snapshot of what that login may do, and hands the browser only the opaque
-id as its HttpOnly cookie. Rolling the owner key no longer touches sessions, the key
-never lives in a cookie, and each session can expire or be revoked on its own.
-
-Mirrors auth.py's keystore discipline: a home-dir JSON file, atomic writes,
-owner-only perms, sha256 of the secret stored and compared constant-time, and a lock
-serialising the read-modify-write. A present-but-unreadable/corrupt store fails
-CLOSED (verifies no session) rather than silently authorising nothing-or-everything.
-"""
+"""Opaque server-side browser sessions for localm's GUI (decouple session <-> key)."""
 
 from __future__ import annotations
 
@@ -67,9 +53,7 @@ def _hash(sid: str) -> str:
 
 
 def _load() -> list:
-    """Load the store as a list of records, using the mtime cache. A missing store
-    is an empty list; a present-but-corrupt/unreadable one raises so callers can
-    fail CLOSED (lookup treats a load failure as 'no valid session')."""
+    """Load the store as a list of records, using the mtime cache."""
     path = sessions_file()
     try:
         st = path.stat()
@@ -120,24 +104,7 @@ def _save(records: list) -> None:
 
 
 def _restrict_perms(path: Path) -> bool:
-    """Owner-only perms where the OS supports it (best-effort, never fatal).
-    Returns True when the tightening is believed to have happened.
-
-    Was POSIX-ONLY, which was the actual defect behind CodeQL 88: this file
-    records ``key_hash``, the same sha256 the keystore stores, while auth.py ran
-    icacls on Windows for auth.key. So on Windows the key DIGEST inherited
-    BUILTIN\\Users from the data dir and was readable by any local account,
-    while the PLAINTEXT next to it was not. Now shares auth.key's exact
-    implementation.
-
-    RETAINED deliberately although ``_save`` no longer calls it: this name is
-    the unit-level equivalence point that pins that fix
-    (``tests/test_auth_kdf.py`` calls it directly against ``auth._restrict_perms``
-    and asserts both the return value and the resulting ACL). ``_save`` now
-    reaches the SAME ``config.restrict_file_perms`` through
-    ``config.atomic_write_private``, so the equivalence is structural rather
-    than conventional and this one-line delegation has nothing left to drift
-    from."""
+    """Owner-only perms where the OS supports it (best-effort, never fatal)."""
     from localm.config import restrict_file_perms
     return restrict_file_perms(path)
 
@@ -157,39 +124,7 @@ def create(*, scopes, key_hash: Optional[str], fs_access: str = "none",
            label: str = "", ttl: float = _ABS_TTL_S,
            idle_ttl: float = _IDLE_TTL_S,
            owner_key_minted: bool = False) -> str:
-    """Mint a new session, persist it, and return the opaque session id (the value
-    the caller sets as the HttpOnly cookie). Stores only a HASH of the id.
-
-    *scopes* is the scope set this login grants (snapshot from auth.verify), so the
-    session stays valid across a later owner-key roll. *key_hash* is the sha256 of
-    the key that minted it (so principal_id() over a cookie matches the same key
-    presented as a bearer, for job ownership). *fs_access* is the host-filesystem
-    reach for this session. *rag_roots* is this session's per-key RAG-indexing
-    folder allowlist snapshot, same shape and same reason as *fs_access* - taken
-    now so it survives a later owner-key roll rather than being re-derived from a
-    key hash that may no longer resolve. Raises if the store cannot be persisted
-    (a security step that fails must not look like success).
-
-    *owner_key_minted* records WHAT KIND of credential minted this session: True
-    only when the presented credential WAS the owner key itself (auth._is_owner_key,
-    a constant-time plaintext compare against auth.get_api_key()), as opposed to a
-    minted, revocable keystore key. Every caller must pass a freshly computed
-    POSITIVE proof; the False default is the fail-closed answer, so a mint site that
-    forgets it, or a record persisted before this field existed, resolves to "not
-    the owner" rather than to a privilege it never proved (REG-509, cookie path).
-
-    Why the flag has to be recorded HERE rather than derived later: *key_hash* is a
-    snapshot of the key VALUE at login, and an owner key ROLL deliberately leaves
-    sessions alive (cli/keys.py). After a roll the frozen hash matches neither the
-    new owner key nor any keystore entry - exactly what a REVOKED scoped key looks
-    like - so the two become indistinguishable at run time and the owner's own
-    scheduled jobs silently lose shell. Mint time is the last moment the difference
-    is provable.
-
-    It grants no authority on its own: it is an ATTRIBUTE OF THE SESSION, so it is
-    exactly as revocable as the session carrying it (revoke / revoke_all / absolute
-    and idle expiry all destroy it), and the sessions it can appear on already carry
-    the owner's ADMIN scope snapshot."""
+    """Mint a new session, persist it, and return the opaque session id (the value the caller sets as the HttpOnly cookie)."""
     now = time.time()
     sid = secrets.token_urlsafe(32)
     rec = {
@@ -216,10 +151,7 @@ def create(*, scopes, key_hash: Optional[str], fs_access: str = "none",
 
 
 def lookup(sid: Optional[str]) -> Optional[dict]:
-    """Resolve a presented session id to a PUBLIC copy of its record
-    (scopes/key_hash/fs_access/...), or None if it matches nothing or has expired.
-    Bumps last_used (throttled). Fails CLOSED: if the store cannot be read, no
-    session verifies."""
+    """Resolve a presented session id to a PUBLIC copy of its record (scopes/key_hash/fs_access/...), or None if it matches nothing or has expired."""
     if not sid or not sid.strip():
         return None
     sid = sid.strip()
@@ -258,8 +190,7 @@ def lookup(sid: Optional[str]) -> Optional[dict]:
 
 
 def _touch_last_used(id_hash: str) -> None:
-    """Best-effort throttled last_used stamp so a session used within its idle
-    window does not expire. Never raises: a usage stamp must not break auth."""
+    """Best-effort throttled last_used stamp so a session used within its idle window does not expire."""
     if not id_hash:
         return
     now = time.monotonic()
@@ -290,16 +221,7 @@ REVOKE_FAILURE_LABEL = "browser sessions (some devices may still be signed in)"
 
 
 def revoke(sid: Optional[str]) -> Optional[bool]:
-    """Delete the session behind *sid* (real, server-side logout).
-
-    Returns True if it existed, False if it did not, and **None when the store
-    could not be written**. That third case is the point: a failed revocation is
-    NOT the same as "there was nothing to revoke", and a caller that cannot tell
-    them apart will report a sign-out that did not happen (AGENTS.md rule 5).
-    None is falsy, so an existing ``if revoke(...)`` keeps its old meaning; only a
-    caller that asks ``is None`` learns the difference.
-
-    Still never raises: logout must not 500. It reports instead of throwing."""
+    """Delete the session behind *sid* (real, server-side logout)."""
     if not sid or not sid.strip():
         return False               # nothing presented: a real answer, not a failure
     h = _hash(sid.strip())
@@ -318,17 +240,7 @@ def revoke(sid: Optional[str]) -> Optional[bool]:
 
 
 def revoke_by_key_hash(key_hash: Optional[str]) -> Optional[int]:
-    """Delete every session minted from the key with this hash, so revoking a scoped
-    key also drops the sessions it authorized. Returns the count removed, or **None
-    when the store could not be written** (see ``revoke`` for why that is a distinct
-    answer rather than 0). Never raises on a missing/unreadable store.
-
-    A failure here is not always contained by the per-request re-check: the cookie
-    path re-validates a session's owning key against the live keystore on every
-    request, which covers a scoped key - but an ADMIN-scoped session is exempt from
-    that check (so an owner-key roll cannot sign the owner out). So if this cleanup
-    fails for an ADMIN-scoped DEVICE key, its cookie keeps working. That is why the
-    caller is given something to report rather than a silent 0."""
+    """Delete every session minted from the key with this hash, so revoking a scoped key also drops the sessions it authorized."""
     if not key_hash:
         return 0
     try:
@@ -345,20 +257,7 @@ def revoke_by_key_hash(key_hash: Optional[str]) -> Optional[int]:
 
 
 def relink_key_hash(old_hash: Optional[str], new_hash: Optional[str]) -> int:
-    """Repoint every session recorded under *old_hash* to *new_hash*. Returns the
-    count changed. Never raises on a missing/unreadable store.
-
-    Used once when the owner key's identity moves from the legacy unsalted digest
-    to its salted KDF derivation (CodeQL 88): without this, a session minted
-    before the upgrade would keep reporting the OLD identity, so a job created
-    from that cookie would stop being recognised as the same principal presenting
-    the key as a bearer - the job-ownership parity ``create``'s docstring
-    promises. Re-linking is the transparent half of that upgrade: the session
-    stays valid and the user is never signed out.
-
-    This changes an IDENTIFIER, never a credential: ``id_hash`` (what actually
-    authenticates a cookie) is untouched, and an ADMIN session is exempt from
-    ``key_hash_live`` anyway, so a session's validity does not depend on it."""
+    """Repoint every session recorded under *old_hash* to *new_hash*."""
     if not old_hash or not new_hash or old_hash == new_hash:
         return 0
     try:
@@ -379,25 +278,7 @@ def relink_key_hash(old_hash: Optional[str], new_hash: Optional[str]) -> int:
 
 
 def remember_owner_key_minted(sid: Optional[str]) -> bool:
-    """Back-fill ``owner_key_minted`` on a session PROVEN to be the owner's.
-
-    Best-effort, and never raises: the caller has already established the fact by
-    comparing the recorded ``key_hash`` against the live owner key, so this run is
-    correct either way and the next request re-proves it identically. Returns True
-    when the record was actually updated.
-
-    It exists for one narrow but real case. A session minted BEFORE the field
-    existed carries no stamp, so it is recognised as the owner's only while the
-    owner key still has the value it was minted with. Roll the key and that proof
-    is gone - the recorded hash then matches neither the new owner key nor any
-    keystore entry - so the session would be treated as a revocable keystore key's
-    and signed out, which is exactly the "a GUI key roll must not log the browser
-    out" promise this whole design exists to keep. Recording the proof while it
-    still holds closes that, the same way jobs' ``_remember_owner_key_job`` does
-    for a job row.
-
-    Writes at most once per session: after this the stamp short-circuits the
-    value comparison, so the auth path does not keep re-writing the store."""
+    """Back-fill ``owner_key_minted`` on a session PROVEN to be the owner's."""
     if not sid or not sid.strip():
         return False
     h = _hash(sid.strip())
@@ -421,23 +302,7 @@ def remember_owner_key_minted(sid: Optional[str]) -> bool:
 
 
 def revoke_all() -> Optional[int]:
-    """Delete EVERY session (log out all devices). Used by the explicit 'clear owner
-    key' / 'sign out everywhere' flows: ``localm key clear``, ``localm key recover``,
-    and ``POST /api/auth/key/clear``.
-
-    Returns the count removed, or **None when the store could not be written**.
-
-    That distinction is the whole reason this signature is not a plain ``int``.
-    Returning 0 for a FAILED write is indistinguishable from 0 for "there were no
-    sessions", so all three callers reported a completed sign-out while every
-    session was still live. ``key recover`` is the sharpest case: its entire stated
-    purpose is locking a compromised owner out, and it always configures a NEW key,
-    so a surviving ADMIN cookie resolves against it immediately. A security step
-    that fails must never report success (AGENTS.md rule 5).
-
-    None is falsy, so an existing ``if revoke_all():`` keeps its old meaning (do not
-    claim devices were signed out); a caller must ask ``is None`` to distinguish a
-    failure from an empty store, and every caller in-tree now does."""
+    """Delete EVERY session (log out all devices)."""
     try:
         with _LOCK:
             records = _load()
@@ -452,7 +317,7 @@ def revoke_all() -> Optional[int]:
 
 
 def sweep() -> int:
-    """Prune expired sessions (called on startup). Returns the count removed."""
+    """Prune expired sessions (called on startup)."""
     now = time.time()
     try:
         with _LOCK:

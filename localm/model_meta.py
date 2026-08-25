@@ -1,21 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Tiny on-disk cache of per-model metadata learned at load time.
-
-A GGUF's true transformer layer count (``llama_model_n_layer``) is only knowable
-AFTER a native load - there is no pre-load header parser in the tree. The auto
-GPU-layer sizing (``GgufBackend._auto_gpu_layers``) and the GUI VRAM estimate
-(``/api/vram-estimate`` -> ``sysstats.estimate_vram``) both want that count to
-scale a partial offload precisely, so we remember it the first time a model
-loads and reuse it on every later load and estimate.
-
-This is STATIC MODEL METADATA (filename, size, mtime, layer count), the same
-class of data as ``registry.json`` already keeps - NOT chat or session content -
-so it is ordinary data-home state and is NOT gated by privacy mode. It lives at
-``<LOCALM_HOME>/model_meta.json``. Writes are best-effort: a failure only means a
-later load re-estimates the layer count (correct, just less precise), so it is
-logged at debug level rather than raised (AGENTS.md rule 5: surface, don't hide,
-but at the right altitude - a metadata-cache miss is not a hard failure).
-"""
+"""Tiny on-disk cache of per-model metadata learned at load time."""
 
 from __future__ import annotations
 
@@ -33,15 +17,13 @@ _MAX_ENTRIES = 256
 
 
 def _meta_path() -> Path:
-    """Path to the metadata cache under the CURRENT data home (read at call time
-    so a test that monkeypatches ``config.HOME_DIR`` / ``LOCALM_HOME`` sees it)."""
+    """Path to the metadata cache under the CURRENT data home (read at call time so a test that monkeypatches ``config.HOME_DIR`` / ``LOCALM_HOME`` sees it)."""
     from localm import config
     return config.HOME_DIR / _META_FILENAME
 
 
 def _model_key(model_path: str) -> Optional[str]:
-    """Stable identity for a model file: ``name:size:mtime``. Returns None when
-    the file cannot be stat'd (then the caller simply skips the cache)."""
+    """Stable identity for a model file: ``name:size:mtime``."""
     try:
         p = Path(model_path)
         st = p.stat()
@@ -51,10 +33,7 @@ def _model_key(model_path: str) -> Optional[str]:
 
 
 def _load_all() -> dict:
-    """Read the whole cache dict. Missing file -> {} (benign, expected on first
-    run). Present but unreadable/corrupt -> {} plus a debug line: a torn write
-    must not crash a load, but per rule 5 the corrupt case is distinguished from
-    the absent one and surfaced, not silently equated with 'empty'."""
+    """Read the whole cache dict."""
     path = _meta_path()
     if not path.is_file():
         return {}
@@ -67,8 +46,7 @@ def _load_all() -> dict:
 
 
 def cached_n_layers(model_path: str) -> Optional[int]:
-    """The remembered true layer count for *model_path*, or None when unknown
-    (never loaded, cache absent/corrupt, or the file changed size/mtime since)."""
+    """The remembered true layer count for *model_path*, or None when unknown (never loaded, cache absent/corrupt, or the file changed size/mtime since)."""
     key = _model_key(model_path)
     if key is None:
         return None
@@ -79,8 +57,7 @@ def cached_n_layers(model_path: str) -> Optional[int]:
 
 
 def store_n_layers(model_path: str, n_layers: int) -> None:
-    """Remember *n_layers* for *model_path*. Best-effort: on any failure the next
-    load just re-estimates, so log at debug rather than raising."""
+    """Remember *n_layers* for *model_path*."""
     if not isinstance(n_layers, int) or n_layers <= 0:
         return
     key = _model_key(model_path)

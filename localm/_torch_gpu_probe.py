@@ -1,38 +1,4 @@
-"""Enumerate CUDA/HIP devices via torch, in a CHILD process, and print JSON.
-
-Run as ``python -m localm._torch_gpu_probe``. Prints ONE line of JSON to stdout:
-a list of ``{"index", "name", "total", "free"}`` entries, ``[]`` when torch
-reports no usable device. Nothing else ever goes to stdout, so the parent can
-read exactly one line.
-
-WHY THIS IS NOT DONE IN-PROCESS (issue #833, measured):
-``import torch`` on Windows runs ``_load_dll_libraries``, a loop of
-``LoadLibraryExW`` calls. ``LoadLibrary`` holds the OS loader lock, and creating
-a thread needs that same lock so ``DLL_THREAD_ATTACH`` can run for every loaded
-module. So while any thread cold-imports torch, NO thread anywhere in that
-process can be created, including the asyncio event loop's worker pool. A
-report's hang-watchdog dump caught exactly that: one thread inside
-``_load_dll_libraries`` while the request thread and a ``subprocess.run`` both
-sat at the last line of ``Thread.start()``, and the event loop stalled 10.9s.
-
-Neither of the timeouts that look like they should have helped could: a probe
-deadline bounds how long a CALLER waits, and ``subprocess``'s timeout bounds a
-wait on a child that had not been spawned yet. Nothing a caller does can bound a
-lock the OS holds on behalf of another thread. Moving the cold import into a
-child process is what actually removes it, because the loader lock is per
-process. Measured on the dev box: thread creation went from 0.22ms to 341ms
-(342x) during a cold torch import, with a warm page cache and an AMD GPU.
-
-The parent keeps the in-process path when torch is ALREADY resident: that import
-is a plain ``sys.modules`` cache hit, takes no loader lock, and enumerating there
-avoids a process spawn. Only the cold case comes here.
-
-Index space is preserved because the child inherits the parent's environment, so
-``CUDA_VISIBLE_DEVICES`` and friends select and order devices identically. That
-matters: ``discover.list_gpus`` returns a TORCH index space by contract (see
-``resolve_media_default_device``), which is why the probe cannot simply be
-reordered to ask ``nvidia-smi`` first.
-"""
+"""Enumerate CUDA/HIP devices via torch, in a CHILD process, and print JSON."""
 from __future__ import annotations
 
 import json
@@ -40,10 +6,7 @@ import sys
 
 
 def _enumerate() -> list:
-    """torch's CUDA/HIP device list, or [] when torch cannot answer.
-
-    Mirrors the in-process branch of ``discover._list_gpus_probe`` field for
-    field, so a caller cannot tell which path produced a reading."""
+    """torch's CUDA/HIP device list, or [] when torch cannot answer."""
     import torch
     if not torch.cuda.is_available():
         return []

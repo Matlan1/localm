@@ -1,50 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Same-port HTTP -> HTTPS handling for network binds (NET-1 follow-up).
-
-When localm binds past loopback it serves HTTPS (built-in TLS, see ``tls.py``).
-A browser that opens the plain ``http://`` URL on that port then speaks cleartext
-to a TLS socket, the handshake fails, and the user just sees a bare "connection
-reset" - not seamless. This module makes that case graceful WITHOUT a reverse
-proxy: it owns the public listening socket, peeks the first byte of every
-connection, and either
-
-  * TLS (the handshake starts with byte ``0x16``) -> transparently relays the
-    raw bytes to an internal loopback uvicorn that terminates TLS and serves the
-    app (TLS still terminates at uvicorn; we only shuffle bytes), or
-  * plaintext (an HTTP request) -> answers with a ``308`` redirect to the
-    ``https://`` URL plus a small HTML catch page, so opening ``http://`` either
-    redirects automatically or at least explains itself.
-
-BOTH BINDS COME THROUGH HERE, INCLUDING THE PLAIN-HTTP LOOPBACK DEFAULT. The TLS
-path relays to an internal TLS uvicorn as described above; the plain-HTTP path
-runs the SAME first-byte peek (``_serve_async_plain``) so a client that wrongly
-opens a TLS connection on this HTTP port is closed cleanly at the socket layer
-instead of feeding a ClientHello into uvicorn's HTTP parser. Any setup failure
-falls back to a direct ``uvicorn.run``, so neither working path is put at risk by
-this convenience.
-
-**CONSEQUENCE, and it is the reason this paragraph is worth reading: the app
-never sees the client's socket.** Every accepted connection is relayed over a
-fresh internal loopback connection, so the peer uvicorn reports is PORTMUX'S OWN
-socket, owned by the server process. Any local-identity or peer-credential
-reasoning at the app layer is therefore invalid - not merely imprecise. Measured
-2026-08-11 through this entry point: the peer resolved to the SERVER'S OWN pid on
-4/4 requests from separate client processes, never to the client. A check built
-on it would answer "trusted" for every caller while appearing to ask. Evidence
-and method: ``dev-notes/PEER-CREDENTIAL-FEASIBILITY-2026-08-11.md``.
-
-That is safe for what the server actually does, because nothing trusts
-``request.client.host`` for a security decision - the loopback/network split is
-made from the configured bind host (see ``gui/web.py`` and
-``http_server.py``'s ``bind_host`` gates). It is NOT a licence to add such a
-check later.
-
-This paragraph previously said the opposite ("used ONLY on a TLS bind ... loopback
-is plain HTTP and never reaches here"). That was accurate when written and stopped
-being true when the plain-HTTP peek was added below. Kept as a note because the
-wrong version is the kind a reader CHECKS and then trusts, so the correction is
-worth more than the space it takes.
-"""
+"""Same-port HTTP -> HTTPS handling for network binds (NET-1 follow-up)."""
 
 from __future__ import annotations
 
@@ -86,18 +41,7 @@ def run_server(
     ssl_keyfile: Optional[str] = None,
     log_level: str = "warning",
 ) -> None:
-    """Serve *app* on ``(host, port)``, blocking until interrupted.
-
-    Without TLS this is a plain ``uvicorn.run`` (the loopback default - unchanged).
-    With TLS it serves HTTPS and also catches a plain-HTTP request on the same
-    port with an https redirect (issue 8), falling back to a direct TLS bind if
-    the demultiplexer cannot start.
-
-    Pure transport: mDNS name advertising lives in the CLI that also prints the
-    reachable URLs (``localm serve`` / ``localm gui``), so the advertised name and
-    the printed name can never disagree - see ``localm/netname.py`` and the
-    ``start_advertiser`` callers.
-    """
+    """Serve *app* on ``(host, port)``, blocking until interrupted."""
     import uvicorn
 
     from localm import bugreport
@@ -164,19 +108,7 @@ def run_server(
 
 def _run_uvicorn_on_socket(uvicorn, app, host, port, *, log_level,
                            ssl_certfile=None, ssl_keyfile=None) -> None:
-    """The last-resort direct uvicorn bind, on a socket built the same way the
-    normal path builds it.
-
-    ``uvicorn.run(host=..., port=...)`` would reach asyncio's create_server and
-    silently re-apply IPV6_V6ONLY, so this fallback - which exists so a failure
-    in the peek layer never leaves the user without a server - would quietly
-    serve IPv6 only on a ``::`` bind, contradicting the URLs already printed.
-    ``Server.run(sockets=[...])`` takes the prepared socket instead, so the
-    reachable set is the same on the degraded path as on the normal one.
-
-    If even the socket cannot be built, fall back to uvicorn's own binding
-    rather than leaving the user with nothing: an IPv6-only server is worse than
-    a dual-stack one and far better than no server, and the reason is logged."""
+    """The last-resort direct uvicorn bind, on a socket built the same way the normal path builds it."""
     config_kwargs = dict(app=app, log_level=log_level)
     if ssl_certfile:
         config_kwargs.update(ssl_certfile=ssl_certfile, ssl_keyfile=ssl_keyfile)
@@ -193,26 +125,14 @@ def _run_uvicorn_on_socket(uvicorn, app, host, port, *, log_level,
 
 
 def _track_conn_task(inflight: "set[asyncio.Task]", coro) -> None:
-    """Schedule *coro* as a tracked, fire-and-forget per-connection task.
-
-    ``asyncio.start_server``'s ``client_connected_cb`` gives no way to keep a
-    reference to the Task it creates when the callback returns a coroutine
-    (``asyncio.streams.StreamReaderProtocol`` just does ``loop.create_task(res)``
-    and drops it) - so a connection still blocked in ``_relay``/``_pump`` at
-    shutdown is invisible to ``Server.wait_closed()`` (which only waits for the
-    LISTENING socket to stop accepting, never for handler tasks already
-    running) and gets silently destroyed mid-flight when the event loop tears
-    down ("Task was destroyed but it is pending!", issue #963/portmux:209-212).
-    Tracking the Task ourselves lets shutdown cancel and await it instead."""
+    """Schedule *coro* as a tracked, fire-and-forget per-connection task."""
     task = asyncio.ensure_future(coro)
     inflight.add(task)
     task.add_done_callback(inflight.discard)
 
 
 async def _cancel_inflight_conns(inflight: "set[asyncio.Task]") -> None:
-    """Cancel and await every still-pending task tracked via
-    :func:`_track_conn_task`, so shutdown never abandons a connection mid-relay.
-    A task that already finished on its own (the common case) is not touched."""
+    """Cancel and await every still-pending task tracked via :func:`_track_conn_task`, so shutdown never abandons a connection mid-relay."""
     pending = [t for t in inflight if not t.done()]
     for t in pending:
         t.cancel()
@@ -286,11 +206,7 @@ async def _serve_async(app, host, port, ssl_certfile, ssl_keyfile, log_level) ->
 
 
 async def _serve_async_plain(app, host, port, log_level) -> None:
-    """Serve plain HTTP behind the same first-byte peek as the TLS path: real HTTP
-    is relayed to an internal uvicorn; a TLS handshake on this HTTP port (a client
-    that wrongly tried HTTPS) is closed cleanly and surfaced once, so uvicorn's
-    HTTP parser never sees the TLS bytes and the 'Invalid HTTP request' flood
-    cannot happen at the source."""
+    """Serve plain HTTP behind the same first-byte peek as the TLS path: real HTTP is relayed to an internal uvicorn; a TLS handshake on this HTTP port (a client that wrongly tried HTTPS) is closed cleanly and surfaced once, so uvicorn's HTTP parser never sees the TLS bytes and the 'Invalid HTTP request' f..."""
     import uvicorn
 
     config = uvicorn.Config(app, host="127.0.0.1", port=0, log_level=log_level)
@@ -350,16 +266,7 @@ async def _serve_async_plain(app, host, port, log_level) -> None:
 
 
 async def _handle_conn_plain(reader, writer, internal_port, public_port, state) -> None:
-    """Peek the first byte: a TLS ClientHello (wrong scheme on the HTTP port) is
-    closed cleanly and noted; anything else is a real HTTP connection and is
-    relayed to the internal uvicorn unchanged.
-
-    One try/finally around the WHOLE body (not just the part after the first
-    byte) - this task can now be cancelled for real, by :func:`_cancel_inflight_conns`
-    on shutdown, and cancellation can land anywhere including inside the initial
-    ``readexactly``. A finally scoped to only the second half left that case
-    (and any other exception raised before it) with the writer never closed,
-    leaking the transport to a GC __del__ warning instead of a clean close."""
+    """Peek the first byte: a TLS ClientHello (wrong scheme on the HTTP port) is closed cleanly and noted; anything else is a real HTTP connection and is relayed to the internal uvicorn unchanged."""
     try:
         first = await reader.readexactly(1)
         if first[0] == _TLS_FIRST_BYTE:
@@ -376,12 +283,7 @@ async def _handle_conn_plain(reader, writer, internal_port, public_port, state) 
 
 
 def _note_tls_on_http(public_port, state) -> None:
-    """Surface a wrong-scheme (HTTPS-on-the-HTTP-port) connection honestly without
-    flooding: one prominent notice with the cause + fix, the rest counted at debug
-    level. The first notice is written to a STABLE stderr duplicate so it is immune
-    to the model-load fd-2 redirect (writing through the live stderr during that
-    window is exactly what turns a benign reject into the WinError-6 cascade we are
-    eliminating)."""
+    """Surface a wrong-scheme (HTTPS-on-the-HTTP-port) connection honestly without flooding: one prominent notice with the cause + fix, the rest counted at debug level."""
     state["count"] += 1
     if state["warned"]:
         # Already surfaced once this run; keep counting in the debug log only so a
@@ -410,12 +312,7 @@ def _note_tls_on_http(public_port, state) -> None:
 
 
 async def _handle_conn(reader, writer, internal_port, public_port) -> None:
-    """Peek the first byte and route: TLS -> relay to uvicorn, else -> redirect.
-
-    One try/finally around the WHOLE body - see :func:`_handle_conn_plain`'s
-    docstring for why: this task is now really cancellable on shutdown, and a
-    finally scoped to only the second half left the initial ``readexactly``
-    uncovered."""
+    """Peek the first byte and route: TLS -> relay to uvicorn, else -> redirect."""
     try:
         first = await reader.readexactly(1)
         if first[0] == _TLS_FIRST_BYTE:
@@ -429,10 +326,7 @@ async def _handle_conn(reader, writer, internal_port, public_port) -> None:
 
 
 async def _relay(first, c_reader, c_writer, internal_port) -> None:
-    """Transparently pipe a connection to the internal uvicorn. The already
-    consumed first byte is written through first so the stream is intact. Generic
-    over scheme: the TLS path relays the ClientHello onward; the plain path relays
-    the HTTP request line onward."""
+    """Transparently pipe a connection to the internal uvicorn."""
     try:
         u_reader, u_writer = await asyncio.open_connection("127.0.0.1", internal_port)
     except OSError:
@@ -468,8 +362,7 @@ async def _pump(src: asyncio.StreamReader, dst: asyncio.StreamWriter) -> None:
 
 
 async def _redirect_to_https(first, c_reader, c_writer, public_port) -> None:
-    """Answer a plaintext HTTP request with a 308 to the https:// equivalent on
-    the same host:port, plus a small HTML catch page."""
+    """Answer a plaintext HTTP request with a 308 to the https:// equivalent on the same host:port, plus a small HTML catch page."""
     try:
         rest = await asyncio.wait_for(c_reader.readuntil(b"\r\n\r\n"), timeout=5)
     except (asyncio.IncompleteReadError, asyncio.LimitOverrunError,
@@ -559,12 +452,7 @@ _stable_resolved = False
 
 
 def _get_stable_stream():
-    """A duplicate of stderr taken ONCE (cached) so it is immune to the model-load
-    fd-2 juggling that the llama.cpp backend uses to silence native output (the
-    same mechanism debuglog #220 uses for the console mirror). MUST be resolved
-    early, while fd 2 is the real console - resolving it lazily during a redirect
-    window would duplicate the redirected fd and lose the output. Returns None
-    when stderr has no duplicable fd (a detached process); callers fall back."""
+    """A duplicate of stderr taken ONCE (cached) so it is immune to the model-load fd-2 juggling that the llama.cpp backend uses to silence native output (the same mechanism debuglog #220 uses for the console mirror)."""
     global _stable_stream, _stable_resolved
     if not _stable_resolved:
         _stable_resolved = True
@@ -577,14 +465,7 @@ def _get_stable_stream():
 
 
 def _safe_notice(msg: str) -> None:
-    """Write a one-time operational notice through the stable stderr duplicate.
-
-    Writing a log line through the LIVE stderr during the model-load fd-2 redirect
-    window raises OSError [WinError 6] on Windows, and Python's logging then prints
-    a multi-line '--- Logging error ---' traceback per line - the exact cascade we
-    are removing. A failure to emit the courtesy hint must never take down the
-    server, so the write is best-effort - the connection itself is already handled
-    correctly by the caller."""
+    """Write a one-time operational notice through the stable stderr duplicate."""
     try:
         stream = _get_stable_stream() or sys.stderr
         stream.write("WARNING " + msg + "\n")
@@ -594,16 +475,7 @@ def _safe_notice(msg: str) -> None:
 
 
 def _harden_uvicorn_logging() -> None:
-    """Point uvicorn's console log handlers at the same stable stderr duplicate.
-
-    uvicorn configures its own loggers (uvicorn / uvicorn.error / uvicorn.access)
-    with StreamHandlers on the LIVE sys.stderr. During the model-load fd-2 redirect
-    window those writes raise WinError 6 and cascade into '--- Logging error ---'
-    tracebacks (R45). Redirecting the handlers to a stable fd-2 duplicate makes
-    uvicorn's own warnings/errors survive that window instead of crashing the
-    logger - the records are still emitted (this fixes WHERE they are written, it
-    never drops one). Resolves the stable stream early (fd 2 still clean here, at
-    server startup). Best-effort and idempotent."""
+    """Point uvicorn's console log handlers at the same stable stderr duplicate."""
     stable = _get_stable_stream()
     if stable is None:
         return
