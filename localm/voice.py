@@ -13,17 +13,14 @@ from typing import Optional
 
 import multiprocessing as mp
 
-# A single transcription that exceeds this many seconds is treated as a hung
-# native call: the worker is killed and a clean VoiceError is returned, so a
-# wedged native library can never block STT forever. Overridable per install via
-# the ``voice_stt_timeout_s`` config key.
+# A transcription exceeding this many seconds is treated as a hung native call:
+# the worker is killed and a VoiceError returned. Overridable per install via the
+# ``voice_stt_timeout_s`` config key.
 _WORKER_TIMEOUT = 120.0
 
-# Fault-injection hook, honoured by the worker ONLY when this environment
-# variable is set. It exists exclusively so the test-suite can prove the
-# crash-containment property with a REAL native fault; it is never set in
-# production. Values: "abort" (a genuine uncatchable native abort, the default),
-# "exit" (a hard process exit), or "hang" (a wedged native call).
+# Fault-injection hook, honoured by the worker only when this environment
+# variable is set, and used only by the test suite. Values: "abort" (the
+# default), "exit" (a hard process exit), or "hang" (a wedged native call).
 _FAULT_ENV = "LOCALM_VOICE_FAULT_FOR_TEST"
 
 
@@ -85,10 +82,8 @@ def stt_model_cached() -> tuple[bool, str]:
     if Path(name).expanduser().is_dir():
         return True, name                       # local model directory
     repo = _stt_repo_for(name)
-    # Hub cache layout: <cache>/models--<org>--<repo>/snapshots/<rev>/model.bin
-    # (the snapshot entry is a symlink or, in no-symlink mode, a real file -
-    # glob matches both). A false negative only costs one harmless consent
-    # prompt; the worker downloads on demand regardless.
+    # Hub cache layout: <cache>/models--<org>--<repo>/snapshots/<rev>/model.bin.
+    # The snapshot entry may be a symlink or a real file; glob matches both.
     try:
         repo_dir = stt_cache_dir() / ("models--" + repo.replace("/", "--"))
         snaps = repo_dir / "snapshots"
@@ -98,18 +93,13 @@ def stt_model_cached() -> tuple[bool, str]:
         return False, name
 
 
-# The name of the background thread the voice plugin's on_install hook runs
-# prefetch_stt_model on. A stable, importable constant so tests (and any other
-# caller that must not outlive it) can find and join that exact thread.
+# Name of the background thread the voice plugin's on_install hook runs
+# prefetch_stt_model on, so a caller can find and join that exact thread.
 PREFETCH_THREAD_NAME = "localm-voice-prefetch"
 
-# The file set faster_whisper's own utils.download_model fetches (verified at
-# 1.2.1, the pyproject floor). Pinned here because the prefetch downloads via
-# huggingface_hub directly rather than through faster_whisper (see
-# prefetch_stt_model for why); if upstream ever needs more files, the worker's
-# own lazy download under net_mode=allow still fetches them - this list only
-# bounds what the EXPLICIT prefetch pulls, so drift degrades to a re-download,
-# never to a broken cache localm cannot recover from.
+# The file set the explicit prefetch pulls, matching faster_whisper's own
+# download_model. The worker's lazy download under net_mode=allow still fetches
+# anything else it needs.
 _STT_ALLOW_PATTERNS = ("config.json", "preprocessor_config.json", "model.bin",
                        "tokenizer.json", "vocabulary.*")
 
@@ -145,10 +135,9 @@ def prefetch_stt_model(allow_download: Optional[bool] = None) -> tuple[bool, str
         reason = f"Whisper model '{name}' download failed ({e})"
         logger.warning(reason)
         return False, reason
-    # Verify the fetch actually produced a loadable snapshot (rule 5: a step
-    # that failed must never report success). A repo that exists but is not a
+    # Verify the fetch produced a loadable snapshot: a repo that is not a
     # faster-whisper (CTranslate2) conversion has no model.bin, and
-    # snapshot_download "succeeds" having fetched next to nothing.
+    # snapshot_download still succeeds.
     cached, _ = stt_model_cached()
     if not cached:
         reason = (f"Whisper model '{name}' was fetched but no model.bin "
@@ -184,23 +173,17 @@ def _simulate_fault(mode: str) -> None:
             time.sleep(3600)
     if mode == "exit":
         os._exit(134)                            # vanish with no Python traceback
-    # default ("abort"): a genuine uncatchable native abort - the same shape as
-    # a ctranslate2 std::terminate. No Python ``except`` can intercept it; the
-    # process dies (worker WER/abort dialogs are already suppressed at startup).
+    # default ("abort"): an uncatchable native abort, the same shape as a
+    # ctranslate2 std::terminate. The process dies; no Python except intercepts it.
     os.abort()
 
 
 def _worker_main(req_q, resp_q) -> None:
     """Long-lived child: decode + load + transcribe, one request at a time."""
-    # ROOT CAUSE of the reported crash: faster-whisper pulls in two OpenMP
-    # runtimes (ctranslate2 -> Intel libiomp5md, onnxruntime -> LLVM libomp140).
-    # When both initialise in one process, OpenMP raises "OMP: Error #15" and
-    # calls abort() - an uncatchable native fault that, in the old in-process
-    # design, took the whole server down. KMP_DUPLICATE_LIB_OK lets the second
-    # runtime load instead of aborting. It is the documented workaround and is
-    # safe to scope to this worker, whose only job is transcription; isolation
-    # remains the safety net for any OTHER native fault. Set before any
-    # faster-whisper import so OpenMP reads it at init.
+    # faster-whisper pulls in two OpenMP runtimes (ctranslate2 -> Intel
+    # libiomp5md, onnxruntime -> LLVM libomp140), and both initialising in one
+    # process makes OpenMP abort(). KMP_DUPLICATE_LIB_OK lets the second load.
+    # Set before any faster-whisper import so OpenMP reads it at init.
     os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
     _silence_native_crash_dialogs()
 
@@ -242,17 +225,10 @@ def _worker_main(req_q, resp_q) -> None:
 
         try:
             if model is None or model_name != name:
-                # download_root keeps the model inside localm's data dir instead of the
-                # global HF cache in the user's home profile (rule 4). Resolved by the
-                # PARENT and sent with the request, not recomputed here: the parent's
-                # stt_model_cached() probe and this download then read the same value by
-                # construction, with no dependence on env surviving the spawn.
-                # local_files_only is likewise the PARENT's network-policy
-                # decision: when it is True this worker is structurally unable
-                # to download (faster_whisper passes it straight through to
-                # huggingface_hub's snapshot_download), so net_mode=off/ask
-                # cannot be bypassed by anything that happens in this child -
-                # and a cached model loads with no network access at all.
+                # download_root keeps the model inside localm's data dir rather
+                # than the global HF cache. Both it and local_files_only are
+                # resolved by the parent and sent with the request, so the child
+                # cannot download past the parent's network-policy decision.
                 model = WhisperModel(name, device="cpu", compute_type="int8",
                                      download_root=download_root,
                                      local_files_only=local_files_only)
@@ -397,12 +373,9 @@ def _run_in_worker(data: bytes, name: str, language, timeout: float, *,
     if tag == "load":
         if blocked_reason:
             # The load ran offline because the network policy refused the
-            # one-time download; report the POLICY as the cause, with the raw
-            # loader detail kept for diagnosis. Dispatching anyway (rather than
-            # refusing up front) is deliberate: the cached-probe can
-            # false-negative on an exotic hand-edited model id (_stt_repo_for),
-            # and the worker's offline load is the source of truth - a model
-            # that is really cached still transcribes under ask/off.
+            # download, so the policy is reported as the cause with the loader
+            # detail kept. Dispatched rather than refused up front: the
+            # cached-probe can false-negative and the offline load is the truth.
             raise VoiceError(f"{blocked_reason} (offline load failed: {detail})",
                              code="download-blocked")
         raise VoiceError(
@@ -421,9 +394,8 @@ def transcribe_bytes(data: bytes, language: Optional[str] = None) -> str:
     if not data:
         raise VoiceError("Empty recording (no audio was captured).", code="empty")
 
-    # Cheap availability check without importing the native lib (find_spec does
-    # not load ctranslate2), so a missing dependency is reported instantly
-    # rather than after a worker spawn.
+    # Availability check without importing the native lib, so a missing
+    # dependency is reported before a worker spawn.
     if importlib.util.find_spec("faster_whisper") is None:
         raise VoiceError(
             "Speech-to-text needs the faster-whisper package. Install it "
@@ -438,13 +410,9 @@ def transcribe_bytes(data: bytes, language: Optional[str] = None) -> str:
     except (TypeError, ValueError):
         timeout = _WORKER_TIMEOUT
 
-    # Network-policy gate for the one-time model download, decided HERE in the
-    # parent (the worker only ever executes the decision, via local_files_only,
-    # so no code path in the child can download past it). A cached model always
-    # loads offline; a missing one may download only under net_mode=allow -
-    # "ask" wants the explicit prefetch action and "off" blocks absolutely,
-    # in which case the offline load's failure surfaces the policy reason
-    # (see _run_in_worker's blocked_reason handling).
+    # Network-policy gate for the one-time model download, decided in the parent;
+    # the worker only executes the decision via local_files_only. A cached model
+    # loads offline; a missing one downloads only under net_mode=allow.
     cached, _ = stt_model_cached()
     local_files_only = True
     blocked_reason = None

@@ -30,12 +30,9 @@ def debug_content_enabled() -> bool:
         return False
     try:
         from localm.audit import SessionMode, effective_mode
-        # Suppress content if ANY of these surfaces is privacy: the backend that
-        # produces the content (llamacpp/llama.py) is surface-agnostic and serves
-        # coder sessions through the same generation path as chat/server, so a
-        # coder-only privacy override (coder_mode / .localcoder/config.toml) must
-        # suppress it too, even when chat/server are not privacy. Err toward not
-        # writing - over-suppression only costs a debug convenience, never privacy.
+        # Suppressed if ANY surface is privacy: the backend that produces the
+        # content is surface-agnostic and serves coder sessions through the same
+        # generation path as chat and server.
         for surface in ("server", "chat", "coder"):
             if effective_mode(surface) == SessionMode.PRIVACY:
                 return False
@@ -75,36 +72,16 @@ def uvicorn_log_level() -> str:
 # --------------------------------------------------------------------------- #
 #  Always-on in-memory recent-activity buffer                                  #
 #                                                                              #
-#  A bug report is only useful if it carries what the app was DOING before it  #
-#  broke. The on-disk debug log only exists under --debug, which a tester will #
-#  not have enabled, so a normal report had no activity trail at all. This     #
-#  bounded, in-memory ring buffer captures recent INFO+ log records ALWAYS, so #
-#  the bug reporter can show the last breadcrumbs (model loads, backend pick,  #
-#  swaps, warnings, errors) regardless of debug mode.                          #
+#  A bounded ring buffer of recent INFO+ log records, captured regardless of    #
+#  debug mode, so the bug reporter can show the last breadcrumbs.              #
 #                                                                              #
-#  Privacy: INFO and above ONLY. The raw, pre-scrub model output (chat content)#
-#  is logged at DEBUG (inference/backends/llamacpp/llama.py), so it never lands #
-#  in this buffer even when --debug is on. Nothing here is written to disk on   #
-#  its own; it only leaves the machine if the user files AND sends a report,    #
-#  which they review and edit first.                                           #
+#  INFO and above ONLY. Raw pre-scrub model output is logged at DEBUG, so it    #
+#  never lands here. Nothing here is written to disk on its own.               #
 #                                                                              #
-#  PROCESS-LOCAL, NOT WHOLE-APP. install_ring_buffer() (below) is called once,  #
-#  at CLI startup, in the SERVER/parent process only. An isolated worker child  #
-#  (multiprocessing "spawn" - llamacpp/_runner.py, _hf_runner.py, etc.) is a    #
-#  fresh interpreter that never runs that call, so this buffer does not exist   #
-#  there: an INFO-level logger.info(...) inside a child is a genuine NO-OP      #
-#  unless the child has ALSO run attach_child_logging() (which requires --debug #
-#  already on - see that function below) - it never reaches THIS buffer either  #
-#  way, since a spawned child cannot share this module's in-memory state with   #
-#  its parent. INFO alone does not guarantee "reaches a bug report"; it only    #
-#  does so for code that executes in the process that called install_ring_     #
-#  buffer(). A child-side breadcrumb needs an explicit relay over its own IPC   #
-#  (an extra envelope back to the parent, which then logs it itself) to land    #
-#  here - verified empirically 2026-08-12, see dev-notes/generation-path-       #
-#  logging-instrumentation-2026-08-12.md for the measurement and the design     #
-#  this constraint forced (llamacpp/_runner.py's ModelRunner.chat_stream logs   #
-#  its own parent-side markers rather than assuming the child's INFO calls      #
-#  would surface here).                                                        #
+#  PROCESS-LOCAL. install_ring_buffer() runs once, at CLI startup, in the       #
+#  server/parent process. A spawned worker child is a fresh interpreter that    #
+#  never runs it, so an INFO call inside a child never reaches this buffer; a   #
+#  child-side breadcrumb needs an explicit relay back to the parent.           #
 # --------------------------------------------------------------------------- #
 
 _RING_CAPACITY = 400
@@ -177,11 +154,9 @@ def install_ring_buffer(capacity: int = _RING_CAPACITY) -> bool:
     handler = _RingBufferHandler(capacity)
     logger.addHandler(handler)
     # The localm logger otherwise inherits the root's WARNING threshold, which
-    # would drop the INFO breadcrumbs we want. Lower it to INFO. This adds NO
-    # console output: a non-debug run has no stream handler on this logger, and
-    # INFO is below the root's WARNING lastResort, so nothing new is printed.
-    # A later enable_debug() drops the level further to DEBUG; the handler's own
-    # INFO level still keeps DEBUG (chat content) out of the buffer.
+    # would drop the INFO breadcrumbs. Adds no console output: a non-debug run
+    # has no stream handler on this logger. A later enable_debug() drops the
+    # level to DEBUG; the handler's own INFO level still excludes DEBUG records.
     if logger.level == logging.NOTSET or logger.level > logging.INFO:
         logger.setLevel(logging.INFO)
     _ring_handler = handler
@@ -211,9 +186,8 @@ def _stable_console_stream():
             encoding=getattr(stream, "encoding", None) or "utf-8",
             errors="backslashreplace", closefd=True)
     except OSError:
-        # Cleanup of OUR OWN just-created descriptor on a construction failure -
-        # this suppresses nothing of the application's; it only avoids leaking
-        # the dup when fdopen itself fails. The caller falls back to live stderr.
+        # Close our own just-created descriptor when fdopen fails, so the dup is
+        # not leaked. The caller falls back to live stderr.
         with contextlib.suppress(OSError):
             os.close(dup_fd)
         return None
@@ -226,9 +200,8 @@ def _add_console_handler() -> None:
             return
     stream = _stable_console_stream()
     if stream is None:
-        # No duplicable stderr fd (e.g. a detached process): fall back to the
-        # live stream. No worse than before, and the file handler still carries
-        # every record - this fallback never silences anything.
+        # No duplicable stderr fd (a detached process): fall back to the live
+        # stream. The file handler still carries every record.
         stream = sys.stderr
     handler = logging.StreamHandler(stream)
     handler.setFormatter(logging.Formatter("%(levelname)-7s %(name)s: %(message)s"))
@@ -267,17 +240,12 @@ def logs_dir() -> Path:
 
 
 # --- Hang watchdog (event-loop stall capture) ------------------------------ #
-# The server runs on a single asyncio event loop; if any callback blocks it (a
-# synchronous driver/subprocess/IO call), the WHOLE server freezes while the box
-# looks idle. The watchdog (wired in http_server.lifespan) runs a plain thread
-# OFF the loop that dumps every thread's stack to a file when the loop stops
-# ticking, so an intermittent freeze is captured instead of lost.
+# A plain thread off the event loop that dumps every thread's stack to a file
+# when the loop stops ticking.
 #
-# It is ON BY DEFAULT: a non-technical tester never has to set anything, and its
-# steady-state cost is ~one wakeup/second on a background thread (the trace file
-# is opened LAZILY, only if a real stall happens, so a healthy run leaves nothing
-# behind). LOCALM_HANG_WATCHDOG=0/false/off turns it off; =1/true/on ALSO enables
-# the verbose extras (asyncio debug + slow-callback logging).
+# On by default; the trace file is opened lazily, only if a stall happens.
+# LOCALM_HANG_WATCHDOG=0/false/off turns it off; =1/true/on also enables the
+# verbose extras (asyncio debug and slow-callback logging).
 _HANG_ENV = "LOCALM_HANG_WATCHDOG"
 _HANG_SECS_ENV = "LOCALM_HANG_WATCHDOG_SECS"
 _HANG_OFF = frozenset({"0", "false", "off", "no"})
@@ -310,12 +278,10 @@ def hang_trace_path() -> Path:
 
 
 # --- Native-fault trace for an isolated CHILD process ---------------------- #
-# A child that dies from a native SIGNAL (SIGILL/SIGSEGV/SIGABRT/SIGBUS/SIGFPE)
-# never regains control in Python, so no `except` clause and no logging call in
-# that child can record why - see llamacpp/_runner.py's _runner_entry. Only a
-# signal-safe writer armed BEFORE the fault can, which is what faulthandler is.
-# The parent arms nothing itself: it picks the path, hands it to the child, and
-# relays whatever the child left there into the shared debug log.
+# A child that dies from a native signal never regains control in Python, so only
+# a signal-safe writer armed before the fault can record why, which is what
+# faulthandler is. The parent picks the path, hands it to the child, and relays
+# whatever the child left there into the shared debug log.
 _crash_trace_counter = itertools.count()
 
 
@@ -336,12 +302,10 @@ def enable_debug() -> Path:
     path = logs_dir() / f"localm_{time.strftime('%Y-%m-%d_%H%M%S')}_{os.getpid()}.log"
     os.environ[_ENV_VAR] = str(path)
 
-    # buffering=1 = line-buffered: each log record is flushed to disk immediately
-    # so no lines are lost if the process is killed or os.execv'd (Task 1: save-bug).
-    # delay=True prevents FileHandler from opening the file internally; we then
-    # set stream to a manually opened line-buffered handle so baseFilename is
-    # preserved (used by attach_child_logging to deduplicate) while the fd is
-    # opened exactly once with the correct buffer mode.
+    # buffering=1 is line-buffered, so each record is flushed immediately and no
+    # lines are lost on a kill or os.execv. delay=True stops FileHandler opening
+    # the file itself; the stream is then set to a manually opened line-buffered
+    # handle, so baseFilename is preserved and the fd is opened once.
     handler = logging.FileHandler(path, mode="a", encoding="utf-8", delay=True)
     handler.stream = open(path, "a", buffering=1, encoding="utf-8",
                          errors="backslashreplace")
@@ -427,18 +391,13 @@ def record_native_line(text: str) -> None:
 class _LineGrouper:
     """Collapses a stream of lines into repeat-count groups, tolerating a small REPEATING SET of up to _MAX_PENDING distinct lines - not just a line repeated immediately after itself."""
 
-    # Small and bounded on purpose: enough to hold a short repeating cycle
-    # (the observed case is 2 lines) open across one-off lines interleaved
-    # with it, while keeping a genuinely non-repeating stream's reordering
-    # latency (at most _MAX_PENDING lines, versus 1 before this class
-    # existed) small enough not to meaningfully change the live view's
-    # responsiveness.
+    # Bounded: enough to hold a short repeating cycle open across one-off lines
+    # interleaved with it, while keeping reordering latency to at most
+    # _MAX_PENDING lines.
     _MAX_PENDING = 8
 
     # Grouping key: the line with every run of digits replaced, so lines that
-    # differ ONLY in an embedded number share one pending slot. See the class
-    # docstring for why exact-string matching could not collapse the measured
-    # case no matter how large _MAX_PENDING got.
+    # differ only in an embedded number share one pending slot.
     _DIGITS_RE = re.compile(r"\d+")
     _PLACEHOLDER = "<N>"
 
