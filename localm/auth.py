@@ -22,19 +22,15 @@ ENV_VAR = "LOCALM_API_KEY"
 REQUIRE_ENV_VAR = "LOCALM_REQUIRE_AUTH"
 _TRUTHY = ("1", "true", "yes", "on")
 
-# Minimum length for an owner key to count as "strong enough" to authenticate a
-# NETWORK bind. Enforced at set time (set_api_key) AND at the network-bind gate
-# (cli._exposed_bind_warning), so a trivially-guessable key supplied via the
-# LOCALM_API_KEY env var or a hand-edited auth.key cannot be served to the LAN.
+# Minimum length for an owner key to authenticate a network bind. Enforced at set
+# time and at the network-bind gate (cli._exposed_bind_warning), so a key from the
+# env var or a hand-edited auth.key cannot be served to the LAN either.
 MIN_KEY_LEN = 8
 
-# Characters an owner key may contain, enforced at set time (set_api_key). This is
-# EXACTLY the alphabet generate_key() emits (secrets.token_urlsafe -> base64url), so
-# a generated key always passes; note ~49% of generated keys contain an underscore,
-# so "-" alone would reject half of them. It is also a strict subset of RFC 7235
-# token68, so a conforming key is always safe to put in an Authorization header.
-# Explicit ASCII classes, not \w or str.isalnum(): both match non-ASCII letters and
-# digits ("ä", "٣"), which is the very thing this rejects. See set_api_key.
+# Characters an owner key may contain, enforced at set time. Exactly the alphabet
+# generate_key() emits, and a strict subset of RFC 7235 token68, so a conforming
+# key is safe in an Authorization header. Explicit ASCII classes rather than a
+# word class, which would also match non-ASCII letters and digits.
 _KEY_CHARSET = re.compile(r"\A[A-Za-z0-9_-]+\Z")
 
 
@@ -59,14 +55,10 @@ def generate_key(nbytes: int = 32) -> str:
     return secrets.token_urlsafe(nbytes)
 
 
-# Transient read retry for the owner key file, mirroring config._read_json: a
-# concurrent atomic replace (set_api_key), an antivirus / indexer, or a backup
-# scanner can hold auth.key open for a microsecond on Windows, making read_text
-# raise a TRANSIENT PermissionError (WinError 5). Ride it out with a short bounded
-# retry rather than momentarily reading the owner key as absent, which would flap
-# the owner's own auth. A PERSISTENT failure still returns None here; the
-# fail-closed guard in any_key_configured() (via _owner_key_present) then keeps
-# auth IN EFFECT so the server locks instead of dropping to open mode.
+# Transient read retry for the owner key file: a concurrent atomic replace, an
+# antivirus scanner or an indexer can hold auth.key open briefly on Windows and
+# make read_text raise PermissionError. A persistent failure still returns None,
+# and any_key_configured() then keeps auth in effect rather than opening.
 _KEY_READ_RETRIES = 8
 _KEY_READ_BACKOFF = 0.01       # seconds; escalates linearly to the cap
 _KEY_READ_BACKOFF_CAP = 0.05
@@ -155,16 +147,11 @@ def set_api_key(key: Optional[str]) -> None:
         raise ValueError(
             f"API key must be at least {MIN_KEY_LEN} characters long.")
     if not _KEY_CHARSET.match(key):
-        # A key is carried in an HTTP Authorization header, which cannot hold these
-        # characters reliably. A NON-ASCII key is the sharp case and is verified:
-        # clients send UTF-8 but RFC 7230 obs-text decodes latin-1, so the server
-        # sees mojibake and refuses the owner's OWN key from most clients. Spaces
-        # and control characters break or inject into the header outright. Refuse at
-        # set time rather than persist a key that mysteriously fails to log in.
-        # This guard does NOT make verify() safe: LOCALM_API_KEY and a hand-edited
-        # auth.key never come through here, and a hostile caller picks its own
-        # presented token anyway. verify() is total on its own (see ct_equal);
-        # this only stops you CHOOSING a key that will not work.
+        # A key is carried in an HTTP Authorization header. Clients send UTF-8
+        # while RFC 7230 obs-text decodes latin-1, so a non-ASCII key arrives as
+        # mojibake and fails to match; spaces and control characters break or
+        # inject into the header. This constrains what may be CHOSEN here; it does
+        # not make verify() safe, which is total on its own.
         raise ValueError(
             "API key must use only letters, numbers, '-' and '_' (the characters "
             "'localm key generate' produces). Spaces, punctuation, and non-English "
@@ -177,19 +164,10 @@ def set_api_key(key: Optional[str]) -> None:
     _atomic_write_private(path, key.strip() + "\n")
     # The key changed, so any memoised derivation for the OLD one is stale.
     _forget_cached_digests()
-    # Derive at SET time, not on the per-request verify path: this is the
-    # moment we are allowed to spend real time on a memory-hard KDF, and it
-    # also means the salt is on disk before anything can stamp an identity
-    # with it. NOT just one ~100ms derivation, though: _owner_digest first
-    # re-verifies every KEPT historical record (_OWNER_KDF_KEEP) before
-    # minting a new one, so a caller that sets the key repeatedly (an admin
-    # route, a rotation loop, tests/test_auth.py's own 200x charset test)
-    # pays that on every call, in whatever thread called it - MEASURED
-    # 2026-08-12 at up to 9 full derivations (~1.7-2s on a loaded box) before
-    # _OWNER_KDF_KEEP was cut from 8 to 3 for exactly this reason (see
-    # dev-notes/FIX-2026-08-12-test-set-api-key-hang-preexisting.md). Still
-    # best-effort regardless: a failure costs a derivation on first use, not
-    # access.
+    # Derived at set time rather than on the per-request verify path. _owner_digest
+    # re-verifies every kept record before minting a new one, so a caller that sets
+    # the key repeatedly pays one derivation per kept record; _OWNER_KDF_KEEP bounds
+    # that. Best-effort: a failure costs a derivation on first use, not access.
     try:
         _owner_digest(key)
     except Exception as e:
@@ -222,9 +200,8 @@ def clear_api_key() -> list[dict[str, str]]:
                          "path": str(keystore_file()),
                          "error": f"{type(e).__name__}: {e}"})
     # The derivation records describe credentials that no longer exist. They hold
-    # no plaintext and authenticate nothing, but a clear that leaves credential
-    # artefacts behind is not a clear - and a stale salt would silently re-link a
-    # future identical key to the cleared install's identities.
+    # no plaintext, but a stale salt would re-link a future identical key to the
+    # cleared install's identities.
     try:
         owner_kdf_file().unlink(missing_ok=True)
     except OSError as e:
@@ -252,17 +229,10 @@ def require_auth_enabled() -> bool:
         from localm.config import load_config
         return bool(load_config().get("require_auth", False))
     except Exception:
-        # Fail CLOSED, not open (see docstring, LM-DA-021): an admin who
-        # explicitly set require_auth: true must never silently drop to open
-        # mode because of a read glitch. load_config() itself only raises here
-        # for something severe (e.g. ensure_dirs() hitting an inaccessible home
-        # dir) - ordinary corrupt/locked config.json is already absorbed by its
-        # own .bak/retry fallback in config._read_json and never reaches this
-        # except - so an install that never touched require_auth hitting this
-        # rare path gets a temporary lockout instead of a silently-open server,
-        # the safe direction for a security kill-switch. Admins who need a
-        # config-independent fail-closed switch regardless of this reasoning
-        # can still set LOCALM_REQUIRE_AUTH (checked above, before this try).
+        # Fail closed: an admin who set require_auth: true must not drop to open
+        # mode on a read glitch. load_config() only raises here for something
+        # severe; ordinary corrupt config.json is absorbed by its own .bak fallback.
+        # LOCALM_REQUIRE_AUTH is checked before this try and is config-independent.
         logger.warning(
             "config unreadable; cannot confirm require_auth - treating as "
             "required (fail closed) until it can be read")
@@ -284,18 +254,14 @@ def _atomic_write_private(path: Path, text: str) -> None:
 # --------------------------------------------------------------------------- #
 #  Scoped keystore (auth.json) - named keys with explicit scopes              #
 # --------------------------------------------------------------------------- #
-# The owner key above (env LOCALM_API_KEY / auth.key) is implicitly ADMIN.
-# auth.json holds ADDITIONAL named keys, each limited to a set of scopes, so a
-# client (a chat session, a read-only dashboard, a third-party tool) can be
-# issued a key that does only what it needs. Only a hash of each key is stored;
-# the plaintext is shown once at creation and is never recoverable.
+# The owner key (env LOCALM_API_KEY or auth.key) is implicitly ADMIN. auth.json
+# holds additional named keys, each limited to a set of scopes. Only a hash of
+# each key is stored; the plaintext is shown once at creation.
 
 
-# Serializes the read-modify-write of the keystore. create_key/revoke_key both
-# load the full record list, mutate it, and write it back; without this lock two
-# concurrent calls can read the same list and the last writer clobbers the
-# other's change (a lost write / dropped key). Module-level so it is shared by
-# every caller in the process.
+# Serializes the read-modify-write of the keystore: create_key and revoke_key both
+# load the record list, mutate it and write it back, so without this the last
+# writer clobbers the other's change.
 _KEYSTORE_LOCK = threading.Lock()
 
 
@@ -308,27 +274,19 @@ def keystore_file() -> Path:
 # --------------------------------------------------------------------------- #
 #  Key digests: a KDF for the user-choosable owner key, fast for generated ones #
 # --------------------------------------------------------------------------- #
-# Two kinds of secret are digested here and they are NOT equivalent:
+# Two kinds of secret are digested here:
 #
-#   * NAMED KEYSTORE KEYS are always secrets.token_urlsafe(32) (create_key is the
-#     only writer) - 256 bits of CSPRNG output. No dictionary and no rainbow table
-#     touches 2^256, so a KDF's work factor buys nothing. These stay on the cheap
-#     path, marked EXPLICITLY on the record (never inferred from the key's shape).
-#   * THE OWNER KEY CAN BE USER-CHOSEN and may be human-memorable. `localm key set
-#     KEY` persists a key the user provides, and LOCALM_API_KEY / a hand-edited
-#     auth.key bypass set_api_key entirely, so they are not even length- or
-#     charset-checked. Its digest is PERSISTED (sessions.json key_hash, jobs.json
-#     owner), where one fast unsalted hash is an offline brute-force oracle that
-#     recovers the PLAINTEXT - which does authenticate. That is CodeQL alert 88
-#     (py/weak-sensitive-data-hashing) and it is a true positive.
+#   * NAMED KEYSTORE KEYS are always secrets.token_urlsafe(32), so 256 bits of
+#     CSPRNG output. They stay on the cheap path, marked explicitly on the record
+#     rather than inferred from the key's shape.
+#   * THE OWNER KEY can be user-chosen and human-memorable, and its digest is
+#     persisted (sessions.json key_hash, jobs.json owner), so it gets a salted
+#     scrypt derivation.
 #
-# The digest is also a stable PRINCIPAL IDENTIFIER: it is recomputed later and
-# compared with == (jobs.runner._shell_still_authorized, principal_id -> job
-# ownership, sessions.key_hash). So it must be DETERMINISTIC for a given key - a
-# per-call random salt would break every one of those. The salt is therefore
-# persisted PER KEY, and the derivation is memoised per process (see
-# _digest_cache) so the KDF never runs on the per-request verify path more than
-# once per key.
+# The digest is also a stable PRINCIPAL IDENTIFIER, recomputed later and compared
+# with ==, so it must be deterministic for a given key. The salt is therefore
+# persisted per key, and the derivation is memoised per process so the KDF never
+# runs more than once per key on the verify path.
 _SCRYPT_N = 2 ** 14            # RFC 7914 interactive-login cost
 _SCRYPT_R = 8
 _SCRYPT_P = 1
@@ -338,30 +296,18 @@ _SCRYPT_DKLEN = 32
 # fails the derivation outright when it is too low.
 _SCRYPT_MAXMEM = 64 * 1024 * 1024
 
-# Marker recorded ON a stored record saying which construction produced its
-# digest, so the cheap path is a DECLARED property of that record and not a guess
-# from the key's shape. A record with no marker predates this and is a generated
-# keystore token (create_key was the only writer), so it reads as _ALG_FAST and is
-# upgraded in place on its next successful verify.
+# Marker recorded on a stored record naming which construction produced its
+# digest, so the cheap path is a declared property rather than a guess from the
+# key's shape. A record with no marker is a generated keystore token, reads as
+# _ALG_FAST, and is upgraded in place on its next successful verify.
 _ALG_FAST = "sha256"
 _ALG_KDF = "scrypt"
 
-# How many owner-key verifier records to keep. The same install legitimately sees
-# more than one owner key over time (a LOCALM_API_KEY override for one run, then
-# the file again; a rotation), and the SAME key must always derive the SAME digest
-# or job ownership and session identity would flip underneath the user. Keeping a
-# few records makes that stable; the cap stops the file growing without bound.
-#
-# It is ALSO the direct bound on how many full scrypt derivations a single
-# set_api_key call can burn: _owner_kdf_record_for re-verifies EVERY kept
-# record (a real derivation each, there is no cheap way to rule one out - see
-# _memo_key's docstring on why a fast index was rejected here) before minting
-# a new one. MEASURED 2026-08-12: at the original value of 8, a saturated
-# records list made every set_api_key call run up to 9 full derivations
-# (~1.7-2s on a loaded box, not the ~100ms its call site used to budget for) -
-# see dev-notes/FIX-2026-08-12-test-set-api-key-hang-preexisting.md. 3 is the
-# smallest value with headroom above the 2-key scenario described above (an
-# env-var override alternating with the persisted file).
+# How many owner-key verifier records to keep. An install legitimately sees more
+# than one owner key over time, and the same key must always derive the same
+# digest or job ownership and session identity flip. The cap also bounds how many
+# full scrypt derivations one set_api_key call can burn: _owner_kdf_record_for
+# re-verifies every kept record before minting a new one.
 _OWNER_KDF_KEEP = 3
 
 
@@ -394,28 +340,20 @@ def _scrypt_derive(key: str, salt: bytes, n: int, r: int, p: int,
                           maxmem=_SCRYPT_MAXMEM).hex()
 
 
-# Memoises the EXPENSIVE derivation only: fast-path digests are never inserted, so
-# a caller spraying random bearer tokens cannot pollute or grow this (the entries
-# it would create are exactly the ones we refuse to make). Bounded LRU because an
-# unbounded cache on a per-request path is a memory leak. Keyed on the presented
-# secret's fast DIGEST plus the data home - never the plaintext, and never a bare
-# digest, because one process legitimately serves more than one LOCALM_HOME (the
-# test suite does) and each home has its own salt.
+# Memoises the expensive derivation only; fast-path digests are never inserted,
+# so a caller spraying random bearer tokens cannot grow this. Bounded LRU. Keyed
+# on the presented secret's fast digest plus the data home, since one process can
+# serve more than one LOCALM_HOME and each has its own salt.
 _DIGEST_CACHE_MAX = 64
 _digest_cache: "OrderedDict[str, str]" = OrderedDict()
 _DIGEST_CACHE_LOCK = threading.Lock()
 
-# Serialises MINTING an owner-key record. Without it two concurrent requests
-# presenting the owner key with a cold memo both find no record, both mint a
-# FRESH SALT, and both write - so the two requests stamp two different identities
-# and only one of them matches what ends up on disk. The identity would then be
-# unstable exactly when the server is busiest. Distinct from _DIGEST_CACHE_LOCK
-# (which only guards the dict) because it must be held across the whole
-# read-derive-write, and it is taken BEFORE any sessions lock, never after.
-#
-# RLock, not Lock: _hash_key takes it to make its check-then-derive atomic and
-# then calls _owner_digest, which takes it again so that set_api_key's DIRECT
-# call is covered by the same mutex. A plain Lock would deadlock that nesting.
+# Serialises MINTING an owner-key record: without it two concurrent requests with
+# a cold memo both mint a fresh salt and both write, stamping two identities.
+# Distinct from _DIGEST_CACHE_LOCK, which only guards the dict, because this is
+# held across the whole read-derive-write. Taken BEFORE any sessions lock, never
+# after. RLock because _hash_key holds it and then calls _owner_digest, which
+# takes it again.
 _OWNER_KDF_LOCK = threading.RLock()
 
 
@@ -473,12 +411,9 @@ def _save_owner_kdf(records: list) -> None:
     ensure_dirs()
     path = owner_kdf_file()
     path.parent.mkdir(parents=True, exist_ok=True)
-    # Restrict the TEMP file (it already holds the whole payload) before the
-    # rename, so a crash between the two lines cannot leave an unrestricted
-    # copy behind. This function had that half right while set_api_key and
-    # _save_keystore did not; _atomic_write_private is the one implementation
-    # all three now share, and it additionally creates the temp file already
-    # restricted rather than tightening it a moment later.
+    # Restricts the TEMP file, which already holds the whole payload, before the
+    # rename, so a crash between the two cannot leave an unrestricted copy.
+    # _atomic_write_private also creates the temp already restricted.
     _atomic_write_private(path, json.dumps({"v": 1, "records": records},
                                            indent=2))
 
@@ -523,11 +458,9 @@ def _owner_digest_locked(key: str) -> str:
     try:
         _save_owner_kdf(records[-_OWNER_KDF_KEEP:])
     except OSError as e:
-        # Not fatal: the digest is still correct for THIS process, so auth keeps
-        # working. But it is not persisted, so the next process mints a different
-        # salt and any identity stored under this one stops matching. Say so -
-        # a silent failure here would look like a stable identity that is not
-        # (AGENTS.md rule 5).
+        # Not fatal: the digest is correct for this process, so auth keeps working.
+        # It is not persisted, so the next process mints a different salt and any
+        # identity stored under this one stops matching.
         logger.warning("could not persist the owner key derivation record %s "
                        "(%s); sessions and jobs stamped in this process may not "
                        "be recognised after a restart", owner_kdf_file(), e)
@@ -656,20 +589,15 @@ def _save_keystore(records: list) -> None:
     _atomic_write_private(path, json.dumps(records, indent=2))
 
 
-# Filesystem-access level a credential may reach on the SERVER HOST. A single
-# graded dial (nested: host > shared > none), NOT a scope, so it can be set below
-# host even on an owner's own device (the device just carries a key with a lower
-# level). "none" = no host FS at all (device upload only); "host" = the whole
+# Filesystem-access level a credential may reach on the server host: a graded
+# dial (host > shared > none), not a scope, so it can be set below host even on
+# an owner's own device. "none" is no host filesystem at all; "host" is the whole
 # server filesystem.
 #
-# "shared" is RESERVED scaffolding for a future "confined to owner-designated
-# shared roots" tier. It is a recognised level (so a stored value normalises and
-# fails safe) but is NOT enforced anywhere yet: require_fs_host() grants only
-# "host", so a "shared" key currently reaches no more host FS than "none". It is
-# deliberately kept OUT of the user-facing `localm key create --fs-access` choices
-# until that confinement is built, so we never advertise a tier that does nothing
-# (AGENTS rule 5: do not hide problems). Implement the confinement, then re-expose
-# it in the CLI choice.
+# "shared" is reserved scaffolding and is NOT enforced anywhere yet:
+# require_fs_host() grants only "host", so a "shared" key currently reaches no
+# more host filesystem than "none". It is kept out of the `localm key create
+# --fs-access` choices until the confinement exists.
 FS_ACCESS_LEVELS = ("none", "shared", "host")
 
 
@@ -751,12 +679,10 @@ def create_key(name: str, scope_list, *, allow_privileged: bool = False,
         "id": secrets.token_hex(6),
         "name": (name or "").strip() or "key",
         # _fast_digest, not _hash_key: this key was just generated by
-        # generate_key(), so it is 256 bits of CSPRNG output by construction and
-        # the cheap digest is sound. The "alg" marker RECORDS that decision on the
-        # row, so the verify path reads it as a declared property instead of
-        # inferring it from the key's length or alphabet - a user-chosen key is
-        # indistinguishable from a token by shape, which is what made the original
-        # "it is always a generated token" premise wrong (CodeQL 88 / C13).
+        # generate_key(), so it is 256 bits of CSPRNG output and the cheap digest
+        # is sound. The "alg" marker records that on the row, so the verify path
+        # reads it as a declared property rather than inferring it from the key's
+        # shape.
         "hash": _fast_digest(key),
         "alg": _ALG_FAST,
         "scopes": clean,
@@ -788,15 +714,10 @@ def revoke_key(key_id: str) -> bool:
         try:
             from localm import sessions
             if sessions.revoke_by_key_hash(target["hash"]) is None:
-                # WARNING, not debug: the docstring above calls this
-                # belt-and-suspenders because the cookie path re-validates a
-                # scoped session's key every request - but an ADMIN-scoped
-                # session is exempt from that re-check (so an owner-key roll
-                # cannot sign the owner out). So for an ADMIN-scoped DEVICE key
-                # this cleanup IS the enforcement, and a failed write leaves its
-                # cookie working. The key itself is genuinely revoked either way,
-                # which is what this function reports, so the honest altitude is
-                # a warning naming the residue rather than failing the revoke.
+                # WARNING, not debug: an ADMIN-scoped session is exempt from the
+                # cookie path's per-request key re-check, so for an admin-scoped
+                # device key this cleanup is the enforcement and a failed write
+                # leaves its cookie working. The key itself is revoked either way.
                 logger.warning(
                     "key %s was revoked, but its browser sessions could not be "
                     "dropped; an admin-scoped session for it may still be "
@@ -823,10 +744,9 @@ def scopes_for_key_hash(key_hash: Optional[str]) -> Optional[set]:
     if not key_hash:
         return None
     now = time.time()
-    # _load_keystore() fails OPEN (returns [] on OSError/ValueError), so a
-    # transient unreadable auth.json makes this return None - which the contract
-    # above requires callers to read as DENY. That is the safe direction, and it
-    # is why the return is Optional rather than a bare set.
+    # _load_keystore() returns [] on OSError/ValueError, so a transient unreadable
+    # auth.json makes this return None, which callers must read as DENY. That is
+    # why the return is Optional rather than a bare set.
     for r in _load_keystore():
         if r.get("hash") == key_hash:
             exp = r.get("expires")
@@ -868,10 +788,8 @@ def _owner_key_present() -> bool:
     if status == _KEY_ABSENT:
         return False                       # genuinely absent -> open by design
     if status == _KEY_UNREADABLE:
-        # Present but we cannot read or decode it (a permission/profile change, a
-        # parent-directory problem, a directory in its place, undecodable bytes):
-        # we cannot tell whether a key exists, so fail CLOSED. Surfaced by
-        # _read_key_file's own warning on the value path.
+        # Present but unreadable or undecodable: whether a key exists cannot be
+        # determined, so fail closed. _read_key_file warns on the value path.
         return True
     if _key_text_or_none(text) is not None:
         # Re-arm the notice: a server that later drops KEYED -> OPEN (the file is
@@ -894,10 +812,9 @@ def any_key_configured() -> bool:
     return _owner_key_present() or _keystore_configured()
 
 
-# Throttle for last-used stamping: verify() runs on EVERY request, so it must not
-# rewrite the keystore each time. Stamp a key's last_used at most once per this many
-# seconds (per process), tracked in memory so the hot path stays lock-free until a
-# write is actually due.
+# Throttle for last-used stamping: verify() runs on every request, so a key's
+# last_used is stamped at most once per this many seconds per process, tracked in
+# memory so the hot path stays lock-free until a write is due.
 _LAST_USED_THROTTLE_S = 300
 _last_used_writes: dict = {}
 _LAST_USED_LOCK = threading.Lock()
@@ -909,11 +826,10 @@ def _touch_last_used(key_hash: str) -> None:
         return
     now = time.monotonic()
     with _LAST_USED_LOCK:
-        # Use dict-ABSENCE (not a 0.0 sentinel) for "never stamped this process":
-        # time.monotonic()'s epoch is platform-defined and is seconds-since-boot
-        # on Linux, so on a freshly-booted machine `now` can be < the throttle
-        # window and `now - 0.0` would wrongly throttle the very FIRST stamp,
-        # leaving last_used None until 5 min of uptime had passed.
+        # Dict absence, not a 0.0 sentinel, for "never stamped this process":
+        # time.monotonic()'s epoch is platform-defined and is seconds-since-boot on
+        # Linux, so `now - 0.0` would wrongly throttle the first stamp on a
+        # freshly-booted machine.
         prev = _last_used_writes.get(key_hash)
         if prev is not None and now - prev < _LAST_USED_THROTTLE_S:
             return
