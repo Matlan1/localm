@@ -32,8 +32,7 @@ def read_activity(scheme: str, port, instance_token: Optional[str] = None,
     try:
         return "ok", r.json()
     except ValueError:
-        # A 200 whose body is not JSON is not an empty activity list; it means
-        # something other than localm answered, or answered wrongly.
+        # A 200 whose body is not JSON means something other than localm answered.
         return "http", r.status_code
 
 

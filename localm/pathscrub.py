@@ -8,16 +8,9 @@ import sys
 from pathlib import Path
 from typing import Callable, List, Tuple
 
-# A home-rooted path whose account segment must go even when it is NOT exactly
-# Path.home() - a different account, or any path under the well-known user
-# roots that an exact-prefix replacement would miss.
-#
-# Kept as a PATTERN STRING, not a pre-compiled object: the flags depend on
-# sys.platform, and compiling at import time would freeze them, so a test that
-# patches sys.platform to exercise the Windows branch would silently get the
-# case-SENSITIVE regex. The original implementation this replaces read
-# sys.platform per call, and this stays byte-identical to it. re caches compiled
-# patterns, so there is no per-call compile cost.
+# Matches a home-rooted path's account segment under the well-known user roots.
+# Kept as a pattern STRING, not a compiled object: the flags depend on
+# sys.platform, which is read per call.
 _USER_ROOT_PATTERN = r"([A-Za-z]:[\\/]Users[\\/]|/home/|/Users/)[^\\/\r\n]+"
 
 
@@ -78,8 +71,8 @@ def _machine_prefixes() -> List[Tuple[str, str]]:
         add(Path(localm.__file__).resolve().parent.parent, "<install>")
     except Exception:
         pass
-    # The venv / interpreter root: third-party frames live under it, and on a
-    # per-user install it carries the account name too.
+    # The venv / interpreter root, which carries the account name on a per-user
+    # install.
     add(getattr(sys, "prefix", ""), "<env>")
     add(getattr(sys, "base_prefix", ""), "<env>")
 

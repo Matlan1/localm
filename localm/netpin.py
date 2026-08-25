@@ -29,8 +29,8 @@ class _PinnedHTTPSConnectionPool(HTTPSConnectionPool):
     def _new_conn(self):
         conn = super()._new_conn()
         if self._pinned_ip:
-            # conn.host is still the real hostname here; capture it for SNI /
-            # cert matching BEFORE repointing the socket at the pinned IP.
+            # Capture the real hostname for SNI and cert matching before
+            # repointing the socket at the pinned IP.
             if conn.server_hostname is None:
                 conn.server_hostname = conn.host
             conn._dns_host = self._pinned_ip

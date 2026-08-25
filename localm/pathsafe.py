@@ -9,41 +9,9 @@ from pathlib import Path
 
 from fastapi import HTTPException
 
-# Characters Windows itself refuses to let a real filename contain
-# (docs.microsoft.com/windows/win32/fileio/naming-a-file - "Naming
-# Conventions"), plus the C0 control range - MINUS '/' and '\\', deliberately:
-# both confined_name and confined_under already treat separators correctly
-# and PLATFORM-APPROPRIATELY on their own (confined_name via its
-# name != Path(name).name check, which - unlike a blanket rejection - accepts
-# a literal backslash as an ORDINARY basename character on POSIX, matching
-# PurePosixPath's own behavior and this module's own tested contract, see
-# test_pathsafe_confined_name.py's test_backslash_is_an_ordinary_basename_on_posix;
-# confined_under via its explicit split on '/' after normalizing '\\' to it).
-# Including them here would silently override that already-correct,
-# already-tested platform split with a blanket, POSIX-incorrect rejection -
-# a regression this constant must not introduce while closing an unrelated gap.
-#
-# ':' is the character that matters most of what remains: it does not fail
-# file creation at all - it opens an NTFS Alternate Data Stream instead, so
-# 'somefile.exe:hidden.gguf' both passes a naive "no separators" check AND
-# lands INSIDE base (the confinement check below genuinely holds - this is
-# not CWE-22/path-injection), while writing its content into a stream hidden
-# from a normal directory listing behind an innocuous, apparently-empty
-# sibling 'somefile.exe'. Live-confirmed against this exact module:
-# confined_name(base, "somefile.exe:hidden.gguf") was accepted and
-# successfully wrote a hidden stream before this constant existed. Near-same
-# set as localm/model_manager/gguf.py's _safe_models_filename uses (that
-# module's own _WINDOWS_RESERVED_CHARS, which #1068 hardened first) - that
-# one also includes '/' and '\\', safe there only because that validator's
-# OWN separate Path(filename).name check runs first and unconditionally
-# rejects any separator before this set is even consulted, so the overlap is
-# redundant rather than reachable; duplicated here (not imported) rather
-# than shared, since pathsafe is the lower-level, backend-agnostic module
-# gguf.py (or anything else) may depend on, never the reverse. Exported (no
-# leading underscore) so a caller needing a bare character check without a
-# base_dir - e.g. a filename that will be folded into a synthesized,
-# already-unique on-disk name rather than resolved directly - can reuse the
-# SAME set instead of maintaining its own copy that can drift.
+# Characters Windows refuses in a filename, plus the C0 control range.
+# '/' and '\' are excluded: the confinement functions below handle separators
+# themselves, per platform.
 WINDOWS_RESERVED_NAME_CHARS = frozenset('<>:"|?*') | frozenset(chr(c) for c in range(32))
 
 
@@ -84,32 +52,11 @@ def confined_under(base: Path, relpath: str) -> Path:
         raise ValueError(f"path resolves to no name: {relpath!r}")
     if ".." in parts:
         raise ValueError(f"traversal component not allowed: {relpath!r}")
-    # PER-COMPONENT, not just position 1 of the whole string. The early check
-    # above only sees a drive on the FIRST component, so ``a/C:evil`` slipped
-    # past it - and that is not a harmless miss. pathlib's joinpath treats a
-    # drive-relative component against a SAME-DRIVE base by silently DROPPING
-    # the drive: base.joinpath("a", "C:evil") -> base/a/evil (measured on 3.12).
-    # The result stays strictly under base, so the resolve-based containment
-    # check below cannot see it - it is not an escape, it is a SILENT RENAME.
-    # For the ComfyUI delete call site that means unlinking a real file that is
-    # NOT the one ComfyUI named, while reporting containment succeeded, which is
-    # exactly the failure AGENTS.md rule 5 forbids. It also reproduces only when
-    # base is on the same drive as the injected letter, so it would present as
-    # "works on my D: install, deletes the wrong file on a C: one".
-    # Reported by the WS2 lane against this exact call site.
+    # Reject a drive-qualified component at any position, not just the first.
     for p in parts:
         if len(p) >= 2 and p[1] == ":":
             raise ValueError(f"drive-qualified path component not allowed: {relpath!r}")
-    # Reserved characters (WINDOWS_RESERVED_NAME_CHARS - see that constant's
-    # docstring above confined_name), checked per component now that
-    # separators have already been consumed by the split above so neither
-    # '/' nor '\\' can appear WITHIN a component here. ':' is the one with a
-    # live consequence beyond position 1 (already covered above): NTFS opens
-    # an Alternate Data Stream for it rather than failing the write, so e.g.
-    # 'sub/somefile.exe:hidden.gguf' stayed confined (this check exists
-    # precisely because that DOES pass containment - it is not CWE-22) while
-    # writing invisibly behind an apparently-empty sibling file. Live-
-    # confirmed against this exact function before this check existed.
+    # Reject a reserved character in any component.
     for p in parts:
         if set(p) & WINDOWS_RESERVED_NAME_CHARS:
             raise ValueError(f"reserved character in path component not allowed: {relpath!r}")
@@ -118,23 +65,11 @@ def confined_under(base: Path, relpath: str) -> Path:
         base_resolved = base.resolve()
     except (OSError, ValueError) as e:
         raise ValueError(f"path could not be resolved: {relpath!r} ({e})")
-    # Strictly BELOW base: base itself is not a valid target (an empty filename
-    # must not resolve to "delete the output directory").
+    # Strictly below base: base itself is not a valid target.
     if base_resolved not in resolved.parents:
         raise ValueError(f"path escapes {base_resolved}: {relpath!r}")
-    # NAME PRESERVATION, per component, walking back up from the resolved leaf.
-    # confined_name has always had this (resolved.name != name) as a side effect
-    # of its single-component check; confined_under never got the equivalent,
-    # even though its own docstring names "the ComfyUI delete call site" as a
-    # consumer - an 8.3 short name resolving to a pre-existing, differently-named
-    # sibling stays strictly under base (this function's only check until now),
-    # so containment held while the identity silently changed. Live-confirmed
-    # against this exact function: confined_under(base, "LONGMO~1.GGU") returned
-    # a DIFFERENT real file's resolved path with no error, before this loop
-    # existed. Checked at every nesting level, not just the last component - an
-    # aliased INTERMEDIATE directory (`subfolder` in ComfyUI's own reply) would
-    # otherwise still resolve strictly under base while silently descending into
-    # the wrong subdirectory.
+    # Reject a component whose resolved name differs from the requested one,
+    # at every nesting level.
     node = resolved
     for part in reversed(parts):
         if node.name != part:
@@ -182,14 +117,12 @@ def is_unc_or_device_path(raw: str) -> bool:
     """True if *raw* is Windows UNC or device-namespace syntax: ``\\\\host\\share``, ``\\\\.\\PhysicalDrive0``, ``\\\\?\\C:\\``, or the ``//host/share`` spelling."""
     if raw[:2] in ("\\\\", "//", "\\/", "/\\"):
         return True
-    # Authoritative backstop: any non-empty drive that is NOT the "X:" form is a
-    # UNC or device root (``\\host\share``, ``\\?\C:``, ``\\.\PhysicalDrive0``).
+    # Any non-empty drive that is not the "X:" form is a UNC or device root.
     drive = ntpath.splitdrive(raw)[0]
     return bool(drive) and not (len(drive) == 2 and drive[1] == ":")
 
 
-# Win32 GetDriveTypeW return code for a drive mapped to a network share
-# (docs.microsoft.com/windows/win32/api/fileapi/nf-fileapi-getdrivetypew).
+# Win32 GetDriveTypeW return code for a drive mapped to a network share.
 _DRIVE_REMOTE = 4
 
 
@@ -211,16 +144,10 @@ def reject_unsafe_path_string(raw: str, *, require_absolute: bool = False,
                                reject_network_drives: bool = False) -> None:
     """Reject a caller-supplied path string LEXICALLY, before any filesystem call."""
     s = raw or ""
-    # BACKSLASH-LED UNC/device forms are refused on every platform: a leading
-    # ``\\`` or ``\/`` is not a meaningful prefix for a local path on POSIX
-    # either, so there is nothing legitimate to protect there.
+    # Backslash-led UNC and device forms are refused on every platform.
     if s[:2] in ("\\\\", "\\/"):
         raise ValueError("UNC and device paths are not allowed")
-    # SLASH-LED forms (``//host/share``, ``/\host/share``) are refused on Windows
-    # ONLY, via the full predicate so device namespaces and mixed separators are
-    # covered rather than re-enumerated here. On POSIX a leading ``//`` is a legal
-    # prefix equivalent to ``/``, and this function's input is a path the USER
-    # named, so refusing it there would break a legitimate local folder.
+    # Slash-led UNC and device forms are refused on Windows only.
     if os.name == "nt" and is_unc_or_device_path(s):
         raise ValueError("UNC and device paths are not allowed")
     if reject_network_drives and is_mapped_network_drive(s):

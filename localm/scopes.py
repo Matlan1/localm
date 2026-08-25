@@ -13,9 +13,8 @@ PLUGINS_ADMIN = "plugins:admin"   # enable/disable/install/uninstall (privileged
 KEYS_ADMIN    = "keys:admin"      # create / scope / revoke API keys (privileged)
 ADMIN         = "admin"           # wildcard owner scope: implies every scope
 
-# --- First-party plugin capabilities (each == the plugin's name) ----------- #
-# Third-party plugins declare their own scope (== their name) in the manifest;
-# it is registered at install time via is_valid_scope(..., extra=...).
+# First-party plugin capabilities (each == the plugin's name). A third-party
+# plugin registers its own scope at install time via is_valid_scope(extra=...).
 CHAT  = "chat"     # the built-in, always-enabled chat plugin
 CODER = "coder"            # restricted coder: read + confined edit, no shell
 CODER_FULL = "coder:full"  # unrestricted coder (shell exec); PRIVILEGED, owner-only to mint
@@ -56,8 +55,7 @@ EXTRA_SCOPES: dict[str, str] = {
     CODER_FULL: "AI coding agent - FULL: shell execution + edits (privileged)",
 }
 
-# Scopes that must never be granted implicitly or to an untrusted key.
-# coder:full hands out shell execution, so only the owner may mint a key with it.
+# Scopes that are never granted implicitly or to an untrusted key.
 PRIVILEGED_SCOPES = frozenset(
     {PLUGINS_ADMIN, KEYS_ADMIN, CONFIG_WRITE, ADMIN, CODER_FULL})
 

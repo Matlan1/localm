@@ -34,17 +34,12 @@ def create_listen_socket(host: str, port: int) -> socket.socket:
         host or None, port, type=socket.SOCK_STREAM, flags=socket.AI_PASSIVE)[0]
     sock = socket.socket(family, socktype, proto)
     try:
-        # Match what asyncio's create_server would have done: SO_REUSEADDR on
-        # POSIX only. On Windows it does not mean "reuse a TIME_WAIT port", it
-        # means another process may steal a port we are already serving, so
-        # asyncio deliberately omits it there and so do we.
+        # SO_REUSEADDR on POSIX only, matching asyncio's create_server.
         if os_name_is_posix():
             try:
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             except OSError:
-                # Best-effort convenience only; a bind that then hits TIME_WAIT
-                # surfaces as an ordinary OSError from the bind below, which the
-                # caller already reports. Nothing is silenced.
+                # Best-effort; a TIME_WAIT bind failure surfaces from the bind below.
                 pass
         if family == socket.AF_INET6 and (host or "").strip() == "::":
             _try_dual_stack(sock)

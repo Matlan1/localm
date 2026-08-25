@@ -5,10 +5,7 @@ from typing import Any, Iterator
 __all__ = ["split_jsonl", "iter_jsonl", "dumps_line", "dumps_lines", "UNSAFE_SEPARATORS"]
 
 #: Characters ``str.splitlines()`` treats as line breaks, mapped to their JSON
-#: escapes. The C0 members are already escaped by ``json.dumps``, so replacing
-#: them is a no-op that costs nothing and documents the full set; U+0085, U+2028
-#: and U+2029 are the ones that actually leak through with ``ensure_ascii=False``,
-#: and U+0085 is the one measured in the wild.
+#: escapes.
 UNSAFE_SEPARATORS = {
     "\x0b": "\\u000b",
     "\x0c": "\\u000c",

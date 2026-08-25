@@ -24,16 +24,11 @@ def atomic_write(path: Path, data: str) -> None:
                     raise
                 time.sleep(0.02)
     finally:
-        # On success the replace consumed tmp, so this is a no-op. On a give-up
-        # (or any other error) it stops ONE ORPHAN ACCUMULATING PER FAILURE next
-        # to the target (REG-631) - the give-up itself still raises, because a
-        # write that did not happen must never look like one that did.
+        # Removes the temp file when the replace gave up; a no-op on success.
         try:
             tmp.unlink(missing_ok=True)
         except OSError as e:
-            # Best-effort by design: the write's outcome is already decided, and
-            # raising here would turn a stray temp file into a broken write.
-            # Logged, not silenced (rule 5), so a persistent leak is discoverable.
+            # Best-effort: the write's outcome is already decided.
             from localm.debuglog import logger
             logger.debug("storekit: could not remove temp file %s (%s)", tmp, e)
 

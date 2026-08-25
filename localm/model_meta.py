@@ -11,8 +11,7 @@ from typing import Optional
 from .debuglog import logger
 
 _META_FILENAME = "model_meta.json"
-# Cap the number of remembered models so the file cannot grow without bound over
-# a machine's lifetime; oldest entries are dropped first (dict insertion order).
+# Cap on remembered models; oldest entries are dropped first.
 _MAX_ENTRIES = 256
 
 
@@ -74,8 +73,7 @@ def store_n_layers(model_path: str, n_layers: int) -> None:
             data.pop(next(iter(data)))
         path = _meta_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        # Per-process temp name so two localm instances sharing a LOCALM_HOME and
-        # loading the same model at once cannot interleave on one temp file.
+        # Per-process temp name, so two instances cannot share one temp file.
         tmp = path.with_suffix(f".json.tmp.{os.getpid()}")
         tmp.write_text(json.dumps(data), encoding="utf-8")
         os.replace(tmp, path)   # atomic: a torn write can never corrupt the cache

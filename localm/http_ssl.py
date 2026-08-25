@@ -20,9 +20,7 @@ class HttpsOnlyRedirect(urllib.request.HTTPRedirectHandler):
     """Refuse a redirect that leaves HTTPS for a weaker scheme."""
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        # newurl is already absolute here: http_error_302 urljoin()s it against
-        # the current request before calling us, so a relative Location cannot
-        # arrive with an empty scheme and read as "not https".
+        # newurl is already absolute: http_error_302 urljoins it before calling us.
         old = urllib.parse.urlsplit(req.get_full_url()).scheme.lower()
         new = urllib.parse.urlsplit(newurl).scheme.lower()
         if old == "https" and new != "https":
@@ -42,10 +40,7 @@ def _open(req, timeout, context, handlers):
 def _with_redirect_guard(handlers: Sequence[type]) -> tuple:
     """*handlers* with :class:`HttpsOnlyRedirect` prepended, unless the caller already supplied a redirect policy of its own."""
     handlers = tuple(handlers)
-    # Class OR instance, mirroring build_opener's own test: it accepts both, and
-    # a policy we failed to recognise would not replace ours - it would join it,
-    # leaving TWO redirect handlers on one opener and which one applies decided
-    # by registration order.
+    # Accepts a class or an instance, mirroring build_opener's own test.
     if any(issubclass(h, urllib.request.HTTPRedirectHandler) if isinstance(h, type)
            else isinstance(h, urllib.request.HTTPRedirectHandler)
            for h in handlers):
