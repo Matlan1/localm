@@ -56,10 +56,12 @@ def _maybe_persist_cli_mmproj(model: str, mmproj: Optional[str],
     backend = getattr(engine, "_backend", None)
     if not getattr(backend, "supports_images", False):
         return
+    from rich.markup import escape
+
     from ..model_manager import persist_cli_mmproj
     note = persist_cli_mmproj(model, mmproj)
     if note:
-        console.print(f"[dim]{note}[/dim]")
+        console.print(f"[dim]{escape(note)}[/dim]")
 
 
 
@@ -119,9 +121,11 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
     Pipe a prompt from stdin:
       echo "Explain RDNA2" | localm run qwen2.5-7b
     """
+    from rich.markup import escape
+
     if debug:
         from ..debuglog import enable_debug
-        console.print(f"[yellow]debug log:[/yellow] {enable_debug()}")
+        console.print(f"[yellow]debug log:[/yellow] {escape(str(enable_debug()))}")
 
     from ..audit import MODE_ENV_VAR, SessionMode, effective_mode
     if mode:
@@ -182,10 +186,12 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
             # mismatch, INFORM, and let the user decide). --no-server is the way out.
             if active and active != model:
                 console.print(
-                    f"[red]The localm server here serves [bold]{active}[/bold], not "
-                    f"the requested [bold]{model}[/bold].[/red]\n"
-                    f"[dim]Attaching would answer with {active}, so localm will not "
-                    f"do that silently. To run {model}, re-run with [bold]--no-server"
+                    f"[red]The localm server here serves "
+                    f"[bold]{escape(active)}[/bold], not "
+                    f"the requested [bold]{escape(model)}[/bold].[/red]\n"
+                    f"[dim]Attaching would answer with {escape(active)}, so localm "
+                    f"will not do that silently. To run {escape(model)}, re-run "
+                    f"with [bold]--no-server"
                     f"[/bold] (loads it in this process).[/dim]")
                 sys.exit(1)
             if state == "empty":
@@ -194,9 +200,11 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
                 # mid-stream; --no-server loads the model in this process.
                 console.print(
                     f"[red]A localm server is running for this directory but has no "
-                    f"model loaded, so it cannot serve [bold]{model}[/bold].[/red]\n"
+                    f"model loaded, so it cannot serve [bold]{escape(model)}[/bold]."
+                    f"[/red]\n"
                     f"[dim]Load a model on its Models page/API, or re-run with "
-                    f"[bold]--no-server[/bold] to run {model} in this process.[/dim]")
+                    f"[bold]--no-server[/bold] to run {escape(model)} in this "
+                    f"process.[/dim]")
                 sys.exit(1)
             # state == "unknown": the server answered our attach but we could not
             # read /v1/models (it needs the models scope, so a chat-scoped attach
@@ -205,9 +213,12 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
             engine = HttpEngine(
                 target["base_url"], token=attach_token,
                 model=active or model, display_name=active or model)
+            # show_url(): target["base_url"] can carry a bracketed IPv6 host
+            # (RFC 3986), the exact case show_url()'s own docstring documents -
+            # not just an arbitrary string that happens to reach this print.
             console.print(
-                f"[dim]connected to the localm server at {target['base_url']} "
-                f"(no second model load)[/dim]")
+                f"[dim]connected to the localm server at "
+                f"{show_url(target['base_url'])} (no second model load)[/dim]")
 
     autostart_attempted = False
     if engine is None and not no_server:
@@ -259,13 +270,13 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
     if engine is None:
         _note = _attach_fallback_note(no_server, attach_error, autostart_attempted)
         if _note:
-            console.print(f"[dim]{_note}[/dim]")
+            console.print(f"[dim]{escape(_note)}[/dim]")
         # allow_direct_path: `localm run /full/path` is a documented feature (the
         # help text right below advertises it), and *model* here is typed by the
         # operator on their own command line, not received over the wire.
         info = get_model_info(model, allow_direct_path=True)
         if info is None:
-            console.print(f"[red]Model not found:[/red] {model}")
+            console.print(f"[red]Model not found:[/red] {escape(model)}")
             console.print("  [dim]localm list[/dim]              - downloaded models")
             console.print("  [dim]localm models[/dim]            - GGUF shortcuts")
             console.print("  [dim]localm pull owner/repo[/dim]   - download HF model")
@@ -462,6 +473,8 @@ def _perf_line(n_tokens: int, t0: float, first_at: Optional[float],
 def _stream_once(engine, messages: list, **kwargs) -> str:
     """Stream response to stdout, print tok/s on completion, and return the full text."""
     import time as _time
+    from rich.markup import escape
+
     from localm.inference.backends.base import (
         ImageDecodeUnavailable,
         UnsupportedInputError,
@@ -485,7 +498,7 @@ def _stream_once(engine, messages: list, **kwargs) -> str:
         # image decoder, so "pick or download a vision model" sends the user
         # after a problem they do not have. This arm keeps the real message,
         # which names the missing library and the fix.
-        console.print(f"\n[red]{e}[/red]")
+        console.print(f"\n[red]{escape(str(e))}[/red]")
         return ""
     except UnsupportedInputError:
         # Capability-aware guidance instead of a flat "can't do that": name a
@@ -494,13 +507,15 @@ def _stream_once(engine, messages: list, **kwargs) -> str:
         backend = getattr(engine, "_backend", None)
         mmproj_failed = bool(getattr(backend, "mmproj_path", None))
         active_model_path = getattr(backend, "model_path", None)
-        console.print(f"\n[yellow]{vision_input_guidance(mmproj_failed=mmproj_failed, active_model_path=active_model_path)}[/yellow]")
+        guidance = vision_input_guidance(
+            mmproj_failed=mmproj_failed, active_model_path=active_model_path)
+        console.print(f"\n[yellow]{escape(guidance)}[/yellow]")
         return ""
     except RuntimeError as e:
         # An attached server returned an error (no model loaded, unreachable, ...).
         # Surface it cleanly instead of a traceback (the interactive path already
         # catches Exception; this is the single-prompt path).
-        console.print(f"\n[red]{e}[/red]")
+        console.print(f"\n[red]{escape(str(e))}[/red]")
         return ""
     end = _time.monotonic()
     print()
@@ -516,8 +531,10 @@ def _stream_once(engine, messages: list, **kwargs) -> str:
 
 def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
                  audit=None, transcript=None) -> None:  # noqa: C901
+    from rich.markup import escape
+
     console.print(Panel(
-        f"[bold cyan]localm[/bold cyan] - {engine.display_name}\n"
+        f"[bold cyan]localm[/bold cyan] - {escape(engine.display_name)}\n"
         "[dim]Ctrl+C or [bold]/exit[/bold] to quit  ·  "
         "[bold]/clear[/bold] history  ·  [bold]/image <path>[/bold] attach image  ·  "
         "[bold]/help[/bold][/dim]",
@@ -530,7 +547,7 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
 
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
-        console.print(f"[dim]system: {system_prompt}[/dim]\n")
+        console.print(f"[dim]system: {escape(system_prompt)}[/dim]\n")
 
     while True:
         img_hint = f" [dim][{len(pending_images)} image(s) queued][/dim]" if pending_images else ""
@@ -600,7 +617,7 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
             printer.flush()
             console.print("\n[dim](interrupted)[/dim]")
         except Exception as e:
-            console.print(f"\n[red]Inference error: {e}[/red]")
+            console.print(f"\n[red]Inference error: {escape(str(e))}[/red]")
             continue
 
         response = "".join(parts) or "(interrupted)"
@@ -679,6 +696,8 @@ def _cmd_generate_media(label: str, arg: str, engine, console, home_dir) -> None
     file via the configured ComfyUI backend, unloading the chat model first to
     free VRAM. console + home_dir are passed in so a caller that resolved the
     (monkeypatchable) localm.cli.console / localm.cli.HOME_DIR is honoured here."""
+    from rich.markup import escape
+
     spec = _MEDIA_REPL[label]
     if engine is None:
         console.print(f"[dim]/{label} not available in this mode[/dim]")
@@ -690,11 +709,12 @@ def _cmd_generate_media(label: str, arg: str, engine, console, home_dir) -> None
     api = default_api_url()
     # Auto-launch ComfyUI from the configured comfy_launch_cmd/comfy_workdir (the
     # GUI does this; the CLI used to just bail - H1). Only unload the chat model
-    # once ComfyUI is actually available.
+    # once ComfyUI is actually available. escape(t): progress text embeds the
+    # user's own comfy_launch_cmd/comfy_workdir config values verbatim.
     ok, msg = ensure_comfy(
-        api, on_progress=lambda t: console.print(f"[dim]{t}[/dim]"))
+        api, on_progress=lambda t: console.print(f"[dim]{escape(t)}[/dim]"))
     if not ok:
-        console.print(f"[yellow]{msg}[/yellow]")
+        console.print(f"[yellow]{escape(msg)}[/yellow]")
         return
     import time as _t
     out_dir = home_dir / spec["subdir"]
@@ -712,7 +732,11 @@ def _cmd_generate_media(label: str, arg: str, engine, console, home_dir) -> None
         write_sidecar=not is_privacy,
         delete_outputs=is_privacy,
     )
-    console.print(message)
+    # escape(): message is a bare string passed straight to console.print - Rich
+    # parses "[...]" in ANY printed string, not just inside literal markup tags -
+    # and it embeds the generated output path plus, on failure, arbitrary
+    # exception/config text (see generate_image's own return sites).
+    console.print(escape(message))
     if ok:
         free_comfy_vram(api)
 
@@ -728,6 +752,8 @@ def _cmd_generate_image(cmd: str, arg: str, engine, console, home_dir) -> None:
 
 def _cmd_save(arg: str, messages: list, console) -> None:
     """REPL /save: write the conversation to JSON, confined to the cwd."""
+    from rich.markup import escape
+
     target = arg or "chat.json"
     # Confine writes to the current working directory: a path like "../x.json" or
     # an absolute path elsewhere must not let the REPL write outside cwd.
@@ -735,12 +761,12 @@ def _cmd_save(arg: str, messages: list, console) -> None:
     try:
         resolved = (cwd / target).resolve()
     except (OSError, ValueError) as e:
-        console.print(f"[red]Invalid save path: {e}[/red]")
+        console.print(f"[red]Invalid save path: {escape(str(e))}[/red]")
         return
     if resolved == cwd or cwd not in resolved.parents:
         console.print(
             f"[red]Refusing to save outside the current directory:[/red] "
-            f"{target}\n[dim]Use a path inside {cwd}[/dim]"
+            f"{escape(target)}\n[dim]Use a path inside {escape(str(cwd))}[/dim]"
         )
         return
     _save_chat(messages, str(resolved))
@@ -754,6 +780,8 @@ def _handle_command(
     engine=None,
 ) -> bool:
     """Handle a /command. Returns True if the session should exit."""
+    from rich.markup import escape
+
     # Resolve console + HOME_DIR from the package at call time so tests that
     # monkeypatch localm.cli.console / localm.cli.HOME_DIR affect this call site.
     from localm import cli as _cli
@@ -800,14 +828,16 @@ def _handle_command(
         else:
             p = Path(arg)
             if not p.exists():
-                console.print(f"[red]File not found:[/red] {arg}")
+                console.print(f"[red]File not found:[/red] {escape(arg)}")
             else:
                 pending_images.append(str(p.resolve()))
-                console.print(f"[dim]Queued {p.name} - will attach to your next message[/dim]")
+                console.print(
+                    f"[dim]Queued {escape(p.name)} - will attach to your next "
+                    f"message[/dim]")
     elif cmd == "images":
         if pending_images:
             for f in pending_images:
-                console.print(f"[dim]  {f}[/dim]")
+                console.print(f"[dim]  {escape(f)}[/dim]")
         else:
             console.print("[dim]No images queued.[/dim]")
     elif cmd == "system":
@@ -879,18 +909,24 @@ def _handle_command(
             from ..plugins import catalog
             hint = catalog.suggestion(cmd)
         if hint:
-            console.print(f"[yellow]{hint}[/yellow]")
+            # escape(): hint is only ever non-None for a command the catalog
+            # itself recognises (a fixed, hardcoded set), so this is currently
+            # provably safe - escaped anyway as defense-in-depth, the same
+            # reasoning #1463 applied to rag.py's collection names.
+            console.print(f"[yellow]{escape(hint)}[/yellow]")
         else:
-            console.print(f"[dim]Unknown: /{cmd} -- try /help[/dim]")
+            console.print(f"[dim]Unknown: /{escape(cmd)} -- try /help[/dim]")
     return False
 
 
 
 
 def _save_chat(messages: list, filepath: str) -> None:
+    from rich.markup import escape
+
     try:
         with open(filepath, "w", encoding="utf-8") as f:
             json.dump(messages, f, indent=2, ensure_ascii=False)
-        console.print(f"[green]✓[/green] Saved: {filepath}")
+        console.print(f"[green]✓[/green] Saved: {escape(filepath)}")
     except Exception as e:
-        console.print(f"[red]Save failed: {e}[/red]")
+        console.print(f"[red]Save failed: {escape(str(e))}[/red]")
