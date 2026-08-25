@@ -987,3 +987,18 @@ def test_every_rocm_pin_matches_the_current_tag():
                      if "rocm" in k and "-rocm-gfx" not in k]
     assert upstream_rocm, "upstream's own rocm assets should be pinned too"
     assert all(sl._PINNED_TAG in k for k in upstream_rocm), upstream_rocm
+
+
+def test_every_amd_rocm_family_has_a_pin_for_the_current_tag():
+    """The offline fallback for a detected gfx110X/gfx120X card reads its
+    sha256 from _PINNED_FALLBACK_SHA256 by constructing the filename from the
+    current _ROCM_TAG; a missing entry there returns a bare None instead of a
+    hash, silently skipping the sha256 check for that family's fallback
+    build. Every family _AMD_ROCM_ASSET_TAG can select must have a pin for
+    whatever tag is current, not just gfx103X."""
+    missing = []
+    for fam, asset_tag in sl._AMD_ROCM_ASSET_TAG.items():
+        name = f"llama-{sl._ROCM_TAG}-windows-rocm-{asset_tag}-x64.zip"
+        if name not in sl._PINNED_FALLBACK_SHA256:
+            missing.append((fam, name))
+    assert not missing, f"no pinned sha256 for {sl._ROCM_TAG!r}: {missing}"
