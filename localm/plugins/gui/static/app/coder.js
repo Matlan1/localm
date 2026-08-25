@@ -256,7 +256,14 @@ export function activateSession(id) {
   const bi = s && s.info.backend_info;
   const remote = $("coder-remote");
   if (bi && bi.leaves_machine) {
-    remote.textContent = `remote: ${bi.target}`;
+    // The HOST, not the whole URL. The session bar already carries eleven
+    // controls, and a full "https://api.anthropic.com/v1" pushed the End button
+    // off the right edge at an ordinary window width - a badge that hides a
+    // control is a worse trade than a badge that abbreviates. The full target
+    // stays in the tooltip and in session.info(), so nothing is lost.
+    let where = bi.target;
+    try { where = new URL(bi.target).host || bi.target; } catch { /* keep raw */ }
+    remote.textContent = `remote: ${where}`;
     remote.title = "This session sends your prompts and the file contents it "
                  + "reads to " + bi.target + ". They leave this machine.";
     remote.style.display = "";
