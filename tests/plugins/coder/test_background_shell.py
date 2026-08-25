@@ -14,6 +14,7 @@ import inspect
 import sys
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -529,11 +530,16 @@ def test_background_uses_the_same_argv_routing_as_run_shell(tmp_path, monkeypatc
 
     # A bare on-PATH command with no shell metacharacters must reach the OS as an
     # ARGUMENT LIST, never wrapped in a shell (that is the property run_shell has
-    # and a naive shell=True background variant would silently give up).
+    # and a naive always-shell-out background variant would silently give up).
+    # argv[0] is the RESOLVED path (see resolve_runner), not the literal token
+    # typed - Windows CreateProcess cannot launch a bare npm/yarn/npx .CMD shim
+    # by name, only the full resolved path - so check the launched executable's
+    # own basename rather than the exact string.
     plain = "tasklist" if sys.platform == "win32" else "env"
     res = tool_run_shell_background(tmp_path, plain)
     assert res.ok, res.output
-    assert seen["argv"] == [plain], seen["argv"]
+    assert isinstance(seen["argv"], list), seen["argv"]
+    assert Path(seen["argv"][0]).stem.lower() == plain.lower(), seen["argv"]
     assert seen["argv"] == _shell_argv(plain), "diverged from run_shell's routing"
 
     # Shell metacharacters -> the platform shell, same as run_shell. The launch

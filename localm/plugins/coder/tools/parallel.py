@@ -344,7 +344,7 @@ def _run_one_child(parent: Any, spec: dict, child_cwd: Path, branch: str,
     there is no read-modify-write across the two threads either.
     """
     from ..agent import Agent
-    from .agents import inherited_child_kwargs
+    from .agents import _isolated_verify_cmd, inherited_child_kwargs
 
     detail = ""
     backend = parent.backend
@@ -378,6 +378,12 @@ def _run_one_child(parent: Any, spec: dict, child_cwd: Path, branch: str,
     # parent had. An inherited glob like "src/**" stays meaningful only because the
     # child sits at the same relative position inside its worktree as the parent
     # occupies in the repo - which is why that mirroring above matters.
+    #
+    # verify_cmd is always computed here, never left None: every child this
+    # function builds is worktree-isolated (that is the whole point of this
+    # tool), so its diff lands in a tree the parent's own pre-done verify_cmd
+    # (if any) never sees. Without its own oracle a child can finish and be
+    # reported ok on a diff nothing ever checked - see _isolated_verify_cmd.
     child = Agent(**inherited_child_kwargs(
         parent,
         backend=backend,
@@ -387,6 +393,7 @@ def _run_one_child(parent: Any, spec: dict, child_cwd: Path, branch: str,
         # The serialising wrapper, so concurrent children cannot talk over each
         # other on the parent's single confirmation channel.
         confirm_handler=_serialised_confirm_handler(parent, spec["name"]),
+        verify_cmd=_isolated_verify_cmd(parent, child_cwd),
     ))
     # Make the child's location introspectable: a caller that reports on a finished
     # child needs to know which worktree and branch its diff belongs to.

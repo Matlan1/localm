@@ -154,14 +154,18 @@ class Agent(
         if self._role_preset is not None:
             self.role = self._role_preset.name
         self.self_verify    = self_verify  # nudge agent to verify code changes before finishing
-        # The exit-code oracle for interactive REPL/GUI sessions: a shell string
-        # or an argv list the HARNESS runs at the pre-done boundary, judging the
-        # task solely by its exit code (see verify.py and loop.py's
-        # _run_verify_gate). None disables it, which is the default - the one-shot
-        # CLI keeps using its own outer --until loop (cli/goal.py), so nothing
-        # runs the check twice. A RESTRICTED session must never set it: those
-        # sessions deliberately have no process execution at all
-        # (SAFE_RESTRICTED_TOOLS), and an oracle would hand it straight back.
+        # The exit-code oracle: a shell string or an argv list the HARNESS runs
+        # at the pre-done boundary, judging the task solely by its exit code
+        # (see verify.py and loop.py's _run_verify_gate). None disables it,
+        # which is the default - the one-shot CLI keeps using its own outer
+        # --until loop (cli/goal.py), so nothing runs the check twice. Set by
+        # an interactive REPL/GUI session, OR by tools/agents.py's
+        # _isolated_verify_cmd for a worktree-isolated child spawned via
+        # spawn_agent_background/dispatch_parallel - that child's diff lands
+        # in a tree neither of those other two ever sees, so it needs its own.
+        # A RESTRICTED session must never set it: those sessions deliberately
+        # have no process execution at all (SAFE_RESTRICTED_TOOLS), and an
+        # oracle would hand it straight back.
         self.verify_cmd     = None if restricted else verify_cmd
         self.verify_max_retries = verify_max_retries
         # Per-task turn budget for uncertainty escalation. None -> 2/3 of max_turns.
