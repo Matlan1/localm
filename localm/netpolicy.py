@@ -124,6 +124,54 @@ def _config() -> dict:
         return {}
 
 
+def check_url_shape(url: str) -> str:
+    """Validate a URL's SHAPE and return its lowercased host.
+
+    The part of the policy that is about the URL STRING rather than about where
+    it points: the parser-differential guard, the http/https scheme restriction,
+    and the host-is-present check. Raises NetworkPolicyError on any of them.
+
+    Extracted from ``check_url`` (which still calls it, so there is exactly one
+    implementation) because a caller can legitimately want THESE checks without
+    the destination ones. An OWNER-CONFIGURED service endpoint is the case:
+    localm's own ``comfy_api_url`` and ``coder_reviewer`` URL point at a local
+    server on purpose, so the public-address arm of ``check_url`` would refuse
+    the intended setup, while the parser-differential guard is still exactly as
+    necessary there as anywhere else.
+
+    RUN THIS BEFORE CLASSIFYING A URL AS LOCAL OR REMOTE. That ordering is the
+    whole reason it is safe to branch on the classification afterwards: until
+    the backslash/control-character check has passed, ``urlparse``'s host can
+    disagree with the host the HTTP client actually dials, so any decision made
+    from it is a decision about a different destination.
+    """
+    # Parser-differential SSRF guard. urllib.parse and the HTTP client
+    # (requests/urllib3) disagree on backslashes and raw control characters in
+    # the authority: 'http://127.0.0.1\\@public/' parses HERE as host 'public'
+    # (so it clears every gate below) but requests terminates the userinfo at the
+    # backslash and connects to 127.0.0.1 - defeating both this guard AND the
+    # net_allow allowlist. A conformant http(s) URL percent-encodes a backslash
+    # or control char, so we refuse any raw one rather than trust the host
+    # urllib.parse extracts. This is deliberately broader than the authority - a
+    # raw '\\' or control char in the path/query (which requests would otherwise
+    # percent-encode) is refused too; a fail-safe choice for a security guard,
+    # and callers can always pass a properly percent-encoded URL.
+    if "\\" in url or any(ord(c) < 0x20 or ord(c) == 0x7F for c in url):
+        raise NetworkPolicyError(
+            "URL contains a backslash or control character; refusing it "
+            "(possible SSRF parser differential).")
+
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise NetworkPolicyError(
+            f"Only http/https URLs are allowed (got '{parsed.scheme}:'). "
+            "Reading local files via file:// is not allowed.")
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if not host:
+        raise NetworkPolicyError(f"URL has no host: {url}")
+    return host
+
+
 def check_url(url: str) -> None:
     """
     Validate one URL against the policy. Raises NetworkPolicyError with an
@@ -161,30 +209,7 @@ def check_url(url: str) -> None:
             "Network access is disabled (net_mode=off). Enable it with:  "
             "localm config net_mode ask")
 
-    # Parser-differential SSRF guard. urllib.parse and the HTTP client
-    # (requests/urllib3) disagree on backslashes and raw control characters in
-    # the authority: 'http://127.0.0.1\\@public/' parses HERE as host 'public'
-    # (so it clears every gate below) but requests terminates the userinfo at the
-    # backslash and connects to 127.0.0.1 - defeating both this guard AND the
-    # net_allow allowlist. A conformant http(s) URL percent-encodes a backslash
-    # or control char, so we refuse any raw one rather than trust the host
-    # urllib.parse extracts. This is deliberately broader than the authority - a
-    # raw '\\' or control char in the path/query (which requests would otherwise
-    # percent-encode) is refused too; a fail-safe choice for a security guard,
-    # and callers can always pass a properly percent-encoded URL.
-    if "\\" in url or any(ord(c) < 0x20 or ord(c) == 0x7F for c in url):
-        raise NetworkPolicyError(
-            "URL contains a backslash or control character; refusing it "
-            "(possible SSRF parser differential).")
-
-    parsed = urllib.parse.urlparse(url)
-    if parsed.scheme not in ("http", "https"):
-        raise NetworkPolicyError(
-            f"Only http/https URLs are allowed (got '{parsed.scheme}:'). "
-            "Reading local files via file:// is not allowed.")
-    host = (parsed.hostname or "").lower().rstrip(".")
-    if not host:
-        raise NetworkPolicyError(f"URL has no host: {url}")
+    host = check_url_shape(url)
 
     deny = _domain_list(cfg.get("net_deny"))
     for pattern in deny:

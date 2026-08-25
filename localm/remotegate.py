@@ -71,6 +71,13 @@ def refusal_message(what: str) -> str:
     fixing, and picked the most helpful variant for all five. This says what is
     off, why, and NAMES THE SETTING that turns it on, because a refusal that
     does not tell the user what to change is a dead end.
+
+    *what* is a PLURAL noun phrase ("Off-machine models"), matching memory's
+    "Memory writes are off in privacy mode ...". The template owns the verb and
+    the pronoun, so there is no per-caller agreement to get wrong - the first
+    draft took a singular subject and shipped "Off-machine models is off" to a
+    live server, which the unit test could not see because it asserted on
+    fragments rather than on the whole sentence.
     """
-    return (f"{what} is off in privacy mode (nothing leaves this machine). "
-            "Set mode/coder_mode to 'log' or 'full' to enable it.")
+    return (f"{what} are off in privacy mode (nothing leaves this machine). "
+            "Set mode/coder_mode to 'log' or 'full' to enable them.")

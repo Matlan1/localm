@@ -358,21 +358,47 @@ def _resolve_backend(req: "CreateSessionRequest", *, self_url: str,
     else:
         base = _PROVIDER_BASE[mode]
 
+    from localm.netpolicy import NetworkPolicyError, check_url, check_url_shape
+
+    # SHAPE FIRST, ALWAYS, AND BEFORE THE CLASSIFICATION BELOW DEPENDS ON IT.
+    # urlparse and the HTTP client disagree about backslashes and control
+    # characters in the authority, so until that guard has run, "is this host on
+    # this machine" is a question about a destination the client may not
+    # actually dial. Running it first is what makes _url_leaves_machine's answer
+    # safe to branch on.
+    try:
+        check_url_shape(base)
+    except NetworkPolicyError as e:
+        raise HTTPException(400, str(e))
+
     leaves = _url_leaves_machine(base)
 
-    # SSRF guard on a destination that now arrives from a WEB FORM. The CLI path
-    # never needed this: the endpoint was operator-supplied at a terminal on the
-    # machine. A browser-supplied base URL is a different trust boundary
-    # (link-local metadata addresses, internal hosts, private ranges), and this
-    # backend posts with requests.post directly rather than through any existing
-    # choke point. ADR-0013 named shipping the URL modes without this a blocker.
-    # The fixed provider bases go through it too, so net_mode=off and a deny
-    # list still mean what they say.
-    from localm.netpolicy import NetworkPolicyError, check_url
-    try:
-        check_url(base)
-    except NetworkPolicyError as e:
-        raise HTTPException(403, f"Network policy refused {base}: {e}")
+    # DESTINATION policy applies only to a destination that actually leaves the
+    # machine. This is deliberately NOT the whole of check_url for every URL,
+    # and that distinction was found by running the feature rather than by
+    # reading it: check_url's public-address arm refuses loopback by default, so
+    # guarding every base URL with it made "point the coder at my own Ollama" -
+    # the single most likely use of this field - fail out of the box, with a
+    # message telling the user to set net_allow_private, a GLOBAL setting that
+    # would weaken the SSRF guard for genuine web fetches too.
+    #
+    # The calibration matches what the rest of localm already does. netpolicy
+    # guards URLs that arrive from UNTRUSTED CONTENT (a model-supplied media
+    # URL, a redirect chain during a model pull). An OWNER-CONFIGURED service
+    # endpoint does not go through it at all: comfy_api_url and the
+    # coder_reviewer URL both point wherever the owner says. This field is the
+    # same kind of thing, and it is already owner-gated above.
+    #
+    # An off-machine destination is different, and there check_url is exactly
+    # right: net_mode=off then means what it says, the deny list applies, and a
+    # LAN address is refused unless net_allow_private is set - whose name
+    # describes precisely that choice, so the refusal is actionable rather than
+    # a setting about something else.
+    if leaves:
+        try:
+            check_url(base)
+        except NetworkPolicyError as e:
+            raise HTTPException(403, f"Network policy refused {base}: {e}")
 
     # Privacy mode REFUSES an off-machine model. Not a checkbox, not a fallback:
     # localm already answers this question this way for memory (fully off in

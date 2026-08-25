@@ -55,8 +55,15 @@ def test_refusal_names_the_setting_that_enables_it():
     plug records that unifying this wording across its five call sites was a
     deliberate fix, so this one is held to the same bar."""
     msg = remotegate.refusal_message("Off-machine models")
-    assert "privacy mode" in msg
-    # The actionable half: WHICH setting, and WHAT to set it to.
+    # The WHOLE sentence, not fragments of it. A fragment assertion passed
+    # happily on "Off-machine models is off in privacy mode", which is what
+    # actually reached a running server the first time; the message is
+    # user-facing prose, so the test has to read it as prose.
+    assert msg == (
+        "Off-machine models are off in privacy mode (nothing leaves this "
+        "machine). Set mode/coder_mode to 'log' or 'full' to enable them.")
+    # And the two properties that must survive any future rewording: it says
+    # WHICH setting, and WHAT to set it to.
     assert "coder_mode" in msg
     assert "log" in msg and "full" in msg
 
@@ -138,11 +145,16 @@ def test_privacy_refuses_a_cloud_backend_and_says_what_to_change(monkeypatch):
     assert "coder_mode" in e.value.detail
 
 
-def test_privacy_still_allows_a_loopback_url(monkeypatch):
-    """Ollama / LM Studio / vLLM on this machine are LOCAL. A mode list that
-    collapses "custom URL" into "cloud" refuses them for no reason - the
-    privacy consequence is what differs, not the field."""
-    _no_netpolicy(monkeypatch)
+def test_privacy_still_allows_a_loopback_url():
+    """Ollama / LM Studio on this machine are LOCAL, so privacy mode must allow
+    them: this is the single most likely use of the field.
+
+    DELIBERATELY RUNS THE REAL netpolicy - no monkeypatch. The first version of
+    this test neutralised it and passed while a live server refused the exact
+    same request, because check_url's public-address arm blocks loopback by
+    default. A fixture that removes the guard cannot fail on the guard being
+    miscalibrated, which is the whole defect. If this test ever needs netpolicy
+    stubbed out to pass, the calibration has regressed."""
     backend, info, notes = _resolve(
         _req(backend="url", backend_url="http://127.0.0.1:11434/v1",
              backend_model="qwen"),
@@ -157,10 +169,9 @@ def test_privacy_still_allows_a_loopback_url(monkeypatch):
     assert any("Grammar-constrained" in n for n in notes)
 
 
-def test_a_scoped_key_cannot_point_the_coder_anywhere(monkeypatch):
+def test_a_scoped_key_cannot_point_the_coder_anywhere():
     """An exfil channel for the project's source and a billing channel for
     someone else's account. Matches coder_reviewer's admin_only=True."""
-    _no_netpolicy(monkeypatch)
     with pytest.raises(HTTPException) as e:
         _resolve(_req(backend="url", backend_url="http://127.0.0.1:11434/v1"),
                  restricted=True, session_mode="log")
@@ -336,3 +347,31 @@ def test_route_default_session_is_unchanged_and_local(tmp_path, monkeypatch):
         assert r.status_code == 200, r.text
         assert r.json()["backend_info"]["leaves_machine"] is False
         assert r.json()["backend_info"]["backend"] == "local"
+
+
+def test_an_on_machine_url_is_not_put_through_the_destination_policy(monkeypatch):
+    """The bug this pins: check_url's public-address arm refuses loopback, so
+    applying the DESTINATION policy to a local model server broke the feature's
+    main use case. Destination policy is for destinations that leave."""
+    called = []
+    import localm.netpolicy as np
+    monkeypatch.setattr(np, "check_url", lambda url: called.append(url))
+    _resolve(_req(backend="url", backend_url="http://127.0.0.1:11434/v1"),
+             session_mode="log")
+    assert called == []
+
+
+def test_the_shape_guard_runs_even_for_an_on_machine_url(monkeypatch):
+    """Skipping the destination policy must NOT skip the parser-differential
+    guard. urlparse reads this host as 'evil.example' while an HTTP client
+    terminates the userinfo at the backslash and dials 127.0.0.1, so a URL that
+    classifies one way here can be dialled another - which is exactly why the
+    shape guard runs BEFORE anything branches on the classification."""
+    import localm.netpolicy as np
+    monkeypatch.setattr(np, "check_url", lambda url: None)
+    with pytest.raises(HTTPException) as e:
+        _resolve(_req(backend="url",
+                      backend_url="http://127.0.0.1\\@evil.example/v1"),
+                 session_mode="log")
+    assert e.value.status_code == 400
+    assert "backslash" in e.value.detail
