@@ -160,6 +160,8 @@ def _print_direct_probe(api_url: str, *, had_server: bool) -> None:
 def comfy_status(ping: bool) -> None:
     """Show whether a managed ComfyUI is installed, where, which ComfyUI localm
     currently targets, and whether that ComfyUI is running."""
+    from rich.markup import escape
+
     from ..config import load_config
     from ..media.managed_comfy import (
         MANAGED_COMFY_API_URL, is_managed_comfy_installed, managed_comfy_paths,
@@ -171,18 +173,28 @@ def comfy_status(ping: bool) -> None:
     installed = is_managed_comfy_installed()
 
     console.print("[bold]Managed ComfyUI[/bold]")
-    console.print(f"  Preferred target  : {cfg.get('comfy_target', 'own')}")
+    # comfy_target is a SELECT field (options own/user) when set through the
+    # GUI/CLI config setters, but config.json can be hand-edited, so this print
+    # does not rely on that validation holding - same defense-in-depth stance
+    # as rag.py's already-safe collection names (escape() is a no-op on "own").
+    console.print(f"  Preferred target  : {escape(str(cfg.get('comfy_target', 'own')))}")
     if installed:
-        console.print(f"  Installed         : yes, at {paths.root}")
+        # paths.root/models_dir are <LOCALM_HOME>/comfyui(-models) - LOCALM_HOME
+        # itself is user-configurable (env var / --home), so these are not
+        # provably bracket-free.
+        console.print(f"  Installed         : yes, at {escape(str(paths.root))}")
         console.print(f"  Managed API URL   : {MANAGED_COMFY_API_URL}")
-        console.print(f"  Managed models    : {paths.models_dir}")
+        console.print(f"  Managed models    : {escape(str(paths.models_dir))}")
     else:
         console.print("  Installed         : no - not set up "
                       "(run 'localm comfy setup' to replicate your ComfyUI)")
 
     target = resolve_comfy_target(cfg)
     which = "localm's managed ComfyUI" if target.managed else "your own ComfyUI"
-    console.print(f"  Target now        : {which} ({target.api_url})")
+    # target.api_url is comfy_api_url (admin-set free text) when not managed -
+    # genuinely user-controlled, unlike MANAGED_COMFY_API_URL above (a fixed
+    # loopback constant derived only from MANAGED_COMFY_PORT).
+    console.print(f"  Target now        : {which} ({escape(target.api_url)})")
 
     _print_process_status(target.api_url, ping)
 
@@ -345,6 +357,8 @@ def comfy_remove(yes: bool, with_models: bool) -> None:
     Removes <LOCALM_HOME>/comfyui. Your own ComfyUI (comfy_workdir) is NEVER
     touched. Add --models to also delete the managed models folder.
     """
+    from rich.markup import escape
+
     from ..media.managed_comfy import (managed_comfy_remove_targets,
                                        remove_managed_comfy)
 
@@ -353,7 +367,9 @@ def comfy_remove(yes: bool, with_models: bool) -> None:
         console.print("[dim]Nothing to remove - no managed ComfyUI is installed.[/dim]")
         return
 
-    listing = "\n".join(f"  {t}" for t in targets)
+    # targets are Path objects under LOCALM_HOME, which is user-configurable -
+    # same reasoning as comfy_status's paths.root/models_dir above.
+    listing = "\n".join(f"  {escape(str(t))}" for t in targets)
     console.print(f"This will delete:\n{listing}")
     if not yes and not click.confirm("Remove it?", default=False):
         console.print("[dim]Cancelled.[/dim]")
@@ -361,9 +377,12 @@ def comfy_remove(yes: bool, with_models: bool) -> None:
 
     # remove_managed_comfy is the shared removal (also used by the GUI route); it
     # reports any path it could NOT delete (rule 5) instead of claiming success.
+    # Each failed entry is "<path> (<OSError>)" - both halves can carry the
+    # same LOCALM_HOME-derived path text as `targets` above.
     _, failed = remove_managed_comfy(with_models)
     if failed:
-        console.print("[red]Could not remove:[/red]\n  " + "\n  ".join(failed))
+        console.print("[red]Could not remove:[/red]\n  "
+                      + "\n  ".join(escape(str(f)) for f in failed))
         raise SystemExit(1)
     console.print("[green]Removed localm's managed ComfyUI.[/green]")
 
@@ -479,7 +498,9 @@ def comfy_update(reinstall_requirements: bool, commit) -> None:
                       f"({COMFYUI_PINNED_COMMIT[:12]}) and re-applying localm's "
                       "patches. This can take a while...")
     else:
-        console.print(f"Updating to ComfyUI {commit[:12]} (advanced override) and "
+        # commit is raw --commit user input (unlike COMFYUI_PINNED_COMMIT above,
+        # a hardcoded module constant), so it needs escaping unlike its sibling.
+        console.print(f"Updating to ComfyUI {escape(commit[:12])} (advanced override) and "
                       "re-applying localm's patches...")
 
     result = upd.update_managed_comfy(
@@ -536,11 +557,18 @@ def _fmt_wf_age(seconds) -> str:
 @click.argument("media", type=click.Choice(MEDIA_TYPES))
 def workflow_list(media: str) -> None:
     """List MEDIA's uploaded workflows and show which one is active."""
+    from rich.markup import escape
+
     from ..media_workflows import list_workflows, selected_name
 
+    # media is click.Choice(MEDIA_TYPES)-validated (always "image"/"music"/
+    # "video"), so it is safe unescaped throughout this function. active/w["name"]
+    # are user-chosen workflow filenames: save_workflow only enforces
+    # path-traversal safety (pathsafe.confined_name), never a safe charset, so a
+    # name like "flux[draft].json" is a genuinely accepted, real filename.
     active = selected_name(media)
     console.print(f"[bold]{media} workflow[/bold]: "
-                 + (f"[green]{active}[/green]" if active
+                 + (f"[green]{escape(active)}[/green]" if active
                     else "[dim](built-in default - none selected)[/dim]"))
     items = list_workflows(media, active=active)
     if not items:
@@ -556,7 +584,9 @@ def workflow_list(media: str) -> None:
     table.add_column("Modified")
     now = time.time()
     for w in items:
-        table.add_row(w["name"], "[green]yes[/green]" if w["is_active"] else "",
+        # Table cell strings go through the SAME markup parsing as
+        # console.print f-strings (confirmed empirically), not just plain text.
+        table.add_row(escape(w["name"]), "[green]yes[/green]" if w["is_active"] else "",
                       _fmt_wf_size(w["size_bytes"]), _fmt_wf_age(now - w["mtime"]))
     console.print(table)
 
@@ -580,6 +610,8 @@ def workflow_add(media: str, file: Path, name, activate: bool) -> None:
     class_type) before storing it, so a bad upload fails now instead of every
     later generation.
     """
+    from rich.markup import escape
+
     from ..media_workflows import save_workflow, select_workflow
 
     content = file.read_bytes()
@@ -589,11 +621,12 @@ def workflow_add(media: str, file: Path, name, activate: bool) -> None:
             select_workflow(media, saved)
     except ValueError as e:
         raise click.ClickException(str(e))
-    console.print(f"[green]Saved[/green] {media} workflow [bold]{saved}[/bold]"
+    # saved is the stored (user-chosen) filename - see workflow_list's comment.
+    console.print(f"[green]Saved[/green] {media} workflow [bold]{escape(saved)}[/bold]"
                  + (" and selected it." if activate else "."))
     if not activate:
         console.print("[dim]Select it with[/dim] "
-                      f"localm comfy workflow use {media} {saved}")
+                      f"localm comfy workflow use {media} {escape(saved)}")
 
 
 @workflow_group.command("use")
@@ -609,6 +642,8 @@ def workflow_use(media: str, name, clear: bool) -> None:
     on the same page. (The same selection `localm plugin config <media>
     workflow <name>` writes - this is the discoverable, dedicated form of it.)
     """
+    from rich.markup import escape
+
     from ..media_workflows import select_workflow
 
     if clear:
@@ -623,7 +658,8 @@ def workflow_use(media: str, name, clear: bool) -> None:
     except ValueError as e:
         raise click.ClickException(str(e))
     if selected:
-        console.print(f"[green]{media} now uses[/green] [bold]{selected}[/bold]")
+        # selected is the user-chosen workflow filename - see workflow_list.
+        console.print(f"[green]{media} now uses[/green] [bold]{escape(selected)}[/bold]")
     else:
         console.print(f"[green]{media} cleared[/green] - falling back to the "
                       "built-in default.")
@@ -636,6 +672,8 @@ def workflow_use(media: str, name, clear: bool) -> None:
 def workflow_rm(media: str, name: str, yes: bool) -> None:
     """Delete an uploaded MEDIA workflow (refuses to delete the active one -
     select another first)."""
+    from rich.markup import escape
+
     from ..media_workflows import delete_workflow
 
     if not yes:
@@ -645,4 +683,5 @@ def workflow_rm(media: str, name: str, yes: bool) -> None:
         delete_workflow(media, name)
     except ValueError as e:
         raise click.ClickException(str(e))
-    console.print(f"[green]Deleted[/green] {media} workflow [bold]{name}[/bold].")
+    # name is the user-supplied workflow filename argument - see workflow_list.
+    console.print(f"[green]Deleted[/green] {media} workflow [bold]{escape(name)}[/bold].")
