@@ -802,6 +802,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   could not run, it was silently skipped rather than treated as a refusal.
   It now refuses whenever that check cannot be completed, matching how every
   other check in the same guard already behaved.
+- **A bug report's error detail could still show your Windows account name,
+  even though the same path elsewhere in the report was already hidden.**
+  Some error messages quote the file path in a form the scrubber did not
+  recognize, so the account name inside it slipped through untouched. Every
+  form of the path is now caught.
 
 ## [0.1.5rc3] - 2026-08-13
 
