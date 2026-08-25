@@ -412,6 +412,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   five scopes the server treats as privileged are now offered and, exactly
   like the two that were already there, greyed out and refused for anyone
   minting from a merely `keys:admin` device.
+- **Music generation gained three new ACE-Step controls: sampler, scheduler and
+  shift.** The workflow template hardcoded these; they can now be overridden
+  per generation the same way seed, steps and cfg already were. Leaving them
+  unset behaves exactly as before.
 
 ### Changed
 - **The chat parameters drawer and the image, music and video generation forms
@@ -696,6 +700,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   Intel GPU driver is needed there. The printed note was wrong for Windows;
   it still correctly asks for a system oneAPI install on Linux, where the
   runtime genuinely is not bundled.
+- **Uploading a media workflow while a generation is reading it can no longer
+  leave a corrupted file on disk.** The upload write and a generation's read
+  raced with no protection between them; a generation starting at exactly the
+  wrong moment could load a half-written, invalid workflow file. The write is
+  now atomic, so a read always sees the complete file, before or after the
+  upload.
 
 ### Security
 - **A form inside a model's reply can no longer send anything off your
