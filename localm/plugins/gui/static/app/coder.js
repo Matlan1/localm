@@ -248,6 +248,28 @@ export function activateSession(id) {
   // writes went to disk, so the button would download an empty file and read
   // as "the agent changed nothing".
   $("coder-patch").style.display = s && s.info.patch_mode ? "" : "none";
+  // A session whose model is not on this machine says so for as long as it
+  // exists. The setup hint is consent at the moment of choosing; this is the
+  // reminder while you are typing into it, which is the half that a hint shown
+  // once cannot cover. Driven off the SERVER's descriptor, never off the form -
+  // the form is what was asked for, this is what was actually built.
+  const bi = s && s.info.backend_info;
+  const remote = $("coder-remote");
+  if (bi && bi.leaves_machine) {
+    // The HOST, not the whole URL. The session bar already carries eleven
+    // controls, and a full "https://api.anthropic.com/v1" pushed the End button
+    // off the right edge at an ordinary window width - a badge that hides a
+    // control is a worse trade than a badge that abbreviates. The full target
+    // stays in the tooltip and in session.info(), so nothing is lost.
+    let where = bi.target;
+    try { where = new URL(bi.target).host || bi.target; } catch { /* keep raw */ }
+    remote.textContent = `remote: ${where}`;
+    remote.title = "This session sends your prompts and the file contents it "
+                 + "reads to " + bi.target + ". They leave this machine.";
+    remote.style.display = "";
+  } else {
+    remote.style.display = "none";
+  }
   renderSessionSelect();
   showCoderUI(!!s);
 }
@@ -713,6 +735,21 @@ export async function startCoderSession(opts = {}) {
     // as seed 0 - a real and reproducible value. Omit rather than coerce.
     const seed = $("setup-seed").value.trim();
     if (seed !== "") body.seed = Number(seed);
+    // WHICH model server answers this session (the CLI's --online/--anthropic/
+    // --url). Sent only when it is not the default, so an unchanged form posts
+    // exactly the body it always did.
+    const backend = $("setup-backend").value;
+    if (backend && backend !== "local") {
+      body.backend = backend;
+      const burl = $("setup-backend-url").value.trim();
+      if (burl) body.backend_url = burl;
+      const bmodel = $("setup-backend-model").value.trim();
+      if (bmodel) body.backend_model = bmodel;
+      // Never stored, never put in localStorage, and cleared from the field
+      // below once the session is created: this only has to survive the POST.
+      const bkey = $("setup-backend-key").value;
+      if (bkey) body.backend_api_key = bkey;
+    }
     const scope = $("setup-scope").value.trim();
     if (scope) body.scope = scope;
     const system = $("setup-system").value.trim();
@@ -734,6 +771,10 @@ export async function startCoderSession(opts = {}) {
     });
     if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
     const info = await r.json();
+    // The key has done its one job. Drop it out of the DOM rather than leaving
+    // it sitting in a field for the rest of the page's life, where a later
+    // screenshot, a shared screen or a stray autofill can pick it up.
+    $("setup-backend-key").value = "";
     lsSetScoped("localm.coderCwd", cwd);
     // A resumed session replays its restored recap from the server; a fresh one
     // has no history to replay (CODER-2).
@@ -953,6 +994,59 @@ if (_railFlip) _railFlip.onclick = async () => {
 };
 // Arrow wrapper: a bare `.onclick = startCoderSession` would pass the click
 // Event as opts, making opts.resume truthy and always resuming (CODER-2).
+/* Reveal only the fields the chosen model server actually needs, and state the
+   consequence of the choice where it cannot be missed.
+
+   The privacy line here is a CONVENIENCE, not the gate. The server refuses an
+   off-machine model in privacy mode on its own (localm/remotegate.py), the same
+   way memory and the coder reviewer already do. Telling the user before they
+   press the button just saves them a round trip; it never decides anything. */
+function syncCoderBackendFields() {
+  const mode = $("setup-backend").value;
+  const remote = mode === "openai" || mode === "anthropic";
+  const hint = $("setup-backend-hint");
+  $("setup-backend-url-wrap").style.display = mode === "url" ? "" : "none";
+  $("setup-backend-key-wrap").style.display = mode === "local" ? "none" : "";
+  $("setup-backend-model-wrap").style.display = mode === "local" ? "none" : "";
+
+  if (mode === "local") {
+    hint.style.display = "none";
+    hint.textContent = "";
+    return;
+  }
+  let text;
+  if (mode === "url") {
+    // Deliberately does NOT try to classify the URL as local or remote. The
+    // server already does that with the canonical classifier, and a second
+    // one here would diverge exactly on the awkward input the first exists for.
+    text = "A URL on this machine (Ollama, LM Studio, vLLM) stays local. A URL "
+         + "anywhere else sends your prompts and the file contents the agent "
+         + "reads off this machine.";
+  } else {
+    const who = mode === "openai" ? "OpenAI" : "Anthropic";
+    text = `Sends your prompts and the file contents the agent reads to ${who}. `
+         + "They leave this machine, and it spends your credit with them.";
+  }
+  // Grammar-constrained tool calls are a localm-server capability, so every
+  // other option loses them. Said here rather than discovered later.
+  text += " Grammar-constrained tool calls are off for this option.";
+  if ($("setup-mode").value === "privacy") {
+    text += remote
+      ? " This session is set to privacy, which keeps everything on this "
+        + "machine, so it will refuse this. Set session persistence to log or "
+        + "full to use it."
+      : " This session is set to privacy, so it will refuse this URL unless it "
+        + "is on this machine.";
+  }
+  hint.textContent = text;
+  hint.style.display = "";
+}
+
+$("setup-backend").addEventListener("change", syncCoderBackendFields);
+// The persistence choice changes whether the backend choice is even allowed,
+// so it has to re-run the hint too.
+$("setup-mode").addEventListener("change", syncCoderBackendFields);
+
 $("setup-start").onclick = () => startCoderSession();
 // Probe for a resumable checkpoint as the directory changes (debounced).
 export let _resumeProbeTimer = null;

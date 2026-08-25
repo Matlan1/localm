@@ -123,6 +123,25 @@ class CreateSessionRequest(BaseModel):
     # server can honour it is reported back rather than assumed - see
     # create_session.
     native_tools: bool = False
+    # WHICH model server answers this session, the web form of the CLI's
+    # --online / --anthropic / --url (ADR-0013). Per session, never global
+    # config: a global default is how a later project's source reaches a cloud
+    # provider without anyone deciding, and that failure is silent.
+    #   local (default) - this localm. Offline, grammar-constrained tool calls.
+    #   url             - any OpenAI-compatible endpoint. On this machine
+    #                     (Ollama, LM Studio, vLLM) or off it; _resolve_backend
+    #                     classifies which, because the privacy consequence
+    #                     differs even though it is one field to the user.
+    #   openai / anthropic - the provider APIs. Off-machine, and it costs money.
+    backend: str = "local"
+    backend_url: str | None = None      # required for backend="url"
+    backend_model: str | None = None    # model id at the far end; blank = provider default
+    # Per-session credential for an off-machine backend, held in memory for the
+    # life of the session and NEVER written to disk (that is a later stage, and
+    # it needs its own review as a new secret at rest). Blank falls back to
+    # OPENAI_API_KEY / ANTHROPIC_API_KEY, which is how the CLI already resolves
+    # them. Never echoed back by session.info().
+    backend_api_key: str | None = None
 
 
 class MessageRequest(BaseModel):
@@ -240,6 +259,206 @@ def _get_session(request: Request, session_id: str):
 
 
 # ------------------------------------------------------------------ #
+#  Coder LLM backend selection (ADR-0013, ADR-0014)                   #
+# ------------------------------------------------------------------ #
+# A GUI coder session was hardwired to this localm; the terminal has had
+# --online / --anthropic / --url since the beginning. This closes that parity
+# gap. Everything below is PER SESSION - see ADR-0013 for why a global config
+# key was rejected.
+
+_BACKEND_MODES = ("local", "url", "openai", "anthropic")
+
+# Fixed provider bases. Constants rather than user input, so only "url" is a
+# GUI-supplied destination - but all three still pass netpolicy below, because
+# net_mode=off means the user disabled network access, and that must hold for a
+# provider we picked just as much as for one they typed.
+_PROVIDER_BASE = {
+    "openai": "https://api.openai.com/v1",
+    "anthropic": "https://api.anthropic.com/v1",
+}
+_PROVIDER_ENV = {
+    "openai": "OPENAI_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+}
+
+
+def _url_leaves_machine(url: str) -> bool:
+    """True when *url* points somewhere other than this machine.
+
+    Uses ``bindhost.is_loopback_host``, the canonical classifier, rather than a
+    private set of literals. It differs deliberately from ``reviewer.py``'s
+    ``_LOOPBACK_HOSTS`` in two places, both in the SAFE direction here:
+    ``127.0.0.2`` (the whole 127.0.0.0/8 block) is correctly local, and
+    ``0.0.0.0`` / an empty host are NOT treated as local. A wildcard bind
+    address is not a destination and a missing host is malformed, so calling
+    either "on this machine" would grant the quiet path to a string nobody
+    validated. Unparseable input answers True, because the only safe answer to
+    "might this leave the machine" is yes.
+    """
+    from urllib.parse import urlparse
+    try:
+        from localm.bindhost import is_loopback_host
+        return not is_loopback_host((urlparse(url).hostname or "").lower())
+    except Exception:
+        return True
+
+
+def _resolve_backend(req: "CreateSessionRequest", *, self_url: str,
+                     model_name: str, restricted: bool, session_mode: str):
+    """Build this session's LLM backend and describe it honestly.
+
+    Returns ``(backend, descriptor, notes)``. The descriptor is what
+    ``session.info()`` reports, so a UI can show WHILE THE SESSION RUNS that it
+    is talking to a remote model rather than only at the moment it was picked -
+    a hint shown once at selection does not meet "obvious while it is on".
+
+    BLOCKING: netpolicy resolves DNS. Call this off the event loop.
+
+    The descriptor deliberately carries no credential, and neither does
+    ``info()``: a secret that round-trips to a client is a secret in a browser
+    history, a proxy log and a screenshot.
+    """
+    mode = (req.backend or "local").strip().lower()
+    if mode not in _BACKEND_MODES:
+        raise HTTPException(
+            400, f"Unknown backend {mode!r}. Choose one of: "
+                 f"{', '.join(_BACKEND_MODES)}.")
+
+    notes: list[str] = []
+
+    if mode == "local":
+        from localm.plugins.coder.backends.http import HTTPBackend
+        backend = HTTPBackend(
+            self_url,
+            model=model_name,
+            api_key=os.environ.get("LOCALM_API_KEY") or "localm",
+            localm_server=True,   # self-connection: grammar sampling available
+            native_tools=req.native_tools,
+        )
+        return backend, {"backend": "local", "leaves_machine": False,
+                         "target": "this localm", "model": model_name}, notes
+
+    # ---- everything past here is a NON-default backend ------------------- #
+
+    # Owner-only, matching coder_reviewer's admin_only=True. A minted, non-owner
+    # key must not be able to point the coder anywhere: that is an exfil channel
+    # for the project's source and a billing channel for someone else's account.
+    if restricted:
+        raise HTTPException(
+            403, "Choosing a model server needs the owner key; a scoped key "
+                 "uses this localm.")
+
+    if mode == "url":
+        base = (req.backend_url or "").strip()
+        if not base:
+            raise HTTPException(400, "backend='url' needs backend_url.")
+        if not (base.startswith("http://") or base.startswith("https://")):
+            raise HTTPException(
+                400, "backend_url must start with http:// or https://.")
+    else:
+        base = _PROVIDER_BASE[mode]
+
+    from localm.netpolicy import NetworkPolicyError, check_url, check_url_shape
+
+    # SHAPE FIRST, ALWAYS, AND BEFORE THE CLASSIFICATION BELOW DEPENDS ON IT.
+    # urlparse and the HTTP client disagree about backslashes and control
+    # characters in the authority, so until that guard has run, "is this host on
+    # this machine" is a question about a destination the client may not
+    # actually dial. Running it first is what makes _url_leaves_machine's answer
+    # safe to branch on.
+    try:
+        check_url_shape(base)
+    except NetworkPolicyError as e:
+        raise HTTPException(400, str(e))
+
+    leaves = _url_leaves_machine(base)
+
+    # DESTINATION policy applies only to a destination that actually leaves the
+    # machine. This is deliberately NOT the whole of check_url for every URL,
+    # and that distinction was found by running the feature rather than by
+    # reading it: check_url's public-address arm refuses loopback by default, so
+    # guarding every base URL with it made "point the coder at my own Ollama" -
+    # the single most likely use of this field - fail out of the box, with a
+    # message telling the user to set net_allow_private, a GLOBAL setting that
+    # would weaken the SSRF guard for genuine web fetches too.
+    #
+    # The calibration matches what the rest of localm already does. netpolicy
+    # guards URLs that arrive from UNTRUSTED CONTENT (a model-supplied media
+    # URL, a redirect chain during a model pull). An OWNER-CONFIGURED service
+    # endpoint does not go through it at all: comfy_api_url and the
+    # coder_reviewer URL both point wherever the owner says. This field is the
+    # same kind of thing, and it is already owner-gated above.
+    #
+    # An off-machine destination is different, and there check_url is exactly
+    # right: net_mode=off then means what it says, the deny list applies, and a
+    # LAN address is refused unless net_allow_private is set - whose name
+    # describes precisely that choice, so the refusal is actionable rather than
+    # a setting about something else.
+    if leaves:
+        try:
+            check_url(base)
+        except NetworkPolicyError as e:
+            raise HTTPException(403, f"Network policy refused {base}: {e}")
+
+    # Privacy mode REFUSES an off-machine model. Not a checkbox, not a fallback:
+    # localm already answers this question this way for memory (fully off in
+    # privacy mode) and for the coder reviewer (skipped in privacy mode), and a
+    # third behaviour for the same question would be drift. The gate lives in a
+    # leaf module so this call site does not re-derive it - see remotegate.
+    #
+    # Refusing rather than quietly using the local model is the load-bearing
+    # half: substituting a different model than the one the user picked is the
+    # silent-override failure, and a session that came back "created" while
+    # ignoring the choice is indistinguishable from one that honoured it.
+    from localm import remotegate
+    if leaves and not remotegate.remote_allowed_for_mode(session_mode):
+        raise HTTPException(403, remotegate.refusal_message("Off-machine models"))
+
+    api_key = (req.backend_api_key or "").strip()
+    env_var = _PROVIDER_ENV.get(mode)
+    if not api_key and env_var:
+        api_key = os.environ.get(env_var, "").strip()
+    if not api_key and mode in ("openai", "anthropic"):
+        # Refuse now, with the reason, rather than building a session that 401s
+        # on its first message - by which point the failure reads as the
+        # provider being down rather than a key never having been supplied.
+        raise HTTPException(
+            400, f"{mode} needs an API key. Enter one for this session, or set "
+                 f"{env_var} before starting localm.")
+
+    from localm.plugins.coder.backends.http import HTTPBackend
+    target_model = (req.backend_model or "").strip() or model_name
+    backend = HTTPBackend(
+        base,
+        model=target_model,
+        # A local OpenAI-compatible server (Ollama, LM Studio, llama.cpp)
+        # usually ignores the bearer entirely; "localm" is the placeholder the
+        # backend's own docstring names for that case.
+        api_key=api_key or "localm",
+        anthropic=(mode == "anthropic"),
+        # localm_server stays FALSE for every mode here, including a URL that
+        # happens to point at another localm. That costs grammar-constrained
+        # tool calls in that one case, and it is the conservative choice the
+        # backend already documents: an unknown third-party server can 400 on
+        # grammar kwargs it does not understand.
+        native_tools=req.native_tools,
+    )
+    if leaves:
+        notes.append(
+            "This session sends your prompts and the file contents it reads to "
+            f"{base}. They leave this machine.")
+    # Selecting anything but this localm loses grammar-constrained tool calls.
+    # Said out loud rather than left for the user to infer from a capability
+    # they cannot see (AGENTS.md rule 5), the same way native_tools is.
+    if not backend.supports_grammar:
+        notes.append(
+            "Grammar-constrained tool calls are off for this backend; the "
+            "session uses the text tool-call convention instead.")
+    return backend, {"backend": mode, "leaves_machine": leaves,
+                     "target": base, "model": target_model}, notes
+
+
+# ------------------------------------------------------------------ #
 #  Session lifecycle                                                  #
 # ------------------------------------------------------------------ #
 
@@ -324,14 +543,24 @@ async def create_session(req: CreateSessionRequest, request: Request):
         except Exception as e:
             raise HTTPException(500, f"Failed to load {req.model}: {e}")
 
-    from localm.plugins.coder.backends.http import HTTPBackend
-    backend = HTTPBackend(
-        self_url,
-        model=active_model(),
-        api_key=os.environ.get("LOCALM_API_KEY") or "localm",
-        localm_server=True,   # self-connection: grammar sampling available
-        native_tools=req.native_tools,
-    )
+    from localm.audit import effective_mode
+    # Pass the session's project dir so a per-project .localcoder/config.toml mode
+    # is honored by the GUI coder, not just the global coder_mode (REC-CODER-MODE-TOML).
+    # Resolved BEFORE the backend, not after: the privacy gate needs it to decide
+    # whether this session may talk to an off-machine model at all.
+    session_mode = req.mode or effective_mode("coder", cwd=cwd).value
+
+    loop = asyncio.get_running_loop()
+    # WHICH model server answers this session (ADR-0013). Off the event loop:
+    # netpolicy resolves DNS for a non-local backend, and a blocking resolve in
+    # an async handler stalls every request this server is serving, not just
+    # this one.
+    backend, backend_info, notes = await loop.run_in_executor(
+        get_plugin_executor(),
+        lambda: _resolve_backend(req, self_url=self_url,
+                                 model_name=active_model(),
+                                 restricted=restricted,
+                                 session_mode=session_mode))
     # The request is wired to the backend for real; whether the SERVER honours
     # it is a separate question and the caller is told the answer rather than
     # left to assume. A localm self-connection does NOT implement the OpenAI
@@ -340,7 +569,6 @@ async def create_session(req: CreateSessionRequest, request: Request):
     # tool-call convention instead - which is the equivalent guarantee, not a
     # downgrade. Nothing errors either way; saying nothing is what would make an
     # ignored option indistinguishable from an applied one (AGENTS.md rule 5).
-    notes: list[str] = []
     if req.native_tools and not backend.supports_native_tools:
         notes.append(
             "native_tools was not applied: this server does not implement the "
@@ -363,12 +591,6 @@ async def create_session(req: CreateSessionRequest, request: Request):
     if req.verify_max_retries is not None:
         verify_kwargs["verify_max_retries"] = req.verify_max_retries
 
-    from localm.audit import effective_mode
-    # Pass the session's project dir so a per-project .localcoder/config.toml mode
-    # is honored by the GUI coder, not just the global coder_mode (REC-CODER-MODE-TOML).
-    session_mode = req.mode or effective_mode("coder", cwd=cwd).value
-
-    loop = asyncio.get_running_loop()
     # Agent construction scans the project (map build) - keep it off the loop
     session = await loop.run_in_executor(get_plugin_executor(), lambda: CoderSession(
         cwd,
@@ -384,6 +606,7 @@ async def create_session(req: CreateSessionRequest, request: Request):
         custom_instructions=req.custom_instructions,
         verify=req.verify,
         auto_verify=req.auto_verify,
+        backend_info=backend_info,
         **verify_kwargs,
         **gen_kwargs,
     ))
@@ -1386,6 +1609,19 @@ async def coder_episodes_consolidate(request: Request, req: EpisodeTargetRequest
         from localm.plugins.coder.backends.http import HTTPBackend
         from localm.plugins.coder.episodes import EpisodeStore, consolidate
         from localm.textnorm import strip_think
+        # PINNED TO THIS LOCALM ON PURPOSE. This is the second HTTPBackend in
+        # this file and it must NOT follow a session's backend selection
+        # (ADR-0013 / ADR-0014), so do not "fix" the inconsistency with
+        # create_session:
+        #   - It rewrites the user's STORED EPISODIC MEMORY, the accumulated
+        #     lessons from every project they have used the coder on. Sending
+        #     that to a provider is a strictly larger disclosure than a single
+        #     session's prompts, and nobody asked for it.
+        #   - There is no selection to inherit anyway: this route takes an
+        #     EpisodeTargetRequest, which carries a cwd and no session id.
+        # The session ESTIMATE route builds no backend at all - it calls
+        # session.run_estimate and therefore already uses the session's own
+        # backend, selection included.
         backend = HTTPBackend(
             self_url,
             model=active_model(),

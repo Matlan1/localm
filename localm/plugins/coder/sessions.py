@@ -107,6 +107,13 @@ class CoderSession:
         verify: Optional["_VerifyCommand"] = None,
         auto_verify: bool = True,
         verify_max_retries: int = 2,
+        # WHICH model server answers this session, decided ONCE by whoever built
+        # the backend and carried here rather than re-derived from the backend
+        # object. Re-deriving "is this remote" at the reporting site is a second
+        # chance to get it wrong, and it would diverge exactly in the awkward
+        # case the classifier exists for. None keeps the pre-selection shape for
+        # the CLI, which builds its own backend from its own flags.
+        backend_info: Optional[dict] = None,
         **gen_kwargs,
     ) -> None:
         from localm.plugins.coder.agent import Agent
@@ -143,6 +150,7 @@ class CoderSession:
         # whether the connected server can actually honour it. Two fields, not
         # one, because collapsing them is exactly how a request that was quietly
         # dropped becomes indistinguishable from one that was applied.
+        self.backend_info = dict(backend_info) if backend_info else None
         self.native_tools_requested = bool(getattr(backend, "native_tools", False))
         self.native_tools = (self.native_tools_requested
                              and bool(getattr(backend, "supports_native_tools", True)))
@@ -846,6 +854,13 @@ class CoderSession:
             # showing the box unticked (AGENTS.md rule 5).
             "native_tools": self.native_tools,
             "native_tools_requested": self.native_tools_requested,
+            # Which model server this session talks to, and whether that is off
+            # this machine. Reported for the LIFE of the session, not just at
+            # the moment it was chosen: "obvious while it is on" is the bar for
+            # a trust-boundary change, and a hint shown once at setup does not
+            # meet it. Carries no credential - a secret that round-trips to a
+            # client is a secret in a browser history and a screenshot.
+            "backend_info": self.backend_info,
             "busy": self.busy,
             "turns": self.agent.turns,
             "total_tokens": self.agent.total_tokens,
