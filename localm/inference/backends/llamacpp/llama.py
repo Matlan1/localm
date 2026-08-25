@@ -1441,7 +1441,12 @@ class LlamaCpp:
             _t0 = time.monotonic()
             tokens_generated = 0
             in_decode = False
+            # Both handles are freed in the finally below, which is reachable
+            # before either is bound: the _stop check right after the lock, and
+            # any raise out of prefill, both exit early. Binding one inside the
+            # try loses the real error to an UnboundLocalError.
             sampler = None
+            draft_sampler = None
             try:
                 # One contiguous suppression scope covering context work and
                 # prefill. The ROCm lazy-buffer verification messages fire

@@ -431,3 +431,54 @@ class TestInferenceLock:
             # Now the lock is released
             assert not llm._inference_lock.locked()
 
+
+
+# ---------------------------------------------------------------------------
+#  Early-exit cleanup in _generate
+# ---------------------------------------------------------------------------
+
+class TestGenerateEarlyExitCleanup:
+    """Regression: the cleanup block frees a draft sampler that is only bound
+    after prefill, so every exit taken before that point raised
+    UnboundLocalError - destroying the real reason the request stopped."""
+
+    def _mock_api(self, **overrides):
+        mock_api = MagicMock()
+        mock_api.llama_decode.return_value = 0
+        mock_api.llama_batch_init.side_effect = fake_batch_init
+        for k, v in overrides.items():
+            setattr(mock_api, k, v)
+        return mock_api
+
+    def _run(self, llm, mock_api):
+        return llm._generate(
+            prompt_tokens=[1, 2, 3], max_new_tokens=4,
+            temperature=0.8, top_k=40, top_p=0.95, repeat_penalty=1.1)
+
+    def test_stop_before_prefill_ends_cleanly(self):
+        """An unload or a user Stop landing before prefill: no tokens, no error."""
+        llm = _bare_llama()
+        llm._stop.set()
+        mock_api = self._mock_api()
+        with patch("localm.inference.backends.llamacpp.llama.api", mock_api):
+            produced = list(self._run(llm, mock_api))
+        assert produced == []
+        # Nothing was allocated this early, so cleanup must free nothing.
+        mock_api.llama_sampler_free.assert_not_called()
+
+    def test_context_creation_failure_reaches_the_caller_intact(self):
+        """The out-of-memory diagnostic IS the value of this failure - it tells
+        the user to start a new chat or lower n_ctx_max. Cleanup must not
+        replace it, and must not swallow it either."""
+        llm = _bare_llama()
+        # A NULL context back from llama_init_from_model is how the native
+        # library reports that the requested window does not fit.
+        mock_api = self._mock_api(
+            llama_init_from_model=MagicMock(return_value=0))
+        with patch("localm.inference.backends.llamacpp.llama.api", mock_api):
+            gen = self._run(llm, mock_api)
+            with pytest.raises(RuntimeError) as excinfo:
+                next(gen)
+        message = str(excinfo.value)
+        assert "Not enough memory to create a" in message
+        assert "lower n_ctx_max" in message
