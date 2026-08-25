@@ -61,12 +61,47 @@ unbounded burst of tool calls can.
 from __future__ import annotations
 
 import atexit
+import concurrent.futures.thread as _cf_thread
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
 _lock = threading.Lock()
 _executor: ThreadPoolExecutor | None = None
+
+
+def pool_is_shut_down(executor: ThreadPoolExecutor | None) -> bool:
+    """True when *executor* has been shut down and can no longer accept work.
+
+    Reads ``_shutdown`` - private, but the same class of long-stable
+    ``ThreadPoolExecutor`` introspection ``_executor_health.pool_health()``
+    already documents and relies on, and there is no public equivalent
+    (``submit()`` raising is the only public signal, which is too late to be a
+    check). Defaults to False if the attribute ever disappears, so a future
+    Python renaming it degrades to exactly today's behaviour rather than
+    making every pool look dead.
+    """
+    if executor is None:
+        return False
+    return bool(getattr(executor, "_shutdown", False))
+
+
+def _interpreter_is_exiting() -> bool:
+    """True once Python has begun tearing the process down.
+
+    ``concurrent.futures.thread`` sets this module-global from ``_python_exit``,
+    which the interpreter runs via ``threading._shutdown()``. MEASURED, not
+    assumed: that runs BEFORE ordinary ``atexit`` handlers, so by the time
+    anything registered with ``atexit`` (including this module's own handler
+    below) executes, this already reads True.
+
+    That ordering is what makes this a usable guard rather than a race: once it
+    is True, EVERY pool refuses new work - a freshly built one included, since
+    ``submit()`` checks this same global - so replacing a dead pool during
+    teardown could only ever spawn threads nothing will join and register an
+    atexit handler mid-atexit, while still failing the call.
+    """
+    return bool(getattr(_cf_thread, "_shutdown", False))
 
 
 def get_plugin_executor() -> ThreadPoolExecutor:
@@ -77,14 +112,68 @@ def get_plugin_executor() -> ThreadPoolExecutor:
     (``min(32, cpu_count+4)``), so splitting this pool out of the shared one
     does not cut plugin capacity - the fix is isolation from inference, not a
     smaller pool.
+
+    A SHUT-DOWN POOL IS DETECTED AND REPLACED, and the reasoning for that
+    choice belongs here rather than in a commit message, because the two
+    alternatives are both defensible and the decision is not recoverable from
+    the code alone:
+
+    This used to guard on ``_executor is None`` ALONE. Once the pool was shut
+    down that check kept returning it, every caller's ``submit()`` raised
+    ``RuntimeError: cannot schedule new futures after shutdown``, and nothing
+    ever recovered - the plugin routes that depend on this pool (rag, web,
+    voice, coder session management, the GUI model-listing routes) then failed
+    for the life of the process with an error naming a thread pool the user has
+    never heard of.
+
+    REPLACING rather than refusing, and WHY that is not "silently masking the
+    cause": a survey of all 12 modules that import this function found NO caller
+    anywhere that shuts this pool down. The only shutdown that exists is the
+    ``atexit`` registration below, plus ``concurrent.futures``'s own
+    ``_python_exit`` - both of which mean the PROCESS IS ENDING, and both of
+    which are caught by the guard above rather than replaced. So outside
+    teardown a dead pool is a state with no known producer in this tree, and
+    for a stateless resource like a thread pool the honest response to that is
+    to restore service AND SAY SO LOUDLY (rule 5 is satisfied by surfacing the
+    state, not by refusing to work). Hence the WARNING, which names the state
+    explicitly so the cause is discoverable instead of absorbed.
+
+    DURING TEARDOWN IT REFUSES INSTEAD, because there replacing is not a
+    recovery: see ``_interpreter_is_exiting`` for the measured ordering. The
+    error says which of the two it was, so "the server is shutting down" is
+    never reported as a mysterious pool failure.
     """
     global _executor
-    if _executor is None:
-        with _lock:
-            if _executor is None:
-                workers = min(32, (os.cpu_count() or 1) + 4)
-                executor = ThreadPoolExecutor(
-                    max_workers=workers, thread_name_prefix="localm-plugin")
-                atexit.register(executor.shutdown, wait=False, cancel_futures=True)
-                _executor = executor
-    return _executor
+    current = _executor
+    if current is not None and not pool_is_shut_down(current):
+        return current
+
+    with _lock:
+        current = _executor
+        if current is not None and not pool_is_shut_down(current):
+            return current
+
+        replacing_dead_pool = current is not None
+        if replacing_dead_pool and _interpreter_is_exiting():
+            raise RuntimeError(
+                "the shared plugin thread pool is shut down because this "
+                "process is exiting; no new plugin work can be scheduled")
+
+        if replacing_dead_pool:
+            # Imported here, not at module scope: this module is a
+            # dependency-free stdlib-only leaf on purpose (see the module
+            # docstring - that is what removed the inference/plugins import
+            # cycle), and a top-level localm import would put it straight back.
+            from localm.debuglog import logger as _dbg
+            _dbg.warning(
+                "the shared plugin thread pool was found shut down while the "
+                "server is still running, and has been replaced so plugin work "
+                "can continue. Nothing in localm shuts this pool down outside "
+                "process exit, so please report this.")
+
+        workers = min(32, (os.cpu_count() or 1) + 4)
+        executor = ThreadPoolExecutor(
+            max_workers=workers, thread_name_prefix="localm-plugin")
+        atexit.register(executor.shutdown, wait=False, cancel_futures=True)
+        _executor = executor
+        return executor
