@@ -441,6 +441,7 @@ def test_resolve_amd_rocm_asset_warns_when_release_lookup_fails(monkeypatch, cap
     general (non-ROCm) fallback already is, not silently skipped (AGENTS.md
     rule 5)."""
     monkeypatch.setattr(sl.sys, "platform", "win32")
+    monkeypatch.setattr(hwdetect, "amd_gfx_family", lambda names: "gfx103x")
     monkeypatch.setattr(sl, "_release_assets", lambda tag, repo=None: [])
 
     url, sha, _tag = sl._resolve_backend_asset("amd-rocm")
@@ -454,13 +455,15 @@ def test_resolve_amd_rocm_asset_warns_when_release_lookup_fails(monkeypatch, cap
 def test_resolve_amd_rocm_asset_warns_when_gfx103x_asset_missing(monkeypatch, capsys):
     """The release lookup can succeed yet still not contain the expected
     gfx103X asset (e.g. only other GPU variants are listed) - that must warn
-    too, not just the empty-list case."""
+    too, not just the empty-list case. Pins the detected family to gfx103x so
+    the outcome does not depend on the box running the test."""
     dummy_assets = [{
         "name": "llama-b1307-windows-rocm-gfx110X-x64.zip",
         "browser_download_url": "https://dummy.github/releases/download/b1307/llama-rocm-gfx110X.zip",
         "digest": "sha256:othergpuvariant",
     }]
     monkeypatch.setattr(sl.sys, "platform", "win32")
+    monkeypatch.setattr(hwdetect, "amd_gfx_family", lambda names: "gfx103x")
     monkeypatch.setattr(sl, "_release_assets", lambda tag, repo=None: dummy_assets)
 
     url, sha, _tag = sl._resolve_backend_asset("amd-rocm")
@@ -478,6 +481,7 @@ def test_resolve_amd_rocm_asset_no_warning_when_release_found(monkeypatch, capsy
         "digest": "sha256:dummyrocmsha",
     }]
     monkeypatch.setattr(sl.sys, "platform", "win32")
+    monkeypatch.setattr(hwdetect, "amd_gfx_family", lambda names: "gfx103x")
     monkeypatch.setattr(sl, "_release_assets", lambda tag, repo=None: dummy_assets)
 
     url, sha, _tag = sl._resolve_backend_asset("amd-rocm")
@@ -486,6 +490,49 @@ def test_resolve_amd_rocm_asset_no_warning_when_release_found(monkeypatch, capsy
     assert sha == "dummyrocmsha"
     out = capsys.readouterr().out.lower()
     assert "could not find" not in out
+
+
+@pytest.mark.parametrize("fam,asset_tag", [("gfx110x", "gfx110X"), ("gfx120x", "gfx120X")])
+def test_resolve_amd_rocm_asset_selects_the_detected_family(monkeypatch, capsys, fam, asset_tag):
+    """The bug this exists for: --backend amd-rocm always fetched the gfx103X
+    asset regardless of the actual card. A release listing several GPU
+    families must select the one hwdetect.amd_gfx_family() actually detected,
+    not the gfx103X default - and must not warn, since the expected asset IS
+    present."""
+    dummy_assets = [
+        {"name": "llama-b1307-windows-rocm-gfx103X-x64.zip",
+         "browser_download_url": "https://dummy.github/releases/download/b1307/gfx103X.zip",
+         "digest": "sha256:gfx103xsha"},
+        {"name": f"llama-b1307-windows-rocm-{asset_tag}-x64.zip",
+         "browser_download_url": f"https://dummy.github/releases/download/b1307/{asset_tag}.zip",
+         "digest": f"sha256:{fam}sha"},
+    ]
+    monkeypatch.setattr(sl.sys, "platform", "win32")
+    monkeypatch.setattr(hwdetect, "amd_gfx_family", lambda names: fam)
+    monkeypatch.setattr(sl, "_release_assets", lambda tag, repo=None: dummy_assets)
+
+    url, sha, _tag = sl._resolve_backend_asset("amd-rocm")
+
+    assert url == f"https://dummy.github/releases/download/b1307/{asset_tag}.zip"
+    assert sha == f"{fam}sha"
+    out = capsys.readouterr().out.lower()
+    assert "could not find" not in out
+
+
+def test_resolve_amd_rocm_asset_falls_back_to_the_detected_familys_own_pin(monkeypatch, capsys):
+    """When the release lookup cannot find the DETECTED family's asset, the
+    offline fallback must be that family's own pinned URL/sha256, not the
+    gfx103X constant - otherwise a gfx110X/gfx120X box would silently receive
+    the wrong (RDNA2) runtime whenever the release API is unreachable."""
+    monkeypatch.setattr(sl.sys, "platform", "win32")
+    monkeypatch.setattr(hwdetect, "amd_gfx_family", lambda names: "gfx110x")
+    monkeypatch.setattr(sl, "_release_assets", lambda tag, repo=None: [])
+
+    url, sha, _tag = sl._resolve_backend_asset("amd-rocm")
+
+    assert url != sl.DEFAULT_URL
+    assert url.endswith("llama-b1307-windows-rocm-gfx110X-x64.zip")
+    assert sha == sl._PINNED_FALLBACK_SHA256["llama-b1307-windows-rocm-gfx110X-x64.zip"]
 
 
 def test_provision_backend_verifies_default_sha256(monkeypatch):
