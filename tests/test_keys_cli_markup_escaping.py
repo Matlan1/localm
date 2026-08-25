@@ -87,11 +87,16 @@ class TestKeyShowMarkupEscaping:
         assert forced in r.output
 
     def test_masked_preview_shows_bracketed_prefix_verbatim(self, runner, monkeypatch):
+        """_mask_key() shows only key[:4] + '...' + key[-4:], so the bracket
+        pair must fit ENTIRELY inside that 4-char window to reach Rich's
+        parser as a complete "[...]" tag - a longer tag like '[draft]' gets
+        truncated to '[dra' (no closing bracket) and passes through
+        unchanged either way, which would make this test unable to fail."""
         from localm.cli.keys import _mask_key
-        forced = f"{BRACKET_DROP}ownerkeypadding1234567890abcdef"
+        forced = "[dr]restofthekeypaddingtoreach1234567890abcdef"
         monkeypatch.setenv("LOCALM_API_KEY", forced)
         expected = _mask_key(forced)
-        assert "[" in expected, "fixture must actually exercise a bracket"
+        assert "[dr]" in expected, "fixture must put a COMPLETE tag in the mask window"
         r = runner.invoke(main, ["key", "show"])
         assert r.exit_code == 0, r.output
         assert forced not in r.output               # still masked, not the full key
@@ -126,9 +131,15 @@ class TestKeySetMarkupEscaping:
         loosened."""
         from localm import auth
         from localm.cli.keys import _mask_key
-        forced = f"padding-key{BRACKET_DROP}-1234567890abcdef"
+        # _mask_key() shows only key[:4] + '...' + key[-4:] - the bracket pair
+        # must fit ENTIRELY inside that 4-char window to reach Rich's parser
+        # as a complete tag (see key_show's identical note above); a bracket
+        # placed mid-string would be truncated away by the mask itself,
+        # making this test unable to fail regardless of escaping.
+        forced = "[dr]restofthekeypaddingtoreach1234567890abcdef"
         monkeypatch.setattr(auth, "set_api_key", lambda key: None)
         expected = _mask_key(forced)
+        assert "[dr]" in expected, "fixture must put a COMPLETE tag in the mask window"
         r = runner.invoke(main, ["key", "set", forced])
         assert r.exit_code == 0, r.output
         assert expected in r.output
