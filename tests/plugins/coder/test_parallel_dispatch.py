@@ -583,12 +583,24 @@ def test_isolated_child_verify_failure_is_reported_as_error_not_ok(repo):
     last_run_ok from its real exit code, exactly as loop.py does on exhausted
     retries. Before this fix verify_cmd was always None here, so a child could
     never even attempt this and always fell back to reporting ok.
+
+    The precondition is asserted OUTSIDE the hook, on the main thread, after
+    dispatch returns - never by raising inside the hook itself. A raise there
+    runs on the pool worker, where dispatch_parallel's own exception handler
+    (its `except Exception as exc: outcome.seal("error", ...)`) catches it and
+    reports the identical "[error]" symptom this test is trying to prove for a
+    real verification failure - so an assertion inside the hook cannot tell
+    "verify_cmd reached the child and failed" from "the hook itself crashed
+    for an unrelated reason", which defeats the whole point of the test.
     """
+    captured = {}
+
     def fails_its_own_verification(agent):
-        assert agent.verify_cmd is not None, "no verify_cmd reached the child"
-        from localm.plugins.coder import verify as _verify
-        code, _out = _verify.run_verify(agent.verify_cmd, agent.cwd)
-        agent.last_run_ok = (code == 0)
+        captured["verify_cmd"] = agent.verify_cmd
+        if agent.verify_cmd is not None:
+            from localm.plugins.coder import verify as _verify
+            code, _out = _verify.run_verify(agent.verify_cmd, agent.cwd)
+            agent.last_run_ok = (code == 0)
         return "child claims done"
 
     FakeAgent.behaviour = {"child1": fails_its_own_verification}
@@ -596,6 +608,7 @@ def test_isolated_child_verify_failure_is_reported_as_error_not_ok(repo):
         repo, verify_cmd=[sys.executable, "-c", "import sys; sys.exit(1)"])
     res = par.tool_dispatch_parallel(repo, tasks=["a"], _parent_agent=parent)
 
+    assert captured.get("verify_cmd") is not None, "no verify_cmd reached the child"
     assert "[error]" in res.output, res.output
     assert "[ok]" not in res.output, res.output
     assert res.ok is False
