@@ -1541,7 +1541,32 @@ class LlamaCpp:
                         yield token   # consumer runs here; an unload can interleave
                         tokens_generated += 1
 
+                        # Coarse heartbeat, OUTSIDE the lock above (never add
+                        # work to a native-call-holding region). DEBUG, not
+                        # INFO: the file-side ring-buffer precedent this whole
+                        # scheme follows (discover.py) is explicit that INFO is
+                        # for a decision made once per call, not a recurring
+                        # tick - the always-on ring buffer holds 400 records
+                        # SHARED across everything the server logs, and an
+                        # INFO line here is spent on every generation forever.
+                        # Only the phase BOUNDARIES (prefill start/complete,
+                        # decode entered, complete/aborted - roughly four per
+                        # generation) are affordable at that level; this one
+                        # still reaches the shared debug-log file once --debug
+                        # is on, which is where a stalled-vs-hung decode is
+                        # actually diagnosed.
+                        if (tokens_generated
+                                and tokens_generated % _DECODE_PROGRESS_INTERVAL == 0):
+                            logger.debug(
+                                "gguf generate: decode progress, %d token(s) in %.2fs",
+                                tokens_generated, time.monotonic() - _decode_t0)
+
                         if max_new_tokens > 0 and tokens_generated >= max_new_tokens:
+                            # The while/else below only runs when the loop exits by
+                            # CONDITION, and this break skips it, so the reason is
+                            # set here too. Callers read it to tell a reply that ran
+                            # out of budget from one the model chose to end.
+                            self.last_finish_reason = "length"
                             # Final token budget reached, update KV cache bookkeeping
                             with self._gen_lock:
                                 if not (self._stop.is_set() or self._ctx_ptr is None):
@@ -1669,25 +1694,6 @@ class LlamaCpp:
                                     # _prefill_fresh_context above raises mid-growth.
                                     if batch is not None:
                                         api.llama_batch_free(batch)
-                        # Coarse heartbeat, OUTSIDE the lock above (never add
-                        # work to a native-call-holding region). DEBUG, not
-                        # INFO: the file-side ring-buffer precedent this whole
-                        # scheme follows (discover.py) is explicit that INFO is
-                        # for a decision made once per call, not a recurring
-                        # tick - the always-on ring buffer holds 400 records
-                        # SHARED across everything the server logs, and an
-                        # INFO line here is spent on every generation forever.
-                        # Only the phase BOUNDARIES (prefill start/complete,
-                        # decode entered, complete/aborted - roughly four per
-                        # generation) are affordable at that level; this one
-                        # still reaches the shared debug-log file once --debug
-                        # is on, which is where a stalled-vs-hung decode is
-                        # actually diagnosed.
-                        if (tokens_generated
-                                and tokens_generated % _DECODE_PROGRESS_INTERVAL == 0):
-                            logger.debug(
-                                "gguf generate: decode progress, %d token(s) in %.2fs",
-                                tokens_generated, time.monotonic() - _decode_t0)
                     else:
                         # Budget exhausted without the model finishing its turn
                         self.last_finish_reason = "length"
