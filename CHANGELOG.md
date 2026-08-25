@@ -416,6 +416,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   shift.** The workflow template hardcoded these; they can now be overridden
   per generation the same way seed, steps and cfg already were. Leaving them
   unset behaves exactly as before.
+- **Chat's web search/fetch tool calls are now grammar-constrained, not just
+  prompted for.** Once the model starts a `<tool_call>`, a lazy grammar forces
+  it to be valid tool-call JSON instead of hoping the model followed the
+  instructions - the same protection the coder plugin's tool calls already
+  had. Applies to both the interactive chat web toggle and scheduled chat
+  jobs, on local grammar-capable backends; toggle with the new "Grammar-
+  constrain chat tool calls" setting.
 
 ### Changed
 - **The chat parameters drawer and the image, music and video generation forms

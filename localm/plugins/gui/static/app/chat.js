@@ -25,6 +25,12 @@ export const chat = {
   docs: [],          // document attachments: {name, text, chars, truncated}
   ctxMax: 16384,     // context ceiling - refreshed from /v1/config
   systemDefault: "", // default system prompt from Settings; a blank drawer inherits it
+  toolGrammar: true, // chat_tool_grammar from /v1/config - grammar-constrain web-tool calls
+  // Set once a backend REFUSES a web-tool grammar request; never cleared until
+  // reload. Kept separate from toolGrammar (the config preference, refreshed
+  // by refreshCtxLimit's 30s poll) - a config refresh must not resurrect a
+  // grammar THIS backend has already demonstrated it cannot honour.
+  toolGrammarUnsupported: false,
   privacy: false,    // server in privacy mode → conversations not persisted
   persist: false,    // non-privacy: conversations sync to the server store
   stick: true,       // R31: follow the stream to the bottom until the user scrolls up
@@ -236,6 +242,7 @@ export async function refreshCtxLimit() {
       // The Settings "Default system prompt": a chat with a blank System prompt
       // field inherits this (the per-chat drawer overrides it).
       chat.systemDefault = (cfg.chat_system_prompt || "").trim();
+      chat.toolGrammar = cfg.chat_tool_grammar !== false;
       // The coder session rail's side. Applied here because this is the one boot
       // round trip that already has the config in hand - a second fetch just for a
       // panel side would be a request per page load for a value that never changes

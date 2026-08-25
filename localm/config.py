@@ -598,6 +598,10 @@ DEFAULT_CONFIG: dict = {
     # (supports_grammar gate + runtime soft-degrade). NOTE: a config.json written
     # before the flip keeps the old dumped False (saved wins) - flip it in Settings.
     "coder_tool_grammar": True,
+    # Same constraint as coder_tool_grammar, for chat's own tool caller (the
+    # web_search/fetch_url loop, scheduled jobs and the interactive GUI alike):
+    # once the model starts a <tool_call>, force it to be valid tool-call JSON.
+    "chat_tool_grammar": True,
     # After an image is generated, ask ComfyUI to release VRAM and reload the chat
     # model so the next reply is instant. Off = the chat model reloads lazily on
     # the next message instead (better for many images in a row).
