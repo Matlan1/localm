@@ -182,12 +182,13 @@ class TestStopCmdMarkupEscaping:
 
     def test_ambiguous_match_shows_bracketed_prefix_and_root_dirs_verbatim(
             self, cli_runner, monkeypatch):
-        # instance_id is intentionally truncated to 8 chars for display (by
-        # design, unrelated to markup) - so a bracket there is not a useful
-        # probe here; root_dir is not truncated and covers the same print's
-        # second escape() call.
+        # The per-displayed-id instance_id column IS truncated to 8 chars (by
+        # design, unrelated to markup), so a bracket placed early enough in
+        # `wanted` survives both there and in the un-truncated matching
+        # prefix - this covers the PREFIX's own escape(repr(...)) call, and
+        # root_dir (never truncated) covers the loop's second escape() call.
         from localm import instances
-        wanted = "jobaaaa"
+        wanted = f"x{BRACKET_DROP}"
         entries = [
             {"instance_id": f"{wanted}1", "pid": 1, "root_dir": f"/proj/a{BRACKET_DROP}",
              "scheme": "http", "host": "127.0.0.1", "port": 1, "_path": "/x/a.json"},
