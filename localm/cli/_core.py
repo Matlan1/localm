@@ -90,12 +90,14 @@ def _resolve_bind_host(cli_host: Optional[str]):
         return "127.0.0.1", False
     from localm.bindhost import is_valid_bind_host
     if not is_valid_bind_host(cfg_host):
+        from rich.markup import escape
+
         from localm.debuglog import logger
         msg = (f"config 'bind_host' is not a bindable address: {cfg_host!r} - "
                f"ignoring it and binding 127.0.0.1 (use an IP literal like "
                f"0.0.0.0, or localhost)")
         logger.warning(msg)
-        console.print(f"[yellow]{msg}[/yellow]")
+        console.print(f"[yellow]{escape(msg)}[/yellow]")
         return "127.0.0.1", False
     return cfg_host, True
 
@@ -151,6 +153,9 @@ def _config_tls_pair(cfg: dict):
     uvicorn's own startup in front of the operator who typed it."""
     import ssl
     from pathlib import Path
+
+    from rich.markup import escape
+
     from localm.debuglog import logger
     cert = str(cfg.get("tls_cert") or "").strip()
     key = str(cfg.get("tls_key") or "").strip()
@@ -174,7 +179,7 @@ def _config_tls_pair(cfg: dict):
     msg = (f"configured TLS certificate pair is unusable ({problem}) - "
            f"using localm's built-in certificate instead")
     logger.warning(msg)
-    console.print(f"[yellow]{msg}[/yellow]")
+    console.print(f"[yellow]{escape(msg)}[/yellow]")
     return None
 
 
@@ -229,12 +234,14 @@ def _setup_tls_or_exit(host, *, no_tls, tls_cert, tls_key):
     """Resolve TLS for *host*, or exit(2) rather than silently serve a network
     bind in cleartext. Returns ``(ssl_certfile, ssl_keyfile)`` (cert is None for
     plain HTTP)."""
+    from rich.markup import escape
+
     try:
         return _resolve_tls(host, no_tls=no_tls, tls_cert=tls_cert, tls_key=tls_key)
     except click.UsageError:
         raise
     except Exception as e:
-        console.print(f"[bold red]Could not set up built-in TLS: {e}[/bold red]")
+        console.print(f"[bold red]Could not set up built-in TLS: {escape(str(e))}[/bold red]")
         console.print(
             "[bold red]Refusing to serve a network bind in cleartext. Re-run with "
             "--no-tls to force HTTP (the API key would cross the network "
@@ -366,7 +373,8 @@ class _GracefulGroup(click.Group):
         except Exception:
             # Broken-pipe is already handled above (before this point), so stdout is
             # live here for a real failure - the original fallback is safe.
-            console.print(f"[red]localm failed:[/red] {e}")
+            from rich.markup import escape
+            console.print(f"[red]localm failed:[/red] {escape(str(e))}")
 
 
 
@@ -486,10 +494,22 @@ def report_server_failure(state, payload, what: str) -> None:
     Never prints a negative RESULT - every branch here is "could not ask", and
     a caller that turned any of them into "it is not running" or "nothing to
     do" would be stating an answer it never obtained.
-    """
+
+    *what* is a caller-supplied description (every current caller happens to
+    pass a hardcoded literal, but this is a shared, generic helper with no way
+    to enforce that for a future or different caller - escape it regardless,
+    the same defense-in-depth ``rag.py``'s already-validated collection names
+    use). *payload* for the "unreachable" branch is ``type(e).__name__`` -
+    not numeric, so escaped too rather than trusted to stay bracket-free.
+    ``detail`` (the "http" branch) is server-response text and genuinely
+    untrusted. ``code`` is ``r.status_code`` from ``requests`` - always a real
+    ``int`` in every path that reaches here, so it is left unescaped."""
+    from rich.markup import escape
+
+    what = escape(what)
     if state == "unreachable":
         console.print(f"[red]Could not reach the localm server[/red] to {what} "
-                      f"({payload}).")
+                      f"({escape(str(payload))}).")
     elif state == "unauthorized":
         console.print(f"[red]The localm server refused this request[/red] "
                       f"({what}). Set LOCALM_API_KEY to the server's key, or "
@@ -503,15 +523,21 @@ def report_server_failure(state, payload, what: str) -> None:
     else:
         code, detail = payload if isinstance(payload, tuple) else (payload, "")
         console.print(f"[red]Could not {what} (HTTP {code})[/red]"
-                      + (f": {detail}" if detail else ""))
+                      + (f": {escape(str(detail))}" if detail else ""))
 
 
 def no_server_message(what: str) -> None:
-    """Say that *what* needs a running localm server, and how to get one."""
+    """Say that *what* needs a running localm server, and how to get one.
+
+    *what* is caller-supplied (see report_server_failure); the directory is a
+    real filesystem path from ``instances.resolve_root_dir()`` and can
+    legitimately contain brackets. Both escaped."""
+    from rich.markup import escape
+
     from .. import instances
     console.print(f"[red]No running localm server found for this directory[/red] "
-                  f"- {what} needs one.")
-    console.print(f"[dim]Directory:[/dim] {instances.resolve_root_dir()}")
+                  f"- {escape(what)} needs one.")
+    console.print(f"[dim]Directory:[/dim] {escape(instances.resolve_root_dir())}")
     console.print("[dim]Start one with[/dim] localm gui  [dim]or[/dim]  "
                   "localm serve <model>[dim], or set LOCALM_URL to target a "
                   "different instance.[/dim]")
