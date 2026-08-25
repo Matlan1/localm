@@ -708,6 +708,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
   upload.
 
 ### Security
+- **Turning network access off no longer left the voice model able to
+  download anyway.** The neural text-to-speech voice is fetched by your
+  browser directly, so localm's network switch, which every other
+  network-triggering action already obeys, had no way to see or stop that
+  request. With network access set to "off" it is now refused outright, with
+  a message telling you how to re-enable it; set to "ask first" (the
+  default), it now asks for a one-time confirmation before the ~86 MB
+  download starts, the same way an embedding model download already does.
+  Nothing changes once the voice model has already been downloaded once.
 - **A form inside a model's reply can no longer send anything off your
   machine.** Replies are rendered as HTML, so a reply could draw a form, and
   the app's security policy did not say where forms were allowed to be
