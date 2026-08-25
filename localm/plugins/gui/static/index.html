@@ -197,6 +197,12 @@
         <button class="btn-secondary" id="session-new"><span class="btn-ic" data-icon="plus"></span>new</button>
         <span class="cwd" id="coder-cwd"></span>
         <span id="coder-state" class="job-state"></span>
+        <!-- Shown for the LIFE of a session whose model is not on this machine,
+             not just when it was picked. A trust boundary the user crossed at
+             setup has to stay visible while they are typing into it. Reuses the
+             .job-state st-warn pill rather than inventing a second severity
+             vocabulary (gui-design rule 6). -->
+        <span id="coder-remote" class="job-state st-warn" style="display:none"></span>
         <span class="spacer"></span>
         <button class="btn-secondary" id="coder-undo" title="Revert the last file write">undo</button>
         <button class="btn-secondary" id="coder-files" title="Files changed this session, with diffs">files</button>
@@ -249,6 +255,34 @@
             <input type="number" id="setup-seed" placeholder="random" step="1">
           </div>
         </div>
+        <div class="grid2">
+          <div>
+            <label for="setup-backend" title="Which model server answers this session. Anything other than this localm sends your prompts and the file contents the agent reads off your machine.">Model server</label>
+            <select id="setup-backend">
+              <option value="local" selected>this localm (offline)</option>
+              <option value="url">OpenAI-compatible URL</option>
+              <option value="openai">OpenAI</option>
+              <option value="anthropic">Anthropic</option>
+            </select>
+          </div>
+          <div id="setup-backend-model-wrap" style="display:none">
+            <label for="setup-backend-model">Model name at that server</label>
+            <input type="text" id="setup-backend-model" placeholder="provider default" spellcheck="false">
+          </div>
+        </div>
+        <div id="setup-backend-url-wrap" style="display:none">
+          <label for="setup-backend-url">Endpoint URL</label>
+          <input type="text" id="setup-backend-url" placeholder="http://127.0.0.1:11434/v1" spellcheck="false">
+        </div>
+        <div id="setup-backend-key-wrap" style="display:none">
+          <label for="setup-backend-key" title="Held for this session only and never written to disk. Leave blank to use OPENAI_API_KEY / ANTHROPIC_API_KEY from the environment.">API key (this session only, never saved)</label>
+          <input type="password" id="setup-backend-key" placeholder="from the environment if blank" spellcheck="false" autocomplete="off">
+        </div>
+        <!-- The consequence of the choice, shown ON SELECT and kept visible.
+             Not a tooltip: hover does not exist on touch, and Companion means
+             phones are a supported target. For the off-machine options this is
+             not documentation, it is the consent surface. -->
+        <div id="setup-backend-hint" class="sub" style="display:none"></div>
         <label for="setup-scope">Scope (optional glob - file tools are confined to matching paths)</label>
         <input type="text" id="setup-scope" placeholder="src/**/*.py" spellcheck="false">
         <label for="setup-system" title="Overrides this project's .localcoder/system.md for this session; leave blank to use that file. Extra guidance prepended to the agent's system prompt: conventions, style, constraints.">Custom instructions (optional - conventions, style, constraints)</label>
