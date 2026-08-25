@@ -219,7 +219,11 @@ class TestStreamingErrorMarkupEscaping:
         engine_instance = MagicMock(name="EngineInstance")
         engine_instance.__enter__ = MagicMock(return_value=engine_instance)
         engine_instance.__exit__ = MagicMock(return_value=False)
-        bad_message = "attached server error: model[404].bin"
+        # A digit-only bracket body ("[404]") is NOT recognised by Rich's own
+        # tag grammar (confirmed empirically: it survives even unescaped), so
+        # it cannot exercise this bug - use a lowercase-word body instead,
+        # matching BRACKET_DROP_NAME/BRACKET_STYLE_NAME's own shape.
+        bad_message = "attached server error: model[legacy].bin"
         engine_instance.chat_stream = MagicMock(side_effect=RuntimeError(bad_message))
         engine_cls = MagicMock(name="Engine", return_value=engine_instance)
 
