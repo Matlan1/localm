@@ -1,5 +1,21 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""REG-464: the recall inlet must read the SAME namespace the write path writes to."""
+"""REG-464: the recall inlet must read the SAME namespace the write path writes to.
+
+PR #464 collapsed every WRITE path (memory_get/put/append/patch/delete +
+memory_consolidate) and the auto-consolidate outlet to the shared "owner"
+namespace for an ADMIN/owner caller (memory_principal -> None -> "owner"), so an
+owner's memories survive a key rotation (AUDIT-MED-14). But the recall INLET was
+left reading the raw per-key-hash principal (ctx.principal), with no ADMIN->owner
+collapse. Net effect in protected mode (an API key configured, owner authed with
+an ADMIN key): the owner SAVES into the "owner" namespace but recall READS the
+key-hash namespace, so the owner's own saved memories are NEVER injected back into
+chat - the exact "recall stopped injecting" symptom #464 claimed to fix.
+
+The negative case this guards: a store populated through the owner-collapsed write
+path, recalled through a realistic protected-mode ctx (ADMIN scope + key-hash
+principal). Pre-fix the inlet opens the empty key-hash store and injects nothing;
+post-fix it collapses to "owner" and injects.
+"""
 
 from __future__ import annotations
 
@@ -16,7 +32,8 @@ def _home(tmp_path, monkeypatch):
 
 
 def _owner_ctx():
-    """A protected-mode owner ctx as the chat route builds it: ctx.principal is the key hash (principal_id) and ctx.scopes carries ADMIN (routes/chat.py)."""
+    """A protected-mode owner ctx as the chat route builds it: ctx.principal is the
+    key hash (principal_id) and ctx.scopes carries ADMIN (routes/chat.py)."""
     return types.SimpleNamespace(model_id="", principal="owner-key-hash",
                                  stream=False, request_id="r1", state={},
                                  scopes=(scopes.ADMIN,))
@@ -33,14 +50,13 @@ def test_owner_recall_reads_owner_namespace_in_protected_mode(tmp_path, monkeypa
                 {"role": "user", "content": "help me test my python code"}]
     out = plug._memory_inlet(messages, _owner_ctx())
 
-    # Pre-fix: the inlet opened _chat_store("owner-key-hash") (empty), injected
-    # nothing, and returned None with messages unchanged.
     assert out is messages, "owner recall injected nothing (wrong namespace)"
     assert "Python and pytest" in messages[0]["content"]
 
 
 def test_owner_recall_matches_write_namespace(tmp_path, monkeypatch):
-    """Read/write namespace consistency, stated directly: whatever namespace the inlet resolves for an owner ctx MUST equal the one the write path uses."""
+    """Read/write namespace consistency, stated directly: whatever namespace the
+    inlet resolves for an owner ctx MUST equal the one the write path uses."""
     _home(tmp_path, monkeypatch)
     write_principal = None                              # memory_principal collapses ADMIN -> None
     read_principal = plug._ctx_principal(_owner_ctx())  # the inlet's resolution
@@ -49,7 +65,9 @@ def test_owner_recall_matches_write_namespace(tmp_path, monkeypatch):
 
 
 def test_scoped_non_owner_keeps_its_own_namespace(tmp_path, monkeypatch):
-    """A non-owner scoped key (no ADMIN) must NOT collapse to owner - its recall stays bound to its own key-hash namespace, matching principal_id on the write path for a scoped key."""
+    """A non-owner scoped key (no ADMIN) must NOT collapse to owner - its recall
+    stays bound to its own key-hash namespace, matching principal_id on the write
+    path for a scoped key."""
     _home(tmp_path, monkeypatch)
     ctx = types.SimpleNamespace(model_id="", principal="scoped-hash", stream=False,
                                request_id="r1", state={}, scopes=(scopes.CHAT,))

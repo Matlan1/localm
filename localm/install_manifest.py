@@ -1,5 +1,25 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Install provenance ledger - so uninstall removes ONLY what install recorded."""
+"""Install provenance ledger - so uninstall removes ONLY what install recorded.
+
+The lesson of the famous data-loss incidents (Valve's Steam ``rm -rf
+"$STEAMROOT/"*`` wiping ``/`` when the variable was empty; Pop!_OS/apt removing
+the desktop as a "dependency") is the same: an uninstaller must never *derive*,
+*glob*, or *guess* what to delete. It must delete only the exact paths the
+installer wrote down at install time, validate each before touching it, and
+refuse anything it does not have a record for.
+
+This module is that record. ``record()`` writes ``.localm-install.json`` listing
+the venv, the provisioned native binaries (by name, inside their dir), the
+home.cfg, the data directory (and whether WE created it), and the shortcut.
+``uninstall()`` reads it back and removes only those items, with hard guards on
+the one ``rm -rf`` it ever performs (the data dir) - never a root, drive root,
+$HOME, the repo, an ancestor of the repo, a symlink, or a relative/empty path.
+It never touches a path that is not in the manifest.
+
+The venv is recorded but NOT removed here: a running interpreter cannot delete
+its own venv on Windows, so the installer shell removes it (marker-checked) after
+this returns.
+"""
 
 from __future__ import annotations
 
@@ -18,7 +38,8 @@ def manifest_path(root) -> Path:
 
 
 def _bin_files(lib_dir: Optional[Path]) -> list:
-    """Snapshot the native-binary filenames currently in *lib_dir* (bare names, not paths)."""
+    """Snapshot the native-binary filenames currently in *lib_dir* (bare names,
+    not paths). These are exactly what setup-llama provisioned."""
     out: list = []
     if not lib_dir:
         return out
@@ -39,7 +60,18 @@ def record(root, *, venv="", lib_dir="", home_cfg="", data_dir="",
            data_created=False, shortcut="", stamp="",
            runtime_contained=False, python_dir="", cache_dir="", uv_dir="",
            path_dir="", command_shim="", path_modified=False) -> Path:
-    """Write the install manifest under *root*."""
+    """Write the install manifest under *root*. Paths are stored absolute; the
+    binary list is snapshotted from *lib_dir* at call time.
+
+    Schema v2 also records:
+      * the Contained-install runtime (the in-clone Python + uv cache dirs, and
+        uv's OWN binary dir when setup installed uv itself into this clone) -
+        removed on uninstall ONLY when ``runtime_contained`` (a SHARED runtime
+        lives in the user's global uv dir and is reused by other clones, so it is
+        reported but never deleted); and
+      * the optional global ``localm`` command (the bin dir added to PATH + its
+        shim), reversed via the same safe method that added it.
+    """
     data = {
         "schema": SCHEMA_VERSION,
         "stamp": stamp,
@@ -73,7 +105,9 @@ def load(root) -> Optional[dict]:
 
 
 def _unsafe_data_dir(path: str, repo: Path) -> Optional[str]:
-    """A reason string if *path* is too dangerous for ``rm -rf``, else None."""
+    """A reason string if *path* is too dangerous for ``rm -rf``, else None.
+    Refuses empty/relative/symlink paths, the filesystem or drive root, $HOME,
+    the repo, and any ancestor of the repo."""
     if not path:
         return "empty path"
     p = Path(path)
@@ -101,7 +135,17 @@ def _unsafe_data_dir(path: str, repo: Path) -> Optional[str]:
 
 
 def uninstall(root, *, purge_data=False, dry_run=False, force=False, log=print) -> dict:
-    """Plan/execute the uninstall."""
+    """Plan/execute the uninstall. Each item is classified:
+
+      * recorded - we have a record we created it; removed.
+      * warn     - we do NOT remember creating it; removed only with *force*
+                   (the caller shows a clear at-your-own-risk warning first and
+                   the user chooses to continue). Always reported.
+      * refuse   - a categorically dangerous target (filesystem/drive root,
+                   $HOME, the repo, an ancestor of it, or a symlink); NEVER
+                   removed, even with force. This is the rm -rf / guard.
+
+    With *dry_run* nothing is touched. The venv is reported, not removed."""
     root = Path(root).resolve()
     report = {"removed": [], "skipped": [], "warned": [], "refused": [],
               "venv": "", "ok": True, "no_manifest": False}

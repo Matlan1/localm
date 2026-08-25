@@ -4,9 +4,8 @@ import assert from "node:assert/strict";
 import { loadAppWithPages, runScript } from "./harness.mjs";
 
 // Ask-to-add: when the owner adds a folder outside the whitelist, /add replies
-// 409 needs_consent instead of failing. The GUI confirms, appends the folder to
-// rag_allowed_roots (owner-only config), and retries the add once - so the pick
-// "just works" instead of dead-ending on a confinement error.
+// 409 needs_consent. The GUI confirms, appends the folder to rag_allowed_roots
+// (owner-only config), and retries the add once.
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
@@ -65,10 +64,8 @@ test("outside-whitelist add: 409 -> confirm -> widen allowed roots -> retry inde
 
 test("a non-consent 409 shows the server's real detail, not 'body stream already read'",
   async () => {
-    // kbRunAdd used to read the 409 body once to check needs_consent, then read it
-    // AGAIN on the fall-through path. On a real Response the second read throws
-    // "body stream already read", masking the server's actual detail. Emulate the
-    // single-read Response semantics: json() succeeds once, then throws.
+    // The stub emulates single-read Response semantics: json() succeeds once,
+    // then throws "body stream already read".
     let addBodyReads = 0;
     const fetchImpl = async (url) => {
       if (String(url).includes("/add")) {

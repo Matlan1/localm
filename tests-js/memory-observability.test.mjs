@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// F11 (memory-audit 2026-07-02, cluster "no visibility into what memory did to a
-// turn"): a chat turn surfaces a "used N memories" chip built from the server's
-// X-Localm-Memory response header. The chip shows the count + degrade reason and
-// opens the memory modal so a wrong/stale remembered fact is correctable in place.
+// A chat turn surfaces a "used N memories" chip built from the server's
+// X-Localm-Memory response header. The chip shows the count and degrade reason,
+// and opens the memory modal on click.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -45,7 +44,7 @@ test("F11: buildMemoryChip shows count + facts + degrade reason and opens the mo
   assert.match(chip.title, /User prefers metric units/);
   assert.match(chip.title, /keyword match only/);   // degrade label surfaced
 
-  // Clicking opens the memory modal (correctable in place).
+  // Clicking opens the memory modal.
   const modal = window.document.getElementById("modal");
   assert.equal(modal.style.display, "none");
   chip.onclick();

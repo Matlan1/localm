@@ -1,10 +1,14 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Helper subprocess for test_portmux: run a localm.portmux server with a tiny ASGI app."""
+"""Helper subprocess for test_portmux: run a localm.portmux server with a tiny
+ASGI app. NOT a test module (underscore prefix -> pytest does not collect it).
+
+Usage: python _portmux_server.py <port> [<certfile> <keyfile>]
+       (omit cert/key, or pass "-" "-", to run a PLAIN-HTTP bind.)
+"""
 import sys
 from pathlib import Path
 
-# Run against THIS worktree's localm, not the editable install (which points at
-# the main checkout and would lack worktree-only changes like portmux).
+# Import localm from this worktree rather than the editable install.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 

@@ -1,5 +1,22 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Model management: registry/selection, the gguf helpers, and the download backends, split into a package for navigability."""
+"""Model management: registry/selection, the gguf helpers, and the download
+backends, split into a package for navigability.
+
+This module is a behavior-preserving split of the former single-file
+``model_manager.py``. The public surface is unchanged: every name that was
+importable as ``from localm.model_manager import X`` (or read as
+``localm.model_manager.X``) is re-exported here, so importers and existing
+monkeypatches keep working. The concerns live in:
+
+  * ``gguf``     - gguf file-format helpers + SHA256 hashing (leaf utilities)
+  * ``registry`` - registry/selection, info + vision, aliases, dedup, sync, add/remove
+  * ``pull``     - download/transport routing (HF / URL / Ollama) + progress
+  * ``_shared``  - the Rich console, the progress sentinel, the win32 stdout side effect
+
+``sys`` and ``shutil`` are imported here so existing tests that patch
+``localm.model_manager.sys.stdin`` / ``localm.model_manager.shutil.disk_usage``
+keep resolving (both patch the global module singleton).
+"""
 
 import shutil  # noqa: F401  (re-exported so localm.model_manager.shutil resolves for tests)
 import sys  # noqa: F401  (re-exported so localm.model_manager.sys resolves for tests)

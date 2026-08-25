@@ -1,5 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Tests for sync_models_dir - registry/folder reconciliation and autoprune."""
+"""Tests for sync_models_dir - registry/folder reconciliation and autoprune.
+
+This runs on every launch and can delete registry entries, yet had no coverage.
+Pins: loose-file registration, missing->flagged (default), flag clearing on
+reappear, prune deletion with a registry backup, the all-missing guardrail, and
+that external (out-of-folder) models are never pruned.
+"""
 
 import os
 import time
@@ -11,14 +17,16 @@ from localm import model_manager as mm
 
 
 def _backdate(path, seconds=60):
-    """Set *path*'s mtime `seconds` in the past, so it reads as settled (not mid-copy) regardless of how fast the test itself runs."""
+    """Set *path*'s mtime `seconds` in the past, so it reads as settled (not
+    mid-copy) regardless of how fast the test itself runs."""
     old = time.time() - seconds
     os.utime(path, (old, old))
 
 
 @pytest.fixture()
 def fake_registry(tmp_path, monkeypatch):
-    """In-memory registry + temp MODELS_DIR wired into model_manager, with a spy standing in for the on-disk registry backup."""
+    """In-memory registry + temp MODELS_DIR wired into model_manager, with a
+    spy standing in for the on-disk registry backup."""
     store: dict = {}
     models_dir = tmp_path / "models"
     models_dir.mkdir()
@@ -57,16 +65,15 @@ class TestRegisterLooseFiles:
         store, models_dir, _ = fake_registry
         f = models_dir / "fresh.gguf"
         f.write_bytes(b"GGUF\x03\x00\x00\x00" + b"w" * 2048)   # magic + past the size floor
-        _backdate(f)   # settled (not mid-copy) - see TestSettlePeriod for that case
+        _backdate(f)   # settled, not mid-copy
         result = mm.sync_models_dir(prune=False)
         assert result.added == 1
         assert any(e["path"].endswith("fresh.gguf") for e in store.values())
 
     def test_foreign_or_partial_gguf_is_not_registered(self, fake_registry):
-        # R45: a non-GGUF file renamed .gguf (or a 0-byte / partial copy with no
-        # header) must NOT be auto-registered - it would pollute the model list
-        # and could crash a later load. Only real GGUFs (magic b"GGUF" plus a
-        # plausible size) register; a header-only stub with the magic is skipped.
+        # A non-GGUF file renamed .gguf (or a 0-byte / partial copy with no header)
+        # is not auto-registered. Only real GGUFs (magic b"GGUF" plus a plausible
+        # size) register; a header-only stub with the magic is skipped.
         store, models_dir, _ = fake_registry
         foreign = models_dir / "foreign.gguf"
         empty = models_dir / "empty.gguf"
@@ -87,7 +94,9 @@ class TestRegisterLooseFiles:
 
 
 class TestSettlePeriod:
-    """R45: a mid-copy of a *valid* GGUF clears the magic+size floor long before the copy finishes (the floor only needs ~1KiB to have landed), so sync_models_dir must not auto-register it until its mtime has gone quiet."""
+    """R45: a mid-copy of a *valid* GGUF clears the magic+size floor long
+    before the copy finishes (the floor only needs ~1KiB to have landed), so
+    sync_models_dir must not auto-register it until its mtime has gone quiet."""
 
     def test_freshly_written_gguf_is_not_registered_yet(self, fake_registry):
         store, models_dir, _ = fake_registry

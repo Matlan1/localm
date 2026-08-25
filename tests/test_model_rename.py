@@ -1,5 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Tests for rename_model: registry MOVE (not copy, unlike alias_model), sibling aliases left untouched, and best-effort migration of the config/jobs/RAG references that name the old model."""
+"""
+Tests for rename_model: registry MOVE (not copy, unlike alias_model), sibling
+aliases left untouched, and best-effort migration of the config/jobs/RAG
+references that name the old model. See tests/test_model_dedup.py for the
+sibling alias_model/registry-RMW test patterns this mirrors.
+"""
 
 import json
 from pathlib import Path
@@ -11,7 +16,9 @@ from localm import model_manager as mm
 
 @pytest.fixture()
 def fake_registry(tmp_path, monkeypatch):
-    """In-memory registry + temp MODELS_DIR wired into model_manager (registry only - config/jobs/RAG are untouched by this fixture, see real_home for tests that need the migration side effects too)."""
+    """In-memory registry + temp MODELS_DIR wired into model_manager (registry
+    only - config/jobs/RAG are untouched by this fixture, see real_home for
+    tests that need the migration side effects too)."""
     store: dict = {}
     models_dir = tmp_path / "models"
     models_dir.mkdir()
@@ -36,7 +43,12 @@ def fake_registry(tmp_path, monkeypatch):
 
 @pytest.fixture()
 def real_home(tmp_path, monkeypatch):
-    """A full isolated <data dir>: registry.json AND config.json are real files under a throwaway home, and the lazy home_dir() jobs.json/RAG use resolve there too (LOCALM_HOME env)."""
+    """A full isolated <data dir>: registry.json AND config.json are real
+    files under a throwaway home, and the lazy home_dir() jobs.json/RAG use
+    resolve there too (LOCALM_HOME env). Unlike fake_registry, this lets
+    rename_model's migration step (update_config, JobStore, rag Collection -
+    all real file I/O) run fully hermetically. Mirrors conftest.py's
+    cli_runner fixture without the CliRunner overhead."""
     import localm.config as cfg
     home = tmp_path / ".localm"
     (home / "models").mkdir(parents=True, exist_ok=True)
@@ -120,7 +132,10 @@ class TestRenameModel:
 
 
 class TestRenameModelWithNotes:
-    """rename_model() is a thin bool-only wrapper over this; a caller that needs to SHOW the migration notes to a user (the GUI route) must call this instead, or the honest 'here is what could not be migrated' report never leaves the server log (AGENTS.md rule 5)."""
+    """rename_model() is a thin bool-only wrapper over this; a caller that
+    needs to SHOW the migration notes to a user (the GUI route) must call
+    this instead, or the honest "here is what could not be migrated" report
+    never leaves the server log (AGENTS.md rule 5)."""
 
     def test_successful_rename_always_reports_the_unreachable_localcoder_note(
             self, fake_registry, tmp_path):
@@ -157,7 +172,9 @@ class TestRenameModelWithNotes:
 
 
 class TestRenameModelRace:
-    """Same atomic-RMW discipline as TestRegistryRmwAtomicity in test_model_dedup.py: a concurrent writer landing between the precheck read and the atomic move must never be lost."""
+    """Same atomic-RMW discipline as TestRegistryRmwAtomicity in
+    test_model_dedup.py: a concurrent writer landing between the precheck
+    read and the atomic move must never be lost."""
 
     def _racy_load(self, mm_mod, store, monkeypatch, inject):
         real_load = mm_mod.load_registry
@@ -183,12 +200,10 @@ class TestRenameModelRace:
         assert store["orig2"]["path"] == str(tmp_path / "m.gguf")
 
     def test_rename_honestly_reports_a_lost_race(self, fake_registry, monkeypatch):
-        # The precheck sees "taken" is free, but a concurrent writer claims it
-        # (for an unrelated entry) before the atomic move runs. Unlike
-        # alias_model (which prints success unconditionally after the RMW
-        # call), rename_model must notice the move never happened and return
-        # False rather than claim success on a step that silently did nothing
-        # (AGENTS.md rule 5).
+        # The precheck sees taken is free, but a concurrent writer claims it (for
+        # an unrelated entry) before the atomic move runs. rename_model must
+        # notice the move never happened and return False rather than claim
+        # success on a step that silently did nothing.
         store, _ = fake_registry
         store["orig"] = {"path": "p", "source": "local"}
         self._racy_load(mm, store, monkeypatch,
@@ -263,8 +278,8 @@ class TestRenameModelMigratesReferences:
 
 
 # ---------------------------------------------------------------------------
-#  `localm rename` CLI command - the same real, end-to-end harness
-#  test_cli_rm_prompt.py-adjacent commands use (conftest.py's cli_runner).
+#  `localm rename` CLI command, driven end to end through conftest.py's
+#  cli_runner
 # ---------------------------------------------------------------------------
 
 class TestRenameCliCommand:

@@ -1,11 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 /* localm GUI - Video page. The library (grid, selection, bulk actions, detail
-   modal, rename/move/delete) is the shared engine in app/media-gallery.js; only
-   the medium-specific bits live here.
-
-   refreshMusicHistory used to live in this file, which meant the Music page
-   imported its own history renderer from video.js. Each page owns its own
-   library now. */
+   modal, rename/move/delete) comes from app/media-gallery.js; this file adds
+   the medium-specific bits. */
 
 "use strict";
 
@@ -50,10 +46,8 @@ const videoGallery = createGallery({
     $("video-seed").value = m.seed ?? "";
     $("video-steps").value = m.steps ?? "";
     $("video-cfg").value = m.cfg ?? "";
-    // Most of these fields live behind this page's Advanced fold. Restoring
-    // into a CLOSED fold means the toast claims the settings came back while
-    // they sit invisible behind a shut triangle - the same trap the Images
-    // page documents, and the seed is the whole reason anyone reuses settings.
+    // Most of these fields live behind this page's Advanced fold; open it when
+    // they are filled.
     revealFilledAdvanced($("view-video"));
   },
 });

@@ -1,5 +1,20 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""setup.sh's detect_gpu(): NVIDIA must win over leftover ROCm tooling."""
+"""setup.sh's detect_gpu(): NVIDIA must win over leftover ROCm tooling.
+
+Regression for a filed ordering bug: detect_gpu() checked rocminfo/rocm-smi/
+/opt/rocm BEFORE nvidia-smi, so a box with an NVIDIA GPU but ALSO some ROCm
+tooling on PATH (a shared ML rig, a base image bundling both vendor stacks)
+reported "rocm" - matching neither hwdetect.py's vendor priority
+("nvidia", "amd", "intel") nor the actual hardware. The real backend
+recommendation comes from `python -m localm.hwdetect` further down in
+setup.sh, which gets this right; $GPU from detect_gpu() only becomes
+load-bearing as setup.sh's OWN fallback if that probe's output is
+unparseable - see the `case "$REC" in ... *) case "$GPU" in ...` guard.
+
+Extracts and runs ONLY the detect_gpu() function body (not the whole
+script, which has side effects and prompts) with a controlled PATH holding
+stub commands - no real GPU hardware needed either way.
+"""
 
 from __future__ import annotations
 
@@ -50,8 +65,7 @@ pytestmark = pytest.mark.skipif(_bash() is None, reason="no bash on PATH")
 
 
 def test_nvidia_wins_over_leftover_rocm_tooling(tmp_path):
-    # The filed bug, reproduced directly: rocminfo present ALONGSIDE nvidia-smi
-    # must still detect nvidia, not rocm.
+    # rocminfo present ALONGSIDE nvidia-smi must still detect nvidia, not rocm.
     assert _run_detect_gpu(tmp_path, stub_names=["nvidia-smi", "rocminfo"]) == "cuda"
 
 
@@ -72,28 +86,22 @@ def test_neither_is_cpu(tmp_path):
 
 
 def test_nvidia_checked_before_rocm_in_source():
-    """Static backstop that holds even without bash on PATH: the nvidia-smi check must appear (and therefore short-circuit) before the rocm probes."""
+    """Static backstop that holds even without bash on PATH: the nvidia-smi
+    check must appear (and therefore short-circuit) before the rocm probes."""
     body = _function_body("detect_gpu")
     assert body.index("nvidia-smi") < body.index("rocminfo"), (
         "detect_gpu() must check nvidia-smi before rocminfo/rocm-smi/opt-rocm")
 
 
 # ---------------------------------------------------------------------------
-# Regression: detect_gpu()'s pre-venv guess must not be presented as its own
-# detection verdict.
+# detect_gpu()'s pre-venv guess must not be presented as its own detection
+# verdict.
 #
-# setup.sh has two things that can each claim to say what GPU acceleration is
-# in play: this bash-level detect_gpu() (runs before the venv exists, no real
-# vendor-priority policy behind it beyond the crude if/elif above) and the
-# authoritative "Recommended for your hardware: $REC" line, sourced from
-# `python -m localm.hwdetect` once the venv exists. Before this fix, setup.sh
-# ALSO printed a standalone "Detected acceleration: $GPU" line straight from
-# detect_gpu(), so a box could see two different verdicts in one run: leftover
-# ROCm tooling on a non-AMD box prints "rocm" while hwdetect says vulkan/cpu;
-# an AMD Linux box prints "rocm" while hwdetect recommends "hip" (different
-# vocabularies for the same box). $GPU's only legitimate remaining job is
-# gating the pre-venv Y/n prompt (and setup.sh's own fallback if the hwdetect
-# probe itself fails) - never standing in as a verdict on its own.
+# setup.sh has two things that can each claim to say what GPU acceleration is in
+# play: this bash-level detect_gpu(), which runs before the venv exists, and the
+# authoritative Recommended for your hardware line, sourced from
+# `python -m localm.hwdetect` once the venv exists. $GPU's only job is gating the
+# pre-venv Y/n prompt, plus setup.sh's own fallback if the hwdetect probe fails.
 # ---------------------------------------------------------------------------
 
 
@@ -134,15 +142,16 @@ def test_pre_venv_block_never_prints_a_detection_verdict_line(tmp_path):
 
 
 def test_pre_venv_block_gpu_var_still_correct_for_the_probe_failed_fallback(tmp_path):
-    # $GPU still has to be right even though it is no longer printed as a
-    # verdict: setup.sh's own fallback (`case "$REC" in ... *) case "$GPU"
-    # in ...`) uses it if the hwdetect probe's output is unparseable.
+    # $GPU still has to be right even though it is not printed as a verdict:
+    # setup.sh's own fallback on $REC falls through to a case on $GPU if the
+    # hwdetect probe's output is unparseable.
     out = _run_pre_venv_gpu_block(tmp_path, stub_names=["nvidia-smi", "rocminfo"], yes=True)
     assert "GPU=cuda" in out
 
 
 def test_authoritative_recommendation_still_sourced_from_hwdetect():
-    """Static lock-in: the one line users should trust as a verdict must stay driven by python -m localm.hwdetect, not by detect_gpu()."""
+    """Static lock-in: the one line users should trust as a verdict must stay
+    driven by python -m localm.hwdetect, not by detect_gpu()."""
     src = SETUP_SH.read_text(encoding="utf-8")
     assert 'Recommended for your hardware: $REC' in src
     assert "localm.hwdetect" in src

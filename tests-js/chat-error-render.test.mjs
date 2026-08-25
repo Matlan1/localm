@@ -1,20 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// A chat send that fails before any token streams (e.g. a 400 "Model parameter
-// is required and cannot be empty") renders "*[error: ...]*" into the live
-// assistant bubble in the catch block, but the very next lines - a guard meant
-// only for the VIS-1 vision-reject case - fired for ANY zero-content failure and
-// unconditionally called renderChat(). renderChat() rebuilds #chat-messages
-// purely from the persisted conv.messages array, which never received the
-// failed turn, so the just-rendered error was silently wiped a moment later.
-// The only surviving signal was a toast that auto-dismisses after 3500ms
-// (helpers.js). This proves the error now stays visible.
+// A chat send that fails before any token streams renders an error into the
+// live assistant bubble and leaves it on screen.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadApp } from "./harness.mjs";
 
-/** A fetch that 400s /v1/chat/completions before any token streams, exactly
- *  like a real "model is required" rejection from the server. */
+/** A fetch that 400s /v1/chat/completions before any token streams. */
 function earlyFailFetch(detail) {
   const impl = async (url) => {
     if (String(url) === "/v1/chat/completions") {
@@ -60,11 +52,6 @@ test("a zero-content chat failure leaves a visible error, not silently wiped", a
 });
 
 test("a long detail is shown parsed, not raw JSON markup or truncated mid-word", async () => {
-  // #996-adjacent: settings-perf.js used to read the raw response TEXT and
-  // slice it to 300 chars, so the user saw literal `{"detail":"...` markup
-  // and lost whatever came after the cutoff - for a VRAM-overflow 503 that is
-  // exactly the server's actionable "Options:" list (lower the context,
-  // offload fewer layers, ...), discarded right when it mattered most.
   const longDetail = "Context too large for available VRAM: this load needs " +
     "roughly 12.3 GB but this GPU only has 8.0 GB total - freeing other VRAM " +
     "will not help, it cannot fit regardless.\n  Options:\n    - Lower the " +
@@ -87,9 +74,8 @@ test("a long detail is shown parsed, not raw JSON markup or truncated mid-word",
 });
 
 test("a zero-content chat failure does not touch vision-reject recovery", async () => {
-  // Guard against a regression that scopes the skip too broadly: a REAL
-  // vision-reject must still clear the live bubble via renderChat() (its own
-  // toast + stripped-image recovery is the intended UX, not an error bubble).
+  // A vision-reject clears the live bubble via renderChat() and strips the
+  // image instead of leaving an error bubble.
   const IMG = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg";
   const impl = async (url) => {
     if (String(url) === "/v1/chat/completions") {

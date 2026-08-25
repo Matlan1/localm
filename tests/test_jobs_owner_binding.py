@@ -1,5 +1,16 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""KEY-SCOPE-3 (security review finding): the scheduled-jobs plugin bound every route to the `jobs` scope but had NO per-principal isolation, so any jobs-scoped key could read/edit/delete/run EVERY principal's jobs - and could run an owner's shell-enabled coder job (reaching run_shell with no coder:ful..."""
+"""KEY-SCOPE-3 (security review finding): the scheduled-jobs plugin bound every
+route to the `jobs` scope but had NO per-principal isolation, so any jobs-scoped
+key could read/edit/delete/run EVERY principal's jobs - and could run an owner's
+shell-enabled coder job (reaching run_shell with no coder:full/owner key, a
+crown-jewel invariant break).
+
+Fix: bind each job to its creator (owner = principal_id), gate every per-job route
+on job_owner_ok (404 on mismatch), filter the list to the caller's own, AND
+re-check shell capability against the CALLER when running a job on demand (so an
+unowned/legacy opt-in job can never be triggered into run_shell by a plain jobs
+key). The autonomous scheduler path is unchanged.
+"""
 
 from pathlib import Path
 
@@ -88,7 +99,8 @@ class TestPerJobOwnerIsolation:
 
 class TestCrownJewelShellGate:
     def test_owner_bound_opt_in_job_is_invisible_to_other_jobs_keys(self, jobs_app, monkeypatch):
-        """The HIGH chain via owner-binding: an owner's NEW shell-opt-in coder job is owner-bound, so another jobs key cannot see, edit, or run it (404)."""
+        """The HIGH chain via owner-binding: an owner's NEW shell-opt-in coder job is
+        owner-bound, so another jobs key cannot see, edit, or run it (404)."""
         monkeypatch.setenv("LOCALM_API_KEY", "ownersecret")
         (b,) = _mk_keys(["jobs"])
         with TestClient(jobs_app) as c:
@@ -100,7 +112,9 @@ class TestCrownJewelShellGate:
                          json={"prompt": "evil"}).status_code == 404
 
     def test_legacy_unowned_opt_in_job_run_blocked_for_plain_jobs_key(self, jobs_app, monkeypatch):
-        """Defense in depth: an unowned (legacy) opt-in job (owner=None, so the owner gate passes) still cannot be RUN on demand by a plain jobs key - the run-time caller capability re-check returns 403, blocking the RCE."""
+        """Defense in depth: an unowned (legacy) opt-in job (owner=None, so the owner
+        gate passes) still cannot be RUN on demand by a plain jobs key - the run-time
+        caller capability re-check returns 403, blocking the RCE. The owner can run it."""
         (b,) = _mk_keys(["jobs"])
         _shell_job(owner=None)
         with TestClient(jobs_app) as c:
@@ -118,7 +132,10 @@ class TestCrownJewelShellGate:
             assert r.status_code == 403
 
     def test_plain_jobs_key_cannot_poison_an_opt_in_job_the_scheduler_runs(self, jobs_app):
-        """The scheduler runs a job's stored prompt with full shell when allow_shell is set."""
+        """The scheduler runs a job's stored prompt with full shell when allow_shell
+        is set. A plain jobs key must NOT be able to edit (poison the prompt of) an
+        unowned/legacy opt-in job - otherwise the autonomous scheduler would later
+        run the attacker's prompt with shell, bypassing the on-demand run_now gate."""
         (b,) = _mk_keys(["jobs"])
         _shell_job(owner=None)
         with TestClient(jobs_app) as c:

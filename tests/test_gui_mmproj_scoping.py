@@ -1,5 +1,18 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""plugins/gui/cli.py's _make_engine closes over the gui/serve command's own --mmproj CLI value for the SERVER'S ENTIRE LIFETIME, and switch_model reuses that same closure for every subsequent model switch."""
+"""plugins/gui/cli.py's _make_engine closes over the gui/serve command's own
+--mmproj CLI value for the SERVER'S ENTIRE LIFETIME, and switch_model reuses
+that same closure for every subsequent model switch. So --mmproj X applied to
+a startup model bled into every later switch: an unrelated model got X too,
+and a model with its OWN correctly-recorded projector had it silently
+overridden by X. See dev-notes/FINDING-gui-mmproj-closure-bleed-2026-08-05.md
+(main checkout) for how this was found and why porting the cli/chat.py
+--mmproj-persistence fix here first would have made it permanent instead of
+fixing it.
+
+The fix scopes --mmproj to the model it was given for at startup; every other
+name falls through to its own registry lookup exactly as if --mmproj had
+never been given.
+"""
 import asyncio
 
 import pytest
@@ -7,7 +20,8 @@ from click.testing import CliRunner
 
 
 class _FakeEngine:
-    """Mirrors test_engine_factory_mmproj.py's _FakeEngine - records only the kwargs it was constructed with."""
+    """Mirrors test_engine_factory_mmproj.py's _FakeEngine - records only the
+    kwargs it was constructed with."""
 
     def __init__(self, *args, **kwargs):
         self.captured = kwargs
@@ -44,7 +58,9 @@ class _FakeEngine:
 
 @pytest.fixture()
 def three_models(tmp_path, monkeypatch):
-    """model-a (the startup model, no own mmproj), model-b (switch target, no own mmproj), model-c (switch target WITH its own correctly-recorded projector - the honest #957 auto-attach association)."""
+    """model-a (the startup model, no own mmproj), model-b (switch target, no
+    own mmproj), model-c (switch target WITH its own correctly-recorded
+    projector - the honest #957 auto-attach association)."""
     def _gguf(name):
         f = tmp_path / name
         f.write_bytes(b"GGUF" + b"\x00" * 64)
@@ -68,7 +84,14 @@ def three_models(tmp_path, monkeypatch):
 
 @pytest.fixture()
 def gui_harness(monkeypatch):
-    """Boots the real `gui` CLI command (via CliRunner) with only the heavy/side-effecting seams mocked - the server-attach probe, TLS/mDNS/ console setup, the real Engine constructor, and the VRAM probe a real model switch consults."""
+    """Boots the real `gui` CLI command (via CliRunner) with only the
+    heavy/side-effecting seams mocked - the server-attach probe, TLS/mDNS/
+    console setup, the real Engine constructor, and the VRAM probe a real
+    model switch consults. Returns (constructed, get_app) where constructed
+    maps model name -> the kwargs its _FakeEngine was built with, and
+    get_app() returns the FastAPI app instance main() created (captured via a
+    spy on create_app), for driving a real post-startup switch through
+    app.state.switch_model."""
     from localm.discover import vram_info as _real_vram_info  # noqa: F401
     from tests.conftest import probe_double
 

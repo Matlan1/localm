@@ -1,5 +1,29 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Static guard against the cmd.exe parenthesis crash class in .bat installers."""
+"""Static guard against the cmd.exe parenthesis crash class in .bat installers.
+
+Why this exists
+---------------
+`setup.bat` once shipped lines like::
+
+    if /i "%VENDOR%"=="amd" (
+        echo  Installing PyTorch (AMD ROCm) + transformers ...
+    )
+
+cmd.exe counts UNescaped parens when it matches a parenthesised block, so the
+`)` inside the echo terminates the `if (` block early and the rest of the line
+(`+ transformers ...`) is parsed as a brand-new command. The result is the
+infamous ``+ was unexpected at this time.`` and the installer dies before the
+user can do anything. The same shape with a trailing ``:`` produced
+``: was unexpected at this time.`` in the uninstall path.
+
+Nothing in CI executed the installers, so this shipped to every AMD and NVIDIA
+user. This test closes that gap: parens that appear in an ``echo`` (or any
+command) *inside* a block MUST be escaped as ``^(`` / ``^)``. Parens at the top
+level (depth 0), e.g. the backend menu, are harmless and are not flagged.
+
+This is a cheap static lint, not a full cmd parser, but it catches the entire
+known family and enforces the safe style going forward.
+"""
 
 from __future__ import annotations
 
@@ -12,7 +36,15 @@ BAT_FILES = sorted(REPO_ROOT.glob("*.bat"))
 
 
 def find_unescaped_block_parens(text: str) -> list[tuple[int, str]]:
-    """Return (line_number, line) for echo lines inside a block that contain an unescaped ``(`` or ``)``."""
+    """Return (line_number, line) for echo lines inside a block that contain an
+    unescaped ``(`` or ``)``.
+
+    Block depth is tracked structurally: a block opens when a line ENDS with
+    ``(`` (``if ... (`` / ``else (`` / ``for ... (``) and closes when a line
+    STARTS with ``)``. Parens embedded mid-line in an echo do not move the
+    structural counter, which is exactly why cmd mis-handles them and why we
+    flag them.
+    """
     offenders: list[tuple[int, str]] = []
     depth = 0
     for lineno, raw in enumerate(text.splitlines(), start=1):

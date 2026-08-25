@@ -1,5 +1,14 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""V2: integration-test scaffold."""
+"""V2: integration-test scaffold. Beyond the coarse `integration` marker, real
+end-to-end paths are tagged with a resource-specific marker - `real_gguf`,
+`real_comfy`, `real_browser` - that conftest gates: a test carrying one is
+skipped (not failed) unless its resource is actually available, so the suite
+documents the real path and runs it the moment the resource is present.
+
+This module holds the always-runnable oracle (the markers are registered) plus
+gated skeletons for the comfy and browser paths; the gguf path is the existing
+tests/test_gguf_smoke_integration.py, now also tagged `real_gguf`.
+"""
 
 from __future__ import annotations
 
@@ -13,7 +22,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_real_resource_markers_registered():
-    """The three resource markers are declared in pyproject so `-m real_gguf` (etc.) works and pytest does not warn about unknown markers."""
+    """The three resource markers are declared in pyproject so `-m real_gguf`
+    (etc.) works and pytest does not warn about unknown markers."""
     cfg = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     markers = cfg["tool"]["pytest"]["ini_options"]["markers"]
     names = {m.split(":", 1)[0].strip() for m in markers}
@@ -22,7 +32,8 @@ def test_real_resource_markers_registered():
 
 
 def test_gguf_smoke_is_tagged_real_gguf():
-    """The existing GGUF end-to-end smoke test carries the fine-grained marker so it can be selected (and gated) as a real_gguf test, not just `integration`."""
+    """The existing GGUF end-to-end smoke test carries the fine-grained marker so
+    it can be selected (and gated) as a real_gguf test, not just `integration`."""
     text = (ROOT / "tests" / "test_gguf_smoke_integration.py").read_text(encoding="utf-8")
     assert "real_gguf" in text, "the GGUF smoke test should be tagged real_gguf"
 

@@ -1,10 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// readStoredJSON (localm/plugins/gui/static/app/helpers.js) must never let a
-// CORRUPT localStorage entry crash the caller. Both chat-state reads (chat.js:19
-// conversations, chat.js:399 convUI.collapsed) run at MODULE EVALUATION time, so a
-// thrown SyntaxError there aborts the whole ES-module graph and boots the app to a
-// blank shell. The guard branches missing-vs-corrupt (AGENTS.md rule 5: surface,
-// do not collapse the two) and falls back instead of throwing.
+// readStoredJSON (localm/plugins/gui/static/app/helpers.js) reads a JSON value
+// from localStorage: the parsed value when well-formed, the fallback for an
+// absent key, and the fallback plus a warning for a corrupt entry. It never
+// throws.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -13,8 +11,8 @@ import { loadApp } from "./harness.mjs";
 test("readStoredJSON returns the parsed value for well-formed JSON", () => {
   const { window } = loadApp();
   window.localStorage.setItem("k", JSON.stringify([1, 2, 3]));
-  // spread the window-realm array into a node array (cross-realm deepStrictEqual
-  // otherwise fails on the differing Array constructor).
+  // Spread the window-realm array into a node array: cross-realm
+  // deepStrictEqual fails on the differing Array constructor.
   assert.deepEqual([...window.readStoredJSON("k", [])], [1, 2, 3]);
 });
 
@@ -36,6 +34,6 @@ test("readStoredJSON returns the fallback for a CORRUPT value and WARNS (does no
   assert.deepEqual(out, [], "falls back to the blank default");
   assert.equal(warns.length, 1, "corruption is surfaced, not silently swallowed");
   assert.match(warns[0], /corrupt/i);
-  // caller-side wrapping (e.g. Set-backed collapsed state) stays safe on the same fallback
+  // the fallback survives caller-side wrapping such as new Set(...)
   assert.deepEqual([...new Set(out)], [], "wrapping the fallback in new Set(...) stays safe");
 });

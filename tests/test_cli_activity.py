@@ -1,5 +1,20 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""`localm status` must say what a running server is DOING, and must never say 'nothing' on the evidence of not having found out."""
+"""`localm status` must say what a running server is DOING, and must never say
+"nothing" on the evidence of not having found out.
+
+ADR-0008 U5. Before this, no CLI command asked a running server anything about
+its work: `localm ps` and `localm status` rendered only the on-disk instance
+registry, which is written at process start and carries no activity fields at
+all, so a terminal could not see a model pull that the server was streaming to
+a browser tab at that moment.
+
+The whole risk in adding it is the failure path. "I asked and nothing is
+running" and "I could not ask" are different claims, and a command that printed
+the first when the second happened would be a fresh instance of exactly the
+defect this ADR exists to remove - a confident statement resting on an
+unanswered question. So the states are kept apart at the seam (read_activity
+returns which one occurred) and every one of them is pinned below.
+"""
 
 from __future__ import annotations
 
@@ -37,7 +52,7 @@ def _patch(monkeypatch, resp=None, exc=None):
 # ---------------------------------------------------------- the seam itself
 
 def test_a_connection_failure_is_not_an_empty_activity_list(monkeypatch):
-    """THE CENTRAL ONE."""
+    """THE CENTRAL ONE. A server that cannot be reached must not read as idle."""
     _patch(monkeypatch, exc=requests.exceptions.ConnectionError("refused"))
     state, _ = read_activity("http", 1234)
     assert state == "unreachable"
@@ -55,13 +70,15 @@ def test_an_auth_refusal_is_its_own_state(monkeypatch, code):
 
 
 def test_an_older_server_without_the_route_is_its_own_state(monkeypatch):
-    """A running 0.1.3 has no /api/activity."""
+    """A running 0.1.3 has no /api/activity. That is "cannot tell me", not
+    "nothing is running"."""
     _patch(monkeypatch, resp=_Resp(404, {}))
     assert read_activity("http", 1234)[0] == "unsupported"
 
 
 def test_a_200_that_is_not_json_is_not_an_empty_list(monkeypatch):
-    """Something other than localm answered on that port."""
+    """Something other than localm answered on that port. An empty operation
+    list would be a fabricated answer."""
     _patch(monkeypatch, resp=_Resp(200, None, text="<html>hello</html>"))
     assert read_activity("http", 1234)[0] == "http"
 
@@ -73,10 +90,13 @@ def test_an_empty_list_is_a_real_answer(monkeypatch):
     assert body["operations"] == []
 
 
-# --------------------------------------------------------- #953 attach token
+# -------------------------------------------------------------- attach token
 
 def test_instance_token_used_when_no_api_key(monkeypatch):
-    """A genuinely open server has no API key to send, so the caller's only proof of being a local process is the instance's own attach token (the 0600 registry file's 'token' field) - without it, #953's B1/B2/E3 defect reappears (a wrong 'needs a key' 403 on the default, keyless install)."""
+    """A genuinely open server has no API key to send, so the caller's only
+    proof of being a local process is the instance's own attach token (the
+    0600 registry file's 'token' field) - without it, #953's B1/B2/E3 defect
+    reappears (a wrong "needs a key" 403 on the default, keyless install)."""
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     captured = {}
 
@@ -91,7 +111,8 @@ def test_instance_token_used_when_no_api_key(monkeypatch):
 
 
 def test_api_key_still_wins_over_instance_token(monkeypatch):
-    """A protected (keyed) server keeps using the real owner key - the instance token is a fallback for open mode only, never a competing credential."""
+    """A protected (keyed) server keeps using the real owner key - the instance
+    token is a fallback for open mode only, never a competing credential."""
     monkeypatch.setenv("LOCALM_API_KEY", "owner-secret")
     captured = {}
 
@@ -105,7 +126,8 @@ def test_api_key_still_wins_over_instance_token(monkeypatch):
 
 
 def test_no_instance_token_and_no_key_sends_no_auth_header(monkeypatch):
-    """Unchanged pre-fix behaviour when the caller genuinely has neither (e.g. an older client, or a direct-path run with no registry entry)."""
+    """Unchanged pre-fix behaviour when the caller genuinely has neither (e.g.
+    an older client, or a direct-path run with no registry entry)."""
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     captured = {}
 
@@ -119,13 +141,16 @@ def test_no_instance_token_and_no_key_sends_no_auth_header(monkeypatch):
 
 
 def test_unauthorized_reads_as_blindness_not_an_optional_tip(monkeypatch, capsys):
-    """#953 (grader 2): the pre-fix wording ('This server needs an API key...') reads as a hardening suggestion, not what B1/B2 proved it actually is - a genuine inability to answer, identical whether the server is busy or idle."""
+    """#953 (grader 2): the pre-fix wording ("This server needs an API key...")
+    reads as a hardening suggestion, not what B1/B2 proved it actually is - a
+    genuine inability to answer, identical whether the server is busy or idle.
+    Must match the SAME "could not ask" framing the unreachable branch uses,
+    not lead with the requirement."""
     _patch(monkeypatch, resp=_Resp(401, {}))
     _print_activity("http", 1234)
     out = _out(capsys)
     assert "could not ask this server what it is doing" in out.lower()
-    # The old framing led with the requirement rather than the failure -
-    # pinned as absent so it cannot silently return.
+    # The requirement-first wording is pinned as absent.
     assert "this server needs an api key" not in out.lower()
 
 
@@ -172,7 +197,10 @@ def test_a_running_operation_is_listed_with_its_label(monkeypatch, capsys):
 
 
 def test_the_age_uses_the_server_clock_not_this_machines(monkeypatch, capsys):
-    """The payload carries the server's `now` precisely so a skewed local clock cannot produce a confident, wrong duration."""
+    """The payload carries the server's `now` precisely so a skewed local clock
+    cannot produce a confident, wrong duration. Here the server says the job is
+    one minute old while this machine's clock is an hour off; the printed age
+    must follow the server."""
     server_now = time.time() - 3600
     _patch(monkeypatch, resp=_Resp(200, {"now": server_now, "operations": [
         {"id": "a", "kind": "pull", "label": "P", "status": "running",
@@ -185,7 +213,8 @@ def test_the_age_uses_the_server_clock_not_this_machines(monkeypatch, capsys):
 
 
 def test_no_percentage_is_printed_when_none_was_reported(monkeypatch, capsys):
-    """R1: an operation that has not reported progress is at an UNKNOWN percentage, never 0%."""
+    """R1: an operation that has not reported progress is at an UNKNOWN
+    percentage, never 0%."""
     now = time.time()
     _patch(monkeypatch, resp=_Resp(200, {"now": now, "operations": [
         {"id": "a", "kind": "pull", "label": "P", "status": "running",
@@ -204,14 +233,9 @@ def test_a_missing_server_clock_suppresses_the_age_rather_than_faking_one(
     _print_activity("http", 1234)
     out = _out(capsys)
     assert "P" in out
-    # Assert against the OPERATION's own line, not the whole output. The
-    # original form was `"h" not in out.replace("http", "")` over everything
-    # printed - which reads as strict and is really a one-letter substring
-    # match, so any unrelated line containing an "h" fails it while the
-    # property under test still holds. It broke the day `_print_activity`
-    # gained a "Cancel one with localm cancel <id>" footer, on the "h" in
-    # "with". The property is unchanged and the second assertion makes it
-    # sharper: the age this fixture WOULD have produced is named outright.
+    # Assert against the OPERATION's own line, not the whole output: any
+    # unrelated line containing an "h" would fail a whole-output match. The
+    # second assertion names the age this fixture would otherwise produce.
     op_line = next(ln for ln in out.splitlines() if "running" in ln)
     assert "h" not in op_line, (
         f"invented an age with no reference clock: {op_line!r}")
@@ -229,6 +253,7 @@ def test_age_formatting(secs, want):
 
 
 def test_a_negative_or_absent_age_renders_as_nothing():
-    """Clock skew can make now - created_at negative."""
+    """Clock skew can make now - created_at negative. Print nothing rather than
+    "-3s", which reads as a real measurement of something impossible."""
     assert _fmt_age(-3) == ""
     assert _fmt_age(None) == ""

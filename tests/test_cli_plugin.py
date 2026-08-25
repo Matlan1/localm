@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""CLI tests for the engine plugin toggles: `localm plugin enable/disable/status`."""
+"""CLI tests for the engine plugin toggles: `localm plugin enable/disable/status`.
+
+These exercise the new-engine commands wired in localm/cli.py (set_enabled_state +
+missing_requires), driven through Click's CliRunner against synthetic plugins."""
 
 import pytest
 from click.testing import CliRunner
@@ -7,7 +10,8 @@ from click.testing import CliRunner
 
 @pytest.fixture
 def cli_env(tmp_path, monkeypatch):
-    """Config isolated to tmp; a synthetic external plugin dir with 'needy' (requires dep1) and 'dep1'. _engine_manager is pointed at it."""
+    """Config isolated to tmp; a synthetic external plugin dir with 'needy'
+    (requires dep1) and 'dep1'. _engine_manager is pointed at it."""
     monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     import localm.config as cfg
@@ -74,7 +78,8 @@ def test_install_unknown_is_error(cli_env):
 
 
 def test_install_warns_missing_requires_with_real_names(cli_env):
-    """The dependency warning must name the actual missing plugin AND give the exact install command (no literal <name> placeholder)."""
+    """The dependency warning must name the actual missing plugin AND give the
+    exact install command (no literal <name> placeholder)."""
     r = CliRunner().invoke(cli_env.main, ["plugin", "install", "needy"])
     assert r.exit_code == 0
     assert "dep1" in r.output
@@ -91,7 +96,8 @@ def test_status_shows_installed_and_available(cli_env):
 
 
 def test_install_from_directory(cli_env, tmp_path):
-    """`plugin install <dir>` installs a THIRD-PARTY plugin by path (not a store name); re-installing the same dir without --force errors."""
+    """`plugin install <dir>` installs a THIRD-PARTY plugin by path (not a store
+    name); re-installing the same dir without --force errors."""
     from localm.config import load_config
     ext = tmp_path / "thirdparty"
     ext.mkdir()
@@ -110,7 +116,9 @@ def test_install_from_directory(cli_env, tmp_path):
 
 
 def test_install_from_directory_surfaces_resolved_scope(cli_env, tmp_path):
-    """LM-DA-019: the CLI install success message must show the resolved scope, so an owner can see what capability they are granting before every route the plugin registers is gated on it."""
+    """LM-DA-019: the CLI install success message must show the resolved
+    scope, so an owner can see what capability they are granting before every
+    route the plugin registers is gated on it."""
     ext = tmp_path / "thirdparty2"
     ext.mkdir()
     (ext / "plugin.toml").write_text(
@@ -124,7 +132,9 @@ def test_install_from_directory_surfaces_resolved_scope(cli_env, tmp_path):
 
 
 def test_install_from_directory_rejects_scope_collision(cli_env, tmp_path):
-    """LM-DA-019: a manifest whose scope collides with a first-party plugin's (here 'dep1', already present in the store) must be rejected with an explicit error, not silently installed."""
+    """LM-DA-019: a manifest whose scope collides with a first-party plugin's
+    (here 'dep1', already present in the store) must be rejected with an
+    explicit error, not silently installed."""
     ext = tmp_path / "thirdparty3"
     ext.mkdir()
     (ext / "plugin.toml").write_text(
@@ -142,11 +152,13 @@ def test_install_from_directory_rejects_scope_collision(cli_env, tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-#  `plugin setup --plugins`: reject all-junk selections (go-public readiness)  #
+#  `plugin setup --plugins`: reject all-junk selections                        #
 # --------------------------------------------------------------------------- #
 
 def test_setup_plugins_all_junk_is_error(cli_env):
-    """A non-interactive --plugins selection that resolves to nothing is a typo, not a deliberate skip; it must fail loudly instead of reporting a no-op as success (so an install/CI script does not silently install nothing)."""
+    """A non-interactive --plugins selection that resolves to nothing is a typo,
+    not a deliberate skip; it must fail loudly instead of reporting a no-op as
+    success (so an install/CI script does not silently install nothing)."""
     r = CliRunner().invoke(cli_env.main, ["plugin", "setup", "--plugins", "ewew"])
     assert r.exit_code == 1
     assert "no known plugins" in r.output.lower()

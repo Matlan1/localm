@@ -1,5 +1,39 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Native app identity: give the running localm server a real, branded process identity - 'LocaLM.exe' in Task Manager and the LocaLM icon on the taskbar - instead of a bare python.exe."""
+"""Native app identity: give the running localm server a real, branded process
+identity - "LocaLM.exe" in Task Manager and the LocaLM icon on the taskbar -
+instead of a bare python.exe.
+
+The mechanism is deliberately NOT a heavyweight freeze. localm's native inference
+libraries are provisioned per-hardware at runtime (`localm setup-llama`) and
+resolved by importing ``localm_llama_runtime``; a frozen monolith would have to
+bake one backend in at build time and would fight that model. Instead we brand the
+interpreter itself:
+
+  * Windows: copy the REAL interpreter (``sys._base_executable``) and its loader
+    DLLs into ``<venv>/localm-app/LocaLM.exe``, then launch
+    ``LocaLM.exe -m localm gui``. The long-running server is then a single genuine
+    process named LocaLM.exe. We copy the BASE interpreter, not ``<venv>/Scripts/
+    python.exe`` - under a uv-managed Python the venv python.exe is a TRAMPOLINE
+    that spawns the base interpreter as a child, so copying it would leave the real
+    server named python.exe. The LocaLM icon is stamped into the copy's PE
+    resources (best-effort) and set on the live console window at runtime; a
+    restart re-execs the same LocaLM.exe, so the identity survives in place.
+  * Linux: copy the interpreter to ``<venv>/bin/LocaLM`` and write a
+    ``LocaLM.desktop`` launcher, so the app appears in the menu with its icon and a
+    process monitor shows "LocaLM".
+
+Honest caveat: this is a BRANDED COPY of the interpreter, not a compiled binary.
+It is small, low-risk and self-contained (it lives inside the clone's own venv),
+and it delivers the native identity WITHOUT disturbing plugin discovery, native
+library resolution, or the GUI static assets - those keep resolving exactly as
+they do for the normal interpreter. A true compiled binary (PyInstaller/Nuitka)
+is documented as future work in docs/native-app.md.
+
+Everything here is best-effort and fully guarded (the appface/winconsole ethos):
+building the launcher or stamping the icon must NEVER block a normal run. A
+just-built launcher is self-checked before we report success, and when a step
+cannot complete we SURFACE why (a returned note), never a silent false success.
+"""
 
 from __future__ import annotations
 
@@ -28,24 +62,44 @@ def _repo_root() -> Path:
 
 
 def ico_path() -> Optional[str]:
-    """The bundled LocaLM .ico (Windows), or None if missing."""
+    """The bundled LocaLM .ico (Windows), or None if missing. Shares appface's
+    resolver so the two never diverge."""
     from localm.appface import icon_path
     return icon_path()
 
 
 def svg_icon_path() -> Optional[str]:
-    """The bundled LocaLM .svg, for the Linux .desktop Icon= (freedesktop renders SVG icons from an absolute path)."""
+    """The bundled LocaLM .svg, for the Linux .desktop Icon= (freedesktop renders
+    SVG icons from an absolute path). None if missing."""
     p = _repo_root() / "assets" / "localm.svg"
     return str(p) if p.is_file() else None
 
 
 def _venv_root() -> Path:
-    """This venv's root (``sys.prefix``)."""
+    """This venv's root (``sys.prefix``). The launcher lives inside it, so the whole
+    app stays contained in the clone's own environment."""
     return Path(sys.prefix)
 
 
 def _base_interpreter() -> Optional[Path]:
-    """The REAL interpreter behind this process."""
+    """The REAL interpreter behind this process. Under a uv-managed Python the venv
+    ``python.exe`` is a trampoline that launches this one as a child; copying THIS
+    (``sys._base_executable``) gives a single genuine LocaLM process rather than a
+    trampoline whose child is still python.exe. Resolved (follows a POSIX symlink)
+    so we copy a real binary. Falls back to ``sys.executable``.
+
+    ``sys._base_executable`` is computed by CPython as ``<base_prefix>/<basename
+    of the CURRENTLY RUNNING exe>``. When this process IS ALREADY the branded
+    LocaLM.exe copy (e.g. ``make-launcher --force`` invoked from LocaLM.exe
+    itself, to refresh the launcher after a Python upgrade), that resolves to
+    ``<base_prefix>/LocaLM.exe`` - a file that never exists, since LocaLM.exe is
+    only ever copied into ``<venv>/localm-app/`` (verified live during the #621
+    follow-up investigation). Fall back to ``_mp_spawn.real_base_python()``
+    (``<base_prefix>/python.exe``) in that case - the same base-interpreter
+    lookup already proven for #617's multiprocessing-spawn redirect - so a
+    ``--force`` relaunch from the branded launcher itself can still find a real
+    interpreter to copy. Windows-only (the fallback's filename is hardcoded);
+    on other platforms a failed resolution still returns None, unchanged."""
     be = getattr(sys, "_base_executable", None) or sys.executable
     try:
         p = Path(be).resolve()
@@ -59,7 +113,9 @@ def _base_interpreter() -> Optional[Path]:
 
 @dataclass
 class LauncherResult:
-    """Outcome of a launcher build. ``notes`` carries the human-readable surface of what happened (and why a best-effort step did not), so a caller can print it and a failure is never silent."""
+    """Outcome of a launcher build. ``notes`` carries the human-readable surface of
+    what happened (and why a best-effort step did not), so a caller can print it and
+    a failure is never silent."""
     ok: bool
     path: Optional[Path] = None
     icon_stamped: bool = False
@@ -68,7 +124,9 @@ class LauncherResult:
 
 
 def _copy_runtime_dlls(src_dir: Path, dst_dir: Path) -> List[str]:
-    """Copy the loader-critical DLLs (python3*.dll, vcruntime*.dll) next to the launcher so a base-interpreter copy can start outside its original directory."""
+    """Copy the loader-critical DLLs (python3*.dll, vcruntime*.dll) next to the
+    launcher so a base-interpreter copy can start outside its original directory.
+    Best-effort per file; returns the names copied."""
     copied: List[str] = []
     for pattern in ("python3*.dll", "vcruntime*.dll"):
         for dll in src_dir.glob(pattern):
@@ -81,7 +139,11 @@ def _copy_runtime_dlls(src_dir: Path, dst_dir: Path) -> List[str]:
 
 
 def _owns_console() -> bool:
-    """True when this process is the ONLY one attached to its console - i.e. it was given its OWN console (a double-click, or the launcher's CREATE_NEW_CONSOLE), not launched into an existing terminal that it shares."""
+    """True when this process is the ONLY one attached to its console - i.e. it was
+    given its OWN console (a double-click, or the launcher's CREATE_NEW_CONSOLE), not
+    launched into an existing terminal that it shares. Windows-only; False on error,
+    off Windows, or with no console. Used to decide whether hiding the console is
+    safe (never hide a terminal the user is also using)."""
     if sys.platform != "win32":
         return False
     try:
@@ -94,7 +156,9 @@ def _owns_console() -> bool:
 
 
 def _self_check(exe: Path) -> bool:
-    """Run the just-built launcher and confirm it starts venv-aware."""
+    """Run the just-built launcher and confirm it starts venv-aware. This is the
+    verify-before-done gate: a copied interpreter that cannot find its DLLs or its
+    venv must NOT be reported as a working launcher. Returns False on any failure."""
     try:
         r = subprocess.run(
             [str(exe), "-c", "import sys; sys.exit(0 if sys.prefix != sys.base_prefix else 3)"],
@@ -109,7 +173,10 @@ def _self_check(exe: Path) -> bool:
 # --------------------------------------------------------------------------- #
 
 def windows_launcher_dir() -> Path:
-    """Where the Windows launcher + its DLLs live: ``<venv>/localm-app``."""
+    """Where the Windows launcher + its DLLs live: ``<venv>/localm-app``. A
+    dedicated subdir keeps Scripts/ clean and groups the launcher with its runtime
+    DLLs. pyvenv.cfg sits one directory up (in the venv root), so the copied
+    interpreter still resolves the venv."""
     return _venv_root() / "localm-app"
 
 
@@ -119,7 +186,25 @@ def windows_launcher_path() -> Path:
 
 
 def _copy_replacing_possibly_running_exe(src: Path, dst: Path) -> bool:
-    """Copy *src* onto *dst*, handling *dst* being the image THIS process is currently executing from (``make-launcher --force`` invoked from the branded LocaLM.exe launcher itself, to refresh it after a Python upgrade - ``_base_interpreter`` then resolves *src* to the real base interpreter, a different fi..."""
+    """Copy *src* onto *dst*, handling *dst* being the image THIS process is
+    currently executing from (``make-launcher --force`` invoked from the
+    branded LocaLM.exe launcher itself, to refresh it after a Python upgrade -
+    ``_base_interpreter`` then resolves *src* to the real base interpreter, a
+    different file than *dst*).
+
+    Verified live (see dev-notes): Windows blocks a direct content-overwrite of
+    a running exe's file (``OSError`` / WinError 32, sharing violation) but DOES
+    allow renaming that same running exe's file out of the way first (the
+    loader holds it open with ``FILE_SHARE_DELETE``), after which a fresh copy
+    can be written at the freed path. The fast path (plain copy) is tried
+    first since *dst* is USUALLY not running. Returns True if the rename
+    fallback was needed.
+
+    Deleting the renamed-aside file while the original process is still alive
+    also fails live (WinError 5) - not a real failure, just Windows not
+    releasing the name until the last handle closes - so that cleanup is
+    best-effort: a straggling ``.old`` file is harmless and is cleared on the
+    NEXT successful rebuild, once the old process has exited."""
     try:
         shutil.copy2(src, dst)
         return False
@@ -142,7 +227,10 @@ def _copy_replacing_possibly_running_exe(src: Path, dst: Path) -> bool:
 
 
 def make_windows_launcher(*, force: bool = False) -> LauncherResult:
-    """Create ``<venv>/localm-app/LocaLM.exe`` as a copy of the base interpreter (+ its loader DLLs) and stamp the LocaLM icon into it."""
+    """Create ``<venv>/localm-app/LocaLM.exe`` as a copy of the base interpreter (+
+    its loader DLLs) and stamp the LocaLM icon into it. Idempotent: an existing
+    launcher is left in place unless *force* is given (a Python upgrade wants
+    ``--force`` to refresh the copy). Self-checks the result. Never raises."""
     base = _base_interpreter()
     if base is None:
         return LauncherResult(ok=False,
@@ -195,7 +283,8 @@ def make_windows_launcher(*, force: bool = False) -> LauncherResult:
 # ---- PE icon stamping (ctypes UpdateResource, no dependency) --------------- #
 
 def _parse_ico(data: bytes) -> List[tuple]:
-    """Parse a .ico into ``[(header_fields, image_bytes), ...]``."""
+    """Parse a .ico into ``[(header_fields, image_bytes), ...]``. Returns [] on any
+    malformation - the caller treats that as "cannot stamp" (best-effort)."""
     if len(data) < 6:
         return []
     _reserved, itype, count = struct.unpack("<HHH", data[:6])
@@ -228,7 +317,10 @@ def _build_group_icon(entries: List[tuple]) -> bytes:
 
 
 def _stamp_exe_icon(exe: Path, ico: str) -> bool:
-    """Stamp *ico* into *exe*'s PE resources (RT_ICON + RT_GROUP_ICON) so Explorer / Task Manager show the LocaLM icon on the file itself."""
+    """Stamp *ico* into *exe*'s PE resources (RT_ICON + RT_GROUP_ICON) so Explorer /
+    Task Manager show the LocaLM icon on the file itself. Windows-only, best-effort:
+    returns False (never raises) if the update cannot be committed. The file must
+    not be running (it is a fresh copy here)."""
     if sys.platform != "win32":
         return False
     try:
@@ -283,7 +375,11 @@ def _stamp_exe_icon(exe: Path, ico: str) -> bool:
 # --------------------------------------------------------------------------- #
 
 def apply_window_identity(*, app_id: str = APP_USER_MODEL_ID) -> bool:
-    """Give this running process a real app identity on Windows: an explicit AppUserModelID (taskbar groups it as LocaLM) and the LocaLM icon on the console window (taskbar button, alt-tab, window corner)."""
+    """Give this running process a real app identity on Windows: an explicit
+    AppUserModelID (taskbar groups it as LocaLM) and the LocaLM icon on the console
+    window (taskbar button, alt-tab, window corner). Best-effort and guarded -
+    cosmetic identity must never block startup. No-op off Windows. Returns True if
+    any identity was applied."""
     if sys.platform != "win32":
         return False
     applied = False
@@ -311,7 +407,8 @@ def apply_window_identity(*, app_id: str = APP_USER_MODEL_ID) -> bool:
 
 
 def _set_console_icon(ico: str) -> bool:
-    """Set the LocaLM icon on this process's console window via WM_SETICON."""
+    """Set the LocaLM icon on this process's console window via WM_SETICON. Returns
+    False when there is no console (pythonw / redirected stdio) or on any error."""
     try:
         import ctypes
         from ctypes import wintypes
@@ -365,7 +462,8 @@ def linux_launcher_path() -> Path:
 
 def _desktop_entry_text(*, exec_path: Path, workdir: Path,
                         icon: Optional[str]) -> str:
-    """The freedesktop .desktop launcher text for LocaLM."""
+    """The freedesktop .desktop launcher text for LocaLM. Pure (no I/O) so it is
+    unit-testable on any platform."""
     lines = [
         "[Desktop Entry]",
         "Type=Application",
@@ -384,7 +482,11 @@ def _desktop_entry_text(*, exec_path: Path, workdir: Path,
 
 
 def make_linux_launcher(*, force: bool = False) -> LauncherResult:
-    """Create ``<venv>/bin/LocaLM`` (a copy of the interpreter, so a process monitor shows 'LocaLM') and write a ``LocaLM.desktop`` launcher next to the clone."""
+    """Create ``<venv>/bin/LocaLM`` (a copy of the interpreter, so a process monitor
+    shows "LocaLM") and write a ``LocaLM.desktop`` launcher next to the clone. If the
+    copied interpreter cannot start (a non-relocatable build), the .desktop falls
+    back to the normal venv python so the launcher still works - and says so. Never
+    raises."""
     base = _base_interpreter()
     if base is None:
         return LauncherResult(ok=False,
@@ -454,7 +556,9 @@ def make_linux_launcher(*, force: bool = False) -> LauncherResult:
 # --------------------------------------------------------------------------- #
 
 def make_launcher(*, force: bool = False) -> LauncherResult:
-    """Build the native launcher for the current OS (LocaLM.exe on Windows, bin/ LocaLM + LocaLM.desktop on Linux)."""
+    """Build the native launcher for the current OS (LocaLM.exe on Windows, bin/
+    LocaLM + LocaLM.desktop on Linux). Returns a result whose ``notes`` should be
+    shown to the user; never raises."""
     if sys.platform == "win32":
         return make_windows_launcher(force=force)
     if sys.platform.startswith("linux"):

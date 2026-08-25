@@ -1,5 +1,23 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Follow-up to #584/#586: model_manager/registry.py's sync_models_dir() had the same bare load/mutate/save shape the update_config()/update_registry() atomic helpers exist to close, just with the registry instead of the config. sync_models_dir() loaded the registry once, reconciled missing/restored/pr..."""
+"""Follow-up to #584/#586: model_manager/registry.py's sync_models_dir() had
+the same bare load/mutate/save shape the update_config()/update_registry()
+atomic helpers exist to close, just with the registry instead of the config.
+sync_models_dir() loaded the registry once, reconciled missing/restored/pruned
+entries against it with real per-entry filesystem stat calls (not
+instantaneous), then did a blind save_registry(reg) at the end - a concurrent
+update_registry() write (a `pull`/`rm`/`alias` in another thread or process)
+landing during that scan was silently discarded by the final overwrite.
+
+Fix: the whole reconcile loop now runs inside a single update_registry()
+call, so it is atomic and (cross-process) lock-protected like every other
+write path in this file.
+
+This test proves the fix with a REAL in-process threading race (not a mock):
+_entry_path (the per-entry accessor the reconcile loop calls to get an
+entry's stat-checkable path) is wrapped with a delay, widening the window a
+concurrent update_registry() writer can land in - exactly the technique
+test_app_lifecycle_1_atomic_config.py's _install_slow_merge uses for the
+config side, adapted to registry.py (which has no merge step of its own)."""
 
 import json
 import threading
@@ -30,7 +48,12 @@ def home(tmp_path, monkeypatch):
 
 
 def _install_slow_entry_path(monkeypatch, delay=0.1):
-    """Delay every _entry_path() call - the accessor sync_models_dir()'s reconcile loop calls per registry entry to get its stat-checkable path."""
+    """Delay every _entry_path() call - the accessor sync_models_dir()'s
+    reconcile loop calls per registry entry to get its stat-checkable path.
+    In the OLD bare load_registry()/mutate/save_registry() shape this delay
+    lands in the fully-unlocked window between the reconcile reload and the
+    final save; in the FIXED shape it lands inside update_registry()'s lock -
+    so only the fixed call site can survive a concurrent writer here."""
     real = registry_mod._entry_path
 
     def slow(entry):
@@ -41,7 +64,10 @@ def _install_slow_entry_path(monkeypatch, delay=0.1):
 
 
 def test_sync_models_dir_survives_a_concurrent_registry_writer(home, monkeypatch):
-    """sync_models_dir()'s reconcile phase, racing a concurrent update_registry() write from another thread, must not lose either change - proving the reconcile loop now runs inside update_registry(), not a bare load_registry()/save_registry() pair."""
+    """sync_models_dir()'s reconcile phase, racing a concurrent
+    update_registry() write from another thread, must not lose either
+    change - proving the reconcile loop now runs inside update_registry(),
+    not a bare load_registry()/save_registry() pair."""
     home_dir, models_dir = home
     # One managed entry whose file is gone -> the reconcile loop flags it
     # ("missing") rather than nothing happening, exercising the write path.

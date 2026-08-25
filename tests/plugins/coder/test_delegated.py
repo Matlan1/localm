@@ -1,5 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Tests for the shared delegated-work presentation (localm.plugins.coder.delegated)."""
+"""Tests for the shared delegated-work presentation (localm.plugins.coder.delegated).
+
+The invariant under test is not cosmetic: session_diff() is an INPUT to the
+self-reviewer (agent/loop.py:381) and to episodic memory (agent/session.py:190),
+so foreign content there would corrupt two model-facing loops. These tests pin
+that delegated work is POINTED AT and never merged in.
+"""
 
 from __future__ import annotations
 
@@ -14,7 +20,9 @@ def _cs(**kw):
 
 
 def test_empty_footer_is_empty_string():
-    """Every display site appends this unconditionally, so the empty case must be a true no-op - otherwise wiring it in would change output for sessions that never delegated anything."""
+    """Every display site appends this unconditionally, so the empty case must be
+    a true no-op - otherwise wiring it in would change output for sessions that
+    never delegated anything."""
     assert d.render_footer([]) == ""
 
 
@@ -25,8 +33,7 @@ def test_changeset_without_a_branch_is_not_advertised():
 
 def test_footer_names_branch_file_count_and_view_command():
     out = d.render_footer([_cs()])
-    # The heading is the one fixed by the joint decision, verbatim: the user must
-    # be told these changes are NOT in their tree, or they may assume they are.
+    # The heading says the changes are not in the user's working tree.
     assert "Delegated work (NOT in your working tree)" in out
     assert "child1" in out
     assert "3 file(s)" in out
@@ -36,17 +43,19 @@ def test_footer_names_branch_file_count_and_view_command():
 
 
 def test_inlined_diff_is_labelled_as_not_in_this_tree():
-    """The hunks ARE inlined (discoverability), so the labelling is what stops a user reading them as changes already applied to their working tree."""
+    """The hunks ARE inlined (discoverability), so the labelling is what stops a
+    user reading them as changes already applied to their working tree."""
     out = d.render_footer([_cs(diff="diff --git a/x b/x\n@@ -1 +1 @@\n-a\n+b\n")])
     assert "NOT in your working tree" in out
     assert "have not been merged" in out
-    # The hunks are present, but the branch that holds them is named right there.
+    # The hunks are present and the branch that holds them is named.
     assert "@@" in out
     assert "coder/child1-ab12ef34" in out
 
 
 def test_inlined_diff_is_capped_and_says_so():
-    """/diff is invoked repeatedly; two unbounded child diffs would drown the parent's own changes."""
+    """/diff is invoked repeatedly; two unbounded child diffs would drown the
+    parent's own changes. The cap must announce itself and stay reachable."""
     huge = "\n".join(f"+line {i}" for i in range(4000))
     out = d.render_footer([_cs(diff=huge)])
     assert len(out) < 6000, "an unbounded child diff was inlined"
@@ -55,7 +64,12 @@ def test_inlined_diff_is_capped_and_says_so():
 
 
 def test_footer_is_never_wired_into_a_model_facing_site():
-    """STRUCTURAL GUARD. session_diff() feeds the self-reviewer (loop.py) and episodic memory (session.py)."""
+    """STRUCTURAL GUARD. session_diff() feeds the self-reviewer (loop.py) and
+    episodic memory (session.py). Appending the delegated section AT THOSE CALL
+    SITES corrupts those loops just as merging foreign keys would, even though
+    session_diff() itself is untouched. Pin it in the source so a future
+    well-meaning edit cannot quietly reintroduce it.
+    """
     from pathlib import Path
     import localm.plugins.coder as pkg
 
@@ -70,7 +84,8 @@ def test_footer_is_never_wired_into_a_model_facing_site():
 
 
 def test_recording_delegated_work_does_not_change_what_the_reviewer_would_see():
-    """The reviewer is handed session_diff()'s return."""
+    """The reviewer is handed session_diff()'s return. Recording delegated work
+    must leave that byte-identical."""
     from localm.plugins.coder.agent.persistence import _PersistenceMixin
 
     class Agent(_PersistenceMixin):
@@ -111,7 +126,8 @@ def test_record_and_footer_for_round_trip():
 
 
 def test_record_does_not_touch_the_parents_changed_files():
-    """THE INVARIANT."""
+    """THE INVARIANT. Delegated work must never enter the parent's own tree map,
+    which feeds session_diff() -> the self-reviewer and episodic memory."""
     class Agent:
         def __init__(self):
             self._changed_files = {"real.py": {"writes": 1}}

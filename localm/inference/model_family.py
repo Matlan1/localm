@@ -1,5 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Model-family detection shared across plugins."""
+"""Model-family detection shared across plugins.
+
+A single source of truth for "is this a thinking/reasoning model" so the coder's
+per-family prompt tuning (localm.plugins.coder.prompts.detect_model_family) and
+regular chat's <think> instruction (CHAT-2b, the chat plugin's inlet hook) cannot
+drift apart. Detection keys on the model NAME we are handed; an opaque registry
+alias ("m8") still resolves to not-thinking - threading the model's true id /
+metadata here is a separate follow-up.
+"""
 
 from __future__ import annotations
 

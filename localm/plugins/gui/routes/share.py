@@ -1,5 +1,15 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""GUI Web Share Target routes (PWA)."""
+"""GUI Web Share Target routes (PWA).
+
+The phone shares an image (or text/link) from any app INTO localm via the OS
+share sheet (manifest "share_target"). The browser POSTs it to /share-target; we
+stash it in a transient server inbox and bounce back to the app, which ingests the
+images as chat attachments and clears the inbox. This makes phone content actually
+reach the model, not just "open a link".
+
+Extracted verbatim from attach_gui(); behavior unchanged. The multipart parser and
+the transient inbox helper stay in ``web.py`` and are imported by name.
+"""
 
 from __future__ import annotations
 
@@ -65,7 +75,14 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.get("/api/share/pending", dependencies=[Depends(_require_auth)])
     async def share_pending(request: Request):
-        """Pending shared files as data URIs, for the app to ingest as chat attachments."""
+        """Pending shared files as data URIs, for the app to ingest as chat
+        attachments. Does not delete - the app calls /api/share/clear after it
+        has the data, so a failed fetch does not lose the share.
+
+        Scoped to the caller's own shares (an admin/owner sees all; an entry
+        with no recorded owner - open mode, or left over from before ownership
+        was tracked - stays visible to everyone), so one key cannot read
+        another key's shared content."""
         import base64
         import mimetypes as _mt
         inbox = _web._share_inbox()
@@ -89,7 +106,10 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.post("/api/share/clear", dependencies=[Depends(_require_auth)])
     async def share_clear(req: ShareClearRequest, request: Request):
-        """Delete shared inbox entries the app has ingested."""
+        """Delete shared inbox entries the app has ingested. With no ids, clears
+        all of the CALLER's own (never another key's - same ownership scoping as
+        /api/share/pending). The id is matched as a filename prefix (no path is
+        built from it), so it cannot traverse out of the inbox."""
         inbox = _web._share_inbox()
         keep = set(req.ids)
         removed = 0

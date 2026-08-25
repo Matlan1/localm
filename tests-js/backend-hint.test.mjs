@@ -2,9 +2,8 @@
 // jsdom tests for the Settings "Backend" row + dismissable NVIDIA+vulkan hint
 // (refreshBackendInfo / shouldShowBackendHint / setupBackendHintDismiss in
 // app/settings-perf.js): reads GET /api/backend, shows the hint only for the
-// NVIDIA+vulkan combination, never for any other combination, and a
-// dismissal persists across a reload (except in privacy mode, which leaves
-// no localStorage trace at all - mirroring the onboarding install gate).
+// NVIDIA+vulkan combination, and a dismissal persists across a reload except
+// in privacy mode, which writes no localStorage.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -18,9 +17,8 @@ async function waitFor(fn, timeout = 800) {
   return false;
 }
 
-// Records calls; serves /api/backend (configurable payload) + the bootstrap
-// endpoints every loadApp() init pass hits (same fallback shape as
-// perf.test.mjs / main-gpu-selector.test.mjs).
+// Records calls; serves /api/backend (configurable payload) plus the bootstrap
+// endpoints every loadApp() init pass hits.
 function makeFetch(calls, { installed = null, vendor = null, recommended = null } = {}) {
   return async (url, opts = {}) => {
     const u = String(url);
@@ -115,9 +113,7 @@ test("dismissing the hint hides it immediately and persists across a reload", as
   assert.equal(window.localStorage.getItem("localm.backendHintDismissed"), "1",
     "dismissal is remembered");
 
-  // A later page load (fresh window; a real browser would carry the same
-  // origin's localStorage across loads - seedLocalStorage simulates that)
-  // must not show the hint again, even though the payload still qualifies.
+  // A later page load: a fresh window seeded with the same localStorage.
   const { window: reload } = loadApp({
     fetchImpl: makeFetch([], { installed: "vulkan", vendor: "nvidia", recommended: "cuda" }),
     seedLocalStorage: { "localm.backendHintDismissed": "1" },

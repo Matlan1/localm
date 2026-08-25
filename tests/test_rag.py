@@ -14,7 +14,8 @@ from localm.rag.bm25 import BM25, ENGLISH_STOP_WORDS, tokenize
 
 
 def _tiny_pdf(text: str) -> bytes:
-    """A minimal valid single-page PDF that renders *text*, built by hand so the test needs no PDF-writer dependency (only pypdf, to read it back)."""
+    """A minimal valid single-page PDF that renders *text*, built by hand so the
+    test needs no PDF-writer dependency (only pypdf, to read it back)."""
     content = b"BT /F1 18 Tf 20 100 Td (" + text.encode("latin-1") + b") Tj ET"
     objs = [
         b"<< /Type /Catalog /Pages 2 0 R >>",
@@ -120,7 +121,10 @@ class TestExtract:
             extract_text(f)
 
     def test_pdf_extracted_with_pypdf(self, tmp_path):
-        """Present-pypdf counterpart of the install-hint test: a real PDF round-trips through extract_text()."""
+        """Present-pypdf counterpart of the install-hint test: a real PDF
+        round-trips through extract_text(). Runs in CI (which installs the [rag]
+        extra); skips locally when pypdf is absent. This is the regression guard
+        that future pypdf bumps cannot silently break PDF extraction."""
         pytest.importorskip("pypdf")
         f = tmp_path / "doc.pdf"
         f.write_bytes(_tiny_pdf("hello localm rag pdf"))
@@ -195,7 +199,7 @@ class TestBM25:
         assert BM25([]).scores("anything") == []
 
     def test_tokenize_keeps_stopwords_by_default(self):
-        # Default MUST leave stopwords in place: localm.memory.store's REG-590
+        # Default MUST leave stopwords in place: localm.memory.store's
         # self-reference check reads "i"/"me"/"my" from this raw token stream.
         assert tokenize("I and me") == ["i", "and", "me"]
 
@@ -206,10 +210,10 @@ class TestBM25:
         assert {"a", "and", "the", "or", "of", "to", "is", "are"} <= ENGLISH_STOP_WORDS
 
     def test_stopword_only_overlap_scores_zero_when_filtered(self):
-        # The reported failure mode: a query and a doc overlap ONLY on the
-        # stopword "and". Unfiltered BM25 hands that doc a real lexical score
-        # (in a small corpus "and" earns a high IDF); filtering removes it so a
-        # stopword can never be the sole basis of a lexical match.
+        # A query and a doc overlap ONLY on the stopword "and". Unfiltered BM25
+        # hands that doc a real lexical score (in a small corpus "and" earns a
+        # high IDF); filtering removes it so a stopword can never be the sole
+        # basis of a lexical match.
         docs = [
             "felines groom their fur then curl up to nap",  # no query content word, no "and"
             "automobiles and trucks burn diesel fuel",      # shares ONLY "and"
@@ -281,7 +285,10 @@ class TestCollection:
         assert "gpu.md" in c2.query("ROCm runtime", k=1)[0]["source"]
 
     def test_concurrent_add_paths_no_data_loss(self, tmp_path):
-        """CHK-RAG-LOCK: two concurrent add_paths() to ONE collection must BOTH persist."""
+        """CHK-RAG-LOCK: two concurrent add_paths() to ONE collection must BOTH
+        persist. Pre-fix, each Collection instance _load()s the same state, adds a
+        different doc, and _save()s with no per-collection coordination -> the
+        last writer overwrote the other and one doc was silently lost."""
         import threading
         base = tmp_path / "rag"
         Collection("kb", base=base).create()
@@ -310,7 +317,12 @@ class TestCollection:
         assert len(docs) == 2, f"data loss: expected both docs, got {docs}"
 
     def test_atomic_write_retries_transient_permission_error(self, tmp_path, monkeypatch):
-        """CHK-RAG-RETRY: on Windows, Path.replace() (MoveFileEx) can transiently raise PermissionError(13, 'Access is denied') if another process (AV real-time scan, Search Indexer) briefly has the destination or temp file open. _atomic_write must retry a bounded number of times, mirroring the established fix..."""
+        """CHK-RAG-RETRY: on Windows, Path.replace() (MoveFileEx) can transiently
+        raise PermissionError(13, 'Access is denied') if another process (AV
+        real-time scan, Search Indexer) briefly has the destination or temp file
+        open. _atomic_write must retry a bounded number of times, mirroring the
+        established fix in localm.plugins.coder.episodes.EpisodeStore.add,
+        instead of letting a spurious OS-level rename failure propagate."""
         import pathlib
 
         base = tmp_path / "rag"
@@ -387,8 +399,7 @@ class TestCollection:
     def test_corrupt_meta_preserves_queryable_chunks(self, tmp_path, docs_dir):
         # A corrupt meta.json must NOT discard the independent chunks.jsonl:
         # meta holds only {name, created, docs}, none of which retrieval needs,
-        # so intact chunks stay fully queryable and recoverable data is not
-        # silently lost (AGENTS rule 5 - missing vs corrupt must not collapse).
+        # so intact chunks stay fully queryable.
         base = tmp_path / "rag"
         c = Collection("kb", base=base).create()
         c.add_paths([docs_dir])
@@ -433,11 +444,12 @@ class TestCollection:
         data = json.loads((base / "kb" / "vectors.json").read_text(encoding="utf-8"))
         assert data["dim"] == 3
 
-    # --- L6: a corrupt / stale / mismatched vectors index is SURFACED, not ---- #
-    # --- silently swallowed into BM25-only (AGENTS rule 5). ------------------- #
+    # --- a corrupt / stale / mismatched vectors index is SURFACED, not ------- #
+    # --- silently swallowed into BM25-only. ---------------------------------- #
 
     def test_absent_vectors_is_not_a_degrade(self, tmp_path, docs_dir):
-        """The benign case: no embeddings indexed -> no vectors.json, no degrade reason. 'Absent' must not be conflated with 'corrupt' (rule 5)."""
+        """The benign case: no embeddings indexed -> no vectors.json, no degrade
+        reason. 'Absent' must not be conflated with 'corrupt' (rule 5)."""
         base = tmp_path / "rag"
         c = Collection("kb", base=base).create()
         c.add_paths([docs_dir])                       # no embed_fn -> no vectors.json
@@ -446,7 +458,8 @@ class TestCollection:
         assert c.stats()["vector_degrade_reason"] is None
 
     def test_corrupt_vectors_json_warns_and_degrades(self, tmp_path, docs_dir, caplog):
-        """An unreadable vectors.json surfaces a warning + a stats reason and still answers lexically - it does not silently vanish or crash."""
+        """An unreadable vectors.json surfaces a warning + a stats reason and still
+        answers lexically - it does not silently vanish or crash."""
         base = tmp_path / "rag"
         c = Collection("kb", base=base).create()
         c.add_paths([docs_dir], embed_fn=lambda ts: [[1.0, 0.0, 0.0] for _ in ts])
@@ -460,7 +473,11 @@ class TestCollection:
         assert c2.query("ROCm DLLs", k=1)             # BM25 fallback, no crash
 
     def test_extra_vectors_length_mismatch_warns_orphaned(self, tmp_path, docs_dir, caplog):
-        """MORE vectors than chunks means leftover/orphaned entries from a prior, larger index (e.g. docs removed/re-chunked without pruning vectors.json to match) - a distinct diagnosis from a genuinely partial embed, surfaced with its own wording rather than a blanket 'stale or partial' (both are fixed the s..."""
+        """MORE vectors than chunks means leftover/orphaned entries from a prior,
+        larger index (e.g. docs removed/re-chunked without pruning vectors.json to
+        match) - a distinct diagnosis from a genuinely partial embed, surfaced with
+        its own wording rather than a blanket 'stale or partial' (both are fixed the
+        same way, by a full reindex, but the cause differs)."""
         base = tmp_path / "rag"
         c = Collection("kb", base=base).create()
         c.add_paths([docs_dir], embed_fn=lambda ts: [[1.0, 0.0, 0.0] for _ in ts])
@@ -476,7 +493,9 @@ class TestCollection:
         assert c2.query("ROCm DLLs", k=1)
 
     def test_fewer_vectors_length_mismatch_warns_partial(self, tmp_path, docs_dir, caplog):
-        """FEWER vectors than chunks is a genuinely partial embed (e.g. an interrupted indexing run) - distinct wording from the 'extra vectors' case above, though both degrade to BM25 and both are fixed by a full reindex."""
+        """FEWER vectors than chunks is a genuinely partial embed (e.g. an
+        interrupted indexing run) - distinct wording from the 'extra vectors' case
+        above, though both degrade to BM25 and both are fixed by a full reindex."""
         base = tmp_path / "rag"
         c = Collection("kb", base=base).create()
         c.add_paths([docs_dir], embed_fn=lambda ts: [[1.0, 0.0, 0.0] for _ in ts])
@@ -492,7 +511,10 @@ class TestCollection:
         assert c2.query("ROCm DLLs", k=1)
 
     def test_query_embedding_model_change_warns(self, tmp_path, docs_dir, caplog):
-        """Querying with an embedding model of a different dimensionality than the stored vectors surfaces a 'model changed' warning + a stats reason (and still answers lexically)."""
+        """Querying with an embedding model of a different dimensionality than the
+        stored vectors surfaces a 'model changed' warning + a stats reason (and
+        still answers lexically). Also covers BUG-5 (dim mismatch must degrade to
+        lexical, never crash or silently truncate)."""
         base = tmp_path / "rag"
         c = Collection("kb", base=base).create()
         c.add_paths([docs_dir],
@@ -508,7 +530,9 @@ class TestCollection:
 
     def test_malformed_vectors_json_degrades_not_crashes(self, tmp_path, docs_dir,
                                                          caplog):
-        """Valid JSON whose entries are scalars (a hand-edit or truncation) must be caught at LOAD and degraded - not accepted and then crashed by cosine at query time with an opaque 'int has no len()'."""
+        """Valid JSON whose entries are scalars (a hand-edit or truncation) must be
+        caught at LOAD and degraded - not accepted and then crashed by cosine at
+        query time with an opaque 'int has no len()'."""
         base = tmp_path / "rag"
         c = Collection("kb", base=base).create()
         c.add_paths([docs_dir], embed_fn=lambda ts: [[1.0, 0.0, 0.0] for _ in ts])
@@ -526,7 +550,8 @@ class TestCollection:
         assert hits and "gpu.md" in hits[0]["source"]
 
     def test_query_embedding_failure_warns(self, tmp_path, docs_dir, caplog):
-        """A raising embed_fn (embedder down) is a real failure, surfaced once, not swallowed into silent lexical-only."""
+        """A raising embed_fn (embedder down) is a real failure, surfaced once, not
+        swallowed into silent lexical-only."""
         base = tmp_path / "rag"
         c = Collection("kb", base=base).create()
         c.add_paths([docs_dir], embed_fn=lambda ts: [[1.0, 0.0, 0.0] for _ in ts])
@@ -542,15 +567,15 @@ class TestCollection:
         assert "query embedding failed" in caplog.text
 
     def test_cosine_dim_mismatch_raises(self):
-        # C3: a dim mismatch is corruption, not a real zero-similarity. _cosine
-        # must fail loud; _vector_scores guarantees equal lengths before calling.
+        # A dim mismatch is corruption, not a real zero-similarity. _cosine must
+        # fail loud; _vector_scores guarantees equal lengths before calling.
         from localm.rag.store import _cosine
         assert _cosine([1.0, 2.0], [3.0, 4.0]) == pytest.approx(0.98, abs=0.02)
         with pytest.raises(ValueError):
             _cosine([1.0, 2.0], [1.0, 2.0, 3.0])
 
     def test_add_with_changed_embed_dim_raises(self, tmp_path, docs_dir):
-        # C3: re-indexing a collection with an embedding model of a different
+        # Re-indexing a collection with an embedding model of a different
         # dimensionality must raise, not silently store mixed-dim vectors.
         base = tmp_path / "rag"
         c = Collection("kb", base=base).create()
@@ -578,9 +603,8 @@ class TestCollection:
     def test_mid_batch_dim_mismatch_persists_earlier_files(self, tmp_path, docs_dir):
         # A folder with >1 file where a LATER file's embedding dimension
         # mismatches must not discard the EARLIER file(s) already processed in
-        # the SAME add_paths() call: _save() only ran once at the very end of
-        # the loop, so raising mid-loop used to lose everything done before the
-        # raise, not just the offending file (silent data loss, AGENTS rule 5).
+        # the SAME add_paths() call: _save() runs once at the very end of the
+        # loop, so a mid-loop raise must not lose the work done before it.
         base = tmp_path / "rag"
         c = Collection("kb", base=base).create()
 
@@ -633,7 +657,12 @@ class TestCollection:
         assert "gpu.md" in hits[0]["source"]
 
     def test_stopword_only_hit_does_not_outrank_semantic_match(self, tmp_path):
-        """Regression: a query overlapping a doc ONLY on a stopword must not let that doc win the lexical half and, via the 50/50 blend, outrank the true semantic match when vectors are present (the reported RAG-embedding nuance)."""
+        """Regression: a query overlapping a doc ONLY on a stopword must not let
+        that doc win the lexical half and, via the 50/50 blend, outrank the true
+        semantic match when vectors are present (the reported RAG-embedding
+        nuance). Four one-sentence docs; the query shares only the stopword "and"
+        with vehicles.txt, while animals.txt is the semantic match (cat~feline,
+        sleep~nap) with NO shared content word."""
         base = tmp_path / "rag"
         d = tmp_path / "docs"
         d.mkdir()
@@ -648,8 +677,7 @@ class TestCollection:
 
         def topic_embed(texts):
             # Deterministic topic axes + a shared bias so EVERY doc has a small
-            # non-zero cosine to the query (as a real dense embedder would) -
-            # that is exactly what let a lone stopword hit flip the old blend.
+            # non-zero cosine to the query, as a real dense embedder would.
             animal = ("cat", "feline", "purr", "nap", "pet", "sleep", "groom", "fur")
             vehicle = ("automobile", "truck", "fuel", "car", "diesel")
             biology = ("mitochondria", "cell", "dna", "living")
@@ -693,7 +721,9 @@ class TestCollection:
         assert c.query("sourdough flour", k=1)    # lexical retrieval works
 
     def test_has_vectors_matches_query_blend_threshold(self, tmp_path):
-        """stats() has_vectors reflects what query() DOES (blend at >=80% coverage), not 'every chunk embedded' - so a partially-embedded collection is not mislabelled BM25-only when it is actually doing hybrid retrieval."""
+        """stats() has_vectors reflects what query() DOES (blend at >=80% coverage),
+        not 'every chunk embedded' - so a partially-embedded collection is not
+        mislabelled BM25-only when it is actually doing hybrid retrieval."""
         base = tmp_path / "rag"
         c = Collection("kb", base=base).create()
         c._chunks = [{"text": f"c{i}", "source": "d"} for i in range(10)]
@@ -712,10 +742,10 @@ class TestCollection:
 
 
 # ---------------------------------------------------------------------------
-#  LM-DA-SEC-03: retrieved chunks are untrusted content - control/frame tokens
-#  in a malicious indexed document must be defanged before they can be spliced
-#  into a chat prompt (indirect prompt injection), the same as fetch_url / MCP
-#  tool output. The /query endpoint neutralises every hit's text at the boundary.
+#  Retrieved chunks are untrusted content: control/frame tokens in a malicious
+#  indexed document are defanged before they can be spliced into a chat prompt
+#  (indirect prompt injection), the same as fetch_url / MCP tool output. The
+#  /query endpoint neutralises every hit's text at the boundary.
 # ---------------------------------------------------------------------------
 
 def test_rag_query_neutralises_control_tokens_in_hits():
@@ -748,7 +778,9 @@ def test_rag_query_neutralise_handles_missing_or_nonstring_text():
 
 
 def test_rag_embedding_status_endpoint(monkeypatch):
-    """GET /api/rag/embedding reports the configured model, its install state, the internal options, and the last error - the data the Knowledge page's embedding picker renders."""
+    """GET /api/rag/embedding reports the configured model, its install state, the
+    internal options, and the last error - the data the Knowledge page's embedding
+    picker renders. Cheap: it never loads a model."""
     import asyncio
 
     from localm.inference import embedder as emb
@@ -761,10 +793,10 @@ def test_rag_embedding_status_endpoint(monkeypatch):
     monkeypatch.setattr(emb, "loaded_dim", lambda: None)
     monkeypatch.setattr(emb, "last_error", lambda: None)
 
-    # The handler now takes the request: `installed` is a file-existence answer,
-    # so it is only reported to an owner or for a localm-managed identity. With no
-    # API key configured this is open mode, caller_scopes() is None, and the caller
-    # is the trusted local owner - so the reported values are unchanged.
+    # The handler takes the request: `installed` is a file-existence answer, so
+    # it is only reported to an owner or for a localm-managed identity. With no
+    # API key configured this is open mode, caller_scopes() is None, and the
+    # caller is the trusted local owner, so the reported values are unchanged.
     from starlette.requests import Request
     req = Request({"type": "http", "method": "GET",
                    "path": "/api/rag/embedding", "headers": []})
@@ -783,11 +815,10 @@ def test_rag_embedding_status_endpoint(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-#  NEW-RAG-INDEX-WARN-SPAM residual C: `rag repair` on a collection with no
-#  rebuildable (non-upload) documents. Real Collection + real CLI command, not
-#  the reg589 test files' mocked _FakeColl - the point here is the ACTUAL
-#  upload:<name> vs server-path distinction, which a fake documents() list
-#  cannot exercise.
+#  `rag repair` on a collection with no rebuildable (non-upload) documents.
+#  Real Collection + real CLI command, not a mocked collection: what this
+#  exercises is the ACTUAL upload:<name> vs server-path distinction, which a
+#  fake documents() list cannot.
 # ---------------------------------------------------------------------------
 
 class TestCliRepairUploadOnlySources:

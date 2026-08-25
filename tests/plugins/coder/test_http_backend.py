@@ -78,7 +78,10 @@ class TestHTTPBackendChat(unittest.TestCase):
 
 
 class TestHTTPBackendSetModel(unittest.TestCase):
-    """A coder session's backend was pinned at construction forever - every chat()/chat_stream() call sends the ORIGINAL model name (self._model in _body()) with no way to repoint it, so a later model switch elsewhere in the app never reached an already-running session."""
+    """A coder session's backend was pinned at construction forever - every
+    chat()/chat_stream() call sends the ORIGINAL model name (self._model in
+    _body()) with no way to repoint it, so a later model switch elsewhere in
+    the app never reached an already-running session."""
 
     def test_model_id_reflects_the_construction_time_model(self):
         backend = _make_backend()
@@ -91,7 +94,8 @@ class TestHTTPBackendSetModel(unittest.TestCase):
 
     @patch("requests.post")
     def test_set_model_changes_the_next_request_body(self, mock_post):
-        """The whole point: set_model() must actually change what is SENT, not just what model_id reports back."""
+        """The whole point: set_model() must actually change what is SENT, not
+        just what model_id reports back."""
         mock_post.return_value = _mock_non_streaming_response(
             "hi", {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2})
         backend = _make_backend()
@@ -101,7 +105,9 @@ class TestHTTPBackendSetModel(unittest.TestCase):
         self.assertEqual(sent_body["model"], "other-model")
 
     def test_set_model_does_not_rebuild_the_backend(self):
-        """Repointing must be in-place mutation, not a new object - a caller holding a reference (the Agent) must see the change without being reconstructed, which would lose conversation history."""
+        """Repointing must be in-place mutation, not a new object - a caller
+        holding a reference (the Agent) must see the change without being
+        reconstructed, which would lose conversation history."""
         backend = _make_backend()
         before = id(backend)
         backend.set_model("other-model")
@@ -109,7 +115,11 @@ class TestHTTPBackendSetModel(unittest.TestCase):
 
 
 class TestHTTPBackendChatReasoning(unittest.TestCase):
-    """AUD-HIGH-17-3: chat() must capture the server's H4 `reasoning_content` field into last_reasoning WITHOUT mixing it into the returned text - the coder loop has no downstream splitter, so any inline <think> tag in the returned string would leak into the visible answer, audit log, and conversation hist..."""
+    """AUD-HIGH-17-3: chat() must capture the server's H4 `reasoning_content`
+    field into last_reasoning WITHOUT mixing it into the returned text - the
+    coder loop has no downstream splitter, so any inline <think> tag in the
+    returned string would leak into the visible answer, audit log, and
+    conversation history verbatim."""
 
     @patch("requests.post")
     def test_chat_captures_reasoning_separately(self, mock_post):
@@ -187,7 +197,12 @@ class TestHTTPBackendChatStream(unittest.TestCase):
 
 
 class TestHTTPBackendChatStreamReasoning(unittest.TestCase):
-    """AUD-HIGH-17-3: chat_stream() must route the server's H4 `reasoning_content` deltas to on_reasoning and last_reasoning, and NEVER yield them as part of the content Iterator[str] - the coder loop's _stream_hiding_tool_calls, terminal display, event-sink, audit log, and conversation history all consume..."""
+    """AUD-HIGH-17-3: chat_stream() must route the server's H4
+    `reasoning_content` deltas to on_reasoning and last_reasoning, and NEVER
+    yield them as part of the content Iterator[str] - the coder loop's
+    _stream_hiding_tool_calls, terminal display, event-sink, audit log, and
+    conversation history all consume that iterator directly with no splitter,
+    so an inlined reasoning chunk would leak through every one of them."""
 
     @staticmethod
     def _stream_response(delta_dicts: list):
@@ -214,7 +229,7 @@ class TestHTTPBackendChatStreamReasoning(unittest.TestCase):
         self.assertEqual("".join(pieces), "The answer.")
         self.assertEqual(backend.last_reasoning, "because reasons")
         # NEGATIVE: no piece of the yielded content stream carries reasoning or
-        # an inline <think> tag - there is no downstream splitter for it here.
+        # an inline <think> tag.
         for p in pieces:
             self.assertNotIn("because", p)
             self.assertNotIn("<think>", p)
@@ -242,7 +257,8 @@ class TestHTTPBackendChatStreamReasoning(unittest.TestCase):
 
     @patch("requests.post")
     def test_broken_on_reasoning_callback_does_not_kill_the_stream(self, mock_post):
-        """A raising sink (mirrors agent/core.py's _emit contract: 'a broken sink must not kill the agent loop') must not abort the stream."""
+        """A raising sink (mirrors agent/core.py's _emit contract: 'a broken
+        sink must not kill the agent loop') must not abort the stream."""
         mock_post.return_value = self._stream_response([
             {"reasoning_content": "x"},
             {"content": "The answer."},
@@ -258,7 +274,8 @@ class TestHTTPBackendChatStreamReasoning(unittest.TestCase):
 
     @patch("requests.post")
     def test_reasoning_does_not_disturb_tool_call_accumulation(self, mock_post):
-        """Reasoning deltas interleaved with native tool_call deltas must not perturb the existing tool-call XML accumulation."""
+        """Reasoning deltas interleaved with native tool_call deltas must not
+        perturb the existing tool-call XML accumulation."""
         mock_post.return_value = self._stream_response([
             {"reasoning_content": "planning the call"},
             {"tool_calls": [{"index": 0, "function": {"name": "read_file", "arguments": ""}}]},

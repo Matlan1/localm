@@ -1,5 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""SSRF-REBIND: the DNS-rebinding TOCTOU is closed by pinning the validated IP."""
+"""SSRF-REBIND: the DNS-rebinding TOCTOU is closed by pinning the validated IP.
+
+netpolicy.check_url resolves+validates a host, but a plain requests.get
+re-resolves at connect time - a TTL-0 attacker can answer public for the check
+and internal for the connect. These tests pin the fix: the host is resolved
+ONCE, the exact address dialled is validated, and the socket connects to that IP
+while the original hostname is presented for SNI / cert / Host.
+"""
 
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -89,7 +96,8 @@ class TestHostHeader:
 # --------------------------------------------------------------------------- #
 
 def test_rebind_between_check_and_connect_is_refused(monkeypatch):
-    """check_url sees a public IP (passes); the pin re-resolves to loopback and refuses - the classic DNS-rebinding flip cannot reach an internal service."""
+    """check_url sees a public IP (passes); the pin re-resolves to loopback and
+    refuses - the classic DNS-rebinding flip cannot reach an internal service."""
     calls = {"n": 0}
 
     def flip(host, *a, **k):
@@ -104,7 +112,10 @@ def test_rebind_between_check_and_connect_is_refused(monkeypatch):
 
 
 def test_unresolvable_host_fails_closed(monkeypatch):
-    """check_url lets an unresolvable host through (it would DNS-fail anyway), but the pin fails CLOSED rather than handing off to a re-resolving session - else a host that is NXDOMAIN at validation and a private A record at connect (TTL-0 rebinding) would reach an internal service unpinned."""
+    """check_url lets an unresolvable host through (it would DNS-fail anyway), but
+    the pin fails CLOSED rather than handing off to a re-resolving session - else a
+    host that is NXDOMAIN at validation and a private A record at connect (TTL-0
+    rebinding) would reach an internal service unpinned."""
     import socket as _socket
 
     monkeypatch.setattr(
@@ -180,14 +191,26 @@ def test_https_pool_preserves_sni_and_repoints_socket():
 # --------------------------------------------------------------------------- #
 
 def test_pinned_session_disables_trust_env():
-    """trust_env=True (the requests default) lets HTTP_PROXY/HTTPS_PROXY environment variables route a request through an operator- or attacker-controlled proxy INSTEAD of the pinned IP, and lets .netrc on disk auto-attach credentials to a request that never asked to authenticate."""
+    """trust_env=True (the requests default) lets HTTP_PROXY/HTTPS_PROXY
+    environment variables route a request through an operator- or
+    attacker-controlled proxy INSTEAD of the pinned IP, and lets .netrc on
+    disk auto-attach credentials to a request that never asked to
+    authenticate. Both defeat the pin from entirely outside this module's own
+    logic, so a pinned session must never consult either."""
     from localm.netpin import pinned_session
 
     assert pinned_session("93.184.216.34").trust_env is False
 
 
 def test_pinned_session_ignores_an_environment_proxy(monkeypatch):
-    """The proxy-environment SSRF-pin bypass this closes."""
+    """The proxy-environment SSRF-pin bypass this closes. When a proxy is
+    selected for a plain-HTTP request, requests.adapters.HTTPAdapter routes
+    it through a DIFFERENT connection pool (proxy_manager_for's own plain
+    urllib3.ProxyManager) that never sees _pinned_ip at all - so with
+    trust_env=True an HTTP_PROXY env var bypasses the pin completely, not
+    merely weakens it. Proven live: a "trap" server stands in for the env
+    proxy and a "real" server stands in for the pinned target; the trap must
+    never be hit."""
     trap_hits = {"n": 0}
     real_hits = {"n": 0}
 
@@ -242,7 +265,9 @@ def test_pinned_session_ignores_an_environment_proxy(monkeypatch):
 
 
 def test_pinned_session_ignores_netrc_credentials(monkeypatch, tmp_path):
-    """trust_env=True (the requests default) auto-attaches .netrc credentials to any request whose host has a matching entry, even though the caller never asked to authenticate - a pinned session must never do this."""
+    """trust_env=True (the requests default) auto-attaches .netrc credentials
+    to any request whose host has a matching entry, even though the caller
+    never asked to authenticate - a pinned session must never do this."""
     netrc_path = tmp_path / "netrc"
     netrc_path.write_text(
         "machine vhost.test login leaked-user password leaked-pass\n")

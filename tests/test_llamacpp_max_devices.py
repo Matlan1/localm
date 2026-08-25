@@ -1,5 +1,17 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Direct-binding coverage for the multi-GPU tensor-split capacity probe: has_max_devices()/llama_max_devices() in localm/inference/backends/llamacpp/_api.py, plus discover._tensor_split_capacity (the sole caller, via apply_gpu_split) which decides between the live native answer and the documented fall..."""
+"""Direct-binding coverage for the multi-GPU tensor-split capacity probe:
+has_max_devices()/llama_max_devices() in
+localm/inference/backends/llamacpp/_api.py, plus discover._tensor_split_capacity
+(the sole caller, via apply_gpu_split) which decides between the live native
+answer and the documented fallback constant.
+
+_api.py's own probes (has_memory_api, has_penalties_sampler) are normally
+exercised indirectly by mocking the whole ``llama.api`` module object at call
+sites (see test_kv_cache.py). These two are new enough, and load-bearing
+enough (an under-sized tensor_split allocation is a real out-of-bounds read -
+see _tensor_split_capacity's docstring), to also warrant testing the bindings
+themselves: mock only load_lib() (what has_max_devices/llama_max_devices
+actually call) and exercise the real hasattr/getattr + ctypes-bind logic."""
 
 from unittest.mock import MagicMock, patch
 
@@ -15,7 +27,9 @@ _LOAD_LIB = "localm.inference.backends.llamacpp._api.load_lib"
 
 
 class _NoMaxDevices:
-    """Stands in for a ctypes.CDLL handle from an older build that never exported llama_max_devices."""
+    """Stands in for a ctypes.CDLL handle from an older build that never
+    exported llama_max_devices. A plain object() (not a Mock) so hasattr()
+    genuinely fails instead of a Mock auto-creating the attribute."""
 
 
 class TestHasMaxDevices:
@@ -29,10 +43,9 @@ class TestHasMaxDevices:
             assert _api.has_max_devices() is False
 
     def test_false_when_spec_mock_lacks_symbol(self):
-        # A Mock constrained with spec=[] behaves like the real CDLL handle
-        # for attributes outside the spec: hasattr/getattr genuinely raise,
-        # they are not auto-vivified. This is the negative-spec counterpart
-        # to test_true_when_symbol_present above.
+        # A Mock constrained with spec=[] behaves like the real CDLL handle for
+        # attributes outside the spec: hasattr/getattr genuinely raise rather
+        # than auto-vivifying.
         fake_lib = MagicMock(spec=[])
         with patch(_LOAD_LIB, return_value=fake_lib):
             assert _api.has_max_devices() is False
@@ -51,9 +64,8 @@ class TestLlamaMaxDevices:
 
     def test_return_value_is_coerced_to_python_int(self):
         # The native call returns a ctypes c_size_t-flavoured value; confirm
-        # llama_max_devices() hands back a plain Python int, not the raw
-        # ctypes/other numeric type, so callers (_tensor_split_capacity's
-        # max()/comparisons) work without surprises.
+        # llama_max_devices() hands back a plain Python int for callers such as
+        # _tensor_split_capacity's max() and comparisons.
         fake_lib = MagicMock(spec=["llama_max_devices"])
         fake_lib.llama_max_devices = MagicMock(return_value=16)
         with patch(_LOAD_LIB, return_value=fake_lib):
@@ -66,7 +78,12 @@ _LLAMA_MAX_DEVICES = "localm.inference.backends.llamacpp._api.llama_max_devices"
 
 
 class TestTensorSplitCapacity:
-    """discover._tensor_split_capacity: the sole call site is apply_gpu_split, deciding how many float slots to allocate for mp.tensor_split."""
+    """discover._tensor_split_capacity: the sole call site is
+    apply_gpu_split, deciding how many float slots to allocate for
+    mp.tensor_split. It imports localm.inference.backends.llamacpp._api
+    lazily inside the function, so the probes are monkeypatched on the _api
+    module directly (patching localm.discover.<name> would miss it, since
+    that name is never bound in discover's own module namespace)."""
 
     def test_false_falls_back_to_documented_constant(self, monkeypatch):
         monkeypatch.setattr(_HAS_MAX_DEVICES, lambda: False)
@@ -89,9 +106,8 @@ class TestTensorSplitCapacity:
         assert _tensor_split_capacity(min_len=0) == 4
 
     def test_true_bounded_below_by_min_len(self, monkeypatch):
-        # A caller configuring more device indices than the native build's
-        # own capacity is a real misconfiguration risk (under-allocation is
-        # an out-of-bounds read) - min_len must win the max().
+        # More configured device indices than the native build's own capacity:
+        # min_len wins the max().
         monkeypatch.setattr(_HAS_MAX_DEVICES, lambda: True)
         monkeypatch.setattr(_LLAMA_MAX_DEVICES, lambda: 4)
         assert _tensor_split_capacity(min_len=8) == 8

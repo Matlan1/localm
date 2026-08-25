@@ -1,5 +1,24 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Phase 3 hardening tests for localm.model_manager."""
+"""Phase 3 hardening tests for localm.model_manager.
+
+Covers three previously-unguarded behaviours:
+
+FAC-5      --sha256 was a facade for HuggingFace pulls: only _pull_url consumed
+           it, so a mismatching --sha256 on an HF GGUF/snapshot pull was silently
+           ignored. It must now be honoured (verify against the downloaded HF
+           file) or refused with a clear error - never quietly dropped.
+
+GAP-CLI-1  A user-supplied -n name went into the registry raw (add_local used
+           'name or p.stem'), so '../evil' or 'a/b' became a registry key
+           unchanged. It must run through the same sanitizer sync_models_dir
+           uses for auto-discovered names.
+
+GAP-CLI-2  The GGUF/URL filename was used as a dest path with no traversal guard
+           (o/r:../../evil.gguf or a URL ending in ../../evil.gguf), and a URL
+           stem collision short-circuited to "Already downloaded" and aliased a
+           new name onto whatever bytes already existed - even when the caller
+           supplied a --sha256 that did not match those bytes.
+"""
 
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,7 +31,22 @@ from localm.model_manager import pull as pull_mod
 
 
 def _flat(text: str) -> str:
-    """Lowercase captured console output with all whitespace collapsed."""
+    """Lowercase captured console output with all whitespace collapsed.
+
+    These messages are rendered through rich, which WRAPS them, and the wrap point
+    moves with the length of values interpolated into the message - notably the dest
+    PATH. So a long --basetemp (an xdist popen-gwN directory, say) can split a phrase
+    like "DIFFERENT model" across a line break and defeat a plain substring match.
+
+    MEASURED: test_plain_name_reuse_across_two_repos_is_refused passes with a short
+    basetemp and FAILS with a long one, same code, same machine, same minute. That is
+    why it looked like an ordering flake under -n auto.
+
+    The negative assertions are the dangerous half: "different model" NOT in out
+    passes trivially once the wrap splits it, so the test goes green without testing
+    anything. Collapsing whitespace makes every assertion here about the MESSAGE
+    rather than about where the terminal happened to break the line.
+    """
     return " ".join(text.lower().split())
 
 
@@ -73,7 +107,7 @@ def _wire_http(monkeypatch, body: bytes):
 
 
 # ---------------------------------------------------------------------------
-# FAC-5: --sha256 is honoured (not silently ignored) on HF pulls
+# --sha256 is honoured (not silently ignored) on HF pulls
 # ---------------------------------------------------------------------------
 
 class TestHfShaIsNotAFacade:
@@ -125,7 +159,8 @@ class TestHfShaIsNotAFacade:
 
     def test_gguf_pull_rejects_sha256_conflicting_with_hf_metadata(
             self, fake_registry, tmp_path, monkeypatch):
-        """If HF's own metadata digest disagrees with --sha256, refuse up front (no point downloading bytes we already know will not match)."""
+        """If HF's own metadata digest disagrees with --sha256, refuse up front
+        (no point downloading bytes we already know will not match)."""
         store, models_dir = fake_registry
         monkeypatch.setattr(mm, "_hf_file_sha256", lambda r, fn: "a" * 64)
         monkeypatch.setattr(mm, "find_by_sha256", lambda *a, **k: [])
@@ -144,7 +179,8 @@ class TestHfShaIsNotAFacade:
 
     def test_snapshot_pull_refuses_sha256(
             self, fake_registry, tmp_path, monkeypatch, capsys):
-        """A full-repo snapshot has no single file digest, so --sha256 cannot be verified - it must be refused, not silently ignored."""
+        """A full-repo snapshot has no single file digest, so --sha256 cannot be
+        verified - it must be refused, not silently ignored."""
         store, _ = fake_registry
 
         downloaded = []
@@ -189,10 +225,10 @@ class TestHfShaIsNotAFacade:
 
 
 # ---------------------------------------------------------------------------
-# HIGH-15: an HF snapshot pull must preflight disk space (like _pull_gguf_file
-# / _pull_url do) and must not register an interrupted snapshot as complete
-# just because config.json - usually one of the smallest, earliest files - is
-# present, while a weight shard is still missing.
+# An HF snapshot pull preflights disk space (like _pull_gguf_file / _pull_url
+# do) and does not register an interrupted snapshot as complete just because
+# config.json - usually one of the smallest, earliest files - is present while
+# a weight shard is still missing.
 # ---------------------------------------------------------------------------
 
 def _fake_hf_api(siblings):
@@ -213,7 +249,9 @@ def _fake_hf_api(siblings):
 class TestSnapshotDiskSpaceAndCompleteness:
     def test_snapshot_pull_refuses_on_disk_space(
             self, fake_registry, monkeypatch, capsys):
-        """A large HF snapshot must preflight-check free disk space and fail cleanly - the same 'Not enough disk space' message _pull_gguf_file and _pull_url produce - instead of running until the OS hits ENOSPC."""
+        """A large HF snapshot must preflight-check free disk space and fail
+        cleanly - the same 'Not enough disk space' message _pull_gguf_file and
+        _pull_url produce - instead of running until the OS hits ENOSPC."""
         store, models_dir = fake_registry
 
         siblings = [
@@ -246,7 +284,9 @@ class TestSnapshotDiskSpaceAndCompleteness:
 
     def test_snapshot_pull_retry_does_not_register_incomplete(
             self, fake_registry, monkeypatch, capsys):
-        """Simulate a disk-full mid-download: config.json landed, the weight shard did not."""
+        """Simulate a disk-full mid-download: config.json landed, the weight
+        shard did not. A retry must detect the missing shard and re-run the
+        download - never silently register the partial directory as ready."""
         store, models_dir = fake_registry
 
         dest = models_dir / "partial-repo"
@@ -281,7 +321,8 @@ class TestSnapshotDiskSpaceAndCompleteness:
 
     def test_snapshot_pull_recognizes_genuinely_complete_download(
             self, fake_registry, monkeypatch, capsys):
-        """A snapshot where every listed file is present with a matching size IS treated as already downloaded (no unnecessary re-download)."""
+        """A snapshot where every listed file is present with a matching size
+        IS treated as already downloaded (no unnecessary re-download)."""
         store, models_dir = fake_registry
 
         dest = models_dir / "full-repo"
@@ -311,19 +352,17 @@ class TestSnapshotDiskSpaceAndCompleteness:
 
 
 # ---------------------------------------------------------------------------
-# 2026-08-05: two different repos (or one repo pulled twice under a reused
-# --name, no special characters required) can compute the exact same dest -
-# model_name comes from _sanitize_name, a LOSSY coercion used directly as both
-# the MODELS_DIR subdirectory and the registry key, with no uniqueness check.
-# Confirmed live before this fix existed: snapshot_download merges into
-# whatever is already at dest rather than clearing it, and the final
-# registration used to call _register() directly, so a second, unrelated
-# pull silently mixed its files into an earlier pull's directory and
-# overwrote its registry entry - reported as an ordinary successful pull.
+# Two different repos (or one repo pulled twice under a reused --name, no
+# special characters required) can compute the exact same dest: model_name
+# comes from _sanitize_name, a LOSSY coercion used directly as both the
+# MODELS_DIR subdirectory and the registry key. snapshot_download merges into
+# whatever is already at dest rather than clearing it, so a collision has to be
+# refused before it registers.
 # ---------------------------------------------------------------------------
 
 def _fake_hf_api_by_repo(files_by_repo: dict):
-    """Like _fake_hf_api, but a DIFFERENT sibling list per repo_id - needed here because the whole point is two DIFFERENT repos."""
+    """Like _fake_hf_api, but a DIFFERENT sibling list per repo_id - needed
+    here because the whole point is two DIFFERENT repos."""
     class _FakeInfo:
         def __init__(self, siblings):
             self.siblings = siblings
@@ -370,7 +409,9 @@ class TestSnapshotDestCollision:
 
     def test_plain_name_reuse_across_two_repos_is_refused(
             self, fake_registry, monkeypatch, capsys):
-        """THE finding: an ordinary user reusing a --name for a different repo weeks later - no special characters, no attacker, just a name they liked - must be refused, not silently merged."""
+        """THE finding: an ordinary user reusing a --name for a different
+        repo weeks later - no special characters, no attacker, just a name
+        they liked - must be refused, not silently merged."""
         store, models_dir = fake_registry
         downloaded = self._wire(monkeypatch)
 
@@ -391,7 +432,8 @@ class TestSnapshotDestCollision:
 
     def test_sanitized_default_name_collision_is_also_refused(
             self, fake_registry, monkeypatch, capsys):
-        """The same defect via the OTHER trigger: two default (un-named) pulls whose repo-tail collapses to the same sanitized name."""
+        """The same defect via the OTHER trigger: two default (un-named)
+        pulls whose repo-tail collapses to the same sanitized name."""
         store, models_dir = fake_registry
         repo_a, repo_b = "owner1/Llama_3(8B)", "owner2/Llama_3-8B"
         files = {
@@ -415,7 +457,8 @@ class TestSnapshotDestCollision:
 
     def test_redownload_of_the_same_repo_still_works(
             self, fake_registry, monkeypatch, capsys):
-        """The collision check must not fire on a legitimate --redownload of the repo already registered at this exact dest (matching source)."""
+        """The collision check must not fire on a legitimate --redownload of
+        the repo already registered at this exact dest (matching source)."""
         store, models_dir = fake_registry
         self._wire(monkeypatch)
 
@@ -425,18 +468,20 @@ class TestSnapshotDestCollision:
         ok = mm._pull_hf_snapshot(self.REPO_A, "mymodel", redownload=True)
 
         assert ok is True
-        # redownload=True skips the "already downloaded" fast path's dedup
-        # prompt branch, but the snapshot IS already complete, so it still
-        # short-circuits there rather than re-downloading - that pre-existing
-        # behavior is unrelated to this fix and is not what this test checks;
-        # the point is only that the NEW collision check does not refuse it.
+        # redownload=True skips the "already downloaded" fast path's dedup prompt
+        # branch, but the snapshot IS already complete, so it still short-circuits
+        # there rather than re-downloading. What this checks is only that the
+        # collision check does not refuse it.
         assert store["mymodel"]["source"] == f"hf:{self.REPO_A}"
         out = _flat(capsys.readouterr().out)
         assert "different model" not in out
 
     def test_resumable_partial_of_the_same_repo_still_works(
             self, fake_registry, monkeypatch):
-        """An interrupted download of THIS repo (config.json landed, the weight file did not, never reached registration) must still resume - the collision check must not mistake 'nothing registered here yet' for a foreign occupant."""
+        """An interrupted download of THIS repo (config.json landed, the
+        weight file did not, never reached registration) must still resume -
+        the collision check must not mistake 'nothing registered here yet'
+        for a foreign occupant."""
         store, models_dir = fake_registry
         # An UNRELATED prior registration exists elsewhere, to prove the
         # check is keyed on THIS dest, not merely "is the registry non-empty".
@@ -468,7 +513,15 @@ class TestSnapshotDestCollision:
 
     def test_final_registration_routes_through_dedup(
             self, fake_registry, monkeypatch):
-        """The second half of the fix: _pull_hf_snapshot's OWN call site for the post-download registration must be _register_with_dedup, not the plain _register - the same asymmetry _pull_gguf_file already closed for its own path. (_register_with_dedup legitimately calls the plain _register internally as its..."""
+        """The second half of the fix: _pull_hf_snapshot's OWN call site for
+        the post-download registration must be _register_with_dedup, not the
+        plain _register - the same asymmetry _pull_gguf_file already closed
+        for its own path. (_register_with_dedup legitimately calls the plain
+        _register internally as its own final implementation step once its
+        dedup checks pass - that is not what this test is about; it is about
+        which function THIS CALL SITE reaches for directly, so both are
+        replaced with bare recording stubs rather than letting either run for
+        real.)"""
         store, models_dir = fake_registry
         self._wire(monkeypatch)
 
@@ -487,7 +540,15 @@ class TestSnapshotDestCollision:
 
     def test_name_collision_at_a_different_path_is_reported_honestly(
             self, fake_registry, monkeypatch, capsys):
-        """_register_with_dedup returns False for a REAL name conflict that is orthogonal to the dest-collision check above: 'mymodel' is already registered pointing at some OTHER path, and this dest ('mymodel') does not exist yet, so the new pre-download collision block never fires."""
+        """_register_with_dedup returns False for a REAL name conflict that
+        is orthogonal to the dest-collision check above: 'mymodel' is already
+        registered pointing at some OTHER path, and this dest ('mymodel')
+        does not exist yet, so the new pre-download collision block never
+        fires. The download still runs and writes real bytes to disk - but
+        registration is then correctly refused (non-interactive, different
+        file under the same name). The call site must not paper over that:
+        it must not print a green checkmark / return True for a download
+        that was never actually registered under the requested name."""
         store, models_dir = fake_registry
         downloaded = self._wire(monkeypatch)
 
@@ -507,7 +568,7 @@ class TestSnapshotDestCollision:
 
 
 # ---------------------------------------------------------------------------
-# GAP-CLI-1: user -n name is sanitized before becoming a registry key
+# user -n name is sanitized before becoming a registry key
 # ---------------------------------------------------------------------------
 
 class TestUserNameSanitized:
@@ -524,7 +585,7 @@ class TestUserNameSanitized:
         assert len(store) == 1
 
     def test_gguf_pull_name_is_sanitized(self, fake_registry, tmp_path, monkeypatch):
-        # the #83 fix sanitized add's -n but NOT pull's -n (re-audit residual)
+        # pull's -n is sanitized as well as add's
         store, models_dir = fake_registry
         monkeypatch.setattr(mm, "_hf_file_sha256", lambda r, fn: None)
         monkeypatch.setattr(mm, "find_by_sha256", lambda *a, **k: [])
@@ -543,7 +604,7 @@ class TestUserNameSanitized:
 
     def test_hf_snapshot_pull_name_is_sanitized(self, fake_registry, tmp_path, monkeypatch):
         # model_name is both the registry key AND the dest dir (MODELS_DIR/name),
-        # so an unsanitized -n escaped the models folder too.
+        # so an unsanitized -n would escape the models folder too.
         store, models_dir = fake_registry
 
         def _fake_snap(repo_id, local_dir, **kw):
@@ -563,13 +624,15 @@ class TestUserNameSanitized:
 
 
 # ---------------------------------------------------------------------------
-# GAP-CLI-2: dest filename confined to MODELS_DIR; collision is hash-checked
+# dest filename confined to MODELS_DIR; collision is hash-checked
 # ---------------------------------------------------------------------------
 
 class TestTraversalGuards:
     def test_url_traversal_filename_rejected(
             self, fake_registry, tmp_path, monkeypatch):
-        """A URL whose last path segment contains separators/traversal (a real Windows escape vector once the stem is joined to MODELS_DIR) must be refused without writing anything outside the models folder."""
+        """A URL whose last path segment contains separators/traversal (a real
+        Windows escape vector once the stem is joined to MODELS_DIR) must be
+        refused without writing anything outside the models folder."""
         store, models_dir = fake_registry
         get_spy = MagicMock()
         monkeypatch.setattr("requests.get", get_spy)
@@ -608,7 +671,9 @@ class TestTraversalGuards:
 
     def test_url_collision_with_mismatched_sha256_does_not_alias(
             self, fake_registry, tmp_path, monkeypatch):
-        """An existing file with the same derived name must NOT be aliased onto a new registry name when the caller's --sha256 does not match its bytes."""
+        """An existing file with the same derived name must NOT be aliased onto
+        a new registry name when the caller's --sha256 does not match its
+        bytes."""
         store, models_dir = fake_registry
         existing = models_dir / "model.gguf"
         existing.write_bytes(b"unrelated-existing-bytes")
@@ -629,7 +694,8 @@ class TestTraversalGuards:
 
     def test_url_collision_with_matching_sha256_aliases(
             self, fake_registry, tmp_path, monkeypatch):
-        """When --sha256 matches the existing file's bytes, treating it as the same file (register/alias) is correct."""
+        """When --sha256 matches the existing file's bytes, treating it as the
+        same file (register/alias) is correct."""
         store, models_dir = fake_registry
         body = b"existing-bytes"
         existing = models_dir / "model.gguf"
@@ -650,8 +716,8 @@ class TestTraversalGuards:
 
 
 # ---------------------------------------------------------------------------
-# REG-477 / REG-514: the full-snapshot pull's model_type resolution and its disk
-# preflight both have to account for what is actually on disk.
+# The full-snapshot pull's model_type resolution and its disk preflight both
+# account for what is actually on disk.
 # ---------------------------------------------------------------------------
 
 _LLAMA_CONFIG = '{"architectures": ["LlamaForCausalLM"], "model_type": "llama"}'
@@ -663,7 +729,8 @@ def _default_writer(d: Path):
 
 
 def _snapshot_env(monkeypatch, siblings, writer=None):
-    """Fake HF API + a snapshot_download that writes REAL files into dest, so the type fallback below reads a real config.json rather than a mock of it."""
+    """Fake HF API + a snapshot_download that writes REAL files into dest, so the
+    type fallback below reads a real config.json rather than a mock of it."""
     import huggingface_hub
     monkeypatch.setattr(huggingface_hub, "HfApi", _fake_hf_api(siblings))
 
@@ -685,7 +752,12 @@ _LLM_SIBLINGS = [
 class TestSnapshotTypeResolution:
     def test_tagless_transformers_llm_registers_as_llm_not_unknown(
             self, fake_registry, monkeypatch):
-        """REG-477: many base/older HF repos carry no exact pipeline_tag, so the pre-download probe returns 'unknown'."""
+        """REG-477: many base/older HF repos carry no exact pipeline_tag, so the
+        pre-download probe returns 'unknown'. The snapshot then registered
+        'unknown' WITHOUT ever reading the config.json it had just downloaded, so
+        a clearly-LlamaForCausalLM model silently vanished from GUI auto-select,
+        the MCP EngineCache and the jobs runner, though the same pull auto-loaded
+        and worked before."""
         store, _ = fake_registry
         _snapshot_env(monkeypatch, _LLM_SIBLINGS)
 
@@ -696,7 +768,9 @@ class TestSnapshotTypeResolution:
 
     def test_config_without_a_causal_arch_stays_unknown(
             self, fake_registry, monkeypatch):
-        """Negative case: the fallback reads HARD metadata only."""
+        """Negative case: the fallback reads HARD metadata only. A repo whose
+        config.json shows no causal-LM architecture stays 'unknown' - never a
+        silent 'llm', which is the old fallback this must NOT restore."""
         store, _ = fake_registry
 
         def _writer(d: Path):
@@ -714,7 +788,9 @@ class TestSnapshotTypeResolution:
 
     def test_a_resolved_probe_type_is_never_overridden(
             self, fake_registry, monkeypatch):
-        """Negative case: when the HF probe DID resolve a type from hard metadata (lora/vae/embedding/...) that stays authoritative - the config.json fallback only answers what the probe could not."""
+        """Negative case: when the HF probe DID resolve a type from hard metadata
+        (lora/vae/embedding/...) that stays authoritative - the config.json
+        fallback only answers what the probe could not."""
         store, _ = fake_registry
         _snapshot_env(monkeypatch, _LLM_SIBLINGS)      # config.json says causal LM
 
@@ -723,7 +799,8 @@ class TestSnapshotTypeResolution:
 
     def test_already_downloaded_snapshot_also_resolves_its_type(
             self, fake_registry, monkeypatch):
-        """The early 'Already downloaded' branch registers too, so it needs the same resolution - otherwise a re-pull re-stamps 'unknown'."""
+        """The early 'Already downloaded' branch registers too, so it needs the
+        same resolution - otherwise a re-pull re-stamps 'unknown'."""
         store, models_dir = fake_registry
         dest = models_dir / "tagless"
         dest.mkdir(parents=True)
@@ -737,7 +814,12 @@ class TestSnapshotTypeResolution:
 class TestSnapshotResumePreflight:
     def test_retry_counts_only_the_bytes_still_missing(
             self, fake_registry, monkeypatch, capsys):
-        """REG-514: a disk-full pull leaves a partial dest."""
+        """REG-514: a disk-full pull leaves a partial dest. Once the user frees
+        enough for the REMAINING bytes the retry must proceed, but the preflight
+        demanded the FULL repo size, ignoring what was already on disk, so the
+        download could never resume - defeating the very recovery it was added
+        for. _pull_gguf_file sums only the missing parts and _pull_url uses
+        (total - already_have); this path did neither."""
         store, models_dir = fake_registry
         dest = models_dir / "partial"
         dest.mkdir(parents=True)
@@ -766,7 +848,8 @@ class TestSnapshotResumePreflight:
 
     def test_a_genuinely_full_disk_still_refuses(
             self, fake_registry, monkeypatch, capsys):
-        """Negative case: subtracting the on-disk bytes must not disable the check. 100 bytes free and ~4000 still needed must still refuse."""
+        """Negative case: subtracting the on-disk bytes must not disable the
+        check. 100 bytes free and ~4000 still needed must still refuse."""
         store, models_dir = fake_registry
         dest = models_dir / "partial"
         dest.mkdir(parents=True)

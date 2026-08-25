@@ -1,5 +1,19 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Production code must not detect tests / mocks and fabricate behavior (Antigravity-audit, AGENTS.md rule 5 / no-facade)."""
+"""Production code must not detect tests / mocks and fabricate behavior
+(Antigravity-audit, AGENTS.md rule 5 / no-facade).
+
+Two facades in http_server accommodated test mocks in shipped code:
+
+  - switch_engine fabricated a fake model path + 4 GB size whenever
+    `"pytest" in sys.modules`, instead of raising the real 404 "Model files not
+    found" - making that contract untestable and running all in-test eviction
+    math on fiction;
+
+  - _complete had hasattr-guarded fallbacks (100 prompt tokens, 4096 capacity,
+    a literal "ok" completion, 10 completion tokens) so a method-less engine
+    passed through the real endpoint with a fabricated 200 instead of surfacing
+    the failure.
+"""
 
 import asyncio
 
@@ -42,7 +56,8 @@ def _reset():
 
 
 def test_switch_engine_404s_a_missing_model_even_under_pytest(monkeypatch):
-    """A non-empty registry where the model's info cannot be resolved must raise the real 404 - not fabricate a path/size just because pytest is importable."""
+    """A non-empty registry where the model's info cannot be resolved must raise
+    the real 404 - not fabricate a path/size just because pytest is importable."""
     _reset()
     monkeypatch.setattr("localm.config.load_registry",
                         lambda: {"other-model": {"path": "x", "source": "local"}})
@@ -57,7 +72,8 @@ def test_switch_engine_404s_a_missing_model_even_under_pytest(monkeypatch):
 
 
 def test_complete_surfaces_a_method_less_engine_instead_of_faking_ok(monkeypatch):
-    """An engine missing chat_stream must raise (a real failure), not return the literal fabricated 'ok' completion."""
+    """An engine missing chat_stream must raise (a real failure), not return the
+    literal fabricated "ok" completion."""
 
     class PartialEngine:
         def count_messages_tokens(self, messages):
@@ -68,7 +84,7 @@ def test_complete_surfaces_a_method_less_engine_instead_of_faking_ok(monkeypatch
 
         def count_tokens(self, text):
             return 3
-        # deliberately NO chat_stream
+        # no chat_stream
 
     sem = asyncio.Semaphore(1)
     with pytest.raises(AttributeError):

@@ -1,5 +1,16 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""NEW-CODER-NO-TOOLCALL-SILENT: a model that emits NO tool call at all must be escalated until it makes one, not silently accepted as finished."""
+"""NEW-CODER-NO-TOOLCALL-SILENT: a model that emits NO tool call at all must be
+escalated until it makes one, not silently accepted as finished.
+
+The live failure this covers: a request to create files produced six turns, five
+escalating re-asks by the user, zero tool_call records in the audit trail, and a
+final "As an AI running fully offline, I don't have the capability to create
+files directly on your local machine."
+
+Every gate in _handle_no_tool_calls was reached only through
+looks_like_tool_attempt(), so the MALFORMED case (the model nearly succeeding)
+had handling and the ZERO-attempt case (the total failure) had none.
+"""
 
 from __future__ import annotations
 
@@ -42,7 +53,7 @@ def _notice_kinds(agent) -> list:
 
 @pytest.mark.parametrize("text", [
     "Create three files: a.txt, b.txt and c.txt",
-    "create 257 files in this folder",              # the live report, scaled
+    "create 257 files in this folder",              # scaled
     "fix the crash",
     "read config.py and tell me the port",           # a READ still needs a tool
     "show me what is in the settings module",
@@ -68,7 +79,8 @@ def test_pure_questions_are_not_action_requests(text):
 # --------------------------------------------------------------------------- #
 
 def test_zero_tool_call_on_an_action_request_is_escalated_not_accepted(tmp_path):
-    """THE DEFECT."""
+    """THE DEFECT. Before the fix this returned "I can't create files." as the
+    finished answer on turn 1, with no re-prompt, no notice and no audit entry."""
     agent = _make_agent(tmp_path, max_turns=8)
     responses = iter([
         "As an AI I don't have the capability to create files on your machine.",
@@ -103,7 +115,9 @@ def test_escalation_is_bounded(tmp_path):
 
 
 def test_the_report_never_tells_the_user_to_change_model(tmp_path):
-    """Binding requirement: the job is to make the USER'S chosen model call the tool."""
+    """Binding requirement: the job is to make the USER'S chosen model call the
+    tool. The last-resort message reports failed enforcement; it must never
+    suggest picking a different model, which is the user's call to make."""
     agent = _make_agent(tmp_path, max_turns=8)
     with patch.object(agent, "_call_llm", side_effect=lambda *a, **k: f"no {id(object())}"), \
          patch("localm.plugins.coder.agent.parse_tool_calls", return_value=[]):
@@ -115,7 +129,8 @@ def test_the_report_never_tells_the_user_to_change_model(tmp_path):
 
 
 def test_a_question_is_still_answered_without_escalation(tmp_path):
-    """Control."""
+    """Control. A request that needs no tool must be unaffected - otherwise the
+    ladder would nag on every conversational turn."""
     agent = _make_agent(tmp_path, max_turns=6)
     with patch.object(agent, "_call_llm", return_value="A closure captures its enclosing scope."), \
          patch("localm.plugins.coder.agent.parse_tool_calls", return_value=[]):
@@ -126,7 +141,8 @@ def test_a_question_is_still_answered_without_escalation(tmp_path):
 
 
 def test_no_escalation_once_the_model_has_called_a_tool(tmp_path):
-    """Control."""
+    """Control. A model that used a tool and then summarised in prose is
+    finishing normally, not refusing."""
     agent = _make_agent(tmp_path, max_turns=6)
     (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
     responses = iter([
@@ -145,7 +161,9 @@ def test_no_escalation_once_the_model_has_called_a_tool(tmp_path):
 # --------------------------------------------------------------------------- #
 
 def test_second_rung_binds_the_forcing_grammar_from_the_first_token(tmp_path):
-    """The lazy grammar cannot rescue this case - it engages only once the model starts a <tool_call>, i.e. it is gated on the very thing that is failing."""
+    """The lazy grammar cannot rescue this case - it engages only once the model
+    starts a <tool_call>, i.e. it is gated on the very thing that is failing. The
+    forcing rung must bind from token one: no trigger, not lazy."""
     agent = _make_agent(tmp_path)
     agent._force_tool_grammar = True
     kw = agent._llm_kwargs()
@@ -159,7 +177,8 @@ def test_second_rung_binds_the_forcing_grammar_from_the_first_token(tmp_path):
 
 
 def test_forcing_is_one_shot(tmp_path):
-    """A constrained sampler must not leak into later turns: the whole session would then be unable to emit a plain answer."""
+    """A constrained sampler must not leak into later turns: the whole session
+    would then be unable to emit a plain answer."""
     agent = _make_agent(tmp_path, max_turns=8)
     seen = []
 
@@ -176,7 +195,9 @@ def test_forcing_is_one_shot(tmp_path):
 
 
 def test_forcing_respects_an_explicit_config_optout(tmp_path):
-    """coder_tool_grammar=False is a deliberate user choice to leave sampling unconstrained."""
+    """coder_tool_grammar=False is a deliberate user choice to leave sampling
+    unconstrained. The rescue path must not quietly re-impose a grammar; it says
+    forcing is unavailable instead."""
     agent = _make_agent(tmp_path)
     with patch("localm.config.load_config", return_value={"coder_tool_grammar": False}):
         assert agent.can_force_tool_calls() is False
@@ -198,7 +219,12 @@ def test_forcing_unavailable_is_reported_with_its_reason(tmp_path):
 # --------------------------------------------------------------------------- #
 
 def test_forcing_grammar_allows_thinking_but_still_requires_a_call():
-    """Trap 1 (gbnf.py, live-tested 2026-07-02): bare TOOL_CALLS_ONLY let a thinking model mask its <think> opener into the leading whitespace and return a WHITESPACE-ONLY reply."""
+    """Trap 1 (gbnf.py, live-tested 2026-07-02): bare TOOL_CALLS_ONLY let a
+    thinking model mask its <think> opener into the leading whitespace and
+    return a WHITESPACE-ONLY reply. The forced variant must therefore permit a
+    reasoning block - including the template-pre-opened dialect, where
+    generation starts INSIDE the block and the first token is prose, not a tag -
+    while still requiring a real tool call."""
     assert "<think>" in TOOL_CALLS_AFTER_THINK
     assert "</think>" in TOOL_CALLS_AFTER_THINK
     # tool-block+ is required, so no prelude alone can satisfy the root rule.
@@ -206,7 +232,20 @@ def test_forcing_grammar_allows_thinking_but_still_requires_a_call():
 
 
 def test_forcing_grammar_requires_the_opening_think_tag():
-    """The prelude's opening tag must NOT be optional, and this is the single property that decides whether this grammar forces anything at all."""
+    """The prelude's opening tag must NOT be optional, and this is the single
+    property that decides whether this grammar forces anything at all.
+
+    MEASURED 2026-08-11: an earlier version made it optional so that templates
+    which emit "<think>" themselves would still be accommodated. That turns the
+    prelude into an ARBITRARY PROSE prelude - any leading text parses as
+    "reasoning that has not closed yet" - so the grammar constrained nothing,
+    and 3/3 live trials on the repro model rambled to max_tokens and emitted no
+    tool call at all. It was strictly weaker than the plain strict grammar,
+    which took the same request 3/3.
+
+    Optional-opener regressions are invisible in a shape test that only greps
+    for "<think>", which is exactly what the first version of the test above
+    did, so this asserts the tag is mandatory rather than merely present."""
     assert '("<think>" think-body "</think>")?' in TOOL_CALLS_AFTER_THINK
     assert '"<think>"?' not in TOOL_CALLS_AFTER_THINK, (
         "an optional opening tag lets arbitrary prose satisfy the prelude, "
@@ -214,7 +253,13 @@ def test_forcing_grammar_requires_the_opening_think_tag():
 
 
 def test_forcing_grammar_prelude_is_bounded_below_the_native_ceiling():
-    """An unbounded prelude keeps alive a parse in which the model may emit text forever and never reach the call, silently defeating the forcing."""
+    """An unbounded prelude keeps alive a parse in which the model may emit text
+    forever and never reach the call, silently defeating the forcing. The bound
+    must also stay under llama.cpp's own repetition ceiling, MEASURED at 1999 on
+    the bundled runtime (2000 is rejected as "exceeds sane defaults"). localm's
+    MAX_GRAMMAR_REPEAT_COUNT is now aligned at 1900 (same margin), so this also
+    doubles as a check that the prelude bound stays inside the structural
+    pre-check's own ceiling, not just the native one."""
     import re
     bounds = [int(m) for m in re.findall(r"\{0,(\d+)\}", TOOL_CALLS_AFTER_THINK)]
     assert bounds, "the reasoning prelude must carry an explicit {0,N} bound"
@@ -227,7 +272,17 @@ def test_forcing_grammar_prelude_is_bounded_below_the_native_ceiling():
 # --------------------------------------------------------------------------- #
 
 def test_near_duplicate_refusals_trip_the_breaker(tmp_path):
-    """The measured live near-duplicates scored 0.91 / 0.75 / 0.72 similar; the old exact-fingerprint, consecutive-only breaker reset to zero on any difference and never fired once."""
+    """The measured live near-duplicates scored 0.91 / 0.75 / 0.72 similar; the
+    old exact-fingerprint, consecutive-only breaker reset to zero on any
+    difference and never fired once.
+
+    The turns carry a REPEATED, IDENTICAL tool call, because that is the only
+    shape in which this can actually happen: a turn with no call at all ends the
+    task in _handle_no_tool_calls, so a call-less refusal loop never reaches a
+    fifth turn to be counted. The live scaffold ("Message 1..4 / I will now
+    wait") was exactly this - a model re-issuing the same call and re-narrating
+    around it, reworded just enough each time that an exact-match breaker reset
+    to zero and never fired."""
     base = ('<tool_call>\n{"name": "read_file", "args": {"path": "a.py"}}\n</tool_call>\n'
             "Message {n}: I have re-read the file and will now wait for further "
             "instructions before doing anything else.")
@@ -250,7 +305,10 @@ def test_near_duplicate_refusals_trip_the_breaker(tmp_path):
 
 
 def test_the_old_exact_breaker_would_not_have_fired_on_these(tmp_path):
-    """Pins WHY the breaker changed."""
+    """Pins WHY the breaker changed. Each successive refusal differs from the
+    last, so the previous implementation (exact string equality, counter reset
+    to zero on any difference) could never have counted past one - which is
+    precisely what happened live across six turns."""
     base = ("Message {n}: I have re-read the file and will now wait for further "
             "instructions before doing anything else.")
     a, b = base.replace("{n}", "1"), base.replace("{n}", "2")
@@ -259,7 +317,10 @@ def test_the_old_exact_breaker_would_not_have_fired_on_these(tmp_path):
 
 
 def test_repetitive_tool_work_does_not_trip_the_breaker(tmp_path):
-    """Legitimate tool use is repetitive BY NATURE - reading five files differs only in the path and scores ~0.97 similar."""
+    """Legitimate tool use is repetitive BY NATURE - reading five files differs
+    only in the path and scores ~0.97 similar. Scoring every response the way
+    the exact-match version did would abort a working session for doing exactly
+    what it was asked, so only turns that produced NO call may count."""
     agent = _make_agent(tmp_path, max_turns=12)
     for i in range(6):
         (tmp_path / f"f{i}.py").write_text(f"x = {i}\n", encoding="utf-8")
@@ -274,11 +335,18 @@ def test_repetitive_tool_work_does_not_trip_the_breaker(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-#  The server can refuse a grammar outright (#1215) - degrade, don't crash     #
+#  The server can refuse a grammar outright - degrade, don't crash             #
 # --------------------------------------------------------------------------- #
 
 def test_grammar_unsupported_400_degrades_instead_of_crashing(tmp_path):
-    """NEW-CODER-NO-TOOLCALL-SILENT residual: HTTPBackend advertises supports_grammar=True for ANY localm server (it cannot know which backend is actually loaded server-side - see http.py). #1215 turned a grammar request against an incapable backend into a hard 400 (GrammarUnsupportedError) instead of a si..."""
+    """NEW-CODER-NO-TOOLCALL-SILENT residual: HTTPBackend advertises
+    supports_grammar=True for ANY localm server (it cannot know which backend
+    is actually loaded server-side - see http.py). #1215 turned a grammar
+    request against an incapable backend into a hard 400
+    (GrammarUnsupportedError) instead of a silent unconstrained 200, so the
+    FIRST grammar-bearing turn against such a server used to crash the whole
+    task with an unhandled CoderServerError. It must instead disable grammar
+    for the rest of the session and retry the same turn unconstrained."""
     from localm.inference.backends.base import GRAMMAR_UNSUPPORTED_MESSAGE
     from localm.plugins.coder.backends.http import CoderServerError
 
@@ -305,7 +373,10 @@ def test_grammar_unsupported_400_degrades_instead_of_crashing(tmp_path):
 
 
 def test_grammar_unsupported_disables_forcing_too(tmp_path):
-    """Once the server has authoritatively refused, the forced (rung-2) grammar must not be offered either - can_force_tool_calls() must report False so the escalation ladder reports failed enforcement instead of trying (and failing the same way) again."""
+    """Once the server has authoritatively refused, the forced (rung-2)
+    grammar must not be offered either - can_force_tool_calls() must report
+    False so the escalation ladder reports failed enforcement instead of
+    trying (and failing the same way) again."""
     agent = _make_agent(tmp_path)
     agent._grammar_confirmed_unsupported = True
     assert agent.can_force_tool_calls() is False
@@ -313,7 +384,9 @@ def test_grammar_unsupported_disables_forcing_too(tmp_path):
 
 
 def test_unrelated_server_error_still_propagates(tmp_path):
-    """Only the grammar-unsupported refusal is swallowed."""
+    """Only the grammar-unsupported refusal is swallowed. Any other server
+    error must still surface - a broad catch here would silently retry a
+    genuinely broken request forever."""
     from localm.plugins.coder.backends.http import CoderServerError
 
     agent = _make_agent(tmp_path)
@@ -329,7 +402,9 @@ def test_unrelated_server_error_still_propagates(tmp_path):
 
 
 def test_invalid_grammar_is_not_treated_as_unsupported(tmp_path):
-    """A malformed grammar (OUR OWN bug - the bundled TOOL_CALLS_* grammar failing to parse) is a different failure than a capability gap and must not be silently swallowed the same way."""
+    """A malformed grammar (OUR OWN bug - the bundled TOOL_CALLS_* grammar
+    failing to parse) is a different failure than a capability gap and must
+    not be silently swallowed the same way."""
     from localm.plugins.coder.backends.http import CoderServerError
 
     agent = _make_agent(tmp_path)
@@ -351,7 +426,9 @@ def test_invalid_grammar_is_not_treated_as_unsupported(tmp_path):
 
 @pytest.mark.parametrize("model_name", ["qwen2.5-coder-7b", "some-thinking-model", "tiny-1b"])
 def test_identity_line_states_capability_not_deployment(tmp_path, model_name):
-    """The model quoted 'running fully offline' back as its reason for refusing."""
+    """The model quoted "running fully offline" back as its reason for refusing.
+    The offline property is true and worth stating - just never inside the
+    sentence that tells the model what it can do."""
     from localm.plugins.coder.prompts import build_system_prompt
     prompt = build_system_prompt(tmp_path, model_name=model_name)
     assert "fully offline" not in prompt
@@ -359,12 +436,18 @@ def test_identity_line_states_capability_not_deployment(tmp_path, model_name):
 
 
 # --------------------------------------------------------------------------- #
-#  The server can refuse the LAZY form specifically - degrade NARROWLY         #
-#  (NEW-LAZY-GRAMMAR-SILENT-UNCONSTRAINED)                                     #
+#  The server can refuse the LAZY form specifically - degrade NARROWLY          #
 # --------------------------------------------------------------------------- #
 
 def test_lazy_grammar_unsupported_400_degrades_instead_of_crashing(tmp_path):
-    """A lazy-grammar refusal must be recognised, not propagated."""
+    """A lazy-grammar refusal must be recognised, not propagated.
+
+    The lazy fix introduced a SECOND refusal message. _disable_grammar_on_unsupported
+    matches on the exact message string, so a message it does not know returns False
+    and the CoderServerError propagates - crashing the whole task. Every ordinary
+    tool-call turn sends grammar_lazy=True, so against an HF-backed server that
+    would be the FIRST turn, every time.
+    """
     from localm.inference.backends.base import GRAMMAR_LAZY_UNSUPPORTED_MESSAGE
     from localm.plugins.coder.backends.http import CoderServerError
 
@@ -390,7 +473,15 @@ def test_lazy_grammar_unsupported_400_degrades_instead_of_crashing(tmp_path):
 
 
 def test_lazy_refusal_leaves_the_forced_grammar_available(tmp_path):
-    """The narrow half, and the reason this is not just reusing the blanket latch."""
+    """The narrow half, and the reason this is not just reusing the blanket latch.
+
+    A server that cannot enforce a grammar from a TRIGGER may still enforce one from
+    the first token (an HF backend with the [grammar] extra is exactly that). The
+    forced rung is what rescues a turn that produced no tool call at all, so
+    discarding it on a lazy-only refusal would remove the recovery on a backend that
+    can still serve it. Contrast test_grammar_unsupported_disables_forcing_too,
+    where the server refused grammar OUTRIGHT and forcing correctly goes away.
+    """
     agent = _make_agent(tmp_path)
     agent._lazy_grammar_confirmed_unsupported = True
 

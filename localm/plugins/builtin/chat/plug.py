@@ -1,5 +1,32 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Chat plugin: the built-in, protected, default-enabled plugin #0."""
+"""Chat plugin: the built-in, protected, default-enabled plugin #0.
+
+This is the reference implementation of the plugin contract - the cleanest,
+most ordinary use of register(host)/mount_router that third-party plugins copy.
+It owns the chat EXPERIENCE persistence (mounted by the engine, auto-scoped to
+the ``chat`` capability):
+
+  GET/PUT/DELETE /api/conversations[/{id}]   - server-side conversation store
+  GET/PUT/DELETE /api/prompts[/{name}]       - prompt library / personas
+
+Durable chat MEMORY (recall + consolidation + the /api/memory* routes) is a
+SEPARATE, opt-in plugin now (localm/plugins/builtin/memory); chat no longer
+depends on it. With memory disabled, chat simply runs without recall.
+
+The actual LLM turn stays in the kernel: the SPA POSTs to /v1/chat/completions
+on the inference server directly. Chat ships installed + enabled and cannot be
+uninstalled or disabled (catalog: preinstalled + protected; manifest:
+default_enabled), so the engine auto-provisions it on first run.
+
+All paths resolve from the data dir at request time, so the plugin needs no
+shared services from attach_gui. Persistence is gated on the chat surface's
+session mode (see _persist_enabled): in privacy mode (the default) the store is
+off entirely - writes 403 and the list/get routes return empty/403 - so a
+conversation lives only in the browser tab for the current session and is gone
+on reload ("no new traces", by design; the GUI also wipes its localStorage copy
+when it confirms privacy mode). In log/full mode conversations are stored under
+the data dir and survive reloads and other devices on the LAN.
+"""
 
 from __future__ import annotations
 
@@ -103,7 +130,14 @@ def _conv_meta(p: Path) -> dict:
 
 @_router.get("/api/conversations")
 async def conversations_list(meta: bool = False, limit: int = 0, offset: int = 0):
-    """List conversations newest-first."""
+    """List conversations newest-first.
+
+    R40: pass ``meta=true`` for a lightweight index (id/title/updated_at/pinned/
+    folder/n_messages) without the heavy message bodies and data-URI images - the
+    GUI sidebar uses this and lazy-loads each conversation's messages on open via
+    ``GET /api/conversations/{id}``. ``limit``/``offset`` paginate. Default (no
+    params) keeps the historical full-payload, 200-item behaviour for back-compat.
+    """
     if not _persist_enabled():
         return {"enabled": False, "conversations": []}
     chats_dir = _home() / "chats"
@@ -132,7 +166,8 @@ async def conversations_list(meta: bool = False, limit: int = 0, offset: int = 0
 
 @_router.get("/api/conversations/{conv_id}")
 async def conversation_get(conv_id: str):
-    """The full body of one conversation (R40 lazy load)."""
+    """The full body of one conversation (R40 lazy load). Path validated by
+    _conv_path; 404 when absent so the client can fall back to its local copy."""
     if not _persist_enabled():
         raise HTTPException(403, "Chat persistence is off (privacy mode)")
     path = _conv_path(conv_id)
@@ -203,7 +238,18 @@ class _PromptsUnreadable(Exception):
 
 
 def _load_prompts() -> dict:
-    """The persona library, or ``{}`` when the user genuinely has none."""
+    """The persona library, or ``{}`` when the user genuinely has none.
+
+    Raises _PromptsUnreadable when the file EXISTS but cannot be read or
+    parsed. Collapsing that case into ``{}`` (which this used to do) is not a
+    cosmetic loss: every writer below does read-modify-write, so the next save
+    replaced the WHOLE library with the single entry being written. The sharp
+    case is not corruption but a transient OSError (an AV or backup agent's
+    share-lock, a permission blip), where the personas on disk are INTACT and
+    were destroyed anyway while the route answered {"status": "saved"} - a step
+    that failed reporting success (AGENTS.md rule 5). Mirrors conversation_get's
+    absent-vs-unreadable branch above, which this path was the odd one out on.
+    """
     prompts_file = _prompts_file()
     if not prompts_file.is_file():
         return {}                       # genuinely absent: an empty library
@@ -220,7 +266,14 @@ def _load_prompts() -> dict:
 
 
 def _prompts_or_refuse() -> dict:
-    """``_load_prompts()``, turning an unreadable library into a 500 that REFUSES the request."""
+    """``_load_prompts()``, turning an unreadable library into a 500 that
+    REFUSES the request.
+
+    No caller may reach _save_prompts on a failed load: that write is the
+    destructive half this branch exists to prevent, and refusing is recoverable
+    where overwriting is not. The HTTP message is path-free because this is a
+    network surface (the clear_api_key disclosure split); the concrete reason
+    goes to the log."""
     try:
         return _load_prompts()
     except _PromptsUnreadable as e:
@@ -280,7 +333,15 @@ _THINK_INSTRUCTION = (
 
 
 def _thinking_inlet(messages, ctx):
-    """Nudge a thinking/reasoning model to emit <think> markers in regular chat."""
+    """Nudge a thinking/reasoning model to emit <think> markers in regular chat.
+
+    Coder sessions already carry this instruction in their system prompt, but
+    plain chat never did (CHAT-2b), so a model that needs the explicit nudge
+    produced no reasoning channel. Inject only for thinking-family models, and
+    never twice: skip when a system message already steers <think> (the coder
+    case, or a persona that already does it). Appends to the first system
+    message - chat templates commonly honour only the first - otherwise inserts
+    one. The kernel pipeline isolates any exception this raises."""
     from localm.inference.model_family import is_thinking_model
 
     if not is_thinking_model(getattr(ctx, "model_id", "") or ""):

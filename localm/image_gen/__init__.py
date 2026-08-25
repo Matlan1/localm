@@ -1,5 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""localm.image_gen - local image generation via ComfyUI FLUX."""
+"""
+localm.image_gen - local image generation via ComfyUI FLUX.
+
+Public API::
+
+    from localm.image_gen.comfy import generate_image
+    ok, message = generate_image("a sunset over the ocean", Path("out.png"))
+"""
 
 from .comfy import generate_image
 

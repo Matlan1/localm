@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Image-generation tool: a thin wrapper that delegates to localm.image_gen.comfy.generate_image."""
+"""Image-generation tool: a thin wrapper that delegates to
+localm.image_gen.comfy.generate_image."""
 
 from __future__ import annotations
 
@@ -22,7 +23,10 @@ def tool_generate_image(
     denoise: Optional[float] = None,
     _privacy: bool = False,
 ) -> ToolResult:
-    """Thin wrapper - delegates to localm.image_gen.comfy.generate_image."""
+    """Thin wrapper - delegates to localm.image_gen.comfy.generate_image.
+
+    In privacy mode (``_privacy=True``, injected by the agent) the prompt
+    sidecar is suppressed so no prompt trace is written to disk."""
     from localm.image_gen.comfy import generate_image
     from localm.media.comfy_client import default_api_url
 

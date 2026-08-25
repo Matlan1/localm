@@ -1,5 +1,23 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""``POST /api/auth/key/rotate`` - the GUI form of ``localm key generate`` / ``set``."""
+"""``POST /api/auth/key/rotate`` - the GUI form of ``localm key generate`` / ``set``.
+
+Two properties carry the weight here and neither is about the happy path:
+
+* **The gate is ADMIN, not config:write.** Setting a key the caller CHOOSES is a
+  direct promotion to owner, so a merely ``config:write`` or ``keys:admin`` holder
+  reaching this route would escalate in one call. The sibling
+  ``/api/auth/key/clear`` takes ``config:write``, which makes copying that bar the
+  obvious mistake - hence an explicit test per non-owner scope rather than one
+  generic "unauthorised" case.
+* **A rotation that did not change the LIVE credential must not report success**
+  (rule 5). ``LOCALM_API_KEY`` outranks the file, so under it the key lands on disk
+  and the server keeps accepting the old one. That is exactly the state where a
+  false "rotated" tells someone rotating a leaked credential they are safe.
+
+Assertions read the real ``auth`` state from OUTSIDE the call rather than trusting
+the response body, so a route that returned a cheerful shape while writing nothing
+still fails.
+"""
 
 import pytest
 
@@ -23,9 +41,8 @@ def _client(bind_host="127.0.0.1"):
     c = TestClient(app)
     # The per-process shell token the server injects into the browser-served SPA.
     # In OPEN mode _origin_guard demands it (or the instance token) for any unsafe
-    # method, so an open-mode test that omits it is testing that guard, not this
-    # route. Kept on the client so the open-mode cases can present it exactly as
-    # the real GUI does.
+    # method. Kept on the client so the open-mode cases present it exactly as the
+    # real GUI does.
     c.shell_token = app.state.shell_token
     return c
 
@@ -60,7 +77,8 @@ class TestRotateHappyPath:
         assert auth.get_api_key() == chosen
 
     def test_the_new_key_authenticates_and_the_old_one_stops(self):
-        """The point of a rotation, asserted end to end over HTTP rather than inferred from the file having changed."""
+        """The point of a rotation, asserted end to end over HTTP rather than
+        inferred from the file having changed."""
         old = auth.regenerate_key()
         c = _client()
         new = c.post(ROTATE, headers=_owner(old)).json()["key"]
@@ -69,7 +87,8 @@ class TestRotateHappyPath:
         assert c.get("/api/session", headers=_owner(old)).json()["authed"] is False
 
     def test_empty_key_generates_rather_than_clearing(self):
-        """``set_api_key('')`` CLEARS."""
+        """``set_api_key("")`` CLEARS. This route must never be a quiet path back
+        to open mode - that is what /api/auth/key/clear is for."""
         old = auth.regenerate_key()
         c = _client()
 
@@ -97,7 +116,9 @@ class TestOnlyTheOwnerMayRotate:
         assert auth.get_api_key() == before, "and it must not have taken effect"
 
     def test_config_write_may_still_clear(self):
-        """Control for the test above: the refusal is specific to ROTATE, not a blanket lockout."""
+        """Control for the test above: the refusal is specific to ROTATE, not a
+        blanket lockout. If clear also 403s, the parametrised test proves nothing
+        about this route's gate."""
         auth.regenerate_key()
         made = auth.create_key("clearer", [scopes.CONFIG_WRITE],
                                allow_privileged=True)
@@ -131,7 +152,8 @@ class TestBadInputIsA400NotA500:
 
 
 class TestRotationHonesty:
-    """Rule 5: a rotation that did not change the live credential is not a rotation, however cleanly the write succeeded."""
+    """Rule 5: a rotation that did not change the live credential is not a
+    rotation, however cleanly the write succeeded."""
 
     def test_env_var_override_is_reported_and_rotated_is_false(self, monkeypatch):
         old = auth.regenerate_key()
@@ -148,7 +170,7 @@ class TestRotationHonesty:
             "while the leaked key still authenticates")
         assert body["warnings"], "the caller must learn WHY it did not take"
         assert "LOCALM_API_KEY" in " ".join(body["warnings"])
-        # And the lie would be material: the old key really does still work.
+        # The old key really does still work.
         assert c.get("/api/session", headers=_owner(old)).json()["authed"] is True
 
     def test_response_leaks_no_path_and_no_exception_text(self, monkeypatch):
@@ -165,7 +187,10 @@ class TestRotationHonesty:
 
 class TestSessionsSurviveARoll:
     def test_a_roll_does_not_sign_the_browser_out(self):
-        """Parity with ``localm key generate`` / ``key set``, which deliberately leave sessions alone - sessions are decoupled from the key value so a roll does not log out the browser doing the rolling. ``localm key recover`` is the local compromise path that DOES revoke."""
+        """Parity with ``localm key generate`` / ``key set``, which deliberately
+        leave sessions alone - sessions are decoupled from the key value so a roll
+        does not log out the browser doing the rolling. ``localm key recover`` is
+        the local compromise path that DOES revoke."""
         old = auth.regenerate_key()
         sid = sessions.create(scopes={scopes.ADMIN},
                               key_hash=auth._hash_key(old), fs_access="host")
@@ -180,7 +205,10 @@ class TestSessionsSurviveARoll:
 
 class TestFirstKeyDoesNotLockTheLocalBrowserOut:
     def test_open_mode_on_loopback_seeds_an_owner_session_cookie(self):
-        """In open mode the loopback GUI is trusted via the shell token, which the server stops honouring the instant a key exists."""
+        """In open mode the loopback GUI is trusted via the shell token, which the
+        server stops honouring the instant a key exists. Setting the FIRST key must
+        therefore hand this browser a session, exactly as the first-key path in
+        routes/keys.py does, or the user locks themselves out of their own GUI."""
         assert not auth.any_key_configured()
         c = _client(bind_host="127.0.0.1")
 
@@ -195,7 +223,9 @@ class TestFirstKeyDoesNotLockTheLocalBrowserOut:
         assert c.get("/api/session").json()["authed"] is True
 
     def test_network_bind_open_mode_seeds_no_cookie(self):
-        """The seed is loopback-only, matching routes/keys.py: a network bind already required a key up front, so nothing there is owed a free owner session."""
+        """The seed is loopback-only, matching routes/keys.py: a network bind
+        already required a key up front, so nothing there is owed a free owner
+        session."""
         assert not auth.any_key_configured()
         c = _client(bind_host="0.0.0.0")
 
@@ -206,7 +236,12 @@ class TestFirstKeyDoesNotLockTheLocalBrowserOut:
         assert SESSION_COOKIE not in r.cookies
 
     def test_open_mode_without_local_proof_is_refused(self):
-        """The ADMIN dependency cannot gate open mode - ``_enforce_request`` returns early when no key is configured - so what actually stops a remote caller seizing a keyless install is ``_origin_guard``'s demand for the shell/instance token."""
+        """The ADMIN dependency cannot gate open mode - ``_enforce_request``
+        returns early when no key is configured - so what actually stops a remote
+        caller seizing a keyless install is ``_origin_guard``'s demand for the
+        shell/instance token. Asserted here because this route depends on that
+        guard for its open-mode safety, and nothing else in this file would notice
+        if the guard stopped covering it."""
         assert not auth.any_key_configured()
         c = _client(bind_host="0.0.0.0")
 
@@ -219,7 +254,9 @@ class TestFirstKeyDoesNotLockTheLocalBrowserOut:
 
 class TestCookieCallerNeedsCsrf:
     def test_cookie_session_without_csrf_token_is_refused(self):
-        """A cookie-authenticated unsafe request needs X-CSRF-Token."""
+        """A cookie-authenticated unsafe request needs X-CSRF-Token. Rotation is
+        the highest-value CSRF target on the server: a cross-site page that could
+        drive it would lock the owner out of their own install."""
         old = auth.regenerate_key()
         c = _client()
         assert c.post("/api/session", json={"key": old}).status_code == 200
@@ -230,7 +267,8 @@ class TestCookieCallerNeedsCsrf:
         assert auth.get_api_key() == old, "and nothing may have changed"
 
     def test_cookie_session_with_csrf_token_succeeds(self):
-        """Control for the test above: the 403 is the CSRF check, not a cookie session being unable to rotate at all."""
+        """Control for the test above: the 403 is the CSRF check, not a cookie
+        session being unable to rotate at all."""
         old = auth.regenerate_key()
         c = _client()
         csrf = c.post("/api/session", json={"key": old}).json()["csrf"]

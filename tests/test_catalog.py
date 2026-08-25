@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""First-party plugin catalog: command -> plugin lookup and the 'that command needs the X plugin' suggestion, plus the CLI REPL wiring that turns an unknown command for a known-but-inactive plugin into that hint (gated on the suggest_plugins config toggle)."""
+"""First-party plugin catalog: command -> plugin lookup and the
+'that command needs the X plugin' suggestion, plus the CLI REPL wiring that
+turns an unknown command for a known-but-inactive plugin into that hint
+(gated on the suggest_plugins config toggle)."""
 
 import io
 
@@ -76,9 +79,7 @@ def _run_command(monkeypatch, raw):
 
 
 # /knowledge (the rag plugin) is a catalogued verb that is NOT a built-in chat
-# REPL command, so it still exercises the unknown-command -> suggestion wiring.
-# (generate-image/music/video are now real REPL commands - see
-# tests/test_cli_repl_media.py - so they no longer fall through to the hint.)
+# REPL command, so it exercises the unknown-command -> suggestion wiring.
 def test_unknown_plugin_command_suggests_install(cfg_env, monkeypatch):
     out = _run_command(monkeypatch, "/knowledge")
     assert "rag plugin" in out

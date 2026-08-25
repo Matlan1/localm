@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// S4 (CLI/GUI parity audit): images.js's img-generate handler must forward the
-// CFG field into the /api/imagine request body, mirroring how the CLI's
-// --cfg already reaches generate_image() and how music.js/video.js already
-// forward their own CFG fields. Without this, the GUI's cfg input can only
-// ever change what the user SEES, never what ComfyUI receives.
+// images.js's img-generate handler forwards the CFG field into the
+// /api/imagine request body, as music.js and video.js do for their own.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";

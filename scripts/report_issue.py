@@ -1,6 +1,33 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Standalone bug reporter for when localm will not start."""
+"""Standalone bug reporter for when localm will not start.
+
+This is the fallback the ``report-issue`` entry (and the setup scripts' failure
+paths) use when the normal ``localm bug-report`` cannot run because the install is
+broken or not there yet. It depends ONLY on the Python standard library and on
+sitting inside a localm clone: it reads the bug-report proxy URL + token straight
+out of ``localm/config.py`` (no duplicated secret, picks up any rotation), collects
+a minimal, username-scrubbed diagnostic snapshot, asks for a one-line description,
+PREVIEWS the exact text alongside the destination host, and only files it - as an
+account-less GitHub issue via the proxy - after the user confirms. Only http/https
+endpoints are accepted, so an overridden proxy is visible rather than silent. A
+failed or declined send never reports success: it saves the report to a file and
+points at the maintainer email (AGENTS.md rule 5, "we do not hide problems").
+
+What it NEVER collects: environment variables (which can hold a key), config
+secrets, or chat/transcript content. Only OS / arch / Python, a few version
+markers, whether a venv exists, and the tail of the most recent log - all
+username-scrubbed before it is shown or sent.
+
+Run it directly:  python scripts/report_issue.py
+Optional flags used by the setup wiring:
+  --summary TEXT    one-line title (else you are prompted)
+  --detail  TEXT    prefilled "what happened" (e.g. the failing setup step)
+  --log     PATH    a specific log file to attach the tail of (else newest found)
+  --yes             SEND immediately, skipping the confirm prompt (the preview
+                    still prints to the console first, but does not gate the
+                    send); for scripted/automated sends
+"""
 
 from __future__ import annotations
 
@@ -16,8 +43,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-# Intentionally published maintainer contact for bug reports (mirrors
-# localm/bugreport.py; kept in sync by hand, both hygiene-allowlisted).
+# Maintainer contact for bug reports; kept in sync by hand with localm/bugreport.py.
 MAINTAINER_EMAIL = "theilige@gmail.com"
 
 
@@ -25,15 +51,18 @@ MAINTAINER_EMAIL = "theilige@gmail.com"
 #  Proxy config: read the shipped constants from localm/config.py             #
 # --------------------------------------------------------------------------- #
 
-#: The only schemes that may ever reach urlopen(). The documented purpose of the
-#: LOCALM_BUGREPORT_URL override is pointing the standalone reporter at your own
-#: proxy or a test double (see read_proxy), which http/https covers completely,
-#: while file://, ftp:// and friends have no legitimate use for POSTing a report.
+#: Schemes accepted for a bug-report endpoint.
 ALLOWED_ENDPOINT_SCHEMES = ("http", "https")
 
 
 def endpoint_is_allowed(url: str | None) -> bool:
-    """True if *url* is a POST-able http(s) endpoint with a host."""
+    """True if *url* is a POST-able http(s) endpoint with a host.
+
+    Defence in depth, not a remote-attack fix: the URL's only producers are the
+    process environment and localm's own source (read_proxy), so reaching it
+    already means controlling the process or the code. It is cheap to make the
+    scheme explicit rather than trusting whatever urlopen() would dispatch on.
+    """
     if not url:
         return False
     try:
@@ -52,7 +81,11 @@ def endpoint_host(url: str) -> str:
 
 
 def read_proxy(config_path: Path | None = None) -> tuple:
-    """(url, token) for the bug-report proxy."""
+    """(url, token) for the bug-report proxy. LOCALM_BUGREPORT_URL /
+    LOCALM_BUGREPORT_TOKEN override per value (a custom proxy, or a test double);
+    otherwise the shipped constants are read as TEXT from localm/config.py so the
+    account-less GitHub-issue channel works with NO import of a possibly-broken
+    localm/venv. Returns (None, None) if nothing is configured or readable."""
     import os
     url_cfg = token_cfg = None
     if config_path is None:
@@ -72,11 +105,7 @@ def read_proxy(config_path: Path | None = None) -> tuple:
     if url:
         url = url.strip()
         if not endpoint_is_allowed(url):
-            # Rule 5: SAY it was rejected. Silently falling back to the shipped
-            # URL would override an explicit choice without telling anyone, and
-            # passing it through would hand a non-http scheme straight to
-            # urlopen. Drop the endpoint instead, so main() saves the report
-            # locally and never sends it.
+            # Drop a disallowed endpoint and say so; nothing is sent.
             print(f"  Ignoring bug-report endpoint {scrub(str(url))!r}: only "
                   f"{' and '.join(s + '://' for s in ALLOWED_ENDPOINT_SCHEMES)} "
                   f"are allowed. Nothing will be sent.")
@@ -91,35 +120,22 @@ def read_proxy(config_path: Path | None = None) -> tuple:
 _BEARER_RE = re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._\-]{8,}")
 _APIKEY_RE = re.compile(r"(?i)\b(?:sk|localm[_-]sk)-[A-Za-z0-9._\-]{12,}")
 
-# Mirrors localm/bugreport.py's _QUERY_SECRET_RE / _HEADER_SECRET_RE: a
-# credential is at least as often carried as a URL query parameter
-# (?api_key=...) or a pasted header line (X-Api-Key: ...) as via user:pass@
-# syntax. Redact by NAME, never by guessing the value's format - see the
-# sibling comment in bugreport.py for why, including why the short generic
-# names (key/auth/sig) are admitted only with a prefix outside a query string.
-# Keep these two byte-identical to their bugreport.py counterparts.
+# Credential-named URL query parameters and pasted header lines. Kept
+# byte-identical to the counterparts in localm/bugreport.py.
 _QUERY_SECRET_RE = re.compile(
     r"(?i)((?:"
-    # 1. Immediately after a query delimiter: the historic set, unchanged.
+    # 1. Immediately after a query delimiter.
     r"(?<=[?&])(?:api[_-]?key|key|token|secret|password|passwd|pwd|auth"
     r"|access[_-]?token|sig|signature)"
-    # 2. Anywhere else, UNPREFIXED: only the names that mean a credential
-    #    and nothing else.
+    # 2. Anywhere else, unprefixed.
     r"|(?<![A-Za-z0-9])(?:api[_-]?key|token|secret|password|passwd|pwd"
     r"|access[_-]?token|signature)"
-    # 3. Anywhere else, PREFIXED. The separator is mandatory and disjoint
-    #    from the run before it, so there is exactly ONE way to split the
-    #    prefix and the engine never backtracks through it (an optional
-    #    separator here would be a polynomial-backtracking shape, since the
-    #    names themselves start with an alnum). This is also the branch that
-    #    admits the short generic names, per the reasoning above.
+    # 3. Anywhere else, prefixed by a mandatory separator.
     r"|(?<=[A-Za-z0-9])[_-](?:api[_-]?key|token|secret|password|passwd|pwd"
     r"|access[_-]?token|signature|key|auth|sig)"
     r")=)"
-    # Leave a value that cannot be a secret alone (true/false/none/0/1/...),
-    # so a config or flag line survives in a report. The literal has to be the
-    # whole value, closing markup aside, so api_key=truesecret123 and
-    # api_key=1)SECRET both still redact. See the sibling in bugreport.py.
+    # Leave a value that cannot be a secret alone (true/false/none/0/1/...);
+    # the literal must be the whole value, closing markup aside.
     r"(?![\"']?(?:true|false|none|null|nil|yes|no|on|off|enabled|disabled|[01])"
     r"[`\"'\)\]\}]{0,4}(?:[\s&#]|$))"
     r"(?:\"[^\"\r\n]*\"?|'[^'\r\n]*'?|[^&\s#\"'\)\]\}]*)"
@@ -130,7 +146,10 @@ _HEADER_SECRET_RE = re.compile(
 
 
 def scrub(text: str) -> str:
-    """Strip the account name from any path and any obvious credential from free text before it is shown or sent."""
+    """Strip the account name from any path and any obvious credential from free
+    text before it is shown or sent. A privacy scrub must fail safe: if it cannot
+    run it must NOT pass the text through as if scrubbed, so the home-root strip
+    below ALWAYS runs (it never depends on Path.home succeeding)."""
     if not text:
         return text
     # Replace the real home dir first (both separator forms), when resolvable.
@@ -146,22 +165,16 @@ def scrub(text: str) -> str:
         else:
             for v in variants:
                 text = text.replace(v, "~")
-    # Backstop: strip the user segment under any common home root, even one that is
-    # not exactly Path.home() (a different account, a path Path.home() missed). This
-    # runs unconditionally so a scrub can never ship the account name.
+    # Strip the user segment under any common home root, not only Path.home().
     flags = re.IGNORECASE if sys.platform == "win32" else 0
     text = re.sub(r"([A-Za-z]:[\\/]Users[\\/]|/home/|/Users/)[^\\/\r\n]+",
                   r"\1<redacted>", text, flags=flags)
-    # Strip user:pass@ credentials from any URL-ish value (mirror _scrub_url_creds in
-    # localm/bugreport.py): a summary/detail or log line can carry an inline secret,
-    # e.g. a comfy/searx/remote-server URL. Without this the standalone reporter would
-    # ship a credential the in-app reporter scrubs.
+    # Strip user:pass@ credentials from any URL-ish value.
     text = re.sub(r"(://)[^/@\s]+@", r"\1<redacted>@", text)
-    # Credential-named query params and header lines (mirror
-    # _scrub_query_and_header_secrets in localm/bugreport.py).
+    # Credential-named query params and header lines.
     text = _QUERY_SECRET_RE.sub(r"\1<redacted>", text)
     text = _HEADER_SECRET_RE.sub(r"\1<redacted>", text)
-    # Defensive credential strip (a pasted token in a log line, a mistyped value).
+    # Bearer tokens and API keys anywhere in the text.
     text = _BEARER_RE.sub(r"\1<redacted>", text)
     text = _APIKEY_RE.sub("<redacted>", text)
     return text
@@ -186,7 +199,8 @@ def _venv_python() -> Path | None:
 
 
 def _newest_log(explicit: str | None = None) -> tuple:
-    """(path, scrubbed tail) of a relevant log, or (None, '')."""
+    """(path, scrubbed tail) of a relevant log, or (None, ''). Looks at an explicit
+    path first, else the newest *.log under the clone's home/logs. Never raises."""
     candidates: list[Path] = []
     if explicit:
         p = Path(explicit)
@@ -213,7 +227,7 @@ def _newest_log(explicit: str | None = None) -> tuple:
 
 
 def collect_diagnostics() -> dict:
-    """A small, safe environment snapshot."""
+    """A small, safe environment snapshot. Never raises."""
     diag: dict = {}
     try:
         diag["platform"] = platform.platform()
@@ -280,11 +294,10 @@ def build_body(summary: str, description: str, diag: dict,
 
 def post_report(url: str, token: str | None, title: str, body: str,
                 *, timeout: float = 15.0, opener=None) -> dict:
-    """POST the report to the proxy and return its JSON response (e.g. {'url': '<issue url>'})."""
-    # Gate the scheme at the sink itself, before anything is built or opened, so
-    # a caller that obtained the URL some other way cannot reach urlopen with a
-    # file:// or ftp:// endpoint. read_proxy() screens it too; this is the layer
-    # that holds regardless of who called.
+    """POST the report to the proxy and return its JSON response (e.g.
+    {"url": "<issue url>"}). Raises RuntimeError on any non-2xx / network error so a
+    failed send is never mistaken for success. *opener* is injectable for tests."""
+    # Reject a non-http(s) endpoint at the sink, before anything is built or opened.
     if not endpoint_is_allowed(url):
         raise RuntimeError(
             f"refusing to send to {scrub(str(url))!r}: only "
@@ -323,7 +336,8 @@ def post_report(url: str, token: str | None, title: str, body: str,
 
 
 def save_report(body: str, when: str) -> Path | None:
-    """Write the report next to the clone so the user can always retrieve it."""
+    """Write the report next to the clone so the user can always retrieve it.
+    Returns the path, or None on failure. *when* is caller-supplied (test-injectable)."""
     base = REPO_ROOT / "home" / "bug-reports"
     try:
         base.mkdir(parents=True, exist_ok=True)
@@ -381,11 +395,10 @@ def main(argv=None) -> int:
     log_path, log_tail = _newest_log(args.log or None)
     body = build_body(scrub(summary), scrub(description), diag, log_path, log_tail)
 
-    # Resolved BEFORE the preview so the destination can be part of what the user
-    # reviews: an overridden endpoint should be visible, not silent.
+    # Resolved before the preview so the destination is shown in it.
     url, token = read_proxy()
 
-    # PREVIEW: show exactly what will be sent, always (the review-first contract).
+    # Preview exactly what will be sent.
     print()
     print("  ----- this is exactly what will be sent (edit later if you prefer) -----")
     for line in body.splitlines():
@@ -400,8 +413,7 @@ def main(argv=None) -> int:
 
     when = _timestamp()
 
-    # CONFIRM. No confirmation possible (not a tty) and not --yes -> save only,
-    # never send unreviewed.
+    # Confirm. Not a tty and not --yes: save only.
     do_send = args.yes
     if not do_send:
         if not interactive:
@@ -432,12 +444,10 @@ def main(argv=None) -> int:
         return 1
 
     try:
-        # Scrub the title too: it becomes a PUBLIC GitHub issue title, and the body
-        # already uses scrub(summary) (line above), so an unscrubbed title would
-        # leak a path/credential the preview claims is "exactly what will be sent".
+        # Scrub the title too; it becomes a public issue title.
         res = post_report(url, token, scrub(summary), body)
     except Exception as e:
-        # Honest failure: a failed send is NEVER reported as success.
+        # A failed send is not reported as success.
         path = save_report(body, when)
         where = str(path) if path else "the text above"
         print(f"  Could not send it ({e}). The report is saved at {where} - email it "
@@ -447,7 +457,7 @@ def main(argv=None) -> int:
     link = res.get("url") if isinstance(res, dict) else None
     print("  Sent to the maintainer. Thank you!"
           + (f" Tracking issue: {link}" if link else ""))
-    # Also keep a local copy so the user has the text.
+    # Keep a local copy.
     save_report(body, when)
     return 0
 

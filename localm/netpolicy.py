@@ -1,5 +1,42 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Central network-access policy for model-initiated requests."""
+"""
+Central network-access policy for model-initiated requests.
+
+Every network capability that a *model* can trigger (the coder's fetch_url /
+web_search tools, the GUI chat's web access) is routed through this module.
+Explicit user actions (``localm pull``, typing ``/web`` in chat) are consent
+by definition, but still respect ``net_mode = off`` so one switch really does
+kill everything.
+
+Config keys (set via ``localm config``, the GUI Settings page, or /v1/config)
+------------------------------------------------------------------------------
+net_mode           "off" | "ask" | "allow"   (default "ask")
+                   off   - every policy-routed request fails fast
+                   ask   - allowed, but surfaces that support confirmation
+                           ask first (the coder routes network tools through
+                           its destructive-tool approval flow)
+                   allow - no confirmation
+                   The LOCALM_NET_MODE env var overrides the config value.
+net_allow          list of domains (or comma-separated string). Empty = any
+                   domain. "example.com" matches example.com and *.example.com.
+net_deny           same format; matches are always refused (wins over allow).
+net_allow_private  False (default) blocks loopback/private/link-local targets
+                   (SSRF guard). True restores access to local dev services.
+net_search_url     None = DuckDuckGo HTML (no API key). Or the base URL of a
+                   SearXNG instance with the JSON API enabled.
+
+What this module does NOT govern
+--------------------------------
+Child processes spawned by run_shell (pip, npm, git, …) talk to the network
+on their own; the shell-command approval is the gate for those. Model pulls
+and online coder providers (OpenAI/Anthropic opt-ins) are explicit user
+choices outside this policy.
+
+SSRF guard: the hostname is resolved and validated once, then the socket is
+pinned to that IP (SSRF-REBIND, see netpin.py), so the connection cannot
+re-resolve to a rebound address and an unresolvable host fails closed.
+Redirects are re-validated hop by hop.
+"""
 
 from __future__ import annotations
 
@@ -23,7 +60,8 @@ _USER_AGENT = "Mozilla/5.0 (compatible; localm/0.1; +https://github.com/localm)"
 
 
 class NetworkPolicyError(Exception):
-    """A request was refused by the network policy."""
+    """A request was refused by the network policy. The message says why
+    and how to change the policy - safe to show to the model and the user."""
 
 
 # ---------------------------------------------------------------------------
@@ -31,7 +69,14 @@ class NetworkPolicyError(Exception):
 # ---------------------------------------------------------------------------
 
 def network_mode() -> str:
-    """Resolve the active mode: LOCALM_NET_MODE env > config > 'ask'."""
+    """Resolve the active mode: LOCALM_NET_MODE env > config > "ask".
+
+    On a config-read failure we resolve to "off", NOT "ask" (HON-2): returning
+    "ask" would silently RE-ENABLE network access for a user who set
+    net_mode="off" as a kill switch - the exact fail-open a safety toggle must
+    never do. Failing closed (and warning) keeps the switch honest; a transiently
+    unreadable config errs toward no network, never toward more. The valid-config
+    path is unchanged: an unset or unrecognised value still resolves to "ask"."""
     env = os.environ.get(NET_MODE_ENV_VAR, "").strip().lower()
     if env in NET_MODES:
         return env
@@ -56,13 +101,20 @@ def _domain_list(value) -> list[str]:
 
 
 def _host_matches(host: str, pattern: str) -> bool:
-    """Suffix match: 'example.com' covers example.com and api.example.com."""
+    """Suffix match: "example.com" covers example.com and api.example.com."""
     host = host.lower().rstrip(".")
     return host == pattern or host.endswith("." + pattern)
 
 
 def _config() -> dict:
-    """Best-effort config read for callers OTHER than check_url."""
+    """Best-effort config read for callers OTHER than check_url.
+
+    check_url reads the config itself, once, up front, and refuses outright
+    on a read failure (LM-DA-046) - it must never reach this fallback. The
+    remaining callers are _resolve_pinned (net_allow_private) and web_search
+    (net_search_url); neither reads net_deny/net_allow, so an unreadable
+    config here only means those two settings fall back to their safe
+    defaults (False / unset) for this call - never a dropped deny list."""
     try:
         from localm.config import load_config
         return load_config()
@@ -73,7 +125,21 @@ def _config() -> dict:
 
 
 def check_url(url: str) -> None:
-    """Validate one URL against the policy."""
+    """
+    Validate one URL against the policy. Raises NetworkPolicyError with an
+    actionable message when refused; returns silently when allowed.
+
+    Checks, in order: mode, malformed-authority, scheme, deny list, allow list,
+    resolved-IP class.
+
+    Reads the config exactly ONCE, up front (LM-DA-046): net_mode and the
+    net_deny/net_allow lists must come from the same snapshot, so a read
+    failure has exactly one outcome - refuse - no matter what LOCALM_NET_MODE
+    says. Resolving mode and lists from two separate reads (as network_mode()
+    and the old _config() helper did) let an env override reach past a
+    transient config-read failure and silently drop the user's explicit deny
+    list while still letting the request through.
+    """
     env = os.environ.get(NET_MODE_ENV_VAR, "").strip().lower()
     try:
         from localm.config import load_config
@@ -140,7 +206,24 @@ _EXTRA_BLOCKED_NETS = (
 
 
 def _is_blocked_ip(ip: ipaddress._BaseAddress) -> bool:
-    """True for addresses the SSRF guard refuses: anything that is not a globally-routable public address."""
+    """True for addresses the SSRF guard refuses: anything that is not a
+    globally-routable public address.
+
+    ``not ip.is_global`` is the primary predicate. It rejects loopback, RFC1918
+    private, link-local (incl. 169.254.169.254 cloud metadata), the CGNAT shared
+    space 100.64.0.0/10 (RFC 6598, which the stdlib does NOT mark is_private on
+    every version, so the old explicit list let it through), benchmarking,
+    documentation and other special-use ranges in one shot, and it stays correct
+    as the stdlib adds new reserved ranges.
+
+    The explicit special-use flags are KEPT as a belt-and-suspenders catch: the
+    stdlib quirkily marks a few deprecated IPv6 forms (IPv4-compatible
+    ``::127.0.0.1``, NAT64-embedded ``64:ff9b::7f00:1``) is_global=True even
+    though they still route to internal IPv4 - is_reserved catches those.
+    _EXTRA_BLOCKED_NETS covers the residual special-use ranges (6to4 anycast)
+    that is_global=True still misses. A genuine public address (is_global True
+    with no special-use flag, outside the extra nets) is the only thing that
+    passes."""
     return bool(not ip.is_global
                 or ip.is_loopback or ip.is_private or ip.is_link_local
                 or ip.is_reserved or ip.is_multicast or ip.is_unspecified
@@ -149,7 +232,16 @@ def _is_blocked_ip(ip: ipaddress._BaseAddress) -> bool:
 
 
 def _literal_ipv4(host: str) -> Optional[ipaddress.IPv4Address]:
-    """If ``host`` is a numeric / short-form IPv4 literal (dotless decimal '2130706433', hex '0x7f000001', octal '0177.0.0.1', short '127.1', or the plain dotted form), return its canonical IPv4Address."""
+    """If ``host`` is a numeric / short-form IPv4 literal (dotless decimal
+    '2130706433', hex '0x7f000001', octal '0177.0.0.1', short '127.1', or the
+    plain dotted form), return its canonical IPv4Address. Otherwise None.
+
+    ipaddress.ip_address() refuses the dotless / hex / octal / short forms, and
+    socket.getaddrinfo may raise for them, so without this an attacker can hand
+    '2130706433' (== 127.0.0.1) to the policy and slip past the public-address
+    check (SEC-5). socket.inet_aton parses the historical IPv4 forms; we then
+    classify the canonical address it yields. Normal hostnames contain letters
+    or dots-with-letters and make inet_aton raise, so they fall through."""
     try:
         packed = socket.inet_aton(host)
     except OSError:
@@ -161,7 +253,14 @@ def _literal_ipv4(host: str) -> Optional[ipaddress.IPv4Address]:
 
 
 def _check_public_address(host: str) -> None:
-    """SSRF guard: refuse hosts that resolve to loopback / private / link-local / reserved addresses (cloud metadata, router admin pages, the localm API itself…)."""
+    """SSRF guard: refuse hosts that resolve to loopback / private /
+    link-local / reserved addresses (cloud metadata, router admin pages,
+    the localm API itself…). Unresolvable hosts pass - the fetch will fail
+    with a normal DNS error anyway.
+
+    Numeric / short-form IPv4 literals are normalized and classified directly
+    (see _literal_ipv4) so they cannot evade the check by being unresolvable or
+    unparseable by the ipaddress module."""
     literal = _literal_ipv4(host)
     if literal is not None:
         if _is_blocked_ip(literal):
@@ -187,7 +286,20 @@ def _check_public_address(host: str) -> None:
 
 
 def _resolve_pinned(host: str) -> Optional[str]:
-    """Resolve *host* to ONE IP to pin the connection to, closing the check-and-connect DNS-rebinding TOCTOU (SSRF-REBIND). ``check_url`` resolves and validates the host, but ``requests`` re-resolves at connect time, so a TTL-0 attacker can answer 'public' for the check and 'internal' for the connect."""
+    """Resolve *host* to ONE IP to pin the connection to, closing the
+    check-and-connect DNS-rebinding TOCTOU (SSRF-REBIND). ``check_url`` resolves
+    and validates the host, but ``requests`` re-resolves at connect time, so a
+    TTL-0 attacker can answer 'public' for the check and 'internal' for the
+    connect. Here we resolve ONCE, validate the address(es), and return the exact
+    IP the socket will dial - there is no second lookup to poison.
+
+    Returns the canonical IP string to pin, or None when the host is unresolvable
+    (the caller then lets the request fail with a normal DNS error - nothing
+    connects, so there is no race). Numeric/short-form and IPv6 literals are
+    pinned directly (already validated by check_url). When net_allow_private is
+    False, an address that fails the SSRF class check is refused HERE too, on the
+    exact IP to be dialled - this is what catches a rebind that slipped past
+    check_url's separate lookup."""
     allow_private = bool(_config().get("net_allow_private", False))
 
     def _guard(ip_obj) -> None:
@@ -231,7 +343,9 @@ def _resolve_pinned(host: str) -> Optional[str]:
 
 
 def _host_header(parsed) -> str:
-    """The Host header value for a pinned request: the original hostname (so virtual-host routing survives the IP pin), with the port only when it is non-default for the scheme."""
+    """The Host header value for a pinned request: the original hostname (so
+    virtual-host routing survives the IP pin), with the port only when it is
+    non-default for the scheme."""
     host = parsed.hostname or ""
     port = parsed.port
     if port and not ((parsed.scheme == "http" and port == 80)
@@ -241,7 +355,18 @@ def _host_header(parsed) -> str:
 
 
 def _session_for(url: str):
-    """A ``requests.Session`` whose socket is pinned to *url*'s pre-validated IP (SSRF-REBIND). ``check_url`` MUST already have passed on *url*."""
+    """A ``requests.Session`` whose socket is pinned to *url*'s pre-validated IP
+    (SSRF-REBIND). ``check_url`` MUST already have passed on *url*. This is the
+    single network-transport seam: production pins here, tests double it here.
+    The caller sends ``_host_header(url)`` as the Host header and closes the
+    session (use it as a context manager).
+
+    Fails CLOSED when the host cannot be resolved to a validated address: we do
+    NOT fall back to a re-resolving session. Otherwise a host that is NXDOMAIN at
+    validation time (check_url lets unresolvable hosts through) but flips to a
+    private A record at connect time (TTL-0 DNS rebinding) would reach an internal
+    service unvalidated - the exact hole this closes. A genuinely unresolvable
+    host cannot be connected to anyway, so refusing costs nothing legitimate."""
     from localm import netpin
     parsed = urllib.parse.urlparse(url)
     ip = _resolve_pinned(parsed.hostname or "")
@@ -253,7 +378,16 @@ def _session_for(url: str):
 
 
 def pinned_request(method: str, url: str, **kwargs):
-    """A single policy-pinned HTTP request (SSRF-REBIND) for callers that manage their own response (streamed downloads, HEAD probes) instead of going through safe_fetch_bytes. ``check_url`` MUST already have passed on *url*."""
+    """A single policy-pinned HTTP request (SSRF-REBIND) for callers that manage
+    their own response (streamed downloads, HEAD probes) instead of going through
+    safe_fetch_bytes. ``check_url`` MUST already have passed on *url*.
+
+    The socket is pinned to the pre-validated IP and the original hostname is sent
+    as the ``Host`` header. The pinned session is attached to the returned response
+    (``resp._localm_pin_session``) so a streamed body stays usable until the caller
+    is done with the response; it is released when the response is GC'd, matching
+    how requests' own streamed responses are managed. Raises NetworkPolicyError
+    when the host cannot be resolved to a validated address (fail-closed)."""
     session = _session_for(url)
     headers = {**(kwargs.pop("headers", None) or {}),
                "Host": _host_header(urllib.parse.urlparse(url))}
@@ -272,7 +406,18 @@ def safe_fetch_bytes(
     max_bytes: int = _DEFAULT_MAX_BYTES,
     timeout: int = _DEFAULT_TIMEOUT,
 ) -> tuple[str, str, bytes]:
-    """Policy-checked GET returning RAW bytes."""
+    """
+    Policy-checked GET returning RAW bytes. Returns (final_url, content_type,
+    body_bytes).
+
+    Same protections as safe_fetch - redirects are followed manually so every
+    hop is re-validated against the policy (a public page cannot bounce the
+    fetch into 127.0.0.1), and the body is capped at max_bytes - but the body is
+    NOT decoded, so this is the entry point for binary payloads (images fetched
+    for vision input). Text callers go through safe_fetch / fetch_text.
+
+    Raises NetworkPolicyError (policy refusal) or requests exceptions.
+    """
     current = url
     for _ in range(_MAX_REDIRECTS + 1):
         check_url(current)
@@ -316,7 +461,14 @@ def safe_fetch(
     max_bytes: int = _DEFAULT_MAX_BYTES,
     timeout: int = _DEFAULT_TIMEOUT,
 ) -> tuple[str, str, str]:
-    """Policy-checked GET."""
+    """
+    Policy-checked GET. Returns (final_url, content_type, body_text).
+
+    Thin text wrapper over safe_fetch_bytes (which does the policy check,
+    per-hop redirect re-validation and size cap); the body is decoded as UTF-8.
+
+    Raises NetworkPolicyError (policy refusal) or requests exceptions.
+    """
     final_url, content_type, body = safe_fetch_bytes(
         url, max_bytes=max_bytes, timeout=timeout)
     return final_url, content_type, body.decode("utf-8", errors="replace")
@@ -385,7 +537,7 @@ def fetch_text(
     max_bytes: int = _DEFAULT_MAX_BYTES,
     timeout: int = _DEFAULT_TIMEOUT,
 ) -> tuple[str, str]:
-    """safe_fetch + HTML stripping."""
+    """safe_fetch + HTML stripping. Returns (final_url, plain_text)."""
     final_url, content_type, body = safe_fetch(
         url, max_bytes=max_bytes, timeout=timeout)
     if "html" in content_type.lower():
@@ -398,7 +550,14 @@ def fetch_text(
 # ---------------------------------------------------------------------------
 
 def web_search(query: str, max_results: int = 5) -> list[dict]:
-    """Search the web."""
+    """
+    Search the web. Returns [{"title", "url", "snippet"}, ...].
+
+    Backend: a SearXNG instance when net_search_url is configured (its JSON
+    API must be enabled), otherwise DuckDuckGo's no-key HTML endpoint.
+    Raises NetworkPolicyError when the policy refuses, or RuntimeError when
+    the backend yields nothing parseable.
+    """
     query = (query or "").strip()
     if not query:
         raise ValueError("Empty search query")
@@ -418,7 +577,13 @@ def web_search(query: str, max_results: int = 5) -> list[dict]:
 
 
 def _refuse_redirect(resp, backend: str) -> None:
-    """The search backends call check_url ONCE on the request URL, so - unlike safe_fetch - they cannot re-validate a redirect target per hop. requests follows redirects by default, which would let a 3xx from the search host bounce the GET into 127.0.0.1 / 169.254.169.254 / an RFC1918 service with no polic..."""
+    """The search backends call check_url ONCE on the request URL, so - unlike
+    safe_fetch - they cannot re-validate a redirect target per hop. requests
+    follows redirects by default, which would let a 3xx from the search host
+    bounce the GET into 127.0.0.1 / 169.254.169.254 / an RFC1918 service with no
+    policy check (SSRF). So the callers pass allow_redirects=False and we refuse
+    any 3xx outright (surfacing it rather than silently following an unchecked
+    hop) - the search backend is expected to answer directly."""
     # getattr default: a real requests.Response always exposes these properties;
     # the default only applies to minimal test doubles standing in for a 200.
     if getattr(resp, "is_redirect", False) or \
@@ -451,7 +616,11 @@ def _searxng_search(base: str, query: str, max_results: int) -> list[dict]:
 
 
 class _DDGParser(html.parser.HTMLParser):
-    """Parse DuckDuckGo's html.duckduckgo.com result page."""
+    """Parse DuckDuckGo's html.duckduckgo.com result page.
+
+    Result anchors carry class ``result__a``; snippets ``result__snippet``.
+    Anchor hrefs are //duckduckgo.com/l/?uddg=<encoded-target> redirects -
+    the real URL is extracted from the uddg parameter."""
 
     def __init__(self):
         super().__init__(convert_charrefs=True)

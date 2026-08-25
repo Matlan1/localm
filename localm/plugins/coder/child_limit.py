@@ -1,5 +1,34 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""One global gate on how many child agents may run at once."""
+"""One global gate on how many child agents may run at once.
+
+WHY THIS IS SHARED, AND WHY IT IS GLOBAL RATHER THAN PER-MECHANISM
+------------------------------------------------------------------
+Two different features spawn concurrent children: worktree-isolated parallel
+dispatch (``tools/parallel.py``) and, separately, background sub-agent jobs. If
+each enforced its own private cap of 2, a model could hold 2 of one plus 2 of the
+other and run 4 children at once. Both features would be individually correct and
+jointly wrong, and neither feature's tests would catch it.
+
+The ceiling is a property of the BOX, not of the dispatch mechanism: the practical
+resident-model limit on a single consumer GPU is about two. A per-mechanism cap
+therefore enforces the wrong noun. So there is exactly one budget here and every
+child-spawning path draws from it.
+
+The deliberate consequence: a full 2-child parallel dispatch SATURATES the budget,
+so a background job requested while it runs is rejected. That is honest - the
+hardware genuinely cannot do more - and rejecting loudly beats admitting four
+children and thrashing VRAM.
+
+WHY THERE IS NO BLOCKING ACQUIRE
+--------------------------------
+Only ``try_acquire`` exists, and it never blocks. A blocking
+``Semaphore(2).acquire()`` would turn "no free slot" into an invisible wait, which
+is exactly the silent queue a caller must not have: a background-spawn tool that
+blocks has defeated its own purpose, and a caller that wanted to report "rejected,
+these two are running" instead hangs. Not exposing a blocking acquire at all means
+neither caller can reintroduce that failure by accident. A caller that genuinely
+wants to wait must do so explicitly, in its own code, where the waiting is visible.
+"""
 
 from __future__ import annotations
 
@@ -16,7 +45,7 @@ MAX_CONCURRENT_CHILDREN = 2
 
 @dataclass(frozen=True)
 class Token:
-    """Opaque proof that a slot is held."""
+    """Opaque proof that a slot is held. Pass back to ``release``."""
     id: int
     kind: str
     label: str
@@ -34,7 +63,8 @@ class Holder:
 
 
 class ChildLimit:
-    """The gate itself."""
+    """The gate itself. A module-level singleton backs the functions below;
+    tests construct their own instance so they never race the real one."""
 
     def __init__(self, max_children: int = MAX_CONCURRENT_CHILDREN) -> None:
         self._max = max_children
@@ -43,7 +73,13 @@ class ChildLimit:
         self._next_id = 1
 
     def try_acquire(self, kind: str, label: str) -> Optional[Token]:
-        """Take a slot, or return None immediately if the budget is full."""
+        """Take a slot, or return None immediately if the budget is full.
+
+        Never blocks. The capacity check and the insert happen under one lock
+        hold: doing them separately would let two near-simultaneous spawns both
+        observe the same single free slot and both admit, which is the whole
+        failure this gate exists to prevent.
+        """
         with self._lock:
             if len(self._holders) >= self._max:
                 return None
@@ -54,7 +90,15 @@ class ChildLimit:
             return token
 
     def release(self, token: Optional[Token]) -> None:
-        """Give a slot back."""
+        """Give a slot back. Idempotent and safe from any thread.
+
+        Idempotent on purpose: the caller releases in a ``finally``, and an error
+        path may well have released already. A double release must not corrupt the
+        budget (a decrement-based counter would drift negative and silently widen
+        the cap), and a release of an unknown/stale token must not raise inside
+        somebody's cleanup handler. Tolerating None keeps caller cleanup free of
+        null-checks when the acquire itself failed.
+        """
         if token is None:
             return
         with self._lock:
@@ -79,12 +123,12 @@ _GATE = ChildLimit()
 
 
 def try_acquire(kind: str, label: str) -> Optional[Token]:
-    """Take a child slot, or None if the budget is full."""
+    """Take a child slot, or None if the budget is full. Never blocks."""
     return _GATE.try_acquire(kind, label)
 
 
 def release(token: Optional[Token]) -> None:
-    """Return a child slot."""
+    """Return a child slot. Idempotent; tolerates None and stale tokens."""
     _GATE.release(token)
 
 
@@ -109,6 +153,6 @@ def describe_holders() -> str:
 
 
 def _reset_for_tests() -> None:
-    """Clear the process-wide gate."""
+    """Clear the process-wide gate. TEST ONLY - never call from product code."""
     global _GATE
     _GATE = ChildLimit()

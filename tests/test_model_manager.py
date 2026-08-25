@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Tests for localm.model_manager disk-space preflight, resumable download helpers, and SHA256 verification."""
+"""
+Tests for localm.model_manager disk-space preflight, resumable download helpers,
+and SHA256 verification.
+"""
 
 import hashlib
 from unittest.mock import MagicMock, patch

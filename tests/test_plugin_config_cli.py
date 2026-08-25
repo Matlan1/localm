@@ -1,5 +1,20 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""`localm plugin config <name> [<key> [<value>]]` - the terminal's reach into a plugin's OWN settings block."""
+"""`localm plugin config <name> [<key> [<value>]]` - the terminal's reach into a
+plugin's OWN settings block.
+
+Three HTTP routes edit those blocks (POST /v1/media/config/<name>,
+POST /v1/tts/config, POST /v1/plugins/<name>/settings) and each validator had
+exactly one caller, the route. `localm config plugins '<json>'` cannot stand in:
+settings_schema requires a real dict there and click always passes a str.
+
+The interesting half is that the three do not share a source for their field
+list. media and tts are module constants this process can read offline; a
+host.add_settings() block is supplied at register() time and therefore exists
+only inside a process that has LOADED that plugin, which a CLI deliberately
+never is. So these tests pin BOTH paths, and - the part that is easy to get
+wrong - that the several "nothing to show" states stay distinguishable instead
+of collapsing into one empty answer (AGENTS.md rule 5).
+"""
 
 import json
 
@@ -45,7 +60,8 @@ def test_plugin_config_kind_splits_static_from_runtime():
 
 
 def test_local_helpers_refuse_a_runtime_plugin():
-    """They must RAISE rather than return [] - an empty field list would read as 'this plugin has no settings', which is a different (and false) answer."""
+    """They must RAISE rather than return [] - an empty field list would read as
+    'this plugin has no settings', which is a different (and false) answer."""
     from localm import settings_schema as ss
     with pytest.raises(ValueError):
         ss.local_plugin_config_fields("widget", {})
@@ -60,7 +76,9 @@ def test_local_helpers_refuse_a_runtime_plugin():
 # --------------------------------------------------------------------------- #
 
 def test_two_media_plugins_hold_different_values_for_the_same_field(env):
-    """The whole point of the media half: `localm config comfy_api_url` sets ONE value for all three plugins, so it cannot express image and music pointing at different ComfyUI installs."""
+    """The whole point of the media half: `localm config comfy_api_url` sets ONE
+    value for all three plugins, so it cannot express image and music pointing
+    at different ComfyUI installs."""
     assert _run("image", "api_url", "http://127.0.0.1:9999").exit_code == 0
     assert _run("music", "api_url", "http://127.0.0.1:8188").exit_code == 0
     blocks = _blocks(env)
@@ -107,7 +125,8 @@ def test_an_unknown_key_is_refused_and_lists_the_settable_ones(env):
 
 
 def test_image_only_and_plugin_restricted_fields_follow_media_fields_for(env):
-    """fast_dequant is image-only and float_type is music/video-only, so the settable key list has to come from media_fields_for, not the whole list."""
+    """fast_dequant is image-only and float_type is music/video-only, so the
+    settable key list has to come from media_fields_for, not the whole list."""
     from localm import settings_schema as ss
     assert "fast_dequant" in ss.local_plugin_config_keys("image")
     assert "fast_dequant" not in ss.local_plugin_config_keys("music")
@@ -183,7 +202,9 @@ def test_tts_block_round_trips_and_validates(env):
 
 
 def test_listing_a_static_plugin_needs_no_server_and_no_install(env):
-    """The tts/media write path is deliberately NOT gated on the plugin being active, so the block can be prepared before it is enabled - same as the routes."""
+    """The tts/media write path is deliberately NOT gated on the plugin being
+    active, so the block can be prepared before it is enabled - same as the
+    routes. The listing says which state it is in rather than refusing."""
     res = _run("tts")
     assert res.exit_code == 0
     assert "voice" in res.output and "speed" in res.output
@@ -233,7 +254,9 @@ def test_installed_but_disabled_says_so_rather_than_no_settings(env):
 
 
 def test_enabled_but_no_server_says_the_plugin_must_be_running(env):
-    """The load-bearing rule-5 case."""
+    """The load-bearing rule-5 case. A host.add_settings() field list exists only
+    inside a process that loaded the plugin, so with no server this command
+    cannot ASK. It must not answer as though it had asked and found nothing."""
     _install_widget(env, enable=True)
     res = _run("widget")
     assert res.exit_code != 0
@@ -245,7 +268,10 @@ def test_enabled_but_no_server_says_the_plugin_must_be_running(env):
 
 
 def test_the_cli_never_loads_a_plugin_to_answer(env, monkeypatch):
-    """Reading a field list must not run a plugin's register()."""
+    """Reading a field list must not run a plugin's register(). PluginManager._load
+    fires the on_first_use lifecycle hook and writes config for it, so a load
+    here would turn a read into a side effect (and would fail outright for any
+    route-mounting plugin, since the CLI has no app)."""
     from localm.plugins.engine import PluginManager
     _install_widget(env, enable=True)
     loaded = []
@@ -261,12 +287,10 @@ def test_the_cli_never_loads_a_plugin_to_answer(env, monkeypatch):
 
 # --------------------------------------------------------------------------- #
 #  The runtime path's own reporting, with the HTTP layer controlled            #
-#                                                                              #
-#  These drive _runtime_plugin_config against a stubbed server rather than a   #
-#  live one, so the reporting logic is pinned without a process to start. Each #
-#  asserts the CALL COUNT as well as the outcome: a stub that never intercepts #
-#  looks exactly like a passing test, and this file would otherwise be reading #
-#  the real requests module.                                                   #
+#                                                                             #
+#  These drive _runtime_plugin_config against a stubbed server rather than a  #
+#  live one, so the reporting logic is pinned without a process to start.     #
+#  Each asserts the CALL COUNT as well as the outcome.                        #
 # --------------------------------------------------------------------------- #
 
 class _Resp:
@@ -300,7 +324,10 @@ def _stub_server(monkeypatch, *, fields, on_post=None):
 
 
 def test_setting_a_secret_reports_a_set_not_a_clear(env, monkeypatch):
-    """REGRESSION."""
+    """REGRESSION. A SECRET field's value is deliberately never echoed back by
+    the server, so reading the reply's absent `value` said "cleared" for a write
+    that had in fact SET the key - reporting the exact opposite of what
+    happened. `is_override` is the field that distinguishes them."""
     _install_widget(env, enable=True)
     saved = [{"key": "api_key", "widget": "secret", "label": "API key",
               "is_override": True, "admin_only": True}]        # no "value", by design
@@ -317,7 +344,8 @@ def test_setting_a_secret_reports_a_set_not_a_clear(env, monkeypatch):
 
 
 def test_clearing_a_secret_still_reports_a_clear(env, monkeypatch):
-    """The other arm: without it, a report that always says 'set' would pass the test above while being just as wrong in the opposite direction."""
+    """The other arm: without it, a report that always says "set" would pass the
+    test above while being just as wrong in the opposite direction."""
     _install_widget(env, enable=True)
     cleared = [{"key": "api_key", "widget": "secret", "label": "API key",
                 "is_override": False, "admin_only": True}]
@@ -349,7 +377,9 @@ def test_a_runtime_plugin_lists_and_sets_through_the_server(env, monkeypatch):
 
 
 def test_the_servers_own_refusal_is_reported_verbatim(env, monkeypatch):
-    """The runtime path does not re-implement validation; the plugin's field list lives on the server and so does its validator."""
+    """The runtime path does not re-implement validation; the plugin's field
+    list lives on the server and so does its validator. A refusal has to reach
+    the user with the server's own reason rather than a bare status."""
     _install_widget(env, enable=True)
     fields = [{"key": "greeting", "widget": "text", "label": "Greeting",
                "value": "hi", "default": "hi", "is_override": False}]
@@ -361,7 +391,17 @@ def test_the_servers_own_refusal_is_reported_verbatim(env, monkeypatch):
 
 
 def test_the_cycle_check_reads_the_config_the_write_is_based_on(env, monkeypatch):
-    """A cycle check taken from a load_config() read BEFORE the write is check-then-act: update_config holds a cross-process lock across the whole read-modify-write, so a concurrent writer can add the other half of the cycle in the window between the look and the write."""
+    """A cycle check taken from a load_config() read BEFORE the write is
+    check-then-act: update_config holds a cross-process lock across the whole
+    read-modify-write, so a concurrent writer can add the other half of the
+    cycle in the window between the look and the write.
+
+    Distinguishing the two needs the pre-read to DISAGREE with what the write is
+    based on, which is what patching load_config does here: it returns a
+    cycle-free view while the real stored config already has music -> image. A
+    check against the stale view allows the write; a check inside the mutator
+    refuses it.
+    """
     import localm.config as cfg_mod
     from localm import settings_schema as ss
 
@@ -374,7 +414,9 @@ def test_the_cycle_check_reads_the_config_the_write_is_based_on(env, monkeypatch
 
 
 def test_a_remote_target_is_not_judged_by_this_machines_install_set(env, monkeypatch):
-    """LOCALM_URL points at an instance that is not this home."""
+    """LOCALM_URL points at an instance that is not this home. Its plugin list
+    is the server's business, so a plugin absent from THIS machine must not
+    produce a confident "No such plugin" about one the target is running."""
     fields = [{"key": "greeting", "widget": "text", "label": "Greeting",
                "value": "hi", "default": "hi", "is_override": False}]
     calls = _stub_server(monkeypatch, fields=fields)      # sets LOCALM_URL
@@ -386,7 +428,8 @@ def test_a_remote_target_is_not_judged_by_this_machines_install_set(env, monkeyp
 
 
 def test_a_remote_that_has_no_section_says_what_it_observed(env, monkeypatch):
-    """The other arm: absent from the remote's list is reported as the remote's answer, not as a claim about installation here."""
+    """The other arm: absent from the remote's list is reported as the remote's
+    answer, not as a claim about installation here."""
     import requests
     monkeypatch.setenv("LOCALM_URL", "http://127.0.0.1:1")
     calls = {"get": 0}

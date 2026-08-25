@@ -1,5 +1,16 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""cpu_backend_select: prune every CPU-tier backend .so but the one safe for this machine, so ggml's directory-scan loaders (and localm's own RTLD_GLOBAL preload) can never simultaneously map two tiers whose identically-named global symbols would otherwise collide."""
+"""cpu_backend_select: prune every CPU-tier backend .so but the one safe for
+this machine, so ggml's directory-scan loaders (and localm's own RTLD_GLOBAL
+preload) can never simultaneously map two tiers whose identically-named global
+symbols would otherwise collide. See the module's own docstring for the full
+mechanism and the live reproduction that found it.
+
+Real .so files can't be fabricated here, so `_probe_score` (the isolated
+subprocess that calls a real candidate's own `ggml_backend_score()`) is
+monkeypatched to canned per-candidate verdicts; everything downstream of that
+- file layout, marker contents, locking, fast-path behaviour - is exercised for
+real against real files under `tmp_path`.
+"""
 
 from __future__ import annotations
 
@@ -79,7 +90,9 @@ def test_marker_not_current_when_fingerprint_stale(lib_dir, monkeypatch):
 
 
 def test_marker_not_current_when_unpruned_sibling_remains(lib_dir):
-    """A marker naming a winner is not enough on its own - if a sibling tier is STILL present un-pruned (e.g. an interrupted prior run), the collision hazard the marker claims to have closed is still on disk."""
+    """A marker naming a winner is not enough on its own - if a sibling tier
+    is STILL present un-pruned (e.g. an interrupted prior run), the collision
+    hazard the marker claims to have closed is still on disk."""
     _touch(lib_dir, "libggml-cpu-haswell.so")
     _touch(lib_dir, "libggml-cpu-alderlake.so")  # not renamed - still a hazard
     cbs._write_marker(lib_dir, "libggml-cpu-haswell.so")
@@ -124,8 +137,8 @@ def test_highest_scoring_candidate_wins_and_losers_are_renamed(lib_dir, monkeypa
     assert "libggml-cpu-haswell.so" in names        # winner: untouched name
     assert "_unused-libggml-cpu-alderlake.so" in names
     assert "_unused-libggml-cpu-zen4.so" in names
-    # The exact bug this module exists to prevent: after selection, ggml's own
-    # directory-scan pattern must find exactly ONE CPU-tier candidate.
+    # After selection, ggml's own directory-scan pattern finds exactly ONE
+    # CPU-tier candidate.
     assert [p.name for p in cbs._candidates(lib_dir)] == ["libggml-cpu-haswell.so"]
 
 

@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// PARITY-AUDIT-CLI-GUI-2026-08-19.md CLI-only gap #5: a model whose file was
-// moved read as "missing" in the CLI's own `localm list` with no GUI form at
-// all. The Models page now surfaces the same state and offers a relocate
-// control - this covers the row rendering and the button's fetch/toast wiring,
-// mirroring models-alias-toast.test.mjs's shape for the sibling alias control.
+// The Models page marks a model whose file has moved as missing and offers a
+// relocate control. Covers the row rendering and the button's fetch/toast wiring.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";

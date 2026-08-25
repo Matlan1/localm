@@ -1,5 +1,14 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""GET /v1/models must mark the active model, and remote_model_status must read that instead of data[0] (Antigravity-audit HIGH-4)."""
+"""GET /v1/models must mark the active model, and remote_model_status must read
+that instead of data[0] (Antigravity-audit HIGH-4).
+
+12e9f59 changed GET /v1/models from returning just the one live engine to
+returning EVERY registered model (sorted), with a per-model `loaded` flag but no
+"which one is active" marker. The pre-existing client probe remote_model_status
+still read data[0] as "the loaded model" - now the alphabetically-first
+REGISTERED model, regardless of what is loaded. `localm run <model>` attaching to
+a running server then chats with (and force-loads) the wrong model.
+"""
 
 from unittest.mock import MagicMock
 
@@ -55,11 +64,10 @@ def multi(monkeypatch):
     monkeypatch.setattr("localm.model_manager.get_model_info",
                         lambda name: (f"models/{name}.gguf", "hint"))
     monkeypatch.setattr("localm.model_manager.get_model_mmproj", lambda name: None)
-    # probe_double, not a bare lambda: #722's gate opts into return_status /
-    # deadline / wait_for_inflight on this exact path (vram_capacity -> vram_info),
-    # and a zero-arg double rejects those kwargs with a TypeError that 500s the
-    # chat-completion-driven load this file tests. Same conversion #722 applied
-    # across the ten other test files it touched; this file was the one it missed.
+    # probe_double, not a bare lambda: the gate on this path (vram_capacity ->
+    # vram_info) passes return_status / deadline / wait_for_inflight, and a
+    # zero-arg double rejects those kwargs with a TypeError that 500s the
+    # chat-completion-driven load this file tests.
     monkeypatch.setattr("localm.discover.vram_info",
                         probe_double({"free": 10 * 1024 ** 3,
                                       "total": 16 * 1024 ** 3}))
@@ -97,7 +105,8 @@ def _resp(payload):
 
 
 def test_remote_model_status_picks_loaded_not_first(monkeypatch):
-    """data[0] is the alphabetically-first REGISTERED model; the loaded one is later in the list. remote_model_status must return the loaded id."""
+    """data[0] is the alphabetically-first REGISTERED model; the loaded one is
+    later in the list. remote_model_status must return the loaded id."""
     payload = {"object": "list", "data": [
         {"id": "aaa-first", "loaded": False, "active": False},
         {"id": "zzz-loaded", "loaded": True, "active": True},

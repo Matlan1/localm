@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""SRV-4: a direct shutdown endpoint so the user can stop the server cleanly (rather than force-closing the window, which segfaults, or relying on a Ctrl+C that sometimes does nothing)."""
+"""SRV-4: a direct shutdown endpoint so the user can stop the server cleanly
+(rather than force-closing the window, which segfaults, or relying on a Ctrl+C
+that sometimes does nothing). The stop sequence unloads the model BEFORE exiting
+so the native context is freed cleanly."""
 
 import os
 
@@ -41,7 +44,14 @@ def test_do_shutdown_unloads_before_exit(monkeypatch):
 
 
 def test_do_shutdown_releases_embedder(monkeypatch):
-    """The shared embedder (localm.inference.embedder) is a separate lifecycle from _engines - it was previously never released on shutdown, leaking its native VRAM/RAM allocation past process teardown of the chat engine."""
+    """The shared embedder (localm.inference.embedder) is a separate lifecycle
+    from _engines - it was previously never released on shutdown, leaking its
+    native VRAM/RAM allocation past process teardown of the chat engine.
+
+    Released via release_for_exit(), NOT reset_embedder(): the latter takes the
+    embedder's load lock, which get_embedder() holds for a whole model load, so
+    a stop issued mid-load blocked here and never reached the teardown at all.
+    See tests/test_embedder_worker_reaped_on_exit.py for that full contract."""
     from localm.inference import embedder as emb
 
     def _fake_exit(code):
@@ -61,7 +71,8 @@ def test_do_shutdown_releases_embedder(monkeypatch):
 
 
 def test_do_shutdown_survives_embedder_release_failure(monkeypatch):
-    """A failing embedder release must not block shutdown (best-effort, same as the existing engine.unload() try/except in this exact function)."""
+    """A failing embedder release must not block shutdown (best-effort, same
+    as the existing engine.unload() try/except in this exact function)."""
     from localm.inference import embedder as emb
 
     order = []
@@ -74,9 +85,7 @@ def test_do_shutdown_survives_embedder_release_failure(monkeypatch):
         order.append(("exit", code))
         raise SystemExit(code)
 
-    # Patch the function the exit path ACTUALLY calls. Recording the attempt is
-    # what keeps this honest: patching a function the path no longer calls would
-    # leave the raise unfired and the test passing vacuously.
+    # Patch the function the exit path ACTUALLY calls, and record the attempt.
     monkeypatch.setattr(emb, "release_for_exit", _boom)
     monkeypatch.setattr(http_server, "_engine", None)
     monkeypatch.setattr(os, "_exit", _fake_exit)

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""HttpEngine (H3): the Engine-compatible client `localm run` uses to ATTACH to a running localm server's /v1 API instead of loading a second in-process model copy."""
+"""HttpEngine (H3): the Engine-compatible client `localm run` uses to ATTACH to a
+running localm server's /v1 API instead of loading a second in-process model copy."""
 
 import json
 from unittest.mock import MagicMock
@@ -43,7 +44,9 @@ def test_chat_stream_yields_tokens(monkeypatch):
 
 
 def _sse_reasoning(*deltas):
-    """A fake streaming response yielding raw delta dicts verbatim, so tests can mix `content` and `reasoning_content` fields per chunk like the real server's H4 reasoning/content split does."""
+    """A fake streaming response yielding raw delta dicts verbatim, so tests can
+    mix `content` and `reasoning_content` fields per chunk like the real server's
+    H4 reasoning/content split does."""
     lines = ["data: " + json.dumps({"choices": [{"delta": d}]}) for d in deltas]
     lines.append("data: [DONE]")
     r = MagicMock()
@@ -53,7 +56,11 @@ def _sse_reasoning(*deltas):
 
 
 def test_chat_stream_surfaces_reasoning_content(monkeypatch):
-    """AUD-HIGH-17: the server splits <think> reasoning into its own `reasoning_content` SSE field (H4); HttpEngine must re-wrap it in inline <think>...</think> markers (like the in-process Engine's raw stream) so cli/chat.py's ThinkSplitter/_ThinkPrinter dims it instead of silently dropping it in localm r..."""
+    """AUD-HIGH-17: the server splits <think> reasoning into its own
+    `reasoning_content` SSE field (H4); HttpEngine must re-wrap it in inline
+    <think>...</think> markers (like the in-process Engine's raw stream) so
+    cli/chat.py's ThinkSplitter/_ThinkPrinter dims it instead of silently
+    dropping it in localm run's default attach mode."""
     deltas = [
         {"reasoning_content": "because "},
         {"reasoning_content": "reasons"},
@@ -153,7 +160,11 @@ def test_remote_active_model(monkeypatch):
 
 
 def test_remote_model_status_distinguishes_no_model_from_cannot_read(monkeypatch):
-    """The bug: `localm run` attaching to a live, model-loaded server printed 'no model loaded' because /v1/models needs the models scope and a chat-scoped attach token gets a 403 - which the old code (returning None) could not tell apart from a genuinely model-less server. remote_model_status must disting..."""
+    """The bug: `localm run` attaching to a live, model-loaded server printed
+    'no model loaded' because /v1/models needs the models scope and a chat-scoped
+    attach token gets a 403 - which the old code (returning None) could not tell
+    apart from a genuinely model-less server. remote_model_status must distinguish
+    'empty' (server says none) from 'unknown' (we could not read it)."""
     def _resp(status, payload):
         m = MagicMock()
         m.status_code = status

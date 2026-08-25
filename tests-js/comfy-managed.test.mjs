@@ -1,15 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// S5 GUI-button slice: the managed-ComfyUI panel in Settings > Media - its own
-// compact box at the TOP of the Media section, ahead of the three per-plugin
-// (image/music/video) boxes. When no managed instance is installed it shows a
-// "Set up localm's own ComfyUI" button that POSTs /api/comfy/setup (dispatched
-// as a job, streamed). When one IS installed it shows "installed at <path>", the
-// S1 coexistence control (comfy_target - a core schema field with group="Media",
-// otherwise skipped from the flat form) with its own small Save, and a Remove
-// button that POSTs /api/comfy/remove. There used to be a second
-// managed_comfy_enabled toggle alongside comfy_target; it was retired (the two
-// were ANDed with no reachable state where they meaningfully disagreed) - see
-// localm/media/managed_comfy.py's module docstring.
+// The managed-ComfyUI panel in Settings > Media: a compact box at the top of the
+// Media section, ahead of the three per-plugin boxes. Not installed shows a Set-up
+// button POSTing /api/comfy/setup; installed shows "installed at <path>", the
+// comfy_target control with its own Save, and a Remove button POSTing
+// /api/comfy/remove.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadAppWithPages, runScript } from "./harness.mjs";
@@ -18,9 +12,7 @@ const SCHEMA = { fields: [
   { key: "comfy_workdir", widget: "folder", label: "ComfyUI folder", help: "",
     group: "Media", owner: "image", default: "/shared" },
 ]};
-// A schema that also carries the S1 coexistence field, for the tests that
-// exercise it specifically (kept separate from SCHEMA above so the minimal
-// no-target-field case - Remove must still render even then - stays covered).
+// SCHEMA plus the comfy_target coexistence field.
 const SCHEMA_WITH_TARGET = { fields: [
   ...SCHEMA.fields,
   { key: "comfy_target", widget: "select", label: "ComfyUI to use", help: "",
@@ -40,10 +32,7 @@ const NOT_INSTALLED = {
   installed: false, state: "not_installed", path: null, api_url: "http://127.0.0.1:8189",
   target: "own", managed_active: false,
 };
-// A checkout abandoned mid-setup (a crashed process, a closed tab) - the exact
-// dead end #653-follow-up fixed: is_managed_comfy_installed() correctly says
-// false, but the folder exists, so the OLD status response looked identical
-// to NOT_INSTALLED and Set-up would just hit the route's own 409.
+// A checkout abandoned mid-setup: not installed, but the folder exists.
 const CORRUPT = {
   installed: false, state: "corrupt", path: "/home/user/.localm/comfyui",
   api_url: "http://127.0.0.1:8189", target: "own", managed_active: false,
@@ -130,10 +119,6 @@ test("installed -> shows 'installed at <path>' + a Remove button, no Set-up butt
 });
 
 test("installed but comfy_target is 'user' -> the pill discloses generation is NOT using the managed instance", async () => {
-  // Conserve-mode review finding: managed_active was fetched into `st` but
-  // never read/displayed anywhere - a GUI-only user completing setup had no
-  // durable way to tell whether generation actually routes to the managed
-  // instance (the CLI's `comfy setup`/`comfy status` say so explicitly).
   const calls = [];
   const { window: win } = loadAppWithPages(
     { fetchImpl: makeFetch(calls, { installed: true, managedActive: false }) });
@@ -162,7 +147,7 @@ test("clicking Remove POSTs /api/comfy/remove", async () => {
   const calls = [];
   const { window: win } = loadAppWithPages({ fetchImpl: makeFetch(calls, { installed: true }) });
   await render(win);
-  // Remove is destructive: it goes through confirmDanger. Stub it to auto-confirm.
+  // Remove goes through confirmDanger; stub it to auto-confirm.
   runScript(win, "confirmDanger = (t, m, l, onConfirm) => onConfirm();");
   win.document.querySelector(".comfy-managed-remove-btn").onclick();
   await new Promise((r) => setTimeout(r, 0));
@@ -183,16 +168,15 @@ test("installed + target field in schema -> the coexistence control renders insi
   const targetCtrl = box.querySelector('select[data-key="comfy_target"]');
   assert.ok(targetCtrl, "comfy_target control renders inside the top box");
 
-  // "its own little thing on the top": the compact box precedes the three-mode
-  // grid in DOM order, not after it.
+  // The compact box precedes the three-mode grid in DOM order.
   const grid = doc.querySelector("#settings-sec-media .media-grid");
   assert.ok(grid, "the three-mode grid exists");
   const pos = box.compareDocumentPosition(grid);
   assert.ok(pos & win.Node.DOCUMENT_POSITION_FOLLOWING,
     "the comfy box comes before the media grid in the DOM");
 
-  // The top box also has its own Save button (distinct from the per-plugin
-  // ".media-save" buttons and the Remove button).
+  // The top box has its own Save button, distinct from the per-plugin
+  // ".media-save" buttons and the Remove button.
   const saveButtons = [...box.querySelectorAll(".actions button")]
     .filter((b) => b.textContent === "Save");
   assert.equal(saveButtons.length, 1, "the top box has exactly one Save button");
@@ -223,12 +207,6 @@ test("changing comfy_target and clicking the top box's Save PATCHes /v1/config w
   assert.equal(Object.keys(body).length, 1, "exactly this one key is sent, nothing else");
 });
 
-// #653-follow-up: state="corrupt" (an abandoned setup attempt, is_managed_
-// comfy_installed()=false but the checkout dir exists) used to be visually
-// IDENTICAL to state="not_installed" - a Set-up button that would just 409
-// "already exists", with no Remove button either (that only ever appears when
-// installed=true) - a genuine dead end reachable only via the CLI.
-
 test("corrupt -> a Repair button renders, not Set-up or Remove", async () => {
   const calls = [];
   const { window: win } = loadAppWithPages({ fetchImpl: makeFetch(calls, { state: "corrupt" }) });
@@ -249,7 +227,7 @@ test("clicking Repair confirms, then POSTs /api/comfy/repair", async () => {
   const calls = [];
   const { window: win } = loadAppWithPages({ fetchImpl: makeFetch(calls, { state: "corrupt" }) });
   await render(win);
-  // Repair clears a folder, so it goes through confirmDanger like Remove does.
+  // Repair goes through confirmDanger; stub it to auto-confirm.
   runScript(win, "confirmDanger = (t, m, l, onConfirm) => onConfirm();");
   win.document.querySelector(".comfy-managed-repair-btn").onclick();
   await new Promise((r) => setTimeout(r, 0));
@@ -295,24 +273,9 @@ test("installing -> no action button, no dead 409-bound Set-up click available",
     + "very tab after a navigate-away-and-back losing its local job id");
 });
 
-// #1332 follow-up: the panel used to show a static "please wait" for an
-// "installing" state with no way to tell it apart from a genuinely stuck job -
-// reported live when switching Settings tabs away and back showed the exact
-// same message with no progress, indistinguishable from a hang. ADR-0008's
-// /api/activity is the one route that finds a running job without already
-// holding its id; the panel should use it to re-attach a live log, exactly
-// like the Setup button's own click flow does for a job it started itself.
-
-// NOTE: these two tests need a custom streamJob stub in effect for the very
-// FIRST render (the "installing" panel attaches during renderManagedComfyPanel
-// itself, not from a later click), so they cannot use the shared render()
-// helper above - render() unconditionally re-stubs streamJob to its own
-// Promise.resolve({status:"done"}) default immediately before calling
-// refreshSettingsPage(), which would silently clobber a stub set beforehand.
-// (First version of this test did exactly that: the clobbered default made
-// streamJob resolve instantly, and since the mocked managed-status never
-// leaves "installing", the fix's own "re-render on success" then recursed
-// forever - a real infinite loop caught by CPU time, not a settings.js bug.)
+// The "installing" panel attaches its stream during renderManagedComfyPanel itself,
+// so streamJob must already be stubbed on the first render. render() re-stubs
+// streamJob and would clobber that, so these tests render through this helper.
 async function renderNoStreamStub(win) {
   runScript(win, "refreshSettingsPage();");
   for (let i = 0; i < 16; i++) await new Promise((r) => setTimeout(r, 0));
@@ -348,10 +311,7 @@ test("installing -> when the job later finishes, the panel re-renders into the i
   const calls = [];
   const activityOp = { id: "job-reattach-2", kind: "comfy-setup", status: "running",
     label: "ComfyUI setup", created_at: 1000 };
-  // Flips true from INSIDE the streamJob stub, at the moment it resolves -
-  // not before render() starts - so the test actually exercises "state was
-  // installing at attach time, then flips once the job ends", rather than
-  // starting already-installed and never touching the reattach path at all.
+  // Flipped from inside the streamJob stub, at the moment it resolves.
   let installedNow = false;
   const fetchImpl = async (url, opts = {}) => {
     const u = String(url);
@@ -388,18 +348,13 @@ test("installing -> /api/activity finds no matching job (e.g. owned by another k
   await render(win);
   const panel = win.document.querySelector(".media-comfy-box");
   assert.match(panel.textContent, /not available/i);
-  // Must NOT keep re-fetching forever - state stays "installing" every time,
-  // so a recursive re-render here would be an unbounded loop.
   const statusCalls = calls.filter((c) => c.url === "/api/comfy/managed-status").length;
   assert.ok(statusCalls <= 1, `must not loop re-checking status: saw ${statusCalls} calls`);
 });
 
 // --------------------------------------------------------------------------- //
-//  Update: the action the GUI never had                                        //
+//  Update                                                                      //
 // --------------------------------------------------------------------------- //
-// The panel offered Set up / Repair / Remove and no Update, while the CLI had
-// `localm comfy update` all along - so a GUI-only user could install a managed
-// ComfyUI and never move it off the pin they installed on.
 
 const UPDATE_DUE = {
   pinned_commit: "fe4195f7", pinned_version: "v0.31.1",
@@ -447,8 +402,6 @@ test("ticking the dependencies box forwards reinstall_requirements", async () =>
             + "checkout without them: " + post.url);
 });
 
-// S8 (PARITY-AUDIT-CLI-GUI-2026-08-19 #17): `localm comfy update --commit` was
-// CLI-only. The GUI's field is the "same shape as the checkbox already there".
 test("typing a commit forwards it to the update route", async () => {
   const calls = [];
   const { window: win } = loadAppWithPages({
@@ -477,8 +430,6 @@ test("leaving the commit field blank omits it (falls back to the shipped pin)", 
 });
 
 test("a non-git install -> Update is disabled and the REASON is visible text", async () => {
-  // The whole point of surfacing this in the GUI: a disabled button with the
-  // explanation only in a hover title is still an opaque dead end.
   const reason = "This managed ComfyUI has no git history (it was installed via the "
     + "non-git copy fallback), so a pinned-version update is not possible. Remove it "
     + "and set it up again to move to the version localm ships.";
@@ -524,15 +475,11 @@ test("already at the shipped pin -> says up to date, Update still available", as
 });
 
 test("a failed update shows the job's OWN reason as page text, not just 'update failed'", async () => {
-  // update_managed_comfy distinguishes states a user must be able to tell apart:
-  // rolled back cleanly, rolled back but the patch re-apply failed, and the rollback
-  // ITSELF failed (a genuinely mixed install). Rendering all of them as "update
-  // failed" swallows exactly the distinction that module goes to trouble to make.
   const calls = [];
   const { window: win } = loadAppWithPages({
     fetchImpl: makeFetch(calls, { installed: true, statusExtra: UPDATE_DUE }) });
   await render(win);
-  // A failing job whose output is the long, WRAPPED rollback-also-failed message.
+  // A failing job whose output is the wrapped rollback-also-failed message.
   runScript(win, `streamJob = (id, onLine) => {
     onLine("Fetching ComfyUI updates ...");
     onLine("The rollback to 8f40b43e0204 ALSO failed (fatal: bad object); the");
@@ -545,8 +492,6 @@ test("a failed update shows the job's OWN reason as page text, not just 'update 
 
   const err = win.document.querySelector(".comfy-managed-update-error");
   assert.ok(err, "a failure must render its reason on the page");
-  // The TAIL, not just the final line: the last line alone is the fragment
-  // "'localm comfy remove' then 'localm comfy setup'." with the actual cause lost.
   assert.ok(err.textContent.includes("ALSO failed"),
             "the real cause must survive the console's line wrapping: " + err.textContent);
   assert.ok(err.textContent.includes("mixed state"), err.textContent);
@@ -573,11 +518,6 @@ test("a retried update does not stack the previous failure's reason", async () =
 // --------------------------------------------------------------------------- //
 //  "Still working" indicator: spinner + elapsed readout while a job runs      //
 // --------------------------------------------------------------------------- //
-// A long silent stretch in the streamed log (a large git clone, a slow pip
-// install, a multi-GB download with no per-line progress) used to look
-// identical to a hung job - the disabled button and a static log gave no
-// "still alive" signal. Covers both ways a job can be in flight: a fresh
-// click, and the reattach-after-reload path exercised above (INSTALLING).
 
 test("Set up: a spinner and elapsed readout appear on the button while the job runs", async () => {
   const calls = [];
@@ -625,9 +565,8 @@ test("Set up: a successful job leaves no spinner or elapsed readout behind (pane
   };
   const { window: win } = loadAppWithPages({ fetchImpl });
   win.__markInstalled = () => { installedNow = true; };
-  await render(win);   // render() always resets streamJob to its own default stub -
-  // set the custom one AFTER, or it gets clobbered right back (see the big
-  // comment above renderNoStreamStub explaining exactly this gotcha).
+  // render() resets streamJob to its default stub, so the custom one is set after it.
+  await render(win);
   runScript(win, `streamJob = () => { window.__markInstalled(); return Promise.resolve({ status: "done" }); };`);
   win.document.querySelector(".comfy-managed-setup-btn").onclick();
   for (let i = 0; i < 8; i++) await new Promise((r) => setTimeout(r, 0));
@@ -689,9 +628,7 @@ test("Repair: the spinner is removed once a failed repair resolves", async () =>
 });
 
 test("Reattach to an in-progress setup (installing state): a spinner appears next to the status pill", async () => {
-  // No button exists in the "installing" reattach state (see the test above
-  // asserting exactly that), so the indicator must anchor somewhere else -
-  // the status pill - rather than silently not showing at all.
+  // There is no button in the "installing" state, so the indicator anchors to the pill.
   const calls = [];
   const activityOp = { id: "job-reattach-spinner", kind: "comfy-setup", status: "running",
     label: "ComfyUI setup", created_at: 1000 };

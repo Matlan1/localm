@@ -3,14 +3,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadAppWithPages, runScript } from "./harness.mjs";
 
-// Settings -> Owner key (settings.js refreshOwnerKeyPanel): the GUI form of
-// `localm key generate` / `localm key set`, over POST /api/auth/key/rotate.
-//
-// The load-bearing test in this file is the rotated:false one. The server answers 200
-// with rotated:false when the key reached disk but is NOT the credential it accepts
-// (LOCALM_API_KEY outranks the stored key). A UI that reads only the status code would
-// tell someone rotating a LEAKED key that the leaked one was dead. Everything else here
-// is ordinary wiring.
+// Settings -> Owner key (settings.js refreshOwnerKeyPanel), over
+// POST /api/auth/key/rotate.
 
 const tick = () => new Promise((r) => setTimeout(r, 50));
 
@@ -35,8 +29,7 @@ function router(routes) {
 
 const OWNER = { status: 200, body: { keys: [], is_owner: true, presets: [] } };
 
-// Rotation is destructive to other devices, so both buttons go through confirmDanger.
-// Auto-confirm it, exactly as the comfy-managed tests do for Remove/Repair.
+// both buttons go through confirmDanger; auto-confirm it
 const autoConfirm = (win) =>
   runScript(win, "confirmDanger = (t, m, l, onConfirm) => onConfirm();");
 
@@ -66,8 +59,7 @@ test("owner key: card hides when /v1/keys is forbidden", async () => {
 });
 
 test("owner key: card hides for a keys:admin device that is not the owner", async () => {
-  // /v1/keys answers 200 for a keys:admin key, so the 403 case above does not cover
-  // this one - is_owner is the discriminator, and rotation is owner-only.
+  // /v1/keys answers 200 for a keys:admin key; is_owner is the discriminator
   const { window } = loadAppWithPages({
     fetchImpl: router({
       "GET /v1/keys": () => ({ status: 200, body: { keys: [], is_owner: false } }),
@@ -132,8 +124,8 @@ test("owner key: Set posts the pasted key", async () => {
 });
 
 test("owner key: Set with an empty box does not call the server", async () => {
-  // An empty value makes the SERVER generate a random key, which is not what someone
-  // pressing "Set this key" asked for. The client refuses before it gets there.
+  // an empty value would make the server generate a random key; the client
+  // refuses before it gets there
   let calls = 0;
   const win = await ownerPanel({
     "POST /api/auth/key/rotate": () => {
@@ -152,7 +144,7 @@ test("owner key: Set with an empty box does not call the server", async () => {
 });
 
 test("owner key: rotated:false is NOT reported as a completed rotation", async () => {
-  // THE ONE THAT MATTERS. 200 + rotated:false = written to disk, not in effect.
+  // 200 + rotated:false = written to disk, not in effect
   const warning = "LOCALM_API_KEY is set in the server's environment and overrides "
     + "the stored key, so the server still accepts the environment's key.";
   const win = await ownerPanel({
@@ -175,7 +167,6 @@ test("owner key: rotated:false is NOT reported as a completed rotation", async (
   assert.match(box.textContent, /LOCALM_API_KEY/,
     "and WHY, which only the server's warning can say");
   assert.ok(box.querySelector(".key-warn"), "the warning is styled as a warning");
-  // The toast is the part a user actually reads, so it carries the same weight.
   const msgs = t.all();
   assert.ok(msgs.length, "a rotation that did not take must still say something");
   assert.ok(msgs.every((x) => !/updated/i.test(x.msg)),

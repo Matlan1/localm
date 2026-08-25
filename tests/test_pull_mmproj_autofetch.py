@@ -1,5 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""#957: a GUI/MCP pull of a vision GGUF had no way to pass --mmproj, so the projector was never fetched and the model downloaded silently unable to see an image. _pull_gguf_file now checks the HF repo's OWN file listing for an mmproj sibling at pull time (free metadata call) and, when found, fetches a..."""
+"""#957: a GUI/MCP pull of a vision GGUF had no way to pass --mmproj, so the
+projector was never fetched and the model downloaded silently unable to see
+an image. _pull_gguf_file now checks the HF repo's OWN file listing for an
+mmproj sibling at pull time (free metadata call) and, when found, fetches and
+records it on the registry entry - no CLI flag required. An explicit --mmproj
+(mmproj_spec) still wins when given (never silently override a user choice).
+"""
 
 import struct
 from pathlib import Path
@@ -11,8 +17,8 @@ from localm import model_manager as mm
 
 
 # ---------------------------------------------------------------------------
-# Minimal-but-structurally-valid GGUF bytes, same layout _gguf_metadata_probe
-# parses (mirrors tests/test_model_type_detection.py::_build_gguf_bytes).
+# Minimal-but-structurally-valid GGUF bytes, the same layout
+# _gguf_metadata_probe parses.
 # ---------------------------------------------------------------------------
 
 def _gguf_bytes(architecture: str) -> bytes:
@@ -38,7 +44,8 @@ _CLIP_BYTES = _gguf_bytes("clip")
 
 @pytest.fixture()
 def fake_registry(tmp_path, monkeypatch):
-    """In-memory registry + temp MODELS_DIR wired into model_manager (mirrors test_model_manager_phase3.py's fixture of the same name)."""
+    """In-memory registry + temp MODELS_DIR wired into model_manager (mirrors
+    test_model_manager_phase3.py's fixture of the same name)."""
     store: dict = {}
     models_dir = tmp_path / "models"
     models_dir.mkdir()
@@ -110,7 +117,9 @@ class TestAutoDetectSingleCandidate:
 
     def test_already_downloaded_branch_also_attaches_mmproj(
             self, fake_registry, monkeypatch):
-        """The fast 'Already downloaded' path must get the same treatment as a fresh download - otherwise a re-pull of an already-present vision GGUF never picks up its projector."""
+        """The fast 'Already downloaded' path must get the same treatment as a
+        fresh download - otherwise a re-pull of an already-present vision GGUF
+        never picks up its projector."""
         store, models_dir = fake_registry
         (models_dir / "main.gguf").write_bytes(_LLM_BYTES)
         _wire_repo_listing(monkeypatch, ["main.gguf", "mmproj-main-f16.gguf"])
@@ -138,7 +147,11 @@ class TestNoCandidate:
 
     def test_listing_api_failure_is_silent_not_a_false_negative(
             self, fake_registry, monkeypatch, capsys):
-        """A repo-listing FAILURE (network hiccup, HF API error) must never be read as 'this repo has no projector' - that would print a false 'no vision projector found' note on an unmeasured premise."""
+        """A repo-listing FAILURE (network hiccup, HF API error) must never be
+        read as 'this repo has no projector' - that would print a false 'no
+        vision projector found' note on an unmeasured premise. Distinguishing
+        the two matters even though the functional outcome (no auto-fetch) is
+        the same either way."""
         store, _ = fake_registry
 
         class _FailingHfApi:
@@ -189,7 +202,11 @@ class TestAmbiguousMultipleCandidates:
         assert store["modelA"]["mmproj"] == str((models_dir / "mmproj-modelA-f16.gguf").resolve())
 
     def test_unresolvable_ambiguity_falls_back_to_f16(self, fake_registry, monkeypatch):
-        """Both candidates share the model's own leading token (same-repo quant variants of the SAME projector), so the stem heuristic alone can't narrow it - unlike a cross-model directory glob, every candidate here is already scoped to the one repo being pulled, so we pick deterministically (prefer f16) inst..."""
+        """Both candidates share the model's own leading token (same-repo
+        quant variants of the SAME projector), so the stem heuristic alone
+        can't narrow it - unlike a cross-model directory glob, every
+        candidate here is already scoped to the one repo being pulled, so we
+        pick deterministically (prefer f16) instead of giving up."""
         store, models_dir = fake_registry
         _wire_repo_listing(monkeypatch, [
             "main.gguf", "mmproj-main-f16.gguf", "mmproj-main-q8_0.gguf"])
@@ -205,7 +222,10 @@ class TestAmbiguousMultipleCandidates:
 
 
 class TestTraversalGuardOnRepoListing:
-    """The repo file listing is REMOTE, untrusted input (a malicious/compromised repo could list anything)."""
+    """The repo file listing is REMOTE, untrusted input (a malicious/compromised
+    repo could list anything). A candidate must be confined the same way an
+    explicit --mmproj filename already is (GAP-CLI-2) - filtered out before it
+    is even considered, not merely rejected after being picked."""
 
     def test_unsafe_candidate_is_filtered_before_picking(
             self, fake_registry, monkeypatch):
@@ -239,7 +259,9 @@ class TestTraversalGuardOnRepoListing:
 
 
 class TestBareExplicitMmprojSpecRejectedCleanly:
-    """A --mmproj value with no 'owner/repo' at all (just a bare filename) must be refused with the clean message, never an IndexError from the rsplit('/', 1) parse (that value has no '/' to split on)."""
+    """A --mmproj value with no 'owner/repo' at all (just a bare filename) must
+    be refused with the clean message, never an IndexError from the
+    rsplit('/', 1) parse (that value has no '/' to split on)."""
 
     def test_bare_filename_mmproj_spec_does_not_crash(
             self, fake_registry, monkeypatch, capsys):
@@ -256,11 +278,15 @@ class TestBareExplicitMmprojSpecRejectedCleanly:
 
 
 class TestAmbiguityNeverCrossAttaches:
-    """_pick_best_of_same_repo_mmprojs's 'same repo, near-certainly the same projector' trust assumption only holds once a candidate is already known to be about THIS model."""
+    """_pick_best_of_same_repo_mmprojs's 'same repo, near-certainly the same
+    projector' trust assumption only holds once a candidate is already known
+    to be about THIS model. Candidates that share no relation to the model's
+    own name at all must never be guessed among."""
 
     def test_completely_unrelated_candidates_stay_unattached(
             self, fake_registry, monkeypatch):
-        """Neither candidate's name has anything to do with 'main' - a repo listing two unrelated models' projectors must not resolve to either."""
+        """Neither candidate's name has anything to do with 'main' - a repo
+        listing two unrelated models' projectors must not resolve to either."""
         store, _ = fake_registry
         _wire_repo_listing(monkeypatch, [
             "main.gguf", "mmproj-alpha-f16.gguf", "mmproj-beta-f16.gguf"])
@@ -277,7 +303,10 @@ class TestAmbiguityNeverCrossAttaches:
 
 class TestVerificationRejectsBadCandidate:
     def test_non_clip_candidate_is_not_attached(self, fake_registry, monkeypatch, capsys):
-        """The filename match ('mmproj' substring) is only a heuristic - the downloaded bytes must pass the real GGUF-metadata check (gguf_is_mmproj) before being attached, or a bad file could silently become the model's projector."""
+        """The filename match ('mmproj' substring) is only a heuristic - the
+        downloaded bytes must pass the real GGUF-metadata check
+        (gguf_is_mmproj) before being attached, or a bad file could silently
+        become the model's projector."""
         store, models_dir = fake_registry
         _wire_repo_listing(monkeypatch, ["main.gguf", "mmproj-fake.gguf"])
         _wire_download(monkeypatch, {"mmproj-fake.gguf": _LLM_BYTES})  # NOT clip
@@ -292,7 +321,8 @@ class TestVerificationRejectsBadCandidate:
 
 class TestSkippedScopes:
     def test_pulling_a_projector_itself_never_recurses(self, fake_registry, monkeypatch):
-        """A file whose own name contains 'mmproj' must not trigger a search for ITS OWN companion projector."""
+        """A file whose own name contains 'mmproj' must not trigger a search
+        for ITS OWN companion projector."""
         store, _ = fake_registry
         list_spy = MagicMock(side_effect=AssertionError("must not be called"))
 
@@ -311,7 +341,8 @@ class TestSkippedScopes:
         list_spy.assert_not_called()
 
     def test_dest_dir_skips_autodetect(self, fake_registry, tmp_path, monkeypatch):
-        """A ComfyUI-style dest_dir pull is not one of localm's own chat models - never spend a network call looking for a projector."""
+        """A ComfyUI-style dest_dir pull is not one of localm's own chat
+        models - never spend a network call looking for a projector."""
         store, _ = fake_registry
         list_spy = MagicMock(side_effect=AssertionError("must not be called"))
 
@@ -353,7 +384,9 @@ class TestSkippedScopes:
 class TestExplicitMmprojWins:
     def test_explicit_mmproj_overrides_autodetected_sibling(
             self, fake_registry, monkeypatch):
-        """The repo being pulled DOES ship its own mmproj sibling, but the user explicitly named a different one via --mmproj - the explicit choice must win, never be silently replaced by auto-detection."""
+        """The repo being pulled DOES ship its own mmproj sibling, but the
+        user explicitly named a different one via --mmproj - the explicit
+        choice must win, never be silently replaced by auto-detection."""
         store, models_dir = fake_registry
         _wire_repo_listing(monkeypatch, ["main.gguf", "mmproj-main-f16.gguf"])
         _wire_download(monkeypatch, {
@@ -380,7 +413,16 @@ class TestExplicitMmprojWins:
 
 
 class TestSyncModelsDirBackfillsExistingEntry:
-    """#957: an entry pulled BEFORE the auto-attach fix (or on a build that predates it) already exists in the registry with no mmproj key - a re-pull is explicitly NOT an acceptable fix (maintainer's ruling: 'an already pulled vision model must work just as a freshly pulled one, no half measures'). sync_m..."""
+    """#957: an entry pulled BEFORE the auto-attach fix (or on a build that
+    predates it) already exists in the registry with no mmproj key - a
+    re-pull is explicitly NOT an acceptable fix (maintainer's ruling: "an
+    already pulled vision model must work just as a freshly pulled one, no
+    half measures"). sync_models_dir must notice and backfill it on its own,
+    using the source the entry already recorded - the exact case
+    test_already_downloaded_branch_also_attaches_mmproj (above) does NOT
+    cover, because that test starts from an EMPTY registry and calls
+    _pull_gguf_file (a re-pull) rather than starting from an ALREADY-
+    REGISTERED entry and calling sync_models_dir (no pull at all)."""
 
     def _preexisting_entry(self, store, models_dir, name="main", source="hf:o/r"):
         (models_dir / f"{name}.gguf").write_bytes(_LLM_BYTES)
@@ -406,7 +448,10 @@ class TestSyncModelsDirBackfillsExistingEntry:
 
     def test_entry_already_carrying_mmproj_is_never_re_fetched(
             self, fake_registry, monkeypatch):
-        """An entry with mmproj already recorded (even resolved-empty in some odd past state) must never be re-queried - matches the architecture/ expert_count backfill's own 'key present, even falsy, means resolved' rule two blocks up."""
+        """An entry with mmproj already recorded (even resolved-empty in some
+        odd past state) must never be re-queried - matches the architecture/
+        expert_count backfill's own 'key present, even falsy, means resolved'
+        rule two blocks up."""
         store, models_dir = fake_registry
         self._preexisting_entry(store, models_dir)
         store["main"]["mmproj"] = str(models_dir / "already-set.gguf")
@@ -431,14 +476,19 @@ class TestSyncModelsDirBackfillsExistingEntry:
 
     def test_repo_genuinely_has_no_projector_is_not_counted_as_backfilled(
             self, fake_registry, monkeypatch):
-        """A repo that was actually checked (net_mode allowed it) but has no mmproj sibling at all is the legitimate silent case - distinct from net_mode blocking the check. `mmproj_backfilled` counts SUCCESSFUL attaches only: this attempt found nothing, wrote nothing to the registry, so it must not be counted..."""
+        """A repo that was actually checked (net_mode allowed it) but has no
+        mmproj sibling at all is the legitimate silent case - distinct from
+        net_mode blocking the check. `mmproj_backfilled` counts SUCCESSFUL
+        attaches only: this attempt found nothing, wrote nothing to the
+        registry, so it must not be counted, and `changed` must stay False -
+        a no-op reconciliation pass must not report itself as having
+        changed anything."""
         store, models_dir = fake_registry
         self._preexisting_entry(store, models_dir)
-        # Pre-set architecture/expert_count so the UNRELATED F8-PERSIST-ARCH-
-        # AND-EXPERT-COUNT backfill (registry.py, right above this one) does
-        # not also fire on this entry and set `backfilled` - that would make
-        # `changed` True for a reason that has nothing to do with mmproj,
-        # muddying exactly the signal this test exists to isolate.
+        # Pre-set architecture/expert_count so the unrelated architecture and
+        # expert-count backfill does not also fire on this entry and set
+        # `backfilled`, which would make `changed` True for a reason unrelated
+        # to mmproj.
         store["main"]["architecture"] = "llama"
         store["main"]["expert_count"] = 0
         _wire_repo_listing(monkeypatch, ["main.gguf"])  # no mmproj sibling
@@ -452,7 +502,13 @@ class TestSyncModelsDirBackfillsExistingEntry:
 
     def test_out_of_directory_result_is_refused_not_attached(
             self, fake_registry, monkeypatch, tmp_path):
-        """Defense in depth: backfill_mmproj_for_entry's own result already passed a traversal guard in pull.py (_safe_models_filename, several call-frames away), but sync_models_dir re-verifies locally, at the exact point an HF-repo-derived path is written into the registry, rather than trusting a distant cal..."""
+        """Defense in depth: backfill_mmproj_for_entry's own result already
+        passed a traversal guard in pull.py (_safe_models_filename, several
+        call-frames away), but sync_models_dir re-verifies locally, at the
+        exact point an HF-repo-derived path is written into the registry,
+        rather than trusting a distant caller unconditionally. A result
+        outside the model's own directory (simulating a bug or a
+        compromised/unexpected return) must be refused, not attached."""
         store, models_dir = fake_registry
         self._preexisting_entry(store, models_dir)
         outside = tmp_path / "elsewhere" / "evil.gguf"
@@ -469,7 +525,8 @@ class TestSyncModelsDirBackfillsExistingEntry:
         assert result.mmproj_backfilled == 0
 
     def test_non_hf_source_is_never_a_candidate(self, fake_registry, monkeypatch):
-        """A locally-added model (source='local' or similar) has no repo to even check - must not crash or attempt a listing."""
+        """A locally-added model (source='local' or similar) has no repo to
+        even check - must not crash or attempt a listing."""
         store, models_dir = fake_registry
         self._preexisting_entry(store, models_dir, source="local")
         called = []
@@ -493,7 +550,9 @@ class TestSyncModelsDirBackfillsExistingEntry:
 
     def test_net_mode_off_blocks_the_fetch_and_names_the_model_precisely(
             self, fake_registry, monkeypatch):
-        """The ONE case that must be loud: net_mode=off blocks the check, and the resulting note names the model and net_mode by name - never collapsed with the silent 'looked and found nothing' outcome."""
+        """The ONE case that must be loud: net_mode=off blocks the check, and
+        the resulting note names the model and net_mode by name - never
+        collapsed with the silent 'looked and found nothing' outcome."""
         store, models_dir = fake_registry
         self._preexisting_entry(store, models_dir)
         called = []
@@ -520,7 +579,10 @@ class TestSyncModelsDirBackfillsExistingEntry:
 
     def test_net_mode_ask_still_backfills_no_half_measure_behind_a_setting(
             self, fake_registry, monkeypatch):
-        """The maintainer's ruling ('no half measures') must hold under the DEFAULT net_mode ('ask'), not only for installs that separately opted into net_mode=allow - matching _pull_gguf_file's own net_mode gate for this identical operation on an explicit pull."""
+        """The maintainer's ruling ("no half measures") must hold under the
+        DEFAULT net_mode ("ask"), not only for installs that separately opted
+        into net_mode=allow - matching _pull_gguf_file's own net_mode gate for
+        this identical operation on an explicit pull."""
         store, models_dir = fake_registry
         self._preexisting_entry(store, models_dir)
         _wire_repo_listing(monkeypatch, ["main.gguf", "mmproj-main-f16.gguf"])

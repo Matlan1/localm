@@ -1,5 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Low-level ctypes bindings for the llama.cpp C API."""
+"""
+Low-level ctypes bindings for the llama.cpp C API.
+
+All functions are bound lazily on first access via the module-level ``lib``
+property so the DLL is not loaded until something actually imports this module.
+
+Naming convention mirrors the C API exactly (llama_xyz → llama_xyz).
+"""
 
 from __future__ import annotations
 
@@ -16,13 +23,25 @@ from ._structs import (
 
 
 def _model_params_class():
-    """The ``llama_model_params`` ctypes class matching the LOADED runtime."""
+    """The ``llama_model_params`` ctypes class matching the LOADED runtime.
+
+    upstream reordered that struct in place at an unchanged 72-byte size (see
+    ``_structs``' docstring), so the class cannot be a module constant - it is
+    a property of whichever library got loaded. Resolved once per process by
+    ``_abi.model_params_layout``; imported lazily to keep the
+    ``_api -> _abi -> _loader`` import order acyclic."""
     from ._abi import model_params_class, model_params_layout
     return model_params_class(model_params_layout())
 
 
 def _context_params_class():
-    """The ``llama_context_params`` ctypes class matching the LOADED runtime."""
+    """The ``llama_context_params`` ctypes class matching the LOADED runtime.
+
+    upstream inserted a new field (``n_outputs_max_per_seq``) partway through
+    that struct (see ``_structs``' docstring), so - same reasoning as
+    ``_model_params_class`` above - the class cannot be a module constant.
+    Resolved once per process by ``_abi.context_params_layout``; imported
+    lazily to keep the ``_api -> _abi -> _loader`` import order acyclic."""
     from ._abi import context_params_class, context_params_layout
     return context_params_class(context_params_layout())
 
@@ -59,13 +78,26 @@ def llama_backend_free() -> None:
 # ---------------------------------------------------------------------------
 
 def llama_model_default_params():
-    """Native default model params, as an instance of the LOADED build's layout."""
+    """Native default model params, as an instance of the LOADED build's layout.
+
+    The concrete class is ``LlamaModelParamsV1`` or ``...V2`` - callers must not
+    assume either. Fields present in both (``n_gpu_layers``, ``split_mode``,
+    ``main_gpu``, ``tensor_split``, ``tensor_buft_overrides``, ...) can be set
+    directly; for mmap use ``_structs.set_use_mmap``, which is the one field
+    with no V2 counterpart."""
     fn = _bind("llama_model_default_params", _model_params_class())
     return fn()
 
 
 def llama_context_default_params():
-    """Native default context params, as an instance of the LOADED build's layout."""
+    """Native default context params, as an instance of the LOADED build's
+    layout. The concrete class is ``LlamaContextParamsV1`` or ``...V2`` -
+    callers must not assume either (same contract as
+    ``llama_model_default_params`` above). Every field this codebase sets or
+    reads (``n_ctx``, ``n_batch``, ``rope_scaling_type``, ``type_k``, ...) is
+    named identically in both, since the V1/V2 split is a single INSERTED
+    field (``n_outputs_max_per_seq``), not a rename or reorder of anything
+    already in use - see ``_structs``' docstring."""
     fn = _bind("llama_context_default_params", _context_params_class())
     return fn()
 
@@ -169,13 +201,23 @@ def llama_model_n_layer(model: ctypes.c_void_p) -> int:
 
 
 def has_model_meta_api() -> bool:
-    """True when this llama.dll exports the GGUF metadata reader, so a caller can ask what a model DECLARES about itself (e.g. its trained pooling type) before creating a context."""
+    """True when this llama.dll exports the GGUF metadata reader, so a caller can
+    ask what a model DECLARES about itself (e.g. its trained pooling type) before
+    creating a context. Every current build exports it (probed on the shipped
+    runtime); the guard lets an exotic stripped build degrade instead of raising
+    AttributeError - same pattern as has_kv_head_api()/has_memory_api()."""
     lib = load_lib()
     return hasattr(lib, "llama_model_meta_val_str")
 
 
 def llama_model_meta_val_str(model: ctypes.c_void_p, key: str) -> Optional[str]:
-    """Value of GGUF metadata *key* as a string, or None when the key is absent or unreadable."""
+    """Value of GGUF metadata *key* as a string, or None when the key is absent
+    or unreadable. Only call after has_model_meta_api().
+
+    A missing key is a NORMAL answer, not a failure: most GGUFs declare only a
+    subset of keys (verified 2026-07-15 - bge-small declares bert.pooling_type,
+    a Qwen2.5 chat GGUF declares no pooling key at all), so the caller must
+    distinguish "not declared" (None) from a declared value."""
     fn = _bind("llama_model_meta_val_str", ctypes.c_int32, LlamaModel,
                ctypes.c_char_p, ctypes.c_char_p, ctypes.c_size_t)
     buf = ctypes.create_string_buffer(256)
@@ -186,36 +228,59 @@ def llama_model_meta_val_str(model: ctypes.c_void_p, key: str) -> Optional[str]:
 
 
 def has_kv_head_api() -> bool:
-    """True when this llama.dll exports llama_model_n_head + llama_model_n_head_kv, so the KV-cache size per token can be computed EXACTLY from the model's attention shape (heads x head_dim x layers) instead of estimated from file size."""
+    """True when this llama.dll exports llama_model_n_head + llama_model_n_head_kv,
+    so the KV-cache size per token can be computed EXACTLY from the model's
+    attention shape (heads x head_dim x layers) instead of estimated from file
+    size. Every current build exports them (probed on the shipped cpu / vulkan /
+    amd-rocm runtimes); the guard lets an exotic stripped build fall back to the
+    size-class heuristic instead of raising AttributeError - same pattern as
+    has_memory_api()/has_penalties_sampler()."""
     lib = load_lib()
     return all(hasattr(lib, fn)
                for fn in ("llama_model_n_head", "llama_model_n_head_kv"))
 
 
 def llama_model_n_head(model: ctypes.c_void_p) -> int:
-    """Number of attention (query) heads."""
+    """Number of attention (query) heads. Only call after has_kv_head_api()."""
     return _bind("llama_model_n_head", ctypes.c_int32, LlamaModel)(model)
 
 
 def llama_model_n_head_kv(model: ctypes.c_void_p) -> int:
-    """Number of key/value heads - fewer than n_head under grouped-query attention, which is exactly what makes the KV cache smaller than a naive n_head estimate."""
+    """Number of key/value heads - fewer than n_head under grouped-query
+    attention, which is exactly what makes the KV cache smaller than a naive
+    n_head estimate. Only call after has_kv_head_api().
+
+    REPORTS LAYER 0 ONLY. Upstream's llama_model_n_head_kv calls
+    llama_hparams::n_head_kv(), whose il parameter defaults to 0 (verified in
+    llama.cpp's own llama-hparams.cpp/llama-model.cpp). On a UNIFORM stack every
+    layer agrees, so layer 0 speaks for all of them; on a HYBRID one it does not,
+    and multiplying this by the layer count over-charges. Callers doing that must
+    gate on has_hybrid_api()/llama_model_is_hybrid first."""
     return _bind("llama_model_n_head_kv", ctypes.c_int32, LlamaModel)(model)
 
 
 def has_hybrid_api() -> bool:
-    """True when this llama.dll exports llama_model_is_recurrent + llama_model_is_hybrid, so a caller can tell whether the stack mixes attention layers with recurrent ones (whose fixed-size state is NOT a per-token KV cache) instead of assuming every layer attends."""
+    """True when this llama.dll exports llama_model_is_recurrent +
+    llama_model_is_hybrid, so a caller can tell whether the stack mixes attention
+    layers with recurrent ones (whose fixed-size state is NOT a per-token KV
+    cache) instead of assuming every layer attends. Probed as bindable on the
+    shipped runtime; the guard lets an exotic stripped build degrade rather than
+    raise AttributeError - same pattern as has_kv_head_api()/has_memory_api()."""
     lib = load_lib()
     return all(hasattr(lib, fn)
                for fn in ("llama_model_is_recurrent", "llama_model_is_hybrid"))
 
 
 def llama_model_is_recurrent(model: ctypes.c_void_p) -> bool:
-    """True for a fully recurrent architecture (Mamba, RWKV ...), which keeps a fixed-size state and no growing KV cache."""
+    """True for a fully recurrent architecture (Mamba, RWKV ...), which keeps a
+    fixed-size state and no growing KV cache. Only call after has_hybrid_api()."""
     return bool(_bind("llama_model_is_recurrent", ctypes.c_bool, LlamaModel)(model))
 
 
 def llama_model_is_hybrid(model: ctypes.c_void_p) -> bool:
-    """True for a hybrid architecture (Qwen3-Next, Granite 4 H, LFM2, Jamba, Falcon-H1 ...), where only SOME layers attend and the rest keep a fixed-size recurrent state."""
+    """True for a hybrid architecture (Qwen3-Next, Granite 4 H, LFM2, Jamba,
+    Falcon-H1 ...), where only SOME layers attend and the rest keep a fixed-size
+    recurrent state. Only call after has_hybrid_api()."""
     return bool(_bind("llama_model_is_hybrid", ctypes.c_bool, LlamaModel)(model))
 
 
@@ -240,7 +305,12 @@ def llama_tokenize(
     add_special: bool,
     parse_special: bool,
 ) -> int:
-    """Tokenise *text* into *tokens_out*."""
+    """
+    Tokenise *text* into *tokens_out*.
+
+    Returns the number of tokens written (positive) or the negative of the
+    number needed if the buffer was too small.
+    """
     fn = _bind(
         "llama_tokenize",
         ctypes.c_int32,
@@ -338,7 +408,33 @@ def llama_chat_apply_template(
     buf: ctypes.Array,
     length: int,
 ) -> int:
-    """Apply a Jinja-ish chat template to a list of messages."""
+    """
+    Apply a Jinja-ish chat template to a list of messages.
+
+    Parameters
+    ----------
+    tmpl:
+        Raw template string obtained from ``llama_model_chat_template()``.
+        Pass *None* to fall back to the built-in "chatml" template.
+    messages:
+        A ctypes array of ``LlamaChatMessage`` structs.
+    n_messages:
+        Number of elements in *messages*.
+    add_assistant:
+        If True, append the assistant-turn start tokens so the model knows
+        it should continue generating.
+    buf:
+        Output buffer.
+    length:
+        Size of *buf*.  If the required output is larger, the function returns
+        the total bytes needed (positive) so you can reallocate and retry.
+
+    Returns
+    -------
+    int
+        Number of bytes written.  If > *length*, the buffer was too small -
+        reallocate and call again.
+    """
     fn = _bind(
         "llama_chat_apply_template",
         ctypes.c_int32,
@@ -389,7 +485,10 @@ def llama_batch_free(batch: LlamaBatch) -> None:
 # ---------------------------------------------------------------------------
 
 def llama_decode(ctx: ctypes.c_void_p, batch: LlamaBatch) -> int:
-    """Run the model on *batch*."""
+    """
+    Run the model on *batch*.  Returns 0 on success, 1 if no KV slot available,
+    negative on error.
+    """
     return _bind("llama_decode", ctypes.c_int32, LlamaContext, LlamaBatch)(ctx, batch)
 
 
@@ -415,14 +514,20 @@ def llama_get_logits(ctx: ctypes.c_void_p) -> ctypes.Array:
 # ---------------------------------------------------------------------------
 
 def has_embeddings_api() -> bool:
-    """True when this llama.dll exports the embedding accessors."""
+    """True when this llama.dll exports the embedding accessors. Every mainline
+    llama.cpp build does; the probe lets a caller fall back (to lexical-only
+    retrieval) rather than crash on an exotic stripped build."""
     lib = load_lib()
     return all(hasattr(lib, fn)
                for fn in ("llama_get_embeddings_seq", "llama_get_embeddings_ith"))
 
 
 def llama_get_embeddings_seq(ctx: ctypes.c_void_p, seq_id: int) -> ctypes.Array:
-    """Pooled embedding for sequence *seq_id* (a pointer to ``n_embd`` floats)."""
+    """Pooled embedding for sequence *seq_id* (a pointer to ``n_embd`` floats).
+
+    Valid after ``llama_decode`` on a context created with ``embeddings=True`` and
+    a pooling type other than NONE. Returns a NULL pointer when pooling is off or
+    the sequence has no output."""
     fn = _bind("llama_get_embeddings_seq", ctypes.POINTER(ctypes.c_float),
                LlamaContext, ctypes.c_int32)
     return fn(ctx, seq_id)
@@ -499,7 +604,15 @@ _warned_penalties_arity = False
 
 
 def has_penalties_sampler() -> bool:
-    """True when this llama.dll exports llama_sampler_init_penalties AND localm can determine which of its two signatures the build uses."""
+    """True when this llama.dll exports llama_sampler_init_penalties AND localm
+    can determine which of its two signatures the build uses.
+
+    The symbol alone is not enough: upstream #26520 prepended an ``int32_t
+    n_vocab`` without renaming it or adding any other symbol, and calling either
+    arity against the other corrupts the arguments (see
+    ``_abi.penalties_arity``). A build whose arity cannot be PROVEN reports
+    False here, so the caller drops the repetition-penalty stage rather than
+    make an unsafe call - and says so, rather than quietly sampling without it."""
     try:
         getattr(load_lib(), "llama_sampler_init_penalties")
     except AttributeError:
@@ -539,7 +652,19 @@ def llama_sampler_init_penalties(
     penalty_present: float = 0.0,
     n_vocab: int = 0,
 ) -> ctypes.c_void_p:
-    """Repetition penalty sampler, dispatched on the build's argument list."""
+    """Repetition penalty sampler, dispatched on the build's argument list.
+
+    Two live signatures (see ``_abi.penalties_arity`` for how they are told
+    apart and why guessing is unsafe):
+
+      upstream <= b10269 / lemonade b1288:
+          (penalty_last_n, repeat, freq, present)
+      >= upstream 935cad6497e8 / lemonade b1307:
+          (n_vocab, penalty_last_n, repeat, freq, present)
+
+    *n_vocab* is ignored by the 4-argument form. Callers on the 5-argument form
+    must pass the real vocabulary size; upstream uses it to size the sampler's
+    per-token frequency counters, so a 0 there would under-allocate."""
     from ._abi import penalties_arity
     arity = penalties_arity()
     if arity == 5:
@@ -564,7 +689,23 @@ def llama_sampler_init_grammar(
     grammar_str: bytes,
     grammar_root: bytes,
 ) -> ctypes.c_void_p:
-    """Create a grammar sampler that constrains token selection to outputs matching the given GBNF grammar."""
+    """
+    Create a grammar sampler that constrains token selection to outputs
+    matching the given GBNF grammar.
+
+    The sampler masks logits for tokens that would violate the grammar at the
+    current parse position, so only structurally valid continuations survive
+    into the temperature / dist stage.
+
+    Parameters
+    ----------
+    vocab:
+        Vocabulary pointer from ``llama_model_get_vocab()``.
+    grammar_str:
+        GBNF grammar source, UTF-8 encoded.
+    grammar_root:
+        Name of the root rule, e.g. ``b"root"``.
+    """
     return _bind(
         "llama_sampler_init_grammar",
         LlamaSampler,
@@ -589,7 +730,26 @@ def llama_sampler_init_grammar_lazy_patterns(
     grammar_root: bytes,
     trigger_patterns: list,
 ) -> ctypes.c_void_p:
-    """Create a LAZY grammar sampler: generation is unconstrained until the accumulated output matches one of *trigger_patterns* (regex, full-match against the generated text; the grammar is fed from capture group 1), then the GBNF grammar enforces from that point on."""
+    """
+    Create a LAZY grammar sampler: generation is unconstrained until the
+    accumulated output matches one of *trigger_patterns* (regex, full-match
+    against the generated text; the grammar is fed from capture group 1),
+    then the GBNF grammar enforces from that point on.
+
+    This is the "text-or-tool" mechanism: thinking and prose flow freely, a
+    started structured block must be valid.
+
+    Parameters
+    ----------
+    vocab:
+        Vocabulary pointer from ``llama_model_get_vocab()``.
+    grammar_str:
+        GBNF grammar source, UTF-8 encoded.
+    grammar_root:
+        Name of the root rule, e.g. ``b"root"``.
+    trigger_patterns:
+        Regex patterns as ``bytes``, e.g. ``[rb"[\\s\\S]*?(<tool_call>[\\s\\S]*)"]``.
+    """
     pats = (ctypes.c_char_p * len(trigger_patterns))(*trigger_patterns)
     return _bind(
         "llama_sampler_init_grammar_lazy_patterns",
@@ -612,7 +772,11 @@ LlamaMemory = ctypes.c_void_p   # llama_memory_t
 
 
 def has_memory_api() -> bool:
-    """True when this llama.cpp build exports the llama_memory_* family (introduced mid-2025)."""
+    """
+    True when this llama.cpp build exports the llama_memory_* family
+    (introduced mid-2025). Older DLLs lack it - callers must fall back to
+    recreating the context to clear the KV cache.
+    """
     lib = load_lib()
     return all(
         hasattr(lib, fn)
@@ -633,7 +797,11 @@ def llama_memory_clear(mem: ctypes.c_void_p, data: bool = True) -> None:
 def llama_memory_seq_rm(
     mem: ctypes.c_void_p, seq_id: int, p0: int, p1: int
 ) -> bool:
-    """Remove cached tokens of sequence *seq_id* in position range [p0, p1). p0 < 0 means from the start; p1 < 0 means to the end."""
+    """
+    Remove cached tokens of sequence *seq_id* in position range [p0, p1).
+    p0 < 0 means from the start; p1 < 0 means to the end.
+    Returns False when a partial removal is not possible.
+    """
     fn = _bind(
         "llama_memory_seq_rm",
         ctypes.c_bool,
@@ -648,7 +816,8 @@ def llama_memory_seq_rm(
 def llama_kv_cache_seq_rm(
     ctx: ctypes.c_void_p, seq_id: int, p0: int, p1: int
 ) -> bool:
-    """Remove cached tokens of sequence *seq_id* in position range [p0, p1) for the given context (works across llama_memory_seq_rm and legacy llama_kv_cache_seq_rm)."""
+    """Remove cached tokens of sequence *seq_id* in position range [p0, p1) for
+    the given context (works across llama_memory_seq_rm and legacy llama_kv_cache_seq_rm)."""
     lib = load_lib()
     if hasattr(lib, "llama_memory_seq_rm") and hasattr(lib, "llama_get_memory"):
         mem = llama_get_memory(ctx)
@@ -726,7 +895,11 @@ def llama_print_system_info() -> str:
 # ---------------------------------------------------------------------------
 
 def has_max_devices() -> bool:
-    """True when this llama.dll exports llama_max_devices()."""
+    """True when this llama.dll exports llama_max_devices(). Every build with
+    tensor_split support has exported this for years, but it is probed (not
+    assumed) the same way has_memory_api()/has_penalties_sampler() are, so an
+    exotic stripped build degrades to a documented fallback instead of an
+    AttributeError. See discover.apply_gpu_split for how the fallback is used."""
     try:
         getattr(load_lib(), "llama_max_devices")
         return True
@@ -735,6 +908,9 @@ def has_max_devices() -> bool:
 
 
 def llama_max_devices() -> int:
-    """Capacity of the tensor_split array this build's native loader will read from (a const float* with no length parameter of its own - the caller must match this exactly: too short is a real out-of-bounds read)."""
+    """Capacity of the tensor_split array this build's native loader will read
+    from (a const float* with no length parameter of its own - the caller must
+    match this exactly: too short is a real out-of-bounds read). Only call
+    after has_max_devices() is True."""
     fn = _bind("llama_max_devices", ctypes.c_size_t)
     return int(fn())

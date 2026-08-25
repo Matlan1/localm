@@ -1,20 +1,17 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-/* localm GUI - Knowledge page (split from pages.js). Classic script: it
-   shares the one global lexical environment with app.js and the other
-   page scripts, so the helpers it uses ($, el, authHeaders, toast, ...)
-   resolve by bare name exactly as before. */
+/* localm GUI - Knowledge page. */
 "use strict";
 
-// --- ES module imports (auto-generated boundary; bodies unchanged) ---
+// --- ES module imports ---
 import { chat, lsSetScoped } from "../app/chat.js";
 import { $, authHeaders, confirmDanger, el, jobStatusWord, openModal, streamJob, toast } from "../app/helpers.js";
 import { emptyState, iconEl } from "../app/icons.js";
 import { pickPath } from "../app/picker.js";
 import { caps, refreshKbSelect } from "../app/settings-perf.js";
 
-// Selectable file types, kept in step with rag/extract.py EXTRACTABLE_SUFFIXES:
-// files outside this set are shown greyed in the picker (the server would refuse
-// them anyway). Folders are indexed recursively, picking up any of these.
+// Selectable file types, matching rag/extract.py EXTRACTABLE_SUFFIXES. Files
+// outside this set are shown greyed in the picker. Folders are indexed
+// recursively, picking up any of these.
 const RAG_EXTS = [
   ".txt", ".md", ".markdown", ".rst", ".log", ".csv", ".tsv", ".json", ".jsonl",
   ".yaml", ".yml", ".toml", ".ini", ".cfg", ".py", ".js", ".ts", ".jsx", ".tsx",
@@ -31,10 +28,7 @@ const RAG_EXTS = [
 
 export async function refreshKnowledgePage() {
   refreshKbSelect();   // keep the chat drawer selector in sync
-  // The embedding status is also what a row needs to tell "never embedded"
-  // apart from "embedding is ready now but THIS collection predates it / went
-  // stale" - only the latter is actionable via re-embed, so fetch it once here
-  // and pass it into each row instead of re-deriving it from DOM text.
+  // Fetch the embedding status once and pass it into each row.
   const embedStatus = await refreshEmbeddingPanel();
   const embedReady = !!(embedStatus && embedStatus.status === "ready");
   const box = $("kb-table");
@@ -64,21 +58,10 @@ export async function refreshKnowledgePage() {
   const tbody = el("tbody");
   for (const c of data.collections) {
     const tr = el("tr");
-    // The embedding model being ready is a GLOBAL fact; a collection only picks
-    // it up when (re)indexed. BM25-while-ready means this specific collection
-    // predates the model (or its vector index went stale) and re-embedding would
-    // fix it - worth flagging inline, not just in the info-modal warning.
-    // Gated on n_chunks > 0: an EMPTY collection also reports has_vectors=false
-    // (there is nothing to have vectors for), which is not the same situation as
-    // "was indexed without embeddings" - a freshly created, never-indexed
-    // collection has nothing to re-embed and must not show the badge.
-    // A collection can ALSO look fine (has_vectors=true, "hybrid" shown) while
-    // its stored vectors no longer match the currently active embedding model
-    // - the badge below never used to say so, and only an actual QUERY would
-    // discover it, dropping silently to BM25 (#1078 post-merge review). This
-    // server-computed comparison is best-effort (null, never a false "fine",
-    // whenever it cannot tell - see rag_collections()'s own docstring), so it
-    // only ever ADDS this badge when confident, never suppresses the paths above.
+    // Flag a collection that retrieves lexically only: it holds chunks but no
+    // vectors while the embedding model is ready, or its stored vectors were
+    // built under a different model. dim_mismatch is null when the server
+    // cannot tell, so it only ever adds the badge.
     const staleVectors = c.dim_mismatch === true;
     const needsReembed = (c.n_chunks > 0 && !c.has_vectors && embedReady) || staleVectors;
 
@@ -100,9 +83,7 @@ export async function refreshKnowledgePage() {
     });
 
     const nameTd = el("td", "name-cell");
-    // The flex icon/name/badge line lives on this inner span, never on the td:
-    // a display:flex td stops being a table-cell and its border-bottom then
-    // draws under its own content, breaking the row separator (style.css).
+    // The icon/name/badge flex line goes on this inner span, never on the td.
     const nameLine = el("span", "cell-line");
     nameTd.appendChild(nameLine);
     nameLine.appendChild(iconEl("book", "ic ic-doc"));
@@ -123,13 +104,10 @@ export async function refreshKnowledgePage() {
           + (c.vector_degrade_reason ? " (" + c.vector_degrade_reason + ")" : "");
       retrievalTd.appendChild(badge);
     }
-    // c.corrupt covers three distinct on-disk faults (a corrupt meta.json, a
-    // malformed line in chunks.jsonl, or an unreconstructable roots map) -
-    // only the chunks.jsonl case carries a count (c.chunks_bad_lines), so the
-    // badge names it when it can and falls back to the generic wording for
-    // the other two rather than claiming "0 malformed lines" for a fault it
-    // cannot count (NEW-RAG-INDEX-WARN-SPAM residual B). Separate from
-    // needsReembed: a corrupt index needs Repair, not re-embed.
+    // c.corrupt covers a corrupt meta.json, a malformed line in chunks.jsonl,
+    // or an unreconstructable roots map. Only the chunks.jsonl case carries a
+    // count (c.chunks_bad_lines); the badge names it when present and uses
+    // generic wording otherwise.
     if (c.corrupt) {
       const badge = el("span", "corrupt-badge job-state st-error",
         c.chunks_bad_lines > 0
@@ -159,8 +137,6 @@ export async function refreshKnowledgePage() {
 
     const reembed = el("button", needsReembed ? "warn" : "secondary",
       needsReembed ? "re-embed needed" : "re-embed");
-    // Distinct from "add docs": that skips unchanged files rather than re-embedding them,
-    // so it will not clear a BM25-only collection the way this button does.
     reembed.title = "Recomputes vectors with the current embedding model, from text "
       + "already stored here - no original files needed, nothing deleted. Use after "
       + "switching models or when this shows BM25 unexpectedly.";
@@ -184,9 +160,7 @@ export async function refreshKnowledgePage() {
             "/api/rag/collections/" + encodeURIComponent(c.name), {
               method: "DELETE", headers: authHeaders() });
           if (r.ok) { toast("Deleted " + c.name); refreshKnowledgePage(); }
-          // Show the server's reason: a 409 here names the localm process that
-          // is writing this collection right now (most often a scheduled
-          // re-sync), which turns a dead end into "try again in a moment".
+          // Show the server's reason.
           else toast((await r.json().catch(() => ({}))).detail || "Delete failed",
                      true);
         });
@@ -199,12 +173,7 @@ export async function refreshKnowledgePage() {
   box.appendChild(table);
 }
 
-/* ---- Embedding model: status + one-click setup / model picker ---------- *
- * Semantic search needs a small embedding model, loaded separately from the
- * chat model. This panel lets the user pick the built-in one (downloaded once)
- * or any model from their list, sets it up without a terminal, and reports a
- * clear result - the dimension when it works, or a specific reason it did not
- * (so a wrong pick is understood, not silently swapped). */
+/* ---- Embedding model: status + one-click setup / model picker ---------- */
 const INTERNAL_DEFAULT = "bge-small-en-v1.5";
 const EMBED_LABELS = {
   "bge-small-en-v1.5": "Internal - bge-small-en-v1.5 (recommended, ~24 MB)",
@@ -225,10 +194,6 @@ export async function refreshEmbeddingPanel() {
     return null;
   }
   if (st.status === "ready") {
-    // "Ready" only covers indexing FROM NOW ON: it says nothing about a
-    // collection indexed before this model was set up, or one whose vector
-    // index went stale - those stay BM25 until re-embedded (flagged per-row
-    // below), so this must not read as a blanket "you're all set".
     statusEl.textContent = st.dim
       ? `Ready: ${st.model} (${st.dim}-dim) - semantic search is on for new `
         + `indexing. Existing collections may need "re-embed" below.`
@@ -236,11 +201,8 @@ export async function refreshEmbeddingPanel() {
         + `indexing. Existing collections may need "re-embed" below.`;
     statusEl.style.color = "var(--green)";
   } else if (st.status === "unknown") {
-    // The owner pointed embedding_model at a filesystem path. That path (and
-    // whether it exists) is owner-only information, so the server withheld it
-    // rather than answering - saying "not installed" here would be a guess
-    // presented as a fact, and the "pick a model" advice would be wrong too,
-    // since this key cannot change the setting.
+    // embedding_model points at a filesystem path and the server withheld its
+    // status from this key.
     statusEl.textContent =
       "The embedding model is set to a file chosen by the owner. Its status is " +
       "not shown for this key, and only the owner can change it.";
@@ -259,9 +221,8 @@ export async function refreshEmbeddingPanel() {
     statusEl.textContent += "  " + st.gpu_fallback_reason;
     statusEl.style.color = "var(--yellow)";
   }
-  // One-time download of the CONFIGURED model (not the dropdown selection),
-  // offered only when the server says this caller may authorize it - the
-  // "continue anyway" for a fetch blocked by net_mode=ask. Nothing persisted.
+  // One-time download of the configured model (not the dropdown selection),
+  // shown only when the server reports can_download. Nothing is persisted.
   const dlBtn = $("kb-embed-download");
   if (dlBtn) {
     dlBtn.style.display = st.can_download ? "" : "none";
@@ -301,12 +262,8 @@ async function applyEmbeddingModel(model) {
   log.textContent = `Checking '${model}'…\n`;
   if (btn) btn.disabled = true;
   try {
-    // FIX3: a dry run first (no config write, no embedder reset yet - see the
-    // route's own docstring) so a switch that would drop existing collections
-    // to BM25 is confirmed BEFORE it happens, not just reported in the job
-    // log after the fact. Skipped when nothing is at risk (no collections
-    // currently have embeddings), so the common first-setup case stays one
-    // click.
+    // Dry run first: no config write, no embedder reset. The confirm below is
+    // shown only when it reports collections that would drop to BM25.
     const dry = await fetch("/api/rag/embedding", {
       method: "POST", headers: authHeaders(),
       body: JSON.stringify({ model }),
@@ -334,8 +291,8 @@ async function applyEmbeddingModel(model) {
     const failed = /(^|\n)error:/i.test(log.textContent) || end.status !== "done";
     toast(failed ? "Embedding setup did not complete - see the log below"
                  : "Embedding model ready", failed);
-    // Q3: never silently swap the user's pick. On failure, offer a one-click
-    // switch to the internal default instead (unless that IS what they tried).
+    // On failure, offer a one-click switch to the internal default, unless
+    // that is what was tried.
     if (failed && model !== INTERNAL_DEFAULT) offerInternalFallback();
     else clearInternalFallback();
     refreshEmbeddingPanel();
@@ -348,8 +305,7 @@ async function applyEmbeddingModel(model) {
 }
 
 /** In-page confirm before a model switch that would invalidate existing
- *  collections' semantic search (FIX3) - shown only when the dry-run report
- *  names at least one. Mirrors kbConfirmReembed's shape. */
+ *  collections' semantic search. */
 export function kbConfirmEmbeddingSwitch(model, report) {
   return new Promise((resolve) => {
     openModal(`Switch to '${model}'?`, (body) => {
@@ -403,10 +359,8 @@ if ($("kb-embed-apply")) {
   };
 }
 
-/** One-time download of the configured embedding model when the network policy
- *  blocked its automatic fetch (net_mode=ask). Unlike "Set up / apply" this
- *  writes nothing - no model switch, no config change - and the server gates it
- *  on config:write and refuses under net_mode=off. */
+/** One-time download of the configured embedding model. Writes nothing: no
+ *  model switch and no config change. */
 async function downloadEmbeddingModel() {
   const log = $("kb-embed-log");
   const btn = $("kb-embed-download");
@@ -457,15 +411,11 @@ $("kb-create").onclick = async () => {
 };
 
 export async function kbAddDocs(name) {
-  // Host access -> browse the SERVER disk (the picker hits host-gated /api/fs/*).
-  // A caller WITHOUT host access cannot browse the server, so it uploads from its
-  // OWN device instead (kbUploadDocs) - that reads no server path and needs no
-  // filesystem access.
+  // Host access browses the SERVER disk through the host-gated /api/fs/*;
+  // without it, upload from the caller's own device instead.
   if (caps.fsAccess !== "host") return kbUploadDocs(name);
-  // In-page file/folder picker (multi-select) instead of prompt(): mobile/PWA
-  // browsers suppress prompt(), and typing a full path by hand was the worst of
-  // the old flow. The server's /add takes a paths[] array, so several files and
-  // folders can be indexed in one job.
+  // In-page file/folder picker (multi-select). /add takes a paths[] array, so
+  // several files and folders index in one job.
   const paths = await pickPath({
     mode: "multi",
     title: `Add documents to '${name}'`,
@@ -478,9 +428,8 @@ export async function kbAddDocs(name) {
   // Reopen near the last add next time (the containing folder of the first pick).
   const m = paths[0].match(/^(.*)[\\/][^\\/]+[\\/]?$/);
   lsSetScoped("localm.kbAddPath", m ? m[1] : paths[0]);
-  // Embeddings are opt-out here: the server defaults embed=true and degrades to
-  // BM25-only when unchecked (no embedding-capable model needed). The checkbox
-  // lets a user index lexical-only on purpose.
+  // Embeddings are opt-out: the server defaults embed=true and indexes
+  // BM25-only when unchecked.
   const embed = $("kb-embed") ? $("kb-embed").checked : true;
   const log = $("kb-log");
   log.style.display = "block";
@@ -490,12 +439,10 @@ export async function kbAddDocs(name) {
   await kbRunAdd(name, paths, embed, log);
 }
 
-/** POST the add job. If the server replies 409 needs_consent (a whitelist miss,
- *  owner only), offer to add the folders to the allowed list and retry ONCE.
- *  Pass reindex=true to force re-embedding of files that already look
- *  unchanged (mtime/size/hash match) - a plain "add docs" click otherwise
- *  skips them, which is why re-adding a folder after turning on/switching the
- *  embedding model does nothing on its own. */
+/** POST the add job. On a 409 needs_consent reply, offer to add the folders to
+ *  the allowed list and retry ONCE. reindex=true forces re-embedding of files
+ *  that already look unchanged (mtime/size/hash match), which a plain add
+ *  skips. */
 export async function kbRunAdd(name, paths, embed, log, retried = false, reindex = false) {
   try {
     const r = await fetch(
@@ -503,10 +450,8 @@ export async function kbRunAdd(name, paths, embed, log, retried = false, reindex
         method: "POST", headers: authHeaders(),
         body: JSON.stringify({ paths, embed, reindex }),
       });
-    // Read the body ONCE. A 409 needs_consent reply, a normal error, and a success
-    // all carry a JSON body; reading it twice on the same Response throws "body
-    // stream already read", which used to mask the server's real `detail` on a
-    // 409 that was NOT needs_consent (it fell through to a second r.json()).
+    // Read the body ONCE: every reply carries JSON, and a second r.json() on
+    // the same Response throws "body stream already read".
     const data = await r.json().catch(() => ({}));
     if (r.status === 409 && !retried && data.needs_consent) {
       const folders = data.addable || [];
@@ -536,27 +481,10 @@ export async function kbRunAdd(name, paths, embed, log, retried = false, reindex
 /** Recompute this collection's vectors with the CURRENT embedding model, from
  *  the chunk text already stored in the collection.
  *
- *  This calls POST /api/rag/collections/<name>/reembed, and it MUST. The
- *  obvious-looking alternative - re-adding the collection's own documents with
- *  force - is what this used to do, and it cannot work for the case the button
- *  exists for. Re-adding re-reads the ORIGINAL FILES, which means:
- *
- *    - it trips the very dimension guard the user is trying to get past (the
- *      server's own reembed docstring says so explicitly);
- *    - it silently EXCLUDED every uploaded document (`!d.uploaded`), because
- *      those have no path on the server disk - so a collection built by
- *      uploading re-embedded nothing at all, and a mixed one was left with
- *      some vectors at the old dimension and some at the new;
- *    - it needed the source folder to still exist and still hold those files.
- *
- *  The endpoint has none of those constraints: it works from chunks.jsonl, so
- *  no source file has to exist, uploads are included like anything else, and
- *  an interrupted run leaves the previous index intact. The error the user gets
- *  on a dimension mismatch names this button BY NAME ("or use 'Re-embed' on the
- *  Knowledge page"), so it has to be the thing that actually recovers them.
- *
- *  There is no `embed` toggle here on purpose: re-embedding without computing
- *  embeddings is not an operation. */
+ *  POSTs to /api/rag/collections/<name>/reembed, which works from
+ *  chunks.jsonl: no source file has to exist, uploaded documents are included,
+ *  and an interrupted run leaves the previous index intact. There is no
+ *  `embed` toggle. */
 export async function kbReembedCollection(name) {
   if (!(await kbConfirmReembed(name))) return;
   const log = $("kb-log");
@@ -582,10 +510,7 @@ export async function kbReembedCollection(name) {
   }
 }
 
-/** In-page confirm before a full re-embed (minutes of model work on a large
- *  collection). No document count and no uploaded-document caveat: the server
- *  works from stored chunk text, so every document is covered including
- *  uploads, and nothing is skipped. */
+/** In-page confirm before a full re-embed. */
 export function kbConfirmReembed(name) {
   return new Promise((resolve) => {
     openModal(`Re-embed '${name}'?`, (body) => {
@@ -610,17 +535,8 @@ export function kbConfirmReembed(name) {
   });
 }
 
-/** Rebuild a damaged collection's index from its indexed server-side files
- *  (POST .../repair) - the GUI answer to the "index damaged" badge / info
- *  modal warning. Mirrors kbReembedCollection's log/streamJob shape.
- *
- *  Two-step like applyEmbeddingModel: POST once with no body: the route
- *  itself decides (from whether an embedder is actually available and
- *  whether this collection currently has vectors) if repairing would drop
- *  existing embeddings, and if so answers `needs_confirm` with the exact
- *  reason instead of starting a job - shown here, then re-posted with
- *  `confirm: true`. Never guessed client-side, so this stays correct however
- *  many collections/embedder states exist. */
+/** In-page confirm before a repair, shown with the `needs_confirm` reason the
+ *  repair route returns instead of starting a job. */
 function kbConfirmRepair(name, detail) {
   return new Promise((resolve) => {
     openModal(`Repair '${name}'?`, (body) => {
@@ -670,8 +586,8 @@ export async function kbRepairCollection(name) {
   }
 }
 
-/** In-page confirm (window.confirm is suppressed in some PWAs) asking whether to
- *  add the out-of-whitelist folders to the allowed list and continue. */
+/** In-page confirm asking whether to add the out-of-whitelist folders to the
+ *  allowed list and continue. */
 export function kbConfirmAddRoots(folders) {
   return new Promise((resolve) => {
     openModal("Add to allowed folders?", (body) => {
@@ -719,9 +635,8 @@ export async function kbAppendAllowedRoots(folders) {
   }
 }
 
-/** Per-device upload: pick files from the user's OWN device (the browser's file
- *  input - no server browsing) and POST their bytes to /upload for indexing. Used
- *  when the caller lacks host filesystem access, so it reads no server path. */
+/** POST the bytes of files picked from the user's own device to /upload for
+ *  indexing. Reads no server path. */
 export async function uploadAndIndexFiles(name, files) {
   const MAX = 30 * 1024 * 1024;                 // mirror the server per-file cap
   const tooBig = files.filter((f) => f.size > MAX);
@@ -790,9 +705,8 @@ export function pickDeviceFiles(exts) {
       resolve(files);
     };
     input.addEventListener("change", () => finish(Array.from(input.files || [])));
-    // A cancelled dialog fires no 'change', only a window focus. Resolve empty on
-    // the next focus (after a beat, so a real 'change' wins) so a dismissed picker
-    // does not leave the promise pending forever.
+    // A cancelled dialog fires no 'change', only a window focus: resolve empty
+    // on the next focus, after a beat so a real 'change' wins.
     window.addEventListener("focus",
       () => setTimeout(() => finish([]), 300), { once: true });
     document.body.appendChild(input);
@@ -829,11 +743,9 @@ export async function kbInfoModal(name) {
       `${data.n_docs} documents · ${data.n_chunks} chunks · ` +
       (data.has_vectors ? "hybrid retrieval (BM25 + embeddings)"
                         : "lexical retrieval (BM25)")));
-    // Surface on-disk index damage (meta.json, chunks.jsonl, or the roots map -
-    // see store.py's three self.corrupt = True sites) rather than only via the
-    // CLI's "(corrupt index ...)" listing marker (AGENTS rule 5). Names the
-    // malformed-line count when the server can (chunks.jsonl only - see the
-    // table badge above), falls back to generic wording for the other two.
+    // On-disk index damage: meta.json, chunks.jsonl, or the roots map. Names
+    // the malformed-line count when the server reports one (chunks.jsonl
+    // only), generic wording otherwise.
     if (data.corrupt) {
       body.appendChild(warnLine(data.chunks_bad_lines > 0
         ? `${data.chunks_bad_lines} malformed chunk line(s) in this collection's index.`
@@ -844,17 +756,14 @@ export async function kbInfoModal(name) {
       repair.onclick = () => kbRepairCollection(name);
       body.appendChild(repair);
     }
-    // Surface a degraded semantic index instead of silently answering lexically
-    // (AGENTS rule 5). The server sets this when vectors are corrupt/stale/mismatched.
+    // The server sets this when vectors are corrupt, stale or mismatched.
     if (data.vector_degrade_reason) {
       body.appendChild(warnLine(
         "Semantic search fell back to BM25: " + data.vector_degrade_reason,
         "var(--yellow)"));
     }
-    // Same best-effort signal as the collections table's "re-embed needed"
-    // badge (#1078 post-merge review) - a collection can report has_vectors
-    // and still silently drop to BM25 at query time if its stored vectors
-    // were built under a different embedding model than the one active now.
+    // Stored vectors were built under a different embedding model than the
+    // active one, the same signal as the table's "re-embed needed" badge.
     if (data.dim_mismatch === true) {
       body.appendChild(warnLine(
         "Stored vectors were built under a different embedding model than "
@@ -863,9 +772,7 @@ export async function kbInfoModal(name) {
         "var(--yellow)"));
     }
     // A re-sync flags documents whose source file has vanished rather than
-    // deleting them, so the index can be ahead of the disk. Say so here, where
-    // the documents are listed - otherwise the only place it surfaces is the
-    // job's run output (AGENTS rule 5).
+    // deleting them, so the index can be ahead of the disk.
     if (data.n_missing) {
       body.appendChild(warnLine(
         `${data.n_missing} document(s) are no longer on disk. They are still ` +
@@ -959,7 +866,7 @@ $("gui-clear-convs").onclick = () => {
   confirmDanger(`Delete all saved conversations ${where}?`,
     "This can't be undone.", "Delete", async () => {
       if (chat.persist) {
-        // Server store is the source of truth - clear it too or they come back.
+        // Clear the server store as well as this browser's copy.
         await Promise.allSettled(chat.conversations.map((c) =>
           fetch("/api/conversations/" + encodeURIComponent(c.id), {
             method: "DELETE", headers: authHeaders(),

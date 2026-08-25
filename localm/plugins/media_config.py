@@ -1,5 +1,27 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Per-plugin config resolution for the media plugins (image, music, video)."""
+"""Per-plugin config resolution for the media plugins (image, music, video).
+
+Backend-agnostic: this only manipulates the config dict. It knows nothing about
+ComfyUI or any specific backend - each plugin's backend reads the resolved block
+and fills in its own defaults.
+
+Each media plugin stores a self-contained block under ``config["plugins"][name]``,
+e.g.::
+
+    config["plugins"]["image"] = {
+        "backend": "comfy",
+        "use_config_from": None,          # opt-in share-config pointer
+        "comfy": {"api_url": ..., "launch_cmd": ..., "workdir": ..., "output_dir": ...},
+        "reload_llm_after_generate": True,
+    }
+
+Share-config ("use config from"): a media plugin may point ``use_config_from`` at
+ANOTHER media plugin to reuse its backend settings LIVE - edit the source once and
+the sharer follows. The sharer's own block is never mutated, so toggling sharing
+off restores its own values untouched. Sharing is cycle-prevented (no image<-video
+while video<-image) and falls back to the sharer's own block (with a warning) when
+the source is missing/disabled. Applies only to the three media plugins.
+"""
 
 from __future__ import annotations
 
@@ -32,7 +54,10 @@ def _source_of(name: str, cfg: dict) -> Optional[str]:
 
 
 def active_plugins(cfg: dict) -> set:
-    """The set of ACTIVE plugin names = installed (physically present in the installed folder) AND enabled (config). 'Installed' is disk presence in the new store->installed model, NOT a config flag, so we scan the installed folder rather than reading a (no-longer-written) config list."""
+    """The set of ACTIVE plugin names = installed (physically present in the
+    installed folder) AND enabled (config). "Installed" is disk presence in the
+    new store->installed model, NOT a config flag, so we scan the installed
+    folder rather than reading a (no-longer-written) config list."""
     from pathlib import Path
 
     from localm.debuglog import logger
@@ -53,7 +78,8 @@ def active_plugins(cfg: dict) -> set:
 
 
 def would_cycle(name: str, source: str, cfg: dict) -> bool:
-    """Would setting ``name.use_config_from = source`` create a cycle? Follows the source's own ``use_config_from`` chain back; True if it returns to *name*."""
+    """Would setting ``name.use_config_from = source`` create a cycle? Follows the
+    source's own ``use_config_from`` chain back; True if it returns to *name*."""
     if source == name:
         return True
     seen = {name}
@@ -68,7 +94,16 @@ def would_cycle(name: str, source: str, cfg: dict) -> bool:
 
 def resolve_config(name: str, cfg: dict,
                    *, active: "Optional[set]" = None) -> tuple[dict, Optional[str]]:
-    """Effective stored block for media plugin *name*."""
+    """Effective stored block for media plugin *name*.
+
+    Applies ``use_config_from`` (one hop, using the source's OWN block) when the
+    source is active and non-cyclic; otherwise returns *name*'s own block.
+    *active* is the set of active plugin names (installed AND enabled); when None
+    it is derived from disk + config via ``active_plugins`` (the source plugin
+    must be installed on disk and enabled, per the store->installed model).
+    Returns ``(block, warning_or_None)``. The returned block is a deep copy, so
+    the stored config is never mutated even if the caller writes to nested blocks.
+    """
     own = _own_block(name, cfg)
     src = own.get("use_config_from")
     if not (isinstance(src, str) and src in MEDIA_PLUGINS and src != name):
@@ -107,14 +142,27 @@ def resolve_config(name: str, cfg: dict,
 # plugin and set ``config["plugins"][<plugin>]["backend"] = "<name>"``.
 
 def load_backend(package: str, name: Optional[str]):
-    """Import the media backend module *name* from ``<package>.backends``."""
+    """Import the media backend module *name* from ``<package>.backends``.
+
+    e.g. ``load_backend("localm.plugins.builtin.image", "a1111")`` imports
+    ``localm.plugins.builtin.image.backends.a1111``. Raises ``ModuleNotFoundError``
+    when no such module exists, so the caller falls back to its built-in ``comfy``
+    reference rather than hard-crashing on a typo or an uninstalled backend."""
     import importlib
     nm = (name or "comfy").strip().lower() or "comfy"
     return importlib.import_module(f"{package}.backends.{nm}")
 
 
 def backend_unavailable_warning(package: str, name: Optional[str]) -> Optional[str]:
-    """A warning when *name* is a media backend that is not the built-in ``comfy`` reference and cannot be imported (a typo, an unimplemented backend, or one whose dependency is not installed), else None for ``comfy``/empty/loadable."""
+    """A warning when *name* is a media backend that is not the built-in ``comfy``
+    reference and cannot be imported (a typo, an unimplemented backend, or one
+    whose dependency is not installed), else None for ``comfy``/empty/loadable.
+
+    The caller still falls back to its inline ``comfy`` reference - a typo must
+    not hard-crash a generate - but we never silently pretend a missing backend
+    is the active one. The user is told their configured backend was ignored
+    (AGENTS rule 5, "we do not hide problems"). A plugin folds this into its
+    ``settings()['warning']`` so the surface that runs the job shows it."""
     nm = (name or "comfy").strip().lower() or "comfy"
     if nm == "comfy":
         return None
@@ -128,13 +176,26 @@ def backend_unavailable_warning(package: str, name: Optional[str]) -> Optional[s
 
 
 def combine_warnings(*warnings: Optional[str]) -> Optional[str]:
-    """Join the non-empty *warnings* with ``'; '``, or None when all are empty."""
+    """Join the non-empty *warnings* with ``'; '``, or None when all are empty.
+    Lets a caller merge several independent config notes into one ``warning``
+    without one silently dropping another."""
     parts = [w for w in warnings if w]
     return "; ".join(parts) if parts else None
 
 
 def make_backend_facade(package: str, comfy_ref: SimpleNamespace) -> SimpleNamespace:
-    """Build the ``ensure_available``/``free_vram``/``generate`` dispatch facade shared by every media plugin's backend.py: *comfy_ref* (the plugin's own inline ComfyUI reference implementation) for the default ``'comfy'`` backend, else ``<package>.backends.<name>`` loaded by ``load_backend`` - falling bac..."""
+    """Build the ``ensure_available``/``free_vram``/``generate`` dispatch facade
+    shared by every media plugin's backend.py: *comfy_ref* (the plugin's own
+    inline ComfyUI reference implementation) for the default ``"comfy"`` backend,
+    else ``<package>.backends.<name>`` loaded by ``load_backend`` - falling back
+    to *comfy_ref* on an unknown/missing name so a typo never hard-crashes a
+    generate (the settings ``warning`` already carries the config note, via
+    ``backend_unavailable_warning``).
+
+    A plugin's backend.py assigns the returned callables to its own module-level
+    names (including ``resolve`` as ``_impl``, its historical name), so both
+    ``plug.py`` call sites (``_backend.ensure_available``, etc.) and tests that
+    introspect which implementation a settings dict resolves to are unchanged."""
 
     def resolve(s: dict):
         name = (s.get("backend") or "comfy").strip().lower()

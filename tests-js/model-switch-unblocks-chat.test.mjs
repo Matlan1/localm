@@ -1,20 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// REG-471: loading a model from the sidebar must unblock chat IMMEDIATELY.
-//
-// The empty-model guard in sendChat reads modelCache.active, but the only writer
-// used to be refreshModels(), which polls every 30s. So after a successful
-// sidebar load from a model-less start, modelCache.active stayed "" and the
-// guard falsely toasted "No model loaded" for up to ~30s while the model was in
-// fact loaded and the server would have answered.
-//
-// empty-model-guard.test.mjs sets modelCache.active by hand, so it can never see
-// this: these tests drive the REAL switchModel/onchange -> sendChat sequence.
+// Drives the real switchModel/onchange -> sendChat sequence.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { loadApp, runScript } from "./harness.mjs";
 
-// A fetch stub that answers the model load for real and records every call.
+// a fetch stub that answers the model load and records every call
 function _stub(window, { loadedName = "my-model" } = {}) {
   const calls = [];
   window.fetch = (url, opts) => {
@@ -63,10 +54,7 @@ test("switchModel records the model the SERVER reports, not the requested name",
 });
 
 test("a superseded load does NOT claim to be the active model", async () => {
-  // Negative case: another model was selected while this one loaded, so the
-  // server aborted this one. Claiming it here would publish a model that is not
-  // loaded - the mirror image of the bug, and worse (it would let a doomed chat
-  // request through).
+  // another model was selected while this one loaded, so the server aborted it
   const { window } = loadApp();
   runScript(window, "modelCache.active = '';");
   window.fetch = () => Promise.resolve({
@@ -82,8 +70,8 @@ test("a superseded load does NOT claim to be the active model", async () => {
 });
 
 test("picking a model in the sidebar lets the very next chat send through", async () => {
-  // The end-to-end REG-471 scenario: no model -> pick one in the sidebar ->
-  // type and send immediately, with no refreshModels() poll in between.
+  // no model -> pick one in the sidebar -> send immediately, with no
+  // refreshModels() poll in between
   const { window } = loadApp();
   runScript(window, "modelCache.active = '';");
   const calls = _stub(window);

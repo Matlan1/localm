@@ -1,5 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Validate every bundled (store) plugin manifest so a broken plugin.toml, a missing register module, or a client-asset plugin shipping a missing entry module fails CI rather than the user at install time."""
+"""Validate every bundled (store) plugin manifest so a broken plugin.toml, a
+missing register module, or a client-asset plugin shipping a missing entry module
+fails CI rather than the user at install time.
+
+Unlike the engine tests (which use synthetic manifests), this iterates the REAL
+store under localm/plugins/builtin/, located repo-relative so it validates the
+checkout under test.
+"""
 
 import tomllib
 from pathlib import Path
@@ -41,8 +48,7 @@ def test_builtin_manifest_valid(plugin_dir):
         or (plugin_dir / mod / "__init__.py").is_file(), \
         f"{spec.name}: register module {mod!r} not found"
 
-    # Client-asset contract: a client_entry requires an assets_dir that holds it
-    # (so the SPA can import /plugins/<name>/<client_entry>).
+    # Client-asset contract: a client_entry requires an assets_dir that holds it.
     if spec.surface.client_entry:
         assert spec.surface.assets_dir, \
             f"{spec.name}: client_entry set but assets_dir is empty"
@@ -52,7 +58,9 @@ def test_builtin_manifest_valid(plugin_dir):
 
 @pytest.mark.parametrize("plugin_dir", _builtin_dirs(), ids=lambda d: d.name)
 def test_builtin_requires_extras_are_real_pyproject_extras(plugin_dir):
-    """A builtin's requires_extras must name a real [project.optional-dependencies] extra, so a typo cannot silently turn the plugin dep self-installer into a no-op (the host resolves the extra name against localm's own metadata)."""
+    """A builtin's requires_extras must name a real [project.optional-dependencies]
+    extra, so a typo cannot silently turn the plugin dep self-installer into a
+    no-op (the host resolves the extra name against localm's own metadata)."""
     spec = parse_spec(plugin_dir, builtin=True)
     extras = _declared_extras()
     for e in spec.requires_extras:
@@ -61,12 +69,14 @@ def test_builtin_requires_extras_are_real_pyproject_extras(plugin_dir):
 
 
 def test_rag_declares_its_pdf_extra():
-    """RAG's PDF extraction needs pypdf (the [rag] extra)."""
+    """RAG's PDF extraction needs pypdf (the [rag] extra). It must self-provision
+    that on enable - like voice does for faster-whisper - or PDFs silently fail on
+    a default install (which ships .[coder,voice,monitor], no rag)."""
     spec = parse_spec(_BUILTIN / "rag", builtin=True)
     assert spec.requires_extras == ["rag"]
     from localm.plugins import deps
     reqs = deps.plugin_requirements(["rag"])
     assert reqs, "the rag extra must resolve to at least one requirement"
-    # normally the concrete pypdf specifier; the localm[rag] fallback is tolerated
-    # only if the installed-metadata read is unavailable in some CI environment.
+    # Normally the concrete pypdf specifier; the localm[rag] fallback is accepted
+    # when the installed-metadata read is unavailable.
     assert any("pypdf" in r for r in reqs) or reqs == ["localm[rag]"], reqs

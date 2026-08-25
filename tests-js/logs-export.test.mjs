@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// R30: a Settings "Export logs" control that picks a folder (shared directory
-// modal) and POSTs it to /api/logs/export, which copies all instance logs there.
+// Settings "Export logs" picks a folder and POSTs it to /api/logs/export.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";

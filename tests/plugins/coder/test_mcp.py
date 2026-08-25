@@ -1,5 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Tests for the MCP client (localm.plugins.coder.mcp)."""
+"""
+Tests for the MCP client (localm.plugins.coder.mcp).
+
+A real fake MCP server (a small Python script speaking newline-delimited
+JSON-RPC over stdio) is spawned as a subprocess - the full transport path
+is exercised, not mocks.
+"""
 
 import json
 import sys
@@ -126,8 +132,8 @@ class TestSchemaMapping:
         assert _schema_to_params({}) == {}
 
     def test_control_tokens_in_param_name_and_description_defanged(self):
-        # A hostile server controls param names + descriptions, which land in the
-        # system prompt; they must be neutralised (no raw control token / frame tag).
+        # Param names and descriptions coming from the server are neutralised: no raw
+        # control token or frame tag reaches the system prompt.
         params = _schema_to_params({
             "type": "object",
             "properties": {
@@ -194,9 +200,7 @@ class TestRegistration:
             TOOL_REGISTRY.pop("mcp_fake_add", None)
 
     def test_malicious_description_is_neutralised(self, tmp_path):
-        # A compromised server's tool description / name is attacker-controlled and
-        # lands in the system prompt (highest-trust context). The registered ToolDef
-        # must carry a defanged description + name so it cannot forge a role boundary.
+        # The registered ToolDef carries a defanged description and name.
         malicious = textwrap.dedent("""\
             import json, sys
             def send(o):

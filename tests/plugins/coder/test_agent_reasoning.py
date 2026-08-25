@@ -1,5 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""AUD-HIGH-17-3: the coder agent's HTTP backend must surface a thinking model's H4 reasoning_content instead of silently dropping it (the bug fixed for localm run's default attach mode in AUD-HIGH-17 / AUD-HIGH-17-2, but NOT a drop-in port of that fix - context.py has no ThinkSplitter downstream, so r..."""
+"""AUD-HIGH-17-3: the coder agent's HTTP backend must surface a thinking
+model's H4 reasoning_content instead of silently dropping it (the bug fixed
+for localm run's default attach mode in AUD-HIGH-17 / AUD-HIGH-17-2, but NOT
+a drop-in port of that fix - context.py has no ThinkSplitter downstream, so
+reasoning must flow through a SEPARATE channel, never inline <think> tags, in
+all three _call_llm dispatch branches: event-sink, interactive terminal, and
+silent (non-interactive/sub-agent)."""
 
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -22,7 +28,9 @@ def _make_agent(tmp_path: Path, on_event=None) -> object:
 
 
 def _reasoning_stream_backend(backend, content_pieces, reasoning_pieces):
-    """Configure backend.chat_stream to interleave reasoning (via on_reasoning) and content pieces, and last_reasoning to reflect the accumulated total - mirroring HTTPBackend's real contract."""
+    """Configure backend.chat_stream to interleave reasoning (via on_reasoning)
+    and content pieces, and last_reasoning to reflect the accumulated total -
+    mirroring HTTPBackend's real contract."""
     full_reasoning = "".join(reasoning_pieces)
 
     def fake_chat_stream(messages, on_reasoning=None, **kw):
@@ -54,7 +62,7 @@ class TestCallLLMEventSink:
         token_events = [e for e in events if e["type"] == "token"]
         assert [e["text"] for e in reasoning_events] == ["because ", "reasons"]
         assert [e["text"] for e in token_events] == ["The ", "answer."]
-        # NEGATIVE: no token event carries reasoning text, and vice versa.
+        # No token event carries reasoning text, and vice versa.
         assert not any("because" in e["text"] for e in token_events)
 
     def test_reasoning_recorded_in_audit_separately_from_content(self, tmp_path):
@@ -113,7 +121,11 @@ class TestCallLLMInteractive:
         assert call.kwargs["reasoning"] == "thinking..."
 
     def test_interrupted_stream_still_records_partial_text(self, tmp_path):
-        """A KeyboardInterrupt mid-stream (Ctrl-C at the terminal) must still record and return whatever text streamed before the interrupt, not lose it - the original inline code did this via a bare try/except wrapping the whole consume+record sequence; _stream_and_record must preserve that exact behaviour."""
+        """A KeyboardInterrupt mid-stream (Ctrl-C at the terminal) must still
+        record and return whatever text streamed before the interrupt, not
+        lose it - the original inline code did this via a bare try/except
+        wrapping the whole consume+record sequence; _stream_and_record must
+        preserve that exact behaviour."""
         agent = _make_agent(tmp_path)
 
         def fake_chat_stream(messages, on_reasoning=None, **kw):
@@ -134,7 +146,12 @@ class TestCallLLMInteractive:
         agent._audit.llm.assert_called_once()
 
     def test_event_sink_and_interactive_share_one_streaming_implementation(self, tmp_path):
-        """CODER-3 regression guard: a comment in this module's history records that the interactive branch once silently missed a fix (the lazy tool-call grammar) the event-sink branch got, because the two branches duplicated the whole consume-and-record loop."""
+        """CODER-3 regression guard: a comment in this module's history records
+        that the interactive branch once silently missed a fix (the lazy
+        tool-call grammar) the event-sink branch got, because the two branches
+        duplicated the whole consume-and-record loop. Both must now call the
+        SAME _stream_and_record method, so a future fix can never land in only
+        one of them again."""
         from localm.plugins.coder.agent.context import _ContextMixin
 
         agent = _make_agent(tmp_path, on_event=lambda e: None)
@@ -160,7 +177,10 @@ class TestCallLLMInteractive:
         assert calls == ["interactive"]
 
     def test_interactive_response_and_history_never_contain_raw_think_tags(self, tmp_path):
-        """The coder loop has no ThinkSplitter downstream (unlike cli/chat.py), so the returned response - which agent/loop.py stores verbatim via _add_assistant into conversation history and resends to the model - must never contain an inlined <think> tag."""
+        """The coder loop has no ThinkSplitter downstream (unlike cli/chat.py),
+        so the returned response - which agent/loop.py stores verbatim via
+        _add_assistant into conversation history and resends to the model -
+        must never contain an inlined <think> tag."""
         agent = _make_agent(tmp_path)
         _reasoning_stream_backend(
             agent.backend, ["Visible answer."], ["secret scratchpad"])
@@ -194,7 +214,8 @@ class TestCallLLMSilent:
         assert call.kwargs["reasoning"] == "silent scratchpad"
 
     def test_silent_mode_backend_without_last_reasoning_does_not_crash(self, tmp_path):
-        """A backend with no last_reasoning attribute at all (e.g. a minimal test double or a future non-HTTP backend) must not break the call."""
+        """A backend with no last_reasoning attribute at all (e.g. a minimal
+        test double or a future non-HTTP backend) must not break the call."""
         agent = _make_agent(tmp_path)
         del agent.backend.last_reasoning   # MagicMock: remove the auto-attr
         agent.backend.chat.return_value = "Done."

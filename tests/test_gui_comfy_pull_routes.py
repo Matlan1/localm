@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The two new GUI routes for the ComfyUI missing-model auto-download offer: POST /api/media/{kind}/preflight (read-only pre-check) and POST /api/models/pull-comfy-source (curated-only pull trigger, never a client-supplied repo/path)."""
+"""The two new GUI routes for the ComfyUI missing-model auto-download offer:
+POST /api/media/{kind}/preflight (read-only pre-check) and
+POST /api/models/pull-comfy-source (curated-only pull trigger, never a
+client-supplied repo/path). Fixture mirrors test_key_scope_gui.py's scoped_app."""
 
 import json
 from pathlib import Path
@@ -50,13 +53,8 @@ class TestPreflightRoute:
 
     def test_no_comfy_running_reports_nothing_missing(self, scoped_app):
         # Best-effort, matching preflight_models: an unreachable ComfyUI never
-        # surfaces a false "missing" list. Mocks comfy_object_info directly
-        # (matching the sibling tests below) instead of relying on nothing
-        # answering the real ComfyUI default port - a real ComfyUI on 8188
-        # (a common setup for this project's contributors) would otherwise
-        # make this an unmocked network call whose result, and this test's
-        # outcome, this test does not control (the exact shape fixed in
-        # test_gui.py's comfy-model-picker test).
+        # surfaces a false "missing" list. Mocks comfy_object_info directly rather
+        # than relying on nothing answering the real ComfyUI default port.
         from localm.media import comfy_client as cc
         with patch.object(cc, "comfy_object_info", return_value=None):
             with TestClient(scoped_app) as c:
@@ -98,7 +96,11 @@ class TestPreflightRoute:
         assert entry["dest_dir"] == str(Path(str(tmp_path / "external-comfy")) / "models" / "unet")
 
     def test_dest_dir_resolves_via_plugin_only_workdir(self, scoped_app, tmp_path):
-        """NEW-COMFY-DOWNLOAD-DEST-IGNORES-PLUGIN-WORKDIR: media_preflight already has `kind` in scope and now passes it through to comfy_models_dest_dir(), so a workdir set ONLY per-plugin (the shape the modern Settings UI actually produces - no global comfy_workdir at all) resolves correctly here too, not ju..."""
+        """NEW-COMFY-DOWNLOAD-DEST-IGNORES-PLUGIN-WORKDIR: media_preflight
+        already has `kind` in scope and now passes it through to
+        comfy_models_dest_dir(), so a workdir set ONLY per-plugin (the shape
+        the modern Settings UI actually produces - no global comfy_workdir at
+        all) resolves correctly here too, not just at the download route."""
         import localm.config as _cfg
         cfg = _cfg.load_config()
         cfg["plugins"] = {"image": {"comfy": {"workdir": str(tmp_path / "per-plugin-comfy")}}}
@@ -133,13 +135,26 @@ class TestPreflightRoute:
         "C:evil.safetensors", "..",
     ])
     def test_lora_name_traversal_rejected(self, scoped_app, bad_name):
-        """Mirrors plug.py's identical test for the real /api/imagine route - the preflight route reuses the same is_safe_lora_name() predicate (see image_gen/comfy.py) rather than re-implementing the check, so a traversal/absolute/UNC-shaped value must be rejected here too, before it ever reaches _build_check..."""
+        """Mirrors plug.py's identical test for the real /api/imagine route -
+        the preflight route reuses the same is_safe_lora_name() predicate (see
+        image_gen/comfy.py) rather than re-implementing the check, so a
+        traversal/absolute/UNC-shaped value must be rejected here too, before
+        it ever reaches _build_check_workflow's LoraLoader injection."""
         with TestClient(scoped_app) as c:
             r = c.post("/api/media/image/preflight", json={"lora_name": bad_name})
         assert r.status_code == 400
 
     def test_lora_name_whitespace_is_trimmed_before_use(self, scoped_app, tmp_path):
-        """A safe lora_name with incidental leading/trailing whitespace must not be rejected, and the TRIMMED value (not the raw one) is what reaches _build_image_workflow."""
+        """A safe lora_name with incidental leading/trailing whitespace must not
+        be rejected, and the TRIMMED value (not the raw one) is what reaches
+        _build_image_workflow. Asserts the exact kwarg _build_image_workflow is
+        called with directly (rather than checking describe_missing_models's
+        output) because _pick_variant's precision/quant-insensitive matching
+        tokenizes on any non-alphanumeric character - including whitespace - so
+        a padded and unpadded filename normalize to the SAME base and an
+        untrimmed value would still resolve as "not missing" even without the
+        strip. That made an earlier version of this test pass whether or not
+        stripping actually happened - this asserts the value itself instead."""
         fake_wf = tmp_path / "wf.json"
         fake_wf.write_text(json.dumps({}))
         captured = {}
@@ -209,7 +224,14 @@ class TestPullComfySourceRoute:
 
     def test_curated_filename_with_plugin_only_workdir_and_plugin_hint_starts_a_job(
             self, scoped_app, tmp_path):
-        """NEW-COMFY-DOWNLOAD-DEST-IGNORES-PLUGIN-WORKDIR, end to end through the real route + request model: a workdir set ONLY via the per-plugin comfy.workdir field (no global comfy_workdir at all - the shape the modern Settings UI produces) resolves correctly when the request names which plugin is asking,..."""
+        """NEW-COMFY-DOWNLOAD-DEST-IGNORES-PLUGIN-WORKDIR, end to end through
+        the real route + request model: a workdir set ONLY via the per-plugin
+        comfy.workdir field (no global comfy_workdir at all - the shape the
+        modern Settings UI produces) resolves correctly when the request
+        names which plugin is asking, exactly what the real browser flow now
+        sends (helpers.js's checkModelsBeforeGenerate -> _offerModelDownload).
+        This is the maintainer's own reported "can't find working dir" error,
+        reproduced and closed at the route level."""
         import localm.config as _cfg
         cfg = _cfg.load_config()
         cfg["plugins"] = {"image": {"comfy": {"workdir": str(tmp_path / "per-plugin-comfy")}}}
@@ -222,7 +244,10 @@ class TestPullComfySourceRoute:
 
     def test_curated_filename_with_plugin_only_workdir_and_no_plugin_hint_is_400(
             self, scoped_app, tmp_path):
-        """Without a plugin hint (an older/direct API caller), resolution still falls back to the legacy global key only - documented, unchanged behavior; the real browser flow always sends `plugin` now, so this is not a regression this fix needs to close."""
+        """Without a plugin hint (an older/direct API caller), resolution
+        still falls back to the legacy global key only - documented,
+        unchanged behavior; the real browser flow always sends `plugin` now,
+        so this is not a regression this fix needs to close."""
         import localm.config as _cfg
         cfg = _cfg.load_config()
         cfg["plugins"] = {"image": {"comfy": {"workdir": str(tmp_path / "per-plugin-comfy")}}}
@@ -233,7 +258,10 @@ class TestPullComfySourceRoute:
         assert r.status_code == 400
 
     def test_unrecognized_plugin_value_falls_back_gracefully(self, scoped_app, tmp_path):
-        """req.plugin is a SELECTOR into trusted server config, validated against MEDIA_PLUGINS (web.py's own contract comment) - an unrecognized value must not error, just fall back to no plugin context, same as omitting it entirely."""
+        """req.plugin is a SELECTOR into trusted server config, validated
+        against MEDIA_PLUGINS (web.py's own contract comment) - an
+        unrecognized value must not error, just fall back to no plugin
+        context, same as omitting it entirely."""
         import localm.config as _cfg
         cfg = _cfg.load_config()
         cfg["comfy_workdir"] = str(tmp_path / "external-comfy")
@@ -256,7 +284,8 @@ class TestComfyRoutesAreScoped:
         assert r2.status_code == 403
 
     def test_models_write_key_reaches_preflight(self, scoped_app):
-        """preflight is READ-ONLY (it reports which models ComfyUI is missing), so models:write alone still reaches it."""
+        """preflight is READ-ONLY (it reports which models ComfyUI is missing), so
+        models:write alone still reaches it."""
         from localm import auth
         writer = auth.create_key("writer", [S.MODELS_WRITE])["key"]
         with TestClient(scoped_app) as c:
@@ -264,7 +293,26 @@ class TestComfyRoutesAreScoped:
         assert r1.status_code != 403
 
     def test_pull_comfy_source_now_needs_host_fs_access(self, scoped_app):
-        """REVISED CONTRACT."""
+        """REVISED CONTRACT. This test previously asserted that a plain
+        models:write key REACHES this route (`!= 403`, "400 for uncurated, not
+        403"). That is no longer true, deliberately.
+
+        The route downloads into comfy_models_dest_dir(), which resolves through
+        `comfy_workdir` whenever the managed ComfyUI instance is not active - the
+        default on a fresh install. `comfy_workdir` is admin_only now, so a plain
+        config:write key cannot CHOOSE that folder - but an admin may have
+        already configured it, and this route's own caller only needs
+        MODELS_WRITE. Without its own gate, any MODELS_WRITE key could still
+        stream a multi-gigabyte download into whatever host directory an admin
+        previously set, with no host-fs privilege of its own; the route then
+        mkdir -p's it and streams the download from the server process. Picking
+        the directory the server writes gigabytes into is host filesystem reach,
+        and a UNC value there draws outbound SMB authentication from the server -
+        the same capability /api/fs/dirs is gated on, and the same reason the
+        sibling /api/models/scan route is gated.
+
+        models:write governs WHICH MODELS may be added; it does not govern WHERE
+        ON THE DISK the server may write. Those came apart here."""
         from localm import auth
         writer = auth.create_key("writer", [S.MODELS_WRITE])["key"]
         with TestClient(scoped_app) as c:
@@ -273,7 +321,10 @@ class TestComfyRoutesAreScoped:
         assert r.status_code == 403
 
     def test_pull_comfy_source_reaches_the_route_with_host_fs_access(self, scoped_app):
-        """Fires-control for the test above: with host filesystem access the request gets PAST the gate and is answered on its merits (400 for an uncurated name)."""
+        """Fires-control for the test above: with host filesystem access the
+        request gets PAST the gate and is answered on its merits (400 for an
+        uncurated name). Without this, the 403 above would also pass against a
+        route that had simply become unreachable for everyone."""
         from localm import auth
         writer = auth.create_key("hostwriter", [S.MODELS_WRITE], fs_access="host")["key"]
         with TestClient(scoped_app) as c:

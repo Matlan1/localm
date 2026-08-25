@@ -1,5 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Git tools: the shared ``_git`` runner plus the status/diff/log read commands and the commit/push/create-branch write commands."""
+"""Git tools: the shared ``_git`` runner plus the status/diff/log read commands
+and the commit/push/create-branch write commands.
+
+Also holds the git-worktree helpers used by ``tools/parallel.py`` to give each
+concurrently-dispatched child agent its own isolated checkout. Those are plain
+helpers, NOT entries in TOOL_REGISTRY: handing the model a raw ``git worktree add``
+would let it create checkouts at arbitrary paths for no benefit the parallel
+dispatch does not already provide. Keeping them un-exposed keeps the blast radius
+to the one caller that needs them."""
 
 from __future__ import annotations
 
@@ -12,7 +20,12 @@ from .base import ToolResult, _partial_on_timeout, _truncate, run_subprocess
 
 def _git(cwd: Path, *args: str, timeout: int = 10,
          env: Optional[dict] = None) -> tuple[str, bool]:
-    """Run a git command and return (output, ok)."""
+    """Run a git command and return (output, ok).
+
+    *env* REPLACES the child's whole environment (that is subprocess semantics),
+    so a caller that only wants to add a variable must merge it onto os.environ -
+    a git invoked without PATH does not run at all.
+    """
     result = run_subprocess(["git", *args], cwd, timeout=timeout, env=env)
     if result.not_found:
         return "git not found in PATH", False
@@ -31,7 +44,14 @@ def tool_git_status(cwd: Path) -> ToolResult:
 
 
 def tool_git_diff(cwd: Path, path: str = "", staged: bool = False) -> ToolResult:
-    """Return `git diff` output."""
+    """
+    Return `git diff` output.
+
+    Parameters
+    ----------
+    path   : limit diff to this file or directory (optional)
+    staged : if True, show staged changes (`git diff --cached`)
+    """
     args = ["diff", "--stat", "-p"]
     if staged:
         args.append("--cached")
@@ -56,7 +76,17 @@ def tool_git_commit(
     message: str,
     files: Optional[list] = None,
 ) -> ToolResult:
-    """Stage files and create a git commit."""
+    """
+    Stage files and create a git commit.
+
+    Parameters
+    ----------
+    message:
+        Commit message.
+    files:
+        List of file paths to stage.  When omitted, stages all tracked
+        modifications (``git add -A``).
+    """
     # Stage
     if files:
         for f in files:
@@ -120,7 +150,7 @@ def git_repo_root(cwd: Path) -> Optional[Path]:
 
 
 def git_current_branch(cwd: Path) -> str:
-    """Current branch name, or '' when detached or unavailable."""
+    """Current branch name, or "" when detached or unavailable."""
     out, ok = _git(cwd, "rev-parse", "--abbrev-ref", "HEAD")
     if not ok:
         return ""
@@ -137,7 +167,16 @@ def git_is_dirty(cwd: Path) -> bool:
 
 
 def _ensure_locally_ignored(repo: Path, rel: str) -> None:
-    """Make *rel* ignored via .git/info/exclude (local, untracked)."""
+    """Make *rel* ignored via .git/info/exclude (local, untracked).
+
+    A worktree created INSIDE the repo shows up as untracked in the user's
+    ``git status`` unless the path is ignored, which is noise we would be
+    inflicting on their working tree. ``.git/info/exclude`` is the right lever:
+    it is local-only and never committed, so we are not editing the user's
+    tracked ``.gitignore`` behind their back. Best-effort by design - failing to
+    tidy git status must never fail a dispatch - but we only skip silently when
+    the path is ALREADY ignored, which is the benign case.
+    """
     _, already = _git(repo, "check-ignore", "-q", rel)
     if already:
         return
@@ -160,7 +199,15 @@ def _ensure_locally_ignored(repo: Path, rel: str) -> None:
 
 def git_worktree_add(repo: Path, path: Path, branch: str,
                      base: str = "HEAD") -> tuple[str, bool]:
-    """Create a worktree at *path* on a NEW branch *branch* based at *base*."""
+    """Create a worktree at *path* on a NEW branch *branch* based at *base*.
+
+    Always creates a fresh branch (``worktree add -b``). That is what keeps this
+    safe on two counts the caller depends on:
+    - the new worktree is never checked out on master (or any existing branch), so
+      it cannot collide with a branch already checked out elsewhere; and
+    - the SHARED main checkout is never switched, branched, or reset - ``worktree
+      add`` only ever touches the new directory.
+    """
     if not branch or branch in {"master", "main", "HEAD"}:
         return (f"refusing to create a child worktree on '{branch}': child work "
                 "must go on its own fresh branch, never a shared one"), False
@@ -186,7 +233,15 @@ def git_worktree_add(repo: Path, path: Path, branch: str,
 
 
 def git_worktree_remove(repo: Path, path: Path) -> tuple[str, bool]:
-    """Remove the worktree at *path*."""
+    """Remove the worktree at *path*.
+
+    Deliberately NEVER passes ``--force``. A removal that fails because the tree is
+    dirty or because a live process still holds it is a REAL condition, not a
+    spurious error to bulldoze: ``--force`` would delete a child's uncommitted work,
+    which is precisely the outcome this feature exists to prevent. The caller
+    commits the child's work to its branch BEFORE removing, so a dirty tree here
+    means something went wrong and the operator needs to know.
+    """
     out, ok = _git(repo, "worktree", "remove", str(path), timeout=60)
     if ok:
         return out, True
@@ -214,7 +269,27 @@ _PRUNE_RECORD_RE = re.compile(r"^Removing\s+worktrees/(?P<name>.+?):")
 
 
 def git_prune_child_worktrees(repo: Path) -> tuple[str, bool]:
-    """Prune stale worktree records, but ONLY when every one of them is ours."""
+    """Prune stale worktree records, but ONLY when every one of them is ours.
+
+    `git worktree prune` takes no pathspec (`usage: git worktree prune [-n] [-v]
+    [--expire <expire>]`), so a bare call drops the administrative record of
+    EVERY registered worktree whose directory is currently missing - in the
+    USER's repo, not just ours. Git's own documentation names the victim: a
+    worktree "stored on a portable device or network share which is not always
+    mounted" is indistinguishable from an abandoned one, and recovering it needs
+    `git worktree repair`. Tidying up after our own children is not worth
+    silently discarding a user's worktree; that is the same class of bug #795
+    fixed for RAG, where an unplugged drive must not be able to destroy the index.
+
+    So: ask git what it WOULD prune, and prune only when every record listed is
+    one of ours (the ``coder-child-`` prefix). Anything else, INCLUDING a line we
+    cannot parse, fails CLOSED - we skip the prune and say why. A leftover record
+    of our own is harmless and already surfaced in the dispatch report; a dropped
+    foreign record cannot be recovered from here.
+
+    Returns (message, ok). ok=False means nothing was pruned and the message says
+    what stopped it, for the caller to surface rather than swallow.
+    """
     # Force git's own messages to English FOR THIS PROBE. The line we parse is
     # gettext-translated (git's source emits `Removing %s/%s: %s` through _()),
     # so on a build that ships message catalogs a localized line would fail the
@@ -257,7 +332,11 @@ def git_prune_child_worktrees(repo: Path) -> tuple[str, bool]:
 
 
 def git_list_child_worktrees(repo: Path) -> list[Path]:
-    """Every registered worktree whose directory name marks it as one of ours."""
+    """Every registered worktree whose directory name marks it as one of ours.
+
+    Used to surface orphans left by a hard kill, so they can be reaped instead of
+    silently accumulating.
+    """
     out, ok = _git(repo, "worktree", "list", "--porcelain", timeout=30)
     if not ok:
         return []
@@ -273,7 +352,12 @@ def git_list_child_worktrees(repo: Path) -> list[Path]:
 
 
 def git_commit_all_in(cwd: Path, message: str) -> tuple[str, bool]:
-    """Stage and commit everything in *cwd*, including untracked files."""
+    """Stage and commit everything in *cwd*, including untracked files.
+
+    Committing a child's work is what makes the worktree disposable: the BRANCH is
+    the durable artifact the human reviews and merges, the worktree is transient.
+    Committing is NOT merging - the parent's tree is untouched either way.
+    """
     out, ok = _git(cwd, "add", "-A", timeout=30)
     if not ok:
         return f"failed to stage child work: {out}", False
@@ -288,7 +372,16 @@ def tool_git_create_branch(
     name: str,
     checkout: bool = True,
 ) -> ToolResult:
-    """Create a new git branch."""
+    """
+    Create a new git branch.
+
+    Parameters
+    ----------
+    name:
+        Branch name, e.g. ``feat/my-feature``.
+    checkout:
+        Switch to the new branch after creating it (default: True).
+    """
     if checkout:
         out, ok = _git(cwd, "checkout", "-b", name)
     else:

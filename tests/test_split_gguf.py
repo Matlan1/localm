@@ -93,13 +93,10 @@ class TestGgufBackendSplitCheck:
             (tmp_path / f"m-0000{i}-of-00002.gguf").write_bytes(b"GGUF")
         backend = GgufBackend(str(tmp_path / "m-00001-of-00002.gguf"))
         # The split check must pass; the native load itself is mocked out.
-        # _check_vram is also mocked: this test is only about the split-file
-        # precondition, but load() calls the real _check_vram() unconditionally,
-        # which reaches the real _total_vram_bytes()/_free_total_vram_bytes() and
-        # a genuine `import torch` in a venv without the [gpu] extra - leaving it
-        # unmocked here would (rarely, order-dependently) latch
-        # VramSizingMixin._torch_rocm_init_broken for the rest of the process,
-        # the same cross-test leak fixed in test_vram_preflight.py.
+        # _check_vram is mocked too: load() calls it unconditionally, which reaches
+        # the real _total_vram_bytes()/_free_total_vram_bytes() and a genuine
+        # `import torch` in a venv without the [gpu] extra, latching
+        # VramSizingMixin._torch_rocm_init_broken for the rest of the process.
         with patch.object(backend, "_check_vram"), \
              patch.object(backend, "_load_native") as mock_native:
             backend.load()

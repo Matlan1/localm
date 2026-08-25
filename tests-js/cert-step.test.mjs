@@ -1,9 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// The "Install certificate" step must be offered over HTTPS whenever the local CA
-// is not CONFIRMED trusted - including the UNKNOWN state (__swFailed undefined),
-// which is what happens on a phone (Firefox) or a clicked-through self-signed cert
-// where service-worker registration never cleanly resolves. Gating on `=== true`
-// (#201) hid the cert download from exactly those mobile users.
+// Exercises updateKeyGateCertStep() across the three __swFailed states and loopback HTTP.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -15,7 +11,7 @@ const certShown = (window) =>
 
 test("HTTPS + UNKNOWN trust (mobile / clicked-through cert) -> cert download offered", () => {
   const { window } = loadApp({ url: "https://localhost:8642/", fetchImpl: gate401 });
-  // jsdom has no service worker, so __swFailed stays undefined = trust unknown.
+  // jsdom has no service worker, so __swFailed stays undefined.
   window.updateKeyGateCertStep();
   assert.ok(certShown(window), "unknown trust over HTTPS must still offer the certificate");
   assert.match(window.document.getElementById("key-gate-cert-link").href,

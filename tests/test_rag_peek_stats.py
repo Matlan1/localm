@@ -1,5 +1,28 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Collection.peek_stats() / peek_detail() - the lazy, meta.json-only read path rag_collections/rag_detail use to avoid materialising chunks.jsonl and vectors.json just to report counts (measured 2.7-3.8s on a real tree, freezing the single-worker event loop for every other in-flight request the whole..."""
+"""Collection.peek_stats() / peek_detail() - the lazy, meta.json-only read
+path rag_collections/rag_detail use to avoid materialising chunks.jsonl and
+vectors.json just to report counts (measured 2.7-3.8s on a real tree,
+freezing the single-worker event loop for every other in-flight request the
+whole time it took).
+
+The one property that actually matters here, adversarially: peek_stats()
+must NEVER report a value that disagrees with what the real, full
+``Collection(name).stats()`` would say for the SAME on-disk state. A cache
+that answers fast but wrong is worse than the freeze it replaces, because a
+freeze is at least visibly slow - a wrong ``has_vectors`` or a silently
+stale ``vector_degrade_reason`` looks like a healthy collection. So every
+case below builds a collection through the REAL API (create/add_paths/hand-
+corrupt-on-disk, the same fixtures test_rag_degraded_vectors_preserved.py
+uses), then asserts ``peek_stats()``/``peek_detail()`` are BYTE-IDENTICAL to
+the eager ``stats()``/``{**stats(), "docs": docs()}`` - never a looser
+"close enough" comparison.
+
+Also pins the None contract: peek_stats()/peek_detail() must return None
+(never a wrong dict) for anything they cannot answer cheaply and correctly -
+a collection saved before this cache existed, a corrupt meta.json, or a
+name that does not exist - so the caller's fallback to the real, full load
+is exercised, not skipped.
+"""
 
 from __future__ import annotations
 
@@ -33,7 +56,10 @@ def docs(tmp_path):
 
 
 def _assert_peek_matches_eager(base, name):
-    """The core adversarial assertion: reload the collection FRESH (a brand new Collection instance, exactly what a real request does) and compare its authoritative stats()/docs() against the lazy peek path, byte for byte."""
+    """The core adversarial assertion: reload the collection FRESH (a brand
+    new Collection instance, exactly what a real request does) and compare
+    its authoritative stats()/docs() against the lazy peek path, byte for
+    byte."""
     eager = Collection(name, base=base)
     eager_stats = eager.stats()
     eager_detail = {**eager_stats, "docs": eager.docs()}
@@ -74,7 +100,10 @@ def test_fully_embedded_collection_has_vectors_true(base, docs):
 
 
 def test_no_embedder_has_vectors_false_no_degrade(base, docs):
-    """No embed_fn at all is a legitimate, undegraded state - lexical-only by choice, not a fault. has_vectors must be False with NO reason (None), not conflated with an actual degrade (rule 5: distinct causes, distinct signals)."""
+    """No embed_fn at all is a legitimate, undegraded state - lexical-only by
+    choice, not a fault. has_vectors must be False with NO reason (None), not
+    conflated with an actual degrade (rule 5: distinct causes, distinct
+    signals)."""
     coll = Collection("kb", base=base).create()
     coll.add_paths([docs])
     stats = _assert_peek_matches_eager(base, "kb")
@@ -84,7 +113,20 @@ def test_no_embedder_has_vectors_false_no_degrade(base, docs):
 
 
 def _flaky_embed(fail_on):
-    """A real embed_fn (goes through add_paths' own finiteness/shape checks, not a hand-edited file) that raises for any batch containing one of the *fail_on* substrings - reproduces genuine partial coverage the way a real, spotty embedder would, so the resulting vectors.json is exactly what a legitimate _..."""
+    """A real embed_fn (goes through add_paths' own finiteness/shape checks,
+    not a hand-edited file) that raises for any batch containing one of the
+    *fail_on* substrings - reproduces genuine partial coverage the way a
+    real, spotty embedder would, so the resulting vectors.json is exactly
+    what a legitimate _save() writes, not a simulated-corruption fixture.
+
+    IMPORTANT ordering note, verified against the real add_paths loop: a
+    single raised exception sets an internal "embed_broken" flag for the
+    REST of that add_paths() call - every file processed AFTER the failing
+    one also gets no vector, not just the one that raised (a real embedder
+    outage is treated as terminal for the batch, not retried per file). So
+    *fail_on* must target the LAST file in iteration order (alphabetical) to
+    get partial-but-nonzero coverage; targeting an earlier file zeroes
+    everything after it too."""
     def embed(texts):
         if any(any(f in t for f in fail_on) for t in texts):
             raise RuntimeError("embedder unavailable for this batch")
@@ -101,7 +143,15 @@ def _vectors_present_count(base, name) -> int:
 
 
 def test_partial_coverage_below_threshold_has_vectors_false(base, docs):
-    """Below the 80% coverage threshold: has_vectors must read False even though SOME vectors exist - this is the exact boundary a naive re- derivation could get subtly wrong (e.g. `bool(n_vectors)` instead of the real coverage ratio)."""
+    """Below the 80% coverage threshold: has_vectors must read False even
+    though SOME vectors exist - this is the exact boundary a naive re-
+    derivation could get subtly wrong (e.g. `bool(n_vectors)` instead of the
+    real coverage ratio). Reproduced through the REAL embed pipeline (the
+    LAST of three files - alpha, beta, gamma, processed in that order - fails
+    to embed, exactly like a flaky real embedder), not by hand-editing
+    vectors.json after the fact - see the module docstring for why that
+    matters: a hand-edit after _save() is indistinguishable from external
+    tampering and is covered separately below."""
     coll = Collection("kb", base=base).create()
     coll.add_paths([docs], embed_fn=_flaky_embed(["compressors"]))  # gamma (last) fails
     assert _vectors_present_count(base, "kb") == 2, (
@@ -113,7 +163,11 @@ def test_partial_coverage_below_threshold_has_vectors_false(base, docs):
 
 
 def test_partial_coverage_at_threshold_has_vectors_true(base, tmp_path):
-    """>=80% coverage (not 'every chunk') is the real has_vectors contract - a partially-embedded collection still does hybrid retrieval, so this must read True, not under-report a working collection as lexical-only."""
+    """>=80% coverage (not "every chunk") is the real has_vectors contract -
+    a partially-embedded collection still does hybrid retrieval, so this
+    must read True, not under-report a working collection as lexical-only.
+    Reproduced through the real embed pipeline (the LAST of five files fails,
+    per the ordering note on _flaky_embed)."""
     d = tmp_path / "docs5"
     d.mkdir()
     for i in range(5):
@@ -132,17 +186,20 @@ def test_partial_coverage_at_threshold_has_vectors_true(base, tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-#  Files changed WITHOUT going through _save(): the cache must refuse, never  #
-#  answer wrong. A real _save() can never itself produce a chunk/vector       #
-#  count mismatch or a non-finite value on disk (add_paths validates          #
-#  finiteness before writing - see test_rag.py/test_rag_degraded_vectors_-    #
-#  preserved.py); the only way to reach these states is a hand-edit, an       #
-#  interrupted write, or genuine external tampering - exactly what the       #
-#  fingerprint in _save()'s cache block exists to detect.                    #
+#  Files changed WITHOUT going through _save(): the cache must refuse,        #
+#  never answer wrong. A real _save() cannot itself produce a chunk or        #
+#  vector count mismatch or a non-finite value on disk, so these states       #
+#  are reachable only by a hand-edit, an interrupted write, or external       #
+#  tampering - what the fingerprint in _save()'s cache block detects.         #
 # --------------------------------------------------------------------------- #
 
 def test_hand_corrupted_vectors_after_save_is_never_trusted(base, docs):
-    """A structurally-valid vectors.json whose length no longer matches the chunk count, written AFTER _save() already cached a healthy state (the same shape test_rag_degraded_vectors_preserved.py uses to simulate an interrupted/partial embed): the fingerprint must no longer match, so peek_stats()/peek_det..."""
+    """A structurally-valid vectors.json whose length no longer matches the
+    chunk count, written AFTER _save() already cached a healthy state (the
+    same shape test_rag_degraded_vectors_preserved.py uses to simulate an
+    interrupted/partial embed): the fingerprint must no longer match, so
+    peek_stats()/peek_detail() return None - NOT the stale cached "healthy"
+    answer. The fallback (the real, full stats()) must still get it right."""
     coll = Collection("kb", base=base).create()
     coll.add_paths([docs], embed_fn=_embed3)
     assert Collection.peek_stats("kb", base=base)["has_vectors"] is True, (
@@ -163,7 +220,11 @@ def test_hand_corrupted_vectors_after_save_is_never_trusted(base, docs):
 
 
 def test_hand_corrupted_non_finite_vectors_after_save_is_never_trusted(base, docs):
-    """Same shape as above for NaN/inf: add_paths itself would never write a non-finite value (it validates before storing - see the write pipeline around _vectors_finite in add_paths), so this can only be reached by a hand-edit / external write, and the cache must refuse rather than answer from its now-st..."""
+    """Same shape as above for NaN/inf: add_paths itself would never write a
+    non-finite value (it validates before storing - see the write pipeline
+    around _vectors_finite in add_paths), so this can only be reached by a
+    hand-edit / external write, and the cache must refuse rather than answer
+    from its now-stale "healthy" snapshot."""
     coll = Collection("kb", base=base).create()
     coll.add_paths([docs], embed_fn=_embed3)
     assert Collection.peek_stats("kb", base=base)["has_vectors"] is True
@@ -181,15 +242,17 @@ def test_hand_corrupted_non_finite_vectors_after_save_is_never_trusted(base, doc
 
 
 def test_hand_edited_chunks_jsonl_after_save_is_never_trusted(base, docs):
-    """The fingerprint covers BOTH files independently - editing chunks.jsonl alone (leaving vectors.json untouched) must also invalidate the cache, not just a vectors.json edit."""
+    """The fingerprint covers BOTH files independently - editing chunks.jsonl
+    alone (leaving vectors.json untouched) must also invalidate the cache,
+    not just a vectors.json edit. Appends a chunk by hand, so n_chunks itself
+    would be wrong if the stale cache were trusted."""
     coll = Collection("kb", base=base).create()
     coll.add_paths([docs], embed_fn=_embed3)
     assert Collection.peek_stats("kb", base=base)["n_chunks"] == 3
 
-    # dumps_lines() (what _save() writes with) joins records with "\n" and
-    # adds NO trailing newline, so the append must supply the separator
-    # itself - appending without one would concatenate onto the last real
-    # record and corrupt it instead of adding a clean new line.
+    # dumps_lines() (what _save() writes with) joins records with a newline and
+    # adds none at the end, so the append must supply the separator itself or it
+    # would concatenate onto the last real record.
     chunks_path = base / "kb" / "chunks.jsonl"
     with chunks_path.open("a", encoding="utf-8") as f:
         f.write("\n" + json.dumps({"source": "hand-added", "pos": 0, "text": "smuggled"}))
@@ -199,7 +262,12 @@ def test_hand_edited_chunks_jsonl_after_save_is_never_trusted(base, docs):
 
 
 def test_malformed_chunks_jsonl_count_surfaces_in_stats(base, docs):
-    """NEW-RAG-INDEX-WARN-SPAM residual B: the malformed-line COUNT must reach stats() (not just the boolean 'corrupt'), so a caller can say '62 malformed chunk line(s)' instead of a generic 'index damaged'."""
+    """NEW-RAG-INDEX-WARN-SPAM residual B: the malformed-line COUNT must reach
+    stats() (not just the boolean 'corrupt'), so a caller can say "62 malformed
+    chunk line(s)" instead of a generic "index damaged". Two bad lines hand-
+    appended: one that is not valid JSON at all, one that is valid JSON but the
+    wrong shape (no "text" field) - both are the two ways _load() counts a line
+    as bad."""
     coll = Collection("kb", base=base).create()
     coll.add_paths([docs], embed_fn=_embed3)   # 3 real chunks
 
@@ -214,10 +282,9 @@ def test_malformed_chunks_jsonl_count_surfaces_in_stats(base, docs):
     assert stats["corrupt"] is True
     assert stats["n_chunks"] == 3, "malformed lines are skipped, never counted as chunks"
 
-    # The count must also survive into the cache load_and_maybe_backfill writes,
-    # exactly like every other stats() field - it only writes meta.json's cache
-    # block (never rewrites chunks.jsonl), so this reads the count from the
-    # SAME still-malformed file, not a self-healed one.
+    # The count also survives into the cache load_and_maybe_backfill writes: it
+    # only writes meta.json's cache block and never rewrites chunks.jsonl, so
+    # this reads the count from the SAME still-malformed file.
     backfilled = Collection.load_and_maybe_backfill("kb", base=base)
     assert backfilled.stats() == stats
     assert backfilled.stats()["chunks_bad_lines"] == 2
@@ -245,10 +312,9 @@ def test_malformed_chunks_jsonl_count_surfaces_in_stats(base, docs):
         "so the malformed lines are gone from disk and must not still be "
         "counted on the next load")
 
-    # THE actual bug shape: peek_stats() (what the GUI list/repair-button
-    # renders from) must ALSO see the healed state right after this save -
-    # not require an intervening fresh Collection() construction, which a
-    # cache is supposed to make unnecessary in the first place.
+    # peek_stats() (what the GUI list and repair button render from) sees the
+    # healed state right after this save, with no intervening fresh Collection()
+    # construction.
     peeked_after_heal = Collection.peek_stats("kb", base=base)
     assert peeked_after_heal is not None, (
         "fingerprint must still match what _save() just wrote")
@@ -257,7 +323,10 @@ def test_malformed_chunks_jsonl_count_surfaces_in_stats(base, docs):
 
 
 def test_fingerprint_survives_a_real_noop_save(base, docs):
-    """The other direction: a real _save() that changes NOTHING (e.g. a resync that finds no changes) must NOT spuriously invalidate its own cache - a fingerprint bug that always mismatches would silently defeat the whole fix by falling back to the slow path on every call."""
+    """The other direction: a real _save() that changes NOTHING (e.g. a
+    resync that finds no changes) must NOT spuriously invalidate its own
+    cache - a fingerprint bug that always mismatches would silently defeat
+    the whole fix by falling back to the slow path on every call."""
     coll = Collection("kb", base=base).create()
     coll.add_paths([docs], embed_fn=_embed3)
     coll.resync(embed_fn=_embed3, policy=None)   # nothing changed
@@ -265,7 +334,10 @@ def test_fingerprint_survives_a_real_noop_save(base, docs):
 
 
 def test_rejected_sidecar_present_degrade_reason(base, docs):
-    """After a rejected vectors.json is set aside (see test_rag_degraded_vectors_preserved.py), the collection is still degraded until a real rebuild - peek must carry that same reason, not silently clear it because the (missing) vectors.json alone looks clean."""
+    """After a rejected vectors.json is set aside (see
+    test_rag_degraded_vectors_preserved.py), the collection is still
+    degraded until a real rebuild - peek must carry that same reason, not
+    silently clear it because the (missing) vectors.json alone looks clean."""
     coll = Collection("kb", base=base).create()
     coll.add_paths([docs], embed_fn=_embed3)
     vec_path = base / "kb" / "vectors.json"
@@ -307,7 +379,11 @@ def test_indexed_folder_root_counts_toward_n_roots(base, docs):
 # --------------------------------------------------------------------------- #
 
 def test_uncached_collection_returns_none_not_a_guess(base, docs):
-    """A collection saved before this cache existed (simulated by stripping the key after a real save) must make peek_stats()/peek_detail() return None - never fall back to a partial/approximate read of chunks.jsonl or vectors.json, which is exactly the 'answers wrong instead of not at all' shape this whol..."""
+    """A collection saved before this cache existed (simulated by stripping
+    the key after a real save) must make peek_stats()/peek_detail() return
+    None - never fall back to a partial/approximate read of chunks.jsonl or
+    vectors.json, which is exactly the "answers wrong instead of not at all"
+    shape this whole design avoids."""
     coll = Collection("kb", base=base).create()
     coll.add_paths([docs], embed_fn=_embed3)
     meta_path = base / "kb" / "meta.json"
@@ -318,8 +394,8 @@ def test_uncached_collection_returns_none_not_a_guess(base, docs):
 
     assert Collection.peek_stats("kb", base=base) is None
     assert Collection.peek_detail("kb", base=base) is None
-    # The real load must still be fully correct - the point of returning
-    # None is that the CALLER falls back to this, not that the data is lost.
+    # The real load is still fully correct: returning None makes the CALLER fall
+    # back to it, and no data is lost.
     assert Collection("kb", base=base).stats()["n_chunks"] == 3
 
 
@@ -343,7 +419,8 @@ def test_invalid_name_returns_none(base):
 
 
 def test_hand_edited_stats_cache_wrong_shape_returns_none(base, docs):
-    """A hand-edited meta.json with a malformed cache block (not the shape _save() writes) must fall back rather than trust garbage."""
+    """A hand-edited meta.json with a malformed cache block (not the shape
+    _save() writes) must fall back rather than trust garbage."""
     coll = Collection("kb", base=base).create()
     coll.add_paths([docs], embed_fn=_embed3)
     meta_path = base / "kb" / "meta.json"

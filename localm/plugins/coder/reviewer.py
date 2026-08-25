@@ -1,5 +1,26 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Pre-done diff review for the coder agent (heterogeneous self-review)."""
+"""
+Pre-done diff review for the coder agent (heterogeneous self-review).
+
+Before the agent declares a task done, an optional REVIEWER model reads the
+cumulative diff and looks for BLOCKING problems (correctness bugs, security holes,
+broken/missing functionality, or edits that weaken a check to pass it). If it
+flags any, they are fed back to the agent for one more fix pass; otherwise the
+agent's answer stands. The implementer is a biased grader, so a second pass -
+ideally by a DIFFERENT model - catches what the build pass missed. This is the
+local mirror of the fresh-context grading a human reviewer would do.
+
+The reviewer is just a ``BaseLLMBackend`` (anything with ``.chat()``), so it can be:
+  - the agent's OWN backend (same model; the default; private, zero infra), or
+  - a configured heterogeneous backend - a second OpenAI-compatible endpoint
+    (a cloud model or a 2nd local server) for a genuinely independent opinion.
+The heterogeneous reviewer is opt-in and is NOT used over a non-local endpoint in
+privacy mode or for a restricted session (it would send the diff off the machine);
+those fall back to the local same-model reviewer with a warning.
+
+This module is pure prompt-building + lenient parsing. The Agent owns the wiring,
+the config, and the privacy gate (``reviewer_for_agent``).
+"""
 
 from __future__ import annotations
 
@@ -90,7 +111,8 @@ def _extract_json(raw: str) -> dict:
 
 
 def parse_review(raw: str) -> ReviewResult:
-    """Parse a reviewer reply into a ReviewResult."""
+    """Parse a reviewer reply into a ReviewResult. Fail-OPEN (approved) on garbage,
+    so a flaky reviewer never blocks the agent - the review is a safety net, not a gate."""
     data = _extract_json(raw)
     if not data:
         return ReviewResult(
@@ -129,7 +151,13 @@ class Reviewer:
         return parse_review(raw)
 
     def failure_warning(self, result: ReviewResult) -> str:
-        """The user-facing warning for a review that FAILED, else ``''``."""
+        """The user-facing warning for a review that FAILED, else ``""``.
+
+        A crashed or unparseable review returns approved=True so it never blocks
+        the answer (fail-open), which made it indistinguishable from a genuine
+        approval at every call site. It is not one: nothing was actually checked.
+        Callers surface this before accepting the final answer (AGENTS.md rule 5 -
+        a verification step that failed must never report success)."""
         if result.ok:
             return ""
         who = "the separate reviewer model" if self.heterogeneous else "the review pass"
@@ -141,7 +169,10 @@ class Reviewer:
         )
 
     def feedback_for(self, result: ReviewResult) -> str:
-        """The ``[review feedback]`` message for an already-obtained *result*, or ``''`` when the answer stands."""
+        """The ``[review feedback]`` message for an already-obtained *result*, or
+        ``""`` when the answer stands. Split from ``review_feedback`` so a caller
+        can inspect ``result.ok`` (a failed review is not an approval) instead of
+        being handed the same empty string for both outcomes."""
         if result.approved or not result.blocking:
             return ""
         lines = "\n".join("- " + b for b in result.blocking)
@@ -154,7 +185,13 @@ class Reviewer:
         )
 
     def review_feedback(self, diff: str, task: str = "") -> str:
-        """A ``[review feedback]`` message if the reviewer flagged blocking issues, else ``''`` (the agent's answer stands)."""
+        """A ``[review feedback]`` message if the reviewer flagged blocking issues,
+        else ``""`` (the agent's answer stands).
+
+        Convenience wrapper that DISCARDS the ReviewResult, so it cannot tell an
+        approval from a failed review. A caller that must not treat a crashed
+        reviewer as a pass uses ``review()`` + ``failure_warning()`` +
+        ``feedback_for()`` instead."""
         return self.feedback_for(self.review(diff, task))
 
 
@@ -183,7 +220,22 @@ def _is_privacy(mode) -> bool:
 
 
 def reviewer_for_agent(agent_backend, mode, restricted: bool):
-    """Build the Reviewer for an Agent, or None when review is off / not allowed."""
+    """Build the Reviewer for an Agent, or None when review is off / not allowed.
+
+    Config (global config.py):
+      - ``coder_review`` (bool, default False): master switch.
+      - ``coder_reviewer`` (str): "" = the agent's own model (local, private);
+        "local" = a different small model loaded on CPU in this process
+        (heterogeneous AND private); "openai"/"anthropic" = a cloud model; an
+        http(s) URL = a 2nd OpenAI-compatible endpoint (e.g. a second local server).
+      - ``coder_reviewer_model`` (str): model name/path for a heterogeneous reviewer.
+
+    A NETWORK reviewer (cloud, or a non-loopback URL) sends the diff off the
+    agent's own model, so it is NOT used in privacy mode or for a restricted
+    (shareable, non-owner) session - those fall back to the local same-model
+    reviewer with a warning, never silently leaking the diff. The "local" CPU
+    reviewer stays on-machine, so it is allowed in privacy mode.
+    """
     from .display import print_warning
     try:
         from localm.config import load_config

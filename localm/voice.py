@@ -1,5 +1,47 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Speech-to-text for the GUI chat: Whisper via faster-whisper (CPU int8)."""
+"""Speech-to-text for the GUI chat: Whisper via faster-whisper (CPU int8).
+
+faster-whisper was chosen over openai-whisper/torch because it runs well on
+CPU with int8 quantization and ships as plain wheels - no torch required, so
+it works on the GGUF-only base install. It is still optional:
+
+    pip install "localm[voice]"
+
+The model (config ``voice_stt_model``, default "base") is downloaded from
+HuggingFace on FIRST use into localm's OWN data dir (``stt_cache_dir()``), not
+the global HuggingFace cache in the user's home profile - that one download is
+the only network access; transcription itself is fully local and offline.
+
+That one download is gated by the network policy (netpolicy.network_mode), the
+same bypass-ask-respect-off rule the embedder's ``_download_known`` applies:
+under ``net_mode=allow`` the first use fetches automatically; under ``ask`` the
+fetch needs an explicit one-time authorization (``prefetch_stt_model``); under
+``off`` nothing fetches, ever - off is the kill switch and stays absolute. The
+worker enforces this structurally: it is dispatched with ``local_files_only``
+so it CANNOT download unless the policy decision in this (parent) process said
+so - and a cached model always loads with ``local_files_only=True``, so a
+routine load never touches the network at all.
+
+Text-to-speech needs no backend at all: the GUI uses Kokoro in the browser
+(see the ``tts`` plugin) or the browser's built-in speechSynthesis.
+
+VOICE-1 - why transcription runs in a SEPARATE PROCESS
+------------------------------------------------------
+faster-whisper's native engine (ctranslate2) and the PyAV decoder are C/C++
+libraries. On some inputs and some builds they do not raise a Python exception
+- they fault at the C level (an abort()/access-violation). A native fault
+cannot be caught by ``try/except``: it terminates the whole interpreter, which
+took the entire localm server down with it (the reported "speech to text
+crashed the server"). An empty/undecodable-blob guard does not help, because
+the fault is in the real transcription path, not in obviously-bad input.
+
+The only robust containment for an uncatchable native fault is process
+isolation. So the entire native pipeline (decode -> load -> transcribe) runs in
+a dedicated worker process. If it crashes or hangs, only the worker dies; the
+server process detects the dead/stuck worker, returns a clean ``VoiceError``,
+and respawns the worker for the next request. STT can therefore never take the
+server down.
+"""
 
 from __future__ import annotations
 
@@ -25,7 +67,14 @@ _FAULT_ENV = "LOCALM_VOICE_FAULT_FOR_TEST"
 
 
 class VoiceError(Exception):
-    """Transcription failed; the message says why and what to install."""
+    """Transcription failed; the message says why and what to install.
+
+    ``code`` carries the failure CLASS as a stable machine-readable tag (the
+    worker's own structured tags - "needs-faster-whisper", "decode", "empty",
+    "load", "transcribe" - plus the manager-side "spawn", "timeout", "crash",
+    "no-speech"), so an HTTP endpoint can pick a status by class instead of
+    substring-matching the human message: rewording a message must never flip
+    a status code."""
 
     def __init__(self, message: str, code: str = "") -> None:
         super().__init__(message)
@@ -33,7 +82,22 @@ class VoiceError(Exception):
 
 
 def stt_available() -> tuple[bool, str]:
-    """(available, reason) - lets the GUI grey out the mic button up front instead of letting the user record and only then failing."""
+    """(available, reason) - lets the GUI grey out the mic button up front
+    instead of letting the user record and only then failing.
+
+    Three gates, each with its own honest reason (a blocked prerequisite is
+    NEVER silent): the faster-whisper package must be importable, and when the
+    configured model is not cached yet the network policy must permit the
+    one-time download - automatic only under ``net_mode=allow``; ``ask`` needs
+    the explicit download action (``prefetch_stt_model`` via
+    POST /api/voice/model/download) and ``off`` blocks absolutely.
+
+    Uses ``find_spec`` (does NOT import the package), so a status check never
+    loads the native STT stack into the server process. That stack initialises
+    OpenMP, which can abort the whole process on the OMP-runtime collision
+    described in the module docstring; it must only ever load in the isolated
+    worker. Keeping this import-free (netpolicy/config are stdlib-light; no
+    faster-whisper, no huggingface_hub) also keeps the status probe instant."""
     if importlib.util.find_spec("faster_whisper") is None:
         return False, (
             "Speech-to-text needs the faster-whisper package. Install it "
@@ -49,7 +113,9 @@ def stt_available() -> tuple[bool, str]:
 
 
 def _stt_download_blocked_reason(name: str, mode: str) -> str:
-    """Why the one-time Whisper download cannot happen right now, stated for the user."""
+    """Why the one-time Whisper download cannot happen right now, stated for
+    the user. ONE helper shared by ``stt_available``, the transcribe path and
+    ``prefetch_stt_model``, so every surface reports the same reason."""
     if mode == "off":
         return (
             f"The Whisper '{name}' speech model is not downloaded, and network "
@@ -63,18 +129,53 @@ def _stt_download_blocked_reason(name: str, mode: str) -> str:
 
 
 def stt_cache_dir():
-    """Where localm keeps the Whisper STT model: inside the data dir (rule 4)."""
+    """Where localm keeps the Whisper STT model: inside the data dir (rule 4).
+
+    THE single source of truth for the model's location, used by BOTH the
+    ``stt_model_cached`` probe below and the worker's actual download
+    (``WhisperModel(download_root=...)``). One function, so the probe cannot drift
+    from where the bytes really land - a disagreement would show as a consent prompt
+    for a model that is already there, or vice versa.
+
+    Left to itself, faster-whisper downloads into the GLOBAL HuggingFace hub cache
+    (``~/.cache/huggingface/hub``, i.e. the user's home profile - up to ~1.5 GB for the
+    larger models). The user consents to the DOWNLOAD; they never consented to that
+    LOCATION. faster-whisper passes ``download_root`` straight through as
+    huggingface_hub's ``cache_dir``, so the on-disk layout is the standard
+    ``models--<org>--<repo>/snapshots/<rev>/`` either way - only the root moves."""
     from localm.config import cache_dir
     return cache_dir() / "whisper"
 
 
 def _stt_repo_for(name: str) -> str:
-    """The HuggingFace repo a ``voice_stt_model`` value maps to."""
+    """The HuggingFace repo a ``voice_stt_model`` value maps to. ONE helper
+    shared by the ``stt_model_cached`` probe and ``prefetch_stt_model``'s
+    download, so the two cannot drift: the prefetch fetches exactly the repo
+    the probe checks, and a successful prefetch therefore always flips the
+    probe to cached (the same one-source-of-truth argument as ``stt_cache_dir``).
+
+    Standard faster-whisper repos follow the Systran/faster-whisper-<name>
+    convention - exact for every value the ``voice_stt_model`` SELECT can hold
+    (tiny/base/small/medium; the settings schema validates SELECT values against
+    their options) - and an explicit "<org>/<repo>" id is used as-is. A few
+    exotic aliases (distil-*/turbo), reachable only by hand-editing config.json
+    past the schema, map elsewhere upstream and would show as not-cached here;
+    the worker stays the source of truth for whether the model actually loads."""
     return name if "/" in name else f"Systran/faster-whisper-{name}"
 
 
 def stt_model_cached() -> tuple[bool, str]:
-    """(cached, model_name) - is the configured Whisper model already in localm's own model cache (``stt_cache_dir()``)? First use otherwise downloads it; the GUI asks for consent before triggering that one network access."""
+    """(cached, model_name) - is the configured Whisper model already in localm's
+    own model cache (``stt_cache_dir()``)? First use otherwise downloads it; the GUI
+    asks for consent before triggering that one network access.
+
+    Resolved WITHOUT importing huggingface_hub (or faster-whisper): we read the
+    documented hub-cache layout directly. The earlier version imported
+    ``huggingface_hub`` here, whose heavy transitive import chain (requests,
+    fsspec, filelock, tqdm, ...) could take tens of seconds on a cold start and,
+    because this runs inside the ``async def`` /api/voice/status handler, froze
+    the event loop and stalled the whole first /api/* batch (R24). A direct path
+    probe keeps it genuinely instant, matching ``stt_available``."""
     from pathlib import Path
 
     from localm.config import load_config
@@ -105,7 +206,37 @@ _STT_ALLOW_PATTERNS = ("config.json", "preprocessor_config.json", "model.bin",
 
 
 def prefetch_stt_model(allow_download: Optional[bool] = None) -> tuple[bool, str]:
-    """Fetch the configured Whisper model into localm's own cache, gated by the network policy."""
+    """Fetch the configured Whisper model into localm's own cache, gated by the
+    network policy. Returns ``(ok, reason)``: ok True when the model is present
+    afterwards (already cached counts), reason says why when it is not.
+
+    The policy rule is the bypass-ask-respect-off one the embedder's
+    ``_download_known`` applies, with the same parameter shape:
+
+    * ``allow_download=None`` follows net_mode - automatic fetch only under
+      "allow";
+    * ``allow_download=True`` is an EXPLICIT, ONE-CALL authorization that
+      bypasses net_mode="ask". The caller has collected the user's consent (the
+      GUI's download action, gated on config:write, or installing the voice
+      plugin - itself an explicit user action);
+    * net_mode="off" ALWAYS refuses, even with ``allow_download=True``: off is
+      the kill switch and stays absolute.
+
+    The authorization is deliberately nothing but this function argument - not
+    a config key, not module state, not an env var - so a one-time grant dies
+    with this call and structurally cannot persist or leak into any other
+    net_mode-gated path.
+
+    Downloads via huggingface_hub directly (the embedder's ``_download_known``
+    precedent) instead of through the STT worker: it needs no native code, so
+    it works at plugin-install time BEFORE the faster-whisper pip extra is
+    installed, and it never holds the worker lock for the length of a download.
+    The repo and cache root come from the same helpers the cached-probe reads
+    (``_stt_repo_for`` / ``stt_cache_dir``), so a successful prefetch always
+    flips ``stt_model_cached()`` to True.
+
+    NOT import-free (huggingface_hub is a heavy import): call from a job or a
+    background thread, never from an async status handler (R24)."""
     from localm.debuglog import logger
     cached, name = stt_model_cached()
     if cached:
@@ -155,7 +286,11 @@ def prefetch_stt_model(allow_download: Optional[bool] = None) -> tuple[bool, str
 # --------------------------------------------------------------------------- #
 
 def _silence_native_crash_dialogs() -> None:
-    """Windows: stop a native fault in this worker from popping a Windows Error Reporting dialog."""
+    """Windows: stop a native fault in this worker from popping a Windows Error
+    Reporting dialog. Without this, a real ctranslate2/PyAV access-violation
+    could block on a "program stopped working" dialog instead of dying fast; we
+    want the worker to terminate immediately so the parent detects it and
+    recovers. No-op off Windows."""
     if os.name != "nt":
         return
     try:
@@ -167,7 +302,11 @@ def _silence_native_crash_dialogs() -> None:
 
 
 def _simulate_fault(mode: str) -> None:
-    """Test-only: reproduce a genuine uncatchable native fault on demand."""
+    """Test-only: reproduce a genuine uncatchable native fault on demand.
+
+    Used solely by the crash-containment test (gated behind ``_FAULT_ENV``,
+    never set in production) to prove a real native fault in the STT worker is
+    contained instead of taking the server down."""
     if mode == "hang":
         while True:                              # a wedged native call
             time.sleep(3600)
@@ -179,7 +318,14 @@ def _simulate_fault(mode: str) -> None:
 
 
 def _worker_main(req_q, resp_q) -> None:
-    """Long-lived child: decode + load + transcribe, one request at a time."""
+    """Long-lived child: decode + load + transcribe, one request at a time.
+
+    Returns a structured envelope on the response queue so we never depend on
+    pickling native exception objects across the process boundary:
+        ("ok", text)            - success
+        ("error", tag, detail)  - a clean, expected failure (tags below)
+    A native crash/hang produces NO envelope; the parent detects the dead/stuck
+    worker instead."""
     # faster-whisper pulls in two OpenMP runtimes (ctranslate2 -> Intel
     # libiomp5md, onnxruntime -> LLVM libomp140), and both initialising in one
     # process makes OpenMP abort(). KMP_DUPLICATE_LIB_OK lets the second load.
@@ -259,7 +405,7 @@ _resp_q = None
 
 
 def _spawn_worker() -> None:
-    """Start a fresh worker."""
+    """Start a fresh worker. Caller holds ``_mgr_lock``."""
     global _proc, _req_q, _resp_q
     from localm._mp_spawn import ensure_spawn_uses_venv_python
     ensure_spawn_uses_venv_python()   # #617: avoid a renamed-launcher WinError 2
@@ -273,7 +419,7 @@ def _spawn_worker() -> None:
 
 
 def _kill_worker() -> None:
-    """Terminate the worker and drop its queues."""
+    """Terminate the worker and drop its queues. Caller holds ``_mgr_lock``."""
     global _proc, _req_q, _resp_q
     p = _proc
     if p is not None:
@@ -298,7 +444,7 @@ def _kill_worker() -> None:
 
 
 def _ensure_worker() -> None:
-    """Spawn the worker if it is absent or has died."""
+    """Spawn the worker if it is absent or has died. Caller holds ``_mgr_lock``."""
     if _proc is None or not _proc.is_alive():
         if _proc is not None:                    # reap a dead handle + its queues
             _kill_worker()
@@ -308,7 +454,18 @@ def _ensure_worker() -> None:
 def _run_in_worker(data: bytes, name: str, language, timeout: float, *,
                    local_files_only: bool = True,
                    blocked_reason: Optional[str] = None) -> str:
-    """Send one transcription to the isolated worker and wait for its result."""
+    """Send one transcription to the isolated worker and wait for its result.
+
+    ``local_files_only`` is the caller's network-policy decision (default True:
+    never download unless something explicitly said so - the fail-safe
+    direction). ``blocked_reason`` carries the policy explanation to attach
+    when a download WOULD have been needed: the worker's offline load then
+    fails, and that failure is reported as the policy block it really is
+    (code "download-blocked"), not as a mysterious load error.
+
+    Raises ``VoiceError`` for every failure mode - a clean worker error, a
+    native crash (worker died), or a hang (timeout) - and always leaves a
+    healthy worker (or no worker) behind for the next call."""
     with _mgr_lock:
         try:
             _ensure_worker()                     # spawn failures must not escape raw
@@ -388,7 +545,12 @@ def _run_in_worker(data: bytes, name: str, language, timeout: float, *,
 
 
 def transcribe_bytes(data: bytes, language: Optional[str] = None) -> str:
-    """Transcribe an audio blob (webm/ogg/wav/mp3 - anything PyAV decodes)."""
+    """Transcribe an audio blob (webm/ogg/wav/mp3 - anything PyAV decodes).
+
+    The native pipeline (decode -> load -> transcribe) runs in an isolated
+    worker process; see the module docstring. The only work done in the server
+    process is the pure-Python guards below, so no native code path can fault
+    the server."""
     # Reject an empty recording up front (pure Python, no native, no worker
     # spawn): a 0-byte blob (a mic that captured nothing) is a clean client error.
     if not data:
@@ -430,7 +592,7 @@ def transcribe_bytes(data: bytes, language: Optional[str] = None) -> str:
 
 
 def shutdown_stt() -> None:
-    """Stop the worker process (best effort)."""
+    """Stop the worker process (best effort). Safe to call when none is running."""
     with _mgr_lock:
         _kill_worker()
 

@@ -1,9 +1,4 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Discoverability: the owner-only "Keys & devices" manager lives in a Settings
-// sub-section that is easy to miss. The command palette (Ctrl/Cmd+K) offers a
-// direct "Manage keys & devices" jump - but ONLY when the panel is actually
-// available to this key (not gated-hidden), so a non-manager never sees a dead end.
-
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadApp, loadAppWithPages } from "./harness.mjs";
@@ -37,7 +32,7 @@ test("the keys jump opens Settings without throwing (app-only: helper guarded)",
   window.document.getElementById("keys-card").classList.remove("sec-hidden");
   const cmd = window.cmdkCommands().find((c) => c.label === "Manage keys & devices");
   assert.ok(cmd, "command present");
-  cmd.run();   // gotoSettingsSection lives in pages.js (not loaded here) -> guarded, no throw
+  cmd.run();   // gotoSettingsSection lives in pages.js, not loaded here
   assert.ok(window.document.getElementById("view-settings").classList.contains("active"),
     "Settings view is shown");
 });

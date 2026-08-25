@@ -1,5 +1,15 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""`localm rag docs` and `localm rag rm-doc`: per-document CLI verbs."""
+"""`localm rag docs` and `localm rag rm-doc`: per-document CLI verbs.
+
+Until now the CLI's only deletion verb was `rag rm`, which drops a whole
+collection, and there was no way to list a collection's documents at all
+(dev-notes/PARITY-AUDIT-CLI-GUI-2026-08-19.md section 3 item 4). These wrap
+the same `Collection.docs()` / `Collection.remove_doc()` the GUI's
+`GET /api/rag/collections/{name}` and `POST .../remove-doc` routes already
+call, so the tests exercise the REAL store (create a collection, index real
+files, remove/resync for real) rather than a mocked Collection - a fake here
+would only prove the CLI calls *something*, not that the something is right.
+"""
 
 from __future__ import annotations
 
@@ -9,14 +19,13 @@ from click.testing import CliRunner
 
 @pytest.fixture(autouse=True)
 def env(tmp_path, monkeypatch):
-    """Own copy rather than importing the one in test_rag_reg589_repair_noninteractive.py, which is module-private."""
+    """Own copy rather than importing the one in
+    test_rag_reg589_repair_noninteractive.py, which is module-private."""
     monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     # rich.console.Console() reads COLUMNS at construction time; without it, a
     # non-tty width default (80) hard-wraps mid-word inside the long pytest
-    # basetemp paths these tests assert on - confirmed empirically, and the
-    # same fix test_rag_collection_lock.py's _run_cli already uses for the
-    # identical reason ("keep rich from wrapping the message we assert on").
+    # basetemp paths these tests assert on.
     monkeypatch.setenv("COLUMNS", "300")
     import localm.config as cfg
     monkeypatch.setattr(cfg, "HOME_DIR", tmp_path)
@@ -49,7 +58,8 @@ def docs_dir(tmp_path):
 
 
 def _real_docs(name: str):
-    """Read a collection's documents straight from the store, bypassing the CLI - the ground truth the CLI's own output is checked against."""
+    """Read a collection's documents straight from the store, bypassing the
+    CLI - the ground truth the CLI's own output is checked against."""
     from localm.rag import Collection
     return {d["path"]: d for d in Collection(name).docs()}
 
@@ -170,7 +180,19 @@ class TestRagRmDoc:
 
     def test_a_locked_collection_is_reported_not_left_to_escape(
             self, runner, ragcli, docs_dir, monkeypatch):
-        """`rm-doc` must translate a CollectionLockedError the same way every other write command in this file does (_refuse_if_locked), rather than letting it escape as an unhandled exception."""
+        """`rm-doc` must translate a CollectionLockedError the same way every
+        other write command in this file does (_refuse_if_locked), rather than
+        letting it escape as an unhandled exception. The lock mechanism itself
+        (staleness, cross-process heartbeat, real refusal-then-wait) is already
+        exhaustively covered in test_rag_collection_lock.py, including a real
+        subprocess CLI refusal via `rag resync` against this SAME wrapper - this
+        test is only about rm-doc's own wiring into it, not the lock itself.
+
+        The discriminator (confirmed against this Click version): a caught
+        error that reaches sys.exit(1) leaves r.exception as a bare
+        SystemExit; an error left to escape leaves r.exception as the
+        original exception type. Both give exit_code == 1, so exit_code alone
+        cannot tell "caught and reported" from "leaked a traceback"."""
         from localm.rag import Collection, CollectionLockedError
         add = runner.invoke(ragcli.rag_group, ["add", "kb", str(docs_dir)])
         assert add.exit_code == 0, add.output

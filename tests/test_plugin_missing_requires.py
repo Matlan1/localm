@@ -1,5 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""B15: a plugin can declare `requires = [...]` other plugins, but api_state only exposed the raw `requires` list - the GUI had no way to know which of them are NOT installed, so it could neither warn 'requires X (missing)' nor offer a one-click 'Install requirements'. api_state now carries `missing_re..."""
+"""B15: a plugin can declare `requires = [...]` other plugins, but api_state only
+exposed the raw `requires` list - the GUI had no way to know which of them are
+NOT installed, so it could neither warn "requires X (missing)" nor offer a
+one-click "Install requirements". api_state now carries `missing_requires` (the
+declared requirements not currently installed) per entry.
+"""
 
 import textwrap
 
@@ -87,7 +92,14 @@ def test_no_requires_means_no_missing(env):
 
 
 def test_preinstalled_dep_self_heals_before_headless_cli_check(env, monkeypatch):
-    """A data dir where the server/GUI has never started - only headless CLI commands like `localm plugin install jobs` have run - must still see a preinstalled/protected dependency (chat) as installed."""
+    """A data dir where the server/GUI has never started - only headless CLI
+    commands like `localm plugin install jobs` have run - must still see a
+    preinstalled/protected dependency (chat) as installed. Previously
+    `_ensure_preinstalled` (the self-heal that provisions chat onto disk) only
+    ran from `load_enabled()` (the server-start path); a bare `discover()` call
+    (every CLI entry point) never provisioned it, so `missing_requires` falsely
+    reported chat as missing on a fresh home, even though chat is protected +
+    default_enabled and always supposed to be present."""
     from localm.plugins import catalog as _cat
     from localm.plugins.engine import PluginManager
 

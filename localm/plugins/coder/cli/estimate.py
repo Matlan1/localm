@@ -1,5 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Estimate mode: the console presentation of one planning turn."""
+"""Estimate mode: the console presentation of one planning turn.
+
+The turn itself (the prompt, the backend call, the payload shape) lives in
+``localm.plugins.coder.estimate`` because the GUI runs it too - see that
+module's docstring. Everything here is printing.
+"""
 
 from __future__ import annotations
 
@@ -11,7 +16,13 @@ from ..estimate import estimate_task
 
 
 def _run_estimate(agent: Agent, task: str, output_format: str) -> None:
-    """One planning turn, zero execution."""
+    """
+    One planning turn, zero execution.
+
+    Sends the task with an instruction to produce a plan and effort estimate
+    instead of tool calls, prints the result, and reports the prompt-side
+    token cost so the user knows what a real run starts from.
+    """
     result = estimate_task(agent, task)
 
     if output_format == "json":

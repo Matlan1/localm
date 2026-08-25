@@ -1,5 +1,16 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Cross-session project-map caching, wired into Agent._build_project_map (persistence.py)."""
+"""Cross-session project-map caching, wired into Agent._build_project_map
+(persistence.py). The pure mechanism (save_cache/load_cached_and_reconcile)
+is covered in test_indexer.py; this file proves the WIRING - a second
+Agent constructed for the same project reuses the cache instead of doing a
+full ProjectMap.build() - and that _project_map_path_for reuses #1051's
+project-digest scheme (checkpoint.py's _project_dir_for) rather than
+inventing a second one.
+
+MEASURED (dev-notes, "coder project-map caching"): ProjectMap.build() on the
+real localm repo (300/1000+ files, capped) takes ~360-450ms; reconciling a
+cached map takes ~15-30ms - the reason this unit exists at all.
+"""
 
 from __future__ import annotations
 
@@ -13,7 +24,11 @@ from localm.audit import SessionMode
 
 @pytest.fixture
 def home(tmp_path, monkeypatch):
-    """A controlled HOME_DIR, separate from the project directory each test constructs an Agent against - the cache lives under HOME/checkpoints/..., and it must never overlap with the project tree it describes (a cache file sitting INSIDE the scanned root would itself be indexed as a project file - see te..."""
+    """A controlled HOME_DIR, separate from the project directory each test
+    constructs an Agent against - the cache lives under HOME/checkpoints/...,
+    and it must never overlap with the project tree it describes (a cache
+    file sitting INSIDE the scanned root would itself be indexed as a project
+    file - see test_indexer.py's cross-contamination note)."""
     home_dir = tmp_path / "home"
     home_dir.mkdir()
     monkeypatch.setenv("LOCALM_HOME", str(home_dir))
@@ -67,7 +82,14 @@ def test_first_agent_builds_full_and_writes_a_cache(home, tmp_path):
 
 def test_second_agent_in_the_same_project_loads_from_cache_not_a_full_build(
         home, tmp_path):
-    """The actual wiring proof: a second Agent for the SAME project must reconcile the cache rather than doing a full walk."""
+    """The actual wiring proof: a second Agent for the SAME project must
+    reconcile the cache rather than doing a full walk. ProjectMap.build() is
+    still the one call persistence.py makes (deliberately - see its
+    docstring: a second, differently-named classmethod call would silently
+    defeat every other test in the repo that mocks ProjectMap.build alone),
+    so the walk itself - not the build() call - is what must not happen on a
+    cache hit. os.walk is the ground truth for that; ProjectMap.from_cache
+    is the same signal persistence.py's own log message reads."""
     project = _project(tmp_path)
     _agent(project)   # first session: builds + caches
 
@@ -90,7 +112,11 @@ def test_second_agent_sees_an_edit_made_between_sessions(home, tmp_path):
 
 
 def test_privacy_mode_agent_writes_no_project_map_cache(home, tmp_path):
-    """Same promise save_checkpoint() already makes for the conversation: the project map cache records this project's relative file paths and extracted symbol names - real project content - under HOME, so a privacy session must never leave it behind (checkup 2026-08-11 item 11 - this write had no gate at..."""
+    """Same promise save_checkpoint() already makes for the conversation: the
+    project map cache records this project's relative file paths and
+    extracted symbol names - real project content - under HOME, so a privacy
+    session must never leave it behind (checkup 2026-08-11 item 11 - this
+    write had no gate at all before this fix, unlike its sibling)."""
     project = _project(tmp_path)
     from localm.plugins.coder.agent.checkpoint import _project_map_path_for
     cache_path = _project_map_path_for(project)
@@ -103,7 +129,9 @@ def test_privacy_mode_agent_writes_no_project_map_cache(home, tmp_path):
 
 
 def test_privacy_mode_agent_ignores_an_existing_cache_too(home, tmp_path):
-    """Not just 'stops writing' - a privacy session must not even READ a cache an earlier non-privacy session left behind, so it always does a full in-memory walk rather than reconciling from a file on disk."""
+    """Not just "stops writing" - a privacy session must not even READ a
+    cache an earlier non-privacy session left behind, so it always does a
+    full in-memory walk rather than reconciling from a file on disk."""
     project = _project(tmp_path)
     _agent(project, mode=SessionMode.LOG)   # leaves a real cache behind
     from localm.plugins.coder.agent.checkpoint import _project_map_path_for

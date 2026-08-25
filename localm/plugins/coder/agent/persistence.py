@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Durable + in-session state: project-map build, the resume checkpoint (save/load/clear/resume + path resolution), the changed-files tracker, the cumulative session diff, and undo."""
+"""Durable + in-session state: project-map build, the resume checkpoint
+(save/load/clear/resume + path resolution), the changed-files tracker, the
+cumulative session diff, and undo. Mixed into Agent."""
 
 from __future__ import annotations
 
@@ -24,7 +26,13 @@ from .checkpoint import (
 
 class _PersistenceMixin:
     def changed_files(self) -> list[dict]:
-        """Files this session has written, with change counts."""
+        """
+        Files this session has written, with change counts.
+
+        Each entry: ``{path, writes, created, exists, last_tool}`` where
+        *created* means the file did not exist before this session touched it
+        and *exists* is its current on-disk state (False = since deleted).
+        """
         # Snapshot first - the GUI reads this from another thread while the
         # agent loop may be inserting entries.
         snapshot = dict(self._changed_files)
@@ -42,7 +50,14 @@ class _PersistenceMixin:
         return out
 
     def session_diff(self, path: Optional[str] = None) -> str:
-        """Cumulative unified diff of everything this session changed."""
+        """
+        Cumulative unified diff of everything this session changed.
+
+        Compares each tracked file's first-seen original content against its
+        current on-disk state - so three successive edits to one file show as
+        one combined diff. Pass *path* for a single file, None for all.
+        Returns "" when nothing was changed (or the path is untracked).
+        """
         snapshot = dict(self._changed_files)   # cross-thread read safety
         keys = [path] if path else sorted(snapshot)
         parts: list[str] = []
@@ -87,7 +102,14 @@ class _PersistenceMixin:
             entry["last_tool"] = tool
 
     def _absorb_child_state(self, child) -> None:
-        """Fold a spawned child agent's changed-files and error trace into this parent (audit cluster 11)."""
+        """Fold a spawned child agent's changed-files and error trace into this
+        parent (audit cluster 11).
+
+        A child from ``spawn_agent`` shares this cwd but is never ``close()``d, so
+        without this its delegated file changes and failures would never reach an
+        episode. Merging them here lets the parent's single close-time episode
+        cover the delegated work too. Best-effort: called guarded so bookkeeping
+        never breaks the tool."""
         from .constants import _MAX_ERROR_TRACE
         for key, centry in getattr(child, "_changed_files", {}).items():
             pentry = self._changed_files.get(key)
@@ -106,7 +128,21 @@ class _PersistenceMixin:
                 self._error_trace = self._error_trace[-_MAX_ERROR_TRACE:]
 
     def _drain_background_agents(self) -> list:
-        """Fold finished background sub-agents into this parent and describe them."""
+        """Fold finished background sub-agents into this parent and describe them.
+
+        Called at the TOP of the parent's turn, on the PARENT's own thread. That
+        placement is the whole design, not a convenience: the worker thread never
+        touches parent state, so ``_changed_files`` / ``_error_trace`` keep the
+        single-threaded invariant every other writer relies on, and absorption
+        happens at a deterministic point rather than whenever a thread happened to
+        finish. A lock would have made the mutation atomic but NOT ordered - it
+        could still interleave with the parent's own ``_track_write`` mid-turn, so
+        ``session_diff()`` and the close-time episode could observe a
+        half-absorbed view.
+
+        Returns one note per finished job for the caller to put in front of the
+        model. Best-effort: bookkeeping must never break the turn.
+        """
         from .constants import _MAX_ERROR_TRACE
         try:
             from ..background import get_registry
@@ -116,14 +152,13 @@ class _PersistenceMixin:
             return []
 
         # Completions the registry had to evict before this drain reached them.
-        # From here they are indistinguishable from "nothing finished", so they
-        # must be SAID: absorption is drain-only, which makes an evicted child's
-        # summary, branch and diff unrecoverable.
+        # From here they are indistinguishable from "nothing finished", so they are
+        # reported: absorption is drain-only, so an evicted child's summary, branch
+        # and diff are unrecoverable.
         #
-        # Deliberately its OWN try, AFTER the drain: drain_finished CONSUMES (it
-        # marks the batch drained), so folding this call into the same try would
-        # let a failure here discard completions that were already handed over -
-        # the exact silent loss this whole reporting path exists to prevent.
+        # Its OWN try, AFTER the drain: drain_finished CONSUMES (it marks the batch
+        # drained), so a failure inside the same try would discard completions that
+        # were already handed over.
         try:
             lost = registry.take_dropped_undrained("agent")
         except Exception:
@@ -146,9 +181,7 @@ class _PersistenceMixin:
                 # ERROR TRACE ONLY. The child ran in its OWN worktree, so its
                 # _changed_files keys are relative to a tree this parent does not
                 # have; merging them would make session_diff() resolve them against
-                # the PARENT's cwd and either fabricate a diff for a file the parent
-                # never touched, or silently report nothing and lose the child's
-                # work entirely. Errors carry no path, so that half stays valid.
+                # the PARENT's cwd. Errors carry no path, so that half stays valid.
                 child = getattr(job, "child", None) if job is not None else None
                 child_errors = getattr(child, "_error_trace", None)
                 if child_errors:
@@ -156,13 +189,12 @@ class _PersistenceMixin:
                     if len(self._error_trace) > _MAX_ERROR_TRACE:
                         self._error_trace = self._error_trace[-_MAX_ERROR_TRACE:]
 
-                # DID THE CHILD ACTUALLY SUCCEED? A job reaches state "done"
+                # Did the child actually succeed? A job reaches state "done"
                 # whenever its thread returned, and run_task RETURNS a failure
-                # message rather than raising, so "done" alone reported a child
-                # that hit max_turns or tripped its circuit breaker as ok - to the
-                # /diff footer and to the model. The child records its own verdict
-                # in the payload (background.py); the live child object is the
-                # fallback for a job that predates it.
+                # message rather than raising, so "done" alone covers a child that
+                # hit max_turns or tripped its circuit breaker. The child records
+                # its own verdict in the payload (background.py); the live child
+                # object is the fallback for a job that predates it.
                 child_ok = result.get("ok")
                 if child_ok is None:
                     child_ok = getattr(child, "last_run_ok", True) if child else True
@@ -196,9 +228,7 @@ class _PersistenceMixin:
                              f"({result.get('file_count', 0)} file(s)) and are NOT "
                              "in your working tree.") if branch else ""
                     # Say plainly that it did not finish its task. The summary text
-                    # carries the reason ("[max_turns=10 reached]"), but a note that
-                    # reads "finished" for a failed child is the same false ok in
-                    # prose.
+                    # carries the reason ("[max_turns=10 reached]").
                     verdict = "finished" if child_ok else "DID NOT COMPLETE its task"
                     notes.append(
                         f"Background sub-agent '{label}' ({job_id}) {verdict} after "
@@ -216,7 +246,11 @@ class _PersistenceMixin:
         return notes
 
     def _git_status_map(self) -> "dict[str, str] | None":
-        """Map of dirty path -> 2-char ``git status --porcelain`` code in cwd, or None when cwd is not a git work tree or git is unavailable."""
+        """Map of dirty path -> 2-char ``git status --porcelain`` code in cwd, or
+        None when cwd is not a git work tree or git is unavailable. Best-effort
+        helper for episodic change detection - never raises. The code lets the
+        caller tell an untracked new file (``??``) from a tracked edit so the diff
+        can be built correctly."""
         from ..tools.base import run_subprocess
         try:
             r = run_subprocess(["git", "status", "--porcelain"], self.cwd, timeout=10)
@@ -238,12 +272,19 @@ class _PersistenceMixin:
         return out
 
     def _git_status_paths(self) -> "frozenset[str] | None":
-        """The set of dirty (changed/untracked) paths at cwd, or None when cwd is not a git work tree."""
+        """The set of dirty (changed/untracked) paths at cwd, or None when cwd is
+        not a git work tree. The pre-shell baseline for episodic change detection."""
         m = self._git_status_map()
         return None if m is None else frozenset(m)
 
     def _git_delta_diff(self, paths: list, status: dict) -> str:
-        """A unified diff SCOPED to *paths* (this session's detected delta), so a pre-existing dirty file OUTSIDE the delta never leaks into the work log."""
+        """A unified diff SCOPED to *paths* (this session's detected delta), so a
+        pre-existing dirty file OUTSIDE the delta never leaks into the work log.
+
+        Tracked edits among the delta come from ``git diff HEAD -- <paths>`` (a
+        pathspec, not the whole tree); untracked new files (``??``, which
+        ``git diff`` omits entirely) get a capped content snapshot appended so the
+        session's actual output still appears. Best-effort - '' on any failure."""
         from ..tools.base import run_subprocess
         parts: list[str] = []
         tracked = [p for p in paths if status.get(p, "") != "??"]
@@ -272,7 +313,14 @@ class _PersistenceMixin:
         return "\n".join(p for p in parts if p)
 
     def _detect_shell_changes(self) -> "tuple[list[dict], str]":
-        """Best-effort detection of files changed via run_shell (git apply, a formatter, codegen) that the write-tool tracker never recorded."""
+        """Best-effort detection of files changed via run_shell (git apply, a
+        formatter, codegen) that the write-tool tracker never recorded.
+
+        Returns ``(changed_files_list, unified_diff)``, or ``([], "")`` when no
+        run_shell ran, cwd is not a git work tree, or nothing new changed since the
+        pre-shell baseline. BOTH the file list and the diff are scoped to THIS
+        session by subtracting the baseline captured before the first run_shell, so
+        a pre-existing dirty tree is not misattributed (audit cluster 11)."""
         if not self._shell_baseline_captured or self._git_baseline is None:
             return [], ""
         current = self._git_status_map()
@@ -281,9 +329,9 @@ class _PersistenceMixin:
         delta = sorted(set(current) - self._git_baseline)
         if not delta:
             return [], ""
-        # Only `path` is consumed by the reflection; keep the other fields to match
-        # the changed_files() dict shape for any future reader (created is True for
-        # an untracked new file, "??").
+        # Only `path` is consumed by the reflection; the other fields match the
+        # changed_files() dict shape (created is True for an untracked new file,
+        # "??").
         changed = [{
             "path": p,
             "writes": 1,
@@ -302,9 +350,30 @@ class _PersistenceMixin:
                 for e in reversed(self._undo_stack)]
 
     def _build_project_map(self, cwd: Path) -> ProjectMap:
-        """Index the project with a config-driven deadline, and surface a one-line note when a large tree is slow or truncated so a session started on a huge root (e.g. C:\\) shows progress instead of appearing to hang (CODER-1)."""
-        # Live-attribute access so a test patching agent.ProjectMap is honoured
-        # (the name moved into this submodule when agent.py became a package).
+        """Index the project with a config-driven deadline, and surface a one-line
+        note when a large tree is slow or truncated so a session started on a huge
+        root (e.g. C:\\) shows progress instead of appearing to hang (CODER-1).
+
+        Tries the cross-session cache first (MEASURED 13-25x faster than a
+        full build - see ProjectMap.build's cache_path param), falling back
+        to a full walk when there is nothing usable to reconcile. Either way,
+        the RESULT is persisted for the next session: a fresh build() leaves
+        a cache the next session can reconcile from, and a reconciled-from-
+        cache map is re-saved too, so this session's own edits (captured
+        in-memory via refresh_file()/mark_dirty() as normal) are what the
+        NEXT session reconciles against, not a stale earlier snapshot.
+
+        This makes exactly ONE call into ProjectMap (deliberately: see
+        build()'s cache_path docstring paragraph for why the cache lookup is
+        folded inside build() rather than being a second classmethod call
+        here).
+
+        No-op cache in privacy mode - the cache records this project's file
+        paths and extracted symbol names, the same promise save_checkpoint()
+        below makes about the conversation. cache_path=None makes build() do
+        a fresh in-memory walk with no cache read or write (see build()'s
+        cache_path branch)."""
+        # Live attribute lookup, so a patched agent.ProjectMap is honoured.
         ProjectMap = _agent.ProjectMap
         import time
         cache_path = None if self.mode == SessionMode.PRIVACY else _project_map_path_for(cwd)
@@ -322,10 +391,9 @@ class _PersistenceMixin:
 
     @property
     def _checkpoint_path(self) -> Path:
-        # Session data lives under HOME, not in the project tree (CODER-4).
-        # Keyed on THIS agent's own stable checkpoint id (core.py), not the
-        # project alone - see _checkpoint_path_for's docstring for why that
-        # used to destroy a sibling session's saved conversation outright.
+        # Session data lives under HOME, not in the project tree. Keyed on THIS
+        # agent's own stable checkpoint id (core.py), not the project alone - see
+        # _checkpoint_path_for.
         return _checkpoint_path_for(self.cwd, self._checkpoint_id)
 
     @property
@@ -337,7 +405,12 @@ class _PersistenceMixin:
         return _legacy_home_checkpoint_path_for(self.cwd)
 
     def save_checkpoint(self) -> None:
-        """Persist current conversation state so it can be resumed later."""
+        """Persist current conversation state so it can be resumed later.
+
+        No-op in privacy mode - the checkpoint contains the full
+        conversation, which privacy mode promises never to write to disk.
+        The task list rides along in the same file and is therefore covered by
+        the same promise: in privacy mode it stays in memory only."""
         if self.mode == SessionMode.PRIVACY:
             return
         data = {
@@ -345,38 +418,30 @@ class _PersistenceMixin:
             "interrupted_at": datetime.datetime.now().isoformat(timespec="seconds"),
             "turns": self._turns,
             "total_tokens": self._total_tokens,
-            # A short display title for a resume listing (NEW-CODER-RESUME-
-            # DESTROYS-SESSIONS item 3) - captured once, from the RAW first
-            # task/message text before any episodic-memory preamble is
-            # prepended (see _session_title's capture sites in loop.py), so a
-            # listing shows what the user actually asked for rather than
-            # boilerplate. Re-derived from the SAME stored source on every
-            # save rather than only at first-save, so an older checkpoint
-            # missing this field (pre-item-3) still gets a real title the next
-            # time it is saved, not "(untitled session)" forever.
+            # A short display title for a resume listing - captured once, from the
+            # RAW first task/message text before any episodic-memory preamble is
+            # prepended (see _session_title's capture sites in loop.py). Re-derived
+            # from the same stored source on every save rather than only at
+            # first-save, so an older checkpoint missing this field still gets a
+            # real title the next time it is saved.
             "title": _derive_title(self._session_title),
             "messages": self._messages,
-            # The model's own task list (tools/tasks.py). An older build simply
-            # ignores the extra key, and an older checkpoint restores as no todos.
+            # The model's own task list (tools/tasks.py). An older build ignores
+            # the extra key, and an older checkpoint restores as no todos.
             "todos": self.get_todos(),
             # Pointers to work delegated children COMMITTED on their own branches.
-            # The branches are durable; without this the pointer to them is not,
-            # so a resumed session would show no footer and the user would
-            # reasonably conclude real, committed work had been lost. The
-            # change-sets are small, frozen and JSON-shaped precisely so they can
-            # ride along here.
+            # The branches are durable; this keeps the pointer to them durable too,
+            # so a resumed session still shows the footer. The change-sets are
+            # small, frozen and JSON-shaped so they can ride along here.
             "delegated": [
                 dataclasses.asdict(cs)
                 for cs in (getattr(self, "_delegated", None) or [])
             ],
-            # The changed-files tracker (GUI "files changed" / session_diff).
-            # Without this, a server restart or GUI reconnect mid-session lost
-            # every prior write's record even though the writes themselves are
-            # still on disk and the conversation resumes intact - the diff view
-            # would silently go blank for work that genuinely happened. Each
-            # entry's "original" is the pre-change snapshot (bytes or None for
-            # a newly-created file); base64-encoded because JSON has no bytes
-            # type.
+            # The changed-files tracker (GUI "files changed" / session_diff), so a
+            # server restart or GUI reconnect mid-session keeps every prior write's
+            # record. Each entry's "original" is the pre-change snapshot (bytes, or
+            # None for a newly-created file), base64-encoded because JSON has no
+            # bytes type.
             "changed_files": {
                 key: {
                     "original": (base64.b64encode(entry["original"]).decode("ascii")
@@ -395,36 +460,59 @@ class _PersistenceMixin:
             pass  # never let checkpoint failure crash the session
 
     def clear_checkpoint(self) -> None:
-        """Remove THIS agent's own saved checkpoint - its own per-session id under HOME, plus the two legacy shapes (a project can only ever have ONE checkpoint under either legacy layout, so clearing them here on a fresh start is unchanged from what this method always did; it does NOT reach any OTHER session'..."""
+        """Remove THIS agent's own saved checkpoint - its own per-session id
+        under HOME, plus the two legacy shapes (a project can only ever have
+        ONE checkpoint under either legacy layout, so clearing them here on a
+        fresh start is unchanged from what this method always did; it does
+        NOT reach any OTHER session's per-id checkpoint - see
+        _checkpoint_path_for's docstring for why that distinction is the
+        whole point of NEW-CODER-RESUME-DESTROYS-SESSIONS).
+
+        Best-effort per path: a delete that fails is LOGGED at warning and does
+        not raise, so this returning is not by itself proof the checkpoint is
+        gone. See the handler for why it is non-fatal here but fatal in the
+        media/chat delete endpoints."""
         for p in (self._checkpoint_path, self._legacy_checkpoint_path,
                   self._legacy_home_checkpoint_path):
             try:
                 p.unlink(missing_ok=True)
             except Exception as e:
-                # Deliberately NOT the sibling shape: the chat and media delete
-                # endpoints (builtin/chat/plug.py conversation_delete, and
-                # image/music/video) call unlink() bare inside the route, so an
-                # OSError becomes a 500 - correct there, because the deletion IS
-                # the request's whole outcome. Here it is cleanup riding on
-                # OTHER work, so raising would MISREPORT that work: loop.py
-                # clears on a CLEAN finish, where a raise turns a task that
-                # fully succeeded into a failure, and repl.py's /resume clear
-                # runs inside _handle_command, which the REPL loop does NOT wrap
-                # in a try, so a raise there ends the session outright.
+                # Non-fatal: this is cleanup riding on OTHER work, so raising would
+                # misreport that work. loop.py clears on a CLEAN finish, where a
+                # raise would turn a fully successful task into a failure, and
+                # repl.py's /resume clear runs inside _handle_command, which the
+                # REPL loop does not wrap in a try, so a raise there would end the
+                # session.
                 #
-                # So it stays non-fatal, but it must not stay silent: a
-                # checkpoint that outlives a "clear" is exactly the state
-                # NEW-CODER-RESUME-DESTROYS-SESSIONS was fixed to prevent,
-                # because a later session can adopt one the user believes is
-                # gone. WARNING, not debug: the always-on recent-activity ring
-                # a bug report dumps is INFO+, so debug would reach no report.
+                # Not silent either: a checkpoint that outlives a "clear" can be
+                # adopted by a later session the user believes is gone. WARNING,
+                # not debug, so it reaches the always-on recent-activity ring a bug
+                # report dumps (that ring is INFO+).
                 from localm.debuglog import logger
                 logger.warning(
                     "coder: could not clear checkpoint %s: %s; it remains on "
                     "disk and a later session may resume from it", p, e)
 
     def load_checkpoint(self, checkpoint_id: Optional[str] = None) -> dict | None:
-        """Read a saved checkpoint for this cwd, or None if none is found."""
+        """
+        Read a saved checkpoint for this cwd, or None if none is found.
+
+        *checkpoint_id* is None (the default) to load the MOST RECENT
+        checkpoint - the zero-argument "continue where I left off" behaviour
+        this always had, unaffected by several sessions now being able to
+        coexist in the same project (NEW-CODER-RESUME-DESTROYS-SESSIONS item
+        3: the common case must not get worse to enable the rare one). Pass a
+        specific id (from list_checkpoints()) to resume a particular one
+        instead of the newest.
+
+        On success this sets self._checkpoint_id, so a LATER save_checkpoint()
+        writes back to the SAME file the resumed conversation came from,
+        rather than minting a fresh one on every save - including when the
+        checkpoint came from a pre-item-3 legacy location, which is migrated
+        into the new per-session layout as part of this same load (see
+        migrate_legacy_checkpoint; explicit-id lookups never fall back to a
+        legacy path, since those predate the id concept entirely).
+        """
         if checkpoint_id is not None:
             data = _read_checkpoint(_checkpoint_path_for(self.cwd, checkpoint_id))
             if data is not None:
@@ -447,26 +535,39 @@ class _PersistenceMixin:
         return None
 
     def resume_checkpoint(self, data: dict) -> None:
-        """Restore agent state from a checkpoint dict."""
+        """Restore agent state from a checkpoint dict.
+
+        This is the single restore path for every caller (the REPL /resume, the
+        CLI resume flag, and the GUI session), so restoring the task list here
+        is what makes it survive a pause/resume everywhere. The file is plain
+        user-writable JSON, so the todos go back through normalize_todos rather
+        than being trusted as-is."""
         from ..tools.tasks import normalize_todos
         from .checkpoint import _first_user_text
         self._messages     = data["messages"]
         self._turns        = data.get("turns", len(self._messages))
         self._total_tokens = data.get("total_tokens", 0)
-        # Keep the restored session's own title stable across resume + a later
-        # save (the guard in loop.py's run_task/chat only sets this once per
-        # Agent, so a fresh Agent being resumed into needs it seeded here or
-        # its NEXT instruction would silently retitle the whole session).
-        # Falls back to re-deriving from the messages for a checkpoint saved
-        # before "title" existed - load_checkpoint()'s migration path already
-        # backfills this, so the fallback is defense, not the normal case.
+        # Keep the restored session's own title stable across resume plus a later
+        # save: the guard in loop.py's run_task/chat only sets this once per Agent,
+        # so a fresh Agent being resumed into needs it seeded here or its NEXT
+        # instruction would retitle the whole session. Falls back to re-deriving
+        # from the messages for a checkpoint saved before "title" existed;
+        # load_checkpoint()'s migration path already backfills it.
         self._session_title = data.get("title") or _first_user_text(self._messages)
         self.set_todos(normalize_todos(data.get("todos")))
         self._restore_delegated(data.get("delegated"))
         self._restore_changed_files(data.get("changed_files"))
 
     def _restore_changed_files(self, raw) -> None:
-        """Rebuild the changed-files tracker from a checkpoint."""
+        """Rebuild the changed-files tracker from a checkpoint.
+
+        The file is plain user-writable JSON (same posture as
+        _restore_delegated): each entry is filtered to the expected shape and
+        skipped if it does not fit, rather than trusted as-is. An older
+        checkpoint (saved before this field existed) has no "changed_files"
+        key at all - *raw* is then None and this just leaves the tracker
+        empty, exactly its prior (lossy) behaviour, not a new failure mode.
+        """
         restored: dict[str, dict] = {}
         if isinstance(raw, dict):
             for key, entry in raw.items():
@@ -489,7 +590,18 @@ class _PersistenceMixin:
         self._changed_files = restored
 
     def _restore_delegated(self, raw) -> None:
-        """Rebuild the delegated-work pointers from a checkpoint."""
+        """Rebuild the delegated-work pointers from a checkpoint.
+
+        The file is plain user-writable JSON, so each entry is filtered to the
+        dataclass's own fields and skipped if it does not fit, rather than
+        splatted in and trusted - the same posture normalize_todos takes.
+
+        NOTE ON IN-FLIGHT JOBS: a background sub-agent itself does NOT survive
+        here, and deliberately nothing pretends it does. Its thread dies with the
+        process, so a resumed session records no job id for it - there is no
+        orphaned reference that silently resolves to nothing. What survives is
+        what is genuinely durable: the branch its committed work sits on.
+        """
         from ..delegated import DelegatedChangeSet
         if not isinstance(raw, list):
             return
@@ -507,7 +619,7 @@ class _PersistenceMixin:
             self._delegated = restored
 
     def _undo_one(self, entry: dict) -> tuple[str, bool]:
-        """Revert a single undo-stack entry."""
+        """Revert a single undo-stack entry. Returns (description, ok)."""
         path: Path = entry["path"]
         old: bytes | None = entry["old_content"]
         try:
@@ -524,7 +636,19 @@ class _PersistenceMixin:
             return f"FAILED to restore {path}: {e}", False
 
     def undo(self) -> str | None:
-        """Revert the last undoable file operation (write_file, edit_file, edit_files, patch_file, edit_notebook_cell)."""
+        """
+        Revert the last undoable file operation (write_file, edit_file,
+        edit_files, patch_file, edit_notebook_cell).
+
+        A multi-file call (edit_files) pushes one stack entry PER FILE but is a
+        single operation, so all entries sharing its call id are reverted
+        together. Undoing only the last of them would leave the other files
+        edited while reporting the operation undone - a half-undone state the
+        caller was told does not exist.
+
+        Returns a human-readable summary of what was restored, or None if the
+        undo stack is empty.
+        """
         if not self._undo_stack:
             return None
         entry = self._undo_stack.pop()
@@ -532,7 +656,7 @@ class _PersistenceMixin:
         call_id = entry.get("call_id")
         group = [entry]
         # An entry with no call id is never grouped (single-file tools, and any
-        # entry predating call ids), so their behaviour is unchanged.
+        # entry predating call ids).
         if call_id is not None:
             while self._undo_stack and self._undo_stack[-1].get("call_id") == call_id:
                 group.append(self._undo_stack.pop())
@@ -546,7 +670,7 @@ class _PersistenceMixin:
             return f"Undid {tool}: {parts[0]}"
         summary = f"Undid {tool}: {len(parts)} of {len(group)} file(s) - " + "; ".join(parts)
         if failures:
-            # RULE 5: a partial undo must never read as a complete one.
+            # A partial undo must never read as a complete one.
             summary += ("\nWARNING: the undo did NOT fully succeed: "
                         + "; ".join(failures)
                         + " - these files still hold the change.")

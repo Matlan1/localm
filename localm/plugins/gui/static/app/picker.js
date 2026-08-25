@@ -3,21 +3,19 @@
 
    One pickPath() modal powers the RAG add-docs flow and every "Browse..." /
    "Move to..." button in the app. pickDirectory() and pickFile() are thin
-   back-compat wrappers with the exact signatures/return contract the older call
-   sites (coder setup, image/video move, settings, models) already depend on.
+   wrappers over it.
 
-   Classic module boundary: the shared helpers ($, el, openModal, toast,
-   authHeaders) resolve as before. pickDirectory/pickFile MUST stay `function`
-   declarations so the jsdom tests can reassign the global to a stub. */
+   pickDirectory and pickFile must stay `function` declarations so the global
+   can be reassigned to a stub. */
 "use strict";
 
-// --- ES module imports (auto-generated boundary; bodies unchanged) ---
+// --- ES module imports ---
 import { $, authHeaders, el, openModal, toast } from "./helpers.js";
 
 /** GET the listing for `path`. include_files adds files; meta adds the
  *  entries[] array of {name, is_dir, size, mtime}; includeHidden asks the
- *  server for dot-prefixed entries too (the picker always passes this and
- *  decides visibility itself - see renderList()'s showHidden check). */
+ *  server for dot-prefixed entries too. The picker always passes includeHidden
+ *  and decides visibility itself. */
 export async function fetchDirs(path, includeFiles = false, meta = false, includeHidden = false) {
   let url = "/api/fs/dirs?path=" + encodeURIComponent(path || "");
   if (includeFiles) url += "&include_files=true";
@@ -36,9 +34,9 @@ export async function fetchPlaces() {
   return r.json();
 }
 
-/** Create a new folder named `name` inside `path`. Resolves to
- *  {path, parent, name} for the created folder, or throws with the server's
- *  real reason (never overwrites an existing file/folder - the server 409s). */
+/** Create a folder named `name` inside `path`. Resolves to
+ *  {path, parent, name}, or throws with the server's reason. The server 409s
+ *  rather than overwriting an existing file or folder. */
 export async function mkdirFs(path, name) {
   const r = await fetch("/api/fs/mkdir", {
     method: "POST", headers: authHeaders(),
@@ -50,8 +48,8 @@ export async function mkdirFs(path, name) {
 }
 
 /** Rename the file/folder at `path` to `newName`, in the same parent
- *  directory. Resolves to {path, parent, name}, or throws (the server never
- *  overwrites an existing target - it 409s instead). */
+ *  directory. Resolves to {path, parent, name}, or throws. The server 409s
+ *  rather than overwriting an existing target. */
 export async function renameFs(path, newName) {
   const r = await fetch("/api/fs/rename", {
     method: "POST", headers: authHeaders(),
@@ -79,9 +77,8 @@ function extOf(name) {
   const i = name.lastIndexOf(".");
   return i > 0 ? name.slice(i).toLowerCase() : "";
 }
-/** Join a child name onto a directory. "/" separates fine on Windows too
- *  (Python's Path accepts both; the server resolves and echoes the native
- *  form). An empty dir means `name` is itself a root (a drive like "C:\"). */  /* hygiene-ok */
+/** Join a child name onto a directory. "/" works as the separator on Windows
+ *  too. An empty dir means `name` is itself a root (a drive like "C:\"). */  /* hygiene-ok */
 function joinPath(dir, name) {
   if (!dir) return name;
   return dir.replace(/[\\/]+$/, "") + "/" + name;
@@ -340,8 +337,7 @@ export function pickPath(opts = {}) {
               : (data && data.parent === null)
                 ? "No drives found" : "This folder is empty"));
         }
-        // The server caps very large listings; say so rather than silently
-        // showing a partial folder (AGENTS rule 5).
+        // The server caps very large listings; say so when the list is partial.
         if (data && data.truncated) {
           listEl.appendChild(el("div", "picker-trunc",
             "This folder is very large - showing a partial list. "
@@ -371,9 +367,8 @@ export function pickPath(opts = {}) {
         row.appendChild(iconSpan("picker-ic", entry.is_dir ? "folder" : "file"));
         row.appendChild(el("span", "picker-name", entry.name));
         if (current) {
-          // Renaming a synthetic drive-letter "folder" shown at the drive-list
-          // root (current === "") makes no sense - only real listed entries
-          // inside a real directory are renamable.
+          // Only entries inside a real directory are renamable, not the
+          // synthetic drive-letter rows at the drive-list root (current === "").
           const renameBtn = el("button", "picker-row-rename");
           renameBtn.type = "button"; renameBtn.title = "Rename";
           renameBtn.appendChild(iconSpan("picker-svg", "edit"));
@@ -438,7 +433,6 @@ export function pickPath(opts = {}) {
           mkdirFs(current, name).then((created) => {
             navigate(created.path);
           }).catch((e) => {
-            // Rule 5: surface the real reason, do not silently drop the attempt.
             toast("Could not create folder: " + e.message, true);
             done = false;
             renderList();
@@ -450,9 +444,7 @@ export function pickPath(opts = {}) {
           if (e.key === "Enter") { e.preventDefault(); commit(); }
           else if (e.key === "Escape") { e.preventDefault(); cancel(); }
         };
-        // Revert on blur unless one of the buttons above took the click (their
-        // mousedown fires and commits/cancels - setting `done` - before this
-        // blur handler's setTimeout runs).
+        // Revert on blur unless a button's mousedown already set `done`.
         inp.onblur = () => setTimeout(() => {
           if (!done && listEl.contains(row)) cancel();
         }, 100);
@@ -474,8 +466,7 @@ export function pickPath(opts = {}) {
         if (entry.is_dir) {
           inp.select();
         } else {
-          // Select the stem only, leaving the extension untouched by default -
-          // matches the convention every desktop file manager uses.
+          // Select the stem only, leaving the extension unselected.
           const ext = extOf(entry.name);
           const stopAt = ext ? entry.name.length - ext.length : entry.name.length;
           inp.setSelectionRange(0, stopAt);
@@ -519,11 +510,7 @@ export function pickPath(opts = {}) {
           if (push && current !== d.path) history.push(current);
           current = d.path;
           data = d;
-          // Reaching a dot-directory directly - typed, pasted, or via startPath -
-          // means the caller already knows hidden entries exist here. Turn the
-          // toggle on so its siblings are visible too, instead of leaving a user
-          // who just found one hidden folder to separately notice a checkbox
-          // (issue #1220: this is the sharpest form of "I know it's there").
+          // Landing in a dot-directory turns the Hidden toggle on.
           const base = (current || "").replace(/[\\/]+$/, "").split(/[\\/]/).pop() || "";
           if (base.startsWith(".") && !showHidden) {
             showHidden = true;
@@ -540,7 +527,6 @@ export function pickPath(opts = {}) {
         }).catch((e) => {
           if (seq !== reqSeq) return;
           setLoading(false);
-          // Rule 5: surface the failure, do not silently pretend it succeeded.
           toast("Cannot open " + (path || "location") + ": " + e.message, true);
           if (!data) navigate("", { push: false });   // first load failed -> drives
         });
@@ -578,8 +564,7 @@ export function pickPath(opts = {}) {
           group("Drives", pl.drives);
           highlightPlace();
         }).catch((e) => {
-          // The rail is a convenience, not load-bearing: hide it but leave a
-          // discoverable trace rather than a silent success (Rule 5).
+          // Hide the rail and log the reason.
           rail.style.display = "none";
           try { console.debug("picker: places unavailable:", e && e.message); } catch (_) {}
         });
@@ -639,8 +624,8 @@ export function pickPath(opts = {}) {
       };
       cancelBtn.onclick = () => finish(null);
 
-      // Dismissing via the shared modal chrome (x / backdrop) sets display:none;
-      // poll for it and resolve null, since those handlers are not ours.
+      // Dismissing via the shared modal chrome (x / backdrop) sets
+      // display:none; poll for that and resolve null.
       const watch = setInterval(() => {
         if ($("modal").style.display === "none") { clearInterval(watch); finish(null); }
       }, 200);
@@ -690,8 +675,7 @@ function pathSegments(current) {
   return out;
 }
 
-/** Pick a single directory. Resolves the chosen path, or null if dismissed.
- *  Kept as a `function` declaration so the jsdom tests can stub the global. */
+/** Pick a single directory. Resolves the chosen path, or null if dismissed. */
 export function pickDirectory(title, startPath = "") {
   return pickPath({ mode: "dir", title: title || "Pick a directory", startPath });
 }

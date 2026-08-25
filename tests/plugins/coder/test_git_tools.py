@@ -1,5 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Tests for git helpers in localm.plugins.coder.tools."""
+"""
+Tests for git helpers in localm.plugins.coder.tools
+
+Both mocked-subprocess tests (fast, no git dependency) and real git-init
+integration tests (use pytest's tmp_path fixture, require git in PATH).
+"""
 
 import subprocess
 import pytest
@@ -187,7 +192,7 @@ class TestGitDiff:
         big = "+" + "x" * 50 + "\n"
         with _patch_run(stdout=big * 10_000):
             r = tool_git_diff(tmp_path)
-        # Whether truncated or not depends on _truncate's default; just check ok
+        # Only ok is checked; truncation depends on _truncate's default.
         assert r.ok
 
 
@@ -314,5 +319,4 @@ class TestGitIntegration:
     def test_git_status_not_a_repo(self, tmp_path):
         """Outside a git repo, git exits non-zero."""
         r = tool_git_status(tmp_path)
-        # Should return ok=False and describe the error
         assert not r.ok

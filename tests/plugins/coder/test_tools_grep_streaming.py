@@ -1,5 +1,20 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""grep: streaming, pre-filter skips, and configurable caps (WORKITEMS B4)."""
+"""grep: streaming, pre-filter skips, and configurable caps (WORKITEMS B4).
+
+grep used to read every candidate file whole - including everything under .git
+and node_modules, which pathlib's ``**/*`` walks into - and its two caps were
+hardcoded. It now streams line by line, skips noise directories / binaries /
+oversized files before reading them, and takes its caps from call args or config.
+
+The bar these tests hold is not "it got faster", it is:
+
+- results did not change for the files it still searches (line numbers, context
+  windows, hit counts, the exact "N more" remainders);
+- every new skip is REPORTED. A search that quietly covers less than it used to
+  is the exact "hidden problem" AGENTS.md rule 5 forbids, and it is worse than a
+  slow search because the caller cannot tell;
+- the caps are actually configurable, and 0 really means no cap.
+"""
 
 import tracemalloc
 
@@ -47,7 +62,10 @@ class TestResultsUnchanged:
         assert "     0:" not in r.output
 
     def test_zero_context_shows_only_the_hit(self, project):
-        """A context=0 window is ONE line."""
+        """A context=0 window is ONE line. The rolling-window matcher closes a
+        hit only when its trailing context arrives, so a hit needing zero
+        trailing lines has to be closed at creation or it picks up the next
+        line - silently doubling output and halving the reach of the line cap."""
         r = tool_grep(project, "def target", context=0)
         assert "→    3: def target(a):" in r.output
         assert "return a" not in r.output
@@ -89,7 +107,8 @@ class TestSkipsAreReported:
         assert "1 binary" in r.output
 
     def test_extensionless_text_file_is_still_searched(self, project):
-        """A NUL sniff, not an extension allowlist - or Makefile/LICENSE would silently drop out of every search."""
+        """A NUL sniff, not an extension allowlist - or Makefile/LICENSE would
+        silently drop out of every search."""
         (project / "Makefile").write_text("target: build\n", encoding="utf-8")
         r = tool_grep(project, "target: build")
         assert "Makefile" in r.output
@@ -120,7 +139,8 @@ class TestSkipsAreReported:
         assert ".git" in r.output and "node_modules" in r.output   # named, not "..."
 
     def test_the_noise_note_counts_directories_not_entries(self, project):
-        """The note exists to state coverage accurately."""
+        """The note exists to state coverage accurately. Counting every entry
+        under node_modules reports thousands of 'files' when a handful were."""
         nm = project / "node_modules" / "dep" / "lib"
         nm.mkdir(parents=True)
         for i in range(5):
@@ -131,7 +151,9 @@ class TestSkipsAreReported:
         assert "8" not in r.output.split("[not searched")[1]
 
     def test_a_noise_dir_named_in_the_glob_is_searched(self, project):
-        """glob='build/**/*.py' must not silently return nothing - the caller named the directory, so it is not noise to them. _SKIP_DIRS contains build/dist/target/venv, so this is not a corner case."""
+        """glob="build/**/*.py" must not silently return nothing - the caller
+        named the directory, so it is not noise to them. _SKIP_DIRS contains
+        build/dist/target/venv, so this is not a corner case."""
         b = project / "build"
         b.mkdir()
         (b / "gen.py").write_text("needle here\n", encoding="utf-8")
@@ -146,7 +168,8 @@ class TestSkipsAreReported:
         assert "path=" in r.output and "glob=" in r.output
 
     def test_pointing_path_at_a_noise_dir_still_searches_it(self, project):
-        """Pruning is by name BELOW the search root, so an explicit grep(path='node_modules') is not silently empty."""
+        """Pruning is by name BELOW the search root, so an explicit
+        grep(path="node_modules") is not silently empty."""
         nm = project / "node_modules" / "dep"
         nm.mkdir(parents=True)
         (nm / "index.js").write_text("needle here\n", encoding="utf-8")
@@ -233,7 +256,8 @@ class TestConfigurableCaps:
         assert "30 match(es)" in r.summary
 
     def test_config_keys_are_registered_settings(self):
-        """A cap read from config that has no registered default cannot be set with `localm config ...` - the coder_index_timeout lesson."""
+        """A cap read from config that has no registered default cannot be set
+        with `localm config ...` - the coder_index_timeout lesson."""
         from localm.config import DEFAULT_CONFIG
         for key in ("coder_grep_max_per_file", "coder_grep_max_output_lines",
                     "coder_grep_max_file_bytes"):
@@ -265,7 +289,8 @@ class TestConfigurableCaps:
 
 class TestStreaming:
     def test_a_large_file_is_not_materialised(self, project):
-        """The point of streaming: peak allocation must not track file size."""
+        """The point of streaming: peak allocation must not track file size.
+        Reading a 16 MB file whole costs >16 MB (more, as a list of str)."""
         big = project / "big.txt"
         line = "x" * 99 + "\n"
         big.write_text(line * 160_000, encoding="utf-8")     # ~16 MB
@@ -285,7 +310,8 @@ class TestStreaming:
             "the file is being read whole, not streamed")
 
     def test_hit_windows_are_correct_in_a_streamed_file(self, project):
-        """Context comes from a rolling window, so an off-by-one shows up as a wrong line number rather than a crash."""
+        """Context comes from a rolling window, so an off-by-one shows up as a
+        wrong line number rather than a crash."""
         lines = [f"line{i}" for i in range(1, 101)]
         lines[49] = "needle"                                  # line 50
         (project / "long.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")

@@ -6,24 +6,15 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { loadApp, runScript } from "./harness.mjs";
 
-// A tiny model (the reported case: a 1B GLM/Gemma) can produce a reply whose
-// <think> works but whose visible answer is only a bare, unterminated ```code
-// fence - which marked renders as an EMPTY <pre><code> (a blank box). The chat
-// then showed nothing at all. The renderer must never leave a blank reply
-// bubble: on a settled render it shows a plain "(no reply text)" note instead.
-//
-// The jsdom harness stubs marked with an identity parse, which would NOT
-// reproduce the empty-code-fence render (the raw string is non-empty). So these
-// tests load the REAL vendored marked bundle into the window, so renderMarkdown
-// produces the exact HTML the browser does - the faithful reproduction. The
-// placeholder therefore only appears if the body genuinely rendered to nothing.
+// A settled render whose body renders to nothing shows a "(no reply text)" note.
+// These tests run against the real vendored marked, not the harness's identity
+// stub, so the rendered HTML matches the browser's.
 
 const STATIC = join(dirname(fileURLToPath(import.meta.url)), "..",
   "localm", "plugins", "gui", "static");
 
-/** Swap the harness's identity `marked` stub for the real vendored bundle so the
- *  renderer produces browser-identical HTML. The UMD's global branch runs in
- *  jsdom (no module/exports/define), so it sets window.marked to real marked. */
+/** Swaps the harness's identity `marked` stub for the real vendored bundle. The
+ *  UMD takes its global branch in jsdom, so it sets window.marked. */
 function withRealMarked(window) {
   runScript(window, readFileSync(join(STATIC, "vendor", "marked.min.js"), "utf-8"));
   assert.equal(typeof window.marked.parse, "function", "real marked loaded");
@@ -42,9 +33,9 @@ test("a reply that renders to an empty code fence shows a note, not a blank bubb
   const note = target.querySelector(".md-main .md-empty");
   assert.ok(note, "a placeholder note replaced the blank body");
   assert.match(note.textContent, /no reply/i);
-  // The empty code box must be gone, not left sitting next to the note.
+  // The empty code box is replaced, not left beside the note.
   assert.equal(target.querySelector(".md-main pre"), null, "empty code box replaced");
-  // The reasoning the model DID produce is still shown - we did not drop the turn.
+  // The reasoning block is still shown.
   const think = target.querySelector("details.think-block");
   assert.ok(think, "the thoughts bubble is preserved");
   assert.match(think.textContent, /some reasoning here/);
@@ -68,11 +59,10 @@ test("mid-stream (not final) an empty body shows NO note - never flash a false '
   const target = window.document.createElement("div");
   window.document.body.appendChild(target);
 
-  // A slow model: reasoning has streamed, the answer has not started yet. The
-  // wrapper always closes <think>, so the body is momentarily empty.
+  // Reasoning has streamed, the answer has not started, so the body is empty.
   window.renderMarkdown(target, "<think>\nthinking\n</think>\n", { final: false });
   assert.equal(target.querySelector(".md-empty"), null, "no placeholder while streaming");
-  // Default (no opts) is also treated as non-final - the streaming shell path.
+  // Default (no opts) is also treated as non-final.
   window.renderMarkdown(target, "<think>\nthinking\n</think>\n");
   assert.equal(target.querySelector(".md-empty"), null, "default render adds no placeholder");
 });
@@ -102,13 +92,12 @@ test("addMessageRow: a settled turn gets the note; a fresh streaming shell does 
   const { window } = loadApp();
   withRealMarked(window);
 
-  // Settled (from history / renderChat): final:true -> note for the blank body.
+  // Settled: final:true, so the blank body gets the note.
   const settled = window.document.createElement("div");
   window.addMessageRow(settled, "assistant", EMPTY_FENCE_REPLY, { final: true });
   assert.ok(settled.querySelector(".md-empty"), "settled empty reply shows the note");
 
-  // Fresh live shell (settings-perf/coder create it with ""): default opts, no
-  // final -> no note, so the empty shell never flashes before its first token.
+  // Fresh live shell: default opts, no final, so no note.
   const shell = window.document.createElement("div");
   window.addMessageRow(shell, "assistant", "");
   assert.equal(shell.querySelector(".md-empty"), null, "a fresh live shell shows no note");

@@ -1,5 +1,14 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""GUI diagnostics routes (localm/plugins/gui/routes/doctor.py):."""
+"""GUI diagnostics routes (localm/plugins/gui/routes/doctor.py):
+
+  GET  /api/doctor      - the last report; runs nothing
+  POST /api/doctor/run  - starts the five ACTIVE self-checks as a background job
+
+Mirrors test_gui_runtime_update_routes.py's shape: the heavy work is stubbed so
+these assert the DISPATCH and REPORTING contract, never re-run the real probes.
+The probes themselves are covered by tests/test_diagnostics_core.py (including
+one real child-process run) and by the eight test_doctor_*.py files.
+"""
 
 from __future__ import annotations
 
@@ -47,7 +56,8 @@ def _report(*statuses):
 
 @pytest.fixture
 def stub_run(monkeypatch):
-    """Replace the isolated run with a canned report."""
+    """Replace the isolated run with a canned report. Patched on localm.
+    diagnostics, which is where the route resolves the name from."""
     def _set(report, *, block: threading.Event | None = None,
              progress: list | None = None):
         def _fake(*, timeout=360.0, on_progress=None):
@@ -62,7 +72,9 @@ def stub_run(monkeypatch):
 
 
 def _wait_until_idle(client, deadline_s=10.0):
-    """Poll the GET until the background job has finished."""
+    """Poll the GET until the background job has finished. The work runs in a
+    worker thread (JobManager.start_fn), so a test that read once would be
+    racing it."""
     end = time.monotonic() + deadline_s
     while time.monotonic() < end:
         body = client.get("/api/doctor").json()
@@ -86,7 +98,9 @@ def test_before_any_run_the_report_is_null_and_nothing_is_running(app):
 
 
 def test_the_endpoint_names_the_five_checks_it_covers_before_it_runs_them(app):
-    """The card has to be able to say WHICH checks this is, both to render placeholder rows and so its verdict is never read as a claim about the whole machine."""
+    """The card has to be able to say WHICH checks this is, both to render
+    placeholder rows and so its verdict is never read as a claim about the whole
+    machine. That list has to come from the core, not be retyped in the UI."""
     with TestClient(app) as client:
         body = client.get("/api/doctor").json()
     assert [c["key"] for c in body["covers"]] == list(d.CHECK_KEYS)
@@ -112,7 +126,10 @@ def test_a_run_stores_the_report_and_reports_the_verdict(app, stub_run):
 
 
 def test_a_failing_check_makes_the_verdict_fail_without_failing_the_run(app, stub_run):
-    """'We could not check' and 'we checked and it is broken' are different facts."""
+    """"We could not check" and "we checked and it is broken" are different
+    facts. A report that found a real fault is a SUCCESSFUL run, so the job must
+    not be marked failed - otherwise the activity list says the diagnostics
+    broke when what actually happened is that they worked."""
     stub_run(_report(d.FAIL, d.SKIPPED, d.OK, d.OK, d.SKIPPED))
     with TestClient(app) as client:
         job_id = client.post("/api/doctor/run").json()["job_id"]
@@ -127,7 +144,9 @@ def test_a_failing_check_makes_the_verdict_fail_without_failing_the_run(app, stu
 
 
 def test_a_run_that_could_not_complete_is_reported_as_an_error(app, stub_run):
-    """The sharpest failure this route can have: an unrunnable diagnostic rendering as a clean bill of health."""
+    """The sharpest failure this route can have: an unrunnable diagnostic
+    rendering as a clean bill of health. The verdict must be ERROR, the reason
+    must survive, and the JOB must be marked failed."""
     stub_run(d.DiagnosticsReport(checks=(), verdict=d.ERROR,
                                  error="the diagnostics run did not finish within 360s"))
     with TestClient(app) as client:
@@ -142,7 +161,8 @@ def test_a_run_that_could_not_complete_is_reported_as_an_error(app, stub_run):
 
 
 def test_a_second_run_is_refused_while_one_is_in_flight(app, stub_run):
-    """Two concurrent runs would each build a throwaway venv and each spawn workers, to answer one question."""
+    """Two concurrent runs would each build a throwaway venv and each spawn
+    workers, to answer one question."""
     gate = threading.Event()
     stub_run(_report(d.OK, d.OK, d.OK, d.OK, d.OK), block=gate)
     try:
@@ -161,7 +181,8 @@ def test_a_second_run_is_refused_while_one_is_in_flight(app, stub_run):
 
 
 def test_progress_names_the_check_currently_running(app, stub_run):
-    """A run is ~20s on a healthy box and minutes at worst."""
+    """A run is ~20s on a healthy box and minutes at worst. Reporting which
+    check is in flight is the difference between progress and a spinner."""
     gate = threading.Event()
     stub_run(_report(d.OK, d.OK, d.OK, d.OK, d.OK), block=gate,
              progress=[("llama_lib", "llama.cpp library", 0, 5),
@@ -197,7 +218,8 @@ def test_progress_is_absent_once_the_run_has_finished(app, stub_run):
 # --------------------------------------------------------------------------- #
 
 def test_the_job_line_names_the_checks_that_need_attention():
-    """A job log is often the only thing quoted in a bug report, so '2 problems' sends the reader back to a UI they may not have."""
+    """A job log is often the only thing quoted in a bug report, so "2 problems"
+    sends the reader back to a UI they may not have."""
     from localm.plugins.gui.routes import doctor as route
 
     line = route._job_line(_report(d.FAIL, d.OK, d.OK, d.WARN, d.SKIPPED))
@@ -223,7 +245,10 @@ def test_the_all_clear_job_line_does_not_claim_more_than_it_checked():
     ("POST", "/api/doctor/run"),
 ])
 def test_both_routes_are_scope_gated(app, method, path):
-    """Starting a run spawns processes and builds a throwaway venv, so neither of these may be reachable without a checked key."""
+    """Starting a run spawns processes and builds a throwaway venv, so neither
+    of these may be reachable without a checked key. Walks the live app the way
+    test_kernel_routes_scope_contract.py does, so removing the dependency fails
+    here rather than in review."""
     route = next(r for r in app.routes
                  if isinstance(r, APIRoute) and r.path == path
                  and method in r.methods)

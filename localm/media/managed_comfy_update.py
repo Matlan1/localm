@@ -1,5 +1,28 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""localm-managed ComfyUI: STAGE S4 `localm comfy update` (design decision 7)."""
+"""localm-managed ComfyUI: STAGE S4 `localm comfy update` (design decision 7).
+
+The pin is a single CONSTANT (``COMFYUI_PINNED_COMMIT`` in managed_comfy_fresh.py).
+It advances ONLY deliberately: a maintainer bumps that constant to a new, localm-
+tested ComfyUI commit and ships it; a user then runs ``localm comfy update``, which
+moves their managed checkout to the (new) pinned commit and RE-APPLIES the localm
+patch set. It NEVER auto-advances - update only ever targets the shipped pin (or an
+explicit ``--commit`` for an advanced/test override).
+
+Safety (AGENTS.md rule 5: no facade, no half-updated install): update records the
+current commit first and, on ANY failure, ROLLS BACK - it returns the managed source
+to that prior commit and re-applies the patch set, so a failed update leaves the
+working prior install exactly as it was, not a broken in-between state. The rollback
+is git-based (the managed ComfyUI is a git checkout), so it is cheap and exact; the
+venv is not touched by an update, so there is nothing to restore there.
+
+Requirements are NOT reinstalled by default: a partial pip upgrade cannot be rolled
+back exactly, so update stays within the guaranteeable git rollback. When the pinned
+commit changes ComfyUI's requirements.txt, update SAYS SO and points at
+``--reinstall-requirements`` (opt-in); passing it reinstalls into the existing venv,
+and a failure there still rolls the source back and reports honestly.
+
+Design + locked decisions: dev-notes/DESIGN-localm-managed-comfyui-2026-07-08.md
+"""
 
 from __future__ import annotations
 
@@ -44,7 +67,9 @@ _LOCK_OWNER = "owner.json"
 
 
 def _update_lock_path() -> Path:
-    """Where the update lock lives: a SIBLING of the managed checkout, never inside it, so the update's own ``git checkout --force`` can never disturb the lock that is protecting it."""
+    """Where the update lock lives: a SIBLING of the managed checkout, never inside
+    it, so the update's own ``git checkout --force`` can never disturb the lock that
+    is protecting it."""
     root = mc.managed_comfy_paths().root
     return root.parent / (root.name + ".update.lock")
 
@@ -60,7 +85,18 @@ def _lock_holder_pid(lock: Path) -> Optional[int]:
 
 
 def _acquire_update_lock() -> tuple:
-    """Take the update lock."""
+    """Take the update lock. Returns ``(True, "")`` or ``(False, <honest reason>)``.
+
+    FAILS FAST rather than waiting: an update takes minutes, and a caller blocked on a
+    lock is indistinguishable from a hang - the GUI would show a spinner forever and
+    the CLI would look wedged.
+
+    Staleness is judged by PID LIVENESS, never by elapsed time. The operation is
+    unbounded (a fetch over a slow link, a dependency reinstall), so any fixed timeout
+    would eventually reclaim a LIVE holder's lock and produce the exact concurrent
+    mutation this exists to prevent. ``pid_alive`` is conservative - when it genuinely
+    cannot tell it returns True - so an uncertain answer keeps the lock rather than
+    stealing it."""
     from localm.instances import pid_alive
     lock = _update_lock_path()
     for attempt in (1, 2):
@@ -104,7 +140,9 @@ def _acquire_update_lock() -> tuple:
 
 
 def _release_update_lock() -> None:
-    """Drop the lock."""
+    """Drop the lock. Never raises: a failure to clean up must not turn a SUCCESSFUL
+    update into a reported failure - and a leftover lock is self-healing anyway, since
+    the next caller finds our dead pid and reclaims it."""
     try:
         shutil.rmtree(str(_update_lock_path()))
     except OSError as e:
@@ -112,13 +150,17 @@ def _release_update_lock() -> None:
 
 
 def _rev_parse_head(root: Path) -> Optional[str]:
-    """The managed checkout's HEAD sha, or None when *root* is not a git checkout (e.g. installed via the non-git copytree fallback)."""
+    """The managed checkout's HEAD sha, or None when *root* is not a git checkout
+    (e.g. installed via the non-git copytree fallback). None is the signal that a
+    pin update is not possible - we never fake one."""
     ok, out = _run(["git", "-C", str(root), "rev-parse", "HEAD"], timeout=30)
     return out.strip() if ok else None
 
 
 def _requirements_changed(root: Path, prev: str, target: str) -> bool:
-    """True when requirements.txt differs between *prev* and *target*. ``git diff --quiet`` exits 0 for no change, non-zero for a change; a git error (unknown here) is treated as 'changed' so we warn rather than silently skip a real dep bump."""
+    """True when requirements.txt differs between *prev* and *target*. ``git diff
+    --quiet`` exits 0 for no change, non-zero for a change; a git error (unknown here)
+    is treated as 'changed' so we warn rather than silently skip a real dep bump."""
     ok, _out = _run(["git", "-C", str(root), "diff", "--quiet", prev, target,
                      "--", "requirements.txt"], timeout=60)
     return not ok
@@ -126,7 +168,8 @@ def _requirements_changed(root: Path, prev: str, target: str) -> bool:
 
 def _update_marker(root: Path, target_commit: str, target_version: Optional[str],
                    prev_commit: str, patch_outcomes) -> None:
-    """Record the update in the managed dir's marker (provenance; not load-bearing)."""
+    """Record the update in the managed dir's marker (provenance; not load-bearing).
+    Merges into any existing marker so the original source (fresh/copy) is preserved."""
     marker_path = root / MARKER_FILENAME
     data = {}
     try:
@@ -156,7 +199,13 @@ def update_managed_comfy(cfg: Optional[dict] = None, *, on_progress: ProgressCb 
                          target_commit: Optional[str] = None,
                          target_version: Optional[str] = None,
                          reinstall_requirements: bool = False) -> ProvisionResult:
-    """Advance localm's managed ComfyUI to the pinned commit and re-apply the localm patch set, rolling back safely on any failure."""
+    """Advance localm's managed ComfyUI to the pinned commit and re-apply the localm
+    patch set, rolling back safely on any failure.
+
+    ``comfyui_repo`` / ``target_commit`` / ``target_version`` are injection points for
+    an offline test; production callers pass none and get the shipped pin. Returns an
+    honest ProvisionResult: ``status`` is "updated" on success, "noop" when already at
+    the pin (patches re-verified), else an error status with the prior install intact."""
     cfg = cfg if cfg is not None else load_config()
     repo = comfyui_repo or COMFYUI_REPO
     target = target_commit or COMFYUI_PINNED_COMMIT
@@ -194,7 +243,11 @@ def update_managed_comfy(cfg: Optional[dict] = None, *, on_progress: ProgressCb 
         return _result(False, "busy", busy)
 
     def _rollback(reason: str) -> ProvisionResult:
-        """Return the managed source to prev_commit and re-apply the patch set, then report *reason*."""
+        """Return the managed source to prev_commit and re-apply the patch set, then
+        report *reason*. Rolls back the git source exactly; if even the rollback
+        checkout fails - OR the checkout succeeds but the localm patch set cannot be
+        re-applied on the restored source - say so rather than pretend the tree is
+        clean (rule 5)."""
         note = ""
         ok, out = _run(["git", "-C", str(root), "checkout", "--force", "--quiet",
                         prev_commit], on_progress=on_progress, timeout=300)

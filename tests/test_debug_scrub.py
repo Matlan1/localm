@@ -19,7 +19,8 @@ def _scrub(pieces):
 
 
 class TestUtf8PieceReassembly:
-    """R46: a multibyte character whose UTF-8 bytes straddle two tokens must be reassembled, not decoded into U+FFFD replacement characters mid-word."""
+    """R46: a multibyte character whose UTF-8 bytes straddle two tokens must be
+    reassembled, not decoded into U+FFFD replacement characters mid-word."""
 
     def test_two_byte_char_split_across_tokens(self):
         # 'cafe<acute>' -> b'caf\xc3\xa9'; the e-acute is split between tokens.
@@ -50,8 +51,8 @@ class TestUtf8PieceReassembly:
         assert out == "Hello, world!"
 
     def test_old_per_token_decode_would_have_mangled_this(self):
-        # Documents the bug: decoding each token's bytes in isolation (the old
-        # token_to_piece path) produced replacement chars at the split.
+        # Decoding each token's bytes in isolation produces replacement chars at
+        # the split.
         per_token = "".join(b.decode("utf-8", errors="replace")
                             for b in [b"caf\xc3", b"\xa9"])
         assert "�" in per_token                  # the old, broken result
@@ -74,7 +75,7 @@ class TestMarkerScrub:
         assert _scrub([text]) == "<think>\nReasoning here.\n</think>\nThe answer."
 
     def test_mangled_channel_tags_become_think(self):
-        # The exact garbage observed in the bug report
+        # Mangled channel tags around the reasoning block.
         text = "<|channel>thought\nhmm<channel|>Good morning! How can I help?"
         assert _scrub([text]) == \
             "<think>\nhmm\n</think>\nGood morning! How can I help?"
@@ -162,7 +163,8 @@ class TestDebugLog:
         assert "simulated native crash" in path.read_text(encoding="utf-8")
 
     def test_debug_mode_scrubs_output_and_logs_raw(self, tmp_path, monkeypatch):
-        """_decode_stream always scrubs; debug mode logs the raw text in log/full mode, but NEVER in privacy mode (chat content is not persisted there)."""
+        """_decode_stream always scrubs; debug mode logs the raw text in log/full
+        mode, but NEVER in privacy mode (chat content is not persisted there)."""
         import logging as _logging
         from localm.inference.backends.llamacpp.llama import LlamaCpp
         from unittest.mock import MagicMock
@@ -174,8 +176,8 @@ class TestDebugLog:
 
         llm = LlamaCpp.__new__(LlamaCpp)
         llm._tokenizer = MagicMock()
-        # _decode_stream now decodes raw token BYTES through one UTF-8-safe
-        # stream (R46), so the tokenizer mock yields bytes, not str.
+        # _decode_stream decodes raw token BYTES through one UTF-8-safe stream,
+        # so the tokenizer mock yields bytes, not str.
         llm._tokenizer.token_to_piece_bytes.side_effect = \
             lambda t: {1: b"<|channel|>", 2: b"thought", 3: b" hi"}[t]
         try:
@@ -191,7 +193,7 @@ class TestDebugLog:
             assert "<|channel|>thought hi" in path.read_text(encoding="utf-8")
 
             # privacy mode: a decode's raw content must NOT reach the debug log,
-            # even though the log file is open (the keep_diagnostics leak fix).
+            # even though the log file is open.
             llm._tokenizer.token_to_piece_bytes.side_effect = \
                 lambda t: {1: b"<|channel|>", 2: b"SECRETWORD", 3: b" x"}[t]
             monkeypatch.setenv("LOCALM_MODE", "privacy")

@@ -1,5 +1,17 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Best-effort live system stats for the GUI hardware monitor."""
+"""Best-effort live system stats for the GUI hardware monitor.
+
+Pure and NEVER raises: a probe that fails just omits its field, so the status
+bar degrades gracefully (e.g. VRAM still shows on a box without psutil). Safe
+to call on a short GUI poll - CPU/RAM are cheap; the two GPU-touching probes
+below run throttled and single-flighted on their own background thread so a
+slow driver/subprocess call never blocks the poll itself (see _vram/_gpu_util):
+  * CPU % and RAM via psutil (the optional ``[monitor]`` extra)
+  * VRAM via localm.discover.vram_capacity (combined across a configured
+    multi-GPU split, else the single main GPU - torch -> nvidia-smi ->
+    Windows registry)
+  * GPU utilisation % best-effort via nvidia-smi (NVIDIA only; omitted elsewhere)
+"""
 
 from __future__ import annotations
 
@@ -8,12 +20,25 @@ import time
 
 
 def _clamped_field_deltas(t1, t2):
-    """Per-field ``t2 - t1`` from two same-shaped ``psutil.cpu_times()`` ntuples, each trimmed to >= 0."""
+    """Per-field ``t2 - t1`` from two same-shaped ``psutil.cpu_times()`` ntuples,
+    each trimmed to >= 0. CPU-time counters are supposed to only increase, but
+    some fields (Windows ``interrupt``/``dpc``, some Linux counters) can
+    occasionally regress even while total CPU time moves forward - psutil's own
+    ``_cpu_times_deltas`` trims each field to zero rather than let one regressing
+    field corrupt the aggregate, and this mirrors that exactly (verified against
+    psutil 7.2.2 source) so the percent derived from it matches what a blocking
+    ``cpu_percent(interval=..)`` would report even across a regressing field."""
     return type(t2)(*(max(0.0, float(b) - float(a)) for a, b in zip(t1, t2)))
 
 
 def _busy_total(times) -> tuple[float, float]:
-    """``(busy, total)`` CPU-seconds from a ``psutil.cpu_times()``-shaped ntuple - either an absolute snapshot or a delta from :func:`_clamped_field_deltas` (the formula is identical either way; this mirrors psutil's own ``_cpu_busy_time``/``_cpu_tot_time``, which run on both shapes too). ``iowait``/``gues..."""
+    """``(busy, total)`` CPU-seconds from a ``psutil.cpu_times()``-shaped ntuple -
+    either an absolute snapshot or a delta from :func:`_clamped_field_deltas` (the
+    formula is identical either way; this mirrors psutil's own
+    ``_cpu_busy_time``/``_cpu_tot_time``, which run on both shapes too).
+    ``iowait``/``guest``/``guest_nice`` exist only on some platforms (Linux); the
+    ``getattr`` defaults keep this correct on Windows and macOS, which have
+    neither, so ``busy`` there is simply ``total - idle``."""
     total = float(sum(times))
     # Linux already counts guest/guest_nice inside user/nice; subtract them so the
     # total is not double-counted (mirrors psutil._cpu_tot_time).
@@ -25,7 +50,25 @@ def _busy_total(times) -> tuple[float, float]:
 
 
 class _CpuMeter:
-    """Non-blocking CPU-utilisation meter that keeps its OWN previous snapshot."""
+    """Non-blocking CPU-utilisation meter that keeps its OWN previous snapshot.
+
+    ``psutil.cpu_percent(interval=None)`` measures CPU% "since the previous call"
+    off psutil's process-global state, so its FIRST reading (and any reading whose
+    since-last-call window happened to span a burst, e.g. server startup or a model
+    load) is fabricated: it can report 100% on a busy-starting box or 0% on an idle
+    one, neither a real measurement. The GUI polls /api/stats off a MULTI-thread
+    executor (get_plugin_executor), which chops that shared window into unpredictable
+    slices on top of it.
+
+    So we do not rely on that implicit state. We store our own previous
+    ``(times, monotonic)`` snapshot and derive the percent from the CLAMPED
+    per-field delta over a real, known window (see :func:`_clamped_field_deltas`
+    - computing an aggregate busy/total per snapshot and subtracting THOSE would
+    let one regressing field, e.g. Windows ``interrupt``, corrupt the whole
+    percentage; clamping per-field first, like psutil itself does, does not).
+    The first reading (no baseline yet) reports ``None`` so the caller omits the
+    CPU field for that one poll rather than showing a made-up number (AGENTS.md
+    rule 5: never present a fabricated value as a live measurement)."""
 
     # Two samples closer than this (seconds) form too short a window to trust -
     # rapid or concurrent polls, where the delta is noise; reuse the last value.
@@ -37,7 +80,10 @@ class _CpuMeter:
         self._last: float | None = None                  # last computed percent
 
     def percent(self, times, now: float) -> float | None:
-        """CPU% over the interval since the previous sample, or ``None`` when there is no trustworthy baseline yet. *times* is a ``psutil.cpu_times()`` ntuple; *now* is a monotonic timestamp."""
+        """CPU% over the interval since the previous sample, or ``None`` when there
+        is no trustworthy baseline yet. *times* is a ``psutil.cpu_times()`` ntuple;
+        *now* is a monotonic timestamp. Deterministic given its inputs plus the prior
+        state, so it is unit-testable with fabricated snapshots."""
         with self._lock:
             prev = self._prev
             if prev is None:                       # first poll: seed, no baseline yet
@@ -61,7 +107,7 @@ _cpu_meter = _CpuMeter()
 
 
 def _cpu_ram() -> dict:
-    """{'cpu': {...}, 'ram': {...}} via psutil, or {} when psutil is absent."""
+    """{"cpu": {...}, "ram": {...}} via psutil, or {} when psutil is absent."""
     try:
         import psutil
     except Exception:
@@ -90,7 +136,23 @@ def _cpu_ram() -> dict:
 
 
 def _vram_reading_trusted(info: dict, status) -> bool:
-    """Whether a ``vram_capacity``/``vram_info`` reading's ``free`` may be shown as the board's CURRENT free VRAM."""
+    """Whether a ``vram_capacity``/``vram_info`` reading's ``free`` may be shown as
+    the board's CURRENT free VRAM. True only when the reading is BOTH:
+
+      * fresh - ``status`` is GPU_PROBE_OK, i.e. a probe actually completed. A
+        GPU_PROBE_TIMEOUT/BUSY reading is a served last-known-good value (possibly
+        frozen from an earlier state), not a current measurement.
+      * device-global - ``free_scope`` is FREE_SCOPE_DEVICE, i.e. it counts every
+        process's VRAM. On Windows + an AMD ROCm/HIP torch build the driver query is
+        blind to other processes (FREE_SCOPE_PROCESS); since every GGUF loads in an
+        isolated worker (#606) the model's own VRAM is invisible, so a process-scoped
+        ``free`` overstates what is available - a fresh reading can still be wrong.
+
+    Presenting a stale or process-scoped ``free`` as the board's live figure is
+    exactly the "report success when the measurement did not hold" that AGENTS.md
+    rule 5 forbids, so those readings show total-only instead (board capacity is
+    always true). Linux/NVIDIA tag every live reading FREE_SCOPE_DEVICE by
+    documentation, so this never withholds there."""
     from localm.discover import FREE_SCOPE_DEVICE, GPU_PROBE_OK
     return (status == GPU_PROBE_OK
             and info.get("free_scope") == FREE_SCOPE_DEVICE
@@ -121,7 +183,15 @@ _vram_ready = threading.Event()     # set once, after the first completed attemp
 
 
 def _compute_vram() -> dict:
-    """The actual vram_capacity() call and the dict-shaping around it, split out of :func:`_vram` so :func:`_vram_probe` can run it on a background thread."""
+    """The actual vram_capacity() call and the dict-shaping around it, split
+    out of :func:`_vram` so :func:`_vram_probe` can run it on a background
+    thread. May raise - :func:`_vram_probe` is the exception boundary, the
+    same split :func:`_gpu_util_probe`/``subprocess.run`` use below.
+
+    ``used``/``percent`` are included ONLY when the free reading is trustworthy
+    (see :func:`_vram_reading_trusted`); a stale or process-blind reading shows
+    ``total`` alone rather than a wrong used/free, so the status bar never
+    presents a number localm cannot stand behind as current fact."""
     from localm.discover import (FREE_SCOPE_DEVICE as _FREE_SCOPE_DEVICE,
                                  last_known_gpus, vram_capacity)
     info, status = vram_capacity(return_status=True)
@@ -211,7 +281,32 @@ def _compute_vram() -> dict:
 
 
 def _vram_probe() -> None:
-    """The actual (blocking) vram_capacity() call, which drives list_gpus()'s out-of-process torch probe."""
+    """The actual (blocking) vram_capacity() call, which drives list_gpus()'s
+    out-of-process torch probe. Runs on its OWN single-flighted daemon thread,
+    started by :func:`_vram` - never call this directly.
+
+    On a genuine exception the cache is left UNTOUCHED rather than overwritten
+    with an empty reading: an error is "could not look", never "confirmed
+    nothing there" - collapsing the two is the exact bug class
+    ``.claude/rules/diff-review-discipline.md`` item 3 documents for this same
+    subsystem (list_gpus' own TIMEOUT/BUSY/INCONCLUSIVE statuses are not this
+    case - vram_capacity() already degrades those to an honest total-only or
+    last-known-good dict via :func:`_vram_reading_trusted`, so a clean return
+    here, whatever its status, IS a completed attempt worth caching). The
+    refresh-window timer still advances on a raised exception too, so a
+    persistently erroring probe backs off at the same cadence as a healthy one
+    instead of retrying on every single poll (mirrors _gpu_util_probe).
+
+    Unlike list_gpus()'s own probe machinery, this has no epoch/retirement
+    guard against a straggler thread writing late: list_gpus() needs one
+    because the NATIVE torch/HIP call it starts can hang uninterruptibly
+    forever, so it abandons that call and returns early, leaving a thread
+    that may write whenever (or never). This function never does that - it
+    calls vram_capacity() and blocks on IT, and vram_capacity() (via
+    list_gpus()'s own deadline) is guaranteed to return within that same
+    bounded deadline regardless of what its own native probe does. So this
+    thread is always bounded and never becomes an abandoned straggler
+    itself; there is nothing here for an epoch to fence out."""
     global _vram_inflight, _vram_last, _vram_last_at
     computed = None
     try:
@@ -228,7 +323,25 @@ def _vram_probe() -> None:
 
 
 def _vram(wait_first: bool = False) -> dict:
-    """{'vram': {'used'?, 'total', 'percent'?}} - combined across a configured multi-GPU split, else the single main GPU, or {} when unmeasurable or before the first reading has landed."""
+    """{"vram": {"used"?, "total", "percent"?}} - combined across a configured
+    multi-GPU split, else the single main GPU, or {} when unmeasurable or
+    before the first reading has landed.
+
+    NEVER blocks the calling (poll) thread on the underlying torch/nvidia-smi
+    probe: the actual vram_capacity() call runs single-flighted on its own
+    background thread (:func:`_vram_probe`), throttled to at most once per
+    :data:`_VRAM_REFRESH_INTERVAL_S`, and this function always returns
+    immediately with the last completed reading - omitting the section (never
+    fabricating one) until a reading has landed, the same "omit rather than
+    fabricate" contract ``_cpu_ram``/``_gpu_util`` already use in this module.
+
+    *wait_first*: for a ONE-SHOT caller that will never poll again to pick up
+    a reading that lands later (e.g. the MCP system_stats tool, unlike the
+    GUI's repeating ~2.5s poll) - when no reading has ever landed AND a probe
+    is genuinely in flight, block for up to the underlying probe's own
+    cold-init-tolerant deadline instead of silently omitting VRAM. Default
+    False leaves every existing (repeating-poll) caller's non-blocking
+    contract exactly as it was."""
     global _vram_inflight
     now = time.monotonic()
     start_probe = False
@@ -273,7 +386,26 @@ _gpu_util_last_at: float | None = None   # monotonic time of the last COMPLETED
 
 
 def _gpu_util_probe() -> None:
-    """The actual (blocking) nvidia-smi call."""
+    """The actual (blocking) nvidia-smi call. Runs on its OWN daemon thread,
+    started single-flighted by :func:`_gpu_util` - never call this directly,
+    it can take up to its subprocess timeout on a slow/wedged driver.
+
+    KNOWN RESIDUAL RISK, deliberately not guarded further: CPython's
+    ``subprocess.run(..., timeout=N)`` on Windows, after a ``TimeoutExpired``,
+    calls ``process.kill()`` then calls ``communicate()`` a SECOND time with NO
+    timeout to drain the killed process's pipes (verified in
+    ``Lib/subprocess.py``'s ``run()``, the ``if _mswindows:`` branch). If a
+    killed nvidia-smi's pipes never close, that second call - and this whole
+    thread - can hang past the stated 4s indefinitely, leaving
+    ``_gpu_util_inflight`` stuck True forever (the reading simply freezes at
+    its last value; nothing user-facing blocks, unlike before this fix). This
+    is not new: the pre-fix code shared the identical subprocess timeout and
+    the identical exposure. Accepted rather than fixed with a retirement/epoch
+    mechanism (see the no-epoch note in :func:`_gpu_util`) because the field is
+    explicitly best-effort/nice-to-have and no caller ever blocks on it either
+    way - a genuinely wedged nvidia-smi that never releases its pipes is rare
+    enough that the fix's cost (a second timed layer, e.g. killing this thread
+    itself) is not worth it unless it is ever observed for real."""
     global _gpu_util_inflight, _gpu_util_last, _gpu_util_last_at
     import subprocess
     pct = None
@@ -295,7 +427,40 @@ def _gpu_util_probe() -> None:
 
 
 def _gpu_util() -> dict:
-    """{'gpu': {'percent': N}} via nvidia-smi (NVIDIA), or {} on any other box or before the first reading has landed."""
+    """{"gpu": {"percent": N}} via nvidia-smi (NVIDIA), or {} on any other box
+    or before the first reading has landed.
+
+    NO LONGER NVIDIA-ONLY, and the non-NVIDIA path is now PER VENDOR rather than
+    one shared counter. Source order: nvidia-smi where it exists, then ADL's own
+    whole-GPU activity sensor on AMD, then the vendor-neutral WDDM counter for
+    everything else. Until a non-NVIDIA source landed at all, AMD and Intel
+    machines showed no GPU load - which read as "this box has no GPU utilisation"
+    rather than "localm cannot see it", on a status bar whose whole job is to show
+    load.
+
+    The AMD branch exists because the vendor-neutral counter is not merely less
+    precise there, it is blind to the workload localm itself creates: ROCm/HIP
+    compute appears on no WDDM engine, so that counter reported another process's
+    video encoder as GPU load while the card was saturated. Every figure this
+    returns is WHOLE-GPU - all work on the board, whichever process caused it -
+    never localm's own share.
+
+    NEVER blocks the calling (poll) thread on nvidia-smi: the subprocess call
+    runs single-flighted on its own daemon thread (:func:`_gpu_util_probe`),
+    and this function always returns immediately with the last completed
+    reading, omitting the field (never fabricating 0%) until one has landed -
+    the same "omit rather than fabricate" contract the CPU-percent meter and
+    the VRAM used/percent gate already use elsewhere in this module. The old
+    version ran a bare per-poll ``subprocess.run(..., timeout=4)`` (the poll
+    interval is 2.5s), which spawned a fresh nvidia-smi on every single poll
+    with no cap on how many could be in flight at once, and could park the
+    polling thread on a slow driver call. This is a standalone efficiency/
+    robustness fix for this one reading; it is unrelated to the GPU-enumeration
+    freeze diagnosed for issue #833 (a cold ``import torch`` holding the
+    Windows loader lock across thread creation process-wide, fixed separately
+    in ``discover.py``/``_torch_gpu_probe.py`` - a caller-side timeout or cache
+    cannot fix that class of stall, since nothing a caller does bounds a lock
+    the OS holds on another thread's behalf)."""
     global _gpu_util_inflight
     now = time.monotonic()
     start_probe = False
@@ -360,7 +525,14 @@ def _gpu_util() -> dict:
 
 
 def system_stats(*, wait_first_vram: bool = False) -> dict:
-    """Combined live stats; any unmeasurable section is simply absent."""
+    """Combined live stats; any unmeasurable section is simply absent.
+
+    *wait_first_vram*: pass True only for a one-shot caller that will not
+    poll again (see :func:`_vram`'s ``wait_first``) - blocks up to the GPU
+    probe's own deadline so a cold first call gets a real VRAM reading
+    instead of omitting it. The GUI's repeating status-bar poll must never
+    pass this: it self-heals within one refresh window and blocking it would
+    reintroduce the executor-stall this throttling exists to prevent."""
     out: dict = {}
     out.update(_cpu_ram())
     out.update(_vram(wait_first=wait_first_vram))
@@ -379,7 +551,33 @@ from localm.vram import VRAM_OVERHEAD_BYTES as _VRAM_OVERHEAD_BYTES
 def estimate_vram(model_bytes: int, n_ctx: int,
                   n_gpu_layers: int = 99, n_layers: int | None = None,
                   kv_bytes_per_token: int = 0, moe_pinned_bytes: int = 0) -> dict:
-    """Rough VRAM footprint (bytes) to load a GGUF model at *n_ctx* with *n_gpu_layers* offloaded."""
+    """Rough VRAM footprint (bytes) to load a GGUF model at *n_ctx* with
+    *n_gpu_layers* offloaded. Returns a breakdown {weights, kv_cache, overhead,
+    needed} so the UI can show where the memory goes. A model/ctx of 0 yields 0
+    needed (nothing to load).
+
+    *kv_bytes_per_token*, when > 0, is the exact per-token KV cost the caller
+    read from the model's GGUF header via gguf_kv_bytes_per_token(path) - this
+    function only ever sees a raw byte count, not a path, so it cannot read the
+    header itself (the /api/vram-estimate route does that read off the event
+    loop and passes the result in). 0 means no header reading was possible
+    (missing file, unreadable header, or an unresolved attention shape); this
+    then falls back to the size-class heuristic, kept as the LAST resort by
+    calling GgufBackend._bytes_per_token rather than reimplementing it, so
+    there is exactly one size-class formula in the codebase - the same one
+    VramSizingMixin._kv_bytes_per_token falls back to post-load.
+
+    *moe_pinned_bytes*, when > 0, is the caller's own read of
+    gguf_moe_pinned_expert_bytes(path, n_cpu_moe) - the exact byte count of
+    routed-expert tensors an n_cpu_moe load pins to system RAM instead of
+    VRAM (see llamacpp/_sizing.py's VramSizingMixin._effective_model_bytes_for_vram,
+    which applies the identical discount to the preflight that decides whether
+    a load is even attempted). Without this, this estimate double-counted
+    exactly what that preflight fix corrected: a Mixture-of-Experts model
+    with its experts pinned to system RAM would still show the WHOLE file as
+    VRAM-needed here, overstating the readout even after the load itself
+    would have succeeded. Same "0 means no signal, do nothing" contract as
+    kv_bytes_per_token - this function cannot read a header itself."""
     model_bytes = max(0, int(model_bytes or 0))
     n_ctx = max(0, int(n_ctx or 0))
     # The MoE-pinned share never touches VRAM regardless of n_gpu_layers - it

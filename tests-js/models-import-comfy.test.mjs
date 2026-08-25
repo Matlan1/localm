@@ -1,16 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// import-comfy: the guided "Import from ComfyUI..." flow on the Models page
-// (Add-a-model card). Folder pick -> dry-run preview (counts per category,
-// nothing registered) -> confirm (real registration) -> toast + refresh.
-// Separate from the existing "Scan ComfyUI Models" button/tests (scan-reason,
-// models-add-disk): this flow always sends an explicit workdir + dry_run.
-//
-// A real (dry_run:false) scan is job-based now (see gui_scan_models /
-// scan_comfy_models's progress_cb): POST /api/models/scan returns {job_id}
-// immediately and the registration count streams over GET
-// /api/jobs/{id}/events, mirroring the model-pull flow's streamJob() usage.
-// jobEvents below plays back that SSE stream the same way
-// streamjob-reconnect.test.mjs does for the pull flow.
+// The guided "Import from ComfyUI..." flow on the Models page: folder pick ->
+// dry-run preview -> confirm -> toast + refresh. Every request carries an
+// explicit workdir and dry_run. A real (dry_run:false) scan is job-based: POST
+// /api/models/scan returns {job_id} and progress streams over
+// GET /api/jobs/{id}/events, which jobEvents below plays back.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -20,11 +13,8 @@ const flush = async () => {
   for (let i = 0; i < 8; i++) await new Promise((r) => setTimeout(r, 0));
 };
 
-// A minimal real filesystem for the picker's /api/fs/dirs + /api/fs/places
-// (same shape as picker.test.mjs), so tests can drive the REAL pickDirectory()
-// end to end instead of stubbing it out - stubbing it would hide exactly the
-// bug this flow had (openModal() has no stack; a picker opened from inside an
-// already-open modal destroys that modal's own DOM, pathInput included).
+// A minimal filesystem for the picker's /api/fs/dirs + /api/fs/places, so the
+// tests drive the real pickDirectory() end to end instead of stubbing it.
 const FS = {
   "": { path: "", parent: null, entries: [
     { name: "comfy-root", is_dir: true, size: null, mtime: 1700000000 },
@@ -36,18 +26,12 @@ const FS = {
   },
 };
 
-// A single-shot SSE playback of *events*, shaped exactly like
-// streamjob-reconnect.test.mjs's mock: a fetch Response whose body.getReader()
-// hands back one "data: <json>\n\n" frame per call, then a clean EOF.
+// A single-shot SSE playback of *events*: a fetch Response whose
+// body.getReader() hands back one "data: <json>\n\n" frame per call, then EOF.
 //
-// delayMs>0 resolves each frame on a REAL timer instead of an already-resolved
-// microtask. Plain `await`-chained microtasks all drain within a single event
-// loop turn (Node runs the microtask queue to exhaustion before any timer
-// fires), so a test that fires the click and reads the DOM after just one
-// `setTimeout(...,0)` observes the FULLY SETTLED end state, not a mid-stream
-// one, no matter how many progress events preceded it - a real per-frame delay
-// plus polling (waitFor, below) is what actually lets a test catch an
-// in-flight "registering model N of M" moment.
+// delayMs>0 resolves each frame on a real timer instead of an already-resolved
+// microtask, which is what lets a polling test (waitFor, below) observe an
+// in-flight frame rather than only the fully settled end state.
 function sseResponse(events, { delayMs = 0 } = {}) {
   const frames = events.map((ev) => `data: ${JSON.stringify(ev)}\n\n`);
   let idx = 0;
@@ -76,9 +60,7 @@ function sseResponse(events, { delayMs = 0 } = {}) {
   };
 }
 
-// Poll *cond* until it returns true or *timeout* elapses - same shape as
-// streamjob-reconnect.test.mjs's deadline loops, for asserting on a
-// real-timer-paced SSE playback (see sseResponse's delayMs) without a race.
+// Poll *cond* until it returns true or *timeout* elapses.
 async function waitFor(cond, { timeout = 2000, interval = 5 } = {}) {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
@@ -145,16 +127,10 @@ test("import-comfy: the button exists and opens a modal with a path field, Previ
 });
 
 test("import-comfy: Browse fills the path field via the REAL pickDirectory, surviving the modal being rebuilt", async () => {
-  // Regression test for a real shipped bug: openModal() has no stack (a single
-  // shared #modal-body, replaced not pushed), so pickDirectory()'s OWN
-  // openModal() call - fired from inside this already-open modal - wiped this
-  // modal's DOM out from under it, including the pathInput reference the old
-  // code tried to write into after the picker resolved. That landed on an
-  // already-detached node: no visible effect, exactly "click select and
-  // nothing happens". A version of this test that stubs pickDirectory() itself
-  // (as this test used to) cannot catch that - it never invokes the real
-  // openModal() nesting that causes it. Drives the REAL picker against a fake
-  // /api/fs/dirs + /api/fs/places filesystem instead (see picker.test.mjs).
+  // openModal() has no stack: a single shared #modal-body, replaced not
+  // pushed, so pickDirectory()'s own openModal() call replaces this modal's
+  // DOM. Every element reference has to be re-queried after the picker
+  // resolves.
   const { window } = loadAppWithPages({ fetchImpl: makeFetch({}) });
   openModalFor(window);
   await flush();
@@ -162,9 +138,7 @@ test("import-comfy: Browse fills the path field via the REAL pickDirectory, surv
   const browseBtn = [...body.querySelectorAll("button")].find((b) => b.textContent.includes("Browse"));
   browseBtn.click();
   await flush();
-  // Navigate into the one folder the fake filesystem offers, then confirm -
-  // by now the picker has replaced the Import-from-ComfyUI dialog's content
-  // in the shared modal.
+  // Navigate into the one folder the fake filesystem offers, then confirm.
   const row = [...window.document.querySelectorAll(".picker-row")].find(
     (r) => r.querySelector(".picker-name") && r.querySelector(".picker-name").textContent === "comfy-root");
   assert.ok(row, "the real folder picker opened and listed the fake folder (not a stub)");
@@ -174,9 +148,7 @@ test("import-comfy: Browse fills the path field via the REAL pickDirectory, surv
   assert.equal(okBtn.textContent, "Use this folder");
   okBtn.click();
   await flush();
-  // The Import-from-ComfyUI modal must be showing again (rebuilt), not just
-  // closed, with the picked path filled in - re-query, do not reuse the old
-  // (now-detached) input reference.
+  // Re-query rather than reusing the now-detached input reference.
   const modal = window.document.getElementById("modal");
   assert.equal(modal.style.display, "flex", "the Import-from-ComfyUI dialog reopened, not left closed");
   body = window.document.getElementById("modal-body");
@@ -201,10 +173,9 @@ test("import-comfy: a managed ComfyUI install shows the quick-fill row and it fi
   assert.equal(input.value, "D:/localm-home/comfyui");
 });
 
-// The quick-fill button is always built (mirrors the hide-via-style pattern
-// used elsewhere, e.g. disc-hf-hint / pull-mmproj) and only its containing row
-// is toggled visible - so "not offered" means the row stays display:none, not
-// that the button is absent from the DOM.
+// The quick-fill button is always built; only its containing row is toggled
+// visible, so "not offered" means the row is display:none, not that the button
+// is absent from the DOM.
 function managedRowOf(body) {
   const btn = [...body.querySelectorAll("button")].find((b) => b.textContent.includes("localm's own ComfyUI"));
   return btn ? btn.closest(".row") : null;
@@ -354,16 +325,13 @@ test("import-comfy: Import POSTs dry_run:false for the previewed folder, toasts,
 
   assert.equal(calls.length, 2);
   assert.deepEqual(calls[1], { workdir: "D:/my-comfy", dry_run: false });
-  // The final progress event's added/skipped/method feeds scanResultMessage()
-  // exactly as the old synchronous response body used to.
+  // The final progress event's added/skipped/method feeds scanResultMessage().
   assert.match(window.document.getElementById("toast").textContent, /added 2 models/i);
   assert.equal(window.document.getElementById("modal").style.display, "none", "the modal closes on a successful import");
   assert.ok(modelsFetchCount > fetchesBeforeImport, "the models list is refreshed after import");
 });
 
 test("import-comfy: Import shows live 'registering model N of M' progress as the job runs", async () => {
-  // The concrete gap this whole unit closes: Import used to disable the
-  // button and show LITERALLY NOTHING until the whole batch finished.
   const { window } = loadAppWithPages({
     fetchImpl: makeFetch({
       scanImpl: async (b) => {
@@ -372,11 +340,8 @@ test("import-comfy: Import shows live 'registering model N of M' progress as the
         }
         return { ok: true, json: async () => ({ job_id: "scan-job-2" }) };
       },
-      // A real per-frame delay (not an already-resolved microtask) so the
-      // test below can genuinely observe an IN-FLIGHT state via polling,
-      // rather than a fully-drained end state that happens to still read
-      // "registering..." because nothing later overwrote it (see
-      // sseResponse's doc comment).
+      // jobEventsDelayMs paces the frames on a real timer so the polling
+      // below can observe an in-flight state.
       jobEvents: [
         { type: "progress", phase: "registering", done: 1, total: 3, name: "alpha.safetensors" },
         { type: "progress", phase: "registering", done: 2, total: 3, name: "beta.safetensors" },
@@ -398,9 +363,7 @@ test("import-comfy: Import shows live 'registering model N of M' progress as the
   const importBtn = [...body.querySelectorAll("button")].find((b) => b.textContent === "Import");
   importBtn.click();
   const progressText = () => body.querySelector(".import-comfy-progress").textContent;
-  // Catch the FIRST tick specifically (not just "some registering text
-  // eventually") - proves the count genuinely advances per event rather than
-  // jumping straight to the end.
+  // Match the FIRST tick specifically, not any registering text.
   const sawFirst = await waitFor(() => /registering model 1 of 3/i.test(progressText()));
   assert.ok(sawFirst, `never observed "1 of 3" while the job was in flight (last seen: ${progressText()})`);
 
@@ -416,9 +379,8 @@ test("import-comfy: a failed Import surfaces the job's own error and re-enables 
         if (b.dry_run) {
           return { ok: true, json: async () => ({ dry_run: true, method: "folder-walk", counts: { lora: 1 }, already_registered: 0, total_new: 1 }) };
         }
-        // A real scan is job-based now: the POST always starts the job (200 +
-        // job_id); a failure surfaces on the job's OWN stream, not as a
-        // synchronous 500 from this POST.
+        // A real scan is job-based: the POST always starts the job (200 +
+        // job_id) and a failure surfaces on the job's own stream.
         return { ok: true, json: async () => ({ job_id: "scan-job-3" }) };
       },
       jobEvents: [

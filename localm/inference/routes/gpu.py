@@ -1,5 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Multi-instance GPU/VRAM coordination route (see ``localm.gpu_registry``)."""
+"""Multi-instance GPU/VRAM coordination route (see ``localm.gpu_registry``).
+
+One endpoint: a sibling localm instance on this machine, itself out of local
+eviction candidates, asks THIS instance to release its own VRAM. Deliberately
+a SEPARATE auth code path from ``require_scope``/``MODELS_WRITE``: it accepts
+ONLY this instance's own ``coordination_token`` (minted fresh at startup,
+stored only in this instance's own 0600 gpu-registry entry) - never the real
+API key, shell token, or instance attach token, so holding a real API key
+alone does not grant this without ALSO knowing the token."""
 
 from __future__ import annotations
 
@@ -31,7 +39,11 @@ async def _presented_token(request: Request) -> "str | None":
 def register(app: FastAPI, ctx) -> None:
     @app.post("/v1/instances/cooperate-unload", include_in_schema=False)
     async def cooperate_unload(request: Request):
-        """Unload THIS instance's currently-loaded model(s) - the one action a sibling instance's cooperation request can trigger."""
+        """Unload THIS instance's currently-loaded model(s) - the one action a
+        sibling instance's cooperation request can trigger. Authenticated
+        ONLY by this instance's own coordination_token; reuses
+        ``unload_all_models()`` (the same VRAM-release-wait behavior as
+        ``POST /v1/models/unload``) rather than duplicating it."""
         from localm.auth import ct_equal
         presented = await _presented_token(request)
         coord = getattr(_hs, "_gpu_coord", None)

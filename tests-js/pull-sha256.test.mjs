@@ -1,10 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// S2, PARITY-AUDIT-CLI-GUI-2026-08-19: a GUI user pulling an arbitrary https URL
-// had no integrity assertion at all - PullRequest had no sha256 field, so the
-// CLI's own --sha256 flag was unreachable from the "Add a model" card. This
-// covers the frontend half: the #pull-sha256 field must reach the POST body,
-// must be omitted (not sent as "") when left blank, and must clear on a
-// successful pull like the other fields in the row.
+// The "Add a model" card's #pull-sha256 field reaches the POST body, is omitted
+// rather than sent as "" when left blank, and clears on a successful pull like
+// the other fields in the row.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadAppWithPages, runScript } from "./harness.mjs";

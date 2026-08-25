@@ -1,5 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The media backend seam (I1)."""
+"""The media backend seam (I1).
+
+Each media plugin (image/music/video) dispatches to the backend named by the
+``backend`` config key: ``"comfy"`` (default) is the inline ComfyUI reference,
+any other name loads ``backends/<name>.py`` via ``media_config.load_backend``.
+These tests prove the seam actually SWITCHES implementations - it was previously a
+config value that was read and then ignored (every call hard-wired to ComfyUI)."""
 
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -61,8 +67,8 @@ def test_non_comfy_backend_is_dispatched(backend_mod, gen_args, monkeypatch):
 
 @pytest.mark.parametrize("backend_mod", [image_backend, music_backend, video_backend])
 def test_comfy_default_uses_the_inline_reference(backend_mod, monkeypatch):
-    # The default 'comfy' must use the inline reference and NOT consult
-    # load_backend (so it keeps working with no backends/ dir present).
+    # The default 'comfy' uses the inline reference and does not consult
+    # load_backend.
     called = {"n": 0}
 
     def spy(*a, **k):
@@ -76,8 +82,8 @@ def test_comfy_default_uses_the_inline_reference(backend_mod, monkeypatch):
 
 
 def test_unknown_backend_falls_back_to_comfy(monkeypatch):
-    # A configured-but-missing backend module must not hard-crash a generate; it
-    # falls back to the comfy reference (the settings 'warning' carries notes).
+    # A configured-but-missing backend module falls back to the comfy reference;
+    # the settings warning carries the notes.
     def boom(package, name):
         raise ModuleNotFoundError(name)
 
@@ -97,7 +103,18 @@ _S = {"api_url": "http://127.0.0.1:8188", "launch_cmd": "", "workdir": "",
 ])
 def test_instance_token_survives_the_backend_seam(
         backend_mod, gen_args, underlying_mod, underlying_fn, monkeypatch):
-    """The plug.py route's instance_token must reach the per-plugin comfy.py generate_* call THROUGH the backend seam (plug.py -> backend.generate -> backend.py's _comfy_generate -> comfy.py), not just when comfy.py is called directly."""
+    """The plug.py route's instance_token must reach the per-plugin comfy.py
+    generate_* call THROUGH the backend seam (plug.py -> backend.generate ->
+    backend.py's _comfy_generate -> comfy.py), not just when comfy.py is
+    called directly.
+
+    Distinct from tests/test_comfy_containment.py, tests/test_music_gen.py
+    and tests/test_video_gen.py's instance_token tests, which call
+    comfy.generate_image/music/video directly and would stay green even if
+    backend.py's adapter silently dropped instance_token on the floor between
+    the seam and comfy.py - the exact one-layer-removed blind spot
+    diff-review-discipline.md item 23 describes. This test goes through the
+    actual public seam (backend_mod.generate) plug.py calls."""
     spy = MagicMock(return_value=(True, "ok"))
     monkeypatch.setattr(underlying_mod, underlying_fn, spy)
 

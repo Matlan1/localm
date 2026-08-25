@@ -1,5 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""A config.json that parses as valid JSON but is NOT an object (a list, a bare string, a number, null) used to be silently ignored -> defaults, discarding the user's saved settings with no warning. (A genuinely unparseable file DID warn via _read_json; only the valid-JSON-wrong-shape case was silent.)."""
+"""A config.json that parses as valid JSON but is NOT an object (a list, a bare
+string, a number, null) used to be silently ignored -> defaults, discarding the
+user's saved settings with no warning. (A genuinely unparseable file DID warn via
+_read_json; only the valid-JSON-wrong-shape case was silent.)
+
+`_merge_stored_config` now surfaces that discard once per process, while a MISSING
+file stays the benign silent default (AUD-CFGNONDICT)."""
 
 import pytest
 
@@ -21,7 +27,8 @@ def cfg_home(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("bad", ["[1, 2, 3]", '"hello"', "42", "null"])
 def test_load_config_non_dict_warns_not_silent(cfg_home, capsys, bad):
-    """A present-but-non-object config.json must not silently become defaults - the user's settings are being ignored, which has to be surfaced."""
+    """A present-but-non-object config.json must not silently become defaults -
+    the user's settings are being ignored, which has to be surfaced."""
     (cfg_home / "config.json").write_text(bad, encoding="utf-8")
     cfg._warned_bad_config.clear()
     conf = cfg.load_config()
@@ -50,7 +57,9 @@ def test_load_config_non_dict_leaves_file_for_recovery(cfg_home):
 
 
 def test_update_config_non_dict_does_not_crash_and_persists(cfg_home):
-    """update_config over a non-dict config.json falls back to defaults, applies the mutation, and writes a valid config - the bad file is snapshotted to .bak by the atomic write, so it stays recoverable."""
+    """update_config over a non-dict config.json falls back to defaults, applies
+    the mutation, and writes a valid config - the bad file is snapshotted to .bak
+    by the atomic write, so it stays recoverable."""
     p = cfg_home / "config.json"
     p.write_text('"not an object"', encoding="utf-8")
     cfg._warned_bad_config.clear()
@@ -62,7 +71,27 @@ def test_update_config_non_dict_does_not_crash_and_persists(cfg_home):
 
 
 class TestUnreadableConfigIsRefusedNotOverwritten:
-    """An UNREADABLE config/registry is not the same as an absent one."""
+    """An UNREADABLE config/registry is not the same as an absent one.
+
+    `_read_json` returns the caller's default for both, which is right for the
+    read-only consumers (auth, netpolicy, netname, updater all fail safe on
+    defaults). It is wrong for a read-modify-write: update_config would merge
+    that default, and `_user_delta` would then persist ONLY the key just set,
+    replacing every setting the user had while the caller reported success.
+
+    These assert on the FILE before the exception, and catch by hand rather
+    than with `pytest.raises`, deliberately: as a context manager `pytest.raises`
+    fails at the end of its `with` block, so a regression reports "DID NOT RAISE
+    ConfigUnreadable" and never reaches the file check. That is a proxy, and a
+    proxy invites adjusting the assertion. Catching by hand lets the data
+    assertion speak first, so a regression reports that the user's config was
+    destroyed - which cannot be talked away. (Measured: the first version of
+    these tests used `pytest.raises` and reported exactly the useless message.)
+
+    Distinct from the valid-JSON-wrong-shape case above, which is deliberately
+    still tolerated: a JSON string or list holds nothing recoverable, whereas an
+    unreadable file may be hiding settings that still exist.
+    """
 
     def test_update_config_refuses_and_leaves_the_file_alone(self, cfg_home):
         p = cfg_home / "config.json"
@@ -82,13 +111,14 @@ class TestUnreadableConfigIsRefusedNotOverwritten:
             "an unreadable config.json was OVERWRITTEN; every user setting "
             "(including net_mode and llama_runtime_pin) would be gone")
         assert raised is not None, "update_config did not refuse"
-        # Names the file so it is actionable, never the path: this message can
-        # reach an HTTP error body via inference/routes/config.py.
+        # Names the file, never the path: this message can reach an HTTP error
+        # body via inference/routes/config.py.
         assert "config.json" in str(raised)
         assert str(cfg_home) not in str(raised)
 
     def test_update_registry_refuses_and_leaves_the_file_alone(self, cfg_home):
-        """Worse than config: update_registry writes the WHOLE dict, so one registration over an unreadable registry leaves only that model."""
+        """Worse than config: update_registry writes the WHOLE dict, so one
+        registration over an unreadable registry leaves only that model."""
         p = cfg_home / "registry.json"
         cfg.update_registry(lambda r: r.__setitem__("a", {"path": "a.gguf"}))
         p.write_text("{ not json", encoding="utf-8")
@@ -106,7 +136,8 @@ class TestUnreadableConfigIsRefusedNotOverwritten:
         assert raised is not None, "update_registry did not refuse"
 
     def test_absent_config_still_writes(self, cfg_home):
-        """The control: first run must be unaffected, or the refusal would be unfalsifiable (a fix that refused everything would pass the tests above)."""
+        """The control: first run must be unaffected, or the refusal would be
+        unfalsifiable (a fix that refused everything would pass the tests above)."""
         p = cfg_home / "config.json"
         assert not p.is_file()
         cfg.update_config(lambda c: c.__setitem__("port", 9191))
@@ -114,7 +145,8 @@ class TestUnreadableConfigIsRefusedNotOverwritten:
         assert json.loads(p.read_text(encoding="utf-8"))["port"] == 9191
 
     def test_recovered_from_bak_still_writes(self, cfg_home):
-        """The second control: an unreadable PRIMARY whose .bak reads fine is a SUCCESSFUL read of real data, so it must not refuse."""
+        """The second control: an unreadable PRIMARY whose .bak reads fine is a
+        SUCCESSFUL read of real data, so it must not refuse."""
         import json
         p = cfg_home / "config.json"
         p.write_text(json.dumps({"net_mode": "off"}), encoding="utf-8")
@@ -125,7 +157,6 @@ class TestUnreadableConfigIsRefusedNotOverwritten:
 
         got = json.loads(p.read_text(encoding="utf-8"))
         # 8192, not the 4096 DEFAULT: _user_delta drops a value equal to the
-        # default, so asserting on the default would assert on something that
-        # can never appear in the file.
+        # default, so the default can never appear in the file.
         assert got["n_ctx"] == 8192
         assert got["net_mode"] == "off", "the .bak's real settings were lost"

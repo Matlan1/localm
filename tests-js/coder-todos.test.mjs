@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// jsdom tests for the B2 task-list surfacing in coder.js: a set_todos tool card
+// jsdom tests for the task-list surfacing in coder.js: a set_todos tool card
 // shows the model's plan progress on its collapsed head line (todoHint), and the
-// tool_result then fills the card body with the rendered checklist. Without
-// this, the plan the model wrote is only visible after expanding raw args JSON.
+// tool_result fills the card body with the rendered checklist.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -30,8 +29,7 @@ test("todoHint: tolerates the marker variants the parser accepts", () => {
 
 test("todoHint: a task whose own text is bracketed keeps it", () => {
   const { window } = loadApp();
-  // Only the leading status marker is stripped, matching tasks.py: an
-  // unrecognised bracket is part of the task the model wrote.
+  // Only the leading status marker is stripped, matching tasks.py.
   assert.equal(window.todoHint(["[>] [api] fix the handler", "[ ] test it"]),
                "0/2 done · [api] fix the handler");
   assert.equal(window.todoHint(["[api] fix the handler"]), "0/1 done");
@@ -49,7 +47,7 @@ test("a set_todos tool card shows the plan on its head line", () => {
   const card = window.buildToolCard({ tool: "set_todos", args: { items: PLAN } });
   assert.equal(card.querySelector(".name").textContent, "set_todos");
   assert.equal(card.querySelector(".hint").textContent, "1/3 done · fix the parser");
-  // The full plan is still in the body, as for every other tool card.
+  // The full plan is still in the body.
   assert.ok(card.querySelector(".body").textContent.includes("[>] fix the parser"));
 });
 

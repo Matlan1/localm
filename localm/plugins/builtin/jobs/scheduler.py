@@ -1,5 +1,16 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The job scheduler and a self-contained 5-field cron matcher."""
+"""The job scheduler and a self-contained 5-field cron matcher.
+
+The matcher and the due/tick logic are deliberately PURE and clock-injectable so
+they unit-test without real time or a running event loop:
+
+  - ``cron_match(expr, when)``    -> bool   (no I/O, no global state)
+  - ``JobScheduler.due(job, now)``-> bool   (interval vs cron, given a clock)
+  - ``JobScheduler.tick(now=...)``         (runs due+enabled jobs once)
+
+``start()`` / ``stop()`` drive ``tick`` from an asyncio loop that sleeps between
+wakeups (never a busy-loop). A disabled or not-due job is never run.
+"""
 
 from __future__ import annotations
 
@@ -32,7 +43,11 @@ _FIELD_BOUNDS = (
 
 
 def _parse_field(field: str, lo: int, hi: int) -> set:
-    """Expand one cron field into the set of matching integers."""
+    """Expand one cron field into the set of matching integers.
+
+    Supports ``*``, single values, comma lists (``a,b``), ranges (``a-b``), and
+    steps (``*/n`` or ``a-b/n`` or ``a/n``). Raises ValueError on a malformed
+    field or an out-of-range value."""
     values: set = set()
     field = field.strip()
     if field == "":
@@ -74,7 +89,9 @@ def _parse_field(field: str, lo: int, hi: int) -> set:
 
 
 def parse_cron(expr: str) -> list:
-    """Parse a 5-field cron expression into a list of 5 value-sets."""
+    """Parse a 5-field cron expression into a list of 5 value-sets. Raises
+    ValueError when the expression does not have exactly 5 fields or a field is
+    malformed."""
     if not isinstance(expr, str):
         raise ValueError("cron expression must be a string")
     fields = expr.split()
@@ -100,7 +117,12 @@ def validate_cron(expr: str) -> None:
 
 
 def cron_match(expr: str, when: Optional[float] = None) -> bool:
-    """True if the cron *expr* fires at the wall-clock time *when* (epoch seconds; defaults to now)."""
+    """True if the cron *expr* fires at the wall-clock time *when* (epoch
+    seconds; defaults to now). Pure: no global state, no side effects.
+
+    Day-of-month and day-of-week are matched cron-style: if BOTH are restricted
+    (neither is ``*``), the job fires when EITHER matches; otherwise both must
+    match. (This mirrors Vixie cron.)"""
     if when is None:
         when = time.time()
     minute_s, hour_s, dom_s, month_s, dow_s = parse_cron(expr)
@@ -128,7 +150,13 @@ def cron_match(expr: str, when: Optional[float] = None) -> bool:
 # --------------------------------------------------------------------------- #
 
 class JobScheduler:
-    """Runs enabled + due jobs on a periodic asyncio loop."""
+    """Runs enabled + due jobs on a periodic asyncio loop.
+
+    The decision logic is pure and clock-injectable (``due`` / ``tick`` take a
+    ``now``), so it is testable without real time. ``start`` spawns the loop on
+    the running event loop; ``stop`` cancels it. A disabled or not-due job is
+    never run; a job that errors is recorded and never crashes the tick.
+    """
 
     def __init__(self, store: Optional[JobStore] = None, *,
                  run_job: Optional[Callable] = None,
@@ -157,7 +185,9 @@ class JobScheduler:
 
     # ---- pure decision logic ----------------------------------------------
     def due(self, job: Job, now: float) -> bool:
-        """True if *job* should run at *now* (epoch seconds)."""
+        """True if *job* should run at *now* (epoch seconds). Does NOT consider
+        ``enabled`` - the caller filters that - so the interval/cron logic stays
+        easy to test in isolation."""
         if job.schedule_kind == "interval":
             try:
                 interval = int(job.schedule)
@@ -191,7 +221,9 @@ class JobScheduler:
         return False
 
     def _missed_cron_slot(self, job: Job, now: float) -> bool:
-        """True if a cron-matching minute lies in ``(last_run, now)`` within the bounded catch-up window."""
+        """True if a cron-matching minute lies in ``(last_run, now)`` within the
+        bounded catch-up window. Scans minute-by-minute from just after now back
+        to the window floor, short-circuiting on the first match."""
         try:
             expr = str(job.schedule)
             floor = max(float(job.last_run), now - _CATCHUP_WINDOW_SECONDS)
@@ -211,7 +243,16 @@ class JobScheduler:
         return _run
 
     def tick(self, now: Optional[float] = None) -> list:
-        """Run every enabled + due job once."""
+        """Run every enabled + due job once. Pure-ish: side effects are limited
+        to running each due job and recording its result. Returns the list of
+        job ids that ran this tick. Never raises out (a per-job error is caught
+        and recorded).
+
+        Overlap guard (U-4): if a previous run (this scheduler or a GUI "run now")
+        is still in flight, the tick SKIPS its due jobs rather than starting runs
+        that would stack a second model load and OOM the GPU. Skipped jobs are due
+        again next tick - an interval job runs as soon as the slow run finishes, a
+        cron job is not marked fired so its minute is not consumed."""
         if now is None:
             now = time.time()
         current = self.store.list()
@@ -261,7 +302,11 @@ class JobScheduler:
 
     # ---- async loop --------------------------------------------------------
     def _note_tick_error(self, exc: BaseException) -> None:
-        """Log a failing tick ONCE per distinct error (not every poll)."""
+        """Log a failing tick ONCE per distinct error (not every poll). A tick
+        must never kill the loop, but it must not fail SILENTLY either: an
+        unreadable jobs.json makes ``store.list()`` raise every tick and halts all
+        scheduled jobs, which was invisible behind the old ``except: pass``
+        (AGENTS.md rule 5). Log-once/on-change keeps the ~30s poll from spamming."""
         signature = f"{type(exc).__name__}: {exc}"
         if signature == self._last_tick_error:
             return
@@ -272,7 +317,8 @@ class JobScheduler:
             "clears: %s", signature)
 
     def _note_tick_ok(self) -> None:
-        """After a tick succeeds, clear the failure state (noting recovery once) so a later recurrence is logged again rather than suppressed as a duplicate."""
+        """After a tick succeeds, clear the failure state (noting recovery once) so
+        a later recurrence is logged again rather than suppressed as a duplicate."""
         if self._last_tick_error is None:
             return
         self._last_tick_error = None
@@ -299,7 +345,9 @@ class JobScheduler:
                 pass        # normal wakeup; loop again
 
     def start(self) -> bool:
-        """Start the scheduler loop on the running event loop."""
+        """Start the scheduler loop on the running event loop. Returns False
+        (no-op) when there is no running loop (e.g. a sync test or headless
+        CLI) or it is already running, so callers can guard safely."""
         if self._running:
             return False
         try:
@@ -312,7 +360,8 @@ class JobScheduler:
         return True
 
     def stop(self) -> None:
-        """Signal the loop to stop and cancel its task."""
+        """Signal the loop to stop and cancel its task. Safe to call when not
+        running."""
         if self._stop is not None:
             self._stop.set()
         if self._task is not None:

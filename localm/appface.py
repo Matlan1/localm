@@ -1,5 +1,17 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The 'running app' control surface: a small set of actions - Open, Copy address, View logs, Restart, Stop - presented natively per OS so the localm server reads as a real background app instead of a python.exe console."""
+"""The "running app" control surface: a small set of actions - Open, Copy
+address, View logs, Restart, Stop - presented natively per OS so the localm
+server reads as a real background app instead of a python.exe console.
+
+Now: a Windows tray icon via the Win32 API through ctypes (NO dependency - the
+llama.cpp-binding ethos: bind thinly to a shipped system API, do not import an
+unknown wrapper). Later: a small styled Tk control window on Linux (bundled
+stdlib Tk), so Linux gets a nice server app too.
+
+Everything here is best-effort and fully guarded: the control surface is a
+convenience layered on the server, so a failure to show it must NEVER stop the
+server from running.
+"""
 
 from __future__ import annotations
 
@@ -19,7 +31,8 @@ def icon_path() -> Optional[str]:
 
 
 def copy_to_clipboard(text: str) -> bool:
-    """Put *text* on the clipboard with no dependency (Win32 clipboard via ctypes)."""
+    """Put *text* on the clipboard with no dependency (Win32 clipboard via
+    ctypes). Best-effort; returns True on success."""
     if sys.platform == "win32":
         try:
             import ctypes
@@ -48,7 +61,11 @@ def copy_to_clipboard(text: str) -> bool:
 
 
 def _native_window_allowed_by_preference() -> bool:
-    """Has the user explicitly turned the app window off (config key desktop_window_mode == 'browser')? Defaults to True (allowed) on any read failure - a config problem must never silently disable a feature the user did not ask to disable, same posture run_native_window's own desktop_window_quit_on_close..."""
+    """Has the user explicitly turned the app window off (config key
+    desktop_window_mode == "browser")? Defaults to True (allowed) on any
+    read failure - a config problem must never silently disable a feature
+    the user did not ask to disable, same posture run_native_window's own
+    desktop_window_quit_on_close read already uses. Never raises."""
     try:
         from localm.config import load_config
         return load_config().get("desktop_window_mode", "auto") != "browser"
@@ -59,7 +76,17 @@ def _native_window_allowed_by_preference() -> bool:
 
 
 def native_window_available() -> bool:
-    """Cheap, side-effect-free probe: is the optional ``localm[desktop]`` extra (pywebview) installed AND has the user not turned it off via the desktop_window_mode setting?"""
+    """Cheap, side-effect-free probe: is the optional ``localm[desktop]``
+    extra (pywebview) installed AND has the user not turned it off via the
+    desktop_window_mode setting?
+
+    Used ONLY to decide, before anything else starts, whether the caller
+    should hand this process's actual main thread to the native window loop
+    instead of the server - see run_native_window's docstring for why that
+    matters. The real question of whether a window actually opens and loads
+    is answered by run_native_window's own return value, not this. Never
+    raises.
+    """
     if "pytest" in sys.modules:
         return False
     try:
@@ -79,7 +106,51 @@ _native_window_may_really_close = threading.Event()
 def run_native_window(url: str, name: str = "LocaLM", *,
                       hide_on_close: bool = True,
                       on_quit: Optional[Callable] = None) -> bool:
-    """Open *url* in a native OS webview window, BLOCKING the calling thread for the lifetime of the app."""
+    """Open *url* in a native OS webview window, BLOCKING the calling thread
+    for the lifetime of the app.
+
+    MUST be called from the process's actual main thread. This is not a
+    convention this codebase chose - it is pywebview's own hard requirement,
+    confirmed against the installed 6.2.1 source (webview/__init__.py):
+    ``if threading.current_thread().name != 'MainThread': raise
+    WebViewException(...)``, unconditional, no override flag. A caller that
+    wants this AND has something else already occupying the main thread (the
+    server, in gui/cli.py's fresh-launch path) must move that something else
+    to its own background thread first - see that call site's comment for
+    how localm does it.
+
+    *hide_on_close* (default True - the fresh-launch, this-process-owns-the-
+    server case): the window's own close button HIDES it instead of
+    destroying it - matching this module's existing _StatusWindow/_WinTray
+    precedent ("closing the window never stops the server: hide to tray...
+    Stop is the deliberate quit") - so a later show_native_window() (the
+    tray/status "Open" action) can bring the SAME window back, rather than
+    needing a second webview.start() call this codebase has no free main
+    thread to run (the caller of show_native_window is the tray/Tk thread,
+    never the main thread). The user's own "quit when the app window is
+    closed" preference (config key desktop_window_quit_on_close, off by
+    default) overrides this per close: when on, the window closes for real
+    and *on_quit* (if given - the same action the tray's Stop button
+    triggers) is invoked. Pass False for a window that owns no server of its
+    own to keep alive (gui/cli.py's attach-to-an-already-running-instance
+    path) - it then just closes normally on its own close button, no
+    hiding, no setting lookup, no on_quit: closing it is that process's
+    entire purpose. This function only actually returns once the window is
+    genuinely destroyed - via close_native_window() (normally the server's
+    own shutdown path, once it has genuinely stopped), the user's own close
+    with the quit preference on, or hide_on_close=False's plain close - or
+    the window fails to load at all.
+
+    Returns True only once the window actually LOADED the page (via
+    pywebview's own ``window.events.loaded``, confirmed against the real
+    installed API to wrap a plain threading.Event with .wait(timeout) - not
+    merely "pywebview imported and create_window() didn't raise"), watched
+    from a short-lived helper thread since the calling thread itself is busy
+    inside the blocking webview.start() call by the time loading happens.
+    Returns False whenever a real, loaded window cannot be confirmed (extra
+    absent, WebView2/WebKitGTK missing or broken, window never loaded) so the
+    caller can fall back to webbrowser.open. NEVER raises.
+    """
     global _native_window
     if "pytest" in sys.modules:
         return False
@@ -166,7 +237,11 @@ def run_native_window(url: str, name: str = "LocaLM", *,
 
 
 def show_native_window() -> bool:
-    """Thread-safe: re-show (and foreground-activate) the currently open native window, for the tray/status 'Open' action."""
+    """Thread-safe: re-show (and foreground-activate) the currently open
+    native window, for the tray/status "Open" action. Returns False - the
+    caller should fall back to webbrowser.open - when no native window is
+    active this run (this platform/launch used a browser tab instead, or the
+    window failed to load in the first place). NEVER raises."""
     window = _native_window
     if window is None:
         return False
@@ -179,7 +254,11 @@ def show_native_window() -> bool:
 
 
 def close_native_window() -> None:
-    """Thread-safe: let the native window ACTUALLY close now (not just hide), so run_native_window's blocking webview.start() call finally returns and the process can exit."""
+    """Thread-safe: let the native window ACTUALLY close now (not just
+    hide), so run_native_window's blocking webview.start() call finally
+    returns and the process can exit. Call this once the server has
+    genuinely stopped - never merely because the window was hidden. A no-op
+    when no native window is active. NEVER raises."""
     window = _native_window
     if window is None:
         return
@@ -205,7 +284,8 @@ def open_logs(logfile) -> None:
 
 
 class AppFace:
-    """Handle for a running control surface; .close() tears it down."""
+    """Handle for a running control surface; .close() tears it down. The base is a
+    no-op used off Windows (until the Linux Tk window lands)."""
 
     def close(self) -> None:  # pragma: no cover - trivial
         pass
@@ -224,7 +304,15 @@ _RED = "#e25d5d"
 
 
 class _StatusWindow(AppFace):
-    """A small styled Tk status/control window (bundled stdlib Tk, no dependency)."""
+    """A small styled Tk status/control window (bundled stdlib Tk, no dependency).
+
+    It shows ACCURATE startup progress ("Starting..." -> "Running") and, once
+    ready, minimizes to the tray on Windows (hide_on_ready) or stays as a
+    console-like status window with a live log tail on Linux. On an error it stays
+    and shows the message in red instead of vanishing. Runs its own Tk mainloop in
+    a dedicated thread; other threads update it through a queue polled via after().
+    Fully guarded - a window failure must never take down the server.
+    """
 
     def __init__(self, *, name, url, logfile=None, get_log_lines=None,
                  on_restart=None, on_stop=None, hide_on_ready=False):
@@ -261,7 +349,7 @@ class _StatusWindow(AppFace):
         self._q.put(("error", text))
 
     def show(self):
-        """Re-show the window (from the tray)."""
+        """Re-show the window (from the tray). Thread-safe."""
         self._q.put(("show", None))
 
     def close(self):
@@ -458,7 +546,9 @@ class _StatusWindow(AppFace):
 
 
 class _AppFaceHandle(AppFace):
-    """Composite control surface: a status window (all platforms) plus a tray (Windows). set_status/set_ready/set_error drive the window; close() tears both down."""
+    """Composite control surface: a status window (all platforms) plus a tray
+    (Windows). set_status/set_ready/set_error drive the window; close() tears both
+    down. All methods are guarded no-ops when a piece is absent."""
 
     def __init__(self, window, tray):
         self._window = window
@@ -489,7 +579,14 @@ def start_app_face(*, name: str = "LocaLM", url: str, logfile=None,
                    get_log_lines: Optional[Callable] = None,
                    on_restart: Optional[Callable] = None,
                    on_stop: Optional[Callable] = None) -> Optional[AppFace]:
-    """Start the control surface for the running server: a styled status window (accurate startup progress; on Windows it hides to the tray when ready, on Linux it stays as a console-like status window), plus a native tray on Windows."""
+    """Start the control surface for the running server: a styled status window
+    (accurate startup progress; on Windows it hides to the tray when ready, on
+    Linux it stays as a console-like status window), plus a native tray on Windows.
+
+    Returns a handle with .close() + set_status/set_ready/set_error, or None if
+    nothing could be shown. NEVER raises - a control-surface failure must not take
+    down the server. *get_log_lines* feeds the live log tail and "View logs".
+    """
     # Never spin up real UI (tray icon / Tk window) inside the test suite.
     if "pytest" in sys.modules:
         return None

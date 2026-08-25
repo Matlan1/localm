@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// A3: Artifacts canvas - render a self-contained HTML/SVG reply block in a
-// hard-sandboxed iframe (no same-origin; a CSP blocks all network access).
+// Artifacts canvas: renders a self-contained HTML/SVG reply block in a
+// sandboxed iframe with no same-origin and a CSP that blocks network access.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadApp } from "./harness.mjs";
@@ -33,7 +33,7 @@ test("artifactSrcdoc injects a network-blocking CSP", () => {
   assert.match(svg, /Content-Security-Policy/);
   assert.match(svg, /default-src 'none'/);
   assert.match(svg, /<svg><\/svg>/);
-  // full document: the CSP must be injected INTO the existing head (before loads)
+  // full document: the CSP is injected into the existing head
   const full = win.artifactSrcdoc(
     "<!doctype html><html><head><title>t</title></head><body>x</body></html>", "html");
   assert.match(full, /Content-Security-Policy/);
@@ -86,7 +86,7 @@ test("enhanceCodeBlock adds copy always and canvas only for renderable blocks", 
   assert.ok(pyPre.querySelector(".copy-btn"));
   assert.equal(pyPre.querySelector(".canvas-btn"), null, "non-renderable: no canvas button");
 
-  // idempotent: a second call must not duplicate buttons
+  // a second call does not duplicate buttons
   win.enhanceCodeBlock(htmlPre);
   assert.equal(htmlPre.querySelectorAll(".copy-btn").length, 1);
   assert.equal(htmlPre.querySelectorAll(".canvas-btn").length, 1);

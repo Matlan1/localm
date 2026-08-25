@@ -1,5 +1,39 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""A stop or restart must not abandon a background job's child process."""
+"""A stop or restart must not abandon a background job's child process.
+
+``JobManager.start_cli`` runs ``python -m localm <cmd>`` as a real subprocess - a
+model pull, a llama.cpp runtime provision, a ComfyUI setup. Three facts combined to
+leave that child running after the server went away:
+
+  * ``_do_shutdown`` ends at ``os._exit(0)`` and ``_do_restart`` at ``os.execv``.
+    Both bypass atexit.
+  * the job's worker thread is a daemon, so its ``finally`` may never run.
+  * the ``Popen`` carries no ``creationflags`` and no ``start_new_session``, and
+    nothing anywhere in either exit path referenced a job.
+
+ADR-0008 inferred exactly this from the code shape, recorded that it was "inferred
+from code shape and was not measured", and made measuring it the follow-up that
+would decide its option E.
+
+IT IS MEASURED NOW, AND THE ANSWER HAS TWO HALVES. On Windows, with both children
+spawned exactly as start_cli does and then abandoned by an os._exit(0): a child
+that writes NOTHING to stdout survived and kept working (heartbeat advancing after
+the parent was gone), while a child that writes and flushes DIED at its next write
+on the broken pipe. So a quiet child (a git clone, a pip install, a long write
+between progress emissions) becomes untracked work, and a chatty one (a pull
+flushes constantly) is instead torn down mid-operation with no cleanup and no
+record. Both are unacceptable and both are fixed by terminating deliberately, which
+leaves one known state for the next start to report as "interrupted". Evidence:
+``dev-notes/O3-job-durability-and-child-fate-2026-08-19.md``.
+
+WHY THE REAL-PROCESS TEST IS THE LOAD-BEARING ONE. Asserting that a recording
+double's ``terminate`` was CALLED would pass just as happily against a kill that
+does not actually reach the process (the wrong pid, a signal the child ignores, a
+tree that survives its root). So the first test here spawns a genuine child and
+asserts on genuine process liveness, exactly as
+``test_embedder_worker_reaped_on_exit.py`` does for the embedder worker; the
+double-based tests below only cover which exit paths CALL it.
+"""
 
 from __future__ import annotations
 
@@ -21,7 +55,11 @@ from localm.plugins.gui import jobs as J
 
 @pytest.fixture(autouse=True)
 def isolated_managers(monkeypatch, tmp_path):
-    """A fresh manager registry and activity dir per test."""
+    """A fresh manager registry and activity dir per test.
+
+    _MANAGERS is module state and a WeakSet's membership is only cleared by the
+    garbage collector, so without this a manager built by an earlier test could
+    still be reachable and the module-level terminate would act on ITS jobs."""
     monkeypatch.setattr(J, "_MANAGERS", weakref.WeakSet())
     monkeypatch.setattr(J, "activity_dir", lambda: tmp_path / "activity")
 
@@ -32,7 +70,13 @@ def _spawn_sleeper(seconds: int = 120) -> subprocess.Popen:
 
 
 def _running_cli_job(manager, proc, *, kind="pull", label="Pull tiny/model.gguf"):
-    """Register a job in *manager* the way start_cli does, wrapping *proc*."""
+    """Register a job in *manager* the way start_cli does, wrapping *proc*.
+
+    Built directly rather than by calling start_cli with a real localm command:
+    the property under test is what the EXIT PATH does to a running job's child,
+    and every localm subcommand that runs long enough to observe also downloads
+    something or provisions a runtime. Nothing here fakes the child - it is a real
+    process, which is the part that matters."""
     job = J.Job(id=f"{len(manager._jobs):012d}", kind=kind, argv=[], label=label)
     job._proc = proc
     manager._register(job)
@@ -96,7 +140,9 @@ class TestRealChildIsKilled:
                 proc.wait(timeout=10)
 
     def test_a_grandchild_is_killed_too(self):
-        """A start_cli child spawns its own children (comfy setup runs git and pip)."""
+        """A start_cli child spawns its own children (comfy setup runs git and
+        pip). Killing only the direct child strands those - which on Windows is
+        why taskkill /T is used, and on POSIX why the tree is walked with psutil."""
         if sys.platform != "win32":
             pytest.importorskip(
                 "psutil", reason="without psutil only the direct child is "
@@ -137,7 +183,9 @@ class TestRealChildIsKilled:
                     pass
 
     def test_the_registry_still_says_running_afterwards(self):
-        """Deliberate: the next start reconciles a 'running' row to 'interrupted', which is the honest word for a server that stopped mid-operation."""
+        """Deliberate: the next start reconciles a "running" row to "interrupted",
+        which is the honest word for a server that stopped mid-operation. Marking
+        it "cancelled" here would claim the USER asked to stop it (ADR-0008 R3)."""
         m = J.JobManager()
         proc = _spawn_sleeper()
         try:
@@ -184,7 +232,9 @@ class TestSelection:
         assert J.terminate_children_for_exit() == 3
 
     def test_managers_are_reached_through_module_state(self):
-        """The exit paths take no app and hold no manager, so a module-level registry is the only way they can reach one - the same shape as embedder.release_for_exit."""
+        """The exit paths take no app and hold no manager, so a module-level
+        registry is the only way they can reach one - the same shape as
+        embedder.release_for_exit."""
         a, b = J.JobManager(), J.JobManager()
         _running_cli_job(a, _FakeProc(pid=1))
         _running_cli_job(b, _FakeProc(pid=2))

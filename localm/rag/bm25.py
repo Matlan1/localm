@@ -1,5 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Minimal BM25 ranking - pure stdlib, fast enough for home-scale corpora."""
+"""Minimal BM25 ranking - pure stdlib, fast enough for home-scale corpora.
+
+A few thousand chunks score in single-digit milliseconds; this is the
+always-available retrieval baseline (the ctypes GGUF binding has no
+embedding support, so vectors can never be assumed).
+"""
 
 from __future__ import annotations
 
@@ -57,7 +62,17 @@ ENGLISH_STOP_WORDS = frozenset(
 
 
 def tokenize(text: str, stop_words: "frozenset[str] | None" = None) -> list[str]:
-    """Lowercase unicode word tokens."""
+    """Lowercase unicode word tokens.
+
+    Word runs are split on unicode word boundaries (so accented latin,
+    Cyrillic, Arabic, etc. survive instead of collapsing to nothing under
+    the old ASCII-only rule). Characters from space-free scripts (CJK,
+    Hangul) are emitted one token per character so a query can still match.
+
+    When *stop_words* is given, tokens in that set are dropped (case is already
+    folded above). Default None leaves every token in place - callers that need
+    stopwords (e.g. the memory self-reference check) must not have them removed.
+    """
     tokens: list[str] = []
     for run in _TOKEN_RE.findall(text.lower()):
         buf: list[str] = []

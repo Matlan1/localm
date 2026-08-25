@@ -1,7 +1,4 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// U2 (GUI half): the plugin catalog now shows a load-status indicator and
-// populates its rows one after another (token-guarded) instead of flashing the
-// whole table at once.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadAppWithPages, runScript } from "./harness.mjs";
@@ -62,11 +59,10 @@ test("catalog shows a status indicator and fills in all rows", async () => {
 
 test("a newer render cancels the stale staggered populate (no duplicate rows)", async () => {
   const { window: win } = loadAppWithPages({ fetchImpl: makeFetch() });
-  // Use a non-zero stagger so the first render is still mid-populate when the
-  // second starts; the token guard must abandon the first.
+  // a non-zero stagger keeps the first render mid-populate when the second starts
   runScript(win, "_catalogStaggerMs = 5; renderCatalogPlugins(); renderCatalogPlugins();");
   await settle(win);
-  // Extra drain in case the higher stagger needs more time.
+  // extra drain for the higher stagger
   for (let i = 0; i < 30; i++) await new Promise((r) => setTimeout(r, 5));
 
   const rows = win.document.querySelectorAll("#catalog-table tbody tr");

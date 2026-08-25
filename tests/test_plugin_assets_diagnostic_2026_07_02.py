@@ -1,5 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""HONESTY (resume audit 2026-07-02): PluginHost.mount_surface_assets swallowed BOTH the 'assets_dir missing on disk' and the 'assets_dir escapes the plugin dir' ValueError into a bare `return None` with a comment that named only the first case and no log."""
+"""HONESTY (resume audit 2026-07-02): PluginHost.mount_surface_assets swallowed
+BOTH the 'assets_dir missing on disk' and the 'assets_dir escapes the plugin
+dir' ValueError into a bare `return None` with a comment that named only the
+first case and no log. The path-confinement security property holds either way
+(nothing is mounted), but a plugin author who fat-fingers `assets_dir = '../x'`
+got a silent SPA 404 with zero diagnostic (rule 5: surface, do not hide). The
+swallow now debug-logs the real cause. Behaviour (return None, keep serving the
+rest of the plugin) is unchanged - this only adds the missing diagnostic."""
 
 import logging
 
@@ -25,7 +32,7 @@ def test_missing_assets_dir_is_logged_not_silent(tmp_path, caplog):
 
 def test_boundary_escape_is_logged_with_its_real_cause(tmp_path, caplog):
     # A manifest typo that escapes the plugin dir: the security guard rejects it
-    # (nothing mounted) AND the reason is now surfaced, not misread as 'missing'.
+    # (nothing mounted) and the reason is surfaced rather than read as missing.
     host = _host(tmp_path, "../../../etc")
     with caplog.at_level(logging.DEBUG, logger="localm.plugins"):
         assert host.mount_surface_assets() is None

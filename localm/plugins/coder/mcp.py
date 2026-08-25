@@ -1,5 +1,25 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Minimal MCP (Model Context Protocol) client - stdio transport, stdlib only."""
+"""
+Minimal MCP (Model Context Protocol) client - stdio transport, stdlib only.
+
+Lets the coder agent use tools from any MCP server. Servers are declared in
+``.localcoder/config.toml``:
+
+    [mcp.servers.weather]
+    command = "python"
+    args = ["path/to/weather_server.py"]
+
+    [mcp.servers.db]
+    command = "npx"
+    args = ["-y", "@modelcontextprotocol/server-sqlite", "app.db"]
+    trusted = true          # skip the destructive-tool confirmation
+
+Each server is spawned as a child process speaking JSON-RPC 2.0 over
+newline-delimited JSON on stdin/stdout (the MCP stdio transport). Its tools
+are registered into TOOL_REGISTRY as ``mcp_<server>_<tool>`` so the agent
+can call them like any built-in tool. Everything is local and offline -
+whether a given server talks to the network is up to that server.
+"""
 
 from __future__ import annotations
 
@@ -248,7 +268,12 @@ def load_mcp_config(cwd: Path) -> Dict[str, dict]:
 
 
 def register_mcp_tools(cwd: Path) -> tuple[List[str], List[str]]:
-    """Start every configured MCP server and register its tools."""
+    """
+    Start every configured MCP server and register its tools.
+
+    Returns (registered_tool_names, warnings). A failing server produces a
+    warning, never an exception - MCP problems must not break the agent.
+    """
     registered: List[str] = []
     warnings: List[str] = []
 

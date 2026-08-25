@@ -1,5 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""GUI upload routes (R37): accept files into <home>/uploads/, list them, delete one."""
+"""GUI upload routes (R37): accept files into <home>/uploads/, list them, delete one.
+
+Extracted verbatim from attach_gui(); behavior unchanged. The multipart parser,
+the uploads-dir confinement, the unique-target helper, and the size cap stay in
+``web.py``; they are reached via ``import ... as _web`` (not imported by value) so
+that a test which reassigns e.g. ``web._MAX_UPLOAD_BYTES`` is still seen here -
+the same live-attribute access the inference routes use for ``http_server``.
+"""
 
 from __future__ import annotations
 
@@ -16,7 +23,11 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.post("/api/upload", dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
     async def upload_files(request: Request):
-        """R37: accept files from a phone/browser into <home>/uploads/ so models and tools can read them, beyond transient chat attachments."""
+        """R37: accept files from a phone/browser into <home>/uploads/ so models
+        and tools can read them, beyond transient chat attachments. Multipart,
+        parsed without python-multipart. CONFIG_WRITE (owner/companion-admin)
+        because writing host files is privileged - a restricted shared key must
+        not be able to drop files on the host. Capped at _MAX_UPLOAD_BYTES."""
         clen = request.headers.get("content-length", "")
         cap_mb = _web._MAX_UPLOAD_BYTES // (1024 * 1024)
         if clen.isdigit() and int(clen) > _web._MAX_UPLOAD_BYTES:
@@ -51,7 +62,8 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.get("/api/uploads", dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
     async def list_uploads():
-        """R37: list files in <home>/uploads/ (name, size, mtime) for the Settings 'Uploaded files' list."""
+        """R37: list files in <home>/uploads/ (name, size, mtime) for the Settings
+        'Uploaded files' list."""
         base = _web._uploads_dir()
         items = []
         for p in sorted(base.iterdir()):
@@ -68,7 +80,8 @@ def register(app: FastAPI, ctx) -> None:
     @app.delete("/api/uploads/{name}",
                 dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
     async def delete_upload(name: str):
-        """R37: remove one uploaded file."""
+        """R37: remove one uploaded file. The name is basename-confined to the
+        uploads dir (no path is built from raw input), so it cannot traverse out."""
         target = _web._confined_upload_path(name)
         if not target.is_file():
             raise HTTPException(404, "No such uploaded file.")

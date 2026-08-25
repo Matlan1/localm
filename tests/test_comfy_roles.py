@@ -1,5 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Role-based ComfyUI node resolution (I3 / MEDIA-1)."""
+"""Role-based ComfyUI node resolution (I3 / MEDIA-1).
+
+These pin the contract that injection resolves nodes by class_type + graph edges
+rather than hardcoded ids, so a user's own exported graph - with arbitrary node
+ids - is driven correctly. The end-to-end test runs generate_video against a fully
+RENUMBERED Wan graph and proves the prompt/seed/latent/fps still land in the right
+places.
+"""
 
 import json
 from unittest.mock import MagicMock, patch
@@ -8,7 +15,7 @@ from localm.image_gen import comfy as shared
 from localm.media import comfy_client
 
 
-# A Wan-shaped graph with deliberately non-template ids (mix of numeric + named).
+# A Wan-shaped graph with non-template ids (a mix of numeric and named).
 RENUMBERED_WAN = {
     "100": {"inputs": {"unet_name": "wan2.2_ti2v_5B_fp16.safetensors",
                        "weight_dtype": "default"}, "class_type": "UNETLoader"},
@@ -86,7 +93,7 @@ class TestResolver:
 
     def test_set_seed_on_all_covers_every_sampler(self):
         # A two-stage graph (Wan high/low-noise, SDXL refiner): the seed must land on
-        # BOTH samplers, not just the first, or later stages stay deterministic.
+        # BOTH samplers, not just the first.
         wf = {
             "a": {"class_type": "KSampler", "inputs": {"seed": 0}},
             "b": {"class_type": "KSamplerAdvanced", "inputs": {"noise_seed": 0}},
@@ -142,7 +149,7 @@ class TestEndToEndRenumberedGraph:
                 seconds=5.0, fps=24, seed=99, steps=20, cfg=4.0)
         assert ok, msg
         wf = captured["workflow"]
-        # Injection landed on the RENUMBERED nodes, proving role resolution.
+        # Injection landed on the RENUMBERED nodes.
         assert wf["pos"]["inputs"]["text"] == "a red fox"
         assert wf["neg"]["inputs"]["text"] == "blurry"
         assert wf["ks"]["inputs"]["seed"] == 99
@@ -178,7 +185,8 @@ def _fake_video_urlopen(captured):
 
 class TestVideoRobustness:
     def test_two_sampler_graph_seeds_every_stage(self, tmp_path):
-        """A two-stage graph must get the seed on BOTH samplers (regression: a fixed template seed on the second stage made 'random' output partly deterministic)."""
+        """A two-stage graph must get the seed on BOTH samplers (regression: a fixed
+        template seed on the second stage made 'random' output partly deterministic)."""
         from localm.video_gen import comfy as vcomfy
         graph = dict(RENUMBERED_WAN)
         # A second sampling stage that refines the first stage's latent.
@@ -203,7 +211,8 @@ class TestVideoRobustness:
         assert wf["ks2"]["inputs"]["seed"] == 99      # the second stage too
 
     def test_malformed_latent_node_returns_clean_error_not_crash(self, tmp_path):
-        """A user graph whose latent node has no inputs dict must return a clean (False, msg), not raise KeyError - and must not unload the chat model."""
+        """A user graph whose latent node has no inputs dict must return a clean
+        (False, msg), not raise KeyError - and must not unload the chat model."""
         from localm.video_gen import comfy as vcomfy
         bad = {
             "lat": {"class_type": "Wan22ImageToVideoLatent"},   # no "inputs" key

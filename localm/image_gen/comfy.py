@@ -1,5 +1,18 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""ComfyUI FLUX image generation."""
+"""
+ComfyUI FLUX image generation.
+
+Standalone module - usable from the localcoder agent tool, the CLI,
+or any other caller.  No coder-plugin dependencies.
+
+The generic ComfyUI plumbing (role resolution, model preflight, the VRAM
+handoff, server launch, the queue / poll / download transport, output
+containment) lives in ``localm.media.comfy_client`` and is shared with the
+video and music generators. This module keeps only the FLUX-specific workflow
+shaping. The shared helpers are re-imported into this module's namespace and
+called as bare globals so monkeypatching ``localm.image_gen.comfy.<name>``
+still takes effect.
+"""
 
 from __future__ import annotations
 
@@ -140,7 +153,38 @@ _MAX_LORA_NAME_LEN = 255
 
 
 def is_safe_lora_name(name: str) -> bool:
-    """True when *name* is safe to embed as a ComfyUI ``LoraLoader.lora_name`` value."""
+    """True when *name* is safe to embed as a ComfyUI ``LoraLoader.lora_name``
+    value.
+
+    A LoRA name is never a local filesystem path - ComfyUI resolves it against
+    its OWN models directory, not localm's - so there is no base directory to
+    confine it under the way ``pathsafe.confined_name``/``confined_under`` do
+    for a real local path. This is instead a pure lexical predicate (no
+    filesystem call): reject empty, a NUL byte, an implausibly long value, any
+    path separator, a bare "." / ".." component, or a ':' anywhere in the name.
+
+    The ':' check used to be ``not ntpath.splitdrive(name)[0]`` - it only
+    recognises a drive designator at POSITION 0, so ``"foo.safetensors:hidden"``
+    passed it (measured: ``ntpath.splitdrive("foo.safetensors:hidden") ==
+    ("", ...)``, no drive detected). A colon anywhere opens an NTFS Alternate
+    Data Stream on a Windows-hosted ComfyUI the same way it does for localm's
+    own local writes (see ``pathsafe.WINDOWS_RESERVED_NAME_CHARS``'s
+    docstring) - this function's own stated purpose is to be the backstop for
+    WHATEVER receives ``lora_name``, local or remote, so the rejection does not
+    depend on which one it turns out to be. Rejecting ':' anywhere ALSO
+    subsumes every case ``splitdrive`` could ever have caught here (a drive
+    letter is always ':'-qualified, and a forward-slash UNC-style prefix is
+    already rejected by the separator check above it never reaches) - so
+    ``ntpath`` is no longer imported for a check it cannot uniquely provide.
+    No real LoRA filename (the ``.safetensors`` convention this repo and
+    Civitai/HuggingFace both use) legitimately contains a colon.
+
+    Called from EVERY entry point that can supply ``lora_name`` - not just the
+    HTTP image route, which only protects browser-originated requests. The
+    coder agent's ``generate_image`` tool (and any future MCP wiring) calls
+    straight into ``generate_image``/``_build_image_workflow`` below, so this
+    also runs there as the backstop no caller can bypass, regardless of where
+    the value entered."""
     if not name or len(name) > _MAX_LORA_NAME_LEN or "\x00" in name:
         return False
     if "/" in name or "\\" in name or name in (".", ".."):
@@ -149,7 +193,15 @@ def is_safe_lora_name(name: str) -> bool:
 
 
 def apply_fast_dequant(workflow: dict) -> int:
-    """Rewrite a slow ``dequant_dtype: 'float32'`` to the loader's fast default."""
+    """Rewrite a slow ``dequant_dtype: "float32"`` to the loader's fast default.
+
+    A float32 dequant unpacks a Q8 Flux UNet to roughly twice the size of the
+    fp16 path, which on a VRAM-limited card (e.g. a 16 GB 6900 XT) spills several
+    GB to system RAM and drags iterations from ~6-7 s to ~36 s. "default" lets
+    ComfyUI-GGUF dequant to the model's own compute dtype (fp16/bf16), which is
+    what a fast Flux config uses. Only the known-slow "float32" value is touched;
+    an explicit "float16"/"bfloat16"/"target" choice is left alone. Mutates
+    *workflow* in place and returns how many loader nodes were changed."""
     changed = 0
     for node in workflow.values():
         if not isinstance(node, dict):
@@ -186,7 +238,13 @@ def _build_image_workflow(
     fast_dequant: bool,
     con,
 ) -> tuple[bool, str, Optional[str]]:
-    """Shape the FLUX workflow in place from the call's parameters."""
+    """Shape the FLUX workflow in place from the call's parameters.
+
+    Returns ``(ok, message, uploaded_name)``: ``ok=False`` with an error message
+    when the workflow cannot be driven (bad input image, no text-prompt node);
+    ``uploaded_name`` is the ComfyUI-side filename of an uploaded img2img source
+    (for later containment) or None. Pure workflow shaping; no network I/O beyond
+    the img2img upload that the original did at this same point."""
     # 2a. Perf: a float32 GGUF dequant unpacks Flux to ~2x size and forces CPU
     # offload on a VRAM-limited card (the ~36 s/it vs ~6-7 s/it slowdown). Rewrite
     # it to the loader's fast default unless the caller opted out. Applies to both
@@ -356,7 +414,11 @@ def _build_image_workflow(
 
 
 def _strip_png_metadata(output_path: Path) -> str:
-    """Strip PNG metadata/EXIF for privacy (pure-Python, zero deps), in place."""
+    """Strip PNG metadata/EXIF for privacy (pure-Python, zero deps), in place.
+
+    A failure here must NOT be silent: ComfyUI PNGs embed the full
+    prompt/workflow, so a strip that did not run means the saved file still
+    carries that data. Returns a warning string on failure, else ""."""
     try:
         png_bytes = output_path.read_bytes()
         if png_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
@@ -404,7 +466,30 @@ def _write_image_sidecar(
     comfy_console_warning: Optional[str] = None,
     comfy_console_checked: bool = False,
 ) -> str:
-    """Write the ``<output>.json`` reproducibility sidecar next to the image."""
+    """Write the ``<output>.json`` reproducibility sidecar next to the image.
+
+    A write failure is surfaced (not silent): the success message promises the
+    reproducibility the sidecar provides. Returns a warning string on failure,
+    else "".
+
+    ``lora_name``/``lora_strength_model``/``lora_strength_clip`` record what
+    was REQUESTED, not confirmed applied - ComfyUI can silently skip a
+    mismatched LoRA (or checkpoint/VAE/CLIP weights) and still report success
+    (NEW-COMFY-SILENT-PARTIAL-APPLY). ``comfy_console_warning`` and
+    ``comfy_console_checked`` together avoid collapsing "checked, found
+    nothing" into the same silence as "could not check at all" - a reader
+    who only sees comfy_console_warning's absence has no way to tell those
+    apart, and would reasonably (and wrongly) read an unchecked generation as
+    confirmed-clean:
+      - checked=True,  warning present  -> localm SAW ComfyUI report a
+        mismatch during this generation.
+      - checked=True,  warning absent   -> localm read ComfyUI's console and
+        found no KNOWN silent-partial-apply pattern (not a guarantee nothing
+        was skipped - only that nothing in _COMFY_SILENT_PARTIAL_APPLY_PATTERNS
+        matched).
+      - checked=False, warning absent   -> localm could not read the console
+        at all (a remote or already-running ComfyUI it did not launch
+        itself) - this says NOTHING about whether anything was skipped."""
     try:
         sidecar = {
             "prompt": prompt,
@@ -467,7 +552,93 @@ def generate_image(
     placement: Optional[dict] = None,
     on_progress: Optional[callable] = None,
 ) -> tuple[bool, str]:
-    """Generate an image from *prompt* and save it to *output_path*."""
+    """
+    Generate an image from *prompt* and save it to *output_path*.
+
+    Parameters
+    ----------
+    prompt
+        Descriptive text prompt.  For img2img, describe what to *change*
+        rather than the full scene - the base image already provides structure.
+    output_path
+        Destination file (PNG).  Parent directories are created if needed.
+    api_url
+        ComfyUI base URL.  Defaults to ``http://127.0.0.1:8188``.
+        Override with the ``FLUX_API_URL`` environment variable before calling.
+    guidance
+        FluxGuidance scale.  None keeps the workflow's own default (~3.5).
+    negative_prompt
+        Things to steer away from (e.g. ``"old, mature, middle-aged"``).
+        A real negative requires classifier-free guidance, so when this is
+        set the workflow's single-pass ``BasicGuider`` is swapped for a
+        ``CFGGuider`` with a dedicated negative branch and ``cfg`` > 1 (see
+        below).  This roughly doubles inference time (two forward passes per
+        step).  Leave it None to keep the fast single-pass path.
+    cfg
+        Classifier-free guidance scale for the negative branch.  Only used
+        when *negative_prompt* is set; ``None`` defaults to 3.5.  A value of
+        1.0 disables the negative entirely (the negative branch is ignored),
+        higher values push harder away from it.  Note: guidance-*distilled*
+        FLUX (the vanilla dev checkpoint) tends to over-saturate at cfg > 1;
+        de-distilled checkpoints (e.g. the "unchained" variants) handle it
+        cleanly.  Distinct from *guidance*, which is FLUX's own distilled
+        guidance embedding and applies to both branches.
+    seed
+        Noise seed for reproducible outputs.  Randomised if not given.
+    clip_name1
+        Override the CLIP-L encoder filename in the workflow.
+        Useful for comparing encoder variants without editing the workflow JSON.
+    clip_name2
+        Override the T5 encoder filename.  If the name ends in ``.gguf``,
+        the node is automatically switched to ``DualCLIPLoaderGGUF``.
+    model_overrides
+        Generic per-node model-slot overrides: ``{node_id: {input_name: value}}``,
+        the shape ``localm.media.comfy_client.workflow_model_slots()`` returns
+        slots in. Lets a caller override ANY model-file combo in the active
+        workflow (the base UNET/checkpoint, VAE, or anything else a custom
+        workflow adds) - not just clip_name1/clip_name2/lora_name, which only
+        cover the shipped template's own encoder/LoRA slots. Applied before any
+        other workflow shaping, so a later explicit clip_name1/clip_name2/
+        lora_name still wins if both are given for the same field.
+    lora_name
+        LoRA filename to inject (optional).
+    lora_strength_model
+        How strongly the LoRA patches the UNet weights (default 1.0).
+        This is the main lever for unlock/style LoRAs.
+    lora_strength_clip
+        How strongly the LoRA patches the text encoder (default 0.5).
+        Lower than model strength is usually correct for unlock LoRAs -
+        the base CLIP already understands the vocabulary.
+    input_image
+        Path to an existing image to use as the starting point (img2img mode).
+        When provided, FLUX refines this image guided by *prompt* instead of
+        generating from noise.  Output dimensions match the input image.
+    denoise
+        How much to change the input image (img2img only).
+        0.0 = no change, 1.0 = completely new image.
+        Defaults to 0.75 when *input_image* is set and not explicitly given.
+        Ignored in txt2img mode.
+    localm_url
+        localm server URL (e.g. ``http://127.0.0.1:8642/v1``) to unload
+        before generation so FLUX gets the full VRAM budget.
+        Reads ``LOCALM_URL`` env var if None.  Skipped silently when unset.
+    instance_token
+        This server's own attach token, forwarded to the ``localm_url``
+        unload call so it authenticates on a keyless (open-mode) server too -
+        see ``selfclient.self_request``'s docstring. Only used as a fallback
+        when no owner API key is configured.
+    max_poll_seconds
+        Timeout waiting for ComfyUI to finish (default 10 minutes).
+    write_sidecar
+        Write a ``<output>.json`` sidecar with the prompt and settings so
+        the image can be reproduced.  Pass False in privacy mode - the
+        prompt then never touches disk.
+
+    Returns
+    -------
+    (ok, message)
+        ``ok=True`` and a success description, or ``ok=False`` and an error.
+    """
     from rich.console import Console
     from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 

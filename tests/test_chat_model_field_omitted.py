@@ -1,5 +1,21 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""An omitted 'model' field must be distinguishable from an explicit 'localm'."""
+"""An omitted "model" field must be distinguishable from an explicit "localm".
+
+checkup item 17. protocol.py's ChatRequest/CompletionRequest.model used to
+default to the string "localm" - a TRUTHY sentinel - so a request that OMITTED
+the field entirely was indistinguishable from one that explicitly asked for
+"localm" at ``reported_model = req.model or engine.display_name``
+(routes/chat.py). The "or" never fell through on the natural (omitted-field)
+request shape, so the client was told the literal string "localm" instead of
+the model that actually answered.
+
+FIXTURE PREMISE (diff-review-discipline.md item 19). The pre-existing tests for
+this exact fallback (test_chat_reload_after_eviction.py) all send
+``{"model": ""}`` explicitly - not one omits the field - so that suite is
+structurally incapable of failing on this defect: the value that distinguishes
+"omitted" from "explicitly emptied" is never in the test data. These tests
+build the request body without a "model" key at all.
+"""
 
 from __future__ import annotations
 
@@ -79,7 +95,7 @@ def server(monkeypatch):
 
 
 def test_omitted_model_field_reports_the_serving_model(server):
-    """The natural request shape: no 'model' key in the body at all."""
+    """The natural request shape: no "model" key in the body at all."""
     client, engines = server
 
     r = client.post("/v1/chat/completions",
@@ -93,7 +109,9 @@ def test_omitted_model_field_reports_the_serving_model(server):
 
 
 def test_omitted_model_field_reports_the_serving_model_on_completions_route(server):
-    """CompletionRequest carries the identical model default - same fix, same fixture-blindness risk, so it needs its own proof rather than riding on the chat route's coverage."""
+    """CompletionRequest carries the identical model default - same fix, same
+    fixture-blindness risk, so it needs its own proof rather than riding on the
+    chat route's coverage."""
     client, engines = server
 
     r = client.post("/v1/completions", json={"stream": False, "prompt": "hi"})
@@ -105,7 +123,8 @@ def test_omitted_model_field_reports_the_serving_model_on_completions_route(serv
 
 
 def test_explicit_localm_still_echoes_localm(server):
-    """The documented behaviour that must NOT change: a client that actually sends 'localm' gets 'localm' back, not the resolved engine's real name."""
+    """The documented behaviour that must NOT change: a client that actually
+    sends "localm" gets "localm" back, not the resolved engine's real name."""
     client, engines = server
 
     r = client.post("/v1/chat/completions",
@@ -118,7 +137,11 @@ def test_explicit_localm_still_echoes_localm(server):
 
 
 def test_omitted_model_still_400_when_nothing_can_be_resolved(monkeypatch):
-    """The contract that must NOT change, omitted-field variant of test_empty_model_is_still_400_when_nothing_can_be_resolved (test_chat_reload_after_eviction.py): with no model loaded and none ever configured, an unnamed request is genuinely unserveable regardless of whether 'unnamed' means the field was..."""
+    """The contract that must NOT change, omitted-field variant of
+    test_empty_model_is_still_400_when_nothing_can_be_resolved
+    (test_chat_reload_after_eviction.py): with no model loaded and none ever
+    configured, an unnamed request is genuinely unserveable regardless of
+    whether "unnamed" means the field was left out or sent as ""."""
     monkeypatch.setattr("localm.config.load_registry", lambda: {})
     hs._engines.clear()
     hs._engines_lru.clear()

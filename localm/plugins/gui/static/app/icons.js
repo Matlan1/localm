@@ -1,28 +1,22 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 /* localm GUI - shared inline-SVG icon set.
 
-   Crisp 24x24 stroke SVGs drawn with stroke="currentColor" (from the file/folder
-   picker), so every icon inherits its context's text colour and both themes for
-   free; promoted app-wide to replace blurry, un-themeable emoji/entity glyphs.
+   24x24 stroke SVGs drawn with stroke="currentColor", so every icon inherits
+   its context's text colour.
 
    Two ways to use it:
      - JS-built DOM: iconEl("send", "cls") -> a <span class="cls"> with the SVG.
      - Static markup: put <span data-icon="send"></span> in index.html; this
        module hydrates every [data-icon] on load (and hydrateIcons(root) can be
-       called again after a fragment is inserted).
-
-   picker.js keeps its own small copy so the picker modal stays self-contained;
-   everything else uses this module. Classic module boundary: `el` resolves by
-   bare name after the import strip, exactly like the other app/* modules. */
+       called again after a fragment is inserted). */
 "use strict";
 
-// --- ES module imports (auto-generated boundary; bodies unchanged) ---
+// --- ES module imports ---
 import { el } from "./helpers.js";
 
-// 24x24 viewBox, currentColor stroke - identical drawing convention to picker.js
-// so icons match visually wherever they are used. Named iconMarkup/APP_ICONS
-// (not svg/ICONS) so they never collide with picker.js's same-purpose locals in
-// the jsdom test harness, which shares ONE global scope across all app modules.
+// Wrap paths in a 24x24 currentColor-stroked <svg>. The names iconMarkup and
+// APP_ICONS must not collide with picker.js's locals: the app modules share one
+// global scope.
 function iconMarkup(paths) {
   return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
     'stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" ' +
@@ -75,8 +69,7 @@ const APP_ICONS = {
   // --- status / markers ---
   warning:  iconMarkup('<path d="M12 3L22 21H2Z"/><path d="M12 9v5"/><path d="M12 17h.01"/>'),
   check:    iconMarkup('<path d="M5 12l4 4 10-10"/>'),
-  // Filled/outline pair sharing one geometry so they align pixel-for-pixel when
-  // swapped in place (active/inactive markers, radio-style selection).
+  // Filled/outline pair sharing one geometry.
   dot:      iconMarkup('<path d="M12 18a6 6 0 1 0 0-12 6 6 0 0 0 0 12z" fill="currentColor" stroke="none"/>'),
   ring:     iconMarkup('<path d="M12 18a6 6 0 1 0 0-12 6 6 0 0 0 0 12z"/>'),
   caret:    iconMarkup('<path d="M12 8l5 8H7z" fill="currentColor" stroke="none"/>'),
@@ -87,16 +80,14 @@ export function iconSvg(name) {
   return APP_ICONS[name] || APP_ICONS.file;
 }
 
-// Parse a trusted, static SVG STRING (from ICONS above - never user input) into
-// real DOM nodes without innerHTML. createContextualFragment runs the HTML
-// fragment parser, which places <svg> in the SVG namespace correctly.
+// Parse a static SVG string from APP_ICONS into DOM nodes. The input must be
+// trusted markup, never user input.
 function svgFragment(str) {
   return document.createRange().createContextualFragment(str);
 }
 
-/** A <span class=cls> wrapping the icon, for JS-built DOM. The requested name is
- *  recorded on data-icon-name (distinct from the data-icon hydrate placeholder,
- *  so hydrateIcons never re-processes it) for styling and test assertions. */
+/** A <span class=cls> wrapping the icon. The name is recorded on data-icon-name,
+ *  not data-icon, so hydrateIcons never re-processes it. */
 export function iconEl(name, cls) {
   const s = el("span", cls || "ic");
   s.dataset.iconName = name;
@@ -105,9 +96,7 @@ export function iconEl(name, cls) {
 }
 window.iconEl = iconEl;
 
-/** A designed empty state: a centred icon, a line of text, and an optional
- *  "do this next" hint. Replaces the bare `.sub` "No X yet" lines so every empty
- *  list reads as intentional (design standard rule 7). */
+/** An empty state: a centred icon, a line of text, and an optional hint. */
 export function emptyState(iconName, text, hint) {
   const box = el("div", "empty-state");
   box.appendChild(iconEl(iconName, "empty-state-ic"));
@@ -117,9 +106,8 @@ export function emptyState(iconName, text, hint) {
 }
 window.emptyState = emptyState;
 
-/** Replace every <span data-icon="NAME"> placeholder under `root` with its SVG
- *  (once). Static markup in index.html carries the placeholders; this runs on
- *  load and can be re-run after a fragment is inserted. */
+/** Replace every <span data-icon="NAME"> placeholder under `root` with its SVG,
+ *  once each. Can be re-run after a fragment is inserted. */
 export function hydrateIcons(root) {
   const scope = root || document;
   for (const n of scope.querySelectorAll("[data-icon]")) {
@@ -130,7 +118,5 @@ export function hydrateIcons(root) {
 }
 window.hydrateIcons = hydrateIcons;
 
-// Hydrate the static placeholders as soon as this module loads. The DOM is
-// already parsed by now (modules are deferred in the browser; the jsdom harness
-// parses index.html before injecting scripts), so no DOMContentLoaded wait.
+// Hydrate the static placeholders on load.
 hydrateIcons(document);

@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Job-run overlap guard (U-4): a previous run still in flight must not be joined by a second run that stacks a model load and OOMs the GPU."""
+"""Job-run overlap guard (U-4): a previous run still in flight must not be joined
+by a second run that stacks a model load and OOMs the GPU. Also covers freeing a
+self-loaded engine after the run so sequential headless runs do not accumulate VRAM.
+"""
 
 from __future__ import annotations
 

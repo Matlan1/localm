@@ -1,5 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Shared HTTP client for the localm proxy (the Cloudflare Worker)."""
+"""Shared HTTP client for the localm proxy (the Cloudflare Worker).
+
+The bug-report upload, the issues list, and the update check all talk to the same
+Worker. Stdlib only (urllib). A non-2xx response, a network error, or non-JSON
+raises :class:`~localm.bugreport.LocalmError` so callers surface the failure rather
+than reporting a false success ("we do not hide problems"). The *opener* is
+injectable for tests.
+"""
 
 from __future__ import annotations
 
@@ -10,7 +17,7 @@ from localm.bugreport import LocalmError
 
 
 def _default_opener(method: str, url: str, data, headers: dict, timeout: float):
-    """Return (status, body_bytes)."""
+    """Return (status, body_bytes). Raises LocalmError on transport failure."""
     import urllib.error
     import urllib.request
 
@@ -37,7 +44,10 @@ def _default_opener(method: str, url: str, data, headers: dict, timeout: float):
 
 def request(base: str, path: str, *, method: str = "GET", token: Optional[str] = None,
             body=None, timeout: float = 15.0, opener=None):
-    """Call ``<base><path>`` on the proxy and return the parsed JSON dict."""
+    """Call ``<base><path>`` on the proxy and return the parsed JSON dict.
+
+    Adds the ``X-Localm-Token`` shared-secret header when *token* is set. Raises
+    LocalmError on any non-2xx / transport / non-JSON result."""
     if not base:
         raise LocalmError("no proxy endpoint is configured",
                           reason="set the upload/update URL in config")

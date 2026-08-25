@@ -1,5 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Session auth routes: HttpOnly cookie + CSRF for the browser GUI."""
+"""Session auth routes: HttpOnly cookie + CSRF for the browser GUI.
+
+Extracted verbatim from create_app(); behavior unchanged. The session cookie
+names, max age, and the token/CSRF helpers live on the http_server module and are
+referenced via ``_hs.`` so external importers still find them there.
+"""
 
 from __future__ import annotations
 
@@ -18,7 +23,13 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.post("/api/session", include_in_schema=False)
     async def session_login(request: Request, response: Response):
-        """Exchange the API key for an HttpOnly session cookie so the browser GUI never has to hold the key in JS-readable localStorage."""
+        """Exchange the API key for an HttpOnly session cookie so the browser GUI
+        never has to hold the key in JS-readable localStorage. The key is read from
+        the JSON body ``{"key": ...}`` or an Authorization: Bearer header, verified,
+        and on success set as the HttpOnly ``localm_session`` cookie (an opaque
+        session id). The response body returns the ``csrf`` token (an HMAC of the
+        session, NOT a cookie) for the client to send as ``X-CSRF-Token`` on writes.
+        401 on a bad key; 400 in open mode (nothing to log into)."""
         from localm.auth import any_key_configured, verify
         presented = None
         try:
@@ -70,7 +81,12 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.post("/api/session/logout", include_in_schema=False)
     async def session_logout(request: Request, response: Response):
-        """Sign the browser out: revoke the session and clear its cookie."""
+        """Sign the browser out: revoke the session and clear its cookie.
+
+        A POST from the cookie-authenticated browser GUI is subject to the same CSRF
+        check as every other state-changing endpoint (the X-CSRF-Token header must
+        match the token derived from the session). A bearer-header caller (CLI / SDK)
+        is CSRF-exempt because it cannot be driven cross-site."""
         token, source = _request_token(request)
         if source == "cookie" and not _csrf_ok(request):
             raise HTTPException(
@@ -101,7 +117,15 @@ def register(app: FastAPI, ctx) -> None:
               dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))],
               include_in_schema=False)
     async def clear_owner_key(request: Request, response: Response):
-        """Delete the server-side owner key (auth.key) and immediately invalidate the caller's session cookie."""
+        """Delete the server-side owner key (auth.key) and immediately
+        invalidate the caller's session cookie.
+
+        CSRF-protected: a cookie-authenticated caller must send the session's
+        derived token in X-CSRF-Token. After this call any_key_configured() returns
+        False (assuming no LOCALM_API_KEY env var and an empty keystore), and all
+        subsequent web UI requests that rely on the session cookie will fail auth and
+        be redirected to the key gate by the client (Task 3: CSRF-post-clear).
+        """
         _, source = _request_token(request)
         if source == "cookie" and not _csrf_ok(request):
             raise HTTPException(
@@ -162,7 +186,47 @@ def register(app: FastAPI, ctx) -> None:
               dependencies=[Depends(require_scope(scopes.ADMIN))],
               include_in_schema=False)
     async def rotate_owner_key(request: Request, response: Response):
-        """Roll or set the owner key (``auth.key``) - the GUI form of ``localm key generate`` and ``localm key set <key>``."""
+        """Roll or set the owner key (``auth.key``) - the GUI form of
+        ``localm key generate`` and ``localm key set <key>``.
+
+        The body is optional: no body (or ``{}``) mints a fresh random key,
+        ``{"key": "<value>"}`` persists that exact one. An empty or whitespace
+        ``key`` GENERATES rather than clearing, so this route can never drop the
+        server to open mode by accident - ``/api/auth/key/clear`` is the only way
+        out of protected mode, and it is a separate, deliberate action.
+
+        The active key is returned so the caller can show it once. That discloses
+        nothing new to THIS caller: an ADMIN principal can already read the owner
+        key from ``GET /api/pairing/qr``.
+
+        OWNER-GATED AND REMOTE-CAPABLE, deliberately. This is the posture decision
+        the route exists to record, so it is written here rather than left implicit:
+
+        * ``scopes.ADMIN``, NOT the ``config:write`` its sibling clear route takes,
+          and NOT ``keys:admin``. Clearing REMOVES a credential; setting INSTALLS
+          one the caller chose. A merely config:write or keys:admin holder POSTing
+          ``{"key": "<a value I know>"}`` would promote itself to owner in a single
+          call, so the lower bar next door is not a precedent to copy here.
+        * NOT loopback-only. The only pre-existing rolling path is a side effect of
+          the first-key lockout guard in ``routes/keys.py``, gated on
+          ``is_loopback_host`` and therefore absent on a network bind - i.e. absent
+          from exactly the deployment where an admin needs to rotate a leaked
+          credential (it is False for ``0.0.0.0``). Reaching this route already
+          requires the owner credential, so it grants no authority the caller does
+          not already hold, and rotation is the DEFENSIVE act of the party holding
+          it. Backstop if a stolen owner cookie is used to roll the key:
+          ``localm key recover``, run locally on the server machine, which is
+          precisely what that command is for.
+
+        CSRF needs no check here: ``_enforce_request`` already requires a valid
+        ``X-CSRF-Token`` for any cookie-sourced unsafe method.
+
+        Browser sessions are NOT revoked, matching ``localm key generate`` and
+        ``localm key set`` exactly. That is ``regenerate_key``'s documented design
+        (sessions are decoupled from the key value so a roll does not sign the GUI
+        out), and it is the whole premise of rotating from a browser. The command
+        that DOES revoke is ``localm key recover``, the local compromise path.
+        """
         from localm import auth
         payload = {}
         try:
@@ -256,7 +320,12 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.get("/api/session", include_in_schema=False)
     async def session_state(request: Request):
-        """Report whether the caller is authenticated, so the GUI can show or hide its key gate without ever reading the key. *authed* reflects the presented cookie/header; *required* is True when a key is configured."""
+        """Report whether the caller is authenticated, so the GUI can show or hide
+        its key gate without ever reading the key. *authed* reflects the presented
+        cookie/header; *required* is True when a key is configured. For a cookie
+        session it also returns the ``csrf`` token derived from that session, so the
+        client always has a token in lockstep with its session (it can never desync)
+        and can refresh it after a server restart rotated the secret."""
         from localm.auth import any_key_configured, require_auth_enabled
         configured = any_key_configured()
         token, source = _request_token(request)

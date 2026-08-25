@@ -1,5 +1,21 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""shutdown() racing an in-flight command must not look like a broken runtime."""
+"""shutdown() racing an in-flight command must not look like a broken runtime.
+
+``ModelRunner.shutdown()`` deliberately takes no lock (so teardown works while a
+command holds ``_q_lock``) and CLOSES the three queues BEFORE it nulls them. So a
+command polling the response queue on another thread - a background preload, a
+live stream, a token count - can land on either side of that window:
+
+* closed queue: measured, ``multiprocessing.Queue.get()`` after ``close()`` raises
+  ``ValueError``, NOT ``Empty``, so it slipped straight past ``except _queue.Empty``;
+* ``_proc`` already None: ``AttributeError: 'NoneType' object has no attribute
+  'is_alive'``.
+
+Reported from a real session (a background preload racing a VRAM eviction), where
+it surfaced as "Native llama runtime failed to load: 'NoneType' object has no
+attribute 'is_alive'. Provision or repair it with localm setup-llama" - telling
+the user to repair a healthy install.
+"""
 
 import multiprocessing as mp
 import queue as _queue
@@ -21,7 +37,8 @@ class _FakeProc:
 
 
 class _AlwaysEmpty:
-    """A response queue that never yields, so the loop always takes the Empty branch - which is where the teardown check has to live."""
+    """A response queue that never yields, so the loop always takes the Empty
+    branch - which is where the teardown check has to live."""
 
     def __init__(self, on_get=None):
         self._on_get = on_get
@@ -49,7 +66,8 @@ def _runner_with(resp_q, proc=None):
 # --------------------------------------------------------------------------- #
 
 def test_poll_lets_empty_through_untouched():
-    """Empty is the normal keep-waiting signal every loop is built around; if _poll swallowed it, a load would spin instead of honouring its deadline."""
+    """Empty is the normal keep-waiting signal every loop is built around; if
+    _poll swallowed it, a load would spin instead of honouring its deadline."""
     r = _runner_with(_AlwaysEmpty())
     with pytest.raises(_queue.Empty):
         r._poll(0.01)
@@ -62,7 +80,9 @@ def test_poll_reports_a_nulled_queue_as_torn_down():
 
 
 def test_poll_reports_a_really_closed_queue_as_torn_down():
-    """Against a REAL multiprocessing.Queue, not a stub asserting the behaviour we assumed: the ValueError-not-Empty detail is the whole reason this bug escaped the existing handler."""
+    """Against a REAL multiprocessing.Queue, not a stub asserting the behaviour
+    we assumed: the ValueError-not-Empty detail is the whole reason this bug
+    escaped the existing handler."""
     q = mp.get_context("spawn").Queue()
     q.close()
     q.cancel_join_thread()
@@ -78,7 +98,7 @@ def test_exitcode_is_none_rather_than_raising_once_the_proc_is_released():
 
 
 # --------------------------------------------------------------------------- #
-#  spawn_and_load - the reported crash                                         #
+#  spawn_and_load                                                              #
 # --------------------------------------------------------------------------- #
 
 def _load_runner(resp_q, on_get=None, monkeypatch=None):
@@ -95,7 +115,10 @@ def _load_runner(resp_q, on_get=None, monkeypatch=None):
 
 
 def test_load_racing_a_shutdown_reports_cancelled_not_a_broken_runtime():
-    """The exact reported failure: _proc goes None between the get() and the liveness check."""
+    """The exact reported failure: _proc goes None between the get() and the
+    liveness check. Pre-fix this raised AttributeError, which GgufBackend.load
+    turned into "Native llama runtime failed to load ... repair it with localm
+    setup-llama"."""
     r = None
 
     def _null_the_proc():
@@ -107,7 +130,8 @@ def test_load_racing_a_shutdown_reports_cancelled_not_a_broken_runtime():
 
 
 def test_load_racing_a_queue_close_reports_cancelled_not_a_broken_runtime():
-    """The other side of the same window: shutdown() closes the queues BEFORE it nulls them, so this ordering is the one hit FIRST."""
+    """The other side of the same window: shutdown() closes the queues BEFORE it
+    nulls them, so this ordering is the one hit FIRST."""
     q = mp.get_context("spawn").Queue()
     q.close()
     q.cancel_join_thread()
@@ -117,7 +141,9 @@ def test_load_racing_a_queue_close_reports_cancelled_not_a_broken_runtime():
 
 
 def test_a_genuinely_dead_child_still_reports_a_crash():
-    """The fix must not swallow the case the branch exists for."""
+    """The fix must not swallow the case the branch exists for. A child that
+    really died - proc present, not alive - still gets the crash message with
+    its exit code, not a cancellation."""
     r = R.ModelRunner()
 
     def _fake_spawn():
@@ -166,7 +192,19 @@ def test_simple_request_racing_a_shutdown_says_unloaded_not_attribute_error():
 ])
 def test_a_genuinely_dead_child_is_reported_as_dead_not_unloaded(
         exitcode, expect_native, monkeypatch):
-    """Fires-control for the stream path's own regression: a real death must be reported AS A DEATH, carrying its exit code - never as 'unloaded', which is what the teardown-race window used to produce."""
+    """Fires-control for the stream path's own regression: a real death must be
+    reported AS A DEATH, carrying its exit code - never as "unloaded", which is
+    what the teardown-race window used to produce.
+
+    RENAMED AND PARAMETRIZED, and the old form was over-specified. It asserted the
+    message says "Native inference fault" while setting ``exitcode = 1`` - an
+    arbitrary stand-in for "genuinely dead" that happens to be multiprocessing's
+    signature for an uncaught PYTHON exception, which is not a native fault at
+    all. The load-bearing property was always "reported as a death, with the
+    code", not the particular wording; pinning the wording made a
+    misclassification permanent on this path too. Now both classes are covered
+    here, so the distinction is guarded on the teardown path and not only in
+    tests/test_worker_exit_code_decoding.py."""
     monkeypatch.setattr("localm._mp_spawn.os.name", "posix")
     r = _runner_with(_AlwaysEmpty(), proc=_FakeProc(alive=False))
     r._proc.exitcode = exitcode
@@ -174,7 +212,7 @@ def test_a_genuinely_dead_child_is_reported_as_dead_not_unloaded(
         list(r.chat_stream(messages=[{"role": "user", "content": "hi"}],
                            first_chunk_timeout=1.0))
     msg = str(ei.value)
-    # The original property: a real death is never mistaken for an unload.
+    # A real death is never mistaken for an unload.
     assert "unloaded while" not in msg, msg
     assert str(exitcode) in msg, msg
     assert ("Native inference fault" in msg) is expect_native, msg

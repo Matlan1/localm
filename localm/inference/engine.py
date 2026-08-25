@@ -16,27 +16,19 @@ from localm.inference.backends.base import BaseBackend
 from localm.textnorm import scrub_stream
 
 
-# Process-global model-load lock. Loading a model onto the GPU is the dangerous,
-# memory-spiking step; running two loads at once (e.g. a chat request and a
-# background job, each with its own Engine) thrashes VRAM, garbles the interleaved
-# console output, and can freeze the machine. Serialise every load process-wide so
-# only one model is ever loading at a time. Inference itself is NOT held here, only
-# the load. RLock (not Lock) so a re-entrant load on the same thread cannot
-# deadlock.
+# Process-global model-load lock: only one model is ever loading at a time,
+# across every Engine in the process. Inference is NOT held here, only the load.
+# RLock, so a re-entrant load on the same thread cannot deadlock.
 #
-# LOCK ORDER with localm.inference.embedder._LOCK: _LOAD_LOCK is the OUTER
-# lock of the pair. The load path under this lock calls into embedder status
-# reads that take embedder._LOCK (backend ctx sizing -> loaded_path, #767),
-# so code holding embedder._LOCK must NEVER acquire _LOAD_LOCK or start a
-# load - that inversion deadlocked the whole server on 2026-08-18
-# (embedder.get_embedder held _LOCK and waited here while a chat preload
-# held this lock and waited on _LOCK; nothing had a timeout).
+# LOCK ORDER with localm.inference.embedder._LOCK: _LOAD_LOCK is the OUTER lock
+# of the pair. The load path under this lock calls embedder status reads that
+# take embedder._LOCK (backend ctx sizing -> loaded_path), so code holding
+# embedder._LOCK must NEVER acquire _LOAD_LOCK or start a load.
 _LOAD_LOCK = threading.RLock()
 
 
-# A bare config.json is not enough to call a directory a model: localm's own
-# data directory keeps its settings in a config.json too. A real HF model also
-# carries weights or a tokenizer next to the config, so require one of those.
+# Files that mark a directory as a real HF model. A config.json alone is not
+# enough; weights or a tokenizer must sit next to it.
 _HF_WEIGHT_GLOBS = ("*.safetensors", "*.bin", "*.pt", "*.pth")
 _HF_TOKENIZER_FILES = (
     "tokenizer.json", "tokenizer.model", "tokenizer_config.json",
@@ -70,7 +62,15 @@ def _is_gguf(path: str) -> bool:
 
 
 def _resolve_vram_overhead_bytes(cfg: dict) -> int:
-    """``vram_overhead_mb`` (MB) from config, in bytes, or the built-in default on a missing/unparseable value."""
+    """``vram_overhead_mb`` (MB) from config, in bytes, or the built-in
+    default on a missing/unparseable value. Same rule-5 reasoning as
+    GgufBackend's own ``_load_timeout_seconds``/``_first_token_timeout_seconds``
+    (gguf.py): normal writes (PATCH /v1/config, ``localm config``) already
+    enforce a valid int via settings_schema.validate_update, but a
+    hand-edited config.json is not type-checked on load (config.py's
+    ``load_config`` just merges the stored dict) - a present-but-unparseable
+    value is a real misconfiguration, not the benign missing case, so it is
+    surfaced under --debug rather than silently bricking every later load."""
     from localm.vram import VRAM_OVERHEAD_BYTES
     raw = cfg.get("vram_overhead_mb")
     if raw is None:
@@ -92,7 +92,12 @@ def create_backend(
     n_gpu_layers: Optional[int] = None,
     device: Optional[str] = None,
 ) -> BaseBackend:
-    """Return the appropriate backend for the given model path, without loading it."""
+    """
+    Return the appropriate backend for the given model path, without loading it.
+
+    model_path:   HF model directory  →  HFBackend
+                  *.gguf file         →  GgufBackend
+    """
     cfg = load_config()
 
     if _is_hf_dir(model_path):
@@ -122,13 +127,9 @@ def create_backend(
     )
 
 
-# A model's self-declared name is echoed to API/GUI callers, so it is treated as
-# untrusted text, not as a label we own. Real values look like "meta-llama/
-# Llama-3-8B" or "gemma-3-4b-it": a short run of word characters with . _ - / in
-# between. Anything else (control characters, newlines, markup, a whole absolute
-# path, a paragraph) is a value we will not repeat back to a caller - we fall back
-# to the directory name, which we DO control. Kept as an allowlist, so a shape
-# nobody anticipated is refused rather than passed through.
+# Shape a model's self-declared name must match to be echoed back to API/GUI
+# callers, as an allowlist. Anything else (control characters, newlines, markup,
+# a whole absolute path, a paragraph) falls back to the directory name.
 _SANE_DISPLAY_NAME = re.compile(r"^[\w.-]+(?:/[\w.-]+)*$")
 _MAX_DISPLAY_NAME = 96
 
@@ -144,7 +145,14 @@ def _sane_display_name(value) -> Optional[str]:
 
 
 def model_display_name(model_path: str) -> str:
-    """Human-readable model name from path."""
+    """Human-readable model name from path.
+
+    For an HF directory this prefers the model's own ``_name_or_path``, but only
+    after checking its shape: the directory may be one an untrusted caller named,
+    and this string is handed straight back to API and GUI callers (CodeQL 65-68).
+    A value that does not look like a model name is dropped in favour of the
+    directory name.
+    """
     p = Path(model_path)
     if p.is_dir():
         cfg_file = p / "config.json"
@@ -159,16 +167,25 @@ def model_display_name(model_path: str) -> str:
                         "model_display_name: ignoring implausible _name_or_path in "
                         "%s; using the directory name instead", cfg_file)
             except Exception as exc:
-                # config.json is optional for the display name only; load() validates
-                # it later. Falling back to the dir name is fine, but surface the
-                # corrupt config here so it is discoverable under --debug.
+                # config.json is optional for the display name only; load()
+                # validates it later. Falls back to the directory name, and logs
+                # the corrupt config so it is discoverable under --debug.
                 logger.debug("model_display_name: unreadable config.json at %s: %s", cfg_file, exc)
         return p.name
     return p.stem
 
 
 class Engine:
-    """High-level wrapper: loads a backend and streams chat completions."""
+    """
+    High-level wrapper: loads a backend and streams chat completions.
+
+    Usage:
+        engine = Engine(model_path)
+        engine.load()
+        for tok in engine.chat_stream(messages):
+            print(tok, end="", flush=True)
+        engine.unload()
+    """
 
     def __init__(
         self,
@@ -182,9 +199,9 @@ class Engine:
     ) -> None:
         self.model_path = model_path
         self.display_name = display_name or model_display_name(model_path)
-        # Every Engine shares the one process-global load lock (see _LOAD_LOCK), so
-        # loads serialise across the server, jobs, and embeds, not just within a
-        # single Engine instance.
+        # Every Engine shares the one process-global load lock, so loads
+        # serialise across the server, jobs and embeds, not just within a single
+        # Engine instance.
         self._load_lock = _LOAD_LOCK
         self._backend = create_backend(
             model_path,
@@ -196,10 +213,10 @@ class Engine:
         self.active_requests = 0
         # Set True by an unload/eviction path for the duration of the native
         # free, so get_engine()/switch_engine()'s fast paths refuse to hand this
-        # engine back (and thus refuse to let a request pin it) while it is being
-        # torn down. Closes the pin-arrives-during-the-unload-await window that
-        # active_requests alone cannot (a request pins lock-free, AFTER the
-        # active_requests==0 check has already passed). See http_server.py.
+        # engine back, and so refuse to let a request pin it, while it is being
+        # torn down. A request pins lock-free, after the active_requests==0 check
+        # has already passed, so active_requests alone does not close that
+        # window.
         self.unloading = False
 
     @property
@@ -207,7 +224,10 @@ class Engine:
         return self._backend.loaded
 
     def set_load_cancel(self, event) -> None:
-        """Install a cancel event on the backend so an in-flight load() can be aborted mid-flight when a newer model selection supersedes it (preemptive switching)."""
+        """Install a cancel event on the backend so an in-flight load() can be
+        aborted mid-flight when a newer model selection supersedes it (preemptive
+        switching). Best-effort: backends that cannot abort a partial load ignore
+        it. ``None`` clears it."""
         self._backend.set_load_cancel(event)
 
     def load(self) -> None:
@@ -228,12 +248,26 @@ class Engine:
 
     @property
     def effective_ctx_max(self):
-        """Resolved context ceiling of the last load (VRAM-derived when ctx_auto is on), or None when unknown / not loaded yet."""
+        """Resolved context ceiling of the last load (VRAM-derived when
+        ctx_auto is on), or None when unknown / not loaded yet."""
         return getattr(self._backend, "effective_ctx_max", None)
 
     @property
     def gpu_placement(self) -> Optional[dict]:
-        """Where the last load's transformer layers actually ended up: GPU vs CPU. ``{'gpu_layers_offloaded': N, 'gpu_layers_total': M, 'degraded': bool}`` when the backend can report it (GgufBackend, once a load has completed and the model's true layer count is known), else None - e.g. before any load, or for..."""
+        """Where the last load's transformer layers actually ended up: GPU vs
+        CPU. ``{"gpu_layers_offloaded": N, "gpu_layers_total": M, "degraded":
+        bool}`` when the backend can report it (GgufBackend, once a load has
+        completed and the model's true layer count is known), else None -
+        e.g. before any load, or for a backend that places layers itself
+        without a layer-count knob (HF's device_map="auto").
+
+        ``degraded`` is True whenever fewer than the full layer count landed
+        on the GPU, whatever the reason (VRAM-constrained auto-sizing, or an
+        explicit partial n_gpu_layers) - a caller of /v1/models/load has no
+        visibility into the server's own config either way, so this is
+        reported unconditionally rather than only for the auto-sized case.
+        Exists so a load response can tell a full GPU load from a silent CPU
+        fallback (AGENTS.md rule 5) instead of a bare "loaded" that hides it."""
         offloaded = getattr(self._backend, "gpu_layers_offloaded", None)
         total = getattr(self._backend, "gpu_layers_total", None)
         if offloaded is None or not total:
@@ -246,17 +280,21 @@ class Engine:
 
     @property
     def last_finish_reason(self) -> str:
-        """Why the most recent generation ended: 'stop' (model finished) or 'length' (the max_tokens budget ran out)."""
+        """Why the most recent generation ended: "stop" (model finished) or
+        "length" (the max_tokens budget ran out). Backends that cannot tell
+        report "stop"."""
         return getattr(self._backend, "last_finish_reason", "stop")
 
     @property
     def supports_images(self) -> bool:
-        """True when the active backend can actually see image input."""
+        """True when the active backend can actually see image input. For HF
+        this is only accurate once the model is loaded (see can_be_multimodal)."""
         return getattr(self._backend, "supports_images", False)
 
     @property
     def can_be_multimodal(self) -> bool:
-        """True when the backend class could support images, so it is worth loading the model to find out."""
+        """True when the backend class could support images, so it is worth
+        loading the model to find out. False for text-only backends (GGUF)."""
         return getattr(self._backend, "can_be_multimodal", False)
 
     @property
@@ -265,15 +303,30 @@ class Engine:
         return getattr(self._backend, "supports_mtp", False)
 
     def count_tokens(self, text: str) -> int:
-        """Return the number of tokens in *text* using the loaded backend's tokenizer."""
+        """
+        Return the number of tokens in *text* using the loaded backend's
+        tokenizer.  Falls back to a chars-÷-4 heuristic when the model is
+        not yet loaded.
+        """
         return self._backend.count_tokens(text)
 
     def count_messages_tokens(self, messages: List[dict]) -> int:
-        """Return the number of tokens in a list of structured messages, including chat template formatting."""
+        """
+        Return the number of tokens in a list of structured messages,
+        including chat template formatting.
+        """
         return self._backend.count_messages_tokens(messages)
 
     def context_capacity(self) -> Optional[int]:
-        """Maximum token capacity of the loaded model's context window."""
+        """Maximum token capacity of the loaded model's context window.
+
+        Prefers the RESOLVED ceiling from the last load (VRAM-derived under
+        ctx_auto), then the configured ceiling, then the base window. The old
+        implementation read attributes the GGUF backend does not have
+        (``_n_ctx_max`` / ``_llm.n_ctx()``), so it ALWAYS returned None and the
+        server-side compaction safety net, the CLI budget, and the coder's fill
+        gauge all fell back to wrong ceilings (memory-audit 2026-07-02 F10).
+        Returns None only when nothing is loaded / resolvable."""
         b = self._backend
         eff = getattr(b, "effective_ctx_max", None)
         if isinstance(eff, int) and eff > 0:
@@ -290,7 +343,12 @@ class Engine:
             return None
 
     def _embed_via_dedicated(self, texts: List[str]) -> List[List[float]]:
-        """Embed with the small DEDICATED on-device embedding model (:mod:`localm.inference.embedder`), or raise with the one command that fixes it."""
+        """Embed with the small DEDICATED on-device embedding model
+        (:mod:`localm.inference.embedder`), or raise with the one command that
+        fixes it. Raising (rather than returning the chat model's own vectors)
+        is the point: RAG catches this and degrades to lexical-only BM25 with a
+        warning, which measurably beats blending unusable vectors into its
+        50/50 lexical+vector score."""
         from localm.inference.embedder import embed_texts
         vecs = embed_texts(list(texts))
         if vecs is not None:
@@ -301,7 +359,30 @@ class Engine:
             "lexical BM25 until then.")
 
     def embed(self, texts: List[str]) -> List[List[float]]:
-        """Return embedding vectors for a list of texts."""
+        """
+        Return embedding vectors for a list of texts.
+
+        A backend that can genuinely embed its own loaded model (a HuggingFace
+        encoder / sentence-transformer) is used directly. Anything that cannot is
+        served by a small DEDICATED on-device embedding model
+        (:mod:`localm.inference.embedder`). Two backends cannot, for different
+        reasons and at different times:
+
+        - the bundled GGUF chat backend NEVER can (``can_embed = False``, a fixed
+          class attribute: the ctypes binding exposes no create_embedding), which
+          is known up front, so the large chat model is not loaded just to fail;
+        - the HF backend can only tell once the weights are LOADED, because it
+          depends on what the checkpoint is: an encoder can embed, a chat decoder
+          cannot (see ``HFBackend.can_embed`` for the measurements).
+
+        Hence the capability is checked TWICE, before and after the load. Checking
+        only before it meant an HF chat decoder - which reports the "unknown" True
+        while unloaded - fell straight through to ``backend.embed()`` and silently
+        returned mean-pooled chat vectors that cannot separate related from
+        unrelated text, to both /v1/embeddings and RAG, even with a real embedding
+        model installed. Raises ``NotImplementedError`` only when no embedding path
+        is available at all.
+        """
         if getattr(self._backend, "can_embed", True) is False:
             return self._embed_via_dedicated(texts)
         if not self._backend.loaded:
@@ -309,9 +390,9 @@ class Engine:
                 if not self._backend.loaded:
                     self._backend.load()
         if getattr(self._backend, "can_embed", True) is False:
-            # Only knowable now (HF): the loaded checkpoint is a chat decoder.
-            # Substituting the dedicated embedder is the CORRECT outcome, not a
-            # degradation, but it must not be invisible either (rule 5).
+            # Only knowable now (HF): the loaded checkpoint is a chat decoder,
+            # so the dedicated embedder is substituted, and the substitution is
+            # logged rather than left invisible.
             logger.debug(
                 "%s is not an embedding model; embedding via the dedicated "
                 "on-device embedder instead", self.display_name)
@@ -320,11 +401,37 @@ class Engine:
 
     @property
     def supports_grammar(self) -> bool:
-        """True when the active backend can actually constrain generation to a grammar."""
+        """True when the active backend can actually constrain generation to a
+        grammar. See ``BaseBackend.supports_grammar`` for why the default denies."""
         return getattr(self._backend, "supports_grammar", False)
 
     def validate_grammar(self, grammar: Optional[str], *, lazy: bool = False) -> None:
-        """Up-front grammar validation, delegated to the backend."""
+        """Up-front grammar validation, delegated to the backend.
+
+        Raises :class:`GrammarUnsupportedError` when the backend cannot apply a
+        grammar at all - or, with *lazy*, cannot apply it LAZILY - and
+        :class:`InvalidGrammarError` when it can but this grammar will not parse.
+        Either way the request path turns it into a clean 4xx instead of
+        generating text that silently ignores the constraint.
+
+        *lazy* is forwarded rather than interpreted here: only the backend knows
+        whether it can honour trigger-gated enforcement, and only some backends
+        can answer that honestly at all (see ``BaseBackend.validate_grammar``).
+
+        Called unconditionally, NOT probed with ``getattr``. It used to be:
+
+            fn = getattr(self._backend, "validate_grammar", None)
+            if callable(fn):
+                fn(grammar)
+
+        which asked "does this backend have a validator" and acted on the answer
+        as though it had asked "can this backend apply a grammar". Only the GGUF
+        backend defined the method, so every grammar sent to an HF-backed model
+        skipped validation AND, when the optional ``[grammar]`` extra is absent,
+        was then dropped by the worker - a 200 full of unconstrained text with
+        nothing anywhere telling the caller the grammar had been ignored. The
+        method now lives on ``BaseBackend`` and denies by default, so an absent
+        capability answers the question it was actually asked."""
         self._backend.validate_grammar(grammar, lazy=lazy)
 
     def chat_stream(
@@ -341,10 +448,10 @@ class Engine:
         grammar_triggers: Optional[List[str]] = None,
         seed: Optional[int] = None,
     ) -> Iterator[str]:
-        # Auto-reload if the model was unloaded (e.g. to free VRAM for image gen).
-        # Hold the process-global load lock so a reload cannot race another load
-        # (chat vs job vs embed) onto the GPU, and double-check inside the lock so
-        # we do not reload a model another thread just brought back.
+        # Auto-reload if the model was unloaded. Holds the process-global load
+        # lock so a reload cannot race another load onto the GPU, and
+        # double-checks inside the lock so a model another thread just brought
+        # back is not reloaded.
         if not self._backend.loaded:
             with _LOAD_LOCK:
                 if not self._backend.loaded:
@@ -354,10 +461,10 @@ class Engine:
                     self._backend.load()
 
         cfg = load_config()
-        # Normalise model-internal control markers (harmony/Gemma channel tags,
-        # etc.) once here so every backend inherits it - the GGUF backend also
-        # scrubs internally, which is fine because scrub_stream is idempotent,
-        # while the HF backend relies on this pass alone.
+        # Normalise model-internal control markers (harmony and Gemma channel
+        # tags, and similar) once here, so every backend inherits it. The GGUF
+        # backend also scrubs internally and scrub_stream is idempotent; the HF
+        # backend relies on this pass alone.
         return scrub_stream(self._backend.chat_stream(
             messages,
             max_tokens=max_tokens if max_tokens is not None else cfg["max_tokens"],

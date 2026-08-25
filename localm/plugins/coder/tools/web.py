@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Network tools: ``fetch_url`` and ``web_search``, both routed through localm.netpolicy (imported lazily inside each call)."""
+"""Network tools: ``fetch_url`` and ``web_search``, both routed through
+localm.netpolicy (imported lazily inside each call)."""
 
 from __future__ import annotations
 
@@ -13,7 +14,20 @@ def tool_fetch_url(
     max_chars: int = 8000,
     _privacy: bool = False,
 ) -> ToolResult:
-    """Fetch a URL and return its plain-text content (HTML tags stripped)."""
+    """
+    Fetch a URL and return its plain-text content (HTML tags stripped).
+
+    Useful for documentation pages, GitHub raw files, Stack Overflow answers,
+    and package changelogs.  Content is truncated to ``max_chars`` to avoid
+    flooding the context window.
+
+    Routed through localm.netpolicy: net_mode/net_allow/net_deny apply, every
+    redirect hop is re-validated, and private/loopback targets are refused
+    unless net_allow_private is set.
+
+    In privacy mode (``_privacy=True``) a one-line network audit message is
+    emitted to stderr before the request so the user can see outbound URLs.
+    """
     from localm.netpolicy import NetworkPolicyError, fetch_text
 
     if _privacy:
@@ -42,7 +56,12 @@ def tool_web_search(
     max_results: int = 5,
     _privacy: bool = False,
 ) -> ToolResult:
-    """Search the web and return numbered results (title, URL, snippet)."""
+    """
+    Search the web and return numbered results (title, URL, snippet).
+
+    Use fetch_url on a result URL to read the full page. Routed through
+    localm.netpolicy like fetch_url.
+    """
     from localm.netpolicy import NetworkPolicyError, format_results, web_search
 
     if _privacy:

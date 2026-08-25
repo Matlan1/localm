@@ -1,5 +1,18 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Conversation compaction for chat sessions."""
+"""
+Conversation compaction for chat sessions.
+
+When a chat history approaches the context ceiling, older turns are
+summarised by the model itself and replaced with a compact summary
+exchange, keeping the most recent turns verbatim. If summarisation fails
+for any reason (model error, empty output), the fallback is a hard trim -
+older messages are simply dropped with a visible note. Either way the
+function never raises and always returns a usable history: chat keeps
+working instead of dying at the ceiling.
+
+Used by the CLI interactive chat; the GUI implements the same protocol
+client-side against /v1/chat/completions.
+"""
 
 from __future__ import annotations
 
@@ -76,7 +89,14 @@ def compact_messages(
     messages: List[dict],
     generate: Callable[[List[dict], int], str],
 ) -> Tuple[List[dict], bool]:
-    """Summarise everything but the system prompt and the last KEEP_RECENT messages."""
+    """
+    Summarise everything but the system prompt and the last KEEP_RECENT
+    messages. Returns (new_messages, changed).
+
+    *generate(messages, max_tokens)* runs the model and returns its text.
+    Any failure inside it triggers the hard-trim fallback - this function
+    never raises.
+    """
     head, older, recent = _split(messages)
     if not older:
         return messages, False
@@ -130,7 +150,12 @@ def maybe_compact(
     generate: Callable[[List[dict], int], str],
     count_tokens: Optional[Callable[[str], int]] = None,
 ) -> Tuple[List[dict], bool]:
-    """Compact *messages* when they exceed COMPACT_RATIO of *limit_tokens*."""
+    """
+    Compact *messages* when they exceed COMPACT_RATIO of *limit_tokens*.
+
+    limit_tokens <= 0 disables auto-compaction (unlimited window).
+    Returns (messages, compacted).
+    """
     if limit_tokens <= 0:
         return messages, False
     if estimate_tokens(messages, count_tokens) < COMPACT_RATIO * limit_tokens:

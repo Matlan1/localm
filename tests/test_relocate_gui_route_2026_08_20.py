@@ -1,5 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""GET /api/models `missing`/`last_path` + POST /api/models/relocate - the GUI form of `localm relocate MODEL NEW_PATH` (PARITY-AUDIT-CLI-GUI-2026-08-19.md, CLI-only gap #5)."""
+"""GET /api/models `missing`/`last_path` + POST /api/models/relocate - the GUI
+form of `localm relocate MODEL NEW_PATH` (PARITY-AUDIT-CLI-GUI-2026-08-19.md,
+CLI-only gap #5). No route re-pointed a registry entry before this; the GUI was
+also blind to the 'missing' condition the CLI's own `localm list` already flags.
+
+SECURITY: new_path always names a location on the server's own disk (unlike a
+pull spec, which may be a remote HuggingFace repo id), so relocate is gated on
+host filesystem access exactly like /api/models/scan - see
+test_scan_workdir_route.py, whose fixture shape this file mirrors."""
 
 from pathlib import Path
 
@@ -18,7 +26,9 @@ def _gguf(p: Path) -> Path:
 
 @pytest.fixture
 def relocate_app(tmp_path, monkeypatch):
-    """Full stack (engine + GUI) on a throwaway home."""
+    """Full stack (engine + GUI) on a throwaway home. No owner key by default,
+    so a minted key's own scopes/fs_access govern what it can reach - same
+    shape as test_scan_workdir_route.py's scan_app fixture."""
     home = tmp_path / ".localm"
     monkeypatch.setenv("LOCALM_HOME", str(home))
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
@@ -63,7 +73,9 @@ def _no_models_key():
 
 
 def _host_read_write_key():
-    """models:read AND models:write AND host filesystem access - WRITE alone does not imply READ (only ADMIN/coder:full carry an implication), so a test that both lists and relocates through one key needs both."""
+    """models:read AND models:write AND host filesystem access - WRITE alone
+    does not imply READ (only ADMIN/coder:full carry an implication), so a
+    test that both lists and relocates through one key needs both."""
     from localm import auth
     return auth.create_key("host-rw", [S.MODELS_READ, S.MODELS_WRITE],
                            fs_access="host")["key"]
@@ -179,7 +191,14 @@ class TestRelocateValidation:
             assert "GGUF" in r.json()["detail"]
 
     def test_relocate_clears_missing_from_the_models_list(self, relocate_app):
-        """End-to-end: a row that reads missing=True stops reading that way after a successful relocate, through the same /api/models route."""
+        """End-to-end: a row that reads missing=True stops reading that way
+        after a successful relocate, through the same /api/models route.
+
+        Mints its key BEFORE the first GET: any_key_configured() flips the
+        server out of open/loopback mode the instant a key exists anywhere, so
+        an unauthenticated GET made AFTER minting one would 401 - not a second
+        auth boundary this test needs to prove, so it uses the one key
+        throughout instead of relying on open mode for the earlier reads."""
         import localm.model_manager as mm
         app, tmp = relocate_app
         old = tmp / "ext" / "m.gguf"          # never created - starts missing

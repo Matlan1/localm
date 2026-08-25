@@ -1,5 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""cli-2: `localm setup-embeddings` must not claim existing RAG collections 'will now use semantic search' - they stay lexical (BM25) until re-embedded."""
+"""cli-2: `localm setup-embeddings` must not claim existing RAG collections "will
+now use semantic search" - they stay lexical (BM25) until re-embedded. Memory uses
+it now; the message must state the capability and name the RAG re-embed step.
+
+The re-embed step itself was `rag add ... --embed` (re-reads the original source
+files) until `rag reembed <name>` existed (works from stored chunk text alone, no
+source files needed) - the message now points at the latter, the actual fix for
+the common case where a source file has moved, been deleted, or arrived only as
+an upload."""
 
 from click.testing import CliRunner
 
@@ -21,27 +29,22 @@ def test_setup_embeddings_message_scopes_the_rag_claim(monkeypatch, tmp_path):
 
     # The success line is still printed.
     assert "Embedding model ready" in flat
-    # The overclaim is gone: no accomplished-fact "RAG will now use semantic search".
+    # No accomplished-fact claim that RAG will now use semantic search.
     assert "RAG will now use semantic search" not in flat
     assert "Memory and RAG will now use semantic search" not in flat
     # The RAG caveat + the concrete, no-source-files-needed re-embed step are named.
     assert "rag reembed" in low
     assert ("lexical" in low) or ("re-embed" in low)
-    # The stale advice (re-reading originals, which reembed's whole point is to
-    # avoid needing) must not still be there alongside the new one.
+    # The advice to re-read originals is not present.
     assert "rag add" not in low
-    # Memory's capability is stated (it is the part that IS true now).
+    # Memory's capability is stated.
     assert "memory" in low
 
 
 # --------------------------------------------------------------------------- #
-#  NEW-RAG-DIM-NO-REEMBED (2026-08-12 follow-up): `setup-embeddings --model`  #
-#  is the third writer of embedding_model, alongside POST /api/rag/embedding  #
-#  and PATCH /v1/config - both of which already warn what a switch is about   #
-#  to invalidate BEFORE it happens instead of only in a post-switch note.     #
-#  Uses the `cli_runner` fixture (conftest.py) for real per-test isolation:   #
-#  unlike the test above, these assert on load_config() afterward, so a       #
-#  session-shared home is not good enough.                                    #
+#  `setup-embeddings --model` warns what an embedding-model switch is about   #
+#  to invalidate before it happens. Uses the `cli_runner` fixture for real    #
+#  per-test isolation: these assert on load_config() afterward.               #
 # --------------------------------------------------------------------------- #
 
 def _stub_install(monkeypatch, tmp_path, name="new-model.gguf"):
@@ -54,7 +57,8 @@ def _stub_install(monkeypatch, tmp_path, name="new-model.gguf"):
 
 
 def _make_affected_collection():
-    """A collection with real vectors under this test's isolated rag_dir(), recorded as built with 'old-model' - the thing a switch would invalidate."""
+    """A collection with real vectors under this test's isolated rag_dir(),
+    recorded as built with 'old-model' - the thing a switch would invalidate."""
     from localm.rag.store import Collection, rag_dir
     c = Collection("docs", base=rag_dir()).create()
     c._chunks = [{"source": "doc0.txt", "pos": 0, "text": "alpha"}]
@@ -111,8 +115,7 @@ class TestSetupEmbeddingsPreSwitchConfirm:
         _make_affected_collection()
 
         # No `input=` at all: if the code prompted, CliRunner would hit EOF
-        # (a different, already-covered path) rather than silently answering
-        # yes - so this also proves --yes never reaches click.confirm.
+        # rather than silently answering yes.
         result = cli_runner.invoke(setup_embeddings,
                                    ["--model", "new-model", "--yes"])
         assert result.exit_code == 0, result.output
@@ -121,11 +124,9 @@ class TestSetupEmbeddingsPreSwitchConfirm:
 
     def test_noninteractive_eof_proceeds_rather_than_aborting(
             self, cli_runner, monkeypatch, tmp_path):
-        # REG-589's shape (mirrors test_rag_reg589_repair_noninteractive.py):
-        # run from cron/CI/a script with no stdin. Unlike `rag repair` (which
-        # would DESTROY embeddings by proceeding), nothing here is destroyed -
+        # Run from cron/CI/a script with no stdin. Nothing here is destroyed -
         # a collection's chunk text and existing vectors stay on disk either
-        # way - so EOF must proceed rather than abort, and say so (rule 5).
+        # way - so EOF proceeds rather than aborts, and says so.
         from localm.cli.maintenance import setup_embeddings
         from localm.config import load_config
         _stub_install(monkeypatch, tmp_path)
@@ -140,8 +141,7 @@ class TestSetupEmbeddingsPreSwitchConfirm:
 
     def test_no_affected_collections_skips_the_report_and_prompt(
             self, cli_runner, monkeypatch, tmp_path):
-        # No collection created - nothing at risk, so this must behave
-        # exactly as before this change: one command, no prompt.
+        # No collection created: one command, no prompt.
         from localm.cli.maintenance import setup_embeddings
         from localm.config import load_config
         _stub_install(monkeypatch, tmp_path)
@@ -167,9 +167,7 @@ class TestSetupEmbeddingsPreSwitchConfirm:
 
 # --------------------------------------------------------------------------- #
 #  An unreadable memory namespace must be NAMED in the banner, not silently   #
-#  absorbed as "nothing to embed". Reproduces the CLI-layer cost of the       #
-#  backfill.py defect: pending == 0 for a root whose only namespace could not #
-#  be opened, which used to skip the whole memory block with no note at all.  #
+#  absorbed as "nothing to embed".                                            #
 # --------------------------------------------------------------------------- #
 
 class TestSetupEmbeddingsUnreadableMemoryNamespace:

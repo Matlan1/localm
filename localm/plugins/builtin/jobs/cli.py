@@ -1,5 +1,24 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""``localm job`` CLI: manage scheduled recurring jobs from the terminal."""
+"""``localm job`` CLI: manage scheduled recurring jobs from the terminal.
+
+Subcommands:
+  localm job add NAME --prompt "..." [--cron "..." | --every SECONDS]
+                                     [--coder --cwd DIR --scope GLOB --allow-shell]
+                                     [--rag --collection NAME]
+                                     [--model M] [--disabled]
+  localm job list
+  localm job show JOB_ID             full definition: schedule, prompt, cwd/
+                                     scope, allow_shell (everything `list`
+                                     leaves out)
+  localm job run JOB_ID              run a job once now (records a result)
+  localm job results JOB_ID          past run results, newest first
+  localm job remove JOB_ID
+  localm job enable JOB_ID
+  localm job disable JOB_ID
+
+The CLI mutates the same on-disk store the GUI/server use, so a running server
+picks changes up on its next scheduler tick.
+"""
 
 from __future__ import annotations
 
@@ -20,13 +39,17 @@ def _store():
 
 
 def _fmt_schedule(schedule_kind: str, schedule) -> str:
-    """One-line schedule rendering, shared so `list` and `show` never disagree on how the same job reads."""
+    """One-line schedule rendering, shared so `list` and `show` never disagree
+    on how the same job reads."""
     return (f"every {schedule}s" if schedule_kind == "interval"
             else f"cron '{schedule}'")
 
 
 def _fmt_ts(ts) -> str:
-    """Readable local timestamp for a detail view, or '-' when unset (never run / a result missing its own timing)."""
+    """Readable local timestamp for a detail view, or '-' when unset (never
+    run / a result missing its own timing). Seconds-precision, unlike
+    cli.keys._fmt_ts's minute-precision: a results listing can hold several
+    runs a minute apart and needs to tell them apart."""
     if ts is None:
         return "-"
     try:
@@ -153,7 +176,8 @@ def job_list():
 @main.command("show")
 @click.argument("job_id")
 def job_show(job_id):
-    """Show a job's full definition: schedule, prompt, cwd/scope, allow_shell - everything `list`'s one-line summary leaves out."""
+    """Show a job's full definition: schedule, prompt, cwd/scope, allow_shell -
+    everything `list`'s one-line summary leaves out."""
     job = _store().get(job_id)
     if job is None:
         click.echo(f"No such job: {job_id}", err=True)

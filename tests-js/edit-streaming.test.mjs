@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// U1: clicking "edit" while a reply is streaming corrupted the branch tree
-// (editMessage forks before the streaming reply lands). editMessage must bail
-// while chat.abort is set, like switchBranch / regenerate.
+// editMessage bails while chat.abort is set, like switchBranch and regenerate.
 
 import assert from "node:assert";
 import { test } from "node:test";
@@ -21,9 +19,8 @@ test("editMessage is a no-op while a reply is streaming", () => {
     window.__u1val = document.getElementById("chat-input").value;
     window.__u1len = conv.messages.length;
   `);
-  // Guard returned early: the composer was not loaded with the message text and
-  // the conversation was not forked/truncated. Pre-fix, editMessage set the
-  // input to "hello" and forked before returning.
+  // The composer is not loaded with the message text and the conversation is
+  // neither forked nor truncated.
   assert.equal(window.__u1val, "ORIGINAL");
   assert.equal(window.__u1len, 2);
 });

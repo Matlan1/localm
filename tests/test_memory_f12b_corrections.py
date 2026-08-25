@@ -1,5 +1,15 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""F12b regression suite (memory-audit 2026-07-02 cluster [9]): a stale user fact must be CORRECTABLE by the system, not permanently immortal."""
+"""F12b regression suite (memory-audit 2026-07-02 cluster [9]): a stale user fact
+must be CORRECTABLE by the system, not permanently immortal.
+
+Pre-fix, consolidation downgraded any UPDATE/DELETE against a source=user record to
+a silent NO_OP, so the user's own later words ("actually I moved to Munich") could
+never supersede an earlier typed fact ("I live in Berlin") - the new info was
+dropped and the stale fact stayed forever. Now a high-confidence contradiction is
+recorded as a PENDING CORRECTION the user accepts or rejects; nothing is silently
+lost and the trusted fact is never auto-overwritten by a possibly-hallucinated
+synth candidate.
+"""
 
 from __future__ import annotations
 
@@ -10,8 +20,8 @@ import pytest
 from localm.memory import MemoryRecord, MemoryStore, PendingCorrection, run_consolidation
 
 
-# Topic-clustered fake embedder (mirrors the F9 suite): location words share an
-# axis, food another, so paraphrased same-topic facts are cosine-near.
+# Topic-clustered fake embedder: location words share an axis, food another, so
+# paraphrased same-topic facts are cosine-near.
 _LOCATION = ("berlin", "munich", "ghent", "live", "lives", "moved", "city")
 _FOOD = ("tea", "coffee", "drink", "vegetarian", "meat", "eat")
 
@@ -70,8 +80,7 @@ def test_high_conf_contradiction_proposes_correction(tmp_path, allow_writes):
 
 
 def test_low_conf_contradiction_makes_no_proposal(tmp_path, allow_writes):
-    # A weak contradiction against a trusted fact is ignored (NO_OP), not surfaced,
-    # so the user is not nagged with low-confidence guesses.
+    # A weak contradiction against a trusted fact is ignored (NO_OP), not surfaced.
     s = MemoryStore("owner", "chat", root=tmp_path)
     s.add(MemoryRecord(text="User lives in Berlin", source="user"),
           embed_fn=_fake_embed)
@@ -116,8 +125,8 @@ def test_import_source_is_protected_like_user(tmp_path, allow_writes):
 
 
 def test_synth_vs_synth_still_updates_no_proposal(tmp_path, allow_writes):
-    # The F9 path is unchanged: a synth target is superseded directly (no review),
-    # because only TRUSTED facts get the propose-and-review treatment.
+    # A synth target is superseded directly (no review); only trusted facts get
+    # the propose-and-review treatment.
     s = MemoryStore("owner", "chat", root=tmp_path)
     s.add(MemoryRecord(text="User lives in Berlin", source="synth"),
           embed_fn=_fake_embed)
@@ -239,8 +248,8 @@ def test_resolve_target_gone_clears_stale_entry(tmp_path, allow_writes):
 def test_accept_aborts_and_reports_when_archive_fails(tmp_path, allow_writes,
                                                       monkeypatch):
     # If the recoverable-archive step fails, accept must NOT destroy the trusted
-    # record and must NOT report success (rule 5): the record and the pending
-    # correction stay intact so the user can retry.
+    # record and must NOT report success: the record and the pending correction
+    # both stay intact.
     s, _target = _seed_pending(tmp_path)
     cid = s.corrections()[0].id
     monkeypatch.setattr(MemoryStore, "_archive_forgotten",
@@ -254,8 +263,7 @@ def test_accept_aborts_and_reports_when_archive_fails(tmp_path, allow_writes,
 
 def test_rejected_correction_is_not_reproposed(tmp_path, allow_writes):
     # A dismissed suggestion must NOT come back every consolidation while the same
-    # contradicting session is still in the recent window (the reject route used to
-    # only clear the pending entry, so the next pass re-created it and nagged).
+    # contradicting session is still in the recent window.
     s = MemoryStore("owner", "chat", root=tmp_path)
     s.add(MemoryRecord(text="User lives in Berlin", source="user"),
           embed_fn=_fake_embed)
@@ -276,10 +284,10 @@ def test_rejected_correction_is_not_reproposed(tmp_path, allow_writes):
 
 def test_proposal_for_size_cap_evicted_target_is_not_falsely_counted(tmp_path,
                                                                      allow_writes):
-    # prune's SIZE cap can evict an old low-value trusted record; a proposal against
-    # a target the same run then evicts must not report a false `proposed` count and
-    # then be silently dropped by corrections() (memory-audit [9] is about never
-    # losing a contradiction silently). The eviction itself is surfaced separately.
+    # prune's SIZE cap can evict an old low-value trusted record; a proposal
+    # against a target the same run then evicts must not report a false proposed
+    # count and then be dropped by corrections(). The eviction is surfaced
+    # separately.
     from localm.memory.store import N_MAX
 
     s = MemoryStore("owner", "chat", root=tmp_path)

@@ -1,5 +1,38 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""scripts/check_event_loop_offload.py: the sweep for `async def` route handlers that block the event loop."""
+"""scripts/check_event_loop_offload.py: the sweep for `async def` route handlers
+that block the event loop.
+
+WHY A STATIC SWEEP EXISTS AT ALL, given this repo already has behavioural tests
+for the same class (test_embedder_event_loop_freeze.py, test_image_proxy.py,
+test_bug_report_endpoint.py): those tests each pin ONE route that somebody
+already knew about. Every instance of this class so far was found by a hang
+alarm firing on a user's machine - the GPU probes (#541), then
+POST /api/embedding/warmup, GET /api/image-proxy and GET /api/rag/embedding in
+one QA run. Nothing in the tree looked for the NEXT one, and neither coverage
+nor ruff can: the offending line executes, it is simply executing on the wrong
+thread. This is the instrument that looks.
+
+WHAT THESE TESTS PIN, and the order matters:
+
+1. It FIRES. Four synthetic trees, one per mechanism the analyzer claims to
+   detect. A gate that has never been red proves nothing, and this one has to
+   stay honest about a heuristic (see 3).
+2. It does NOT fire on correctly-offloaded code, or on a plain `def` handler
+   (which FastAPI already runs in a worker thread), or on a short-hold lock.
+   The false-positive direction is what kills a gate: an early revision of the
+   analyzer counted a nested closure as part of its parent and reported
+   GET /v1/comfy/status, which is correctly offloaded and says so in its own
+   comment. About 180 of this repo's 208 async routes flag if "any lock"
+   counts, so the bounded/unbounded split is load-bearing, not a refinement.
+3. The UNCONFIRMED marking survives. The analyzer resolves `x.method(...)` on
+   an unknown receiver by unique method name; dropping that heuristic lost a
+   real finding and trusting it invented one (`sidecar.rename` is
+   pathlib.Path.rename, matched to the CLI's `rename` command, manufacturing a
+   network call on three media routes that make none). Marked findings must
+   never gate.
+4. The real tree passes --gate. This is the recurrence guard, and it is the
+   only assertion here that a future change can trip.
+"""
 
 from __future__ import annotations
 
@@ -117,7 +150,9 @@ def register(app):
 
 
 def test_fires_through_a_helper_chain_a_grep_would_not_follow(tmp_path):
-    """The reason this is not a grep: in every real instance the blocking call was two or three hops below the handler, in a module the handler's own file does not mention."""
+    """The reason this is not a grep: in every real instance the blocking call
+    was two or three hops below the handler, in a module the handler's own file
+    does not mention."""
     mod = _load()
     root = _tree(tmp_path, {
         "helpers.py": _HELPERS,
@@ -142,7 +177,10 @@ def register(app):
 
 
 def test_a_bounded_lock_is_reported_but_does_not_gate(tmp_path):
-    """A lock whose longest hold is a short subprocess is real and is worth reporting, and it is a different severity from one held across a model load."""
+    """A lock whose longest hold is a short subprocess is real and is worth
+    reporting, and it is a different severity from one held across a model
+    load. Conflating them is what would make this gate unusable: ~46 routes in
+    the real tree reach sessions._LOCK through the auth path alone."""
     mod = _load()
     root = _tree(tmp_path, {
         "helpers.py": '''
@@ -203,7 +241,8 @@ def register(app):
 
 
 def test_does_not_fire_on_a_plain_def_handler(tmp_path):
-    """FastAPI runs a non-async handler in a worker thread itself, so a blocking call there is not a defect and must not be reported."""
+    """FastAPI runs a non-async handler in a worker thread itself, so a
+    blocking call there is not a defect and must not be reported."""
     mod = _load()
     root = _tree(tmp_path, {
         "helpers.py": _HELPERS,
@@ -220,7 +259,9 @@ def register(app):
 
 
 def test_does_not_fire_on_a_short_hold_lock(tmp_path):
-    """A dict guard held for microseconds."""
+    """A dict guard held for microseconds. Every authenticated request in the
+    real tree takes several; flagging them is the difference between a 5-row
+    report and a 180-row one."""
     mod = _load()
     root = _tree(tmp_path, {
         "helpers.py": _HELPERS,
@@ -237,7 +278,11 @@ def register(app):
 
 
 def test_a_job_callback_is_not_walked(tmp_path):
-    """The body of a function handed to jobs.start_fn runs on a job thread."""
+    """The body of a function handed to jobs.start_fn runs on a job thread.
+    POST /api/embedding/warmup calls get_embedder() inside exactly such a
+    closure and that call is correct - only the fast-path peek above it was
+    the defect. Walking into the closure would report the wrong line and hide
+    the right one."""
     mod = _load()
     root = _tree(tmp_path, {
         "helpers.py": _HELPERS,
@@ -260,7 +305,9 @@ def register(app, jobs):
 # --------------------------------------------------------------------------- #
 
 def test_an_unknown_receiver_is_reported_as_unconfirmed_and_never_gates(tmp_path):
-    """`x.fetch(...)` where x is a local of unknown type."""
+    """`x.fetch(...)` where x is a local of unknown type. Resolved by unique
+    method name, because dropping that lost a real finding - and marked, because
+    trusting it invented one."""
     mod = _load()
     root = _tree(tmp_path, {
         "helpers.py": _HELPERS,
@@ -285,13 +332,17 @@ def register(app):
 # --------------------------------------------------------------------------- #
 
 def test_the_real_tree_has_no_unoffloaded_blocking_route():
-    """The gate."""
+    """The gate. A new `async def` handler that reaches a network call or a
+    lock held across a model load fails HERE, instead of on a user's machine
+    via the hang alarm, which is how all four previous instances were found.
+
+    To land a deliberate exception, add an entry to ALLOWED in the script with
+    a reason and a tracking id."""
     mod = _load()
     rows = mod._shortest(mod.Analyzer(REPO).findings())
     gating = [f for f in rows if f.gating]
-    # Built eagerly, not as a lazy expression after the comma: this message is
-    # the ONLY thing a future reader gets, and it has to name the call chain or
-    # they are left with a route name and no idea which hop blocks.
+    # Built eagerly, not as a lazy expression after the comma, so the message
+    # names the call chain rather than only the route.
     report = []
     for f in gating:
         report.append("%s blocks the event loop via %s (%s)"
@@ -301,12 +352,15 @@ def test_the_real_tree_has_no_unoffloaded_blocking_route():
 
 
 def test_an_unparseable_file_is_surfaced_and_fails_the_gate(tmp_path):
-    """A file the analyzer cannot parse contributes nothing, so without this it would quietly turn the gate green for that file."""
+    """A file the analyzer cannot parse contributes nothing, so without this it
+    would quietly turn the gate green for that file. Found by measurement, not
+    by reasoning: a botched revert while fires-controlling this check made
+    routes/chat.py unparseable, and the gate passed on code that WAS blocking.
+    An unswept file is not a clean one."""
     mod = _load()
     root = _tree(tmp_path, {
         "helpers.py": _HELPERS,
-        # `this is not python` would have PARSED (an `is not` comparison), which
-        # is its own small lesson about writing a negative fixture. This does not.
+        # `this is not python` would PARSE as an `is not` comparison; this does not.
         "broken.py": "def register(app:\n",
         "routes.py": '''
 from localm.helpers import loaded_dim
@@ -330,7 +384,9 @@ def test_the_real_tree_parses_completely():
 
 
 def test_the_two_worked_examples_are_still_recognised_shapes():
-    """A guard against the gate passing for the WRONG reason - an analyzer that stopped seeing these routes at all would also report zero findings."""
+    """A guard against the gate passing for the WRONG reason - an analyzer that
+    stopped seeing these routes at all would also report zero findings. Both
+    are now offloaded, so they must be KNOWN as routes and CLEAN as findings."""
     mod = _load()
     analyzer = mod.Analyzer(REPO)
     routes = {m + " " + p
@@ -345,7 +401,10 @@ def test_the_two_worked_examples_are_still_recognised_shapes():
 
 
 def test_the_embedder_load_lock_is_classified_unbounded():
-    """The classification the whole report rests on. embedder._LOCK is held across an IsolatedEmbedder construction - a process spawn plus a native load, ceiling 300s - and if that stopped being computed as UNBOUNDED the gate would silently stop covering the defect it was built for."""
+    """The classification the whole report rests on. embedder._LOCK is held
+    across an IsolatedEmbedder construction - a process spawn plus a native
+    load, ceiling 300s - and if that stopped being computed as UNBOUNDED the
+    gate would silently stop covering the defect it was built for."""
     mod = _load()
     analyzer = mod.Analyzer(REPO)
     kind = analyzer.lock_kind.get("localm.inference.embedder._LOCK")

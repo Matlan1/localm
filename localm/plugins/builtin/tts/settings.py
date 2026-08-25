@@ -1,5 +1,18 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The tts plugin's own settings DATA: the shipped defaults and the voice ids."""
+"""The tts plugin's own settings DATA: the shipped defaults and the voice ids.
+
+Both live in files that belong to the plugin (the tracked ``tts.example.json``
+template and the vendored ``static/vendor/voices.json`` the picker is built
+from), and both are needed in two places: the plugin's own ``/api/tts/config``
+(what the browser loads) and the settings write surface in
+``localm.settings_schema`` (what the GUI edits). This module is the single
+reader for both, so the template is never parsed by two different code paths
+that could drift.
+
+Deliberately dependency-light (stdlib + the debug logger): ``settings_schema``
+imports it lazily from inside its helpers, so importing the core settings
+schema never pulls in the plugin package.
+"""
 
 from __future__ import annotations
 
@@ -14,7 +27,13 @@ _VOICES = _PLUGIN_DIR / "static" / "vendor" / "voices.json"
 
 
 def defaults() -> dict:
-    """Shipped defaults from the tracked template (sans documentation keys)."""
+    """Shipped defaults from the tracked template (sans documentation keys).
+
+    Returns {} if the template cannot be read. That is abnormal (it is a TRACKED
+    shipped file, so absent is as broken as corrupt), and silently returning {}
+    would hide a broken install behind the frontend's hardcoded fallbacks, so it
+    is surfaced as a warning rather than swallowed.
+    """
     try:
         data = json.loads(_TEMPLATE.read_text(encoding="utf-8"))
     except (OSError, ValueError) as e:
@@ -31,7 +50,16 @@ def defaults() -> dict:
 
 
 def voices() -> list:
-    """The shipped Kokoro voices as ``[{'id', 'label'}, ...]``, in file order."""
+    """The shipped Kokoro voices as ``[{"id", "label"}, ...]``, in file order.
+
+    The label matches the one the in-chat picker builds client-side (name,
+    language, gender, grade), so the same voice reads the same in Settings and
+    in chat.
+
+    Returns [] when the vendored list cannot be read; callers must then fall
+    back to a SHAPE check instead of an exact-membership one (a missing asset
+    must not make every voice unsettable), and this logs why.
+    """
     try:
         data = json.loads(_VOICES.read_text(encoding="utf-8"))
     except (OSError, ValueError) as e:
@@ -62,7 +90,22 @@ def voice_ids() -> list:
 
 
 def asset_root() -> Path:
-    """The static asset directory the BROWSER is served from."""
+    """The static asset directory the BROWSER is served from.
+
+    ``library`` / ``wasm_paths`` are resolved by the browser against this
+    directory (tts.js uses ``import.meta.url``, which is
+    ``/plugins/tts/tts.js``), so the validator has to check a candidate path
+    against the tree that is actually mounted. That is the INSTALLED copy under
+    the data directory (``PluginHost.mount_static`` roots at the installed
+    plugin's path), not this in-tree source: the two are kept hash-identical by
+    the builtin refresh, but a user who drops their own onnxruntime WASM folder
+    into the installed copy would otherwise be told it does not exist. (The
+    plugin now VENDORS that runtime under ``static/vendor/onnxruntime/`` and
+    defaults ``wasm_paths`` to it, so this is the override case rather than the
+    only case.) Falls back to the shipped source when the plugin is not
+    installed (so the setting can still be validated before the plugin is
+    added).
+    """
     try:
         from localm.config import home_dir
         installed = Path(home_dir()) / "plugins" / "tts" / "static"

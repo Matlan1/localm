@@ -3,8 +3,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadAppWithPages } from "./harness.mjs";
 
-// P2a: the "Pair a phone" block in Settings fetches the server-rendered key QR
-// and shows it; it hides when no key is configured (the endpoint 404s).
+// The "Pair a phone" block in Settings fetches the server-rendered key QR and
+// shows it, and hides when no key is configured and the endpoint 404s.
 
 const tick = () => new Promise((r) => setTimeout(r, 50));
 

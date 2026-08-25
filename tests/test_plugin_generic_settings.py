@@ -1,5 +1,16 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The generic settings-contribution seam: host.add_settings(), and its GET/POST /v1/plugins/<name>/settings render/save path."""
+"""The generic settings-contribution seam: host.add_settings(), and its
+GET/POST /v1/plugins/<name>/settings render/save path.
+
+Before this, add_settings(fields) appended to a list nothing ever read - a
+plugin could call it, get no error, and the fields would simply never appear
+anywhere (docs/plugins.md and docs/plugin-interop.md documented it as a real
+Host API method the whole time). This pins the real path: field-shape
+validation at register() time, aggregation across active plugins
+(PluginManager.get_all_plugin_settings), resolved-value rendering and
+validated persistence into config["plugins"][<name>], generic over widget
+rather than tied to a fixed field list the way the tts/media blocks are.
+"""
 
 import textwrap
 
@@ -22,7 +33,9 @@ def env(tmp_path, monkeypatch):
 
 
 def _make_settings_plugin(root, name, *, toml_extra=""):
-    """A synthetic plugin that contributes a small, varied set of fields: one of every widget family this generic path is meant to handle, plus one admin_only/secret pair mirroring REC-MEDIA-CMD's shape."""
+    """A synthetic plugin that contributes a small, varied set of fields:
+    one of every widget family this generic path is meant to handle, plus one
+    admin_only/secret pair mirroring REC-MEDIA-CMD's shape."""
     pdir = root / name
     pdir.mkdir(parents=True, exist_ok=True)
     (pdir / "plugin.toml").write_text(
@@ -62,7 +75,13 @@ def _bad_plugin(root, name, body):
 
 
 def _install_real_plugin(env, name="myplug"):
-    """Install the synthetic settings plugin under the REAL installed-plugins dir (plugins_dir(), inside the patched LOCALM_HOME) and mark it enabled in config - what create_app(None)'s own PluginManager (default roots) needs to load it at construction time."""
+    """Install the synthetic settings plugin under the REAL installed-plugins
+    dir (plugins_dir(), inside the patched LOCALM_HOME) and mark it enabled in
+    config - what create_app(None)'s own PluginManager (default roots) needs
+    to load it at construction time. Used only by tests that need the real
+    auth/scopes machinery create_app(None) wires up; the plain functional
+    tests above use a local PluginManager pointed at a throwaway dir instead,
+    same as test_plugin_engine.py's pattern."""
     import shutil
 
     from localm.config import update_config
@@ -258,7 +277,8 @@ def test_a_plugin_with_no_add_settings_call_contributes_nothing(env):
 
 
 def test_a_bad_add_settings_call_fails_the_load_and_is_surfaced(env):
-    """A plugin author's mistake (wrong shape) fails LOUDLY - the whole point of validating at register() time - and is recorded, not silently dropped."""
+    """A plugin author's mistake (wrong shape) fails LOUDLY - the whole point of
+    validating at register() time - and is recorded, not silently dropped."""
     from localm.plugins.engine import PluginManager
     plugins = env / "plugins"
     _bad_plugin(plugins, "broken", '''
@@ -305,9 +325,8 @@ def _fields(resp):
 def test_get_returns_no_sections_when_nothing_is_active(env):
     # In open mode every metadata GET under /v1/* additionally requires the
     # shell token (or an equivalent local-process credential) as a CORS
-    # defense-in-depth (http_server.py's is_metadata_get gate) - independent of
-    # require_scope's own open-mode pass-through. Mirrors
-    # test_tts_settings_endpoint.py's `client` fixture.
+    # defense-in-depth (http_server.py's is_metadata_get gate), independent of
+    # require_scope's own open-mode pass-through.
     from localm.inference.http_server import create_app
     app = create_app(None)
     with TestClient(
@@ -383,14 +402,18 @@ def test_post_404s_for_an_unknown_or_inactive_plugin(client_with_plugin):
 
 
 def _bulk_fields(resp, plugin="myplug"):
-    """Extract {key: field} for one plugin's section out of a GET /v1/plugins/settings response (the bulk list shape - distinct from _field_list(), which reads a single-plugin POST response)."""
+    """Extract {key: field} for one plugin's section out of a GET
+    /v1/plugins/settings response (the bulk list shape - distinct from
+    _field_list(), which reads a single-plugin POST response)."""
     assert resp.status_code == 200, resp.text
     sections = {s["plugin"]: s for s in resp.json()["plugins"]}
     return {f["key"]: f for f in sections[plugin]["fields"]} if plugin in sections else {}
 
 
 def test_get_and_post_require_config_scopes_not_the_plugins_own_scope(env):
-    """The reason this lives on the core routes and not the plugin's own router: a key that merely grants 'may use myplug' must not be able to rewrite its settings - same reasoning as the tts/media settings routes."""
+    """The reason this lives on the core routes and not the plugin's own
+    router: a key that merely grants 'may use myplug' must not be able to
+    rewrite its settings - same reasoning as the tts/media settings routes."""
     from localm import auth
     from localm.inference.http_server import create_app
 

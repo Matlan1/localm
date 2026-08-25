@@ -1,5 +1,31 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""REG-569: a symlinked FILE inside an added folder must still be indexed."""
+"""REG-569: a symlinked FILE inside an added folder must still be indexed.
+
+_walk_files replaced rglob('*') to stop a Windows junction loop hanging the
+folder index (B3). rglob follows NTFS junctions, which report is_symlink()==False,
+so pathlib's own loop guard misses them and a self-referential junction spins
+until the path overflows. The replacement is correct for that, but it skips
+EVERY symlink/reparse entry - including a symlink that resolves to a plain FILE.
+
+That is a silent regression, and the walk's own comment admitted it ("files are
+skipped quietly"). Pre-fix, `p.rglob('*')` + `f.is_file()` followed a
+symlink-to-file, so it WAS indexed. A docs folder that aggregates links to files
+elsewhere (docs/spec.pdf -> /projects/x/spec.pdf) is an extremely common layout;
+post-fix the user sees "indexed N chunks" and never learns those documents were
+dropped. A query for that content then returns nothing. Rule 5: no log, no say()
+line, no reason surfaced.
+
+The DoS argument does NOT extend to files. A cycle needs a DIRECTORY to recurse
+into; a file is a terminal node, so following a link to one cannot loop. Escape
+is handled a layer up: _expand's confine loop already rejects "symlinks escaping
+an allowed folder" when a policy is given, and with no policy (the local CLI) the
+operator is unconfined by design.
+
+The added sweep (tests/test_rag_robustness_sweep.py) only exercised the malicious
+side - junction loops / self-referential reparse points - so nothing covered the
+benign, previously-working case. Needs a real symlink on disk; a mock-based test
+stays green either way.
+"""
 
 from __future__ import annotations
 
@@ -12,7 +38,10 @@ from localm.rag.store import _walk_files
 
 
 def _symlink_or_skip(src: Path, dst: Path, **kw) -> None:
-    """Create a real symlink, or skip."""
+    """Create a real symlink, or skip. On Windows this needs Developer Mode or
+    SeCreateSymbolicLinkPrivilege; where it is genuinely unavailable this is a
+    platform constraint, not a masked product failure (the assertions below are
+    about the walk, and cannot be expressed without a real link on disk)."""
     try:
         os.symlink(src, dst, **kw)
     except (OSError, NotImplementedError, AttributeError) as e:
@@ -58,7 +87,9 @@ class TestSymlinkedFilesAreIndexed:
 
 
 class TestLoopSafetyIsPreserved:
-    """NEGATIVE CASES: the B3 DoS guard must survive the fix."""
+    """NEGATIVE CASES: the B3 DoS guard must survive the fix. Without these, a
+    'fix' that simply followed every symlink would pass the tests above while
+    re-opening the junction-loop hang."""
 
     def test_symlinked_directory_is_still_not_followed(self, tmp_path):
         outside = tmp_path / "outside"

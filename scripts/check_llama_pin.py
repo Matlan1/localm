@@ -1,6 +1,47 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Report how far localm's pinned llama.cpp build has fallen behind upstream."""
+"""Report how far localm's pinned llama.cpp build has fallen behind upstream.
+
+``localm/setup_llama.py`` installs ``_PINNED_TAG``, one release confirmed to load
+AND generate, rather than whatever upstream published most recently. That removes
+the failure where a third party's release breaks every fresh install with no
+localm change - and introduces the opposite one, which is why this script exists:
+**a pin nobody advances fails a user as surely as tracking latest does, just more
+slowly.** Both halves of that were required, so both halves need a mechanism.
+
+Measured while the pin was being written: the resolved upstream tag moved b10373
+-> b10375 within hours. A pin advanced only when someone happens to remember will
+rot, and "staying close to upstream" is a requirement here rather than an
+aspiration.
+
+This is a MAINTENANCE SIGNAL, not a build gate, and the same shape as
+scripts/check_comfyui_pin.py for the other pinned dependency in this tree. It
+always exits 0. A stale pin is not something a PR can fix on its own: advancing
+it means running scripts/confirm_llama_runtime.py against the newer build on real
+hardware and reading the result, which is a person's decision, deliberately.
+
+READ THE HONEST LIMIT OF THIS SIGNAL BEFORE RELYING ON IT. It runs from the
+weekly CI cron, and that cron is measured to fire unreliably (see the comment on
+the schedule block in .github/workflows/ci.yml: five of six eligible Mondays
+never fired). So a quiet week is NOT evidence the pin is current - it is at least
+as likely to be evidence that nothing ran. The stronger version of this, which
+needs a decision this script does not make, is a job with write permission that
+opens a PR bumping the constant once it has confirmed the newer build: an open PR
+is visible in a way a green log line is not. See the U1 note in dev-notes/ for
+what that would take.
+
+Fails soft on the API: unreachable, rate-limited, or a malformed response all
+print a clearly-labelled "could not check" and exit 0 - never a false "up to
+date". That distinction (blocked vs. current) is the whole point; a currency
+check that reports currency it did not verify is worse than no check.
+
+Usage:
+    python scripts/check_llama_pin.py
+    python scripts/check_llama_pin.py --pinned b10361   # sanity-check a hypothetical
+
+Stdlib only (urllib + re + json), so the CI job running it does not even need
+localm installed - same as check_comfyui_pin.py.
+"""
 
 from __future__ import annotations
 
@@ -15,17 +56,18 @@ from pathlib import Path
 _REPO = "ggml-org/llama.cpp"
 _SETUP_PATH = Path(__file__).resolve().parent.parent / "localm" / "setup_llama.py"
 _PIN_RE = re.compile(r'^_PINNED_TAG\s*=\s*"([^"]+)"', re.M)
-# Upstream's build tags are "b" plus a monotonically increasing build number.
-# Parsed to an int rather than compared as strings, for the same reason
-# check_comfyui_pin.py parses versions: "b9870" > "b10375" lexically, since '9'
-# sorts after '1', so a string comparison reports a NEWER pin as behind - and it
-# starts doing so silently at the exact moment the digit count changes.
+# Upstream build tags are "b" plus a monotonically increasing build number.
 _TAG_RE = re.compile(r"^b(\d+)$")
 _PER_PAGE = 100
 
 
 def pinned_tag(path: Path = _SETUP_PATH) -> str:
-    """_PINNED_TAG out of setup_llama.py, BY TEXT rather than by importing it."""
+    """_PINNED_TAG out of setup_llama.py, BY TEXT rather than by importing it.
+
+    Importing would drag in click, rich and the rest of localm, which this script
+    is deliberately independent of so the CI job can run it with nothing
+    installed. It also keeps the script usable when the tree it is reading does
+    not import cleanly, which is exactly when a maintenance signal is wanted."""
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as e:
@@ -45,7 +87,8 @@ def _build_number(tag: str):
 
 
 def upstream_tags() -> "tuple[list, str]":
-    """(tags newest-first, error)."""
+    """(tags newest-first, error). Never raises: a failed lookup is reported as
+    an error string, never as an empty list that would read as "nothing newer"."""
     url = f"https://api.github.com/repos/{_REPO}/releases?per_page={_PER_PAGE}"
     req = urllib.request.Request(
         url, headers={"Accept": "application/vnd.github+json",
@@ -64,10 +107,7 @@ def upstream_tags() -> "tuple[list, str]":
         if not isinstance(rel, dict) or rel.get("draft") or rel.get("prerelease"):
             continue
         tag = rel.get("tag_name")
-        # Same asset filter setup_llama._recent_tags applies: a release is
-        # published before its ~25 archives finish uploading, and a tag with no
-        # assets is not something anyone could install, so counting it as
-        # "behind" would overstate the gap.
+        # Skip releases whose assets have not finished uploading.
         if isinstance(tag, str) and _build_number(tag) is not None and rel.get("assets"):
             tags.append(tag)
     if not tags:

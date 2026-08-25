@@ -1,5 +1,19 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Plugin contract (v1): the interface every localm plugin implements, plus the host API the engine provides to it."""
+"""
+Plugin contract (v1): the interface every localm plugin implements, plus the
+host API the engine provides to it.
+
+This is a SUPERSET of the legacy CLI manifest in localm/plugins/loader.py. A
+plugin may still expose a Click command (``cli_entry = "module:attr"``), but it
+can also contribute a *server surface* via ``register(host)``: routes, a GUI
+tab, a settings section, and a capability scope. Built-in (in-tree) plugins and
+third-party (<data dir>/plugins) plugins use the same contract. Chat is the
+canonical built-in, *protected* plugin (cannot be disabled or uninstalled).
+
+Phase 0 defines the interfaces only. The engine (PluginManager) and the concrete
+Host land in Phase 2; loader.py is extended to populate PluginSpec in Phase 2;
+the existing features migrate onto register() in Phase 3.
+"""
 
 from __future__ import annotations
 
@@ -62,7 +76,25 @@ class ModelRoleDescriptor:
 
 @dataclass
 class PluginSettingField:
-    """One field a plugin contributes to its own settings section via ``host.add_settings()``."""
+    """One field a plugin contributes to its own settings section via
+    ``host.add_settings()``.
+
+    Stored under ``config["plugins"][<plugin>][key]``, read/written through
+    the same ``plugin_config()`` / ``save_plugin_config()`` block the plugin
+    already uses for everything else - GET/POST ``/v1/plugins/<name>/settings``
+    is the generic write surface, and the GUI renders each field with the same
+    per-widget control the core settings form and the tts/media sections
+    already use. ``widget`` must be one of ``localm.settings_schema.Widget``'s
+    values (import it from there rather than hardcoding the strings, so a
+    typo is caught at ``register()`` time instead of silently never
+    rendering). This is the seam ``docs/plugin-interop.md`` maps Open WebUI's
+    ``Valves`` onto.
+
+    ``default`` is shown/used only until the user (or a config import) sets
+    an explicit value in the plugin's own block - it is never written to disk
+    by itself. A blank/None save clears an override back to it, exactly like
+    the tts plugin's own settings block.
+    """
     key: str
     widget: str
     label: str
@@ -120,7 +152,9 @@ class PluginSpec:
 
 @runtime_checkable
 class Host(Protocol):
-    """The API the engine hands a plugin at register() time."""
+    """The API the engine hands a plugin at register() time. The plugin attaches
+    itself through this object and never imports the app or global config
+    directly - which is what lets a plugin be loaded/unloaded at runtime."""
 
     api_version: int
 
@@ -145,19 +179,55 @@ class Host(Protocol):
     def audit(self, event: str, data: dict) -> None: ...
     def browse_dirs(self, path: str) -> dict: ...         # server-side folder picker
     def register_model_role(self, descriptor: ModelRoleDescriptor) -> None:
-        """Declare a model slot this plugin needs, by registry ``model_type``."""
+        """Declare a model slot this plugin needs, by registry ``model_type``.
+
+        ``descriptor.model_type`` must be one of the registry's ``MODEL_TYPES``;
+        anything else raises here, at ``register()`` time, rather than surfacing
+        later as a role that silently matches nothing. ``plugin_name`` is stamped
+        from this plugin's own spec, so a descriptor cannot claim another
+        plugin's roles. The host drops them with everything else when the plugin
+        is disabled or uninstalled.
+
+        This is a DECLARATION, not an allocation: nothing is reserved or loaded,
+        and a user's choice is never restricted to the declared type. What reads
+        the declarations is ``GET /api/models/roles`` and the media plugins'
+        model picker, which joins them to the active ComfyUI workflow's slots and
+        to the registry's own models of each type (``plugins/media_roles.py``).
+        See docs/plugins.md, "Model roles"."""
         ...
 
 
     def register_chat_hook(self, phase: str, fn: Any, *,
                            priority: int = 0) -> None:
-        """Register a transform run on every ``/v1/chat/completions`` turn."""
+        """Register a transform run on every ``/v1/chat/completions`` turn.
+
+        *phase* is one of:
+          - ``"inlet"``  - ``fn(messages, ctx) -> messages`` (sync or async),
+            run before token counting and inference.
+          - ``"stream"`` - ``fn(token, ctx) -> token`` (SYNC; per streamed text
+            piece on the hot path - an async fn is skipped).
+          - ``"outlet"`` - ``fn(text, messages, ctx) -> text`` (sync or async),
+            run on the final reply.
+
+        Returning None from a hook keeps the prior value (mutate-in-place is
+        fine). Lower *priority* runs first; ties keep registration order. A hook
+        that raises is logged and skipped, never breaking the turn. The engine
+        removes this plugin's hooks automatically on disable/uninstall.
+
+        Hooks see scrubbed content text, not model control markers. In a
+        streaming turn the outlet runs after all chunks have been sent (for
+        record/side-effects only); use a stream hook to rewrite streamed output.
+        """
         ...
 
 
 @runtime_checkable
 class Plugin(Protocol):
-    """What a plugin module/object exposes. ``register`` / ``unregister`` are required."""
+    """What a plugin module/object exposes. ``register`` / ``unregister`` are
+    required. Optional lifecycle hooks: ``on_install`` (called once at install),
+    ``on_uninstall(delete_data)`` (called at uninstall), and ``on_first_use``
+    (called once the FIRST time the plugin is loaded/activated, persisted so it
+    never re-fires on a later server start) are invoked if present."""
 
     def register(self, host: Host) -> None: ...
     def unregister(self) -> None: ...

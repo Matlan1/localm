@@ -1,5 +1,57 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""LM-DA-044/LM-DA-027: no THIRD generation of a bare ``chmod(..., 0o600)`` locking down a secret file, bypassing ``config.restrict_file_perms``."""
+"""LM-DA-044/LM-DA-027: no THIRD generation of a bare ``chmod(..., 0o600)``
+locking down a secret file, bypassing ``config.restrict_file_perms``.
+
+``config.restrict_file_perms`` (config.py:749) exists precisely because a bare
+POSIX ``os.chmod(path, 0o600)`` is a documented no-op on Windows
+(config.py:768-769, tls.py's own former comment) - it leaves the file
+inheriting the data directory's ACL (commonly ``BUILTIN\\Users`` read) instead
+of being restricted to the current user. Three writers drifted onto the bare
+form before this test existed: ``tls._write_private`` (the TLS CA and leaf
+PRIVATE KEYS - LM-DA-044), and the token-bearing registry writers
+``instances.register_instance``/``instances.set_mode`` and
+``gpu_registry.write_entry`` (LM-DA-027, folded into LM-DA-044). Each was a
+separate incident because ``config.py``'s own docstring documented the helper
+and that did not stop a fourth site from reaching for the familiar bare
+pattern instead - "one implementation so a fourth caller cannot get a weaker
+fourth variant" held only by convention. This test makes that convention
+mechanical: any NEW bare ``chmod(..., 0o600)`` under ``localm/`` fails here
+instead of shipping as a silent fourth (now fifth) instance.
+
+Deliberately NOT "no module may call os.chmod with 0o600" as a lint rule
+against the exact call site config.restrict_file_perms itself makes -
+excluded below because it passes 0o600 as its *mode* default, a `Name` node,
+never a literal `Constant` at the call site (the AST scan already cannot see
+it; nothing to allowlist).
+
+If you land a new site here, EITHER route it through
+``config.restrict_file_perms`` (the common case) OR add it to the allowlist
+below with a review comment proving the file carries no secret - never widen
+the scan to stop noticing it.
+
+  localm/bugreport.py::save_report   its ``path.chmod(0o600)`` on the saved
+                             bug-report markdown. Reviewed: the module
+                             docstring and the site's own why-comment both
+                             state the report deliberately carries NO secrets
+                             (no API key, env, config secrets, or chat
+                             content) - the 0600 here is multi-user-box
+                             world-readability hygiene, not credential
+                             protection, so a Windows no-op degrades it to
+                             "as readable as anything else in the data dir",
+                             not to "a leaked secret".
+
+THE ALLOWLIST IS KEYED ON THE ENCLOSING FUNCTION, NOT ON A LINE NUMBER, and
+that is load-bearing rather than cosmetic. It was keyed on a line when it was
+written (``localm/bugreport.py``, 887) and it DETACHED: bugreport.py grew, the
+byte-identical call and its why-comment moved to line 962, and this test went
+RED ON MASTER reporting an "unreviewed" site that was the reviewed one all
+along. A pin that reports a defect every time an unrelated edit lands above it
+is a pin people learn to re-type, and re-typing it is how a genuinely new
+fourth site would get waved through on the assumption that it had drifted too.
+Same discipline the CodeQL dispositions in this repo already use for the same
+reason. A function RENAME still detaches, which is correct - that is a change
+worth re-reading the review comment for.
+"""
 
 from __future__ import annotations
 
@@ -17,7 +69,11 @@ _REVIEWED_SITES = {
 
 
 def _enclosing_qualnames(tree: ast.AST):
-    """Map every ``ast.Call`` in *tree* to the dotted name of the def/class it sits inside (``'<module>'`` for a call at module level)."""
+    """Map every ``ast.Call`` in *tree* to the dotted name of the def/class it
+    sits inside (``"<module>"`` for a call at module level).
+
+    ``ast.walk`` alone cannot answer this: it flattens the tree, so a node
+    knows its own line but not its owner."""
     found: list[tuple[ast.Call, str]] = []
 
     def visit(node: ast.AST, prefix: str) -> None:
@@ -36,7 +92,14 @@ def _enclosing_qualnames(tree: ast.AST):
 
 
 def _bare_chmod_0600_sites(root: pathlib.Path):
-    """Every ``<expr>.chmod(...)`` call under *root* whose arguments include a literal ``0o600`` - positional or keyword (``mode=0o600``)."""
+    """Every ``<expr>.chmod(...)`` call under *root* whose arguments include a
+    literal ``0o600`` - positional or keyword (``mode=0o600``). AST, not grep,
+    so a comment or docstring mentioning ``0o600`` is never mistaken for a
+    call, and a call passing a *variable* (e.g. ``restrict_file_perms``'s own
+    ``os.chmod(path, mode)``) is never mistaken for the literal.
+
+    Reported as (path, enclosing qualname) - see the module docstring for why
+    not (path, line)."""
     hits = []
     for path in sorted(root.rglob("*.py")):
         try:
@@ -54,7 +117,7 @@ def _bare_chmod_0600_sites(root: pathlib.Path):
 
 
 # --------------------------------------------------------------------------- #
-#  Fires-control for the instrument, run BEFORE trusting its clean result      #
+#  The scanner fires on a synthetic bare chmod                                 #
 # --------------------------------------------------------------------------- #
 
 def test_the_scan_detects_a_planted_os_chmod_call():
@@ -68,7 +131,8 @@ def test_the_scan_detects_a_planted_os_chmod_call():
 
 
 def test_the_scan_detects_a_planted_path_chmod_call():
-    """``Path.chmod(0o600)`` is a real second spelling (bugreport.py uses it), not covered by matching only ``os.chmod``."""
+    """``Path.chmod(0o600)`` is a real second spelling (bugreport.py uses it),
+    not covered by matching only ``os.chmod``."""
     planted = ast.parse("path.chmod(0o600)\n")
     hits = [n for n in ast.walk(planted)
             if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
@@ -89,7 +153,11 @@ def test_the_scan_detects_a_planted_keyword_mode_call():
 
 
 def test_a_different_mode_or_a_variable_is_not_flagged():
-    """0o700 (directory lockdown - tls.py/instances.py/gpu_registry.py all still chmod their run/tls dirs to 0700 directly, out of this finding's scope) and a *variable* mode (restrict_file_perms's own implementation) must not be flagged, or this test would fail on legitimate code the moment it is written."""
+    """0o700 (directory lockdown - tls.py/instances.py/gpu_registry.py all
+    still chmod their run/tls dirs to 0700 directly, out of this finding's
+    scope) and a *variable* mode (restrict_file_perms's own implementation)
+    must not be flagged, or this test would fail on legitimate code the
+    moment it is written."""
     planted = ast.parse(
         "os.chmod(path, 0o700)\n"
         "os.chmod(path, mode)\n"
@@ -104,7 +172,17 @@ def test_a_different_mode_or_a_variable_is_not_flagged():
 
 def test_the_scan_reports_the_enclosing_function_and_survives_a_line_shift(
         tmp_path):
-    """Fires-control for the REAL scanner, and the regression guard for the detachment described in the module docstring."""
+    """Fires-control for the REAL scanner, and the regression guard for the
+    detachment described in the module docstring.
+
+    The three planted tests above re-apply the predicate by hand, so they are
+    blind to a change in ``_bare_chmod_0600_sites`` itself - they would stay
+    green if it stopped scanning entirely. This one drives the actual function.
+
+    The second half is the point: padding the file shifts every line and must
+    not change the reported sites. Against the previous line-keyed scanner this
+    assertion fails, which is exactly what happened on master.
+    """
     root = tmp_path / "localm"
     root.mkdir()
     body = (
@@ -139,7 +217,10 @@ def test_the_scan_reports_the_enclosing_function_and_survives_a_line_shift(
 # --------------------------------------------------------------------------- #
 
 def test_every_bare_chmod_0600_is_a_reviewed_site():
-    """A NEW (unreviewed) hit is a candidate fourth-generation instance of the LM-DA-044/LM-DA-027 class - route it through config.restrict_file_perms, or review it and extend _REVIEWED_SITES with the same rigor as the module docstring above."""
+    """A NEW (unreviewed) hit is a candidate fourth-generation instance of the
+    LM-DA-044/LM-DA-027 class - route it through config.restrict_file_perms,
+    or review it and extend _REVIEWED_SITES with the same rigor as the module
+    docstring above. Never widen this test to stop noticing it."""
     root = pathlib.Path(_config.__file__).resolve().parent
     hits = set(_bare_chmod_0600_sites(root))
 

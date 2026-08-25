@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Tests for localm.plugins.coder.memory."""
+"""Tests for localm.plugins.coder.memory"""
 
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -134,12 +134,8 @@ def test_default_memory_file(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-#  Injection budget (work item D3 / memory-audit finding 28)
-#
-#  Project memory and user instructions are paid on EVERY turn and cannot be
-#  recovered by compaction (_compact_history rewrites the message list, never the
-#  system prompt), so both are capped. The cap must never be silent: the model
-#  gets an in-band notice and the user gets a warning naming the file.
+#  Injection budget: project memory and user instructions are capped, with an
+#  in-band notice to the model and a warning naming the file.
 # --------------------------------------------------------------------------- #
 
 def _oversized(n: int = _MAX_MEMORY_CHARS * 2) -> str:
@@ -174,7 +170,7 @@ def test_oversized_memory_is_capped(tmp_path):
 
     # Bounded: the whole file did NOT go into the prompt.
     assert len(out) < len(raw)
-    # The budget is respected apart from the notice we deliberately append.
+    # The budget is respected apart from the appended notice.
     assert len(out) <= _MAX_MEMORY_CHARS + 200
     # It still starts with the real content, so the useful part survives.
     assert out.startswith("# Project Memory")
@@ -207,7 +203,8 @@ def test_oversized_memory_warns_the_user(tmp_path):
 
 
 def test_notice_and_warning_agree_on_the_number(tmp_path):
-    """Two honest numbers that disagree still erode trust, so the in-band notice and the user warning must derive the omitted count from the same split."""
+    """Two honest numbers that disagree still erode trust, so the in-band notice
+    and the user warning must derive the omitted count from the same split."""
     raw = _oversized()
     (tmp_path / "LOCALCODER.md").write_text(raw, encoding="utf-8")
 
@@ -220,7 +217,8 @@ def test_notice_and_warning_agree_on_the_number(tmp_path):
 
 
 def test_capping_keeps_whole_lines(tmp_path):
-    """A cap that slices mid-word can invert a bullet's meaning, so cut on a line boundary when one is available."""
+    """A cap that slices mid-word can invert a bullet's meaning, so cut on a
+    line boundary when one is available."""
     (tmp_path / "LOCALCODER.md").write_text(_oversized(), encoding="utf-8")
 
     body = load_memory(tmp_path).split("\n\n[...")[0]
@@ -229,7 +227,8 @@ def test_capping_keeps_whole_lines(tmp_path):
 
 
 def test_unreadable_memory_file_is_reported_not_swallowed(tmp_path):
-    """A file that EXISTS but cannot be read must not look like 'no memory' (AGENTS.md rule 5: do not collapse absent and corrupt into one silent path)."""
+    """A file that EXISTS but cannot be read must not look like "no memory"
+    (AGENTS.md rule 5: do not collapse absent and corrupt into one silent path)."""
     (tmp_path / "LOCALCODER.md").write_text("- something important\n", encoding="utf-8")
 
     def boom(*a, **kw):
@@ -282,7 +281,8 @@ def test_absent_instructions_are_silent(tmp_path):
 
 
 def test_system_flag_override_is_capped_too(tmp_path):
-    """--system bypasses the file loader, so it needs the same bound or the documented way to set instructions stays unbounded."""
+    """--system bypasses the file loader, so it needs the same bound or the
+    documented way to set instructions stays unbounded."""
     raw = "Do the thing carefully.\n" * 300
 
     out = cap_user_instructions(raw)
@@ -301,12 +301,8 @@ def test_normal_system_flag_override_is_untouched(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-#  End-to-end through a real Agent.
-#
-#  The functions above are only half the fix: the cap is worthless if the agent
-#  does not actually inject the capped text, and the honesty half is worthless if
-#  the warning never reaches a human. These drive a real Agent (real load_memory,
-#  not a patched one) and assert on the prompt it really builds.
+#  End-to-end through a real Agent: the capped text is injected into the
+#  prompt it really builds, and the warning reaches the human.
 # --------------------------------------------------------------------------- #
 
 def _make_agent(tmp_path):
@@ -323,7 +319,12 @@ def _make_agent(tmp_path):
 
 
 def _memory_warnings(warn) -> str:
-    """Just the print_warning calls that are about the memory file."""
+    """Just the print_warning calls that are about the memory file.
+
+    Agent startup legitimately warns about other things (MCP servers, plugins,
+    skills that failed to register), so asserting on "no warnings at all" would
+    be testing the wrong thing and would break for unrelated reasons.
+    """
     return " ".join(str(c) for c in warn.call_args_list
                     if "LOCALCODER.md" in str(c) or "system.md" in str(c))
 
@@ -336,8 +337,6 @@ def test_agent_prompt_is_bounded_and_user_is_warned(tmp_path):
     prompt = agent._system_prompt
 
     # The whole file did NOT reach the prompt - only the capped version did.
-    # (Comparing len(prompt) to len(raw) would be wrong: the prompt also carries
-    # the ~7650-char base instructions, so it exceeds the memory file either way.)
     assert raw.strip() not in prompt
     injected = load_memory(tmp_path)
     assert injected in prompt
@@ -361,7 +360,8 @@ def test_agent_injects_normal_memory_whole_and_stays_quiet(tmp_path):
 
 
 def test_agent_warns_once_more_after_remember_pushes_it_over(tmp_path):
-    """/remember is how the file grows, so the warning must fire on that path too - not only at session start."""
+    """/remember is how the file grows, so the warning must fire on that path
+    too - not only at session start."""
     (tmp_path / "LOCALCODER.md").write_text("- small\n", encoding="utf-8")
     agent, warn = _make_agent(tmp_path)
     assert _memory_warnings(warn) == ""       # quiet while it is small

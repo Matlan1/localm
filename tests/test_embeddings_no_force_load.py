@@ -1,5 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""/v1/embeddings must not force-load the chat model (Antigravity-audit MED-13)."""
+"""/v1/embeddings must not force-load the chat model (Antigravity-audit MED-13).
+
+The embeddings endpoint calls get_engine(req.model), which LOADS the model via
+switch_engine (with eviction). But a GGUF backend (can_embed=False, the default
+runtime) embeds via a small DEDICATED embedder and never needs the multi-GB chat
+model resident - so loading it (and, under VRAM pressure, evicting the active
+chat model) is pure waste.
+"""
 
 import pytest
 from fastapi.testclient import TestClient

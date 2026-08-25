@@ -1,5 +1,32 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""localm-managed ComfyUI: STAGE S2 provisioning (the COPY path)."""
+"""
+localm-managed ComfyUI: STAGE S2 provisioning (the COPY path).
+
+S1 (managed_comfy.py) decided WHERE a managed ComfyUI lives and how routing picks
+it; it deliberately provisioned nothing. This module builds one, by REPLICATING a
+user's existing ComfyUI stack (design decisions 2 + 3):
+
+  1. Read the user's ComfyUI repo state: its git commit when comfy_workdir is a git
+     checkout (else a version marker), plus a pip-freeze of THEIR venv (which pins
+     the exact torch build via its local version label).
+  2. Provision localm's managed ComfyUI under <LOCALM_HOME>/comfyui: clone that same
+     commit, create a FRESH localm venv, and pip-install the SAME versions into it.
+     We do NOT byte-copy the user's venv - venvs are not portable (absolute paths in
+     pyvenv.cfg / Scripts launchers, platform wheels).
+  3. Custom nodes are copied ONLY when the user opts in (decision 3): a clean localm
+     ComfyUI is a legitimate want.
+  4. Models are shared via S1's extra_model_paths.yaml (decision 9): the managed
+     ComfyUI sees the user's models dir AND localm's managed models dir, no copy.
+
+The user's own ComfyUI is READ ONLY here - cloned/frozen, never modified. When no
+usable user ComfyUI exists, this module is not used: the setup dispatcher
+(managed_comfy_fresh.setup_managed_comfy) runs the FRESH hardware-matched install
+(stage S3, managed_comfy_fresh.py) instead.
+
+Not built here (later stages): S4 version pin + localm patch set + `localm comfy
+update`, S5 GUI button / bug re-offer (the S3 fresh install lives in
+managed_comfy_fresh.py; the S5 doctor hint already shipped).
+"""
 
 from __future__ import annotations
 
@@ -21,7 +48,23 @@ from localm.media.comfy_patches import apply_patches as _apply_localm_patches
 
 
 class ProgressEvent(str):
-    """A best-effort provisioning progress update."""
+    """A best-effort provisioning progress update.
+
+    IS the human-readable line every existing sink already treats it as (isinstance,
+    equality, formatting, and a markup-off ``rich`` render all just work - verified
+    live) - so widening this never breaks a caller that only ever wanted the text.
+    When an update corresponds to a discrete, countable step it ALSO carries the
+    structured facts that line was built from: ``phase`` (a short machine key, e.g.
+    "clone", "custom_nodes"), and, for a counted step, ``done``/``total``/``unit``. A
+    consumer that wants state reads these directly - it must never regex them back out
+    of the text (the second-derivation trap: a display string and a hand-rolled parse
+    of it diverge in exactly the case the formatting existed for).
+
+    ``pct`` is deliberately NOT carried here: it is a derived value, and computing it
+    in a second place is the same divergence risk one layer down. A future consumer
+    that wants a percentage derives it itself (e.g. via ``Job.progress``, which already
+    owns that arithmetic) from ``done``/``total``, once, in one place.
+    """
 
     def __new__(cls, line: str, *, phase: Optional[str] = None,
                done: Optional[int] = None, total: Optional[int] = None,
@@ -73,7 +116,8 @@ class UserComfyStack:
 
 @dataclass
 class ProvisionResult:
-    """Outcome of a provision attempt. ``ok`` is True only when the managed ComfyUI ended up actually installed (main.py + venv present)."""
+    """Outcome of a provision attempt. ``ok`` is True only when the managed ComfyUI
+    ended up actually installed (main.py + venv present)."""
     ok: bool
     status: str = ""             # "copied" | "exists" | "error"
     message: str = ""
@@ -89,7 +133,11 @@ class ProvisionResult:
 # --------------------------------------------------------------------------- #
 
 def _emit(cb: ProgressCb, event: str | ProgressEvent) -> None:
-    """Hand *event* to *cb*. *event* may be a plain ``str`` (a raw subprocess line, or any other caller with no structured facts to add - it becomes a bare ``ProgressEvent`` with phase/done/total/unit all None) or an already-built ``ProgressEvent``."""
+    """Hand *event* to *cb*. *event* may be a plain ``str`` (a raw subprocess line, or
+    any other caller with no structured facts to add - it becomes a bare
+    ``ProgressEvent`` with phase/done/total/unit all None) or an already-built
+    ``ProgressEvent``. Best-effort per the module contract above: a raising sink must
+    never abort the provision it is merely reporting on."""
     if cb is None:
         return
     if not isinstance(event, ProgressEvent):
@@ -106,12 +154,47 @@ def _tail(text: str, limit: int = 600) -> str:
 
 
 def pip_cache_dir() -> Path:
-    """localm's OWN pip cache, inside the data dir (rule 4: self-contained)."""
+    """localm's OWN pip cache, inside the data dir (rule 4: self-contained).
+
+    A cache rather than ``--no-cache-dir``: the fresh path installs torch and the copy
+    path replicates the user's whole freeze (their exact torch build), so the bytes are
+    multi-GB. Without a cache, every re-provision (remove + setup again, a retry after a
+    failed install) re-downloads all of it. The cost of keeping it is disk INSIDE the
+    data dir, where it is visible, contained, and removed with the data dir - which is
+    the point. Delegates to ``config.pip_cache_dir()`` so the pip-cache location has ONE
+    definition shared with the other localm-driven pip subprocesses (plugins/deps.py,
+    setup_llama.py)."""
     return config.pip_cache_dir()
 
 
 def _isolated_env() -> dict:
-    """The environment for a subprocess that runs Python against the USER's venv or the freshly-created managed venv - never localm's own ``PYTHONPATH``, and never the ambient pip cache."""
+    """The environment for a subprocess that runs Python against the USER's venv or
+    the freshly-created managed venv - never localm's own ``PYTHONPATH``, and never the
+    ambient pip cache.
+
+    PIP_CACHE_DIR: provisioning shells out to pip in the MANAGED ComfyUI's own venv, a
+    separate interpreter from localm's, so localm's own process environment does not
+    reach it - the setting has to be in the env handed to the child, which is this one.
+    Left unset, that child's pip caches to the per-user default OUTSIDE the data dir
+    (measured live: ``pip cache dir`` resolved to the user profile and held ~11 GB, all
+    of it put there by this module). This is THE choke point: every pip subprocess in
+    both provisioning paths (``_run`` here and in managed_comfy_fresh, which imports it,
+    plus ``read_user_freeze`` below) builds its env from this function, so containment
+    cannot be forgotten at a new call site. Harmless to the git/venv subprocesses that
+    also run through here - they simply ignore it.
+
+    ``subprocess.run`` inherits the full parent environment by default, and
+    ``PYTHONPATH`` is a per-process search path that Python's ``venv`` isolation
+    does NOT filter out - so if the calling localm process happens to have
+    ``PYTHONPATH`` set (e.g. a dev/CI invocation, or any future wrapper), a fresh
+    "isolated" venv silently sees whatever localm's OWN ``site-packages`` holds on
+    top of its actual package set. Reproduced live: with a dev ``PYTHONPATH`` set,
+    ``pip freeze`` on a venv holding exactly one package reported 91, one of which
+    needed a source build localm never intended to trigger. That defeats this
+    module's entire point (an exact, uncontaminated replica of the user's package
+    set - see the module docstring) silently, which is exactly the AGENTS.md rule 5
+    failure mode: a real fault (a corrupted freeze) masquerading as an unrelated
+    downstream error (a missing offline build dependency)."""
     env = dict(os.environ)
     env.pop("PYTHONPATH", None)
     env["PIP_CACHE_DIR"] = str(pip_cache_dir())
@@ -120,7 +203,25 @@ def _isolated_env() -> dict:
 
 def _run(cmd: list, *, cwd: Optional[Path] = None, on_progress: ProgressCb = None,
          timeout: Optional[int] = None) -> tuple[bool, str]:
-    """Run *cmd*, streaming its combined output to *on_progress* AS EACH LINE ARRIVES (not only after the whole command exits)."""
+    """Run *cmd*, streaming its combined output to *on_progress* AS EACH LINE ARRIVES
+    (not only after the whole command exits). This is the one shared helper behind
+    every git/pip/venv step in both provisioning pipelines and `comfy update`, so a
+    caller that could see nothing until a multi-minute `pip install` of a
+    hardware-matched torch wheel (or a full `git clone`) finished is exactly what
+    made a real setup read as "a couple of lines, then silence for minutes" (#953).
+
+    A missing executable or a timeout is still a clean (False, reason), never a
+    raise - the caller turns it into an honest ProvisionResult. Runs with
+    ``_isolated_env()`` since every caller of this helper drives the user's or the
+    managed venv.
+
+    Streams via a Popen + background reader thread (the same shape
+    ``JobManager.start_cli`` already uses one process-hop further out, in
+    plugins/gui/jobs.py) rather than ``subprocess.run(capture_output=True)``, which
+    buffers the whole child output and only hands it over once the process exits.
+    The reader thread only does line I/O and calls the best-effort progress sink
+    (``_emit``, which never raises); the timeout is still enforced in THIS thread via
+    ``proc.wait(timeout=...)``, so a hung child is killed exactly as before."""
     _emit(on_progress, "$ " + " ".join(str(c) for c in cmd))
     try:
         proc = subprocess.Popen(
@@ -161,13 +262,17 @@ def _run(cmd: list, *, cwd: Optional[Path] = None, on_progress: ProgressCb = Non
 # --------------------------------------------------------------------------- #
 
 def _find_user_venv_python(workdir: Path) -> Optional[Path]:
-    """The user ComfyUI's own venv interpreter (venv/ or .venv/), if present."""
+    """The user ComfyUI's own venv interpreter (venv/ or .venv/), if present. Reuses
+    comfy_client's resolver so localm agrees with itself on where a ComfyUI venv is."""
     from localm.media.comfy_client import _venv_python
     return _venv_python(workdir)
 
 
 def read_user_comfy_commit(workdir: Path) -> Optional[str]:
-    """The user ComfyUI's HEAD commit, or None when *workdir* is not the root of its OWN git checkout."""
+    """The user ComfyUI's HEAD commit, or None when *workdir* is not the root of its
+    OWN git checkout. Verifies the repo toplevel IS *workdir* first, so a ComfyUI that
+    merely sits inside some other git repo is treated as non-git (we must not clone the
+    wrong outer repo)."""
     def _g(*args: str) -> Optional[str]:
         try:
             p = subprocess.run(["git", "-C", str(workdir), *args],
@@ -189,7 +294,8 @@ def read_user_comfy_commit(workdir: Path) -> Optional[str]:
 
 
 def _version_marker(workdir: Path, commit: Optional[str]) -> str:
-    """A provenance marker for what we replicated: the git commit when there is one, else ComfyUI's own ``comfyui_version.py`` __version__, else 'unknown'."""
+    """A provenance marker for what we replicated: the git commit when there is one,
+    else ComfyUI's own ``comfyui_version.py`` __version__, else "unknown"."""
     if commit:
         return f"git:{commit}"
     vf = workdir / "comfyui_version.py"
@@ -205,7 +311,12 @@ def _version_marker(workdir: Path, commit: Optional[str]) -> str:
 
 
 def _any_plugin_workdir(cfg: dict) -> Optional[str]:
-    """The first non-empty per-plugin ``comfy.workdir`` among image/music/video, in that order, or None. `setup_managed_comfy()` is a single, plugin-agnostic action (one shared managed instance, not invoked per-plugin), so there is no 'current plugin' to resolve against here - any plugin's configured folde..."""
+    """The first non-empty per-plugin ``comfy.workdir`` among image/music/video,
+    in that order, or None. `setup_managed_comfy()` is a single, plugin-agnostic
+    action (one shared managed instance, not invoked per-plugin), so there is no
+    "current plugin" to resolve against here - any plugin's configured folder is
+    equally valid evidence of "an existing ComfyUI to copy" (see
+    NEW-MANAGED-COMFY-IGNORES-PLUGIN-WORKDIR)."""
     from localm.plugins.media_config import MEDIA_PLUGINS, resolve_config
     for name in MEDIA_PLUGINS:
         block, _warning = resolve_config(name, cfg)
@@ -217,7 +328,19 @@ def _any_plugin_workdir(cfg: dict) -> Optional[str]:
 
 
 def discover_user_comfy(cfg: Optional[dict] = None) -> Optional[UserComfyStack]:
-    """The user's replicable ComfyUI, or None when there is nothing usable to copy."""
+    """The user's replicable ComfyUI, or None when there is nothing usable to copy.
+
+    "Usable" means: comfy_workdir is set, is a directory, has ComfyUI's ``main.py``,
+    AND a venv interpreter is discoverable under it (we replicate that venv's package
+    set, so a ComfyUI with no venv is not copyable). None here is the dispatcher's
+    signal to run the fresh hardware-matched install (S3) instead.
+
+    Checks the legacy GLOBAL comfy_workdir first, then falls back to any
+    plugin's own comfy.workdir (NEW-MANAGED-COMFY-IGNORES-PLUGIN-WORKDIR) -
+    this previously only ever checked the bare global key, so a folder set
+    solely via a plugin's own Settings field (the common case; the Settings UI
+    foregrounds per-plugin fields) was invisible here even though it is
+    exactly what that plugin's own launch path already uses."""
     cfg = cfg if cfg is not None else load_config()
     workdir = cfg.get("comfy_workdir") or _any_plugin_workdir(cfg)
     if not workdir:
@@ -237,7 +360,8 @@ def discover_user_comfy(cfg: Optional[dict] = None) -> Optional[UserComfyStack]:
 
 
 def count_user_custom_nodes(workdir) -> int:
-    """How many custom nodes the user has (node dirs + standalone .py nodes), so the CLI can ask 'copy your N custom nodes?'."""
+    """How many custom nodes the user has (node dirs + standalone .py nodes), so the
+    CLI can ask "copy your N custom nodes?". Ignores __pycache__ and *.example."""
     src = Path(workdir) / "custom_nodes"
     if not src.is_dir():
         return 0
@@ -256,7 +380,13 @@ def count_user_custom_nodes(workdir) -> int:
 # --------------------------------------------------------------------------- #
 
 def read_user_freeze(venv_python: Path) -> Optional[list]:
-    """``pip freeze`` of the user's venv as a list of requirement lines (blank and comment lines dropped), or None when pip freeze FAILED."""
+    """``pip freeze`` of the user's venv as a list of requirement lines (blank and
+    comment lines dropped), or None when pip freeze FAILED.
+
+    None (failure) is deliberately distinct from an empty list (a venv with no
+    packages): a swallowed freeze failure must NOT be replicated as "install nothing"
+    and then reported as a ready ComfyUI (rule 5: no hidden problem). The caller fails
+    loudly on None, and only faithfully replicates an actually-empty venv on []."""
     try:
         proc = subprocess.run(
             [str(venv_python), "-m", "pip", "freeze", "--disable-pip-version-check"],
@@ -271,7 +401,10 @@ def read_user_freeze(venv_python: Path) -> Optional[list]:
 
 
 def torch_index_url_from_freeze(freeze_lines) -> Optional[str]:
-    """The PyTorch wheel index-url implied by a torch pin's local version label (``torch==2.4.1+rocm6.2`` -> ``https://download.pytorch.org/whl/rocm6.2``), or None when torch is a plain PyPI build (no ``+label``) or absent. pip does not record the index a package came from, so this label is the only signal..."""
+    """The PyTorch wheel index-url implied by a torch pin's local version label
+    (``torch==2.4.1+rocm6.2`` -> ``https://download.pytorch.org/whl/rocm6.2``), or
+    None when torch is a plain PyPI build (no ``+label``) or absent. pip does not
+    record the index a package came from, so this label is the only signal we have."""
     for line in freeze_lines:
         m = _TORCH_LABEL_RE.match(line.strip())
         if m:
@@ -291,7 +424,11 @@ _PIP_NO_MATCH_RE = re.compile(r"^ERROR: No matching distribution found for (\S+)
 
 
 def _unresolvable_packages(pip_output: str) -> list:
-    """Package names pip reported it found NO version for at all (parsed from its own ``No matching distribution found for <req>`` lines), deduped and in first-seen order."""
+    """Package names pip reported it found NO version for at all (parsed from its
+    own ``No matching distribution found for <req>`` lines), deduped and in
+    first-seen order. Empty when *pip_output* names none - an ordinary failure
+    (network error, build failure, disk full) leaves this empty and the caller
+    falls back to the generic message."""
     names: list = []
     for m in _PIP_NO_MATCH_RE.finditer(pip_output or ""):
         # Strip the version/marker suffix so the message names the bare package,
@@ -308,7 +445,10 @@ def _unresolvable_packages(pip_output: str) -> list:
 
 def _clone_source(user_workdir: Path, managed_root: Path, commit: str,
                   on_progress: ProgressCb) -> tuple[bool, str]:
-    """Local git clone of the user's ComfyUI into *managed_root*, then pin the exact commit."""
+    """Local git clone of the user's ComfyUI into *managed_root*, then pin the exact
+    commit. A local clone is offline and brings ONLY tracked source - the user's
+    .gitignore keeps venv/models/custom_nodes/outputs out - so the managed checkout
+    is a clean copy at the same history, without dragging the un-portable venv."""
     # core.longpaths: without it, a deeply-nested LOCALM_HOME (a long username, a
     # OneDrive-redirected profile, a nested custom data dir) can push a pack
     # object's path past Windows' legacy 260-char MAX_PATH, failing clone with
@@ -326,7 +466,8 @@ def _clone_source(user_workdir: Path, managed_root: Path, commit: str,
 
 def _copytree_source(user_workdir: Path, managed_root: Path,
                      on_progress: ProgressCb) -> tuple[bool, str]:
-    """Fallback when the user's ComfyUI is NOT a git checkout: copy the source tree, excluding the venv / models / custom_nodes / outputs (the user's data + env)."""
+    """Fallback when the user's ComfyUI is NOT a git checkout: copy the source tree,
+    excluding the venv / models / custom_nodes / outputs (the user's data + env)."""
     try:
         shutil.copytree(str(user_workdir), str(managed_root),
                         ignore=shutil.ignore_patterns(*_NON_SOURCE_DIRS, "*.pyc"))
@@ -337,20 +478,33 @@ def _copytree_source(user_workdir: Path, managed_root: Path,
 
 def _create_managed_venv(user_venv_python: Path, managed_venv_dir: Path,
                          on_progress: ProgressCb) -> tuple[bool, str]:
-    """Create a FRESH venv for the managed ComfyUI, using the user's venv base Python so the managed venv's Python version matches the user's ComfyUI (torch wheels are Python-version specific)."""
+    """Create a FRESH venv for the managed ComfyUI, using the user's venv base Python
+    so the managed venv's Python version matches the user's ComfyUI (torch wheels are
+    Python-version specific). Never a byte-copy of the user's venv."""
     return _run([str(user_venv_python), "-m", "venv", str(managed_venv_dir)],
                 on_progress=on_progress, timeout=300)
 
 
 def _probe_pip(python: Path, on_progress: ProgressCb) -> tuple[bool, str]:
-    """Confirm the venv just created at *python* actually has a working pip. ``-m venv`` can report success (return code 0, the interpreter file present) while its own mandatory ensurepip bootstrap silently failed - a base Python with ensurepip stripped, or (POSIX, ``real_base_python()`` returning None) a..."""
+    """Confirm the venv just created at *python* actually has a working pip.
+    ``-m venv`` can report success (return code 0, the interpreter file present)
+    while its own mandatory ensurepip bootstrap silently failed - a base Python
+    with ensurepip stripped, or (POSIX, ``real_base_python()`` returning None) a
+    pip-less base venv itself created with ``uv venv`` and no ``--seed``. Without
+    this probe the failure only surfaces two steps later as an opaque "No module
+    named pip" deep inside a package install (NEW-MANAGED-COMFY-VENV-MISSING-PIP).
+    Mirrors doctor.py's own ``_check_venv_creation`` probe, same wording, so the
+    two diagnoses agree."""
     return _run([str(python), "-m", "pip", "--version"],
                on_progress=on_progress, timeout=60)
 
 
 def _install_freeze(managed_python: Path, freeze_lines: list, index_url: Optional[str],
                     managed_root: Path, on_progress: ProgressCb) -> tuple[bool, str]:
-    """pip-install the user's exact package set into the managed venv."""
+    """pip-install the user's exact package set into the managed venv. The freeze is
+    written to a requirements file (kept as provenance) and installed with -r; the
+    derived PyTorch index is added as an extra index so torch resolves to the same
+    wheel while everything else still comes from PyPI."""
     req_file = managed_root / "localm-replicated-requirements.txt"
     req_file.write_text("\n".join(freeze_lines) + "\n", encoding="utf-8")
     cmd = [str(managed_python), "-m", "pip", "install", "--disable-pip-version-check"]
@@ -362,7 +516,16 @@ def _install_freeze(managed_python: Path, freeze_lines: list, index_url: Optiona
 
 def _copy_custom_nodes(user_workdir: Path, managed_root: Path,
                        on_progress: ProgressCb = None) -> tuple[int, list]:
-    """Copy the user's custom_nodes into the managed ComfyUI, returning (copied_count, warnings)."""
+    """Copy the user's custom_nodes into the managed ComfyUI, returning (copied_count,
+    warnings). Only when the user opted in. Skips __pycache__ / compiled files and
+    *.example. A node that fails to copy is not silently dropped: its warning is RETURNED
+    so the caller routes it through the run log (ProvisionResult.log), not only the live
+    progress stream (rule 5: a surfaced problem must survive into the result).
+
+    Emits one structured progress event per node, before its own copy attempt
+    (phase="custom_nodes", done/total/unit) - this loop has no total, no timeout and no
+    output at all otherwise (ADR-0009 P13), so a multi-minute copy of a large node
+    collection would be indistinguishable from a hang without a per-item signal."""
     src = user_workdir / "custom_nodes"
     if not src.is_dir():
         return 0, []
@@ -421,7 +584,12 @@ def _write_marker(managed_root: Path, stack: UserComfyStack,
 def provision_by_copy(stack: UserComfyStack, cfg: Optional[dict] = None, *,
                       copy_custom_nodes: bool,
                       on_progress: ProgressCb = None) -> ProvisionResult:
-    """Replicate *stack* into localm's managed ComfyUI dir."""
+    """Replicate *stack* into localm's managed ComfyUI dir. Steps: clone the source
+    at the same commit, make a fresh venv, install the same packages, optionally copy
+    custom nodes, write extra_model_paths.yaml, drop a provenance marker, and verify
+    the result actually reads as installed. Returns an honest ProvisionResult; a
+    failure at any step stops and reports the real reason (rule 5: no facade). The
+    user's ComfyUI is never modified."""
     cfg = cfg if cfg is not None else load_config()
     paths = mc.managed_comfy_paths()
     root = paths.root
@@ -432,7 +600,12 @@ def provision_by_copy(stack: UserComfyStack, cfg: Optional[dict] = None, *,
         _emit(on_progress, ProgressEvent(line, phase=phase))
 
     def _fail(status: str, message: str) -> ProvisionResult:
-        """Roll back a PARTIAL install before returning a failure."""
+        """Roll back a PARTIAL install before returning a failure. Once the source is
+        cloned and the venv made, S1's is_managed_comfy_installed() would read the
+        half-built tree as INSTALLED and reroute media to a broken instance - and a
+        re-run would refuse ("already exists"). So a failure must leave NOTHING behind
+        (rule 5: no broken-but-reads-as-ready facade). If the tree cannot be removed,
+        say so rather than pretend it is gone."""
         note = ""
         if root.exists():
             try:
@@ -588,7 +761,10 @@ def provision_by_copy(stack: UserComfyStack, cfg: Optional[dict] = None, *,
 
 def resolve_copy_custom_nodes(flag: Optional[bool], n_nodes: int, interactive: bool,
                               confirm: Optional[Callable[[], bool]] = None) -> bool:
-    """Resolve whether to copy the user's custom nodes (decision 3's ASK)."""
+    """Resolve whether to copy the user's custom nodes (decision 3's ASK). An explicit
+    --copy-custom-nodes / --no-custom-nodes flag wins. With no flag: no nodes -> False;
+    nodes present AND interactive -> ask via *confirm*; otherwise (non-interactive)
+    default to a clean start (False), never hang on a prompt."""
     if flag is not None:
         return bool(flag)
     if not n_nodes:

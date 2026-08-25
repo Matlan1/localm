@@ -3,14 +3,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadAppWithPages, runScript } from "./harness.mjs";
 
-// A collection can show "BM25" for two very different reasons: embeddings were
-// never turned on (nothing actionable), or the embedding model IS ready but
-// this collection predates it / its vector index went stale (actionable -
-// "re-embed" fixes it). Before this, the only place that distinction surfaced
-// was a small warning inside the per-collection info modal; the collections
-// table itself just said "BM25" with no hint that anything could be done. Now
-// a ready-but-BM25 row gets a visible inline badge and the re-embed button is
-// highlighted as the fix.
+// A BM25 row in the collections table carries an inline "re-embed needed"
+// badge and a highlighted re-embed button when the embedding model is ready,
+// and neither when it is not installed.
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
@@ -154,10 +149,6 @@ test("clicking the highlighted re-embed button calls the reembed endpoint", asyn
   reembedBtn.onclick();
   for (let i = 0; i < 8; i++) await tick();
 
-  // The full wiring, end to end: the badge highlights the button, and clicking
-  // the highlighted button reaches the endpoint that can actually recover a
-  // dimension-mismatched collection. It used to send /add with force + paths,
-  // which re-read the originals and tripped the very guard the badge is about.
   const reembedCall = calls.find((c) => c.url.includes("/reembed"));
   assert.ok(reembedCall, "a /reembed POST was sent");
   assert.equal(reembedCall.url, "/api/rag/collections/kb/reembed");

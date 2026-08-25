@@ -1,5 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Honesty-audit (AGENTS.md rule 5) fixes for the plugin builtins."""
+"""Honesty-audit (AGENTS.md rule 5) fixes for the plugin builtins.
+
+Each test guards a site that used to hide a real failure - a swallowed exception,
+a silenced warning, or a false cause reported in place of the true one. The fix is
+always to SURFACE (a debug/WARNING log, or the honest error), keep the guard, and
+not crash. Every test has a built-in negative case: it fails against the pre-fix
+code (proven by git-stashing the source and re-running) and passes after.
+"""
 
 from __future__ import annotations
 
@@ -10,11 +17,12 @@ import pytest
 
 
 # --------------------------------------------------------------------------- #
-#  #1 jobs/scheduler.py - a failing tick must be logged, not silently swallowed
+#  jobs/scheduler.py - a failing tick must be logged, not silently swallowed
 # --------------------------------------------------------------------------- #
 
 def test_scheduler_loop_logs_tick_failure(monkeypatch):
-    """An unreadable jobs.json makes store.list() raise every tick, which halts ALL scheduled jobs."""
+    """An unreadable jobs.json makes store.list() raise every tick, which halts
+    ALL scheduled jobs. The old `except: pass` hid it; the loop must now WARN."""
     from localm.plugins.builtin.jobs.scheduler import JobScheduler
 
     class BoomStore:
@@ -45,7 +53,8 @@ def test_scheduler_loop_logs_tick_failure(monkeypatch):
 
 
 def test_scheduler_tick_error_logged_once_then_recovers(monkeypatch):
-    """Log-once/on-change: the same failure is not re-logged every 30s poll, a recovery is noted once, and a later recurrence is logged again."""
+    """Log-once/on-change: the same failure is not re-logged every 30s poll, a
+    recovery is noted once, and a later recurrence is logged again."""
     from localm.plugins.builtin.jobs.scheduler import JobScheduler
 
     sched = JobScheduler(store=object(), run_job=lambda *a, **k: {})
@@ -69,8 +78,8 @@ def test_scheduler_tick_error_logged_once_then_recovers(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-#  #2 rag/plug.py - image-describe failure surfaces its true cause,
-#     not a false "empty description"
+#  rag/plug.py - image-describe failure surfaces its true cause, not a false
+#     empty description
 # --------------------------------------------------------------------------- #
 
 _PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
@@ -90,7 +99,8 @@ def test_self_describe_image_propagates_transport_error(monkeypatch):
 
 
 def test_image_extract_reports_honest_cause_not_empty(monkeypatch):
-    """End to end: extract_bytes must wrap the REAL error ('Image description failed: ...') instead of the misleading 'returned empty description'."""
+    """End to end: extract_bytes must wrap the REAL error ("Image description
+    failed: ...") instead of the misleading "returned empty description"."""
     import localm.plugins.builtin.rag.plug as ragplug
     import localm.selfclient as selfclient
     from localm.rag.extract import ExtractError, extract_bytes
@@ -120,7 +130,8 @@ class _FakeResp:
 
 
 def test_self_describe_image_empty_success_returns_empty_string(monkeypatch):
-    """A genuine empty-but-successful description stays a '' return (extract then honestly reports it as empty) - only FAILURES propagate."""
+    """A genuine empty-but-successful description stays a "" return (extract then
+    honestly reports it as empty) - only FAILURES propagate."""
     import localm.plugins.builtin.rag.plug as ragplug
     import localm.selfclient as selfclient
 
@@ -147,8 +158,8 @@ def test_self_describe_image_no_vision_message(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-#  #3 memory/plug.py - an unreadable legacy file is not treated as "empty",
-#     so the migration is not falsely marked done
+#  memory/plug.py - an unreadable legacy file is not treated as empty, so the
+#     migration is not falsely marked done
 # --------------------------------------------------------------------------- #
 
 def test_read_memory_distinguishes_absent_from_unreadable(tmp_path, monkeypatch):
@@ -176,7 +187,8 @@ def test_read_memory_distinguishes_absent_from_unreadable(tmp_path, monkeypatch)
 
 
 def test_unreadable_legacy_memory_not_marked_migrated(tmp_path, monkeypatch):
-    """The core false-success bug: an exists-but-unreadable chat-memory.md must NOT cause _migrate_legacy to write the permanent .legacy-imported marker."""
+    """The core false-success bug: an exists-but-unreadable chat-memory.md must NOT
+    cause _migrate_legacy to write the permanent .legacy-imported marker."""
     monkeypatch.setenv("LOCALM_MODE", "log")             # persist enabled
     import localm.plugins.builtin.memory.plug as plug
     from localm.memory import MemoryStore
@@ -206,7 +218,8 @@ def test_unreadable_legacy_memory_not_marked_migrated(tmp_path, monkeypatch):
 
 
 def test_rendered_text_tolerates_unreadable_legacy(tmp_path, monkeypatch):
-    """The memory modal must show an empty textarea, not 500, when the legacy file is unreadable and the structured store is empty."""
+    """The memory modal must show an empty textarea, not 500, when the legacy file
+    is unreadable and the structured store is empty."""
     import localm.plugins.builtin.memory.plug as plug
     from localm.memory import MemoryStore
 
@@ -226,7 +239,7 @@ def test_rendered_text_tolerates_unreadable_legacy(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-#  #6 mcpserver/server.py - a coder-availability probe failure is logged and
+#  mcpserver/server.py - a coder-availability probe failure is logged and
 #     still fails closed (the coder tool hides, but not silently)
 # --------------------------------------------------------------------------- #
 
@@ -253,7 +266,7 @@ def test_coder_availability_probe_logs_on_failure(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-#  #7 rag/plug.py - the classify tie-break failure is logged before falling back
+#  rag/plug.py - the classify tie-break failure is logged before falling back
 # --------------------------------------------------------------------------- #
 
 def test_self_classify_logs_on_failure(monkeypatch):
@@ -275,7 +288,8 @@ def test_self_classify_logs_on_failure(monkeypatch):
 
 
 def test_self_classify_logs_on_non_ok_response(monkeypatch):
-    """self_request never raises on a non-2xx, so a non-ok HTTP response was the silent fall-through path - it must be logged too."""
+    """self_request never raises on a non-2xx, so a non-ok HTTP response was the
+    silent fall-through path - it must be logged too."""
     import localm.plugins.builtin.rag.plug as ragplug
     import localm.selfclient as selfclient
 

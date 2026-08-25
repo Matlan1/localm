@@ -1,5 +1,14 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""localm/diagnostics.py - the callable core behind `localm doctor`'s five ACTIVE probes and the GUI's diagnostics card."""
+"""localm/diagnostics.py - the callable core behind `localm doctor`'s five ACTIVE
+probes and the GUI's diagnostics card.
+
+The rendering half is covered by the eight pre-existing test_doctor_*.py files,
+which still drive `localm doctor`'s printed output through the same core and are
+what prove the extraction changed nothing a terminal user sees. This file covers
+what only the core can express: the aggregate verdict, which finding a compact
+surface leads with, and - the part with the sharpest failure mode - that a run
+which could NOT be completed is never renderable as a clean bill of health.
+"""
 
 from __future__ import annotations
 
@@ -30,14 +39,20 @@ def test_the_verdict_is_the_worst_status_present(statuses, expected):
 
 
 def test_a_skipped_check_neither_drags_a_clean_report_down_nor_lifts_a_broken_one():
-    """SKIPPED sits BELOW ok in the severity order on purpose."""
+    """SKIPPED sits BELOW ok in the severity order on purpose.
+
+    An absent optional backend is the common case (no torch installed), so if
+    "did not run" ranked as a warning every ordinary box would render a warning
+    verdict and the word would stop meaning anything. It must not round UP
+    either: a skipped check beside a failing one is still a failing report."""
     assert d.verdict([_check(d.OK), _check(d.SKIPPED)]) == d.OK
     assert d.verdict([_check(d.FAIL), _check(d.SKIPPED)]) == d.FAIL
     assert d.verdict([_check(d.WARN), _check(d.SKIPPED)]) == d.WARN
 
 
 def test_a_report_of_only_skipped_checks_does_not_claim_ok():
-    """Nothing was measured, so nothing passed."""
+    """Nothing was measured, so nothing passed. Reporting "ok" here would be the
+    exact shape of a check that answers an adjacent question."""
     assert d.verdict([_check(d.SKIPPED), _check(d.SKIPPED)]) == d.SKIPPED
 
 
@@ -46,7 +61,10 @@ def test_a_report_of_only_skipped_checks_does_not_claim_ok():
 # --------------------------------------------------------------------------- #
 
 def test_the_summary_leads_with_the_finding_carrying_the_checks_own_verdict():
-    """The llama-library shape, and the reason _result does not just take findings[0]: that check reports a GREEN 'found the library' line and then the BLAS kernel failures underneath it."""
+    """The llama-library shape, and the reason _result does not just take
+    findings[0]: that check reports a GREEN "found the library" line and then
+    the BLAS kernel failures underneath it. A card showing one line per check
+    would otherwise render the reassuring half of a failure."""
     res = d._result("llama_lib", "llama.cpp library", [
         d.Finding(d.OK, "llama.dll found in /somewhere"),
         d.Finding(d.FAIL, "rocblas is installed but its rocblas/ kernel "
@@ -65,7 +83,8 @@ def test_the_summary_carries_the_inline_note_a_terminal_would_print_dim():
 
 
 def test_healthy_is_true_only_for_a_clean_pass():
-    """`doctor` gates the ABI load-test on this."""
+    """`doctor` gates the ABI load-test on this. A truncated library reports
+    WARN, and load-testing it anyway is exactly what must not happen."""
     assert _check(d.OK).healthy is True
     assert _check(d.WARN).healthy is False
     assert _check(d.FAIL).healthy is False
@@ -83,7 +102,7 @@ def _bindir(tmp_path, size):
 
 
 def test_a_zero_byte_library_is_a_failure_not_a_pass(tmp_path):
-    """It EXISTS, which is all a presence check would ask."""
+    """It EXISTS, which is all a presence check would ask. It cannot load."""
     res = d.check_llama_lib(_bindir(tmp_path, 0))
     assert res.status == d.FAIL
     assert "0 bytes" in res.summary
@@ -103,7 +122,16 @@ def test_a_plausible_library_with_no_vendor_blas_passes(tmp_path):
 
 
 def test_a_rocblas_install_with_no_kernel_data_fails_despite_a_good_library(tmp_path):
-    """The silent one: the library is present and the right size, so every presence check passes, and the first GEMM hard-crashes the native process."""
+    """The silent one: the library is present and the right size, so every
+    presence check passes, and the first GEMM hard-crashes the native process.
+
+    Note the assertion: `"rocblas" in res.summary` was the obvious one and it is
+    USELESS here, because pytest derives tmp_path's basename from this test's own
+    name - so the string appears in the healthy "llama.dll found in <tmp_path>"
+    line too, and the test passed even when the summary picked the wrong finding.
+    Found by fires-controlling this file (diff-review-discipline item 19: name a
+    value the fixture can never take). It asserts on wording only the FAILING
+    finding can produce, and that the green line is not what leads."""
     (tmp_path / "llama.dll").write_bytes(b"\0" * (d.TINY_LIB_BYTES + 1))
     (tmp_path / "rocblas.dll").write_bytes(b"\0" * 4096)
     res = d.check_llama_lib(lambda: tmp_path)
@@ -127,7 +155,8 @@ def test_a_missing_binary_dir_fails(tmp_path):
 # --------------------------------------------------------------------------- #
 
 def test_a_report_survives_the_json_boundary_intact():
-    """run_report_isolated parses exactly this, so a field that does not round-trip is a field the GUI silently never sees."""
+    """run_report_isolated parses exactly this, so a field that does not
+    round-trip is a field the GUI silently never sees."""
     original = d.build_report([
         d._result("llama_lib", "llama.cpp library",
                   [d.Finding(d.OK, "llama.dll found in /x")]),
@@ -151,14 +180,17 @@ def test_a_report_survives_the_json_boundary_intact():
 
 @pytest.fixture
 def child(monkeypatch):
-    """Swap the child program so the REAL Popen/parse path runs against a controlled process."""
+    """Swap the child program so the REAL Popen/parse path runs against a
+    controlled process. Patching subprocess would test the mock instead."""
     def _set(code):
         monkeypatch.setattr(d, "_CHILD_CODE", code)
     return _set
 
 
 def test_a_child_that_prints_nothing_is_an_error_not_an_empty_pass(child):
-    """The failure this guards is specific: an empty `checks` list aggregates to a clean-looking report, so 'we could not check' would render identically to 'we checked and found nothing wrong'."""
+    """The failure this guards is specific: an empty `checks` list aggregates to
+    a clean-looking report, so "we could not check" would render identically to
+    "we checked and found nothing wrong"."""
     child("pass")
     rep = d.run_report_isolated(timeout=60)
     assert rep.verdict == d.ERROR
@@ -167,7 +199,8 @@ def test_a_child_that_prints_nothing_is_an_error_not_an_empty_pass(child):
 
 
 def test_a_child_that_crashes_reports_its_own_stderr(child):
-    """Surface, do not silence: a diagnostics run that failed is the one case where the reason matters most."""
+    """Surface, do not silence: a diagnostics run that failed is the one case
+    where the reason matters most."""
     child("import sys; sys.stderr.write('boom: no runtime\\n'); sys.exit(3)")
     rep = d.run_report_isolated(timeout=60)
     assert rep.verdict == d.ERROR
@@ -190,7 +223,8 @@ def test_unparseable_result_json_is_an_error_not_a_silent_empty_report(child):
 
 
 def test_progress_lines_are_delivered_as_they_arrive(child):
-    """Progress that only shows up once the run has finished is not progress (ADR-0009)."""
+    """Progress that only shows up once the run has finished is not progress
+    (ADR-0009). The parent reads line by line for exactly this."""
     child(
         "import sys, json;"
         "w=lambda o: (sys.stdout.write("
@@ -208,7 +242,8 @@ def test_progress_lines_are_delivered_as_they_arrive(child):
 
 
 def test_a_broken_progress_callback_never_costs_the_report(child):
-    """The report is the deliverable; a surface that cannot render an update is not a reason to lose it."""
+    """The report is the deliverable; a surface that cannot render an update is
+    not a reason to lose it."""
     child(
         "import sys, json;"
         "sys.stdout.write('LOCALM_DIAGNOSTICS_PROGRESS:'+json.dumps("
@@ -226,7 +261,9 @@ def test_a_broken_progress_callback_never_costs_the_report(child):
 
 
 def test_run_checks_reports_each_check_before_it_starts(monkeypatch):
-    """`done` counts what has actually FINISHED and `phase` names what is running now, so a card never shows a number nothing has earned (ADR-0008 R1) and never attributes the wait to the wrong check."""
+    """`done` counts what has actually FINISHED and `phase` names what is
+    running now, so a card never shows a number nothing has earned (ADR-0008
+    R1) and never attributes the wait to the wrong check."""
     monkeypatch.setattr(d, "check_llama_lib",
                         lambda *a, **k: _check(d.OK, key="llama_lib"))
     monkeypatch.setattr(d, "check_native_abi",
@@ -245,7 +282,10 @@ def test_run_checks_reports_each_check_before_it_starts(monkeypatch):
 
 def test_the_abi_check_is_skipped_rather_than_omitted_when_the_library_is_broken(
         monkeypatch):
-    """An omitted row reads as a check that passed."""
+    """An omitted row reads as a check that passed. It gets a named SKIPPED
+    result carrying the reason instead - and it must not be RUN, because
+    load-testing a library already known to be truncated costs a 120s timeout
+    to learn nothing."""
     monkeypatch.setattr(d, "check_llama_lib",
                         lambda *a, **k: _check(d.FAIL, key="llama_lib"))
     monkeypatch.setattr(d, "check_native_abi",
@@ -265,7 +305,14 @@ def test_the_abi_check_is_skipped_rather_than_omitted_when_the_library_is_broken
 # --------------------------------------------------------------------------- #
 
 def test_a_real_isolated_run_returns_all_five_checks_in_order():
-    """The one test here with no fixture between it and the shipped path: a real child interpreter, the real checks, the real JSON boundary."""
+    """The one test here with no fixture between it and the shipped path: a real
+    child interpreter, the real checks, the real JSON boundary.
+
+    Asserts STRUCTURE, not verdicts - a machine with no provisioned runtime is
+    entitled to fail llama_lib, and pinning a verdict here would make this test
+    a statement about the box rather than about the code. What it does insist on
+    is that the run COMPLETED: an ERROR verdict means the isolation path itself
+    is broken, which no fixture-driven test above can tell you."""
     rep = d.run_report_isolated(timeout=300)
     assert rep.verdict != d.ERROR, rep.error
     assert [c.key for c in rep.checks] == list(d.CHECK_KEYS)
@@ -276,7 +323,13 @@ def test_a_real_isolated_run_returns_all_five_checks_in_order():
 
 
 def test_the_outer_deadline_fits_around_every_inner_bound():
-    """The RELATION, not the literal (diff-review-discipline item 1)."""
+    """The RELATION, not the literal (diff-review-discipline item 1).
+
+    ``run_report_isolated``'s deadline has to be larger than everything the child
+    can legitimately spend, or the outer timer becomes the first thing to fire and
+    every slow-but-working box reports "the diagnostics run did not finish" - a
+    fabricated failure on a healthy machine. Neither number is wrong alone; the
+    relation is the thing, and it cannot be reviewed one number at a time."""
     inner = (d.PROBE_TIMEOUT_S + d.VENV_TIMEOUT_S + d.VENV_PIP_TIMEOUT_S
              + d.SPAWN_REPLY_TIMEOUT_S + 2 * d.SPAWN_JOIN_TIMEOUT_S)
     assert d.worst_case_run_seconds() > inner, (
@@ -286,14 +339,14 @@ def test_the_outer_deadline_fits_around_every_inner_bound():
 
 
 def test_a_child_that_floods_its_output_still_yields_its_result(child):
-    """stderr is merged into stdout rather than given its own pipe: reading one pipe to EOF while the other fills its buffer is the classic subprocess deadlock, and this child's dependencies do write to stderr. 400 KiB is well past a 64 KiB pipe buffer, so this hangs against a two-pipe implementation and r..."""
+    """stderr is merged into stdout rather than given its own pipe: reading one
+    pipe to EOF while the other fills its buffer is the classic subprocess
+    deadlock, and this child's dependencies do write to stderr. 400 KiB is well
+    past a 64 KiB pipe buffer, so this hangs against a two-pipe implementation
+    and returns against the merged one."""
     # chr(10) rather than a backslash escape: this string is Python source that
-    # becomes a `-c` program, so an escape has to survive two levels of quoting
-    # and getting it wrong puts a REAL newline inside the child's string literal.
-    # That is not a hypothetical - the first version of this test did exactly
-    # that, the child died with a SyntaxError, and the test went red for a reason
-    # that had nothing to do with pipes (item 24: prove the fault fired, not just
-    # that the test failed).
+    # becomes a `-c` program, so an escape would have to survive two levels of
+    # quoting.
     child(
         "import sys, json;"
         "nl = chr(10);"

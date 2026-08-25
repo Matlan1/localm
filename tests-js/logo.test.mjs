@@ -1,12 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // jsdom tests for the logo-style picker (LOGO_STYLES / applyLogoStyle /
 // setLogoStyle / syncLogoStyleFromConfig / renderLogoPicker in
-// localm/plugins/gui/static/app.js). The sidebar wordmark can be drawn three
-// ways; the choice is SHARED via server config (logo_style) so the web GUI and
-// the desktop launcher agree, with localStorage as a no-flash cache. The blue
-// half always lives in a <span> so #logo span (var(--accent)) tints it. The
-// default is the single-blue-M treatment (LocaL white + M blue), matching the
-// L-white / M-blue app icon.
+// localm/plugins/gui/static/app.js). The sidebar wordmark has three styles; the
+// choice is stored in server config (logo_style) with localStorage as a cache.
+// The blue half lives in a <span> so #logo span (var(--accent)) tints it. The
+// default is the single-blue-M treatment (LocaL white + M blue).
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -15,8 +13,7 @@ import { loadApp } from "./harness.mjs";
 const settle = () => new Promise((r) => setTimeout(r, 0));
 const ok = (j) => ({ ok: true, status: 200, json: async () => j });
 
-// Well-formed responses for the endpoints app.js's bootstrap touches on load
-// (so populateSetupModels etc. never throw while we drive the logo picker).
+// Well-formed responses for the endpoints app.js's bootstrap touches on load.
 // Optionally records calls and serves a given /v1/config body.
 function goodFetch({ calls = null, config = {} } = {}) {
   return async (url, opts = {}) => {

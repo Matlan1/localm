@@ -1,5 +1,43 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""``localm memory`` CLI: read and manage durable chat memory from the terminal."""
+"""``localm memory`` CLI: read and manage durable chat memory from the terminal.
+
+Subcommands:
+  localm memory list [--all] [--json]     what localm has remembered about you
+  localm memory show ID                   one fact in full, with its provenance
+  localm memory add TEXT [--kind K]       save a fact yourself
+  localm memory forget ID [--yes]         delete one fact (NOT recoverable)
+  localm memory forgotten                 facts localm archived on its own
+  localm memory restore ID                bring an archived fact back
+  localm memory corrections               proposals consolidation left for review
+  localm memory accept ID / reject ID     resolve one proposal
+  localm memory clear [--yes]             erase everything (NOT recoverable)
+
+FORGET IS NOT ARCHIVED, and the distinction is measured rather than assumed:
+``MemoryStore.delete`` is a hard delete that never writes the forgotten sidecar.
+Only prune eviction and an accepted correction archive a record, so ``forgotten``
+lists what localm dropped ON ITS OWN and ``restore`` can only reach those. Saying
+"restorable" on ``forget`` would be a promise ``restore`` cannot keep.
+
+WHY THIS EXISTS. Until now the memory plugin shipped no ``cli`` manifest key, so
+installing it added zero CLI commands and every one of the operations above was
+reachable only from the GUI. The asymmetry that made it worth fixing rather than
+noting: ``localm job add --memory`` schedules unattended consolidation, so the
+terminal could already PRODUCE proposals and evictions that it had no way to read,
+accept, reject or undo.
+
+NAMESPACE. Every command opens the SAME store the chat routes use -
+``open_store(principal=None, agent="chat", scope_key="", root=<home>/memory)`` via
+:func:`_store` - because a CLI that opened a different agent, scope_key or root
+would show an empty list and let the user conclude localm has learned nothing about
+them. That is the highest-risk mistake available here, so the one helper is the only
+place any of those four values is written, and ``test_memory_cli.py`` pins CLI and
+route against each other rather than each against a constant.
+
+PRINCIPAL. ``None``, which ``principal_of`` maps to the shared ``"owner"``
+namespace. This matches every write path on the route side, which collapses an
+ADMIN-scoped caller to owner for exactly this reason. A terminal user standing at
+the machine IS the owner; there is no bearer to hash.
+"""
 
 from __future__ import annotations
 
@@ -13,7 +51,18 @@ import click
 
 @contextlib.contextmanager
 def _refuse_if_locked():
-    """Turn a cross-process write-lock refusal into a clear message and exit 1."""
+    """Turn a cross-process write-lock refusal into a clear message and exit 1.
+
+    A memory write shares its namespace with a running server (its consolidation
+    pass, or an edit from the GUI). The store waits a bounded time for that other
+    process and then refuses rather than interleaving with it, so this command's
+    job is to report WHO holds it - which the error already names - instead of
+    showing "localm hit an unexpected error" and saving a bug report for what is a
+    normal, recoverable situation. Same shape, and the same reasoning, as
+    ``localm rag``'s handler for the identical error.
+
+    Nothing was written when this fires: the store refuses rather than proceeding
+    unprotected, so re-running once the other process finishes is always safe."""
     from localm.rag.collection_lock import CollectionLockedError
     try:
         yield
@@ -22,7 +71,12 @@ def _refuse_if_locked():
 
 
 class _MemoryGroup(click.Group):
-    """Applies _refuse_if_locked to every subcommand, present and future."""
+    """Applies _refuse_if_locked to every subcommand, present and future.
+
+    Wrapping at the group rather than per command body on purpose: a verb added
+    later would otherwise silently get the traceback-and-bug-report behaviour
+    back, and nothing would flag it - the failure only shows up when a second
+    process happens to hold the namespace."""
 
     def invoke(self, ctx):
         with _refuse_if_locked():
@@ -35,14 +89,25 @@ def main() -> None:
 
 
 def _store():
-    """The chat memory store, opened exactly as the routes open it."""
+    """The chat memory store, opened exactly as the routes open it.
+
+    The four values here are load-bearing and deliberately not parameterised: see
+    this module's NAMESPACE note.
+    """
     from localm import memory as _mem
     from localm.config import home_dir
     return _mem.open_store(None, "chat", "", root=home_dir() / "memory")
 
 
 def _embed_fn():
-    """The embedding callable, or None when no embedder is available."""
+    """The embedding callable, or None when no embedder is available.
+
+    None is a NORMAL outcome, not a failure: recall and consolidation fall back to
+    lexical BM25, and the store's own writers all accept ``embed_fn=None``. So no
+    command here requires an embedder to run - a CLI that refused to save a fact
+    because no embedding model was loaded would be worse than one that saves it
+    without a vector and lets the next backfill catch up.
+    """
     try:
         from localm.inference.embedder import get_embedder
         emb = get_embedder()
@@ -57,7 +122,12 @@ def _embed_fn():
 
 
 def _fail(msg: str) -> None:
-    """Print to stderr and exit non-zero."""
+    """Print to stderr and exit non-zero.
+
+    Non-zero matters: these commands are scriptable, and a "no such id" that exited
+    0 would be indistinguishable from a successful forget to anything reading the
+    exit code.
+    """
     click.echo(msg, err=True)
     sys.exit(1)
 
@@ -124,7 +194,12 @@ def memory_show(mem_id: str) -> None:
 
 @main.command("forgotten")
 def memory_forgotten() -> None:
-    """Facts localm dropped on its own, which can still be brought back."""
+    """Facts localm dropped on its own, which can still be brought back.
+
+    NOT the things you forgot by hand: ``memory forget`` is a hard delete (see
+    that command). This archive is filled by exactly two paths - prune evicting a
+    record at the cap, and an accepted correction archiving the record it replaced.
+    """
     rows = _store().forgotten()
     if not rows:
         click.echo("Nothing has been archived for this store. localm files a "
@@ -153,7 +228,17 @@ def memory_forgotten() -> None:
 @click.option("--importance", default=0.8, show_default=True, type=float,
               help="Weighting used when recall ranks and prune evicts.")
 def memory_add(text: str, kind: str, importance: float) -> None:
-    """Save a fact yourself, without going through a chat turn."""
+    """Save a fact yourself, without going through a chat turn.
+
+    Produces the SAME record `POST /api/memory/append` does - kind semantic,
+    source user, importance 0.8, and the same cap refusal. That parity is not
+    cosmetic: `MemoryRecord.__post_init__` silently coerces an unknown kind to
+    "semantic" and an unknown source to "synth", so a CLI that invented its own
+    values would file the user's own assertion as machine-synthesised at a lower
+    weight, and prune's user-fact eviction reporting would stop seeing it. Both
+    coercions are silent, which is why the choices here are constrained rather
+    than free text.
+    """
     if not text.strip():
         _fail("Refusing to save an empty memory.")
     from localm.memory.store import N_MAX, MemoryRecord
@@ -172,7 +257,13 @@ def memory_add(text: str, kind: str, importance: float) -> None:
 @click.argument("mem_id")
 @click.option("--yes", "-y", is_flag=True, help="Skip the confirmation.")
 def memory_forget(mem_id: str, yes: bool) -> None:
-    """Delete one fact."""
+    """Delete one fact. NOT recoverable.
+
+    MEASURED, and the reason this help does not say "restorable": ``store.delete``
+    is a hard delete that does not write the forgotten archive at all. Only prune
+    eviction and an accepted correction archive a record. Telling the user they
+    could restore this would be a promise `memory restore` then cannot keep.
+    """
     store = _store()
     rec = store.get(mem_id)
     if rec is None:
@@ -203,7 +294,7 @@ def memory_restore(mem_id: str) -> None:
 @main.command("clear")
 @click.option("--yes", "-y", is_flag=True, help="Skip the confirmation.")
 def memory_clear(yes: bool) -> None:
-    """Erase everything localm remembers about you."""
+    """Erase everything localm remembers about you. NOT recoverable."""
     store = _store()
     live = len(store.all())
     gone = len(store.forgotten())
@@ -236,7 +327,12 @@ def memory_clear(yes: bool) -> None:
 @main.command("corrections")
 @click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
 def memory_corrections(as_json: bool) -> None:
-    """Proposals consolidation left for you to review."""
+    """Proposals consolidation left for you to review.
+
+    This is the command the whole group exists for: `localm job add --memory`
+    schedules the consolidation that CREATES these, so without it the terminal
+    could generate proposals it had no way to see.
+    """
     rows = _store().corrections()
     if as_json:
         click.echo(_json.dumps([c.to_dict() for c in rows], indent=2))

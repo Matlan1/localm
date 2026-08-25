@@ -3,9 +3,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadAppWithPages, runScript } from "./harness.mjs";
 
-// rec#584 (GUI): the coder session-setup form gains a "Custom instructions"
-// textarea whose value is sent as custom_instructions in POST /api/coder/sessions
-// (the server threads it to Agent, which already supports it since PR #303).
+// The coder session-setup form's "Custom instructions" textarea is sent as
+// custom_instructions in POST /api/coder/sessions.
 
 function setup() {
   const calls = [];

@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""GGUF vision (C1) plumbing that is testable WITHOUT a model + GPU: the image -> marker message rewrite, and that a text-only GGUF (no mmproj) still refuses images while one with an mmproj advertises it is worth loading."""
+"""GGUF vision (C1) plumbing that is testable WITHOUT a model + GPU: the image ->
+marker message rewrite, and that a text-only GGUF (no mmproj) still refuses images
+while one with an mmproj advertises it is worth loading. The full mtmd image path
+is verified end-to-end against a real vision model on an actual GPU (see
+dev-notes/open-points-loop-worklog.md - it returned a correct image description)."""
 
 import base64
 import io
@@ -8,10 +12,9 @@ import pytest
 
 from localm.inference.backends.base import VisionInputError
 
-# Pillow ships only with the [gpu] extra, which CI deliberately does not install
-# (the ci.yml Tests step uses [dev,rag] only). Skip cleanly when it is absent so
-# the suite still collects, matching the repo convention that gpu/gguf-tier tests
-# importorskip themselves rather than break collection for everyone.
+# Pillow ships only with the [gpu] extra, which CI does not install (the ci.yml
+# Tests step uses [dev,rag] only), so skip cleanly when it is absent rather than
+# breaking collection.
 Image = pytest.importorskip("PIL.Image")
 
 
@@ -73,7 +76,10 @@ def test_gguf_with_mmproj_advertises_can_be_multimodal():
 
 
 class _FakeMtmdLib:
-    """A stand-in for the loaded mtmd.dll's bound functions, controllable per test - real enough to drive MtmdContext.eval_into()'s Python-side logic (n_batch derivation, the new_n_past sanity check) without a real native library or GPU."""
+    """A stand-in for the loaded mtmd.dll's bound functions, controllable per
+    test - real enough to drive MtmdContext.eval_into()'s Python-side logic
+    (n_batch derivation, the new_n_past sanity check) without a real native
+    library or GPU."""
 
     def __init__(self, new_n_past: int, rc_tokenize: int = 0, rc_eval: int = 0):
         self._new_n_past = new_n_past
@@ -103,7 +109,8 @@ class _FakeMtmdLib:
 
 
 def _fake_mtmd_context(new_n_past: int, **kwargs):
-    """A real MtmdContext instance with its native-loading __init__ bypassed (no DLL/GPU needed), _m swapped for a controllable fake."""
+    """A real MtmdContext instance with its native-loading __init__ bypassed
+    (no DLL/GPU needed), _m swapped for a controllable fake."""
     from localm.inference.backends.llamacpp.mtmd import MtmdContext
     ctx = MtmdContext.__new__(MtmdContext)
     ctx._m = _FakeMtmdLib(new_n_past, **kwargs)
@@ -112,7 +119,19 @@ def _fake_mtmd_context(new_n_past: int, **kwargs):
 
 
 class TestMtmdEvalIntoSanity:
-    """RAG-VISION-1: eval_into() must derive n_batch from the LIVE context (not a hardcoded 512) and must refuse an implausible new_n_past rather than silently handing a likely-corrupted KV position to the generation loop - both gaps found during a RELEASE.md verification pass while diagnosing RAG image-de..."""
+    """RAG-VISION-1: eval_into() must derive n_batch from the LIVE context
+    (not a hardcoded 512) and must refuse an implausible new_n_past rather
+    than silently handing a likely-corrupted KV position to the generation
+    loop - both gaps found during a RELEASE.md verification pass while
+    diagnosing RAG image-description producing garbage/hallucinated output.
+
+    The refusal is a VisionInputError (a ValueError) rather than the RuntimeError
+    it used to be. That is deliberate and is the point of the change: a
+    RuntimeError escaping here KILLED the whole gguf worker process and evicted
+    the model, because _runner.py treats an escaping non-grammar exception as a
+    native fault. Every failure eval_into reports is a checked status code from a
+    native call that returned normally, so it must stay a per-request refusal.
+    See tests/test_mtmd_input_text_abi.py."""
 
     def test_default_n_batch_derives_from_real_context_size(self, monkeypatch):
         monkeypatch.setattr(
@@ -120,7 +139,7 @@ class TestMtmdEvalIntoSanity:
             lambda llama_ctx: 4096)
         ctx = _fake_mtmd_context(new_n_past=10)
         ctx.eval_into(llama_ctx=1, prompt="hi", images=[], add_special=True)
-        assert ctx._m.last_eval_n_batch == 2048   # min(4096, 2048), not the old fixed 512
+        assert ctx._m.last_eval_n_batch == 2048   # min(4096, 2048)
 
     def test_default_n_batch_capped_at_2048_for_a_larger_context(self, monkeypatch):
         monkeypatch.setattr(

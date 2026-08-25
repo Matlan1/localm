@@ -1,5 +1,17 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""ComfyUI ACE-Step music generation."""
+"""
+ComfyUI ACE-Step music generation.
+
+Mirrors localm.image_gen.comfy: standalone module, reachable from the GUI,
+the CLI, or any other caller.  Uses the same ComfyUI server as image
+generation - the checkpoint (``ace_step_v1_3.5b.safetensors``) must be in
+ComfyUI's ``models/checkpoints`` directory (ComfyUI ships native ACE-Step
+support since v0.3.34).
+
+Track length is arbitrary: the ACE-Step latent is sized directly from the
+requested duration in seconds, so 30-second jingles and 10-minute ambient
+tracks go through the same path.  Output is lossless FLAC.
+"""
 
 from __future__ import annotations
 
@@ -83,7 +95,10 @@ def _build_music_workflow(
     ckpt_name: Optional[str],
     float_type: Optional[str],
 ) -> tuple[bool, str]:
-    """Shape the ACE-Step workflow in place from the call's parameters."""
+    """Shape the ACE-Step workflow in place from the call's parameters.
+
+    Returns ``(ok, message)``: ``ok=False`` with an error message when the graph
+    has no sampler / prompt / latent node localm can drive."""
     # Resolve the nodes we drive by ROLE (sampler by class_type, then the ACE-Step
     # prompt and latent by following its graph edges) instead of hardcoded ids, so
     # a user's own exported ACE-Step graph works without renumbering (MEDIA-1).
@@ -160,7 +175,55 @@ def generate_music(
     delete_outputs: bool = False,
     placement: Optional[dict] = None,
 ) -> tuple[bool, str]:
-    """Generate a music track and save it to *output_path* (FLAC)."""
+    """
+    Generate a music track and save it to *output_path* (FLAC).
+
+    Parameters
+    ----------
+    tags
+        Comma-separated style description - genre, mood, instruments, BPM,
+        vocal type (e.g. ``"synthwave, 80s, female vocals, 120 bpm, dreamy"``).
+    output_path
+        Destination file (.flac).  Parent directories are created if needed.
+    lyrics
+        Song lyrics, optionally with section markers like ``[verse]`` /
+        ``[chorus]``.  None or empty generates an instrumental track.
+    duration_seconds
+        Track length in seconds - arbitrary; the latent is sized from it.
+        Long tracks take proportionally longer and use more VRAM.
+    api_url
+        ComfyUI base URL; defaults to the shared image-gen URL resolution
+        (FLUX_API_URL env var, else http://127.0.0.1:8188).
+    seed
+        Noise seed for reproducible output.  Randomised if not given.
+    steps / cfg
+        Sampler settings.  The defaults (50 / 5.0) match the official
+        ComfyUI ACE-Step template - raise steps for more polish.
+    lyrics_strength
+        How strongly the lyrics steer generation (0..1).
+    ckpt_name
+        Override the checkpoint filename inside ComfyUI's models/checkpoints.
+    model_overrides
+        Generic per-node model-slot overrides (see image_gen.comfy.generate_image's
+        docstring for the full explanation) - ``{node_id: {input_name: value}}``,
+        applied before ckpt_name/any other shaping, so an explicit ckpt_name for
+        the same field still wins if both are given.
+    localm_url
+        localm server /v1 URL to unload before generation (VRAM handoff).
+    instance_token
+        This server's own attach token, forwarded to the ``localm_url``
+        unload call so it authenticates on a keyless (open-mode) server too -
+        see ``selfclient.self_request``'s docstring. Only used as a fallback
+        when no owner API key is configured.
+    max_poll_seconds
+        Timeout waiting for ComfyUI (default 30 minutes - long tracks are slow).
+    on_progress
+        Optional ``Callable[[str], None]`` for status lines.
+
+    Returns
+    -------
+    (ok, message)
+    """
     def _say(text: str) -> None:
         if on_progress:
             try:

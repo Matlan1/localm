@@ -1,5 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""U2: plugins load sequentially at server startup but the load was silent - no per-plugin record of what loaded, in what order, or what failed (only the final api_state errors dict). load_enabled now reports each plugin as it loads through an on_event callback (and logs a line per plugin), so the serv..."""
+"""U2: plugins load sequentially at server startup but the load was silent - no
+per-plugin record of what loaded, in what order, or what failed (only the final
+api_state errors dict). load_enabled now reports each plugin as it loads through
+an on_event callback (and logs a line per plugin), so the server surfaces the
+sequential load and the GUI can show progress.
+"""
 
 import logging
 import textwrap

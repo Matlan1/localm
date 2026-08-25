@@ -117,7 +117,9 @@ def test_small_prompt_has_condensed_rules():
 
 
 def test_small_prompt_lists_every_tool():
-    """The small-model list is condensed (one line per tool, no JSON examples) but no longer omits tools - the docs are generated from TOOL_REGISTRY so models know everything that is callable."""
+    """The small-model list is condensed (one line per tool, no JSON
+    examples) but no longer omits tools - the docs are generated from
+    TOOL_REGISTRY so models know everything that is callable."""
     from localm.plugins.coder.tools import TOOL_REGISTRY
     p = _prompt("phi3-mini")
     for tool in TOOL_REGISTRY:
@@ -145,7 +147,7 @@ def test_model_name_empty_uses_default():
 
 
 # ---------------------------------------------------------------------------
-#  Untrusted-content rule (provenance tagging, R19 / AutoJack #2)
+#  Untrusted-content rule (provenance tagging)
 # ---------------------------------------------------------------------------
 
 def test_untrusted_content_rule_present_by_default():
@@ -172,18 +174,12 @@ def test_untrusted_content_rule_in_small_family():
 
 
 # ---------------------------------------------------------------------------
-#  The "do not prepend the cwd folder name" clause (REC-CODER-GUI-PATH)
-#
-#  The clause tells the model not to repeat the folder name it was just shown.
-#  Two properties matter and neither was covered when it shipped: it must be
-#  PRESENT and name the right folder, and it must never name something the
-#  displayed cwd deliberately withheld. The second one has teeth: every other
-#  prompt test uses tmp_path, which can never be the home directory, so the
-#  account-name leak below was structurally invisible to the suite.
+#  The clause telling the model not to repeat the folder name it was shown
 # ---------------------------------------------------------------------------
 
 def _patch_home(monkeypatch, path):
-    """Point Path.home() at *path*."""
+    """Point Path.home() at *path*. USERPROFILE is what expanduser reads on
+    Windows, HOME on POSIX; set both so the test is not platform-conditional."""
     monkeypatch.setenv("USERPROFILE", str(path))
     monkeypatch.setenv("HOME", str(path))
     monkeypatch.delenv("HOMEDRIVE", raising=False)
@@ -191,7 +187,8 @@ def _patch_home(monkeypatch, path):
 
 
 def test_clause_names_the_folder_the_model_was_shown(tmp_path):
-    """A project outside the user's home is shown as a bare folder name, which is the case the clause exists for: it must name that exact folder."""
+    """A project outside the user's home is shown as a bare folder name, which
+    is the case the clause exists for: it must name that exact folder."""
     proj = tmp_path / "myproj"
     proj.mkdir()
     p = build_system_prompt(proj, model_name="llama3-8b")
@@ -206,7 +203,13 @@ def test_clause_present_for_small_family_too(tmp_path):
 
 
 def test_cwd_at_home_does_not_leak_the_account_name(monkeypatch, tmp_path):
-    """cwd == the user's home directory. _display_cwd renders that as '~/.', withholding the account name on purpose."""
+    """cwd == the user's home directory. _display_cwd renders that as "~/.",
+    withholding the account name on purpose. The clause must not put it back.
+
+    Regression test: the original helper re-resolved the cwd independently and
+    returned Path(cwd).resolve().name, which for the home directory IS the
+    account name - so every prompt built from the home directory carried the
+    username. Running the coder from your own home directory is ordinary."""
     home = tmp_path / "zz_account_name_zz"
     home.mkdir()
     _patch_home(monkeypatch, home)
@@ -214,7 +217,6 @@ def test_cwd_at_home_does_not_leak_the_account_name(monkeypatch, tmp_path):
     p = build_system_prompt(home, model_name="llama3-8b")
 
     assert "zz_account_name_zz" not in p
-    # The withholding is real, not an artifact of the folder simply being absent.
     assert "Working directory: ~/." in p
 
 
@@ -251,7 +253,19 @@ def test_prependable_leaf_only_returns_a_plain_folder_name(shown, expected):
 
 
 def test_prependable_leaf_guards_a_bare_tilde_even_though_unreachable_today(monkeypatch):
-    """_display_cwd never actually renders bare '~' today - the home directory comes out as '~/.' - so this branch is unreachable via any currently-existing caller."""
+    """_display_cwd never actually renders bare "~" today - the home
+    directory comes out as "~/." - so this branch is unreachable via any
+    currently-existing caller. Guarded anyway: a future change to how
+    _display_cwd renders the home directory (e.g. collapsing "~/." to "~"
+    to fix the "~/.." double-dot the sentence period after it produces,
+    see dev-notes/coder-changed-files-tracking-gaps-2026-07-29.md) would
+    silently reopen this exact leak class if the guard were not already
+    here to catch it.
+
+    Proven by simulating the alternate rendering (monkeypatching
+    _display_cwd to return "~"), not by asserting the guard works because
+    it is written: without "~" in _prependable_leaf's no-clause tuple,
+    THIS test fails and the clause appears."""
     assert _prependable_leaf("~") is None
 
     monkeypatch.setattr(
@@ -262,7 +276,11 @@ def test_prependable_leaf_guards_a_bare_tilde_even_though_unreachable_today(monk
 
 
 def test_clause_names_the_leaf_for_a_project_under_home(monkeypatch, tmp_path):
-    """The merged suite covers a cwd AT home (test_cwd_at_home_does_not_leak_ the_account_name) and the bare non-home form (test_clause_names_the_ folder_the_model_was_shown), plus the unit-level '~/projects/proj' -> 'proj' case - but nothing builds an end-to-end prompt for a cwd UNDER the home directory a..."""
+    """The merged suite covers a cwd AT home (test_cwd_at_home_does_not_leak_
+    the_account_name) and the bare non-home form (test_clause_names_the_
+    folder_the_model_was_shown), plus the unit-level "~/projects/proj" ->
+    "proj" case - but nothing builds an end-to-end prompt for a cwd UNDER
+    the home directory and checks the clause names the right leaf there."""
     home = tmp_path / "zz_account_name_zz"
     home.mkdir()
     _patch_home(monkeypatch, home)

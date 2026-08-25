@@ -1,5 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""F4 regression suite (memory-audit 2026-07-02): the memory system must never silently, irrecoverably delete data the user typed."""
+"""F4 regression suite (memory-audit 2026-07-02): the memory system must never
+silently, irrecoverably delete data the user typed.
+
+Covers three confirmed data-loss root causes:
+- prune's size cap evicted user-typed facts silently and irreversibly;
+- the GUI bulk-PUT re-minted every record, destroying provenance and freezing
+  the store against consolidation;
+- a corrupt jobs.json loaded as empty and the next write erased every job.
+"""
 
 from __future__ import annotations
 

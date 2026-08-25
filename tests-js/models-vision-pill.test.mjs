@@ -1,18 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// NEW-MODEL-CAPABILITY-TAGS (the vision slice): the model list and the detail
-// modal surface a capability that already existed internally
-// (registry.model_vision_capability, the SAME lookup the load path uses).
-//
-// THE POINT OF THESE TESTS IS THE THIRD STATE. The server sends
-// true / false / NO KEY AT ALL, because the answer is measured from the
-// model's own files on every request and a path on an unmounted drive or a
-// dead UNC share yields no evidence at all. `false` and `absent` must both
-// render NOTHING, and nothing is all they may render: a "no vision" label on a
-// model nobody could check is the same false claim the F8 architecture/MoE
-// badges (models-registry-arch-moe.test.mjs) are written to avoid.
-//
-// These cover the RENDERING. The server-side tri-state is tests/test_gui.py's
-// test_models_exposes_vision_tristate and tests/test_model_vision_capability.py.
+// The model list and the detail modal render a "vision" pill from
+// registry.model_vision_capability. The server sends true, false, or no key at
+// all, since the answer is measured from the model's own files on every request
+// and an unreachable path yields no evidence. Both false and absent render
+// nothing. Covers the rendering only.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -40,8 +31,8 @@ function makeDetailFetch(detail) {
   };
 }
 
-// A detail payload with every field showModelDetail reads, so a test can vary
-// ONLY the field under test.
+// A detail payload carrying every field showModelDetail reads, so a test can
+// vary only the field under test.
 function detailFor(extra) {
   return Object.assign({
     id: "m1", object: "model", owned_by: "localm", path: "m1.gguf",
@@ -78,9 +69,8 @@ test("vision-pill list: vision:false renders no pill (checked, and it cannot)", 
 });
 
 test("vision-pill list: the key ABSENT renders no pill AND no negative text", async () => {
-  // The unmounted-drive / dead-UNC case. It must be indistinguishable from
-  // vision:false ON SCREEN (nothing), and it must NOT acquire a "no vision" /
-  // "text-only" label, which would be a claim about a model nobody inspected.
+  // The unreachable-path case: renders the same as vision:false, and carries no
+  // "no vision" or "text-only" label.
   const models = [{ name: "unreachable-entry", active: false, loaded: false,
     model_type: "llm" }];
   const { window } = loadAppWithPages({ fetchImpl: makeListFetch(models) });

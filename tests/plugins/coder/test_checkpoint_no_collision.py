@@ -1,5 +1,21 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""NEW-CODER-RESUME-DESTROYS-SESSIONS: the checkpoint used to be keyed on the project alone (``HOME/checkpoints/<digest>.json``), so a second coder session started in the same project overwrote the FIRST session's saved conversation outright at its very next save - not 'hard to recover', destroyed, bec..."""
+"""NEW-CODER-RESUME-DESTROYS-SESSIONS: the checkpoint used to be keyed on the
+project alone (``HOME/checkpoints/<digest>.json``), so a second coder session
+started in the same project overwrote the FIRST session's saved conversation
+outright at its very next save - not "hard to recover", destroyed, because
+every session in a project wrote the exact same file.
+
+Fixed by keying on (project, session id): ``HOME/checkpoints/<digest>/
+<checkpoint-id>.json``, one file per session, so several interrupted sessions
+in one project now coexist. This covers, bottom-up: the collision itself (the
+regression test that reproduces the destruction and proves it is gone),
+``list_checkpoints``/``checkpoint_info`` (the "pick any of them" + "resume the
+latest, unaffected" halves), title capture (item 3's other requirement - a
+listing needs a human-recognisable label, not a bare id), migration of both
+legacy single-checkpoint shapes, and the load-as-a-side-effecting-probe bug
+this fix's own review caught (checkpoint_info must never claim an id merely
+by being asked whether something exists).
+"""
 
 import json
 from unittest.mock import patch
@@ -47,7 +63,10 @@ def home(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- #
 
 def test_two_sessions_in_the_same_project_no_longer_collide(home, tmp_path):
-    """The reproduction: session A is interrupted mid-task, then a SEPARATE session B (a different Agent, the shape of a second REPL/GUI session started in the same project) is interrupted on a different task."""
+    """The reproduction: session A is interrupted mid-task, then a SEPARATE
+    session B (a different Agent, the shape of a second REPL/GUI session
+    started in the same project) is interrupted on a different task. Before
+    this fix, B's save silently destroyed A's - same path, last writer wins."""
     proj = tmp_path / "proj"
     proj.mkdir()
 
@@ -68,7 +87,9 @@ def test_two_sessions_in_the_same_project_no_longer_collide(home, tmp_path):
 
 
 def test_resuming_and_re_saving_writes_back_to_the_same_file(home, tmp_path):
-    """The other half: a SINGLE session's own resume-then-interrupt-again cycle must NOT mint a new file every save (that would leak one orphaned file per interruption of the same conversation)."""
+    """The other half: a SINGLE session's own resume-then-interrupt-again
+    cycle must NOT mint a new file every save (that would leak one orphaned
+    file per interruption of the same conversation)."""
     proj = tmp_path / "proj"
     proj.mkdir()
 
@@ -137,7 +158,8 @@ def test_list_checkpoints_empty_for_an_untouched_project(home, tmp_path):
 
 
 def test_checkpoint_info_answers_the_most_recent_across_sessions(home, tmp_path):
-    """The GUI's 'resume?' probe (checkpoint_info) must keep answering 'my last conversation here' - unaffected by several sessions now coexisting."""
+    """The GUI's "resume?" probe (checkpoint_info) must keep answering "my
+    last conversation here" - unaffected by several sessions now coexisting."""
     proj = tmp_path / "proj"
     proj.mkdir()
     import time as _time
@@ -158,7 +180,7 @@ def test_checkpoint_info_answers_the_most_recent_across_sessions(home, tmp_path)
 
 
 # --------------------------------------------------------------------------- #
-#  Title capture (item 3): raw text, not the episode-wrapped one              #
+#  Title capture: raw text, not the episode-wrapped one                       #
 # --------------------------------------------------------------------------- #
 
 def test_run_task_captures_the_raw_task_as_the_title(home, tmp_path):
@@ -170,7 +192,9 @@ def test_run_task_captures_the_raw_task_as_the_title(home, tmp_path):
 
 
 def test_title_is_captured_before_episodic_preamble_wrapping(home, tmp_path):
-    """_with_episodes prepends 'relevant past lessons' text before the model ever sees the task - a title built from THAT would show boilerplate instead of what the user asked for."""
+    """_with_episodes prepends "relevant past lessons" text before the model
+    ever sees the task - a title built from THAT would show boilerplate
+    instead of what the user asked for."""
     proj = tmp_path / "proj"
     proj.mkdir()
     a = _agent(proj)
@@ -228,7 +252,9 @@ def test_resuming_restores_the_title_so_a_later_save_does_not_lose_it(home, tmp_
 
 
 def test_reset_gives_a_cleared_conversation_a_fresh_identity(home, tmp_path):
-    """/clear must not let the next interruption overwrite the checkpoint of the session it just discarded - the exact collision this fix closes, reintroduced through a different door if reset() kept the old id."""
+    """/clear must not let the next interruption overwrite the checkpoint of
+    the session it just discarded - the exact collision this fix closes,
+    reintroduced through a different door if reset() kept the old id."""
     proj = tmp_path / "proj"
     proj.mkdir()
     a = _agent(proj)
@@ -248,11 +274,12 @@ def test_reset_gives_a_cleared_conversation_a_fresh_identity(home, tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-#  Legacy migration (item 4): both shapes, not orphaned                       #
+#  Legacy migration: both shapes, not orphaned                                #
 # --------------------------------------------------------------------------- #
 
 def test_legacy_home_single_file_checkpoint_is_migrated_on_load(home, tmp_path):
-    """The pre-item-3 shape: ONE file per project, HOME/checkpoints/<digest>.json (no session id, no title)."""
+    """The pre-item-3 shape: ONE file per project,
+    HOME/checkpoints/<digest>.json (no session id, no title)."""
     proj = tmp_path / "proj"
     proj.mkdir()
     from localm.plugins.coder.agent.checkpoint import _legacy_home_checkpoint_path_for
@@ -304,7 +331,8 @@ def test_legacy_in_project_checkpoint_is_also_migrated_on_load(home, tmp_path):
 
 def test_migration_never_deletes_the_legacy_file_if_the_write_fails(home, tmp_path,
                                                                      monkeypatch):
-    """AGENTS rule 5 / best-effort posture: losing the migrated COPY to a write failure must not also lose the ORIGINAL."""
+    """AGENTS rule 5 / best-effort posture: losing the migrated COPY to a
+    write failure must not also lose the ORIGINAL."""
     proj = tmp_path / "proj"
     proj.mkdir()
     from localm.plugins.coder.agent.checkpoint import _legacy_home_checkpoint_path_for
@@ -328,7 +356,7 @@ def test_migration_never_deletes_the_legacy_file_if_the_write_fails(home, tmp_pa
     finally:
         monkeypatch.setattr(ckpt_mod.Path, "mkdir", real_mkdir)
     assert legacy.exists(), "the original must survive a failed migration write"
-    assert new_id   # an id is still returned so the caller has something
+    assert new_id   # an id is still returned
 
 
 # --------------------------------------------------------------------------- #
@@ -362,7 +390,10 @@ def test_load_checkpoint_by_unknown_id_returns_none(home, tmp_path):
 
 
 def test_explicit_id_lookup_never_falls_back_to_a_legacy_path(home, tmp_path):
-    """An id names a per-session file; a legacy single-file checkpoint has no id and must not be silently substituted when the requested id is not found - that would resume the WRONG conversation under a name the user never asked for."""
+    """An id names a per-session file; a legacy single-file checkpoint has no
+    id and must not be silently substituted when the requested id is not
+    found - that would resume the WRONG conversation under a name the user
+    never asked for."""
     proj = tmp_path / "proj"
     proj.mkdir()
     from localm.plugins.coder.agent.checkpoint import _legacy_home_checkpoint_path_for
@@ -383,7 +414,16 @@ def test_explicit_id_lookup_never_falls_back_to_a_legacy_path(home, tmp_path):
 # --------------------------------------------------------------------------- #
 
 def test_checkpoint_info_probe_does_not_claim_a_checkpoint_id(home, tmp_path):
-    """Caught during this fix's own review: agent.load_checkpoint() sets self._checkpoint_id as a side effect (so a later save_checkpoint() writes back to the SAME file it just read) - fine for a caller about to resume_checkpoint(), wrong for a caller that only wants to know whether something exists (cli/_..."""
+    """Caught during this fix's own review: agent.load_checkpoint() sets
+    self._checkpoint_id as a side effect (so a later save_checkpoint() writes
+    back to the SAME file it just read) - fine for a caller about to
+    resume_checkpoint(), wrong for a caller that only wants to know whether
+    something exists (cli/_main.py's startup notice used to call
+    load_checkpoint() for exactly that and would have silently adopted, then
+    on the next plain message DESTROYED, the most recent saved session -
+    reintroducing this fix's own bug through the probe path).
+    checkpoint_info() is the module-level, side-effect-free answer; nothing
+    it does may touch any Agent's state, because it does not have one."""
     proj = tmp_path / "proj"
     proj.mkdir()
     existing = _agent(proj)
@@ -395,13 +435,10 @@ def test_checkpoint_info_probe_does_not_claim_a_checkpoint_id(home, tmp_path):
     info = checkpoint_info(proj)
     assert info is not None
 
-    # A brand-new agent, as if a fresh REPL/GUI session just started and
-    # merely displayed the notice - never resumed anything.
+    # A brand-new agent, as if a fresh session started and displayed the notice.
     fresh = _agent(proj)
     assert fresh._checkpoint_id != existing._checkpoint_id
-    # The scenario the bug would have caused: starting fresh and typing a
-    # plain message (repl.py clears "its own" checkpoint first, exactly as
-    # /clear does - see test_reset_gives_a_cleared_conversation_a_fresh_identity).
+    # Fresh agent typing a plain message: repl.py clears its own checkpoint first.
     fresh.clear_checkpoint()
     assert existing_path.read_text(encoding="utf-8"), (
         "the existing session's checkpoint must survive a fresh agent's own "
@@ -417,7 +454,9 @@ def test_checkpoint_info_probe_does_not_claim_a_checkpoint_id(home, tmp_path):
 # --------------------------------------------------------------------------- #
 
 def _printed(monkeypatch):
-    """Capture every string printed via display.console.print during a test, as one big text blob - good enough to assert content without depending on rich's exact rendering."""
+    """Capture every string printed via display.console.print during a test,
+    as one big text blob - good enough to assert content without depending on
+    rich's exact rendering."""
     from localm.plugins.coder import display
     lines = []
     monkeypatch.setattr(display.console, "print",
@@ -455,7 +494,8 @@ def test_sessions_command_on_an_empty_project_says_so(home, tmp_path, monkeypatc
 
 
 def test_resume_with_no_arg_still_picks_the_newest(home, tmp_path, monkeypatch):
-    """The zero-argument default must not regress: /resume alone keeps resuming the most recent session, exactly as before this fix."""
+    """The zero-argument default must not regress: /resume alone keeps
+    resuming the most recent session, exactly as before this fix."""
     proj = tmp_path / "proj"
     proj.mkdir()
     import time as _time
@@ -514,7 +554,12 @@ def test_resume_with_an_unknown_id_reports_it_cleanly(home, tmp_path, monkeypatc
 # --------------------------------------------------------------------------- #
 
 def test_startup_notice_probe_leaves_an_existing_session_intact(home, tmp_path):
-    """The exact bug caught during this fix's own review, exercised through the real call site rather than only through checkpoint_info() directly: checkpoint_info(work_dir) (NOT agent.load_checkpoint()) is what cli/_main.py must call for its 'interrupted session found' notice, so a fresh REPL start never..."""
+    """The exact bug caught during this fix's own review, exercised through
+    the real call site rather than only through checkpoint_info() directly:
+    checkpoint_info(work_dir) (NOT agent.load_checkpoint()) is what
+    cli/_main.py must call for its "interrupted session found" notice, so a
+    fresh REPL start never adopts an existing session's id just by checking
+    whether one exists."""
     proj = tmp_path / "proj"
     proj.mkdir()
     existing = _agent(proj)

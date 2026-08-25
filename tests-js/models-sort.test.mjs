@@ -1,10 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // sortModels(models, sortKey, sortDir) in pages/models.js: the Models page's
-// per-column sort. size_bytes and mtime are nullable (an unreadable file, a UNC
-// stat timeout, a missing path) and a null must sort LAST regardless of
-// direction - coercing it to 0 would rank a broken row as the smallest/oldest
-// file instead of genuinely unknown. Pure function - loaded via the jsdom
-// harness like the vram-caption / split-hint tests.
+// per-column sort. size_bytes and mtime are nullable, and a null sorts LAST in
+// both directions.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";

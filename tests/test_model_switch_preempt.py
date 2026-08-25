@@ -1,5 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Preemptive model switching (http_server.switch_engine)."""
+"""Preemptive model switching (http_server.switch_engine).
+
+Selecting a new model while a previous selection is still loading must abort the
+in-flight load and load the new model immediately, instead of finishing the
+abandoned model first. These tests drive the coordinator with a fake Engine whose
+load blocks until either a gate is opened or its cancel event fires, so the
+preemption/coalescing logic is exercised deterministically without a real model.
+"""
 
 from __future__ import annotations
 
@@ -12,7 +19,9 @@ from localm.inference.backends.base import ModelLoadCancelled
 
 
 class FakeEngine:
-    """Engine stand-in for switch_engine: its load() blocks until `load_gate` is set OR the installed cancel event fires (then it raises ModelLoadCancelled, exactly like the GGUF backend's aborted native load)."""
+    """Engine stand-in for switch_engine: its load() blocks until `load_gate` is
+    set OR the installed cancel event fires (then it raises ModelLoadCancelled,
+    exactly like the GGUF backend's aborted native load)."""
 
     def __init__(self, name, *, load_gate=None, loaded_log=None):
         self.display_name = name
@@ -66,7 +75,8 @@ async def _await_started(engine, timeout=2.0):
 
 
 def test_newer_switch_preempts_in_flight_load():
-    """A second selection aborts the first's in-flight load; only the second one actually loads, and the first reports 'superseded' (not an error)."""
+    """A second selection aborts the first's in-flight load; only the second one
+    actually loads, and the first reports 'superseded' (not an error)."""
 
     async def scenario():
         _reset_switch_state()
@@ -96,7 +106,8 @@ def test_newer_switch_preempts_in_flight_load():
 
 
 def test_rapid_switches_coalesce_to_latest():
-    """Three quick selections: the abandoned two never load, the last one wins."""
+    """Three quick selections: the abandoned two never load, the last one wins.
+    The queued-but-not-started middle switch is dropped without loading."""
 
     async def scenario():
         _reset_switch_state()
@@ -127,7 +138,8 @@ def test_rapid_switches_coalesce_to_latest():
 
 
 def test_reselecting_the_loading_model_does_not_restart_it():
-    """Re-selecting the SAME model that is still loading must let it finish (not cancel and reload it); the second request resolves to 'already_active'."""
+    """Re-selecting the SAME model that is still loading must let it finish (not
+    cancel and reload it); the second request resolves to 'already_active'."""
 
     async def scenario():
         _reset_switch_state()
@@ -174,7 +186,9 @@ def test_single_switch_loads_normally():
 # ---------------------------------------------------------------------------
 
 def test_switch_engine_seeds_per_model_activity_immediately():
-    """A freshly loaded engine must get its OWN activity timestamp the instant it registers into _engines - not fall through, later, to whatever the GLOBAL _last_activity was left at by a PREVIOUS model."""
+    """A freshly loaded engine must get its OWN activity timestamp the instant
+    it registers into _engines - not fall through, later, to whatever the
+    GLOBAL _last_activity was left at by a PREVIOUS model."""
 
     async def scenario():
         _reset_switch_state()
@@ -195,7 +209,11 @@ def test_switch_engine_seeds_per_model_activity_immediately():
 
 
 def test_switching_models_does_not_evict_the_new_one_via_the_old_ones_staleness():
-    """Regression: model A goes idle past the TTL, then the user switches to model B. Before the fix, B inherited A's stale GLOBAL _last_activity the instant it registered (nothing seeded a per-model entry for B), so the very next idle sweep could evict B before it ever served a single request - the user s..."""
+    """Regression: model A goes idle past the TTL, then the user switches to
+    model B. Before the fix, B inherited A's stale GLOBAL _last_activity the
+    instant it registered (nothing seeded a per-model entry for B), so the very
+    next idle sweep could evict B before it ever served a single request - the
+    user switches model, waits through the load, and finds it gone."""
 
     async def scenario():
         _reset_switch_state()

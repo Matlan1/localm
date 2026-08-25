@@ -1,5 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""`localm image` / `localm music` / `localm video` (localm/cli/media.py) privacy parity: the identical GUI/API plugin routes fold privacy mode into BOTH write_sidecar (prompt sidecar suppressed) AND delete_outputs (ComfyUI's own on-disk output copy - which embeds the full prompt/workflow as PNG metada..."""
+"""`localm image` / `localm music` / `localm video` (localm/cli/media.py) privacy
+parity: the identical GUI/API plugin routes fold privacy mode into BOTH
+write_sidecar (prompt sidecar suppressed) AND delete_outputs (ComfyUI's own
+on-disk output copy - which embeds the full prompt/workflow as PNG metadata,
+per localm/image_gen/comfy.py - is removed). These CLI commands only wired up
+write_sidecar, leaving ComfyUI's own copy (and any img2img source image) on
+disk indefinitely in privacy mode. See dev-notes/checkup/CONSOLIDATED-FINDINGS
+item 2.
+"""
 
 from contextlib import ExitStack
 from unittest.mock import patch
@@ -12,7 +20,9 @@ from localm.cli import main
 
 def _invoke(args, generate_target, *, mode, default_api_url_target,
            extra_patches=()):
-    """Invoke `localm <args>` with the generator patched, returning the kwargs it was called with (list, since the func can be called more than once - e.g. image_cmd's retry path) plus the click Result."""
+    """Invoke `localm <args>` with the generator patched, returning the kwargs
+    it was called with (list, since the func can be called more than once -
+    e.g. image_cmd's retry path) plus the click Result."""
     calls = []
 
     def fake_gen(*a, **kwargs):
@@ -58,7 +68,10 @@ class TestImageCmdPrivacy:
         assert not calls[0].get("delete_outputs")
 
     def test_retry_path_also_deletes_outputs_in_privacy_mode(self):
-        """image_cmd builds the retry call as a SEPARATE lambda from the initial call (unlike music/video, which reuse one closure) - the exact shape of drift this bug came from."""
+        """image_cmd builds the retry call as a SEPARATE lambda from the
+        initial call (unlike music/video, which reuse one closure) - the
+        exact shape of drift this bug came from. Force the retry path and
+        confirm the fix was applied there too."""
         calls = []
 
         def fake_gen(*a, **kwargs):

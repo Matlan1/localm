@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Tests for the shared control-marker scrubber and its application at the engine layer, so channel/harmony tokens never leak to the GUI regardless of backend."""
+"""
+Tests for the shared control-marker scrubber and its application at the engine
+layer, so channel/harmony tokens never leak to the GUI regardless of backend.
+"""
 
 from localm.inference.engine import Engine
 from localm.textnorm import (
@@ -48,8 +51,8 @@ class TestSplitThink:
 
     def test_streaming_matches_one_shot(self):
         full = "Pre <think>because reasons</think> Post."
-        # NEGATIVE-style: a naive concatenation of content deltas must equal the
-        # one-shot content, and the tags must never appear in either channel.
+        # A naive concatenation of content deltas must equal the one-shot
+        # content, and the tags must never appear in either channel.
         c_stream, r_stream = _stream_split(list(full))   # one char at a time
         c_once, r_once = split_think(full)
         assert c_stream == c_once
@@ -77,7 +80,9 @@ class TestSplitThink:
 
 
 class TestNativeReasoningTags:
-    """CHAT-2: native reasoning tags emitted WITHOUT a channel wrapper (<reasoning>, <thinking>, <thought>, <reflection>) must normalise to canonical <think> so the reasoning/content split routes them instead of leaking."""
+    """CHAT-2: native reasoning tags emitted WITHOUT a channel wrapper
+    (<reasoning>, <thinking>, <thought>, <reflection>) must normalise to canonical
+    <think> so the reasoning/content split routes them instead of leaking."""
 
     def test_bare_reasoning_becomes_think(self):
         assert scrub_text("<reasoning>why</reasoning>The answer.") == \
@@ -160,7 +165,8 @@ class _FakeBackend:
 
 class TestEngineLayerScrub:
     def test_engine_scrubs_unscrubbing_backend(self):
-        """The leak was an HF-style backend with no scrub; the engine layer must normalise it so raw channel tokens never reach the caller/GUI."""
+        """The leak was an HF-style backend with no scrub; the engine layer must
+        normalise it so raw channel tokens never reach the caller/GUI."""
         eng = Engine.__new__(Engine)          # skip real model loading
         eng._backend = _FakeBackend()
         eng.display_name = "fake"

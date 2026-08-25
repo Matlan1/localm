@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// jsdom tests for the sub-agent attribution on a coder approval card (#794
-// follow-up). Worktree-isolated parallel dispatch serialises several children
-// onto the session's single confirmation channel, so two identical "Approve
-// run_shell?" cards can arrive back to back. The confirm_request event now
-// carries the asking child's label and the card must show it - and must NOT
-// show anything when the session's own agent is the asker.
+// Sub-agent attribution on a coder approval card: a confirm_request carrying an
+// `agent` label renders an attribution line, one without it renders none.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -24,13 +20,13 @@ test("a child's approval card names the sub-agent that is asking", () => {
   assert.ok(asker, "no attribution line on a sub-agent's approval card");
   assert.equal(asker.textContent, "sub-agent child1 is asking");
   assert.equal(asker.querySelector(".name").textContent, "child1");
-  // The card is otherwise unchanged: still names the tool it is approving.
+  // The card still names the tool being approved.
   assert.equal(card.querySelector(".title .name").textContent, "run_shell");
 });
 
 test("FIRES-CONTROL: the session's own prompt carries no attribution line", () => {
   const { window } = loadApp();
-  // Same event minus `agent` - what the top-level agent's prompt looks like.
+  // Same event minus `agent`.
   const card = window.buildConfirmCard(session(), request());
   assert.equal(card.querySelector(".asker"), null,
                "the user's own action was attributed to a sub-agent");

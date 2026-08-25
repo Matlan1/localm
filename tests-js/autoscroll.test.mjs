@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// R31: the user must be able to scroll up to read earlier text while a reply is
-// still streaming. The old code recomputed "am I near the bottom?" per token and
-// also re-pinned to the bottom unconditionally on every renderChat, so a fast
-// stream fought the user back down. The fix latches chat.stick from the user's
-// real scroll position (a scroll listener) and only autoscrolls while it is set.
+// Chat autoscroll: chat.stick latches from the scroll listener, and the view
+// only follows the bottom while it is set.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -81,9 +78,7 @@ test("R31: renderChat does not re-pin to the bottom while the user is scrolled u
     configurable: true, get: () => val, set: (v) => { val = v; writes.push(v); },
   });
 
-  // Paused (user scrolled up): renderChat - which runs mid-stream on web/finalize
-  // re-renders - must NOT yank the view back to the bottom. (On master this tail
-  // was unconditional, the core R31 break.)
+  // Paused: the user is scrolled up.
   window.chatState.stick = false;
   window.renderChat();
   assert.equal(writes.length, 0, "renderChat leaves the scroll alone when paused");

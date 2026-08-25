@@ -1,5 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Guards for the FLUX generator docs matching the code."""
+"""Guards for the FLUX generator docs matching the code.
+
+Two audit findings motivated these:
+  - docs/flux-setup.md told users to download a T5 encoder filename the
+    committed workflow does not load (a guaranteed first-run ComfyUI error).
+  - the generate_image negative-prompt description claimed "ConditioningConcat"
+    while the code builds a real negative branch via CFGGuider.
+"""
 
 import json
 from pathlib import Path

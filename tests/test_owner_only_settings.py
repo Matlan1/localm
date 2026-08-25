@@ -1,5 +1,20 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Owner-only settings gate (REC-OWNER-SETTINGS)."""
+"""Owner-only settings gate (REC-OWNER-SETTINGS).
+
+The RAG indexing settings (rag_indexing_mode / rag_allowed_roots /
+rag_denied_roots) are flagged ``admin_only`` because they define a filesystem-READ
+boundary: which host folders the RAG indexer may open. Hiding the control in the
+GUI is therefore not enough - a non-owner ``config:write`` key must be refused at
+the API, or it could add ``Z:\\`` and then index-and-exfil arbitrary files. These
+tests prove all three surfaces enforce it server-side:
+
+  - GET /v1/config/schema OMITS the field for a non-owner (no control shipped),
+  - GET /v1/config STRIPS its value for a non-owner,
+  - PATCH /v1/config 403s the field for a non-owner, while the OWNER can do all.
+
+A plain (non-owner-only) config:write field stays fully usable by the scoped key,
+so the gate is specific to admin_only keys, not a blanket block.
+"""
 from __future__ import annotations
 
 import pytest
@@ -12,7 +27,8 @@ OWNER_KEY = "owner-admin-key-abc123"
 
 @pytest.fixture
 def app_env(tmp_path, monkeypatch):
-    """Protected-mode app: an owner (ADMIN) key via env + a scoped config:write key in the keystore, both under an isolated data dir."""
+    """Protected-mode app: an owner (ADMIN) key via env + a scoped config:write
+    key in the keystore, both under an isolated data dir."""
     import localm.config as cfg
     home = tmp_path / ".localm"
     home.mkdir(parents=True, exist_ok=True)
@@ -85,10 +101,16 @@ def test_scoped_key_patch_forbidden_owner_allowed(app_env):
 
 
 def test_net_allow_private_is_owner_only(app_env):
-    """net_allow_private DISABLES the SSRF guard server-wide (it permits requests to loopback / private / link-local / cloud-metadata targets), so - exactly like the rag_* folder settings - it widens a trust boundary and must be owner-only."""
+    """net_allow_private DISABLES the SSRF guard server-wide (it permits requests
+    to loopback / private / link-local / cloud-metadata targets), so - exactly like
+    the rag_* folder settings - it widens a trust boundary and must be owner-only.
+    A non-owner config:write key must be refused at the API, or it could flip the
+    guard off and then reach internal services via any model-initiated fetch.
+    Regression for pentest finding LM-PT-001 (net_allow_private was config:write,
+    not admin_only, unlike every other trust-widening key)."""
     c, scoped, _ = app_env
     # PATCH is refused for the non-owner config:write key (the guard-disable is
-    # owner-only), with the same 'owner' rationale the rag_* keys use.
+    # owner-only).
     denied = c.patch("/v1/config", headers=_scoped(scoped),
                      json={"net_allow_private": True})
     assert denied.status_code == 403, denied.text
@@ -102,14 +124,15 @@ def test_net_allow_private_is_owner_only(app_env):
     ok = c.patch("/v1/config", headers=_owner(), json={"net_allow_private": True})
     assert ok.status_code == 200, ok.text
     assert c.get("/v1/config", headers=_owner()).json().get("net_allow_private") is True
-    # A plain (non-owner-only) network field stays fully usable by the scoped key,
-    # so the gate is specific to the guard-disable, not a blanket block on net_*.
+    # A plain (non-owner-only) network field stays fully usable by the scoped key.
     assert c.patch("/v1/config", headers=_scoped(scoped),
                    json={"net_allow": ["x.com"]}).status_code == 200
 
 
 def test_net_allow_private_value_hidden_from_scoped_key(app_env):
-    """The owner-only value is stripped from GET /v1/config for a non-owner key (parity with the rag_* keys), so a scoped key cannot even read the current SSRF-guard state."""
+    """The owner-only value is stripped from GET /v1/config for a non-owner key
+    (parity with the rag_* keys), so a scoped key cannot even read the current
+    SSRF-guard state."""
     c, scoped, _ = app_env
     assert c.patch("/v1/config", headers=_owner(),
                    json={"net_allow_private": True}).status_code == 200
@@ -120,7 +143,16 @@ def test_net_allow_private_value_hidden_from_scoped_key(app_env):
 
 
 def test_cors_origins_is_owner_only(app_env):
-    """cors_origins widens trust reach exactly like net_allow_private and the bugreport_upload_* / update_* keys do: it names which browser origins may call the authenticated API, and '*' opts every unauthenticated-in-every-mode sensitive GET (/whoami, /debug/stacks - see _CROSS_ORIGIN_GET_REFUSED in http_..."""
+    """cors_origins widens trust reach exactly like net_allow_private and the
+    bugreport_upload_* / update_* keys do: it names which browser origins may
+    call the authenticated API, and "*" opts every unauthenticated-in-every-mode
+    sensitive GET (/whoami, /debug/stacks - see _CROSS_ORIGIN_GET_REFUSED in
+    http_server.py) out of the cross-origin refusal too. A non-owner
+    config:write key must not be able to set it, or it could widen the origin
+    trust boundary itself and then read /whoami cross-origin to disclose
+    root_dir (the OS username). Regression for the security-checkup finding
+    2026-07-23 (cors_origins was config:write, not admin_only, unlike every
+    other trust-widening key)."""
     c, scoped, _ = app_env
     denied = c.patch("/v1/config", headers=_scoped(scoped),
                      json={"cors_origins": "*"})
@@ -136,7 +168,13 @@ def test_cors_origins_is_owner_only(app_env):
 
 
 def test_patch_response_hides_admin_only_field_values_from_a_scoped_writer(app_env):
-    """Regression for pentest finding LM-PT-001: update_config() returns the FULL merged config (every key, not just the ones this call changed), so PATCH /v1/config's response must apply the same admin_only_keys() filter GET /v1/config already applies above - otherwise a config:write-scoped, non-owner key..."""
+    """Regression for pentest finding LM-PT-001: update_config() returns the
+    FULL merged config (every key, not just the ones this call changed), so
+    PATCH /v1/config's response must apply the same admin_only_keys() filter
+    GET /v1/config already applies above - otherwise a config:write-scoped,
+    non-owner key's response echoes back an admin_only secret's CURRENT value
+    (e.g. update_token) even though the write itself already refuses to let it
+    SET that field."""
     c, scoped, _ = app_env
     from localm.config import update_config
     update_config(lambda cfg: cfg.update({"update_token": "s3cr3t-owner-set-token"}))
@@ -146,14 +184,16 @@ def test_patch_response_hides_admin_only_field_values_from_a_scoped_writer(app_e
     assert resp.status_code == 200, resp.text
     assert "update_token" not in resp.json(), \
         "an admin_only field's value must not be echoed back to a non-owner key"
-    # The owner's own PATCH response still carries it (parity: not a blanket
-    # drop, only a non-owner boundary).
+    # The owner's own PATCH response still carries it.
     owner_resp = c.patch("/v1/config", headers=_owner(), json={"net_allow": ["y.com"]})
     assert owner_resp.json().get("update_token") == "s3cr3t-owner-set-token"
 
 
 def test_owner_widening_reaches_the_indexer_policy(app_env):
-    """The whole point: the owner's API write flows into the RAG indexer's policy, so a folder the owner adds becomes indexable. (A folder genuinely outside the OS home - e.g. an F:\\ drive - is refused until added; we assert the policy linkage, the deciding factor, since pytest's tmp sits under the OS home..."""
+    """The whole point: the owner's API write flows into the RAG indexer's policy,
+    so a folder the owner adds becomes indexable. (A folder genuinely outside the
+    OS home - e.g. an F:\\ drive - is refused until added; we assert the policy
+    linkage, the deciding factor, since pytest's tmp sits under the OS home.)"""
     c, _scoped_key, tmp_path = app_env
     from localm.rag.store import confine_index_path, indexing_policy
     outside = tmp_path / "external-docs"

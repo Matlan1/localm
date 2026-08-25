@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Goal mode: iterate the task until a verification command exits 0."""
+"""Goal mode: iterate the task until a verification command exits 0.
+
+Success is judged by the command's exit code (an un-gameable oracle), not the
+model, so it cannot declare premature success."""
 
 from __future__ import annotations
 
@@ -37,7 +40,12 @@ def _goal_task_wrap(task: str, until_cmd: str) -> str:
 
 def _run_goal_loop(agent: Agent, task: str, until_cmd: str, max_iters: int,
                    work_dir: Path) -> "tuple[bool, str]":
-    """Iterate: run the task, run the verify command, feed failures back, until it exits 0 or the iteration cap is hit."""
+    """Iterate: run the task, run the verify command, feed failures back, until it
+    exits 0 or the iteration cap is hit. Returns (success, last_response).
+
+    Success is judged solely by the command's exit code, so the model cannot
+    declare a premature success; on exhaustion it reports failure honestly rather
+    than papering over it."""
     # Live-attribute access so a test patching cli._run_verify is honoured (the
     # name moved into this submodule when cli.py became a package).
     _run_verify = _cli._run_verify

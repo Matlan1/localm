@@ -1,5 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Episodic memory for the coder: store, BM25 retrieval, reflection, and the Agent integration (recall injection + close-time reflection, privacy/restricted gated)."""
+"""Episodic memory for the coder: store, BM25 retrieval, reflection, and the
+Agent integration (recall injection + close-time reflection, privacy/restricted
+gated).
+
+Every test isolates LOCALM_HOME so the per-project episode store writes under a
+tmp dir, never the user's real data.
+"""
 
 from __future__ import annotations
 
@@ -83,7 +89,12 @@ def test_store_is_per_project(home, tmp_path):
 
 
 def test_store_evicts_by_value_not_arrival_order(home, tmp_path, monkeypatch):
-    """At the cap the LEAST VALUABLE episode goes, not simply the oldest."""
+    """At the cap the LEAST VALUABLE episode goes, not simply the oldest.
+
+    Replaces the old FIFO pin (`test_store_caps_to_newest`). Under that behavior
+    the rich failure lesson below - added FIRST - was always the first thing
+    discarded, however much it had to teach; that is finding 39 in one line.
+    Ages are staggered so plain recency cannot be what saves it."""
     import localm.plugins.coder.episodes as ep_mod
     monkeypatch.setattr(ep_mod, "_MAX_EPISODES", 3)
     store = ep_mod.EpisodeStore(tmp_path)
@@ -97,8 +108,7 @@ def test_store_evicts_by_value_not_arrival_order(home, tmp_path, monkeypatch):
         lesson="close the psql session before running alembic upgrade",
         ts=now - 2 * 86400))
     # Three thin, newer records: a bare one-line lesson each. Subjects are kept
-    # unrelated so the dedup pass has nothing to collapse and eviction is what is
-    # actually under test here.
+    # unrelated so the dedup pass has nothing to collapse.
     thin = [("rename the config loader", "config lives in one place"),
             ("bump the pillow dependency", "pin the minor version"),
             ("delete the unused sprite sheet", "check references first")]
@@ -113,7 +123,9 @@ def test_store_evicts_by_value_not_arrival_order(home, tmp_path, monkeypatch):
 
 
 def test_dedup_collapses_near_identical_without_losing_a_distinct_one(home, tmp_path):
-    """A restatement of a lesson MERGES into it; a genuinely different lesson is untouched."""
+    """A restatement of a lesson MERGES into it; a genuinely different lesson is
+    untouched. The negative half is the point: an over-eager dedup that also ate
+    the distinct episode would be memory loss dressed up as tidying."""
     store = EpisodeStore(tmp_path)
     a = store.add(Episode(task="fix the flaky upload integration test",
                           lesson="raise the upload timeout to 30 seconds",
@@ -144,7 +156,11 @@ def test_dedup_collapses_near_identical_without_losing_a_distinct_one(home, tmp_
 
 
 def test_merge_keeps_a_failed_predecessors_warning(home, tmp_path):
-    """When a task that once FAILED is done again successfully, the restatement absorbs the older record - and must carry its what_failed forward."""
+    """When a task that once FAILED is done again successfully, the restatement
+    absorbs the older record - and must carry its what_failed forward. Dropping it
+    would delete the most valuable half of the lesson (audit cluster 11) at exactly
+    the moment the merge looks harmless. The outcome, though, is the newer run's:
+    it really did finish this time."""
     store = EpisodeStore(tmp_path)
     store.add(Episode(task="migrate the users table to uuid keys",
                       outcome="incomplete",
@@ -161,7 +177,8 @@ def test_merge_keeps_a_failed_predecessors_warning(home, tmp_path):
 
 
 def test_dedup_does_not_collapse_a_shared_generic_lesson(home, tmp_path):
-    """Two DIFFERENT tasks that happen to yield the same generic advice stay two episodes: the dedup signature is task+lesson, not the lesson alone."""
+    """Two DIFFERENT tasks that happen to yield the same generic advice stay two
+    episodes: the dedup signature is task+lesson, not the lesson alone."""
     store = EpisodeStore(tmp_path)
     store.add(Episode(task="wire up the billing webhook receiver",
                       lesson="write the test first"))
@@ -171,7 +188,8 @@ def test_dedup_does_not_collapse_a_shared_generic_lesson(home, tmp_path):
 
 
 def test_evicted_episode_is_recoverable_from_the_archive(home, tmp_path, monkeypatch):
-    """Archive-before-drop: what the cap evicts is still on disk and restorable."""
+    """Archive-before-drop: what the cap evicts is still on disk and restorable.
+    Negative half first - it really is gone from live recall."""
     import localm.plugins.coder.episodes as ep_mod
     monkeypatch.setattr(ep_mod, "_MAX_EPISODES", 2)
     store = ep_mod.EpisodeStore(tmp_path)
@@ -195,18 +213,17 @@ def test_evicted_episode_is_recoverable_from_the_archive(home, tmp_path, monkeyp
     # Live again means no longer listed as forgotten...
     assert doomed.id not in {r["id"] for r in store.forgotten()}
     # ...but the store was FULL, so putting it back pushed another episode out,
-    # and THAT one's recovery copy must now be in the archive. (Asserting the
-    # archive is empty here would be asserting the bug: the first cut rewrote the
-    # archive from a pre-restore snapshot and destroyed exactly this record.)
+    # and THAT one's recovery copy must now be in the archive.
     assert [e.task for e in store.last_evicted] == ["second task"]
     assert {r["id"] for r in store.forgotten()} == {e.id for e in store.last_evicted}
-    # And a restore of something that was never archived says so, rather than
-    # inventing an episode.
+    # A restore of something that was never archived returns None.
     assert store.restore("nope-not-here") is None
 
 
 def test_restore_survives_the_decay_that_evicted_it(home, tmp_path, monkeypatch):
-    """A restored episode is re-stamped to now, so the very age that got it evicted cannot immediately evict it again - which would make restore a silent no-op."""
+    """A restored episode is re-stamped to now, so the very age that got it
+    evicted cannot immediately evict it again - which would make restore a silent
+    no-op. Its id is preserved so an old citation still resolves."""
     import localm.plugins.coder.episodes as ep_mod
     monkeypatch.setattr(ep_mod, "_MAX_EPISODES", 2)
     store = ep_mod.EpisodeStore(tmp_path)
@@ -226,7 +243,9 @@ def test_restore_survives_the_decay_that_evicted_it(home, tmp_path, monkeypatch)
 
 def test_restore_does_not_discard_recovery_copies_it_displaces(home, tmp_path,
                                                                monkeypatch):
-    """Restoring into a FULL store evicts something else, and that eviction's own recovery copy must survive the archive rewrite."""
+    """Restoring into a FULL store evicts something else, and that eviction's own
+    recovery copy must survive the archive rewrite. Reading the archive before
+    add() and writing it back afterwards silently dropped it."""
     import localm.plugins.coder.episodes as ep_mod
     monkeypatch.setattr(ep_mod, "_MAX_EPISODES", 2)
     store = ep_mod.EpisodeStore(tmp_path)
@@ -250,7 +269,9 @@ def test_restore_does_not_discard_recovery_copies_it_displaces(home, tmp_path,
 
 
 def test_forget_one_episode_by_id(home, tmp_path):
-    """Targeted forget: the whole point of stable ids."""
+    """Targeted forget: the whole point of stable ids. Archived, so an accidental
+    forget is recoverable; unknown ids report failure instead of silently doing
+    nothing."""
     store = EpisodeStore(tmp_path)
     keep = store.add(Episode(task="keep this one", lesson="keep"))
     drop = store.add(Episode(task="a totally different subject", lesson="drop"))
@@ -263,7 +284,8 @@ def test_forget_one_episode_by_id(home, tmp_path):
 
 
 def test_clear_removes_the_archive_too(home, tmp_path, monkeypatch):
-    """'Cleared episodic memory' has to be true."""
+    """"Cleared episodic memory" has to be true. Leaving the lesson text sitting
+    in the sidecar would be a privacy claim that did not hold."""
     import localm.plugins.coder.episodes as ep_mod
     monkeypatch.setattr(ep_mod, "_MAX_EPISODES", 1)
     store = ep_mod.EpisodeStore(tmp_path)
@@ -283,7 +305,7 @@ def test_archive_is_capped(home, tmp_path, monkeypatch):
     monkeypatch.setattr(ep_mod, "_ARCHIVE_MAX", 3)
     store = ep_mod.EpisodeStore(tmp_path)
     # Unrelated subjects, so each add EVICTS its predecessor at the cap rather
-    # than merging into it - the archive cap is what is under test.
+    # than merging into it.
     for t, lsn in [("rename the config loader", "config lives in one place"),
                    ("bump the pillow dependency", "pin the minor version"),
                    ("delete the unused sprite sheet", "check references first"),
@@ -295,7 +317,9 @@ def test_archive_is_capped(home, tmp_path, monkeypatch):
 
 
 def test_failed_archive_is_reported_not_swallowed(home, tmp_path, monkeypatch, caplog):
-    """Rule 5: dropping an episode without a recovery copy is a real failure."""
+    """Rule 5: dropping an episode without a recovery copy is a real failure. It
+    stays best-effort (the write still lands - refusing it would break a working
+    setup over a sidecar), but it must leave a WARNING, not vanish."""
     import logging
 
     import localm.plugins.coder.episodes as ep_mod
@@ -309,8 +333,7 @@ def test_failed_archive_is_reported_not_swallowed(home, tmp_path, monkeypatch, c
     from pathlib import Path
     monkeypatch.setattr(Path, "write_text", boom)
     with caplog.at_level(logging.WARNING, logger="localm"):
-        # write_text is broken for the main log too, so the add itself raises;
-        # what matters is that the archive failure was reported first.
+        # write_text is broken for the main log too, so the add itself raises.
         try:
             store.add(ep_mod.Episode(task="a second unrelated task", lesson="two"))
         except OSError:
@@ -337,11 +360,16 @@ def test_all_skips_malformed_lines(home, tmp_path):
 
 # --------------------------------------------------------------------------- #
 #  JSONL round trip: every separator str.splitlines() breaks on, that          #
-#  json.dumps(ensure_ascii=False) writes RAW - see localm/jsonl.py.            #
+#  json.dumps(ensure_ascii=False) writes RAW.                                 #
 # --------------------------------------------------------------------------- #
 
 def test_add_load_save_round_trip_preserves_a_u0085_bearing_episode(home, tmp_path):
-    """str.splitlines() splits on U+0085 (NEL) as well as LINE FEED, and json.dumps(ensure_ascii=False) writes U+0085 RAW - so a lesson containing one used to be torn into two unparseable fragments and silently dropped, first on load and then for good on the next save (add() rewrites the whole file from wh..."""
+    """str.splitlines() splits on U+0085 (NEL) as well as LINE FEED, and
+    json.dumps(ensure_ascii=False) writes U+0085 RAW - so a lesson containing one
+    used to be torn into two unparseable fragments and silently dropped, first on
+    load and then for good on the next save (add() rewrites the whole file from
+    whatever all() returned). Measured in the wild against a real RAG collection
+    (localm/jsonl.py); same defect, same fix (split_jsonl/dumps_lines) here."""
     sep = "\x85"
     store = EpisodeStore(tmp_path)
     store.add(Episode(task="t1", lesson=f"before{sep}after", files=["a.py"]))
@@ -352,22 +380,18 @@ def test_add_load_save_round_trip_preserves_a_u0085_bearing_episode(home, tmp_pa
     assert len(eps) == 1, "the U+0085-bearing episode was dropped on load"
     assert eps[0].lesson == f"before{sep}after"
 
-    # write side: the file on disk must not carry the raw separator - any OTHER
-    # line-oriented reader (or a pre-fix legacy consumer) has to stay safe too.
+    # write side: the file on disk must not carry the raw separator.
     raw = reloaded.path.read_text(encoding="utf-8")
     assert sep not in raw, f"{sep!r} written raw into the episodes log"
 
-    # save: add() reads the existing log via all() and rewrites the WHOLE file -
-    # the step that permanently deletes a record the read side failed to recover.
+    # save: add() reads the existing log via all() and rewrites the WHOLE file.
     reloaded.add(Episode(task="t2", lesson="L2"))
     final = EpisodeStore(tmp_path).all()
     assert len(final) == 2, "the earlier episode was lost on the next save cycle"
     assert final[0].lesson == f"before{sep}after"
     assert final[1].lesson == "L2"
 
-    # read side, independent of write escaping: a file carrying the RAW separator
-    # (written before this fix existed, or by any other producer) must still
-    # round-trip, not just one this store's own writer just escaped.
+    # read side: a file carrying the RAW separator must still round-trip.
     legacy_line = json.dumps({"task": "legacy", "lesson": f"x{sep}y"},
                              ensure_ascii=False)
     store.path.write_text(store.path.read_text(encoding="utf-8") + legacy_line + "\n",
@@ -378,7 +402,9 @@ def test_add_load_save_round_trip_preserves_a_u0085_bearing_episode(home, tmp_pa
 
 
 def test_forget_and_restore_preserve_a_u0085_bearing_episode(home, tmp_path):
-    """The archive sidecar (_archive()/forgotten()/restore()) carries the identical U+0085 hazard as the live log above - see the why-comments at _archive(), forgotten() and restore() in episodes.py."""
+    """The archive sidecar (_archive()/forgotten()/restore()) carries the identical
+    U+0085 hazard as the live log above - see the why-comments at _archive(),
+    forgotten() and restore() in episodes.py."""
     sep = "\x85"
     store = EpisodeStore(tmp_path)
     keep = store.add(Episode(task="keep this one", lesson="keep"))
@@ -399,8 +425,7 @@ def test_forget_and_restore_preserve_a_u0085_bearing_episode(home, tmp_path):
     assert (rows["a totally different tainted subject"]["lesson"]
             == f"before{sep}after")
 
-    # save (restore rewrites the archive, carrying the OTHER entry forward): the
-    # tainted record must survive a rewrite it was never itself the subject of.
+    # save: restore rewrites the archive, carrying the OTHER entry forward.
     restored = store.restore(plain.id)
     assert restored is not None and store.last_restore_archive_ok
     archive_raw2 = store.archive_path.read_text(encoding="utf-8")
@@ -409,8 +434,8 @@ def test_forget_and_restore_preserve_a_u0085_bearing_episode(home, tmp_path):
     rows2 = store.forgotten()
     assert len(rows2) == 1 and rows2[0]["lesson"] == f"before{sep}after"
 
-    # read side, independent of write escaping: a raw separator injected directly
-    # into the archive (e.g. written before this fix existed) must still load.
+    # read side: a raw separator injected directly into the archive must still
+    # load.
     legacy_line = json.dumps({"task": "legacy", "lesson": f"x{sep}y",
                               "forgotten_at": 0.0, "reason": "forget"},
                              ensure_ascii=False)
@@ -424,7 +449,11 @@ def test_forget_and_restore_preserve_a_u0085_bearing_episode(home, tmp_path):
 
 
 def test_concurrent_add_and_all_survive_a_racing_replace(home, tmp_path):
-    """A writer looping add() and readers looping all() hit the same file concurrently (this is the real shape of a GUI poll racing a session-close reflection write)."""
+    """A writer looping add() and readers looping all() hit the same file
+    concurrently (this is the real shape of a GUI poll racing a session-close
+    reflection write). On Windows, add()'s atomic temp-file replace can
+    momentarily deny a concurrent open of the destination and vice versa; both
+    sides must retry through the transient PermissionError, not raise it."""
     import threading
     import time
 
@@ -463,7 +492,10 @@ def test_concurrent_add_and_all_survive_a_racing_replace(home, tmp_path):
 
 
 def test_add_retries_through_transient_permission_errors_and_succeeds(home, tmp_path, monkeypatch):
-    """Fault-injects PermissionError on tmp.replace() a few times before letting it through, directly exercising add()'s retry-with-backoff path (the fix for the racing-replace flake above) without depending on real OS scheduling luck to hit the window."""
+    """Fault-injects PermissionError on tmp.replace() a few times before letting
+    it through, directly exercising add()'s retry-with-backoff path (the fix for
+    the racing-replace flake above) without depending on real OS scheduling
+    luck to hit the window."""
     from pathlib import Path
 
     store = EpisodeStore(tmp_path)
@@ -484,7 +516,8 @@ def test_add_retries_through_transient_permission_errors_and_succeeds(home, tmp_
 
 
 def test_add_raises_once_the_retry_budget_is_exhausted(home, tmp_path, monkeypatch):
-    """A PermissionError that never clears must still surface as a real failure, not be silently swallowed - the retry is bounded, not infinite."""
+    """A PermissionError that never clears must still surface as a real
+    failure, not be silently swallowed - the retry is bounded, not infinite."""
     import localm.plugins.coder.episodes as ep_mod
     from pathlib import Path
 
@@ -500,7 +533,8 @@ def test_add_raises_once_the_retry_budget_is_exhausted(home, tmp_path, monkeypat
 
 
 def test_all_retries_through_transient_permission_errors_and_succeeds(home, tmp_path, monkeypatch):
-    """Same as above for all()'s read side: a concurrent add()'s replace can momentarily deny the open, and all() must retry through it, not raise."""
+    """Same as above for all()'s read side: a concurrent add()'s replace can
+    momentarily deny the open, and all() must retry through it, not raise."""
     from pathlib import Path
 
     store = EpisodeStore(tmp_path)
@@ -537,19 +571,15 @@ def test_all_raises_once_the_retry_budget_is_exhausted(home, tmp_path, monkeypat
 
 
 # --------------------------------------------------------------------------- #
-#  An UNREADABLE archive is not an EMPTY one (AGENTS.md rule 5)                #
+#  An UNREADABLE archive is not an EMPTY one                                  #
 # --------------------------------------------------------------------------- #
-#
-# forgotten() branched OSError from absent and logged it, but still returned []
-# with no way for a caller to tell the two apart - so the CLI printed "No dropped
-# episodes archived for this project" / "No archived episode with id X" while the
-# user's recovery copies existed and merely could not be read. Only a debug log
-# distinguished them, which no user reads. These pin the distinction at BOTH the
-# store and the CLI, so a revert to the silent form goes red.
 
 
 def _lock_reads_of(monkeypatch, target):
-    """Make Path.read_text raise for *target* only, leaving every other path readable: an existing file that cannot be read (the transient Windows AV / indexer lock storekit.py documents)."""
+    """Make Path.read_text raise for *target* only, leaving every other path
+    readable: an existing file that cannot be read (the transient Windows AV /
+    indexer lock storekit.py documents). Fault injected at the DISK BOUNDARY, so
+    the real store code under test runs unmocked."""
     from pathlib import Path
     real_read_text = Path.read_text
 
@@ -580,7 +610,8 @@ def _seed_one_archived(store_cls, tmp_path, monkeypatch):
 
 def test_unreadable_archive_is_flagged_not_reported_as_empty(home, tmp_path,
                                                              monkeypatch, caplog):
-    """The pin for finding 1: forgotten() must tell a caller that the empty list it just returned is a READ FAILURE, not an empty archive."""
+    """The pin for finding 1: forgotten() must tell a caller that the empty list
+    it just returned is a READ FAILURE, not an empty archive."""
     import logging
 
     store, _dropped = _seed_one_archived(EpisodeStore, tmp_path, monkeypatch)
@@ -599,7 +630,10 @@ def test_unreadable_archive_is_flagged_not_reported_as_empty(home, tmp_path,
 
 
 def test_absent_archive_reports_ok_not_a_read_failure(home, tmp_path):
-    """The fires-control for the above: a genuinely ABSENT archive is normal and must NOT set the failure flag, or the CLI would cry wolf on every fresh project."""
+    """The fires-control for the above: a genuinely ABSENT archive is normal and
+    must NOT set the failure flag, or the CLI would cry wolf on every fresh
+    project. Without this, a store that hardcoded last_forgotten_ok = False would
+    pass the test above."""
     store = EpisodeStore(tmp_path)
     assert not store.archive_path.is_file()
     assert store.forgotten() == []
@@ -607,7 +641,8 @@ def test_absent_archive_reports_ok_not_a_read_failure(home, tmp_path):
 
 
 def test_forgotten_ok_flag_resets_between_calls(home, tmp_path, monkeypatch):
-    """The flag describes the LAST call, not a sticky one-way latch: once the file is readable again the caller must stop being told the list is incomplete."""
+    """The flag describes the LAST call, not a sticky one-way latch: once the file
+    is readable again the caller must stop being told the list is incomplete."""
     store, _dropped = _seed_one_archived(EpisodeStore, tmp_path, monkeypatch)
     restore = _lock_reads_of(monkeypatch, store.archive_path)
     store.forgotten()
@@ -620,7 +655,11 @@ def test_forgotten_ok_flag_resets_between_calls(home, tmp_path, monkeypatch):
 
 def test_restore_does_not_wipe_the_archive_when_the_reread_fails(home, tmp_path,
                                                                  monkeypatch, caplog):
-    """restore() re-reads the archive after add() and rewrites it minus the restored id."""
+    """restore() re-reads the archive after add() and rewrites it minus the
+    restored id. If that re-read FAILS, the empty stand-in must NOT be written
+    over the file - that turns a transient read error into permanent loss of every
+    remaining recovery copy (the trap memory/store.py's propose_corrections
+    guards)."""
     import logging
     from pathlib import Path
 
@@ -637,11 +676,7 @@ def test_restore_does_not_wipe_the_archive_when_the_reread_fails(home, tmp_path,
     assert len(archived_before) == 2                    # two recovery copies exist
 
     # Let the FIRST archive read through (that is the one that finds the record to
-    # restore), then make every later one fail. Note this also faults the read
-    # inside add()'s own _archive - that path is already best-effort and covered by
-    # test_failed_archive_is_reported_not_swallowed, so this test asserts only on
-    # what the re-read guard itself owns: the file must not be REWRITTEN from a
-    # read that failed.
+    # restore), then make every later one fail.
     real_read_text = Path.read_text
     seen = {"n": 0}
 
@@ -667,7 +702,9 @@ def test_restore_does_not_wipe_the_archive_when_the_reread_fails(home, tmp_path,
 
 
 def test_cli_says_the_archive_is_unreadable_not_empty(home, tmp_path, monkeypatch):
-    """The user-facing half of finding 1: --episodes-archive and --restore-episode must not print a clean 'nothing here' while the archive exists and could not be read."""
+    """The user-facing half of finding 1: --episodes-archive and --restore-episode
+    must not print a clean "nothing here" while the archive exists and could not be
+    read. That is the exact absent-vs-unreadable collapse rule 5 forbids."""
     from click.testing import CliRunner
 
     from localm.plugins.engine import PluginManager
@@ -691,7 +728,9 @@ def test_cli_says_the_archive_is_unreadable_not_empty(home, tmp_path, monkeypatc
 
 def test_cli_still_says_empty_when_the_archive_really_is_empty(home, tmp_path,
                                                               monkeypatch):
-    """Fires-control for the CLI half: with a readable (absent) archive the plain empty message must still appear, so the test above is pinning the DISTINCTION rather than just the presence of a scary string."""
+    """Fires-control for the CLI half: with a readable (absent) archive the plain
+    empty message must still appear, so the test above is pinning the DISTINCTION
+    rather than just the presence of a scary string."""
     from click.testing import CliRunner
 
     from localm.plugins.engine import PluginManager
@@ -706,25 +745,35 @@ def test_cli_still_says_empty_when_the_archive_really_is_empty(home, tmp_path,
 # --------------------------------------------------------------------------- #
 #  Concurrent WRITERS: a lost update CLOBBERS an episode with no archive copy  #
 # --------------------------------------------------------------------------- #
-#
-# add/forget/restore/consolidate each did all() -> mutate -> _write_all() with no
-# lock. Two writers on the same project (two sessions closing at once, or a
-# --forget-episode CLI run racing a session-close reflection) are last-writer-
-# wins, and an episode lost that way never reaches the archive - so it is
-# CLOBBERED, not dropped-recoverably, defeating the whole loss-averse design.
-# The pre-existing concurrency test covers reader-vs-replace only.
 
 
 @pytest.fixture
 def no_dedup(monkeypatch):
-    """Make the near-duplicate MERGE unreachable for the concurrency tests."""
+    """Make the near-duplicate MERGE unreachable for the concurrency tests.
+
+    This is load-bearing, not tidiness. A merge is a LEGITIMATE, archived drop, so
+    a merged-away episode still satisfies "live or archived" and the clobber
+    assertion can never fire. Programmatically generated task text is exactly what
+    trips the merge: measured, "alpha unrelated subject number 0" vs "... number 1"
+    scores 0.957 against the 0.90 _DEDUP_RATIO, so an earlier version of these
+    tests collapsed nearly every episode into one and passed vacuously - it would
+    have gone green against the UNLOCKED code too. Raising the ratio above 1.0
+    leaves the real dedup code path running (it is still compared against every
+    episode) but makes a match impossible, so every episode that goes missing is a
+    genuine lost update rather than a merge."""
     import localm.plugins.coder.episodes as ep_mod
     monkeypatch.setattr(ep_mod, "_DEDUP_RATIO", 1.01)
 
 
 def test_concurrent_writers_never_lose_an_episode_without_an_archive_copy(
         home, tmp_path, no_dedup):
-    """Two threads add() distinct episodes to the same project concurrently."""
+    """Two threads add() distinct episodes to the same project concurrently. Every
+    episode either survives in the live log or has a recovery copy in the archive -
+    silently vanishing from both is the clobber this lock exists to prevent.
+
+    Each writer uses its OWN EpisodeStore instance, which is the real shape: the
+    race is across instances (a per-instance lock could not help), so the lock has
+    to be keyed by the store file."""
     import threading
 
     n_each = 25
@@ -760,9 +809,8 @@ def test_concurrent_writers_never_lose_an_episode_without_an_archive_copy(
     live_eps = final.all()
     live = {e.id for e in live_eps}
     archived = {r.get("id") for r in final.forgotten()}
-    # Precondition guard for the assertion below: with dedup unreachable and 50
-    # episodes against the 200 cap, NOTHING should have been legitimately dropped.
-    # If this ever fails, the real assertion has stopped measuring a clobber.
+    # Precondition: with dedup unreachable and 50 episodes against the 200 cap,
+    # nothing should have been legitimately dropped.
     assert not any(e.merged for e in live_eps), "dedup was reachable; test is void"
     assert not archived, "nothing should have been legitimately dropped here"
 
@@ -774,7 +822,10 @@ def test_concurrent_writers_never_lose_an_episode_without_an_archive_copy(
 
 def test_concurrent_forget_and_add_do_not_resurrect_or_clobber(home, tmp_path,
                                                                no_dedup):
-    """The other writer-vs-writer shape from the finding: a --forget-episode CLI run racing a session-close reflection add()."""
+    """The other writer-vs-writer shape from the finding: a --forget-episode CLI
+    run racing a session-close reflection add(). The forgotten episode must stay
+    forgotten (not resurrected by a stale snapshot write) and the concurrently
+    added ones must not be clobbered."""
     import threading
 
     seed_store = EpisodeStore(tmp_path)
@@ -828,7 +879,14 @@ def test_concurrent_forget_and_add_do_not_resurrect_or_clobber(home, tmp_path,
 
 def test_consolidate_does_not_clobber_an_episode_added_while_the_model_ran(
         home, tmp_path, no_dedup):
-    """consolidate() makes slow model calls OFF the lock against a SNAPSHOT, then commits."""
+    """consolidate() makes slow model calls OFF the lock against a SNAPSHOT, then
+    commits. If it wrote that stale snapshot back wholesale, an episode recorded by
+    a session closing during the model call would be clobbered - and, never having
+    gone through a drop path, would have no recovery copy. The commit must merge
+    onto freshly re-read state instead (the shape memory/consolidate.py uses).
+
+    The concurrent add is driven from inside the injected model call, so the race
+    is deterministic rather than timing-dependent."""
     import localm.plugins.coder.episodes as ep_mod
 
     store = ep_mod.EpisodeStore(tmp_path)
@@ -864,7 +922,11 @@ def test_consolidate_does_not_clobber_an_episode_added_while_the_model_ran(
 
 def test_restore_keeps_a_recovery_copy_when_the_cap_evicts_it_again(
         home, tmp_path, monkeypatch):
-    """Restoring into a FULL store can push the restored record straight back out at the cap. add() writes it a fresh recovery copy when that happens, and the archive rewrite must not delete that copy along with the entry it supersedes - otherwise the episode is in NEITHER the live log nor the archive, per..."""
+    """Restoring into a FULL store can push the restored record straight back out
+    at the cap. add() writes it a fresh recovery copy when that happens, and the
+    archive rewrite must not delete that copy along with the entry it supersedes -
+    otherwise the episode is in NEITHER the live log nor the archive, permanently
+    lost, while restore() reports success."""
     import localm.plugins.coder.episodes as ep_mod
     monkeypatch.setattr(ep_mod, "_MAX_EPISODES", 2)
     store = ep_mod.EpisodeStore(tmp_path)
@@ -891,7 +953,10 @@ def test_restore_keeps_a_recovery_copy_when_the_cap_evicts_it_again(
 
 def test_retrying_a_restore_after_an_unreadable_archive_does_not_duplicate(
         home, tmp_path, monkeypatch):
-    """When restore() cannot reconcile the archive it leaves the episode live AND still listed as forgotten."""
+    """When restore() cannot reconcile the archive it leaves the episode live AND
+    still listed as forgotten. Retrying must then RECONCILE, not append a second
+    live copy under a mangled id - the store would otherwise carry the same lesson
+    twice and dilute recall."""
     from pathlib import Path
 
     import localm.plugins.coder.episodes as ep_mod
@@ -948,11 +1013,8 @@ def test_search_returns_nothing_when_irrelevant(home, tmp_path):
 
 
 def test_search_silent_on_stopword_only_overlap(home, tmp_path):
-    # A shared STOPWORD ("the"/"to"/"for") must not clear the relevance floor. BM25
-    # has no stopword removal, so before the content-word filter an unrelated task
-    # that merely contained "the" recalled irrelevant lessons and injected them into
-    # the coder prompt. The lexical signal is now content-words-only, so this stays
-    # silent.
+    # A shared STOPWORD ("the"/"to"/"for") must not clear the relevance floor:
+    # the lexical signal is content-words-only.
     store = EpisodeStore(tmp_path)
     store.add(Episode(task="fix the flaky file-upload integration test",
                       lesson="raise the upload test timeout"))
@@ -965,7 +1027,8 @@ def test_search_empty_store(home, tmp_path):
 
 
 def _kw_embed(texts):
-    """Deterministic keyword-bucket 'embedding' so cosine reflects topical relatedness in-process (no model): [is-networking, is-ui, bias]."""
+    """Deterministic keyword-bucket 'embedding' so cosine reflects topical
+    relatedness in-process (no model): [is-networking, is-ui, bias]."""
     net = {"retry", "backoff", "http", "client", "api", "network", "connection",
            "connections", "unreliable", "resilient", "server", "servers",
            "request", "requests", "flaky", "gracefully", "upstream", "handle"}
@@ -979,7 +1042,8 @@ def _kw_embed(texts):
 
 
 def test_search_semantic_recall_beats_lexical(home, tmp_path, monkeypatch):
-    """With an embedder, a task phrased differently from a lesson is still recalled (cosine), where BM25 alone finds nothing; unrelated stays silent."""
+    """With an embedder, a task phrased differently from a lesson is still
+    recalled (cosine), where BM25 alone finds nothing; unrelated stays silent."""
     import localm.plugins.coder.episodes as em
     monkeypatch.setattr(em, "_embed_fn", lambda: _kw_embed)
     store = EpisodeStore(tmp_path)
@@ -1057,8 +1121,8 @@ def test_reflect_survives_a_model_error(home, tmp_path):
 
 
 def test_reflect_feeds_error_trace_to_the_model(home, tmp_path):
-    # Cluster 13: the reflection must SEE the tool/command failures, not just the
-    # diff, so it can actually fill what_failed. Capture the prompt the model gets.
+    # Capture the prompt the model gets: the reflection must see the tool and
+    # command failures, not just the diff.
     store = EpisodeStore(tmp_path)
     seen = {}
 
@@ -1081,8 +1145,8 @@ def test_reflect_feeds_error_trace_to_the_model(home, tmp_path):
 
 
 def test_reflect_stores_thin_failure_episode_when_model_unusable(home, tmp_path):
-    # Cluster 11: a failed session whose model produces nothing usable must still
-    # record the failure lesson from the raw error evidence - deterministically.
+    # A failed session whose model produces nothing usable still records the
+    # failure lesson from the raw error evidence, deterministically.
     store = EpisodeStore(tmp_path)
     reflect_and_store(
         store, task="add the migration", diff="", outcome="incomplete",
@@ -1112,8 +1176,7 @@ def test_reflect_thin_failure_label_when_completed_with_errors(home, tmp_path):
 
 
 def test_reflect_no_thin_episode_without_error_evidence(home, tmp_path):
-    # Unusable model reply AND no error trace -> still nothing stored (unchanged):
-    # a blank record would only dilute retrieval.
+    # Unusable model reply AND no error trace -> nothing stored.
     store = EpisodeStore(tmp_path)
     reflect_and_store(store, task="t", diff="", outcome="incomplete", files=[],
                       turns=0, errors="", complete=lambda p: "no idea", ts=1.0)
@@ -1133,7 +1196,9 @@ def test_add_assigns_a_stable_id_that_survives_a_round_trip(home, tmp_path):
 
 
 def test_legacy_record_without_an_id_gets_a_stable_derived_one(home, tmp_path):
-    """A record written before ids existed still has to be citable and forgettable, without a migration write: the id derives from its own content, so it is the same on every read."""
+    """A record written before ids existed still has to be citable and
+    forgettable, without a migration write: the id derives from its own content,
+    so it is the same on every read."""
     store = EpisodeStore(tmp_path)
     store.path.parent.mkdir(parents=True, exist_ok=True)
     store.path.write_text(
@@ -1146,7 +1211,8 @@ def test_legacy_record_without_an_id_gets_a_stable_derived_one(home, tmp_path):
 
 
 def test_identical_episodes_still_get_distinct_ids(home, tmp_path):
-    """Two records with the same content AND timestamp derive the same id; the store disambiguates rather than letting one shadow the other."""
+    """Two records with the same content AND timestamp derive the same id; the
+    store disambiguates rather than letting one shadow the other."""
     store = EpisodeStore(tmp_path)
     a = store.add(Episode(task="alpha subject", lesson="one", ts=1.0))
     b = store.add(Episode(task="beta subject entirely", lesson="two", ts=1.0))
@@ -1170,7 +1236,9 @@ def test_render_for_prompt():
 
 
 def test_what_worked_is_load_bearing(home, tmp_path):
-    """It used to be written and then never read by anything - not searched, not rendered, not weighed (audit finding 39, 'what_worked is a dead field')."""
+    """It used to be written and then never read by anything - not searched, not
+    rendered, not weighed (audit finding 39, "what_worked is a dead field"). All
+    three now consume it."""
     import localm.plugins.coder.episodes as em
 
     # 1. rendered on recall
@@ -1227,7 +1295,8 @@ def test_consolidate_merges_related_lessons_and_archives_the_originals(home, tmp
 
 
 def test_consolidate_leaves_a_group_alone_when_the_merge_is_unusable(home, tmp_path):
-    """A weak model that returns nothing usable must not cost the user their lessons - destroying real memory is worse than not consolidating."""
+    """A weak model that returns nothing usable must not cost the user their
+    lessons - destroying real memory is worse than not consolidating."""
     store = EpisodeStore(tmp_path)
     a = store.add(Episode(task="add retry logic to the http client",
                           lesson="use exponential backoff", ts=1000.0))
@@ -1253,7 +1322,8 @@ def test_consolidate_survives_a_model_error(home, tmp_path):
 
 
 def test_consolidate_is_never_automatic(home, tmp_path):
-    """It must not fire on close(): a local model rewriting stored memory is where one bad merge poisons every later run, so it stays user-triggered."""
+    """It must not fire on close(): a local model rewriting stored memory is
+    where one bad merge poisons every later run, so it stays user-triggered."""
     from localm.audit import SessionMode
     store = EpisodeStore(tmp_path)
     store.add(Episode(task="add retry logic to the http client", lesson="backoff"))
@@ -1286,7 +1356,7 @@ def test_agent_enables_episodic_by_default(home, tmp_path):
 def test_privacy_mode_disables_episodic(home, tmp_path):
     # Privacy mode disables the coder's episodic memory ENTIRELY (no recall AND no
     # write): the store is not even opened, so past-session lessons never reach the
-    # model. Mirrors the chat memory's "fully off in privacy" contract.
+    # model.
     agent = _agent(tmp_path, mode=SessionMode.PRIVACY)
     assert agent._episodic is False
     assert agent._episode_store is None
@@ -1298,7 +1368,9 @@ def test_privacy_mode_disables_episodic(home, tmp_path):
 
 
 def test_privacy_recall_opt_in_for_coder(home, tmp_path, monkeypatch):
-    """With the coder privacy-recall opt-in on, a privacy-mode session RECALLS past lessons (read-only) but still writes NO new episode at close - reading existing lessons never creates a new trace."""
+    """With the coder privacy-recall opt-in on, a privacy-mode session RECALLS past
+    lessons (read-only) but still writes NO new episode at close - reading existing
+    lessons never creates a new trace."""
     import localm.config as cfg
     monkeypatch.setattr(cfg, "load_config", lambda: {
         "coder_episodic_memory": True,
@@ -1352,7 +1424,10 @@ def test_with_episodes_noop_when_no_relevant_history(home, tmp_path):
 
 
 def test_recalled_lesson_ids_are_recorded_for_the_run(home, tmp_path):
-    """Retrieval used to render the lessons and throw the Episode objects away, so a lesson that steered a run badly was invisible afterwards and there was no handle to forget it by."""
+    """Retrieval used to render the lessons and throw the Episode objects away, so
+    a lesson that steered a run badly was invisible afterwards and there was no
+    handle to forget it by. The run now records id + text, emits it, and audits
+    it - and the id it reports is the one targeted forget takes."""
     seeded = EpisodeStore(tmp_path).add(Episode(
         task="add retry logic to the http client",
         lesson="exponential backoff capped at 30s"))
@@ -1379,7 +1454,9 @@ def test_recalled_lesson_ids_are_recorded_for_the_run(home, tmp_path):
 
 
 def test_silent_recall_records_the_reason_and_emits_nothing(home, tmp_path):
-    """Nothing relevant is a legitimate outcome, but it must be distinguishable from a BROKEN recall - so it is recorded, while the noisy surfaces stay quiet (silence-when-irrelevant is the contract)."""
+    """Nothing relevant is a legitimate outcome, but it must be distinguishable
+    from a BROKEN recall - so it is recorded, while the noisy surfaces stay quiet
+    (silence-when-irrelevant is the contract)."""
     EpisodeStore(tmp_path).add(Episode(task="totally unrelated css work",
                                        lesson="use grid"))
     events: list = []
@@ -1391,7 +1468,8 @@ def test_silent_recall_records_the_reason_and_emits_nothing(home, tmp_path):
 
 
 def test_failed_recall_is_recorded_not_swallowed(home, tmp_path):
-    """Rule 5: a recall that BLEW UP is not the same as one that found nothing."""
+    """Rule 5: a recall that BLEW UP is not the same as one that found nothing.
+    The run still proceeds (best-effort), but the failure leaves a trace."""
     agent = _agent(tmp_path, mode=SessionMode.LOG)
 
     def boom(task, k=3):
@@ -1405,7 +1483,9 @@ def test_failed_recall_is_recorded_not_swallowed(home, tmp_path):
 
 
 def test_privacy_recall_opt_in_writes_no_audit_entry(home, tmp_path, monkeypatch):
-    """The new citation surface must not create a trace privacy mode forbids: in a privacy session the audit log is a NullAuditLog, so recording what was recalled writes nothing to disk."""
+    """The new citation surface must not create a trace privacy mode forbids: in
+    a privacy session the audit log is a NullAuditLog, so recording what was
+    recalled writes nothing to disk."""
     import localm.config as cfg
     monkeypatch.setattr(cfg, "load_config", lambda: {
         "coder_episodic_memory": True,

@@ -1,5 +1,27 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""``GrammarUnsupportedError`` must SURVIVE the GGUF worker IPC as a type."""
+"""``GrammarUnsupportedError`` must SURVIVE the GGUF worker IPC as a type.
+
+``_build_sampler`` now REFUSES a lazy grammar it cannot apply instead of
+building a chain with no grammar stage and answering with unconstrained text
+(NEW-LAZY-GRAMMAR-SILENT-UNCONSTRAINED). That raise happens in the isolated
+CHILD process, so the fix is only half done in ``llama.py``: exceptions do not
+cross a ``multiprocessing.Queue``, only tagged tuples do.
+
+WHY THE TYPE, NOT JUST THE MESSAGE. The untagged fallback in both decoders is
+``RuntimeError``, and ``GgufBackend.chat_stream`` reads a ``RuntimeError`` from
+the runner as "the isolated worker faulted" - it UNLOADS the model and reports a
+503. So a refusal that arrives untagged does not merely get the wrong status
+code: it evicts the user's loaded model (a multi-second reload, and VRAM churn)
+over a request the caller could simply have resent differently. Hence the
+explicit ``not isinstance(exc, RuntimeError)`` assertions below; asserting only
+``pytest.raises(GrammarUnsupportedError)`` would be satisfied by a subclass of
+RuntimeError and would miss exactly that.
+
+These drive the REAL parent-side decoders over REAL queues, substituting only
+the child process's liveness check - the same approach as
+test_runner_load_progress.py and test_runner_stream_timeouts.py, and for the
+same reason: mocking the decode would leave the code under test unexercised.
+"""
 
 from __future__ import annotations
 
@@ -15,7 +37,8 @@ from localm.inference.backends.llamacpp._runner import ModelRunner
 
 
 class _AliveProc:
-    """Stands in for the worker process's liveness check only; the queues and the parent-side decoders under test are real."""
+    """Stands in for the worker process's liveness check only; the queues and
+    the parent-side decoders under test are real."""
 
     def is_alive(self):
         return True
@@ -54,7 +77,9 @@ def test_chat_stream_reraises_the_tagged_type_not_a_runtimeerror():
 
 
 def test_simple_request_reraises_the_tagged_type_not_a_runtimeerror():
-    """The second decoder reads the SAME protocol off the SAME queue."""
+    """The second decoder reads the SAME protocol off the SAME queue. A tag
+    honoured by one decoder and not the other means one envelope means two
+    different things depending on which command was in flight."""
     r = _make_runner()
     r._resp_q.put(("error", GRAMMAR_LAZY_UNSUPPORTED_MESSAGE,
                    "GrammarUnsupportedError"))
@@ -67,7 +92,21 @@ def test_simple_request_reraises_the_tagged_type_not_a_runtimeerror():
 
 
 def test_child_dispatch_reports_the_refusal_instead_of_dying(monkeypatch):
-    """The PRODUCER half, sited on the dispatch loop where the defect lives."""
+    """The PRODUCER half, sited on the dispatch loop where the defect lives.
+
+    ``_runner_main``'s chat_stream branch catches InvalidGrammarError and
+    UnsupportedInputError and lets everything else escape ON PURPOSE, which
+    kills the worker process and makes GgufBackend unload the model. Adding a
+    raise in ``_build_sampler`` without adding an arm here would therefore turn
+    a silent-wrong-answer bug into a model-eviction bug - strictly worse for the
+    user, and invisible to any test of ``_build_sampler`` alone, because the
+    collapse is in the ARRANGEMENT of except clauses here rather than in the
+    raising code. So drive the real dispatch loop and assert BOTH halves: it
+    reports a tagged envelope, and it is still alive to serve the next command.
+
+    Same shape and same rationale as
+    test_mtmd_input_text_abi.py::test_runner_dispatch_survives_an_unprocessable_image.
+    """
     import queue
     import threading
 
@@ -120,10 +159,9 @@ def test_child_dispatch_reports_the_refusal_instead_of_dying(monkeypatch):
         assert envelope[0] == "error", (
             f"expected a clean error envelope, got {envelope!r}")
         # len BEFORE index, so a missing tag reports the LOSS rather than an
-        # IndexError. An untagged envelope is not a formatting detail: the parent
-        # turns it into RuntimeError, which GgufBackend answers by unloading the
-        # model, so "no tag" and "wrong tag" are the same defect and both must
-        # say so out loud.
+        # IndexError. The parent turns an untagged envelope into RuntimeError,
+        # which GgufBackend answers by unloading the model, so "no tag" and
+        # "wrong tag" are the same defect and both must say so out loud.
         assert len(envelope) > 2, (
             f"the refusal crossed the IPC with NO type tag ({envelope!r}), so the "
             f"parent will raise RuntimeError and GgufBackend will unload the "
@@ -132,7 +170,7 @@ def test_child_dispatch_reports_the_refusal_instead_of_dying(monkeypatch):
             f"untagged errors become RuntimeError, which makes GgufBackend unload "
             f"the model; got tag {envelope[2:]!r}")
 
-        # Still serving. Pre-fix the exception escaped _runner_main entirely.
+        # Still serving.
         req_q.put(("count_tokens", "still alive?"))
         assert resp_q.get(timeout=5) == ("ok", 42)
         assert not died, f"the dispatch loop died instead of reporting: {died!r}"
@@ -142,7 +180,10 @@ def test_child_dispatch_reports_the_refusal_instead_of_dying(monkeypatch):
 
 
 def test_an_untagged_error_is_still_a_runtimeerror_on_both_decoders():
-    """The fires-control's other half, and a real property: adding a tag arm must not soften an UNTAGGED error."""
+    """The fires-control's other half, and a real property: adding a tag arm
+    must not soften an UNTAGGED error. That fallback is what reports a genuine
+    worker fault, and turning it into a recoverable ValueError would keep
+    serving from a model left in an unknown state."""
     r = _make_runner()
     r._resp_q.put(("error", "something native went wrong"))
     with pytest.raises(RuntimeError):

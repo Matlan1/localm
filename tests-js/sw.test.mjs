@@ -1,12 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Tests for the PWA service worker (localm/plugins/gui/static/sw.js).
 //
-// sw.js is a classic service-worker script (uses the `self`, `caches`, `fetch`
-// globals), not an ES module. We run it in a sandboxed VM context with mocked
-// globals, capture the event handlers it registers, then drive its fetch handler
-// with fake events to assert the routing decisions - in particular that the CA
-// cert is never served from the SW (the J2 "Install certificate downloads .html"
-// bug).
+// sw.js is a classic service-worker script using the `self`, `caches` and
+// `fetch` globals, not an ES module. It runs in a sandboxed VM context with
+// mocked globals; the event handlers it registers are captured and driven with
+// fake events to assert its routing decisions.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -20,9 +18,9 @@ const SW_SRC = readFileSync(
   join(HERE, "..", "localm", "plugins", "gui", "static", "sw.js"), "utf8");
 
 // Run sw.js in a sandbox with mocked SW globals and return the handlers it
-// registers via self.addEventListener(...). Only the top-level const defs +
-// addEventListener calls run here (install/activate/fetch bodies run only when
-// dispatched), so the cache/fetch mocks are never actually exercised at load.
+// registers via self.addEventListener(...). Only the top-level const
+// definitions and the addEventListener calls run here; the install, activate
+// and fetch bodies run only when dispatched.
 function loadSW() {
   const handlers = {};
   const self = {

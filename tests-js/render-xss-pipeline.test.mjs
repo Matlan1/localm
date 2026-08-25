@@ -1,36 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// R41: the markdown-to-DOM rendering path, driven END TO END with the REAL
-// vendored libraries.
-//
-// THE GAP THIS CLOSES, and it is a structural one rather than a missing case.
-// tests-js/harness.mjs:69-70 stubs both libraries out for every loadApp() test:
-//     win.marked    = { setOptions() {}, parse: (s) => s };
-//     win.DOMPurify = { sanitize: (s) => s };
-// That is correct for the nav/abort logic those tests actually drive, but it
-// means NO test anywhere exercised renderMarkdown's real sanitisation. With an
-// identity-function sanitizer, deleting the DOMPurify.sanitize() call at
-// helpers.js:290 - or flipping the order to marked.parse(DOMPurify.sanitize(x)),
-// which sanitizes the SOURCE and then generates unsanitized HTML from it - keeps
-// every existing test green. The suite could not fail on the defect it most
-// needed to catch. vendor-dompurify.test.mjs fixed the neighbouring half (it
-// loads the real vendored bytes) but calls DOMPurify.sanitize DIRECTLY, so it
-// says nothing about whether helpers.js still calls it, or in what order.
-//
-// So this file loads the real marked, DOMPurify, highlight.js, KaTeX and
-// auto-render over the stubs and drives the SHIPPED renderMarkdown.
-//
-// IT CARRIES ITS OWN CONTROL, deliberately. The last test re-installs the
-// identity-function sanitizer and asserts the SAME payloads then DO produce live
-// event handlers. Without that, "0 live handlers" is unfalsifiable: a harness
-// that silently stopped injecting payloads, or an assertion that could never
-// fire, would look exactly like a clean pass. The control makes this file
-// incapable of going quietly blind, which a one-off manual fires-control at
-// authoring time cannot guarantee for the file's whole future.
-//
-// WHAT THIS FILE CANNOT COVER, stated rather than left implied: jsdom does not
-// enforce CSP, so nothing here says anything about the shell's Content-Security
-// -Policy. That is a genuinely independent second barrier and it was verified
-// separately in a real browser. This file covers barrier one, the sanitizer.
+// Drives the shipped renderMarkdown against the real vendored marked,
+// DOMPurify, highlight.js, KaTeX and auto-render, in place of the harness stubs.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -39,15 +9,11 @@ import { loadApp } from "./harness.mjs";
 const VENDOR = new URL("../localm/plugins/gui/static/vendor/", import.meta.url);
 const readVendored = (n) => fs.readFileSync(new URL(n, VENDOR), "utf8");
 
-/** loadApp(), then replace harness.mjs's vendor STUBS with the real vendored
- *  bytes, loaded as classic scripts in the same realm - the same load path
- *  index.html uses. helpers.js resolves `marked` / `DOMPurify` as globals at
- *  CALL time, so swapping them after load is enough for renderMarkdown to use
- *  the real ones.
- *
- *  helpers.js:187 runs marked.setOptions() at load, i.e. against the stub, so it
- *  is re-applied here with the SAME options to reproduce production faithfully
- *  rather than testing a differently-configured parser. */
+/** loadApp(), then replace harness.mjs's vendor stubs with the real vendored
+ *  bytes, loaded as classic scripts in the same realm. helpers.js resolves
+ *  `marked` / `DOMPurify` as globals at CALL time, so swapping them after load
+ *  is enough. marked.setOptions() ran at load against the stub, so it is
+ *  re-applied here with the same options helpers.js uses. */
 function loadRealPipeline({ withSanitizer = true } = {}) {
   const { window: win } = loadApp();
   for (const f of ["marked.min.js", "purify.min.js", "highlight.min.js",
@@ -63,12 +29,8 @@ function loadRealPipeline({ withSanitizer = true } = {}) {
   return win;
 }
 
-// Payloads chosen to cover the classes R41 names, not just the obvious ones:
-// raw-HTML passthrough (marked does not escape it), URL schemes markdown can
-// carry, the rawtext-element family behind CVE-2026-0540, the mXSS/namespace
-// confusion shapes (svg/style, MathML annotation-xml), and document-scope
-// hijacks (<base>, <meta refresh>) that are not script execution but are just
-// as much a takeover of the page.
+// Payload classes: raw-HTML passthrough, URL schemes markdown can carry, the
+// rawtext-element family, mXSS/namespace confusion, and document-scope hijacks.
 const PAYLOADS = {
   "raw script element":      "<script>window.__xss=1<\/script>",
   "img onerror":             '<img src=x onerror="window.__xss=1">',
@@ -92,25 +54,11 @@ const PAYLOADS = {
   "object/embed":            '<object data="javascript:window.__xss=1"></object><embed src="x.swf">',
 };
 
-// <FORM> is deliberately NOT in this set, and the reason is a finding rather
-// than an exemption. DOMPurify's default ALLOWED_TAGS includes `form`, so a
-// model-authored <form action="https://elsewhere/"> DOES survive sanitisation
-// intact - confirmed in a real browser, where its action resolved to the remote
-// origin. The sanitizer is not the layer that answers it: the fix is
-// `form-action 'none'` in the CSP (http_server.py's _CSP_SUFFIX for the shell,
-// artifactSrcdoc for the artifact pane), because form-action is a navigation
-// directive with no default-src fallback and omitting it allows submission
-// anywhere. jsdom does not enforce CSP, so asserting it HERE would be asserting
-// against a layer this harness cannot see; it is covered by
-// tests/test_security_headers.py and by the artifactSrcdoc test in
-// tests-js/frontend-sec-2026-07-01.test.mjs instead. The test below pins the
-// survival itself, so that if a future DOMPurify starts stripping <form> the
-// CSP directive's rationale gets re-read rather than silently outliving it.
+// FORM is not in this set: DOMPurify's default ALLOWED_TAGS includes it.
 const HIJACK_TAGS = /^(SCRIPT|IFRAME|OBJECT|EMBED|BASE|META)$/;
 
-/** Every executable or document-hijacking artefact left in a rendered subtree.
- *  Asserts on the DOM, never on the sanitizer's output STRING: the string is a
- *  proxy, and the property that matters is what ends up live in the page. */
+/** Every executable or document-hijacking artefact left in a rendered subtree,
+ *  read off the DOM rather than the sanitizer's output string. */
 function liveThreats(root) {
   const found = [];
   root.querySelectorAll("*").forEach((n) => {
@@ -148,9 +96,7 @@ test("no payload survives renderMarkdown as an executable or hijacking node", ()
 });
 
 test("the <think> block sink is sanitized on the same terms as the main body", () => {
-  // helpers.js:276 is a SECOND innerHTML sink, fed by splitThink() from the same
-  // model output. A reviewer who only reads the main-body line at :290 would
-  // miss it entirely, and a model controls both halves.
+  // helpers.js:276 is a second innerHTML sink, fed by splitThink()
   const win = loadRealPipeline();
   const survivors = {};
   for (const [name, payload] of Object.entries(PAYLOADS)) {
@@ -166,13 +112,8 @@ test("the <think> block sink is sanitized on the same terms as the main body", (
 });
 
 test("both sinks write into a normal HTML element, never a rawtext one", () => {
-  // The structural precondition for the CVE-2026-0540 family (and the rawtext
-  // class generally) is that the SANITIZER'S OUTPUT is re-parsed inside a
-  // rawtext element - noscript / xmp / noembed / noframes / iframe / textarea /
-  // title / style - where the HTML parser applies different rules than the
-  // sanitizer assumed. localm is not exposed to it because the destinations are
-  // plain <div>s. That is a property of the CALL SITES, so it is asserted here
-  // rather than inferred from the sanitizer's version.
+  // the rawtext class needs the sanitizer's output re-parsed inside a rawtext
+  // element; both render destinations are plain <div>s
   const RAWTEXT = new Set(["NOSCRIPT", "XMP", "NOEMBED", "NOFRAMES", "IFRAME",
                            "TEXTAREA", "TITLE", "STYLE", "SCRIPT", "PLAINTEXT"]);
   const win = loadRealPipeline();
@@ -184,8 +125,7 @@ test("both sinks write into a normal HTML element, never a rawtext one", () => {
                               ["think block (helpers.js:276)", think]]) {
     assert.equal(node.tagName, "DIV", `${what} destination is <${node.tagName}>, expected DIV`);
     assert.ok(!RAWTEXT.has(node.tagName), `${what} writes into a rawtext element`);
-    // The chain of ancestors matters too: a rawtext ANCESTOR would re-parse the
-    // subtree just the same.
+    // a rawtext ancestor would re-parse the subtree just the same
     for (let p = node.parentElement; p; p = p.parentElement) {
       assert.ok(!RAWTEXT.has(p.tagName),
         `${what} has a rawtext ancestor <${p.tagName}>, which reopens the `
@@ -195,8 +135,6 @@ test("both sinks write into a normal HTML element, never a rawtext one", () => {
 });
 
 test("ordinary markdown still renders (the sanitizer is not just eating everything)", () => {
-  // A pipeline that returned "" would pass every assertion above. This is the
-  // "assert the fix produces something only the fix can produce" half.
   const win = loadRealPipeline();
   const t = render(win, "# Heading\n\n**bold** and `code`\n\n- item\n\n[link](https://example.com)");
   assert.ok(t.querySelector("h1"), "heading was lost");

@@ -1,5 +1,34 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""localm's OWN pip/uv caches stay INSIDE the data dir (AGENTS.md rule 4)."""
+"""localm's OWN pip/uv caches stay INSIDE the data dir (AGENTS.md rule 4).
+
+localm shells out to package installers in three places, each trying ``uv pip
+install`` first and ``python -m pip install`` second:
+
+  * plugins/deps.py::_run_pip          - a plugin's declared pip extras
+  * setup_llama.py::_install_runtime_wheel - the native llama runtime wheel
+  * media/managed_comfy_provision.py   - the managed ComfyUI venv (already fixed)
+
+Left to their defaults BOTH tools cache to a per-user location OUTSIDE the data
+dir (``%LOCALAPPDATA%\\pip\\cache`` / ``%LOCALAPPDATA%\\uv\\cache`` on Windows,
+``~/.cache/{pip,uv}`` on POSIX). That is a rule-4 containment leak: bytes localm
+downloads land in the user's profile, never asked, never told, not removed with
+the data dir. The fix pins both via ``config.contained_pip_env()`` and hands it to
+every installer subprocess as ``env=``.
+
+These tests cover BOTH halves the discipline needs:
+  1. the wiring - the installers actually pass the contained env to the child
+     (a unit test with a fake subprocess; FAILS on the pre-fix code that passed
+     no env at all); and
+  2. the EFFECT, not the setting - a REAL pip child, launched with the very env
+     the installers build, resolves its cache inside the data dir. Asserting an
+     env var proves nothing about the child; ``pip cache dir`` makes the child
+     report where it would actually write.
+
+The uv EFFECT was verified live during development (uv 0.11.28: ``uv cache dir``
+with ``UV_CACHE_DIR`` set resolved inside the data dir, and its default otherwise
+landed in the per-user profile), but uv is not a test dependency, so here the uv
+half is covered at the env-dict level only.
+"""
 
 from __future__ import annotations
 
@@ -29,7 +58,8 @@ def test_pip_and_uv_cache_dirs_live_inside_the_data_dir(tmp_path):
 
 
 def test_cache_dirs_follow_localm_home(tmp_path, monkeypatch):
-    """Derived from home_dir(), so pointing the data dir moves the caches with it (rule 1: never a hardcoded absolute path)."""
+    """Derived from home_dir(), so pointing the data dir moves the caches with it
+    (rule 1: never a hardcoded absolute path)."""
     elsewhere = tmp_path / "moved-home"
     monkeypatch.setenv("LOCALM_HOME", str(elsewhere))
     assert config.pip_cache_dir() == elsewhere / "cache" / "pip"
@@ -37,7 +67,9 @@ def test_cache_dirs_follow_localm_home(tmp_path, monkeypatch):
 
 
 def test_contained_pip_env_pins_both_caches(tmp_path):
-    """The env handed to an installer subprocess sets PIP_CACHE_DIR AND UV_CACHE_DIR to the contained dirs."""
+    """The env handed to an installer subprocess sets PIP_CACHE_DIR AND UV_CACHE_DIR
+    to the contained dirs. Both, because the installers try uv first and pip second -
+    pinning only one still leaks via the other."""
     env = config.contained_pip_env()
     assert env["PIP_CACHE_DIR"] == str(config.pip_cache_dir())
     assert env["UV_CACHE_DIR"] == str(config.uv_cache_dir())
@@ -46,7 +78,9 @@ def test_contained_pip_env_pins_both_caches(tmp_path):
 
 
 def test_contained_pip_env_overrides_ambient_values(tmp_path, monkeypatch):
-    """Containment a stray environment variable can silently switch off is not a guarantee (see config.cache_dir()): an ambient PIP_CACHE_DIR / UV_CACHE_DIR must NOT win over localm's contained location."""
+    """Containment a stray environment variable can silently switch off is not a
+    guarantee (see config.cache_dir()): an ambient PIP_CACHE_DIR / UV_CACHE_DIR must
+    NOT win over localm's contained location."""
     monkeypatch.setenv("PIP_CACHE_DIR", str(tmp_path / "ambient-pip"))
     monkeypatch.setenv("UV_CACHE_DIR", str(tmp_path / "ambient-uv"))
     env = config.contained_pip_env()
@@ -57,7 +91,8 @@ def test_contained_pip_env_overrides_ambient_values(tmp_path, monkeypatch):
 
 
 def test_contained_pip_env_accepts_a_base_env(tmp_path):
-    """A caller-supplied base is copied (not mutated) and augmented with the two cache vars."""
+    """A caller-supplied base is copied (not mutated) and augmented with the two
+    cache vars."""
     base = {"SOME_VAR": "kept"}
     env = config.contained_pip_env(base=base)
     assert env["SOME_VAR"] == "kept"
@@ -67,14 +102,14 @@ def test_contained_pip_env_accepts_a_base_env(tmp_path):
 
 
 def test_managed_comfy_pip_cache_delegates_to_config(tmp_path):
-    """One source of truth for the pip-cache location: the managed-ComfyUI helper resolves to exactly config.pip_cache_dir()."""
+    """One source of truth for the pip-cache location: the managed-ComfyUI helper
+    resolves to exactly config.pip_cache_dir()."""
     from localm.media import managed_comfy_provision as prov
     assert prov.pip_cache_dir() == config.pip_cache_dir()
 
 
 # --------------------------------------------------------------------------- #
 #  Wiring: the installers pass the contained env to their subprocess          #
-#  (these FAIL on the pre-fix code, which passed no env= at all)              #
 # --------------------------------------------------------------------------- #
 
 class _FakeProc:
@@ -87,7 +122,8 @@ class _FakeProc:
 
 
 def test_deps_run_pip_hands_the_contained_env_to_the_child(monkeypatch):
-    """plugins/deps.py::_run_pip must launch pip/uv with the contained cache env, or a plugin-extra install leaks wheels to the user profile."""
+    """plugins/deps.py::_run_pip must launch pip/uv with the contained cache env,
+    or a plugin-extra install leaks wheels to the user profile."""
     from localm.plugins import deps
     captured = {}
 
@@ -105,7 +141,8 @@ def test_deps_run_pip_hands_the_contained_env_to_the_child(monkeypatch):
 
 
 def test_setup_llama_runtime_wheel_hands_the_contained_env_to_the_child(monkeypatch):
-    """setup_llama.py::_install_runtime_wheel must launch pip/uv with the contained cache env, same as the plugin-extra installer."""
+    """setup_llama.py::_install_runtime_wheel must launch pip/uv with the contained
+    cache env, same as the plugin-extra installer."""
     from localm import setup_llama
     captured = {}
 
@@ -128,12 +165,15 @@ def test_setup_llama_runtime_wheel_hands_the_contained_env_to_the_child(monkeypa
 
 
 # --------------------------------------------------------------------------- #
-#  The EFFECT, not the setting: a REAL pip child honours the contained cache  #
+#  A real pip child honours the contained cache                               #
 # --------------------------------------------------------------------------- #
 
 @pytest.fixture(scope="module")
 def pip_venv(tmp_path_factory):
-    """A throwaway venv WITH pip (localm's own .venv ships without one)."""
+    """A throwaway venv WITH pip (localm's own .venv ships without one). Built once
+    for the module. sys.executable bootstraps pip via ensurepip when it creates the
+    venv, so this proves a real pip child - not localm's own interpreter - honours
+    the env the installers build."""
     venv_dir = tmp_path_factory.mktemp("pipvenv") / "v"
     try:
         subprocess.run([sys.executable, "-m", "venv", str(venv_dir)],
@@ -151,7 +191,12 @@ def pip_venv(tmp_path_factory):
 
 
 def test_real_pip_child_resolves_its_cache_inside_the_data_dir(pip_venv, tmp_path):
-    """A real pip, launched with config.contained_pip_env() (the exact env the installers hand their subprocess), reports a cache dir inside the data dir."""
+    """A real pip, launched with config.contained_pip_env() (the exact env the
+    installers hand their subprocess), reports a cache dir inside the data dir.
+
+    Setting an env var and asserting the env var proves nothing about the child;
+    ``pip cache dir`` makes the child report the location it would actually write to.
+    An ambient PIP_CACHE_DIR must not win, so it is set to prove the override."""
     home = tmp_path / ".localm"
     env = config.contained_pip_env(
         base=dict(os.environ, PIP_CACHE_DIR=str(tmp_path / "ambient")))

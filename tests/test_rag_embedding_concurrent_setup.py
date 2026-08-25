@@ -1,5 +1,21 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""QA 2026-08-20 item 7: two concurrent ``POST /api/rag/embedding`` confirms started TWO ``embed-setup`` jobs, and the second then waited - silently, with no timeout and no error - on the embedder's bare ``_LOAD_LOCK``/``_LOCK`` acquires."""
+"""QA 2026-08-20 item 7: two concurrent ``POST /api/rag/embedding`` confirms
+started TWO ``embed-setup`` jobs, and the second then waited - silently, with
+no timeout and no error - on the embedder's bare ``_LOAD_LOCK``/``_LOCK``
+acquires. Field observation: both jobs sat at "Loading and testing the
+model..." for 15+ minutes with no further event, while unrelated reads timed
+out.
+
+The fix refuses the second one with 409 at the door, the same shape every
+sibling long job on this server already uses (runtime-update, comfy-setup,
+comfy-update, doctor). These tests pin the refusal AND the normal path, so a
+guard that refuses everything fails just as loudly as one that refuses nothing.
+
+Deliberately built on a job that is GENUINELY IN FLIGHT (blocked inside
+``get_embedder``), not on a hand-set status field: the fixture's value space
+has to contain the real concurrent state, or the test cannot fail on the
+defect (diff-review-discipline item 19).
+"""
 from __future__ import annotations
 
 import threading
@@ -11,7 +27,9 @@ import pytest
 
 @pytest.fixture
 def rag_home(tmp_path, monkeypatch) -> Path:
-    """Same isolation as test_rag_dim_switch_warning.py's fixture of this name: a throwaway LOCALM_HOME so config writes and collection reads never touch the developer's real data dir."""
+    """Same isolation as test_rag_dim_switch_warning.py's fixture of this name:
+    a throwaway LOCALM_HOME so config writes and collection reads never touch
+    the developer's real data dir."""
     home = tmp_path / "userhome"
     home.mkdir()
     data = home / ".localm"
@@ -58,7 +76,11 @@ class _StubEmbedder:
 
 @pytest.fixture
 def blocking_embedder(monkeypatch):
-    """``get_embedder`` blocks until the test releases it - the real shape of the first job holding the load locks while a second request arrives."""
+    """``get_embedder`` blocks until the test releases it - the real shape of
+    the first job holding the load locks while a second request arrives.
+
+    Yields ``(entered, release)``: wait on *entered* to know the job is truly
+    inside the load, then ``release.set()`` to let it finish."""
     import localm.inference.embedder as emb
 
     entered = threading.Event()
@@ -92,10 +114,8 @@ class TestConcurrentEmbedSetupIsRefused:
             second = c.post("/api/rag/embedding",
                             json={"model": "model-two", "confirm": True})
 
-            # THE WORLD FIRST, the status code second (diff-review item 24):
-            # the harm this test exists to catch is a second job existing at
-            # all and then wedging. A bare status assertion would read as an
-            # ordinary "wrong number" and invite adjusting it.
+            # Assert on the WORLD first, the status code second: the harm is a
+            # second job existing at all and then wedging.
             assert len(_embed_setup_jobs(app)) == 1, (
                 "a SECOND embed-setup job was started while one was already "
                 "running; it will block on the embedder's unbounded load lock "
@@ -107,7 +127,10 @@ class TestConcurrentEmbedSetupIsRefused:
 
     def test_the_refusal_does_not_write_config_or_reset_the_embedder(
             self, embedding_route_app, blocking_embedder):
-        """The refused request must be a no-op."""
+        """The refused request must be a no-op. The job body's very first acts
+        are ``update_config`` + ``reset_embedder``, so a guard placed after
+        start_fn (or not at all) would already have switched the model the
+        user was just told was refused."""
         entered, release = blocking_embedder
         import localm.config as cfg
         from fastapi.testclient import TestClient
@@ -132,7 +155,8 @@ class TestConcurrentEmbedSetupIsRefused:
 
     def test_a_setup_still_starts_when_none_is_running(
             self, embedding_route_app, monkeypatch):
-        """The guard must not refuse the ordinary case."""
+        """The guard must not refuse the ordinary case. Without this, a guard
+        that returned 409 unconditionally would pass the test above."""
         import localm.inference.embedder as emb
         monkeypatch.setattr(emb, "resolve_embedding_model_path",
                             lambda **kw: "/fake/new-model.gguf")
@@ -158,7 +182,9 @@ class TestConcurrentEmbedSetupIsRefused:
 
     def test_the_unconfirmed_dry_run_is_never_refused(
             self, embedding_route_app, blocking_embedder):
-        """The dry run writes nothing, starts no job, and answers instantly - so it must stay available while a setup runs, which is exactly when a user is most likely to be looking at that page."""
+        """The dry run writes nothing, starts no job, and answers instantly -
+        so it must stay available while a setup runs, which is exactly when a
+        user is most likely to be looking at that page."""
         entered, release = blocking_embedder
         from fastapi.testclient import TestClient
 
@@ -176,7 +202,16 @@ class TestConcurrentEmbedSetupIsRefused:
 
 
 class TestTheSetupJobIsNotSilentWhileItLoads:
-    """The other half of QA item 7's report: 'no further event and no error'."""
+    """The other half of QA item 7's report: "no further event and no error".
+
+    ``get_embedder`` has announced coarse stages since ADR-0004 Unit B - the
+    VRAM/eviction wait and the native load each carry their own 300 s window,
+    so this is the one call in the job that can legitimately run for minutes.
+    This route passed no sink, so the stream stopped dead at "Loading and
+    testing the model..." for that entire time, which is indistinguishable
+    from a wedge to whoever is watching. /api/embedding/warmup already
+    consumes the same stages.
+    """
 
     def test_the_load_stages_reach_the_job_stream(
             self, embedding_route_app, monkeypatch):
@@ -208,8 +243,8 @@ class TestTheSetupJobIsNotSilentWhileItLoads:
             lines = [e.get("text", "") for e in job._history
                      if e.get("type") == "line"]
 
-        # The sink itself first: a stage string could in principle arrive from
-        # somewhere else, but a sink that was never handed over cannot.
+            # The sink itself first: a sink that was never handed over cannot
+            # arrive from anywhere else.
         assert seen.get("sink") is not None, (
             "the setup job ran get_embedder with no progress sink, so the "
             "minutes-long load stage emits nothing at all")

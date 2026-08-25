@@ -3,9 +3,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadAppWithPages, runScript } from "./harness.mjs";
 
-// rec#438: the Knowledge indexing UI always sent embed=true (the server default)
-// with no way to choose BM25-only. A "Compute embeddings when indexing" checkbox
-// (default on) now feeds embed into POST /api/rag/collections/<name>/add.
+// The Knowledge indexing UI's "Compute embeddings when indexing" checkbox
+// (default on) feeds embed into POST /api/rag/collections/<name>/add.
 
 function setup() {
   const calls = [];
@@ -17,9 +16,8 @@ function setup() {
     return { ok: true, status: 200, text: async () => "", json: async () => ({ collections: [] }) };
   };
   const { window } = loadAppWithPages({ fetchImpl });
-  // The file/folder picker is stubbed here (its own behavior is covered in
-  // picker.test.mjs); streamJob is stubbed so the add resolves without a real
-  // job stream. pickPath resolves an ARRAY of paths (the multi-select redesign).
+  // pickPath is stubbed to resolve an array of paths, streamJob to resolve at
+  // once so the add completes without a real job stream.
   runScript(window, `
     globalThis.__pickOpts = null;
     globalThis.__pickResult = ["/some/docs"];
@@ -102,8 +100,7 @@ test("cancelling the picker (null) sends no /add request", async () => {
 
 test("without host access, add-docs never opens the picker or POSTs", async () => {
   const { window, calls } = setup();
-  // A non-host caller: the host picker would 403, so add-docs must short-circuit
-  // with a message (device upload is the coming path) - no pickPath, no /add.
+  // A non-host caller: add-docs short-circuits without opening the picker.
   runScript(window, `
     caps.fsAccess = "none";
     globalThis.__pickOpts = null;

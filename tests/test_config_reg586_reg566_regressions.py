@@ -1,5 +1,28 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Regression audit 2026-07-14: two defects in config.py's locking/retry paths."""
+"""Regression audit 2026-07-14: two defects in config.py's locking/retry paths.
+
+REG-586 [HIGH] - _cross_process_lock checked "is this lock's recorded pid MY
+pid?" BEFORE it checked staleness. PID reuse across process lifetimes is
+routine, so a lock LEAKED by a crashed process whose pid the OS later hands to a
+new localm process was read as "already held by this same process (nested call)"
+and raised RuntimeError forever. The staleness reclaim that exists precisely to
+stop a dead holder wedging every future write was unreachable in exactly the
+case it was written for: every config PATCH and every registry write (pull / rm
+/ alias) failed for the whole life of the new process.
+
+REG-566 [LOW] - _read_json / _replace_atomic retry a PermissionError
+_REPLACE_RETRIES times (~1s of time.sleep) while holding _io_lock. That retry
+exists for the TRANSIENT Windows sharing violation (a concurrent atomic replace,
+antivirus, the indexer). On POSIX, EACCES from open() is a stable state that no
+amount of retrying changes, so the retry is pure stall - and because
+load_config() sits on the per-request auth path (auth.require_auth), it stalls
+every affected request by ~1s with no correctness benefit.
+
+Both are invisible to tests/test_config_cross_process_lock.py: it only ever
+leaks a lock whose pid differs from the reclaiming process's, and it only uses
+readable temp files (plus a Windows-only real file lock the retry is SUPPOSED to
+ride out).
+"""
 
 import asyncio
 import builtins
@@ -22,18 +45,26 @@ def home(tmp_path, monkeypatch):
 
 
 def _leak_stale_lock(lockpath, pid, age_s):
-    """Write a lock file as a CRASHED holder would leave it: a valid ``<pid>:<nonce>`` token on disk with nobody holding it, aged *age_s*."""
+    """Write a lock file as a CRASHED holder would leave it: a valid
+    ``<pid>:<nonce>`` token on disk with nobody holding it, aged *age_s*."""
     lockpath.write_bytes(f"{pid}:deadbeefdeadbeefdeadbeefdeadbeef".encode("ascii"))
     old = cfg.time.time() - age_s
     os.utime(lockpath, (old, old))
 
 
 # --------------------------------------------------------------------------- #
-#  REG-586: stale lock whose recorded pid collides with the CURRENT pid        #
+#  Stale lock whose recorded pid collides with the CURRENT pid                 #
 # --------------------------------------------------------------------------- #
 
 def test_stale_lock_with_colliding_self_pid_is_reclaimed(home, capsys):
-    """THE REGRESSION."""
+    """THE REGRESSION. A crashed process leaked CONFIG.lock holding pid N; the OS
+    later gave pid N to THIS process. The lock is long dead (older than
+    _CROSS_LOCK_STALE_AGE) and must be reclaimed - a pid NUMBER matching ours is
+    not evidence that WE hold it, and treating it as such wedges every config
+    write for the rest of this process's life.
+
+    Pre-fix this raised RuntimeError('already held by this same process') because
+    the self-pid check ran before the staleness check and short-circuited it."""
     cfg.ensure_dirs()
     lockpath = cfg.CONFIG_FILE.with_name(cfg.CONFIG_FILE.name + ".lock")
     _leak_stale_lock(lockpath, os.getpid(), cfg._CROSS_LOCK_STALE_AGE + 10)
@@ -58,7 +89,14 @@ def test_stale_lock_with_colliding_self_pid_does_not_wedge_the_registry(home, ca
 
 
 def test_fresh_foreign_lock_with_colliding_self_pid_waits_and_times_out(home, monkeypatch):
-    """NEGATIVE CASE for the fix's precision."""
+    """NEGATIVE CASE for the fix's precision. A pid collision on a lock we do NOT
+    hold must not be mistaken for a nested call EITHER WAY: it is a foreign lock,
+    so the correct outcome is the normal wait-then-TimeoutError ('held by another
+    localm process'), never an immediate RuntimeError blaming the caller for a
+    nested update_config() it never made.
+
+    Guards against a fix that merely reorders staleness ahead of the pid check:
+    that would still mis-raise RuntimeError here, because this lock is FRESH."""
     monkeypatch.setattr(cfg, "_CROSS_LOCK_TIMEOUT", 0.3)
     cfg.ensure_dirs()
     lockpath = cfg.CONFIG_FILE.with_name(cfg.CONFIG_FILE.name + ".lock")
@@ -69,7 +107,10 @@ def test_fresh_foreign_lock_with_colliding_self_pid_waits_and_times_out(home, mo
 
 
 def test_genuine_nested_call_still_fails_fast(home, monkeypatch):
-    """NEGATIVE CASE: the fix must not buy REG-586 by deleting the nested-call guard."""
+    """NEGATIVE CASE: the fix must not buy REG-586 by deleting the nested-call
+    guard. A mutator that calls back into update_config() on the same file is
+    still unsupported and must still fail immediately with the clear error, not
+    stall for the timeout and not silently reclaim its own live lock."""
     monkeypatch.setattr(cfg, "_CROSS_LOCK_TIMEOUT", 5.0)
     cfg.save_config({"n_ctx": 4096})
 
@@ -83,7 +124,12 @@ def test_genuine_nested_call_still_fails_fast(home, monkeypatch):
 
 
 def test_nested_guard_survives_an_outer_hold_longer_than_the_stale_age(home, monkeypatch):
-    """NEGATIVE CASE: a nested call must be identified as OURS by the fencing token we actually hold, not by the lock's age - so the guard still fires even when the outer critical section has legitimately outlived _CROSS_LOCK_STALE_AGE (a slow write under antivirus)."""
+    """NEGATIVE CASE: a nested call must be identified as OURS by the fencing
+    token we actually hold, not by the lock's age - so the guard still fires even
+    when the outer critical section has legitimately outlived
+    _CROSS_LOCK_STALE_AGE (a slow write under antivirus). Guards against a
+    staleness-only fix, which would let the inner call reclaim its own outer
+    lock and proceed."""
     monkeypatch.setattr(cfg, "_CROSS_LOCK_STALE_AGE", 0.05)
     monkeypatch.setattr(cfg, "_CROSS_LOCK_TIMEOUT", 5.0)
     cfg.ensure_dirs()
@@ -98,7 +144,8 @@ def test_nested_guard_survives_an_outer_hold_longer_than_the_stale_age(home, mon
 
 
 def test_released_lock_is_forgotten_so_a_later_leak_is_not_read_as_ours(home, capsys):
-    """The in-process record of what we hold must be dropped on release, or a later lock file carrying OUR pid would still be read as a live nested hold."""
+    """The in-process record of what we hold must be dropped on release, or a
+    later lock file carrying OUR pid would still be read as a live nested hold."""
     cfg.ensure_dirs()
     lockpath = cfg.CONFIG_FILE.with_name(cfg.CONFIG_FILE.name + ".lock")
 
@@ -112,7 +159,7 @@ def test_released_lock_is_forgotten_so_a_later_leak_is_not_read_as_ours(home, ca
 
 
 # --------------------------------------------------------------------------- #
-#  REG-566: PermissionError retry must be for the TRANSIENT case only          #
+#  PermissionError retry is for the TRANSIENT case only                        #
 # --------------------------------------------------------------------------- #
 
 @pytest.fixture()
@@ -124,7 +171,10 @@ def no_sleep(monkeypatch):
 
 
 def _deny_reads(monkeypatch, target, err):
-    """Make open(*target*) raise *err*."""
+    """Make open(*target*) raise *err*. Injected rather than produced for real
+    because a POSIX EACCES cannot be created on the Windows box this suite runs
+    on (and a real mode-000 file is not readable back for cleanup); the code
+    under test branches on the exception class, which is what this reproduces."""
     attempts = []
     real_open = builtins.open
 
@@ -139,7 +189,10 @@ def _deny_reads(monkeypatch, target, err):
 
 
 def test_posix_permission_denied_falls_back_immediately(home, monkeypatch, no_sleep, capsys):
-    """THE REGRESSION."""
+    """THE REGRESSION. On POSIX, EACCES from open() is a stable state - the file
+    is mode 000 or root-owned. Retrying it 16 times burns ~1s of time.sleep while
+    holding _io_lock (serializing config access process-wide, including the
+    per-request auth path) and cannot ever succeed. Fall back at once instead."""
     monkeypatch.setattr(cfg.os, "name", "posix")
     target = home / "config.json"
     target.write_text("{}", encoding="utf-8")
@@ -152,7 +205,10 @@ def test_posix_permission_denied_falls_back_immediately(home, monkeypatch, no_sl
 
 
 def test_windows_transient_sharing_violation_is_still_ridden_out(home, monkeypatch, no_sleep):
-    """NEGATIVE CASE: the fix must not buy REG-566 by deleting the retry."""
+    """NEGATIVE CASE: the fix must not buy REG-566 by deleting the retry. On
+    Windows a concurrent atomic replace / antivirus / the indexer holds the file
+    for microseconds and raises PermissionError; that IS transient and must still
+    be retried, or a passing scanner makes us discard live settings."""
     monkeypatch.setattr(cfg.os, "name", "nt")
     target = home / "config.json"
     target.write_text("{}", encoding="utf-8")
@@ -166,7 +222,8 @@ def test_windows_transient_sharing_violation_is_still_ridden_out(home, monkeypat
 
 
 def test_windows_transient_retry_recovers_when_the_lock_clears(home, monkeypatch, no_sleep):
-    """NEGATIVE CASE, positive direction: the retry must actually RETURN the file once the transient lock clears, not merely spin and fall back."""
+    """NEGATIVE CASE, positive direction: the retry must actually RETURN the file
+    once the transient lock clears, not merely spin and fall back."""
     monkeypatch.setattr(cfg.os, "name", "nt")
     target = home / "config.json"
     target.write_text('{"n_ctx": 4096}', encoding="utf-8")
@@ -186,7 +243,9 @@ def test_windows_transient_retry_recovers_when_the_lock_clears(home, monkeypatch
 
 
 def test_posix_replace_permission_error_is_not_retried(home, monkeypatch, no_sleep):
-    """_replace_atomic has the same defect on the WRITE path, where the stall is held under _io_lock AND the cross-process lock."""
+    """_replace_atomic has the same defect on the WRITE path, where the stall is
+    held under _io_lock AND the cross-process lock. A POSIX permission failure on
+    os.replace is stable; surface it at once."""
     monkeypatch.setattr(cfg.os, "name", "posix")
     attempts = []
 
@@ -202,7 +261,9 @@ def test_posix_replace_permission_error_is_not_retried(home, monkeypatch, no_sle
 
 
 def test_windows_replace_sharing_violation_is_still_retried(home, monkeypatch, no_sleep):
-    """NEGATIVE CASE: the Windows write-path retry (WinError 5 under an AV lock, WinError 32 under a concurrent reader) must survive - it is the documented reason _replace_atomic has a retry at all."""
+    """NEGATIVE CASE: the Windows write-path retry (WinError 5 under an AV lock,
+    WinError 32 under a concurrent reader) must survive - it is the documented
+    reason _replace_atomic has a retry at all."""
     monkeypatch.setattr(cfg.os, "name", "nt")
     attempts = []
 
@@ -220,7 +281,7 @@ def test_windows_replace_sharing_violation_is_still_retried(home, monkeypatch, n
 
 
 # --------------------------------------------------------------------------- #
-#  REG-586 [LOW]: the async config routes must not block the event loop        #
+#  The async config routes must not block the event loop                       #
 # --------------------------------------------------------------------------- #
 
 def _config_endpoint(path, method):
@@ -244,7 +305,9 @@ class _FakeRequest:
 
 
 async def _ticks_while_running(coro):
-    """Drive *coro* as a task and count 10ms heartbeat ticks that land while it is still pending."""
+    """Drive *coro* as a task and count 10ms heartbeat ticks that land while it
+    is still pending. The ticks can only advance if the EVENT LOOP is free, so
+    this measures loop starvation directly rather than asserting on a mock."""
     task = asyncio.ensure_future(coro)
     ticks = 0
     while not task.done() and ticks < 300:
@@ -257,7 +320,13 @@ async def _ticks_while_running(coro):
 
 @pytest.mark.anyio
 async def test_patch_config_does_not_freeze_the_event_loop(home, monkeypatch):
-    """THE REGRESSION. patch_config is `async def` and called update_config() synchronously, so a lock held by ANOTHER localm process (the user running `localm config ...` while the GUI is up) parked the whole server event loop inside _cross_lock_backoff's time.sleep for up to _CROSS_LOCK_TIMEOUT: health c..."""
+    """THE REGRESSION. patch_config is `async def` and called update_config()
+    synchronously, so a lock held by ANOTHER localm process (the user running
+    `localm config ...` while the GUI is up) parked the whole server event loop
+    inside _cross_lock_backoff's time.sleep for up to _CROSS_LOCK_TIMEOUT: health
+    checks, token streaming and every other request stalled with it.
+
+    Pre-fix this loop is frozen for the whole wait and ticks == 0."""
     monkeypatch.setattr(cfg, "_CROSS_LOCK_TIMEOUT", 0.4)
     cfg.save_config({"n_ctx": 4096})
     lockpath = cfg.CONFIG_FILE.with_name(cfg.CONFIG_FILE.name + ".lock")

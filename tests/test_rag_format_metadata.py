@@ -1,5 +1,15 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""RAG format labeling (audit Branch F: classify-burns -> metadata-only)."""
+"""RAG format labeling (audit Branch F: classify-burns -> metadata-only).
+
+The old behavior computed an LLM format guess inside ``extract_bytes`` and threw
+it away, while firing a 10s chat call during embedding-only indexes. This suite
+pins the fixed contract:
+
+  * a document's format is labeled heuristic-FIRST (free, deterministic) and the
+    label is carried into chunk metadata (used, not discarded);
+  * the LLM tie-break runs ONLY when the heuristic is unsure AND a chat model is
+    loaded - never an unconditional chat call that stalls an embedding-only index.
+"""
 
 import requests
 
@@ -12,7 +22,8 @@ from localm.plugins.builtin.rag import plug
 # --------------------------------------------------------------------------- #
 
 def test_odd_ext_json_labeled_via_heuristic_no_chat(tmp_path):
-    """An odd-extension file whose content is JSON gets chunk metadata format='json' from the free structural heuristic, with ZERO classify calls."""
+    """An odd-extension file whose content is JSON gets chunk metadata
+    format="json" from the free structural heuristic, with ZERO classify calls."""
     coll = Collection("kb", base=tmp_path)
     coll.create()
 
@@ -39,14 +50,14 @@ def test_odd_ext_json_labeled_via_heuristic_no_chat(tmp_path):
 
 
 def test_embedding_only_index_does_not_call_chat_path(tmp_path, monkeypatch):
-    """With no chat model loaded, indexing an ambiguous odd-extension file must NOT fire the (10s-timeout) chat endpoint - no stall - and labels 'text'."""
+    """With no chat model loaded, indexing an ambiguous odd-extension file must
+    NOT fire the (10s-timeout) chat endpoint - no stall - and labels "text"."""
     posted = []
     def fake_request(*args, **kwargs):
         posted.append((args, kwargs))
         raise RuntimeError("chat endpoint must not be called with no model loaded")
     # self_request (localm.selfclient) issues requests.request(method, ...), not
-    # requests.post directly - patch the mechanism actually used, or this guard
-    # would stop verifying anything (a real call would just fail unpatched).
+    # requests.post directly, so this patches the mechanism actually used.
     monkeypatch.setattr(requests, "request", fake_request)
 
     # active_model() == "" is exactly what the server reports when no engine is
@@ -102,8 +113,8 @@ def test_make_self_classify_with_model_calls_endpoint(monkeypatch):
     def fake_request(method, url, **k):
         called.append((method, url))
         return FakeResp()
-    # _make_self_classify now goes through localm.selfclient.self_request, which
-    # issues requests.request(method, ...) (not requests.post directly).
+    # _make_self_classify goes through localm.selfclient.self_request, which
+    # issues requests.request(method, ...), not requests.post directly.
     monkeypatch.setattr(requests, "request", fake_request)
     classify = plug._make_self_classify("https://127.0.0.1:65535/v1", lambda: "mymodel")
     assert classify("key: value") == "yaml"
@@ -111,7 +122,7 @@ def test_make_self_classify_with_model_calls_endpoint(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-#  Pure heuristic / classify_format unit tests (lazy import: new API)          #
+#  Pure heuristic / classify_format unit tests (lazy import)                   #
 # --------------------------------------------------------------------------- #
 
 def test_sniff_text_format_structural_shapes():
@@ -186,10 +197,8 @@ def test_classify_format_config_disables_tiebreak(monkeypatch):
 def test_classify_format_tiebreak_attempted_at_most_once_per_ext(monkeypatch):
     # Simulate a resident NON-chat engine: classify_fn is actually invoked (not
     # short-circuited) but returns None because it cannot classify. The outcome
-    # must be cached so a SECOND same-extension unclear file does NOT re-invoke it
-    # - i.e. no chat call re-fired per file (the "not even cached" cost residual
-    # that the availability short-circuit alone cannot cover when an HF embedder
-    # is the resident engine).
+    # must be cached so a SECOND same-extension unclear file does NOT re-invoke
+    # it.
     from localm.rag.extract import classify_format, _EXT_CLASSIFICATION_CACHE
     import localm.config as cfg
     _EXT_CLASSIFICATION_CACHE.clear()

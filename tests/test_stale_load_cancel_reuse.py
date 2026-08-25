@@ -1,5 +1,28 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""A reused engine must never carry a stale, already-SET load-cancel event into its next load (REG-461)."""
+"""A reused engine must never carry a stale, already-SET load-cancel event into
+its next load (REG-461).
+
+switch_engine builds a fresh cancel Event per call but only ever INSTALLS it on
+the engine when preempt=True. An engine object outlives a load: idle-unload
+deliberately keeps it in _engines for lazy reload (see
+test_idle_unload_keeps_engine.py), so a preempt=True switch that gets
+superseded leaves that engine holding a SET event with nothing to clear it -
+set_load_cancel had exactly one call site, and the GGUF backend clears
+_load_cancel only in its own __init__.
+
+The next API-routed request for that model goes through
+switch_engine(preempt=False), which reuses the engine and SKIPS the install, so
+the stale SET event survives. The real backend honours it: gguf.py passes
+_load_cancel into ModelRunner.spawn_and_load, which sends cancel_load
+immediately when the event is already set (llamacpp/_runner.py:331), so the
+load aborts with ModelLoadCancelled -> switch_engine returns "superseded" ->
+get_engine raises 503. Nothing clears the event, so EVERY later request for
+that model 503s indefinitely.
+
+The existing switch tests never catch this: they build a FRESH engine per test
+and reset the _switch_* globals, so no engine ever survives a cancelled
+preempt=True switch and is then loaded again via preempt=False.
+"""
 
 from __future__ import annotations
 
@@ -14,7 +37,9 @@ from tests.conftest import probe_double
 
 
 class CancelHonoringEngine:
-    """Models the REAL backend contract that a stale event weaponizes: load() aborts when the installed cancel event is already set, exactly as the GGUF backend does via spawn_and_load's pre-set cancel_event check."""
+    """Models the REAL backend contract that a stale event weaponizes: load()
+    aborts when the installed cancel event is already set, exactly as the GGUF
+    backend does via spawn_and_load's pre-set cancel_event check."""
 
     def __init__(self, name, *, load_gate=None):
         self.display_name = name
@@ -65,7 +90,10 @@ def _reset():
 
 @pytest.fixture
 def registered(monkeypatch):
-    """M and N registered, with VRAM to spare so nothing is evicted. get_engine routes by NAME only against a populated registry; with an empty one it deliberately serves the active engine instead (single-model mode), which would sidestep the reuse path under test entirely."""
+    """M and N registered, with VRAM to spare so nothing is evicted. get_engine
+    routes by NAME only against a populated registry; with an empty one it
+    deliberately serves the active engine instead (single-model mode), which
+    would sidestep the reuse path under test entirely."""
     reg = {"M": {"path": "models/M.gguf", "source": "local"},
            "N": {"path": "models/N.gguf", "source": "local"}}
     monkeypatch.setattr("localm.config.load_registry", lambda: reg)
@@ -90,7 +118,10 @@ async def _await_started(engine, timeout=5.0):
 
 
 async def _strand_stale_cancel_on_reused_engine(engines, make):
-    """Drive the REAL sequence that strands a SET cancel event on a REUSED engine: M is resident, idle-unloads (kept in _engines), an explicit switch back to M starts loading, and a newer explicit switch to N supersedes it."""
+    """Drive the REAL sequence that strands a SET cancel event on a REUSED
+    engine: M is resident, idle-unloads (kept in _engines), an explicit switch
+    back to M starts loading, and a newer explicit switch to N supersedes it.
+    Returns once engine M is back in that state, still tracked and unloaded."""
     engM = engines["M"]
     # 1. M resident, then idle-unloaded: the engine object STAYS in _engines.
     engM._loaded = True
@@ -119,7 +150,9 @@ async def _strand_stale_cancel_on_reused_engine(engines, make):
 
 
 def test_api_load_of_reused_engine_after_preempted_switch_succeeds():
-    """An API-routed (preempt=False) load of a model whose engine survived a superseded explicit switch must actually LOAD, not report 'superseded' off the previous switch's already-fired cancel event."""
+    """An API-routed (preempt=False) load of a model whose engine survived a
+    superseded explicit switch must actually LOAD, not report 'superseded' off
+    the previous switch's already-fired cancel event."""
 
     async def scenario():
         _reset()
@@ -144,7 +177,8 @@ def test_api_load_of_reused_engine_after_preempted_switch_succeeds():
 
 
 def test_get_engine_does_not_503_after_preempted_switch(registered):
-    """The user-visible symptom: every later /v1/chat/completions for that model 503s 'superseded' indefinitely, on a load that should simply succeed."""
+    """The user-visible symptom: every later /v1/chat/completions for that model
+    503s 'superseded' indefinitely, on a load that should simply succeed."""
 
     async def scenario():
         _reset()
@@ -167,7 +201,10 @@ def test_get_engine_does_not_503_after_preempted_switch(registered):
 
 
 def test_get_engine_stays_broken_forever_is_not_the_contract():
-    """The negative case that makes this a real regression test rather than a one-shot: the stale event is never cleared by anything, so pre-fix EVERY subsequent request keeps failing, not just the first."""
+    """The negative case that makes this a real regression test rather than a
+    one-shot: the stale event is never cleared by anything, so pre-fix EVERY
+    subsequent request keeps failing, not just the first. Drives the API path
+    twice and requires both to succeed."""
 
     async def scenario():
         _reset()

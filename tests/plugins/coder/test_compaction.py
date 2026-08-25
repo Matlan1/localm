@@ -1,5 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Tests for compaction logic in localm.plugins.coder.agent."""
+"""
+Tests for compaction logic in localm.plugins.coder.agent
+
+Covers:
+  - _compact_history(): keeps last 4, calls backend.chat, returns False ≤4 msgs
+  - _fill_ratio(): math against _ctx_window_tokens
+  - _ctx_window_tokens(): falls back to _DEFAULT_CTX_TOKENS on exception
+  - _maybe_compact(): warns once in interactive mode; auto-compacts in non-interactive
+"""
 
 import pytest
 from unittest.mock import MagicMock, patch

@@ -3,11 +3,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadApp } from "./harness.mjs";
 
-// PWA onboarding P2c: the Settings "Install app" affordance is platform-shaped.
-// applyInstallUI() is the single decision point - one branch visible at a time:
+// applyInstallUI() picks one branch of the Settings "Install app" affordance:
 //   standalone -> "installed" confirmation; canPrompt -> native Install button;
 //   ios -> Add-to-Home-Screen steps; otherwise the generic browser-menu hint.
-// (The camera/UA sniffers can't run headless; this pins the UI logic they feed.)
 
 const allOk = () => Promise.resolve({
   ok: true, status: 200, json: async () => ({ models: [], active: "" }), text: async () => "",

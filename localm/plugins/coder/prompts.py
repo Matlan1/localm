@@ -1,5 +1,26 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""System prompt templates for localcoder agents."""
+"""
+System prompt templates for localcoder agents.
+
+Per-model-family tuning is applied by ``build_system_prompt`` based on the
+``model_name`` parameter.  Families:
+
+  gemma     - gemma / gemma2 / gemma3 / gemma4
+              Informs the model that its native <|tool_call> format is also
+              accepted (parser.py handles both XML and native).
+
+  thinking  - deepseek-r1 / qwq / qwen3 (thinking/reasoning variants)
+              Adds an explicit <think>…</think> scratchpad instruction before
+              the tool-use section; these models produce better results when
+              given an explicit reasoning channel.
+
+  small     - phi / phi2 / phi3 / phi4 / phi-mini / tiny
+              Compressed prompt: condensed tool list + 5-rule set.  Smaller
+              context window means every token counts.
+
+  default   - llama / mistral / qwen2 / codellama / and everything else
+              Standard XML tool-call format with the full tool list.
+"""
 
 from __future__ import annotations
 
@@ -18,23 +39,25 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 def detect_model_family(model_name: str) -> str:
-    """Return a family tag from a model name string."""
+    """
+    Return a family tag from a model name string.
+
+    Tags: "gemma" | "thinking" | "small" | "default"
+    """
     n = model_name.lower()
 
-    # Substring match (not just startswith) so a RESOLVED repo id like
-    # "hf:google/gemma-4-4b" - threaded in for an aliased model whose bare alias
-    # hides the family - is still classified correctly (REC-CODER-FAMILY).
+    # Substring match, not startswith, so a resolved repo id such as
+    # "hf:google/gemma-4-4b" is still classified correctly.
     if "gemma" in n:
         return "gemma"
 
     # Thinking / reasoning models (chain-of-thought fine-tunes). The marker set
-    # lives in localm.inference.model_family so this tuning and regular chat's
-    # <think> instruction (CHAT-2b) share one source of truth and cannot drift.
+    # lives in localm.inference.model_family, shared with regular chat.
     if is_thinking_model(model_name):
         return "thinking"
 
     # Small / resource-constrained models (phi / tiny), matched anywhere in the
-    # name or repo path (phi guarded so it does not catch an unrelated substring).
+    # name or repo path.
     if (n.startswith("phi") or "/phi" in n or "phi-" in n
             or "-tiny" in n or "tiny-" in n):
         return "small"
@@ -43,13 +66,11 @@ def detect_model_family(model_name: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-#  Shared tool documentation - generated from TOOL_REGISTRY so the prompt can
-#  never drift out of sync with the tools that actually exist.
+#  Shared tool documentation - generated from TOOL_REGISTRY
 # ---------------------------------------------------------------------------
 
-# Concrete example arguments per tool (better teaching signal than type
-# placeholders).  Tools not listed here fall back to a generated example
-# built from their required params.
+# Concrete example arguments per tool. Tools not listed here fall back to a
+# generated example built from their required params.
 _TOOL_EXAMPLES: dict = {
     "read_file":     {"path": "src/main.py"},
     "write_file":    {"path": "src/new.py", "content": "..."},
@@ -105,7 +126,13 @@ def _example_args(name: str, tool) -> dict:
 
 
 def _full_tool_docs(disabled: frozenset = frozenset()) -> str:
-    """One block per registered tool: description (the 'when to use this' signal), a concrete example call, and the optional params."""
+    """One block per registered tool: description (the 'when to use this'
+    signal), a concrete example call, and the optional params. Tools in
+    *disabled* are omitted (e.g. run_shell for a restricted, shareable key).
+
+    Disabling a shell-execution tool expands to the whole family here, not just
+    in the callers: this is the boundary that decides what the model is TOLD
+    exists, and it is called directly (not only via build_system_prompt)."""
     from .agent.constants import expand_shell_disable
     from .tools import TOOL_REGISTRY
     disabled = expand_shell_disable(disabled)
@@ -125,7 +152,8 @@ def _full_tool_docs(disabled: frozenset = frozenset()) -> str:
 
 
 def _brief_tool_docs(disabled: frozenset = frozenset()) -> str:
-    """Condensed list for small models - one line per tool, no JSON examples."""
+    """Condensed list for small models - one line per tool, no JSON examples.
+    Tools in *disabled* are omitted."""
     from .agent.constants import expand_shell_disable
     from .tools import TOOL_REGISTRY
     disabled = expand_shell_disable(disabled)
@@ -211,7 +239,13 @@ call next.
 
 
 def _untrusted_content_section(family: str) -> str:
-    """Standing rule for content fetched from untrusted external sources."""
+    """Standing rule for content fetched from untrusted external sources.
+
+    Pairs with provenance.py, which tags results from network / MCP tools with
+    ``provenance="untrusted-external"`` and fences their body in
+    ``<untrusted_content>``. The model must treat that body as data, never as
+    instructions (indirect prompt injection defense).
+    """
     if family == "small":
         return """\
 
@@ -249,13 +283,10 @@ RULES
 4. Summarise what you changed when done.
 5. If a tool errors, diagnose and retry."""
 
-    # REC-N1-PROSE: never advertise a capability this session does not have.
-    # Telling a restricted, shareable key about run_shell was the original case;
-    # a narrowed sub-agent generalises it, because a role can remove the write and
-    # test tools too. A reviewer told to "prefer edit_file" three lines above a
-    # brief saying it cannot edit will waste turns discovering the refusal.
-    # The applicable rules are collected and numbered ONCE, at the end: numbering
-    # them inline meant every conditional line had to know the gaps above it.
+    # Never advertise a capability this session does not have: a narrowed role can
+    # remove the shell, write and test tools. The applicable rules are collected
+    # and numbered ONCE, at the end, so no conditional line has to know the gaps
+    # above it.
     shell_off    = "run_shell" in disabled_tools
     delegate_off = "spawn_agent" in disabled_tools
     can_edit     = bool({"write_file", "edit_file", "patch_file"} - disabled_tools)
@@ -270,8 +301,7 @@ RULES
     if can_edit:
         rules.append("Prefer edit_file for single small changes; patch_file for multi-hunk edits; write_file for new files or complete rewrites.")
     # The examples name only tools this session actually has, for the same reason
-    # the rules above are conditional: a reviewer pointed at run_tests and git_*
-    # it cannot call learns nothing except that the prompt is wrong.
+    # the rules above are conditional.
     focused = [
         (("grep", "search_files"),        "grep/search_files to find things"),
         (("list_dir", "tree"),            "list_dir/tree to explore"),
@@ -317,7 +347,9 @@ RULES
 # ---------------------------------------------------------------------------
 
 def _display_cwd(cwd) -> str:
-    """The working directory as shown to the model: home-anchored (``~/proj/app``) when under the user's home, else just the project folder name."""
+    """The working directory as shown to the model: home-anchored (``~/proj/app``)
+    when under the user's home, else just the project folder name. Hides the OS
+    username and absolute machine layout from the prompt (REC-CODER-GUI-PATH)."""
     try:
         p = Path(cwd).resolve()
     except Exception:
@@ -330,22 +362,38 @@ def _display_cwd(cwd) -> str:
 
 
 def _prependable_leaf(shown_cwd: str) -> str | None:
-    """The folder name a model could mistake for a path SEGMENT to prepend, taken from the string the model was SHOWN, or None when that string holds no plain folder name to warn about."""
+    """The folder name a model could mistake for a path SEGMENT to prepend,
+    taken from the string the model was SHOWN, or None when that string holds
+    no plain folder name to warn about.
+
+    Why the clause exists at all: any project outside the user's home directory
+    (an entirely ordinary setup - a separate drive, /opt, /srv, an external
+    mount) hits _display_cwd's fallback and is shown as JUST a bare name, with
+    no leading path context. Measured live: qwen2.5-coder-1.5b-instruct AND
+    qwen2.5-coder-7b-instruct BOTH, independently, read a bare "Working
+    directory: proj" and then wrote tool-call paths like
+    "proj/strings_utils.py" - which resolves to ".../proj/proj/strings_utils.py"
+    and does not exist. Every read_file / edit_file against the real file then
+    fails on that doubled path, repeatedly, until the circuit breaker stops the
+    run - not a model-capability gap, a prompt ambiguity reproduced identically
+    across two very different model sizes.
+
+    Why it derives from *shown_cwd* rather than resolving the cwd a SECOND
+    time: the clause's whole job is "do not repeat the name I JUST SHOWED YOU",
+    so any independently-derived name is answering an adjacent question - and
+    the two diverge exactly where it hurts. For cwd == the user's home
+    directory, _display_cwd yields "~/." (the account name withheld on purpose,
+    REC-CODER-GUI-PATH) while Path(cwd).resolve().name yields the ACCOUNT NAME
+    itself, so the clause meant to clarify the path would have printed the
+    username into every prompt - defeating the one thing _display_cwd exists to
+    do. Deriving from the shown string makes that divergence unrepresentable
+    rather than merely fixed.
+    """
     leaf = shown_cwd.rsplit("/", 1)[-1]
     # "~/." (the home directory itself), a bare drive root, or anything that is
-    # not a plain folder name: there is no name for the model to wrongly
-    # prepend, so say nothing. A missing clause costs a little clarity in a
-    # rare case; a wrong one would volunteer the account name.
-    #
-    # "~" is UNREACHABLE today - _display_cwd renders the home directory as
-    # "~/.", never bare "~" - but it is guarded anyway: _prependable_leaf(cwd
-    # == home) is exactly the case this function exists to get right, and a
-    # future change to _display_cwd's home rendering (e.g. fixing the "~/.."
-    # it produces when a sentence period follows it - see dev-notes) would
-    # silently reopen this same leak class if this guard were not already
-    # here. A guard added for a reason not yet exercised is still load-
-    # bearing; removing it because the input "cannot happen" is how the
-    # reason gets lost.
+    # not a plain folder name: there is no name for the model to wrongly prepend,
+    # so return None. Bare "~" is guarded too, even though _display_cwd renders
+    # the home directory as "~/." today.
     if leaf in ("", ".", "..", "~") or any(sep in leaf for sep in "\\/:"):
         return None
     return leaf
@@ -363,7 +411,35 @@ def build_system_prompt(
     custom_instructions: str = "",
     role_brief: str = "",
 ) -> str:
-    """Build the system prompt for the main agent."""
+    """
+    Build the system prompt for the main agent.
+
+    Parameters
+    ----------
+    cwd:
+        Working directory shown to the model.
+    agent_name:
+        Display name used in the identity line.
+    project_map:
+        Codebase index injected as context; omitted when empty.
+    memory:
+        Content of LOCALCODER.md; injected under "## Project Memory". Already
+        capped by memory.load_memory, which leaves a visible notice when it cut.
+    model_name:
+        Used to select per-family prompt tuning (Gemma / thinking / small / default).
+    extra_tool_docs:
+        Additional tool documentation appended after the built-in tool list
+        (e.g. dynamically registered MCP tools).
+    custom_instructions:
+        User-authored guidance (the ``--system`` flag or ``.localcoder/system.md``);
+        injected under "## User Instructions". Distinct from ``memory``: these are
+        hand-written directives the user wants followed, rather than the running
+        list of project facts they keep with /remember.
+    role_brief:
+        Sub-agent role section (see ``build_subagent_system_prompt``); empty for a
+        main agent. Placed after the RULES so a role's focus is the last thing the
+        model reads, and so it cannot displace the safety sections above it.
+    """
     # Lazy import: agent/ imports this module, so a top-level import would cycle.
     from .agent.constants import expand_shell_disable
     disabled_tools = expand_shell_disable(disabled_tools)
@@ -377,8 +453,8 @@ def build_system_prompt(
     if memory:
         memory_section = f"\n## Project Memory\n\n{memory}\n"
 
-    # User-authored directives carry more weight than the project-memory facts, so
-    # they get their own clearly-labelled section right after it.
+    # User-authored directives get their own labelled section, right after the
+    # project-memory one.
     custom_section = ""
     if custom_instructions:
         custom_section = f"\n## User Instructions\n\n{custom_instructions}\n"
@@ -390,33 +466,18 @@ def build_system_prompt(
     rules      = _rules_section(family, disabled_tools)
     untrusted  = _untrusted_content_section(family) if untrusted_provenance else ""
 
-    # Identity line - terser for small models. The cwd is HOME-ANCHORED (~/... or
-    # just the project folder name) so the absolute machine path and OS username
-    # do not leak into the prompt - and thus into a shareable artifact or a model
-    # that echoes it back. The tools still operate on the real cwd; the RULES tell
-    # the model to use relative paths (REC-CODER-GUI-PATH).
-    #
-    # The disambiguating clause below is not decoration: see _prependable_leaf's
-    # docstring for the live, cross-model-size failure it closes - a bare
-    # "Working directory: proj" with no clarification is read as a name to
-    # prepend, not a root already stood in, and it happens whether the model
-    # is 1.5B or 7B parameters. It names the leaf OF shown_cwd, never a
-    # separately-resolved one, so it can never reveal what shown_cwd withheld.
+    # Identity line, terser for small models. The cwd is HOME-ANCHORED (~/... or
+    # just the project folder name), so the absolute machine path and OS username
+    # stay out of the prompt; the tools still operate on the real cwd, and the
+    # rules tell the model to use relative paths. The disambiguating clause names
+    # the leaf OF shown_cwd, never a separately-resolved one.
     shown_cwd = _display_cwd(cwd)
     leaf = _prependable_leaf(shown_cwd)
     cwd_note = ("" if leaf is None else
                 f' (paths are relative to here - do not repeat "{leaf}", '
                 f'e.g. "file.py" not "{leaf}/file.py")')
-    # CAPABILITY, NOT DEPLOYMENT. This line used to say the assistant was
-    # "running fully offline", and a model read that as "sandboxed, therefore
-    # powerless" and refused a file-creation task outright: "As an AI running
-    # fully offline, I don't have the capability to create files directly on
-    # your local machine." It is a true statement about deployment that reads
-    # as a false statement about capability, and it handed the model a ready-
-    # made excuse for the exact failure NEW-CODER-NO-TOOLCALL-SILENT is about.
-    # The offline/privacy property is real and worth stating, just never inside
-    # the sentence that tells the model what it can do. Note the "small" branch
-    # never carried the phrase, so only default/thinking models were affected.
+    # The identity text below describes CAPABILITY. The offline/privacy property
+    # is stated outside the sentence that says what the model can do.
     if family == "small":
         identity = (
             f"You are {agent_name}, an AI coding assistant.\n"
@@ -462,21 +523,38 @@ def build_subagent_system_prompt(
     disabled_tools: frozenset = frozenset(),
     mission: str = "",
 ) -> str:
-    """The ROLE BRIEF injected into a spawned sub-agent's system prompt."""
+    """The ROLE BRIEF injected into a spawned sub-agent's system prompt.
+
+    This is a section of the child's prompt, not a replacement for it. It used to
+    return a whole standalone 500-character prompt and had no callers at all,
+    which was lucky: a child built from it would have lost the RULES, the
+    untrusted-content provenance framing (the indirect-prompt-injection defence,
+    and a sub-agent is exactly who fetches web content), the project map and the
+    memory that ``build_system_prompt`` supplies. The child keeps the full prompt
+    and gains this brief, so a role only ever ADDS focus, never removes safety.
+
+    The cwd is HOME-ANCHORED for the same reason as the identity line at the top
+    of ``build_system_prompt``: the raw path carries the OS username and machine
+    layout into the prompt, and from there into anything the model echoes back
+    (AGENTS.md rule 2). The old body interpolated ``{cwd}`` directly.
+
+    ``model_name`` is accepted so callers can pass the family id uniformly, but the
+    brief is deliberately family-neutral: the per-family thinking hint and
+    tool-call syntax already come from ``build_system_prompt``, and repeating them
+    here would state the call format twice in one prompt.
+    """
     # Lazy import: agent/ imports this module, so a top-level import would cycle.
-    # Disabling one shell-execution tool disables the whole family, so the brief
-    # must not advertise run_shell when only run_shell_background was named.
+    # Disabling one shell-execution tool disables the whole family.
     from .agent.constants import expand_shell_disable
     disabled_tools = expand_shell_disable(disabled_tools)
-    # Only advertise tools this child can actually call, so a narrowed role is not
-    # told about run_shell etc. it will be refused (REC-N1-PROSE). Ordered, not a
-    # set, so the line is stable across runs.
+    # Only advertise tools this child can actually call. Ordered, not a set, so
+    # the line is stable across runs.
     _core = ["read_file", "write_file", "edit_file", "patch_file",
              "run_shell", "list_dir", "search_files", "grep"]
     tools_line = ", ".join(t for t in _core if t not in disabled_tools)
 
     # Resolved once: _display_cwd hits the filesystem (Path.resolve), and the
-    # clause must name the leaf of THIS string, not a separate resolution.
+    # clause below must name the leaf of THIS string, not a separate resolution.
     shown_cwd = _display_cwd(cwd)
     _leaf = _prependable_leaf(shown_cwd)
     sub_cwd_note = ("" if _leaf is None else

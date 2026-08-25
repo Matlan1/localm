@@ -1,5 +1,29 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Text-guard: defang untrusted text so it cannot forge a prompt boundary."""
+"""
+Text-guard: defang untrusted text so it cannot forge a prompt boundary.
+
+``neutralise()`` escapes the LEADING delimiter of two dangerous token classes so
+the literal token no longer exists while the text stays human-readable:
+
+  1. localm frame markers (``<tool_result>``, ``<untrusted_content>``) - stops a
+     body from ending / forging the fence it is wrapped in.
+  2. chat-template CONTROL TOKENS (``<|im_start|>``, ``</s>``, ``[INST]``,
+     ``<start_of_turn>`` ...) - stops ROLE forgery via the model's own
+     delimiters, which both backends parse as special tokens.
+
+This was originally the coder's indirect-prompt-injection defense
+(``localm/plugins/coder/provenance.py``). It is HOISTED here because more than
+one KERNEL consumer needs it now: the agent-memory layer (``localm/memory``)
+neutralises every recalled memory before injecting it as trusted context, and a
+kernel library importing from a *plugin* (coder) would be backwards - a plugin
+may be disabled, and coder will later depend on memory, not the reverse. Coder
+re-exports ``neutralise`` from here so its existing call sites and tests are
+unchanged; the escaping is byte-for-byte identical to the original.
+
+It BLOCKS nothing and adds no policy - it only hardens a text boundary. Apply it
+ONLY to untrusted / laundering-path content (fetched pages, tool output, stored
+memory), never to trusted file reads that legitimately contain these strings.
+"""
 
 from __future__ import annotations
 
@@ -40,7 +64,19 @@ def _defang_special(m: "re.Match") -> str:
 
 
 def neutralise(text: str) -> str:
-    """Defang frame markers AND chat-template control tokens in untrusted content."""
+    """Defang frame markers AND chat-template control tokens in untrusted content.
+
+    Two passes, both escaping only the leading delimiter so the literal token no
+    longer exists while the text stays readable:
+      1. tool_result / untrusted_content frame tags  (``</tool_result>`` ->
+         ``&lt;/tool_result>``) - stops textual fence forgery / escape.
+      2. model control tokens (``<|im_start|>``, ``</s>``, ``[INST]``,
+         ``<start_of_turn>`` ...) - stops ROLE forgery via the model's real
+         delimiters, which both backends would otherwise parse as special tokens.
+    Ordinary ``<`` in fetched code (``a < b``, ``vector<int>``) is left alone, and
+    existing ``&lt;`` is untouched. Apply only to untrusted / laundering-path
+    content, never to trusted file reads.
+    """
     if not text:
         return text
     text = _FRAME_RE.sub(r"&lt;\1", text)

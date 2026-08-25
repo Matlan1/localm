@@ -1,5 +1,14 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""`localm coder --seed N`: the seed reaches the request body."""
+"""`localm coder --seed N`: the seed reaches the request body.
+
+Whether a fixed seed actually reproduces output is a property of the runtime, not
+of this wiring - it was measured against a real model and server rather than
+asserted here (see the CHANGELOG entry and docs/cli.md for the numbers and the
+scope they were measured in). What these tests pin down is that the flag is not
+cosmetic: it survives the CLI, the project config, the Agent's gen kwargs, and
+the backend body build, and that the one provider without a seed parameter says
+so instead of silently dropping it.
+"""
 
 from __future__ import annotations
 
@@ -60,9 +69,8 @@ class TestAgentGenKwargs:
 class TestCliResolution:
     def _resolve(self, tmp_path, seed=None, provider=None):
         from localm.plugins.coder.cli._main import _resolve_session_config
-        # mode="log", not "privacy": the privacy branch defuses this process's
-        # readline history as a side effect, which a unit test has no business
-        # doing to the pytest interpreter.
+        # mode is log, not privacy: the privacy branch defuses this process's
+        # readline history as a side effect.
         return _resolve_session_config(
             tmp_path, "m", 40, None, None, seed, True, False, "log",
             False, provider)[5]
@@ -84,7 +92,8 @@ class TestCliResolution:
         assert self._resolve(tmp_path, seed=7)["seed"] == 7
 
     def test_anthropic_drops_the_seed_and_says_so(self, tmp_path):
-        """The Messages API has no seed parameter."""
+        """The Messages API has no seed parameter. Silently passing it on would
+        make the run look pinned when nothing pinned it."""
         with patch("localm.plugins.coder.cli._main.print_warning") as warn:
             gen_kw = self._resolve(tmp_path, seed=7, provider="anthropic")
         assert "seed" not in gen_kw

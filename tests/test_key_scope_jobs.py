@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""KEY-SCOPE-2: a background job is bound to the key that created it."""
+"""KEY-SCOPE-2: a background job is bound to the key that created it. The shared
+JobManager bus means /api/jobs/{id}/events + /cancel stay baseline (any valid key),
+so they are hardened by OWNER-binding instead: only the creating key (or an
+admin/owner) may stream or cancel a job. A non-owner gets an indistinguishable 404
+(never a 403 that would confirm the unguessable id exists)."""
 
 import uuid
 from pathlib import Path
@@ -37,7 +41,8 @@ def _hdr(key):
 
 
 def _inject(app, owner, status="running"):
-    """Register a job in the manager directly (no subprocess/thread) with a pre-queued 'end' event so the SSE stream returns promptly."""
+    """Register a job in the manager directly (no subprocess/thread) with a
+    pre-queued 'end' event so the SSE stream returns promptly."""
     j = Job(id=uuid.uuid4().hex[:12], kind="test", argv=[], owner=owner)
     j.status = status
     j.push({"type": "end", "status": "done"})
@@ -88,7 +93,9 @@ class TestJobOwnerBinding:
                           headers=_hdr(a)).status_code == 200
 
     def test_cookie_auth_same_key_matches_owner(self, scoped_app):
-        """The GUI authenticates by an OPAQUE session cookie minted at login; the principal id must be identical for the same key whether it arrives via the Authorization header or via a session cookie (job ownership parity)."""
+        """The GUI authenticates by an OPAQUE session cookie minted at login; the
+        principal id must be identical for the same key whether it arrives via the
+        Authorization header or via a session cookie (job ownership parity)."""
         from localm import auth, sessions
         a = auth.create_key("A", [S.MODELS_READ])["key"]
         job = _inject(scoped_app, owner=auth._hash_key(a))
@@ -111,7 +118,8 @@ class TestJobOwnerBinding:
 
 class TestPrincipalId:
     def test_stable_and_distinct_and_none_without_token(self, scoped_app):
-        """principal_id is the keystore hash: stable per key, distinct across keys, None when no token is presented (open-mode / anonymous job creation)."""
+        """principal_id is the keystore hash: stable per key, distinct across keys,
+        None when no token is presented (open-mode / anonymous job creation)."""
         from starlette.requests import Request
         from localm import auth
         from localm.inference.http_server import principal_id

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Process-execution tools: ``run_shell`` (with the shell-vs-arglist routing and privacy-env hook) and ``run_tests`` (test-runner autodetection)."""
+"""Process-execution tools: ``run_shell`` (with the shell-vs-arglist routing and
+privacy-env hook) and ``run_tests`` (test-runner autodetection)."""
 
 from __future__ import annotations
 
@@ -31,7 +32,36 @@ def _needs_shell(command: str) -> bool:
 
 
 def _split_command(command: str) -> list[str]:
-    """Split *command* into an argument list, with the quote characters REMOVED."""
+    """Split *command* into an argument list, with the quote characters REMOVED.
+
+    Removing them is the point. A quoted path is the normal way to pass a path
+    containing spaces, and what must reach the process is the path, not the
+    quotes around it. This used to split with ``shlex.split(posix=False)`` on
+    Windows, which does not do quote removal BY DESIGN, so the token stayed
+    ``"a dir with spaces\\f.txt"``, quotes and all, and the process could not
+    open it.
+
+    So: posix mode, which does the removal - plus one Windows adjustment.
+
+    Post-stripping the quotes off posix=False's tokens is not the same fix and
+    does not work, because posix=False also gets the token BOUNDARIES wrong: it
+    honours a quote only where one OPENS a token, so ``--message="a b"`` splits
+    into ``['--message="a', 'b"']``. A wrong boundary cannot be repaired after
+    the fact. Posix mode groups a mid-token quote the way Windows does.
+
+    ``lex.escape = ""`` is the load-bearing Windows line, and the reason plain
+    ``posix=True`` is not the fix either: posix rules read a backslash as an
+    escape, which turns ``dir sub\\dir\\f.txt`` into ``dir subdirf.txt`` and
+    drops a separator from a UNC ``"\\\\host\\share"``. On Windows a backslash is
+    a path separator and nothing else, so the escape character is cleared.
+
+    ``lex.commenters`` is cleared for the same reason :func:`shlex.split` clears
+    it: otherwise ``#`` opens a comment and truncates the rest, silently losing
+    the message in ``git commit -m "fix #42"``.
+
+    Malformed quoting still raises ``ValueError``, which the caller turns into
+    the shell fallback.
+    """
     import shlex
 
     lex = shlex.shlex(command, posix=True)
@@ -43,7 +73,19 @@ def _split_command(command: str) -> list[str]:
 
 
 def _shell_argv(command: str) -> "list[str] | str":
-    """Route *command* to an argument list, or to the platform shell."""
+    """Route *command* to an argument list, or to the platform shell.
+
+    When the command contains no shell operators (pipes, redirects, globs,
+    variable expansion, etc.) it is parsed with :func:`_split_command` and
+    returned as a plain argument list - no shell injection possible. Otherwise
+    it falls back to the system shell (cmd /C on Windows, /bin/sh -c elsewhere),
+    whose launch form is a raw command-line STRING on Windows and a list on
+    POSIX (see :func:`base.platform_shell`).
+
+    This is the ONE place that decision is made, so the blocking ``run_shell``
+    and the background ``run_shell_background`` cannot drift into different
+    security postures.
+    """
     if _needs_shell(command):
         # Complex command - must go through a shell
         return platform_shell(command)
@@ -78,7 +120,14 @@ def tool_run_shell(
     timeout: int = 30,
     _privacy: bool = False,
 ) -> ToolResult:
-    """Execute a shell command and wait for it to finish."""
+    """
+    Execute a shell command and wait for it to finish.
+
+    Argument-list vs shell routing is decided by :func:`_shell_argv`.
+
+    In privacy mode (``_privacy=True``) the subprocess environment has
+    shell-history variables zeroed.
+    """
     shell_cmd = _shell_argv(command)
     env = _privacy_env(_privacy)
 
@@ -127,7 +176,14 @@ def _job_not_found(registry, job_id: str) -> ToolResult:
 
 
 def _render_job(job) -> tuple[str, str, bool, dict]:
-    """Render a job as ``(output, summary, truncated, status)`` for a ToolResult."""
+    """Render a job as ``(output, summary, truncated, status)`` for a ToolResult.
+
+    The status snapshot is RETURNED rather than left for the caller to re-read.
+    A second ``job.status()`` would be an independent read of state the watcher
+    thread mutates, so a job finishing between the two calls would render a
+    "running" body while the caller's ok/exit-code logic saw the finished one.
+    One snapshot, one story.
+    """
     st = job.status()
     out, err, dropped = job.output()
 
@@ -174,7 +230,17 @@ def tool_run_shell_background(
     _privacy: bool = False,
     _owner: str | None = None,
 ) -> ToolResult:
-    """Start a shell command in the background and return a job id immediately."""
+    """
+    Start a shell command in the background and return a job id immediately.
+
+    Use for anything long-running you need to keep talking to or working
+    alongside: a dev server you then curl, a long build, a watcher. Poll it with
+    ``check_shell_job`` and stop it with ``kill_shell_job``. For a command you
+    just need the result of, use ``run_shell`` instead.
+
+    Argument-list vs shell routing and privacy-mode env handling are identical
+    to :func:`tool_run_shell`; only the waiting differs.
+    """
     from ..background import JobCapacityError, ShellJob, get_registry
 
     argv = _shell_argv(command)
@@ -208,7 +274,11 @@ def tool_run_shell_background(
 
 
 def tool_check_shell_job(cwd: Path, job_id: str) -> ToolResult:
-    """Check a background job: its state, exit code once finished, and the output buffered so far."""
+    """
+    Check a background job: its state, exit code once finished, and the output
+    buffered so far. Safe to call repeatedly; output accumulates until the job
+    is pruned.
+    """
     from ..background import get_registry
 
     registry = get_registry()
@@ -230,7 +300,10 @@ def tool_check_shell_job(cwd: Path, job_id: str) -> ToolResult:
 
 
 def tool_kill_shell_job(cwd: Path, job_id: str) -> ToolResult:
-    """Stop a background job and its whole process tree, then report the final state and buffered output."""
+    """
+    Stop a background job and its whole process tree, then report the final
+    state and buffered output.
+    """
     from ..background import get_registry
 
     registry = get_registry()
@@ -248,7 +321,22 @@ def tool_kill_shell_job(cwd: Path, job_id: str) -> ToolResult:
 
 
 def resolve_runner(name: str) -> "str | None":
-    """The launchable path to *name*, or None when it is not installed."""
+    """The launchable path to *name*, or None when it is not installed.
+
+    Returns the RESOLVED path rather than the bare name because these commands
+    are run as an argv list, and argv-list execution on Windows goes through
+    CreateProcess, which only launches real executables. npm, yarn and npx ship
+    as `.CMD` shims, so `['npm', ...]` raises WinError 2 even with npm installed
+    and on PATH, while the full `...\\npm.CMD` path runs fine (both measured).
+    That is why a bare `shutil.which` truthiness check is not enough here: which
+    finds npm.CMD, and the argv that names it `npm` still cannot start.
+
+    Absolutised, because which() on Windows searches the CURRENT directory first
+    and returns what it joined, so the answer can be a relative `.\\npm.CMD`.
+    The result is stored on the session and run later with cwd set to the
+    PROJECT directory, which is not always the directory which() searched - a
+    relative answer would then resolve somewhere else, or against a same-named
+    file the project happens to contain."""
     import os
     import shutil as _shutil
     found = _shutil.which(name)
@@ -271,13 +359,26 @@ _SCRIPT_BIN_SUFFIXES = (".js", ".cjs", ".mjs", ".cmd", ".bat", ".exe")
 
 
 def _last_command_of(script: str) -> str:
-    """The FINAL command in a package script line."""
+    """The FINAL command in a package script line.
+
+    A package manager appends forwarded arguments to the END of the script, so
+    the last command is the only one that can receive them. Measured on npm with
+    the script ``node a.js && node b.js``: the forwarded argument arrived at
+    ``b.js`` and ``a.js`` saw nothing. So in ``jest && eslint .`` an appended
+    ``--passWithNoTests`` would land on eslint, not on jest.
+    """
     import re
     return re.split(r"&&|\|\||[;|&]", script)[-1]
 
 
 def _runner_basename(token: str) -> str:
-    """*token*'s program name: directory dropped, launcher suffix stripped, lowercased."""
+    """*token*'s program name: directory dropped, launcher suffix stripped,
+    lowercased.
+
+    So a package script's ``node_modules/.bin/jest.cmd`` reads as ``jest``, and
+    the absolute ``...\\nodejs\\npm.CMD`` that :func:`resolve_runner` hands back
+    reads as ``npm``. Both callers need the same answer, so there is one rule.
+    """
     name = token.replace("\\", "/").rsplit("/", 1)[-1].lower()
     for suffix in _SCRIPT_BIN_SUFFIXES:
         if name.endswith(suffix):
@@ -286,7 +387,8 @@ def _runner_basename(token: str) -> str:
 
 
 def _script_runner_takes_no_tests_flag(cwd: Path) -> bool:
-    """True when this package's ``test`` script ends in a runner that has a ``--passWithNoTests`` flag (see :data:`_NO_TESTS_OK_RUNNERS`)."""
+    """True when this package's ``test`` script ends in a runner that has a
+    ``--passWithNoTests`` flag (see :data:`_NO_TESTS_OK_RUNNERS`)."""
     import json
     try:
         data = json.loads((cwd / "package.json").read_text(encoding="utf-8"))
@@ -301,7 +403,42 @@ def _script_runner_takes_no_tests_flag(cwd: Path) -> bool:
 
 
 def _js_test_command(cwd: Path, package_manager: str) -> list[str]:
-    """The ``npm``/``yarn`` test command for *cwd*."""
+    """The ``npm``/``yarn`` test command for *cwd*.
+
+    ONE definition, used by both :func:`_detect_test_runner` and ``run_tests``'s
+    explicit npm/yarn branch, so the command the verify oracle runs and the
+    command the model's own tool runs cannot drift apart.
+
+    ``--passWithNoTests`` keeps a project whose suite is still empty from being
+    billed a failed verification. HOW it has to be passed differs per package
+    manager, and the difference is measured (npm 11.13.0, yarn 1.22.22, node
+    24.16.0), not assumed:
+
+    * npm SWALLOWS the bare flag. It reads an unrecognised option as one of its
+      own configs - the script sees only ``npm_config_passwithnotests`` in the
+      environment, and npm warns "Unknown cli config" - and forwards just nopt's
+      POSITIONAL remainder to the script (``npm/lib/npm.js``:
+      ``this.argv = [...parsedArgv.remain]``). Hence npm's own usage for the
+      lifecycle commands, ``[-- <args>]``. Measured against real jest in a
+      package with no test files: the bare form exits 1, identical to passing
+      nothing at all, so the flag was decorative and the empty suite was billed
+      as a failure anyway. Through ``--`` the same project exits 0.
+    * yarn is the OPPOSITE and must NOT be given the separator. yarn classic
+      forwards the bare flag correctly today, and warns that a future yarn "will
+      forward any explicit -- as-is to the scripts" - which would hand the runner
+      a literal ``--`` and demote the flag to a positional argument. So yarn
+      keeps the bare form it already had.
+
+    Positional arguments need no separator on either (measured: ``npm test
+    somepath`` reaches the script), which is why ``run_tests`` can still append
+    its ``path`` after this command.
+
+    The flag also goes only to a runner that HAS it (see
+    :data:`_NO_TESTS_OK_RUNNERS`); anything else gets a plain ``<pm> test``.
+    That is the honest outcome rather than a silent downgrade - the flag never
+    reached those runners before either - and it avoids trading a working check
+    for a permanently red one.
+    """
     cmd = [resolve_runner(package_manager) or package_manager, "test"]
     if _script_runner_takes_no_tests_flag(cwd):
         # npm forwards nothing flag-shaped without the separator; yarn forwards
@@ -313,7 +450,38 @@ def _js_test_command(cwd: Path, package_manager: str) -> list[str]:
 
 
 def _append_caller_args(cmd: list[str], args: list[str]) -> list[str]:
-    """*cmd* with the caller's *args* appended so the RUNNER receives them."""
+    """*cmd* with the caller's *args* appended so the RUNNER receives them.
+
+    npm needs its ``--`` separator or anything flag-shaped never leaves npm: it
+    reads an unrecognised option as one of its own configs, warns "Unknown cli
+    config", and forwards only nopt's POSITIONAL remainder to the package script
+    (``npm/lib/npm.js``: ``this.argv = [...parsedArgv.remain]``). Measured on npm
+    11.13.0: ``npm test --watch`` hands the script ``ARGV=[]``, while ``npm test
+    -- --watch`` hands it ``["--watch"]``. So ``run_tests(runner="npm",
+    extra_args="--watch")`` used to run a plain suite and report it as the run
+    that was asked for. Same root cause as the ``--passWithNoTests`` bug, one
+    code path over.
+
+    The separator also fronts the POSITIONAL ``path``, which needs none of its
+    own. That is measurably free (``npm test -- somepath`` and ``npm test
+    somepath`` both deliver ``["somepath"]``), and a call that passes ``path``
+    AND a flag has to put both on the runner's side of the separator anyway.
+
+    npm only:
+
+    * yarn is the opposite. yarn classic forwards a bare flag correctly and warns
+      that a future yarn "will forward any explicit -- as-is to the scripts",
+      which would hand the runner a literal ``--`` and demote the flag to a
+      positional argument. Measured (yarn 1.22.22): a separator would break a
+      case that works today.
+    * pytest, cargo and go parse their own argv, so their flags already arrive.
+
+    One separator, never two: ``npm test -- -- --watch`` delivers a literal
+    ``["--", "--watch"]`` to the script (measured). A command that already
+    carries one keeps it (the ``--passWithNoTests`` form, where everything
+    appended lands after it anyway), and a caller who wrote their own leading
+    ``--`` gets theirs honoured rather than doubled.
+    """
     if not args:
         return cmd
     if _runner_basename(cmd[0]) == "npm" and "--" not in cmd and args[0] != "--":
@@ -322,7 +490,13 @@ def _append_caller_args(cmd: list[str], args: list[str]) -> list[str]:
 
 
 def _detect_test_runner(cwd: Path) -> list[str]:
-    """Return the command list for the most appropriate test runner in *cwd*."""
+    """Return the command list for the most appropriate test runner in *cwd*.
+
+    Always returns a command (pytest is the fallback), so callers that want
+    positive evidence of a runnable check must gate separately - the verify
+    oracle does exactly that in ``verify._has_project_check``. When a runner is
+    not on PATH the bare name is kept, so the caller's "runner not found"
+    message names something the user recognises."""
     if (cwd / "Cargo.toml").exists():
         return [resolve_runner("cargo") or "cargo", "test", "--color=never"]
     if (cwd / "go.mod").exists():
@@ -344,7 +518,20 @@ def tool_run_tests(
     path: str = ".",
     extra_args: str = "",
 ) -> ToolResult:
-    """Run the project's test suite and return the result."""
+    """
+    Run the project's test suite and return the result.
+
+    Parameters
+    ----------
+    runner:
+        ``auto`` (default) detects from project files; or specify
+        ``pytest``, ``cargo``, ``go``, ``npm``, ``yarn`` explicitly.
+    path:
+        Subdirectory or file to limit the test run (default: whole project).
+    extra_args:
+        Additional arguments appended verbatim to the test command (for npm,
+        past its ``--`` separator, or npm would swallow anything flag-shaped).
+    """
     if runner == "auto":
         cmd = _detect_test_runner(cwd)
     elif runner == "pytest":

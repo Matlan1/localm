@@ -1,5 +1,24 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Three check-then-use gaps found by an independent read of the CodeQL path-injection residue (2026-07-29), each fixed by making the sink consume the value the guard returned instead of the caller's original."""
+"""Three check-then-use gaps found by an independent read of the CodeQL
+path-injection residue (2026-07-29), each fixed by making the sink consume the
+value the guard returned instead of the caller's original.
+
+All three share one shape: a guard was called for its exception and its RETURN
+VALUE was thrown away, so the code decided on one value and acted on another.
+That is the shape ``registry.py`` already documents as an escape at its own
+remove_model gate; these are the three places it had not been applied.
+
+1. ``Collection._add_paths_locked`` called ``confine_index_path(p, policy)`` for
+   its side effect and then walked the caller's unresolved path.
+2. ``model_manager/pull.py`` read ``load_registry()[name]["path"]`` raw, skipping
+   the ``_entry_path`` choke point - and used it to decide an ``unlink()``.
+3. ``registry.py`` read ``entry["mmproj"]`` raw, so the recorded projector path
+   bypassed the type check and the ``..`` rejection every other stored path gets.
+
+Each test below fails on the pre-fix code. Where a test asserts an ABSENCE (no
+crash, no traversal), it is paired with a control that proves the same test can
+still observe the positive case, so it cannot pass by testing nothing.
+"""
 
 from pathlib import Path
 
@@ -19,7 +38,22 @@ def _wl(*allowed):
 # --------------------------------------------------------------------------- #
 
 class TestIndexActsOnTheConfinedPath:
-    """``confine_index_path`` returns the RESOLVED path it validated, and the walk has to use THAT value."""
+    """``confine_index_path`` returns the RESOLVED path it validated, and the
+    walk has to use THAT value.
+
+    Scope note, so this file does not overstate itself: on the shipped code an
+    out-of-policy file was never indexed even before the fix, because ``_expand``
+    re-confines every file it emits on that file's own resolved path. What is
+    asserted here is the wiring - that the top-level walk root is the value
+    confinement returned - not the repair of a live escape.
+
+    Asserting it needs a collaborator whose return differs observably from its
+    input, because every real difference (resolve(), symlink following) is either
+    normalised away downstream or needs a symlink privilege the test may not hold
+    on Windows. So ``confine_index_path`` is substituted with one that returns a
+    DIFFERENT directory. The unit under test is ``_add_paths_locked``'s wiring;
+    the substituted function is its collaborator, not the thing being tested.
+    """
 
     def test_the_walk_uses_the_path_confinement_returned(self, tmp_path, monkeypatch):
         asked = tmp_path / "asked"
@@ -44,9 +78,7 @@ class TestIndexActsOnTheConfinedPath:
             "of the one confine_index_path returned")
 
     def test_control_identity_confinement_still_indexes(self, tmp_path, monkeypatch):
-        # Fires-control: with a pass-through collaborator the same wiring must
-        # still index normally, so the assertion above cannot pass by breaking
-        # indexing outright.
+        # With a pass-through collaborator the same wiring still indexes normally.
         import localm.rag.store as store
         real = store.confine_index_path
         monkeypatch.setattr(store, "confine_index_path",
@@ -64,9 +96,8 @@ class TestIndexActsOnTheConfinedPath:
         assert Path(c.docs()[0]["path"]).name == "a.txt"
 
     def test_cli_path_is_unchanged_by_the_fix(self, tmp_path, monkeypatch):
-        # policy=None is the CLI contract: unconfined, and deliberately NOT
-        # rewritten. The fix must engage only where a policy is enforced, so a
-        # relative CLI pick keeps indexing exactly as before.
+        # policy=None is the CLI contract: unconfined and not rewritten, so a
+        # relative CLI pick keeps indexing as before.
         work = tmp_path / "work"
         (work / "docs").mkdir(parents=True)
         (work / "docs" / "a.txt").write_text("gfx1030 runtime notes", encoding="utf-8")
@@ -82,7 +113,7 @@ class TestIndexActsOnTheConfinedPath:
 #  2 + 3. Every stored registry path goes through the _entry_path choke point  #
 # --------------------------------------------------------------------------- #
 
-# The #562 matrix, applied to the projector field rather than to ``path``.
+# The same matrix, applied to the projector field rather than to ``path``.
 BAD_MMPROJ = {
     "null_mmproj": {"path": "Z:/m.gguf", "mmproj": None},
     "int_mmproj": {"path": "Z:/m.gguf", "mmproj": 123},
@@ -99,8 +130,6 @@ class TestEntryPathCoversTheProjectorField:
         assert _entry_path(entry, "mmproj") is None
 
     def test_control_good_projector_is_returned(self):
-        # Without this the parametrized test above would pass against a helper
-        # that returned None unconditionally.
         entry = {"path": "Z:/m.gguf", "mmproj": "Z:/models/proj.gguf"}
         assert _entry_path(entry, "mmproj") == "Z:/models/proj.gguf"
 
@@ -112,9 +141,7 @@ class TestEntryPathCoversTheProjectorField:
     @pytest.mark.parametrize("label,entry", list(BAD_MMPROJ.items()))
     def test_resolve_mmproj_survives_a_malformed_projector(
             self, label, entry, tmp_path, monkeypatch):
-        # The real consumer. Pre-fix this raised TypeError for int/null (Path(123),
-        # Path(None)) and returned a traversal path for the ".." cases, handing it
-        # to the native mtmd loader.
+        # The real consumer, which hands the result to the native mtmd loader.
         import localm.model_manager as _mm
         import localm.model_manager.registry as reg
 
@@ -127,11 +154,14 @@ class TestEntryPathCoversTheProjectorField:
 
 
 class TestPullDedupRoutesThroughTheChokePoint:
-    """The post-download dedup branch offers 'alias and delete the duplicate'."""
+    """The post-download dedup branch offers "alias and delete the duplicate".
+    It read the sibling's path raw, so a malformed sibling entry crashed the
+    pull with TypeError - and the value it read decides an unlink()."""
 
     @staticmethod
     def _drive_dedup(monkeypatch, tmp_path, sibling_entry, answer="a"):
-        """Run _pull_url to completion against a registry holding one sibling with a matching sha256, answering the interactive dedup prompt."""
+        """Run _pull_url to completion against a registry holding one sibling
+        with a matching sha256, answering the interactive dedup prompt."""
         import click
 
         import localm.model_manager as mm
@@ -194,9 +224,8 @@ class TestPullDedupRoutesThroughTheChokePoint:
     ])
     def test_malformed_sibling_never_deletes_the_download(
             self, label, entry, tmp_path, monkeypatch):
-        # Pre-fix: Path(None) / Path(123) raised TypeError out of the pull, and a
-        # '..' sibling path was resolved and compared without ever passing the
-        # choke point. Either way the file we just downloaded must survive.
+        # The file just downloaded must survive a null, an int, and a '..' sibling
+        # path.
         ok, store, dest = self._drive_dedup(monkeypatch, tmp_path, entry)
 
         assert dest.is_file(), (
@@ -207,9 +236,8 @@ class TestPullDedupRoutesThroughTheChokePoint:
 
     def test_control_good_sibling_still_aliases_and_deletes(
             self, tmp_path, monkeypatch):
-        # Fires-control: with a WELL-FORMED sibling the branch must still do its
-        # job (alias, drop the duplicate file), so the tests above cannot pass by
-        # disabling dedup altogether.
+        # With a WELL-FORMED sibling the branch still aliases and drops the
+        # duplicate file.
         twin = tmp_path / "twin.gguf"
         twin.write_bytes(b"url-model-bytes")
         ok, store, dest = self._drive_dedup(

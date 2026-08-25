@@ -1,15 +1,18 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Pre-submit model validation against ComfyUI /object_info (I3 / MEDIA-1)."""
+"""Pre-submit model validation against ComfyUI /object_info (I3 / MEDIA-1).
+
+The preflight confirms each loader's model file exists BEFORE the chat model is
+unloaded: it names a genuinely-missing file, auto-substitutes a single unambiguous
+precision variant, leaves enum (non-model) combos alone, and is a no-op when
+/object_info cannot be read (so it never breaks a working setup).
+"""
 
 from unittest.mock import MagicMock, patch
 
 from localm.image_gen import comfy
-# preflight_models / comfy_object_info now live in the shared client; the
-# generic ComfyUI plumbing moved out of image_gen.comfy into here. preflight
-# calls comfy_object_info as a bare global in this module, so the stub that
-# replaces /object_info must be patched on comfy_client (the symbol's home),
-# not on the image_gen.comfy re-export. (Re-exports stay importable; this only
-# follows the moved symbol for the INTERNAL call.)
+# preflight_models / comfy_object_info live in the shared client. preflight calls
+# comfy_object_info as a bare global in that module, so the stub replacing
+# /object_info is patched on comfy_client, not on the image_gen.comfy re-export.
 from localm.media import comfy_client
 
 
@@ -53,19 +56,29 @@ class TestComboHelpers:
         assert comfy._looks_like_model_files([]) is False
 
     def test_looks_like_model_files_falls_back_to_current_when_options_empty(self):
-        """ComfyUI reporting zero live options (nothing of this type installed) must not be indistinguishable from 'this is an enum, not a model slot' - the workflow's own current value (a real filename regardless of what is installed) is the fallback signal."""
+        """ComfyUI reporting zero live options (nothing of this type installed) must
+        not be indistinguishable from "this is an enum, not a model slot" - the
+        workflow's own current value (a real filename regardless of what is
+        installed) is the fallback signal."""
         assert comfy._looks_like_model_files([], current="flux1-dev-Q8_0.gguf") is True
         assert comfy._looks_like_model_files([], current="euler") is False
         assert comfy._looks_like_model_files([], current=None) is False
         assert comfy._looks_like_model_files([], current="") is False
 
     def test_looks_like_model_files_falls_back_when_the_lone_option_is_not_a_file(self):
-        """A loader whose only live choice is a non-file sentinel (e.g. a VAE loader offering just its built-in pixel-space passthrough when no external VAE is installed) is exactly as under-informative as an empty list - current is the fallback signal there too."""
+        """A loader whose only live choice is a non-file sentinel (e.g. a VAE
+        loader offering just its built-in pixel-space passthrough when no
+        external VAE is installed) is exactly as under-informative as an empty
+        list - current is the fallback signal there too."""
         assert comfy._looks_like_model_files(["pixel_space"], current="ae.safetensors") is True
         assert comfy._looks_like_model_files(["pixel_space"], current="default") is False
 
     def test_looks_like_model_files_ignores_current_when_options_has_2plus_real_choices(self):
-        """A genuine multi-choice enum (sampler_name, scheduler, ...) must NEVER be misread as a model-file slot because of an unrelated/off-list *current* value that happens to end in a tracked extension (e.g. a hand-edited or corrupted workflow) - 2+ live options is enough of a sample to decide from options..."""
+        """A genuine multi-choice enum (sampler_name, scheduler, ...) must NEVER be
+        misread as a model-file slot because of an unrelated/off-list *current*
+        value that happens to end in a tracked extension (e.g. a hand-edited or
+        corrupted workflow) - 2+ live options is enough of a sample to decide from
+        options alone, exactly as before *current* existed as a parameter."""
         assert comfy._looks_like_model_files(["euler", "dpmpp_2m"], current="custom.pt") is False
         assert comfy._looks_like_model_files(["euler", "dpmpp_2m", "heun"],
                                               current="custom.safetensors") is False
@@ -81,9 +94,8 @@ class TestComboHelpers:
         assert a != b
 
     def test_normalize_keeps_version_discriminators(self):
-        # Bare digits / lone letters are version/variant markers, NOT precision -
-        # they must keep genuinely different models apart (regression: these used to
-        # collapse and trigger a wrong cross-version substitution).
+        # Bare digits / lone letters are version/variant markers, not precision, and
+        # keep genuinely different models apart.
         assert (comfy._normalize_model_base("wan2.1_ti2v_5B_fp16.safetensors")
                 != comfy._normalize_model_base("wan2.2_ti2v_5B_fp16.safetensors"))
         assert (comfy._normalize_model_base("model_s.safetensors")
@@ -92,8 +104,8 @@ class TestComboHelpers:
                 != comfy._normalize_model_base("vae_2.safetensors"))
 
     def test_no_cross_version_substitution(self):
-        # Workflow wants Wan 2.2; only Wan 2.1 is installed -> NOT a precision variant,
-        # so it must be reported missing, never silently swapped to the other version.
+        # Workflow wants Wan 2.2 and only Wan 2.1 is installed: not a precision
+        # variant, so it is reported missing rather than swapped.
         wf = _wan_unet_workflow("wan2.2_ti2v_5B_fp16.safetensors")
         info = _object_info(["wan2.1_ti2v_5B_fp16.safetensors"])
         with patch.object(comfy_client, "comfy_object_info", return_value=info):
@@ -135,7 +147,10 @@ class TestPreflight:
         assert wf["1"]["inputs"]["unet_name"] == "wan2.2_ti2v_5B_fp16.safetensors"
 
     def test_missing_with_zero_live_options_still_names_the_file(self):
-        """ComfyUI has NONE of this file type installed at all (live options == []), not just missing this specific one. preflight_models() must still name it and fail BEFORE the caller unloads the chat model - not silently pass because _looks_like_model_files([]) alone can never recognize the slot."""
+        """ComfyUI has NONE of this file type installed at all (live options == []),
+        not just missing this specific one. preflight_models() must still name it
+        and fail BEFORE the caller unloads the chat model - not silently pass
+        because _looks_like_model_files([]) alone can never recognize the slot."""
         wf = _wan_unet_workflow()
         info = _object_info([])
         with patch.object(comfy_client, "comfy_object_info", return_value=info):
@@ -171,16 +186,18 @@ class TestPreflight:
         assert ok and msg == ""                              # best-effort, never blocks
 
     def test_object_info_fetch_handles_network_error(self):
-        # comfy_object_info routes through comfy_client._comfy_urlopen
-        # (CHK-COMFY-REDIRECT), which builds its own opener and never calls
-        # the top-level urllib.request.urlopen - that is the seam to patch.
+        # comfy_object_info routes through comfy_client._comfy_urlopen, never the
+        # top-level urllib.request.urlopen; that is the seam to patch.
         with patch.object(comfy_client, "_comfy_urlopen",
                           side_effect=OSError("refused")):
             assert comfy.comfy_object_info("http://127.0.0.1:9") is None
 
 
 class TestDescribeMissingModels:
-    """describe_missing_models() is the read-only sibling of preflight_models(), used by the GUI pre-check BEFORE a user clicks Generate."""
+    """describe_missing_models() is the read-only sibling of preflight_models(),
+    used by the GUI pre-check BEFORE a user clicks Generate. It must report the
+    same missing slots preflight_models would, WITHOUT mutating the caller's
+    workflow - neither applying a substitution nor anything else."""
 
     def test_reports_same_missing_slot_as_preflight(self):
         wf = _wan_unet_workflow()
@@ -195,8 +212,8 @@ class TestDescribeMissingModels:
         assert "totally_different_model.safetensors" in slot.available_options
 
     def test_does_not_mutate_workflow_even_with_a_substitutable_variant(self):
-        # preflight_models WOULD substitute this in place; describe_missing_models
-        # must not, since it exists to check inertly before a job even starts.
+        # preflight_models would substitute this in place; describe_missing_models
+        # does not.
         wf = _wan_unet_workflow()
         original = wf["1"]["inputs"]["unet_name"]
         info = _object_info(["wan2.2_ti2v_5B_fp8_scaled.safetensors"])
@@ -213,8 +230,7 @@ class TestDescribeMissingModels:
         assert missing == []
 
     def test_unreachable_object_info_reports_nothing_missing(self):
-        # Same best-effort contract as preflight_models: cannot validate -> defer,
-        # never surface a false "missing" for an unreachable ComfyUI.
+        # Same best-effort contract as preflight_models: cannot validate -> defer.
         wf = _wan_unet_workflow("does-not-exist.safetensors")
         with patch.object(comfy_client, "comfy_object_info", return_value=None):
             missing = comfy_client.describe_missing_models(wf, "http://x")

@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""F12b routes (memory-audit [9]): the /api/memory surface exposes pending corrections and lets the user accept or reject them."""
+"""F12b routes (memory-audit [9]): the /api/memory surface exposes pending
+corrections and lets the user accept or reject them. Drives the real route
+handlers against a real store (no mocks of the mechanism)."""
 
 from __future__ import annotations
 

@@ -1,5 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""LOCALM_HOME is an explicit 'keep my data here' choice, so localm creates it on first use."""
+"""LOCALM_HOME is an explicit "keep my data here" choice, so localm creates it on
+first use. It used to create only ONE level: ``ensure_dirs`` called
+``HOME_DIR.mkdir(exist_ok=True)`` with no ``parents=True``, so a nested home whose
+PARENT did not exist yet (a fresh ``D:\\localm\\data``) crashed with WinError 3 and
+the generic "unexpected error" bug-report path - while the same home with an
+existing parent was created silently. This pins the mkdir -p behavior a user
+expects (AUD-ENSUREDIRS)."""
 
 import json
 

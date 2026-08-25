@@ -1,5 +1,22 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""An Engine-compatible client that talks to a running localm server's ``/v1`` API."""
+"""An Engine-compatible client that talks to a running localm server's ``/v1`` API.
+
+This is the H3 / H6 "thin-client" piece: ``localm run`` ATTACHES to the per-directory
+server (chat flows through its OpenAI-compatible ``/v1/chat/completions``) instead of
+loading a SECOND copy of the model in-process - the same attach-or-spawn model the GUI
+already uses. It is duck-typed to :class:`localm.inference.engine.Engine`, implementing
+ONLY the surface the chat REPL touches:
+
+    chat_stream(messages, **gen_opts) -> Iterator[str]
+    count_tokens(text) -> int
+    display_name
+    load() / unload()            (no-ops - the server owns the model + its VRAM)
+    __enter__ / __exit__         (so ``with engine:`` works)
+    loaded                       (always True for an attached server)
+
+The CLI must NOT manage the remote server's model or VRAM (other clients share it), so
+load/unload are deliberately no-ops.
+"""
 
 from __future__ import annotations
 
@@ -10,7 +27,8 @@ from localm.inference.backends.base import UnsupportedInputError
 
 
 def _error_detail(resp) -> str:
-    """A short human message from an error response (FastAPI's ``{'detail': ...}`` when present, else the raw body)."""
+    """A short human message from an error response (FastAPI's ``{"detail": ...}``
+    when present, else the raw body)."""
     try:
         body = resp.json()
         if isinstance(body, dict) and "detail" in body:
@@ -51,11 +69,16 @@ class HttpEngine:
 
     # --- token estimate ----------------------------------------------------- #
     def count_tokens(self, text: str) -> int:
-        """Estimate token count."""
+        """Estimate token count. There is no remote tokenizer; the REPL uses this
+        only for a tok/s readout and the compaction trigger, where a chars-over-4
+        estimate is adequate (the in-process Engine uses the same fallback when its
+        model is not loaded)."""
         return max(1, len(text or "") // 4)
 
     def context_capacity(self) -> Optional[int]:
-        """The loaded model's RESOLVED context ceiling from the server's /v1/config (VRAM-derived under ctx_auto), cached after the first successful fetch."""
+        """The loaded model's RESOLVED context ceiling from the server's
+        /v1/config (VRAM-derived under ctx_auto), cached after the first
+        successful fetch. Best-effort: None on any error."""
         if getattr(self, "_ctx_capacity_cached", False):
             return self._ctx_capacity
         cap = None
@@ -93,7 +116,11 @@ class HttpEngine:
                     repeat_penalty: Optional[float] = None,
                     grammar: Optional[str] = None,
                     seed: Optional[int] = None) -> Iterator[str]:
-        """Stream assistant tokens from the server's ``/v1/chat/completions``."""
+        """Stream assistant tokens from the server's ``/v1/chat/completions``.
+
+        Raises :class:`UnsupportedInputError` when the server refuses image input on
+        a text-only model (so the REPL shows the same vision guidance as in-process),
+        and ``RuntimeError`` for an unreachable server or other error responses."""
         import requests
 
         body: dict = {
@@ -161,7 +188,17 @@ class HttpEngine:
 
 def remote_model_status(base_url: str, token: Optional[str] = None,
                         *, timeout: float = 5.0) -> tuple[str, Optional[str]]:
-    """Probe a server's loaded model via ``GET /v1/models``."""
+    """Probe a server's loaded model via ``GET /v1/models``. Returns ``(state, id)``:
+
+      - ``("loaded", "<id>")``  the server reports a model (its id).
+      - ``("empty",  None)``    the server ANSWERED (200) but reports no model.
+      - ``("unknown", None)``   we could not tell: unreachable, an auth/scope error,
+        or a malformed reply. This is NOT proof that no model is loaded - ``/v1/models``
+        needs the ``models`` scope, so an attach token scoped only for chat gets a 403
+        here while chatting still works. Callers must not claim "no model loaded" on
+        ``unknown``.
+
+    Best-effort labelling only; never gates the attach."""
     import requests
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     try:
@@ -194,5 +231,8 @@ def remote_model_status(base_url: str, token: Optional[str] = None,
 
 def remote_active_model(base_url: str, token: Optional[str] = None,
                         *, timeout: float = 5.0) -> Optional[str]:
-    """The id of the server's active model, or None when unknown / none loaded."""
+    """The id of the server's active model, or None when unknown / none loaded.
+    Thin wrapper over :func:`remote_model_status` for callers that only want the
+    label. Prefer ``remote_model_status`` when you must distinguish "no model" from
+    "could not read the model list" (see that function)."""
     return remote_model_status(base_url, token, timeout=timeout)[1]

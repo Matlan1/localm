@@ -1,5 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""localm.sysstats._vram() - the GUI hardware-monitor's VRAM line."""
+"""localm.sysstats._vram() - the GUI hardware-monitor's VRAM line.
+
+No dedicated test file existed for this module before AUDIT-GPU-SPLIT-1: the
+maintainer explicitly expected every relevant VRAM-reading function to be
+multi/split-GPU aware, not just the ones that gate a load/refuse decision -
+including this status-bar widget, which previously stayed on vram_info()'s
+single main-GPU number as a deliberate (and, on reflection, unnecessary)
+design choice."""
 
 import sys
 import threading
@@ -34,26 +41,22 @@ def _linux(user=0, nice=0, system=0, idle=0, iowait=0, irq=0, softirq=0,
 
 
 def _status_aware(value, status=GPU_PROBE_OK):
-    """A faithful double of vram_info()/vram_capacity()'s real two-shape contract: the bare value by default, ``(value, status)`` when return_status=True - mirrors tests/test_vram_reading_honesty.py's _list_gpus_double."""
+    """A faithful double of vram_info()/vram_capacity()'s real two-shape
+    contract: the bare value by default, ``(value, status)`` when
+    return_status=True - mirrors tests/test_vram_reading_honesty.py's
+    _list_gpus_double. A plain return_value cannot express this."""
     def _inner(*args, return_status=False, **kwargs):
         return (value, status) if return_status else value
     return _inner
 
 
-# --- VRAM capacity/used reading (efficiency fix, mirrors the GPU-util probe
-# below) ----------------------------------------------------------------- #
-# _vram() used to call discover.vram_capacity() synchronously on every single
-# call: cheap when torch is absent, but 2-3.5s+ (up to the 15s cold-init-
-# tolerant deadline) once torch is present, because list_gpus() deliberately
-# has NO TTL cache of its own (a stale "free" reading would defeat
-# switch_engine's eviction-wait polling - see the module note above
-# discover.list_gpus). The fix moves the actual vram_capacity() call onto its
-# own single-flighted background thread, throttled to _VRAM_REFRESH_INTERVAL_S;
-# _vram() itself always returns immediately with the last completed reading
-# (or {} before the first one lands) - so every test below that exercises a
-# freshly-patched probe must WAIT for that background thread to land before
-# reading the result, the same idiom the _gpu_util tests further down already
-# use.
+# --- VRAM capacity/used reading ------------------------------------------- #
+# _vram() always returns immediately with the last completed reading (or {}
+# before the first one lands); the actual discover.vram_capacity() call runs on
+# its own single-flighted background thread, throttled to
+# _VRAM_REFRESH_INTERVAL_S. Every test below that exercises a freshly-patched
+# probe must WAIT for that background thread to land before reading the result,
+# the same idiom the _gpu_util tests further down use.
 
 def _reset_vram_cache(monkeypatch):
     monkeypatch.setattr(sysstats, "_vram_last", None)
@@ -63,7 +66,8 @@ def _reset_vram_cache(monkeypatch):
 
 
 def _wait_for_vram_cache(timeout=2.0):
-    """Poll until the background probe has landed at least once (_vram_last moves off its None 'never asked yet' sentinel)."""
+    """Poll until the background probe has landed at least once (_vram_last
+    moves off its None "never asked yet" sentinel)."""
     deadline = time.monotonic() + timeout
     while sysstats._vram_last is None and time.monotonic() < deadline:
         time.sleep(0.01)
@@ -80,7 +84,9 @@ def test_reports_single_gpu_when_no_split_configured(monkeypatch):
 
 
 def test_reports_combined_capacity_with_a_configured_split(monkeypatch):
-    """AUDIT-GPU-SPLIT-1: with a configured 2-GPU split, the status bar must show the COMBINED total/used, not just the single main GPU's - it now goes through discover.vram_capacity(), not vram_info() directly."""
+    """AUDIT-GPU-SPLIT-1: with a configured 2-GPU split, the status bar must
+    show the COMBINED total/used, not just the single main GPU's - it now
+    goes through discover.vram_capacity(), not vram_info() directly."""
     _reset_vram_cache(monkeypatch)
     from localm.config import load_config as real_load_config
     base_cfg = real_load_config()
@@ -113,7 +119,9 @@ def test_empty_when_unmeasurable(monkeypatch):
 
 
 def test_percent_omitted_when_free_unknown(monkeypatch):
-    """The registry-fallback tier reports total only (no per-process free reading available), so 'used'/'percent' must be omitted, not fabricated as 0% used."""
+    """The registry-fallback tier reports total only (no per-process free
+    reading available), so 'used'/'percent' must be omitted, not fabricated
+    as 0% used."""
     _reset_vram_cache(monkeypatch)
     with patch("localm.discover.vram_info",
                side_effect=_status_aware({"total": 16 * GB})):
@@ -124,7 +132,11 @@ def test_percent_omitted_when_free_unknown(monkeypatch):
 
 
 def test_exception_from_discover_is_swallowed_not_raised(monkeypatch):
-    """_vram() must never raise - a probe failure just omits the section (matches the module's own documented 'NEVER raises' contract)."""
+    """_vram() must never raise - a probe failure just omits the section
+    (matches the module's own documented 'NEVER raises' contract). And the
+    failure must NOT be cached as a CONFIRMED empty reading: _vram_last must
+    stay None ("could not look"), never collapse to {} ("looked, found
+    nothing") - see _vram_probe's docstring and AGENTS.md rule 5."""
     _reset_vram_cache(monkeypatch)
     with patch("localm.discover.vram_capacity", side_effect=RuntimeError("boom")):
         assert _vram() == {}
@@ -136,7 +148,9 @@ def test_exception_from_discover_is_swallowed_not_raised(monkeypatch):
 
 
 def test_vram_probe_never_blocks_the_polling_thread(monkeypatch):
-    """A slow/wedged torch probe must never park the calling (poll) thread, and concurrent polls while one probe is in flight must not start a second vram_capacity() call (single-flight)."""
+    """A slow/wedged torch probe must never park the calling (poll) thread,
+    and concurrent polls while one probe is in flight must not start a
+    second vram_capacity() call (single-flight)."""
     _reset_vram_cache(monkeypatch)
     entered = threading.Event()
     release = threading.Event()
@@ -177,7 +191,12 @@ def test_vram_probe_never_blocks_the_polling_thread(monkeypatch):
 
 
 def test_vram_probe_invoked_once_across_n_stats_calls_within_cache_window(monkeypatch):
-    """REQUIRED PROOF: across many stats calls inside one cache window, the expensive vram_capacity() probe must fire exactly ONCE."""
+    """REQUIRED PROOF: across many stats calls inside one cache window, the
+    expensive vram_capacity() probe must fire exactly ONCE. Asserted from
+    OUTSIDE via a plain call-count list, never by raising inside the code
+    under test - defensive code in this path catches broadly and would
+    swallow an in-body assertion (.claude/rules/diff-review-discipline.md
+    item 13)."""
     _reset_vram_cache(monkeypatch)
     calls = []
     info = {"total": 16 * GB, "free": 4 * GB, "free_scope": FREE_SCOPE_DEVICE}
@@ -199,7 +218,12 @@ def test_vram_probe_invoked_once_across_n_stats_calls_within_cache_window(monkey
 
 
 def test_vram_probe_failure_does_not_overwrite_a_cached_good_reading(monkeypatch):
-    """REQUIRED PROOF: a probe failure must not be cached as a successful empty result."""
+    """REQUIRED PROOF: a probe failure must not be cached as a successful
+    empty result. Once a good reading is cached, a LATER probe attempt that
+    raises must leave the cache exactly as it was - never collapse a real
+    prior reading to a fabricated empty one just because this round's probe
+    errored (AGENTS.md rule 5 / diff-review-discipline.md item 3: "could not
+    look" and "nothing there" need different handling)."""
     _reset_vram_cache(monkeypatch)
     info = {"total": 16 * GB, "free": 4 * GB, "free_scope": FREE_SCOPE_DEVICE}
     with patch("localm.discover.vram_info", side_effect=_status_aware(info)):
@@ -223,7 +247,10 @@ def test_vram_probe_failure_does_not_overwrite_a_cached_good_reading(monkeypatch
 
 
 def test_wait_first_blocks_until_the_probe_lands(monkeypatch):
-    """A ONE-SHOT caller (wait_first=True, what the MCP system_stats tool passes) never gets a second poll to pick up a reading that lands later, so it must actually BLOCK for a real reading on a cold first call rather than getting the {} a repeating-poll caller (the GUI) correctly accepts."""
+    """A ONE-SHOT caller (wait_first=True, what the MCP system_stats tool
+    passes) never gets a second poll to pick up a reading that lands later,
+    so it must actually BLOCK for a real reading on a cold first call rather
+    than getting the {} a repeating-poll caller (the GUI) correctly accepts."""
     _reset_vram_cache(monkeypatch)
     entered = threading.Event()
     release = threading.Event()
@@ -258,7 +285,9 @@ def test_wait_first_blocks_until_the_probe_lands(monkeypatch):
 
 
 def test_wait_first_gives_up_at_the_probe_deadline_not_forever(monkeypatch):
-    """A probe that never lands (a genuinely wedged driver) must not hang wait_first indefinitely - it gives up at the bounded probe deadline and reports the honest {}, same as every other omission in this module."""
+    """A probe that never lands (a genuinely wedged driver) must not hang
+    wait_first indefinitely - it gives up at the bounded probe deadline and
+    reports the honest {}, same as every other omission in this module."""
     _reset_vram_cache(monkeypatch)
     monkeypatch.setattr("localm.discover._GPU_PROBE_DEADLINE", 0.1)
     release = threading.Event()
@@ -276,12 +305,10 @@ def test_wait_first_gives_up_at_the_probe_deadline_not_forever(monkeypatch):
         release.set()
 
     assert out == {}
-    # BOTH bounds matter, not just the upper one: a no-op that ignores
-    # wait_first entirely and returns {} instantly would also satisfy
-    # "elapsed < 2.0" without ever having waited at all - that would prove
-    # nothing about the deadline behaviour this test exists to check. The
-    # lower bound proves it genuinely blocked close to the patched deadline
-    # (0.1s + the 1.0s margin _vram adds) before giving up.
+    # BOTH bounds matter: a no-op that ignored wait_first and returned {}
+    # instantly would also satisfy "elapsed < 2.0". The lower bound proves it
+    # genuinely blocked close to the patched deadline (0.1s plus the 1.0s margin
+    # _vram adds) before giving up.
     assert elapsed > 0.9, (
         f"wait_first returned after only {elapsed:.2f}s - it must actually "
         f"wait close to the probe deadline before giving up, not bail out "
@@ -294,7 +321,11 @@ def test_wait_first_gives_up_at_the_probe_deadline_not_forever(monkeypatch):
 
 
 def test_vram_never_raises_and_unlatches_when_thread_creation_fails(monkeypatch):
-    """If the OS cannot spawn the probe thread at all (e.g. thread exhaustion), _vram() must still never raise AND must reset the in-flight guard so a later call can retry - otherwise a single failed spawn would wedge every future poll into believing a probe is permanently running."""
+    """If the OS cannot spawn the probe thread at all (e.g. thread exhaustion),
+    _vram() must still never raise AND must reset the in-flight guard so a
+    later call can retry - otherwise a single failed spawn would wedge every
+    future poll into believing a probe is permanently running. Mirrors
+    _gpu_util's handling of the same failure below."""
     _reset_vram_cache(monkeypatch)
 
     def _broken_start(self):
@@ -310,21 +341,23 @@ def test_vram_never_raises_and_unlatches_when_thread_creation_fails(monkeypatch)
         "call could ever retry")
 
 
-# --- CPU-utilisation meter (the status-bar CPU% fix) ---------------------- #
+# --- CPU-utilisation meter ------------------------------------------------ #
 # psutil.cpu_percent(interval=None) reports a fabricated first reading (0 on an
 # idle box, up to 100 on a busy-starting one) because it has no prior sample.
 # _CpuMeter keeps its OWN previous snapshot and derives the percent over a real
 # window, reporting the first (baseline-less) reading as None so the caller omits
-# the CPU field rather than showing a made-up number.
+# the CPU field.
 
 def test_first_reading_is_none_no_baseline():
-    """The very first poll has no prior snapshot, so it must return None (caller omits CPU this once) - never a fabricated 0 or 100."""
+    """The very first poll has no prior snapshot, so it must return None (caller
+    omits CPU this once) - never a fabricated 0 or 100."""
     m = _CpuMeter()
     assert m.percent(WinTimes(0, 0, 0, 0, 0), now=1000.0) is None
 
 
 def test_second_reading_is_the_real_percent_over_the_window():
-    """With a baseline, the percent is busy_delta/total_delta over the interval: 30 busy ticks out of 100 total -> 30%."""
+    """With a baseline, the percent is busy_delta/total_delta over the interval:
+    30 busy ticks out of 100 total -> 30%."""
     m = _CpuMeter()
     assert m.percent(WinTimes(0, 0, 0, 0, 0), now=1000.0) is None
     # busy = total - idle = 100 - 70 = 30; total_delta 100, busy_delta 30 -> 30%.
@@ -332,34 +365,39 @@ def test_second_reading_is_the_real_percent_over_the_window():
 
 
 def test_iowait_counts_as_idle_not_busy():
-    """iowait is a wait, not work: it must be folded into idle (matches psutil), so user=40 with iowait=20 and idle=40 over a 100-tick window reads 40%."""
+    """iowait is a wait, not work: it must be folded into idle (matches psutil),
+    so user=40 with iowait=20 and idle=40 over a 100-tick window reads 40%."""
     m = _CpuMeter()
     assert m.percent(_linux(), now=0.0) is None
     assert m.percent(_linux(user=40, idle=40, iowait=20), now=1.0) == 40.0
 
 
 def test_guest_time_is_not_double_counted():
-    """On Linux guest time is already inside user/nice, so the total must subtract it (matches psutil._cpu_tot_time). user=50 (all guest) + idle=50: total folds to 100, busy 50 -> 50%, not the 33% a naive sum(150) would give."""
+    """On Linux guest time is already inside user/nice, so the total must subtract
+    it (matches psutil._cpu_tot_time). user=50 (all guest) + idle=50: total folds
+    to 100, busy 50 -> 50%, not the 33% a naive sum(150) would give."""
     m = _CpuMeter()
     assert m.percent(_linux(), now=0.0) is None
     assert m.percent(_linux(user=50, idle=50, guest=50), now=1.0) == 50.0
 
 
 def test_window_shorter_than_min_interval_reuses_last_and_keeps_baseline():
-    """A poll closer than _MIN_INTERVAL is too short a window to trust: it returns the last value AND does not advance the baseline, so the next real poll still measures from the older sample."""
+    """A poll closer than _MIN_INTERVAL is too short a window to trust: it returns
+    the last value AND does not advance the baseline, so the next real poll still
+    measures from the older sample."""
     m = _CpuMeter()
     assert m.percent(WinTimes(0, 0, 0, 0, 0), now=101.0) is None      # baseline
     assert m.percent(WinTimes(30, 0, 70, 0, 0), now=102.0) == 30.0    # 1s window
     # 0.05s later: too soon -> reuse 30.0, do NOT record this snapshot as baseline.
     assert m.percent(WinTimes(90, 0, 110, 0, 0), now=102.05) == 30.0
     # Next real poll measures from the 102.0 baseline (busy 30 / total 100), not
-    # the skipped 102.05 one: busy_delta 80 / total_delta 200 -> 40%. A 20% here
-    # would prove the skipped sample had wrongly become the baseline.
+    # the skipped 102.05 one: busy_delta 80 / total_delta 200 -> 40%.
     assert m.percent(WinTimes(110, 0, 190, 0, 0), now=103.0) == 40.0
 
 
 def test_percent_clamped_to_100():
-    """A busy_delta exceeding total_delta (should not happen physically, but guard it) clamps to 100 rather than exceeding it."""
+    """A busy_delta exceeding total_delta (should not happen physically, but guard
+    it) clamps to 100 rather than exceeding it."""
     m = _CpuMeter()
     assert m.percent(WinTimes(0, 0, 100, 0, 0), now=0.0) is None
     # busy_delta 20 / total_delta 10 -> 200% -> clamped to 100.
@@ -374,24 +412,30 @@ def test_percent_never_negative():
 
 
 def test_regressing_field_is_clamped_not_left_to_corrupt_the_percent():
-    """A field that goes BACKWARD between two samples (a documented Windows/Linux kernel-counter quirk: psutil issues #392/#645/#1210, e.g. Windows `interrupt`) must be trimmed to a zero delta for that field alone, exactly like psutil's own _cpu_times_deltas - not left to pull down the aggregate total/busy..."""
+    """A field that goes BACKWARD between two samples (a documented Windows/Linux
+    kernel-counter quirk: psutil issues #392/#645/#1210, e.g. Windows `interrupt`)
+    must be trimmed to a zero delta for that field alone, exactly like psutil's own
+    _cpu_times_deltas - not left to pull down the aggregate total/busy computed by
+    subtracting whole-snapshot sums. WinTimes = (user, system, idle, interrupt, dpc).
+    interrupt regresses 50 -> 30 (delta -20) while every other field advances."""
     m = _CpuMeter()
     assert m.percent(WinTimes(100, 100, 1000, 50, 50), now=0.0) is None
-    # Clamped per-field deltas: user +0, system +40, idle +60, interrupt clamped to
-    # 0 (was -20), dpc +0 -> total_delta=100, busy_delta (total-idle)=40 -> 40%.
-    # An aggregate-then-subtract approach would compute total_delta=80 (100+140+
-    # 1060+30+50=1380 minus prior sum of 1300=80) and busy_delta=20 -> a wrong 25%.
+    # Clamped per-field deltas: user +0, system +40, idle +60, interrupt clamped
+    # to 0 (was -20), dpc +0 -> total_delta=100, busy_delta (total-idle)=40 ->
+    # 40%.
     assert m.percent(WinTimes(100, 140, 1060, 30, 50), now=1.0) == 40.0
 
 
 def test_clamped_field_deltas_matches_psutil_behavior_on_a_monotonic_sample():
-    """Sanity check on the ordinary (non-regressing) case: every field simply advances, so the clamp is a no-op and the delta is the plain subtraction."""
+    """Sanity check on the ordinary (non-regressing) case: every field simply
+    advances, so the clamp is a no-op and the delta is the plain subtraction."""
     d = _clamped_field_deltas(WinTimes(10, 20, 30, 5, 5), WinTimes(15, 25, 45, 10, 5))
     assert d == WinTimes(5, 5, 15, 5, 0)
 
 
 def test_zero_total_delta_reuses_last_not_divide_by_zero():
-    """Identical cpu_times a full second later (no ticks advanced) must keep the last value, never divide by zero or fabricate a 0."""
+    """Identical cpu_times a full second later (no ticks advanced) must keep the
+    last value, never divide by zero or fabricate a 0."""
     m = _CpuMeter()
     assert m.percent(WinTimes(0, 0, 0, 0, 0), now=0.0) is None
     assert m.percent(WinTimes(30, 0, 70, 0, 0), now=1.0) == 30.0
@@ -399,7 +443,8 @@ def test_zero_total_delta_reuses_last_not_divide_by_zero():
 
 
 class _StubMeter:
-    """Feeds _cpu_ram a scripted sequence of meter readings (None then a number) so the wiring can be checked without a real psutil or a wall-clock delay."""
+    """Feeds _cpu_ram a scripted sequence of meter readings (None then a number)
+    so the wiring can be checked without a real psutil or a wall-clock delay."""
     def __init__(self, seq):
         self._seq, self._i = list(seq), 0
 
@@ -418,7 +463,8 @@ def _fake_psutil():
 
 
 def test_cpu_ram_omits_cpu_until_baseline_then_includes_it(monkeypatch):
-    """_cpu_ram must drop the CPU field while the meter has no baseline (None) and include it once a real percent is available - RAM is unaffected throughout."""
+    """_cpu_ram must drop the CPU field while the meter has no baseline (None) and
+    include it once a real percent is available - RAM is unaffected throughout."""
     monkeypatch.setitem(sys.modules, "psutil", _fake_psutil())
     monkeypatch.setattr(sysstats, "_cpu_meter", _StubMeter([None, 42.0]))
 
@@ -432,26 +478,17 @@ def test_cpu_ram_omits_cpu_until_baseline_then_includes_it(monkeypatch):
 
 
 def test_cpu_ram_returns_empty_without_psutil(monkeypatch):
-    """No psutil (the [monitor] extra absent) -> the whole CPU/RAM section is simply absent, never an exception."""
+    """No psutil (the [monitor] extra absent) -> the whole CPU/RAM section is
+    simply absent, never an exception."""
     monkeypatch.setitem(sys.modules, "psutil", None)   # import psutil -> raises
     assert _cpu_ram() == {}
 
 
-# --- GPU-utilisation probe (efficiency/robustness, not the #833 freeze) --- #
-# The old _gpu_util() ran `subprocess.run(["nvidia-smi", ...], timeout=4)`
-# inline on every ~2.5s poll, with no single-flight and no cache: a slow
-# nvidia-smi parked the polling (executor) thread for up to 4s, and spawned a
-# fresh subprocess on every single poll regardless of whether the last one had
-# even finished. The fix moves the actual subprocess call onto its own
-# single-flighted background thread; _gpu_util() itself always returns
-# immediately with the last completed reading (or {} before the first one
-# lands), matching the CPU%/VRAM "omit rather than fabricate" convention used
-# everywhere else in this module. NOTE: this is unrelated to issue #833's
-# reported freeze - that dump shows this same subprocess.run's reader-thread
-# start blocked behind a cold `import torch` holding the Windows loader lock
-# elsewhere in the process (see dev-notes/finding-2026-07-29-loader-lock-
-# freezes-the-event-loop.md), which is fixed out-of-process in discover.py /
-# _torch_gpu_probe.py, not here.
+# --- GPU-utilisation probe ------------------------------------------------ #
+# _gpu_util() always returns immediately with the last completed reading (or {}
+# before the first one lands); the nvidia-smi subprocess runs on its own
+# single-flighted background thread, matching the CPU%/VRAM "omit rather than
+# fabricate" convention used elsewhere in this module.
 
 def _reset_gpu_util_cache(monkeypatch):
     monkeypatch.setattr(sysstats, "_gpu_util_last", None)
@@ -460,7 +497,10 @@ def _reset_gpu_util_cache(monkeypatch):
 
 
 def test_gpu_util_probe_never_blocks_the_polling_thread(monkeypatch):
-    """A hanging/slow nvidia-smi must never park the calling (poll) thread, and concurrent polls while one probe is in flight must not spawn a second nvidia-smi (single-flight)."""
+    """A hanging/slow nvidia-smi must never park the calling (poll) thread,
+    and concurrent polls while one probe is in flight must not spawn a second
+    nvidia-smi (single-flight). An efficiency/robustness guard, independent of
+    issue #833's loader-lock freeze (see the module-level note above)."""
     _reset_gpu_util_cache(monkeypatch)
     entered = threading.Event()
     release = threading.Event()
@@ -528,7 +568,11 @@ def test_gpu_util_reports_percent_once_probe_lands(monkeypatch):
 
 
 def test_gpu_util_omits_field_when_nvidia_smi_absent(monkeypatch):
-    """AMD/Intel box (no nvidia-smi): the field stays omitted, never a fabricated 0%, the missing binary never raises, and a FAILED attempt is throttled by the same refresh window as a successful one - otherwise a GPU-less box would spawn a new probe thread on every single poll forever, since a reading tha..."""
+    """AMD/Intel box (no nvidia-smi): the field stays omitted, never a
+    fabricated 0%, the missing binary never raises, and a FAILED attempt is
+    throttled by the same refresh window as a successful one - otherwise a
+    GPU-less box would spawn a new probe thread on every single poll
+    forever, since a reading that never succeeds would never look 'fresh'."""
     _reset_gpu_util_cache(monkeypatch)
     calls = []
 
@@ -552,7 +596,8 @@ def test_gpu_util_omits_field_when_nvidia_smi_absent(monkeypatch):
 
 
 def test_gpu_util_does_not_reprobe_within_the_refresh_window(monkeypatch):
-    """A fresh-enough cached reading must be served without spawning another nvidia-smi call - otherwise every single poll would still shell out."""
+    """A fresh-enough cached reading must be served without spawning another
+    nvidia-smi call - otherwise every single poll would still shell out."""
     _reset_gpu_util_cache(monkeypatch)
     calls = []
 
@@ -580,7 +625,12 @@ def test_gpu_util_does_not_reprobe_within_the_refresh_window(monkeypatch):
 
 
 def test_gpu_util_never_raises_and_unlatches_when_thread_creation_fails(monkeypatch):
-    """If the OS cannot spawn the probe thread at all (e.g. thread exhaustion), _gpu_util() must still never raise (this module's own documented contract) AND must reset the in-flight guard so a later call can retry - otherwise a single failed spawn would wedge every future poll into believing a probe is p..."""
+    """If the OS cannot spawn the probe thread at all (e.g. thread exhaustion),
+    _gpu_util() must still never raise (this module's own documented contract)
+    AND must reset the in-flight guard so a later call can retry - otherwise a
+    single failed spawn would wedge every future poll into believing a probe is
+    permanently running. Mirrors discover.py's list_gpus() handling of the same
+    failure."""
     _reset_gpu_util_cache(monkeypatch)
 
     def _broken_start(self):
@@ -597,7 +647,15 @@ def test_gpu_util_never_raises_and_unlatches_when_thread_creation_fails(monkeypa
 
 
 class TestPerDeviceVram:
-    """The per-card VRAM breakdown."""
+    """The per-card VRAM breakdown.
+
+    The aggregate is not merely coarser on a multi-GPU board, it is MISLEADING:
+    ``vram_capacity`` either sums a configured split (a full card and an empty one
+    average into a comfortable-looking number) or, with no split configured, falls
+    back to the single main GPU and does not represent the other cards at all.
+    Neither answers "how full is card 1", which is the question the readout exists
+    for once there is more than one card.
+    """
 
     _GIB = 1024 ** 3
 
@@ -621,18 +679,17 @@ class TestPerDeviceVram:
     def test_each_card_reports_its_own_used_total(self, monkeypatch):
         v = self._compute(monkeypatch, self._fake(4 * self._GIB, 22 * self._GIB))
         assert [d["index"] for d in v["devices"]] == [0, 1]
-        # The whole point: the aggregate reads 22/48 (46%, comfortable) while card
-        # 0 is at 20/24 (83%, nearly full). Both must be visible, not just the mean.
+        # The aggregate reads 22/48 (46%, comfortable) while card 0 is at 20/24
+        # (83%, nearly full). Both are visible, not just the mean.
         assert v["used"] == 22 * self._GIB
         assert v["devices"][0]["used"] == 20 * self._GIB
         assert v["devices"][1]["used"] == 2 * self._GIB
         assert v["devices"][0]["percent"] > 80 > v["devices"][1]["percent"]
 
     def test_an_untrusted_reading_reports_total_only_per_card(self, monkeypatch):
-        # Same contract the aggregate already honours: a stale or process-scoped
-        # `free` OVERSTATES what is available, and a confidently wrong per-card
-        # figure is worse than an absent one, because per-card numbers are shown
-        # precisely so someone can act on them.
+        # Same contract the aggregate honours: a stale or process-scoped `free`
+        # overstates what is available, so a per-card figure that cannot be
+        # trusted is omitted rather than reported.
         v = self._compute(monkeypatch, self._fake(4 * self._GIB, 22 * self._GIB),
                           trusted=False)
         for d in v["devices"]:
@@ -640,15 +697,15 @@ class TestPerDeviceVram:
             assert "used" not in d and "percent" not in d
 
     def test_a_single_card_sends_no_breakdown(self, monkeypatch):
-        # `devices` is only worth sending when it says something the aggregate does
-        # not, so a one-card board keeps the payload it always had.
+        # `devices` is only sent when it says something the aggregate does not,
+        # so a one-card board keeps the payload it always had.
         one = [{"index": 0, "name": "RTX 4090", "total": 24 * self._GIB,
                 "free": 4 * self._GIB, "free_scope": "device"}]
         assert "devices" not in self._compute(monkeypatch, one)
 
     def test_a_failing_probe_never_costs_the_aggregate(self, monkeypatch):
-        # Rule 5: the enrichment failing is visible as a MISSING BREAKDOWN, never
-        # as a missing readout, and never as a silenced aggregate.
+        # The enrichment failing is visible as a MISSING BREAKDOWN, never as a
+        # missing readout and never as a silenced aggregate.
         def boom(*a, **k):
             raise RuntimeError("driver wedged")
         from localm import discover, sysstats
@@ -663,7 +720,14 @@ class TestPerDeviceVram:
 
 
 class TestPerDeviceVramAnyBackend:
-    """The per-card breakdown must not be NVIDIA/ROCm-only."""
+    """The per-card breakdown must not be NVIDIA/ROCm-only.
+
+    ``list_gpus`` enumerates via torch.cuda or nvidia-smi and never the Vulkan
+    loader, so on a vulkan build (how Intel Arc and many AMD boards run) it is
+    structurally blind to the very devices the readout is about. Falling back to
+    the ggml runtime's own registry is what makes the stats work on any backend
+    rather than only the maintainer's.
+    """
 
     _GIB = 1024 ** 3
 
@@ -681,8 +745,8 @@ class TestPerDeviceVramAnyBackend:
             {"index": 0, "name": "Vulkan0", "total": 16 * self._GIB, "free": 2 * self._GIB},
             {"index": 1, "name": "Vulkan1", "total": 16 * self._GIB, "free": 6 * self._GIB},
         ])
-        # The registry tags no scope, so the correction pass is what makes these
-        # readable at all - stand in for it rather than touching real hardware.
+        # The registry tags no scope, so stand in for the correction pass rather
+        # than touching real hardware.
         def _tag(gpus):
             for g in gpus:
                 g["free_scope"] = "device"
@@ -693,9 +757,9 @@ class TestPerDeviceVramAnyBackend:
         assert v["devices"][1]["used"] == 10 * self._GIB
 
     def test_the_torch_source_still_wins_when_it_has_devices(self, monkeypatch):
-        # The fallback must not displace a working reading: last_known_gpus costs
-        # nothing (vram_capacity just probed) while the native registry needs the
-        # lib resident, so it stays the fallback.
+        # last_known_gpus costs nothing (vram_capacity just probed) while the
+        # native registry needs the lib resident, so the registry stays the
+        # fallback and does not displace a working reading.
         from localm import discover, sysstats
         from localm.inference.backends.llamacpp import _loader
         monkeypatch.setattr(discover, "last_known_gpus", lambda *a, **k: [
@@ -716,7 +780,13 @@ class TestPerDeviceVramAnyBackend:
 
 
 def test_a_process_scoped_card_reports_total_only(monkeypatch):
-    """The bug this gate exists for, measured on a real board."""
+    """The bug this gate exists for, measured on a real board.
+
+    On Windows + AMD the raw driver `free` counts only the CALLING process, so a
+    probe holding no VRAM reported 0.2 GB in use where the desktop alone held 1.6.
+    A per-card number is shown so someone can decide whether a model fits; one that
+    silently overstates free by more than a gigabyte is worse than no number.
+    """
     GB = 1024 ** 3
     from localm import discover, sysstats
     monkeypatch.setattr(discover, "last_known_gpus", lambda *a, **k: [
@@ -739,19 +809,36 @@ def test_a_process_scoped_card_reports_total_only(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _no_wddm_fallback(monkeypatch):
-    """Keep the WDDM utilisation fallback OUT of every test that is about the nvidia-smi probe path."""
+    """Keep the WDDM utilisation fallback OUT of every test that is about the
+    nvidia-smi probe path.
+
+    Those tests assert `_gpu_util() == {}` to mean "the nvidia reading has not
+    landed, so nothing is fabricated". Once a second, genuinely-different source
+    exists, that empty dict stops being a statement about the nvidia probe and
+    becomes a statement about the whole machine - and on a Windows box with any
+    GPU the fallback correctly returns a real number, so the tests failed while
+    both the code and their intent were fine.
+
+    Stubbing it off here keeps each of those tests measuring the one thing it was
+    written for. The tests that ARE about the fallback stub it back on explicitly.
+    """
     from localm import gpu_usage
     monkeypatch.setattr(gpu_usage, "adapter_utilisation", lambda: {})
-    # The AMD source needs stubbing for exactly the same reason, and it is the
-    # MORE urgent of the two: it answers from the card's own sensor with no
-    # rate-counter warmup, so on this box it returns a real percentage on the
-    # very first call and every nvidia-probe test would silently assert against
-    # live hardware. Tests that ARE about the AMD path stub it back on.
+    # The AMD source is stubbed for the same reason: it answers from the card's
+    # own sensor with no rate-counter warmup, so on this box it returns a real
+    # percentage on the very first call and every nvidia-probe test would assert
+    # against live hardware. Tests that ARE about the AMD path stub it back on.
     monkeypatch.setattr(gpu_usage, "amd_whole_gpu_activity", lambda: None)
 
 
 class TestVendorNeutralGpuUtilisation:
-    """GPU load must not be an NVIDIA-only metric."""
+    """GPU load must not be an NVIDIA-only metric.
+
+    nvidia-smi was the only source, so an AMD or Intel board showed no GPU load at
+    all - which a user reads as "this box reports no GPU utilisation", not as
+    "localm cannot see it", on a readout whose whole job is showing load. Windows
+    publishes it for every vendor through the counters Task Manager itself reads.
+    """
 
     def test_falls_back_to_the_wddm_counter_when_nvidia_smi_has_nothing(
             self, monkeypatch):
@@ -764,9 +851,8 @@ class TestVendorNeutralGpuUtilisation:
         assert sysstats._gpu_util() == {"gpu": {"percent": 7.1}}
 
     def test_omits_the_field_rather_than_fabricating_zero(self, monkeypatch):
-        # adapter_utilisation returns {} on its first ever call: a rate counter has
-        # nothing to rate against yet. Reporting 0% there would assert an idle card
-        # on the strength of a measurement that never happened.
+        # adapter_utilisation returns {} on its first ever call: a rate counter
+        # has nothing to rate against yet.
         from localm import gpu_usage, sysstats
         monkeypatch.setattr(sysstats, "_gpu_util_last", None, raising=False)
         monkeypatch.setattr(sysstats, "_gpu_util_last_t", 0.0, raising=False)
@@ -785,7 +871,11 @@ class TestVendorNeutralGpuUtilisation:
 
 class TestAdapterUtilisationAggregation:
     def test_busiest_engine_not_the_sum_across_engines(self):
-        """Summing engine types double-counts concurrent work and exceeds 100%."""
+        """Summing engine types double-counts concurrent work and exceeds 100%.
+
+        Measured on a real board: 26.1% summed across engine types against 11.0%
+        for the busiest one. Task Manager reports the busiest engine, and so do we.
+        """
         from localm.gpu_usage import _luid_of
         # The LUID pair identifies the ADAPTER; pid and engine index do not, which
         # is what lets a multi-card board be reported per card.
@@ -800,19 +890,35 @@ class TestAdapterUtilisationAggregation:
 from localm import gpu_usage as _gpu_usage_for_capture
 
 # Captured at IMPORT time, before the autouse _no_wddm_fallback fixture can
-# replace it. Without this the fixture's stub shadows the real function in the
-# very tests that exist to exercise it - and two of them would still have PASSED,
-# because the stub returns None and those tests assert None. A test that passes
-# because the thing under test was never called is worse than no test.
+# replace it, so the tests that exercise the real function are not shadowed by
+# the stub.
 _REAL_AMD_ACTIVITY = _gpu_usage_for_capture.amd_whole_gpu_activity
 
 
 class TestAmdWholeGpuActivity:
-    """The AMD readout must be WHOLE-GPU load, not whichever engine is busiest."""
+    """The AMD readout must be WHOLE-GPU load, not whichever engine is busiest.
+
+    MEASURED 2026-08-20 on an RX 6900 XT in a controlled idle/load/idle A/B.
+    The WDDM ``GPU Engine`` max-over-engine-types fold does not track the card:
+    with the card PARKED at 46W/39MHz and then BOOSTED to 87W/2574MHz it
+    reported 7.1-7.2% in BOTH states, because that number was a screen-streaming
+    process's video encoder. The card's own sensor read 6% and 99% across those
+    same two states, correlating +0.971 with core clock against -0.010 for the
+    fold. That is the reported defect exactly.
+
+    The fold is UNRELIABLE, not dead - under a synthetic 295W pure-compute load
+    it did read 93-100%. Stated because the tidier claim ("this vendor's compute
+    is invisible to it") is false and was measured false, and a test whose
+    premise is wrong outlives the person who wrote it.
+    """
 
     @staticmethod
     def _fake_adl(monkeypatch, *, adapters, sensors, activity_rc=0):
-        """Fake ADL whose calls write through ctypes byref, as the real DLL does."""
+        """Fake ADL whose calls write through ctypes byref, as the real DLL does.
+
+        *adapters*: list of (bus, device, function, present, vendor_id).
+        *sensors*:  {adapter_index: {sensor_index: (supported, value)}}.
+        """
         from localm import gpu_usage
 
         class _FakeDll:
@@ -852,7 +958,9 @@ class TestAmdWholeGpuActivity:
         assert gpu_usage.amd_whole_gpu_activity() == 73.0
 
     def test_reads_sensor_19_and_not_a_neighbour(self, monkeypatch):
-        """A wrong sensor index returns a plausible 0-100 number rather than an error, so it would be a SILENT wrong answer."""
+        """A wrong sensor index returns a plausible 0-100 number rather than an
+        error, so it would be a SILENT wrong answer. Neighbouring slots are
+        populated with values that would be obviously wrong if picked up."""
         from localm import gpu_usage
         self._fake_adl(monkeypatch, adapters=self._ONE_CARD,
                        sensors={0: {18: (1, 11), 19: (1, 73), 20: (1, 22)}})
@@ -860,7 +968,10 @@ class TestAmdWholeGpuActivity:
 
     def test_an_unsupported_sensor_yields_no_reading_not_zero_percent(
             self, monkeypatch):
-        """AGENTS.md rule 5: a card reported IDLE on a measurement that never happened is a failed reading presented as a successful one."""
+        """AGENTS.md rule 5: a card reported IDLE on a measurement that never
+        happened is a failed reading presented as a successful one. Distinguishing
+        busy from idle is the whole point of the metric, so the idle end of the
+        range is precisely the value we must never invent."""
         from localm import gpu_usage
         self._fake_adl(monkeypatch, adapters=self._ONE_CARD,
                        sensors={0: {19: (0, 0)}})
@@ -868,7 +979,9 @@ class TestAmdWholeGpuActivity:
         assert gpu_usage.amd_whole_gpu_activity() is None
 
     def test_an_out_of_range_value_is_refused(self, monkeypatch):
-        """Outside 0-100 means we are not reading the sensor we think we are - a wrong index or a struct-layout drift."""
+        """Outside 0-100 means we are not reading the sensor we think we are -
+        a wrong index or a struct-layout drift. Publishing it would turn an ABI
+        bug into a confident wrong number on the status bar."""
         from localm import gpu_usage
         self._fake_adl(monkeypatch, adapters=self._ONE_CARD,
                        sensors={0: {19: (1, 4294967295)}})
@@ -876,7 +989,9 @@ class TestAmdWholeGpuActivity:
         assert gpu_usage.amd_whole_gpu_activity() is None
 
     def test_logical_adapters_of_one_card_are_deduped(self, monkeypatch):
-        """ADL reports several logical adapters per physical card (7 for the one measured here)."""
+        """ADL reports several logical adapters per physical card (7 for the one
+        measured here). Without the PCI-triple dedupe one card is counted many
+        times."""
         from localm import gpu_usage
         self._fake_adl(monkeypatch,
                        adapters=[(45, 0, 0, 1, 1002)] * 4,
@@ -923,7 +1038,10 @@ class TestGpuUtilSourceOrder:
         monkeypatch.setattr(sysstats, "_gpu_util_last_t", 0.0, raising=False)
 
     def test_amd_sensor_beats_the_wddm_fold(self, monkeypatch):
-        """THE REGRESSION GUARD."""
+        """THE REGRESSION GUARD. With both sources answering, the fold is the one
+        that was reporting another process's video encoder as GPU load, so it
+        must not win. Fires on the pre-fix code, which had no AMD branch at all
+        and returned the fold's 7.1%."""
         from localm import gpu_usage, sysstats
         self._cold(monkeypatch)
         monkeypatch.setattr(gpu_usage, "amd_whole_gpu_activity", lambda: 99.0)
@@ -932,7 +1050,8 @@ class TestGpuUtilSourceOrder:
         assert sysstats._gpu_util() == {"gpu": {"percent": 99.0}}
 
     def test_falls_back_to_the_fold_when_there_is_no_amd_sensor(self, monkeypatch):
-        """Intel and any other Windows board: ADL does not exist there, and the vendor-neutral counter is the only device-global source localm has."""
+        """Intel and any other Windows board: ADL does not exist there, and the
+        vendor-neutral counter is the only device-global source localm has."""
         from localm import gpu_usage, sysstats
         self._cold(monkeypatch)
         monkeypatch.setattr(gpu_usage, "amd_whole_gpu_activity", lambda: None)
@@ -942,7 +1061,9 @@ class TestGpuUtilSourceOrder:
 
     def test_a_zero_reading_from_the_card_is_reported_not_discarded(
             self, monkeypatch):
-        """0.0 is a real measurement of an idle card (measured: 20W, 5MHz core)."""
+        """0.0 is a real measurement of an idle card (measured: 20W, 5MHz core).
+        A falsy check here would silently drop it into the fallback path and
+        report the fold's number instead of the truth."""
         from localm import gpu_usage, sysstats
         self._cold(monkeypatch)
         monkeypatch.setattr(gpu_usage, "amd_whole_gpu_activity", lambda: 0.0)

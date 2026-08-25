@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The optional global `localm` command must add itself SAFELY: idempotent, reversible, respecting an existing command, and NEVER via ``setx`` (which truncates and silently corrupts the user PATH)."""
+"""The optional global `localm` command must add itself SAFELY: idempotent,
+reversible, respecting an existing command, and NEVER via ``setx`` (which
+truncates and silently corrupts the user PATH). These tests use an in-memory
+fake for the registry, so they never touch the real machine's PATH."""
 
 from __future__ import annotations
 
@@ -13,7 +16,8 @@ from localm import globalcmd as gc
 
 
 class _FakePath:
-    """In-memory stand-in for HKCU\\Environment\\Path, patched over the module's read/write helpers so no test can touch the real registry."""
+    """In-memory stand-in for HKCU\\Environment\\Path, patched over the module's
+    read/write helpers so no test can touch the real registry."""
 
     def __init__(self, value=""):
         self.value = value
@@ -38,7 +42,10 @@ def fake_path(monkeypatch):
 # --------------------------- the setx guard ------------------------------- #
 
 def test_path_edited_via_registry_not_setx():
-    """PATH is edited through the Windows registry (winreg), never by shelling out to `setx` (which truncates + corrupts the user PATH)."""
+    """PATH is edited through the Windows registry (winreg), never by shelling out
+    to `setx` (which truncates + corrupts the user PATH). Enforced structurally:
+    the module spawns NO external process for a PATH edit. (The docstring names
+    setx on purpose, to say it is banned, so we assert on mechanism not the word.)"""
     src = Path(gc.__file__).read_text(encoding="utf-8")
     assert "import subprocess" not in src         # no shelling out at all
     assert ("os." + "system") not in src          # concat avoids a scanner false-positive
@@ -135,7 +142,9 @@ def test_install_posix_symlink(monkeypatch, tmp_path):
 
 
 def test_install_cli_exit_code_reflects_path_modified(monkeypatch):
-    """setup keys off this exit code to record --path-modified accurately: 0 = PATH changed, 20 = installed but PATH already set, 1 = failed. install() is mocked so no real PATH/registry is touched."""
+    """setup keys off this exit code to record --path-modified accurately: 0 =
+    PATH changed, 20 = installed but PATH already set, 1 = failed. install() is
+    mocked so no real PATH/registry is touched."""
     monkeypatch.setattr(gc, "install", lambda root, precedence="append": {
         "path_dir": "d", "shim": "s", "path_modified": True, "conflict": None})
     assert gc.main(["install", "--root", "."]) == 0
@@ -153,7 +162,11 @@ def test_install_cli_exit_code_reflects_path_modified(monkeypatch):
 # --------------- honesty: PATH-edit-failed is not a false success ---------- #
 
 def test_posix_ensure_on_path_reports_edit_failure(monkeypatch, tmp_path):
-    """When bindir is NOT on PATH and every shell-rc edit fails, the function must return (False, <note>) - the 'could not add it' case - NOT the same (False, None) as 'already on PATH'."""
+    """When bindir is NOT on PATH and every shell-rc edit fails, the function must
+    return (False, <note>) - the 'could not add it' case - NOT the same (False,
+    None) as 'already on PATH'. Home points at a nonexistent dir (via the env vars
+    Path.home() reads) so every rc write AND the ~/.profile fallback raise
+    FileNotFoundError (an OSError)."""
     missing_home = tmp_path / "no_such_home"           # never created
     monkeypatch.setenv("HOME", str(missing_home))
     monkeypatch.setenv("USERPROFILE", str(missing_home))
@@ -174,7 +187,9 @@ def test_posix_ensure_on_path_already_on_path_has_no_note(monkeypatch, tmp_path)
 
 
 def test_install_cli_surfaces_path_edit_failure(monkeypatch, capsys):
-    """main() must NOT claim 'already on PATH' when the shim was created but its dir could not be added to PATH; it prints the manual-add note and still exits 20 (installed, PATH not modified by us)."""
+    """main() must NOT claim 'already on PATH' when the shim was created but its
+    dir could not be added to PATH; it prints the manual-add note and still exits
+    20 (installed, PATH not modified by us). Negative-tests the false success."""
     monkeypatch.setattr(gc, "install", lambda root, precedence="append": {
         "path_dir": "/home/u/.local/bin", "shim": "s", "path_modified": False,
         "conflict": None,

@@ -1,5 +1,29 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Issue #859: a quarantined jobs.json copy must not keep the owner key digest."""
+"""Issue #859: a quarantined jobs.json copy must not keep the owner key digest.
+
+When jobs.json is corrupt, JobStore copies it aside as
+``jobs.json.corrupt-<ts>`` so the user's scheduled jobs are not silently lost.
+That copy was VERBATIM, so it carried every job's ``owner`` field - the same
+sha256 the keystore stores (``http_server.principal_id`` returns ``key_hash``).
+#841 made the copy owner-only on disk, but permission-restricted is not the
+same as digest-free, and nothing ever pruned these, so one legacy bare-sha256
+digest could outlive the alert-88 KDF migration indefinitely.
+
+Two independent halves, both covered here:
+
+* REDACTION fixes copies written from now on. It must redact to a NON-NULL
+  sentinel: ``job_owner_ok`` (http_server.py) returns True when ``owner is
+  None`` - "a job with NO recorded owner is unrestricted" - so dropping the
+  field or nulling it would make every job in a restored copy reachable by any
+  caller. That trades a digest that is already owner-only on disk for an open
+  ACL on the recovery path, which is strictly worse than doing nothing.
+* A RETENTION CAP bounds the copies already on disk, which redaction can never
+  reach, and stays correct for any future credential-shaped field rather than
+  going stale the next time the digest scheme changes.
+
+The copy must stay usable for recovery either way: schedule, prompt, model and
+name are what it exists to preserve, and only the access-control field goes.
+"""
 
 from __future__ import annotations
 
@@ -31,7 +55,12 @@ def store(tmp_path, monkeypatch):
 
 
 def _corrupt_keeping_content(store) -> None:
-    """Corrupt the defs file WITHOUT discarding it."""
+    """Corrupt the defs file WITHOUT discarding it.
+
+    Overwriting it with garbage would leave the quarantine copy holding only
+    garbage, so the assertions below would pass while proving nothing about
+    digests. Appending keeps every digest in the file the copy is made from.
+    """
     f = store._defs_file
     f.write_text(f.read_text(encoding="utf-8") + "\n{trailing garbage",
                  encoding="utf-8")
@@ -43,13 +72,14 @@ def _backups(store) -> list:
 
 class TestQuarantineRedactsTheDigest:
     def test_premise_the_live_file_really_holds_the_digests(self, store):
-        """Fires-control."""
+        """Fires-control. If the source file never contained a digest, every
+        'no digest in the copy' assertion below is vacuously true."""
         raw = store._defs_file.read_text(encoding="utf-8")
         assert OWNER_A in raw and OWNER_B in raw
         assert DIGEST_RE.search(raw)
 
     def test_copy_carries_no_owner_digest(self, store):
-        # NEGATIVE: pre-fix the copy was verbatim, so both digests were in it.
+        # NEGATIVE: neither owner digest survives into the quarantine copy.
         _corrupt_keeping_content(store)
         store._read_all()
         backups = _backups(store)
@@ -61,7 +91,9 @@ class TestQuarantineRedactsTheDigest:
             f"a 64-hex digest remains: {DIGEST_RE.search(text).group(0)[:16]}...")
 
     def test_owner_is_redacted_to_a_NON_NULL_sentinel(self, store):
-        """The whole point. `job_owner_ok` treats owner=None as UNRESTRICTED, so a null/absent owner would make a restored job reachable by any caller - a privilege escalation dressed as a scrub."""
+        """The whole point. `job_owner_ok` treats owner=None as UNRESTRICTED,
+        so a null/absent owner would make a restored job reachable by any
+        caller - a privilege escalation dressed as a scrub."""
         _corrupt_keeping_content(store)
         store._read_all()
         text = _backups(store)[0].read_text(encoding="utf-8")
@@ -75,7 +107,8 @@ class TestQuarantineRedactsTheDigest:
             assert not DIGEST_RE.fullmatch(o), f"sentinel {o!r} has digest shape"
 
     def test_recovery_data_survives(self, store):
-        """It exists so a corrupt store does not lose the user's scheduled jobs."""
+        """It exists so a corrupt store does not lose the user's scheduled
+        jobs. Only the access-control field goes."""
         _corrupt_keeping_content(store)
         store._read_all()
         text = _backups(store)[0].read_text(encoding="utf-8")
@@ -142,7 +175,8 @@ class TestQuarantineRetentionCap:
 
 class TestQuarantineStillDoesItsJob:
     def test_a_corrupt_store_still_warns_and_does_not_discard(self, store, caplog):
-        """Rule 5: the data-loss risk must stay visible, and the copy must still be written."""
+        """Rule 5: the data-loss risk must stay visible, and the copy must
+        still be written. Redaction must not turn this into a silent path."""
         _corrupt_keeping_content(store)
         with caplog.at_level("WARNING"):
             jobs = store._read_all()
@@ -153,15 +187,19 @@ class TestQuarantineStillDoesItsJob:
 
 
 class TestResidualDigestIsWarningVisible:
-    """Checkup finding #1: `_redact_owner_digests` only reports a surviving digest-shaped value at DEBUG, so the operator never sees it - the outer 'backed up to ... your scheduled jobs are preserved' WARNING says nothing about a residual credential. A digest that dodges the regex (odd key casing/whitespac..."""
+    """Checkup finding #1: `_redact_owner_digests` only reports a surviving
+    digest-shaped value at DEBUG, so the operator never sees it - the outer
+    "backed up to ... your scheduled jobs are preserved" WARNING says nothing
+    about a residual credential. A digest that dodges the regex (odd key
+    casing/whitespace in an already-malformed file) must still surface at
+    WARNING, the level an operator is actually watching."""
 
     def test_case_mismatched_owner_key_survives_and_warns(self, caplog):
         from localm.plugins.builtin.jobs.store import _redact_owner_digests
 
         digest = "c3" * 32  # 64 hex chars: valid digest shape
         # "Owner" (capital O) does not match the regex's literal "owner", so
-        # this digest is NOT touched by the substitution - exactly the
-        # malformed-key-casing case the leftover check exists to catch.
+        # this digest is not touched by the substitution.
         raw = '{"version": 1, "jobs": [{"Owner": "%s", "name": "n"}]}' % digest
         with caplog.at_level(logging.DEBUG, logger="localm"):
             out = _redact_owner_digests(raw)
@@ -177,7 +215,11 @@ class TestResidualDigestIsWarningVisible:
 
 
 class TestQuarantineBackupPermsRetryOnFailure:
-    """Checkup finding #2: `restrict_file_perms(backup)` was a single best-effort call with no return-value check, unlike `_write_all` which checks the return and retries when the first attempt fails."""
+    """Checkup finding #2: `restrict_file_perms(backup)` was a single
+    best-effort call with no return-value check, unlike `_write_all` which
+    checks the return and retries when the first attempt fails. The
+    quarantine copy holds the same owner digests as the live file and
+    deserves the same robustness."""
 
     def test_first_failure_is_retried(self, store, monkeypatch):
         import localm.config as cfg
@@ -202,7 +244,10 @@ class TestQuarantineBackupPermsRetryOnFailure:
 
 
 class TestQuarantineBackupFailureMessageStatesReality:
-    """Checkup finding #3: the 'refusing to silently discard it' wording claims a refusal that never happens - the code logs a WARNING and returns normally, and the caller proceeds exactly as on success."""
+    """Checkup finding #3: the "refusing to silently discard it" wording
+    claims a refusal that never happens - the code logs a WARNING and
+    returns normally, and the caller proceeds exactly as on success. The
+    message must describe what actually occurs instead."""
 
     def test_message_does_not_claim_a_refusal_that_never_happens(
             self, store, monkeypatch, caplog):

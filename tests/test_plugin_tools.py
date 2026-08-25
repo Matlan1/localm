@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Plugins can export real, callable tools into the coder agent."""
+"""Plugins can export real, callable tools into the coder agent.
+
+Regression guard for the audit finding that plugin `tool_exports` were parsed
+and displayed but never wired into the agent (the README claim was vapor).
+"""
 
 import textwrap
 from unittest.mock import patch

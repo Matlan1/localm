@@ -1,5 +1,26 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Built-in TLS for network binds (NET-1)."""
+"""Built-in TLS for network binds (NET-1).
+
+localm serves HTTPS itself the moment it binds past loopback, so the API key and
+all traffic are encrypted out of the box - no reverse proxy, no tailscale, no
+manual certificate wrangling. We run a tiny local certificate authority: a
+long-lived CA whose certificate the user installs ONCE per device (one tap),
+plus a short-lived leaf certificate that the server actually presents.
+
+Installing the CA removes the browser's "not secure" warning and lets the PWA
+install. Because the CA is REUSED when the leaf is regenerated, a device trusted
+once stays trusted even if this machine's LAN IP later changes. That reuse is
+not unconditional: ``_load_or_make_ca`` mints a NEW CA when the old one has
+reached its own expiry or its files are missing/unreadable, and every device
+then has to trust the new one. Say "when", never "whenever" - the unconditional
+version of this sentence is what made ``docs/tls.md`` wrong.
+
+This is the same model as Caddy's ``tls internal`` and mkcert. The CA and leaf
+private keys are stored as unencrypted PEM under ``<LOCALM_HOME>/tls/`` (uvicorn
+loads them without a passphrase); the directory and key files are locked down
+to the current user via ``config.restrict_file_perms`` (POSIX chmod, Windows
+icacls; best-effort, defence in depth on top of the data dir's own scoping).
+"""
 
 from __future__ import annotations
 
@@ -75,7 +96,12 @@ def _meta_path(home: Path) -> Path:
 # ------------------------------------------------------------------ #
 
 def _vpn_adapter_ips() -> set[str]:
-    """IPv4 addresses bound to an adapter whose NAME looks VPN/tunnel-like (best-effort, via psutil when the ``[monitor]`` extra is installed; empty otherwise, same degrade as ``_iface_ips``)."""
+    """IPv4 addresses bound to an adapter whose NAME looks VPN/tunnel-like
+    (best-effort, via psutil when the ``[monitor]`` extra is installed; empty
+    otherwise, same degrade as ``_iface_ips``). A VPN's virtual adapter often
+    carries an ordinary RFC1918 address indistinguishable from a real LAN
+    address by IP range alone, so callers that need to tell them apart cross-
+    reference against the owning adapter's name instead."""
     out: set[str] = set()
     try:
         import psutil
@@ -96,7 +122,17 @@ def _vpn_adapter_ips() -> set[str]:
 
 
 def _primary_lan_ip() -> str:
-    """Best-effort primary outbound LAN IPv4, or '' if undetermined."""
+    """Best-effort primary outbound LAN IPv4, or "" if undetermined. Opens a UDP
+    socket toward a TEST-NET address to learn the outbound interface; no packets
+    are actually sent.
+
+    A VPN client can legitimately become the default route, in which case this
+    trick reports the VPN's virtual tunnel address instead of the machine's
+    real LAN address - reachable only through the VPN, not by another device on
+    the physical LAN. When the discovered address maps to an adapter whose name
+    looks VPN/tunnel-like, it is discarded (treated as undetermined) rather than
+    reported as the LAN IP; callers that need a fallback (``companion_addresses``)
+    still have other probes to try."""
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
@@ -112,7 +148,8 @@ def _primary_lan_ip() -> str:
 
 
 def _host_ips() -> list[str]:
-    """All IPv4 addresses bound to this machine's hostname (best-effort)."""
+    """All IPv4 addresses bound to this machine's hostname (best-effort). On
+    Windows this usually includes the LAN address and any Tailscale address."""
     out: list[str] = []
     try:
         hostname = socket.gethostname()
@@ -128,7 +165,8 @@ def _host_ips() -> list[str]:
 
 
 def _norm_ip(value: str) -> Optional[str]:
-    """Canonicalise an IP string (so ``::1`` and its long form compare equal), or None when it is not a valid IP address."""
+    """Canonicalise an IP string (so ``::1`` and its long form compare equal), or
+    None when it is not a valid IP address."""
     try:
         return str(ipaddress.ip_address(value.strip()))
     except ValueError:
@@ -139,7 +177,10 @@ def san_targets(
     extra_hostnames: Optional[Iterable[str]] = None,
     extra_ips: Optional[Iterable[str]] = None,
 ) -> tuple[list[str], list[str]]:
-    """Return ``(hostnames, ip_strings)`` the server cert should cover: loopback, this machine's hostname, its primary LAN IP, any Tailscale IP, plus any caller-supplied extras."""
+    """Return ``(hostnames, ip_strings)`` the server cert should cover: loopback,
+    this machine's hostname, its primary LAN IP, any Tailscale IP, plus any
+    caller-supplied extras. Best-effort and never raises; results are sorted and
+    de-duplicated. IPs are canonicalised so equivalent forms do not duplicate."""
     hostnames: set[str] = {"localhost"}
     ips: set[str] = {"127.0.0.1", "::1"}
 
@@ -191,7 +232,10 @@ def is_tailscale_ip(value: str) -> bool:
 
 
 def _iface_ips() -> list[str]:
-    """Every IPv4 bound to a local interface, via psutil when it is installed (the ``[monitor]`` extra)."""
+    """Every IPv4 bound to a local interface, via psutil when it is installed
+    (the ``[monitor]`` extra). Catches a Tailscale address that hostname
+    resolution misses - notably on Linux, where ``gethostbyname_ex`` often
+    returns only loopback. Empty when psutil is absent; never raises."""
     out: list[str] = []
     try:
         import psutil
@@ -209,7 +253,16 @@ def _iface_ips() -> list[str]:
 
 
 def companion_addresses() -> dict:
-    """Best-effort ``{'lan': ip, 'tailscale': ip}`` for the Companion-app card, so a phone is shown a REACHABLE address instead of the meaningless loopback one (``127.0.0.1`` on a phone is the phone itself)."""
+    """Best-effort ``{"lan": ip, "tailscale": ip}`` for the Companion-app card, so
+    a phone is shown a REACHABLE address instead of the meaningless loopback one
+    (``127.0.0.1`` on a phone is the phone itself).
+
+    ``lan`` is this machine's primary private (RFC 1918) IPv4 - the interface a
+    phone on the same Wi-Fi reaches; ``tailscale`` is a 100.64.0.0/10 (CGNAT)
+    address when Tailscale is up, else "". Either may be "" when it cannot be
+    determined. A VPN's virtual tunnel adapter is never picked for ``lan`` even
+    if it offers an RFC 1918 address, since it is reachable only through the
+    VPN. Purely informational - never raises."""
     lan = ""
     tailscale = ""
     primary = _norm_ip(_primary_lan_ip()) or ""
@@ -248,7 +301,17 @@ def companion_addresses() -> dict:
 
 
 def requests_verify(url: str):
-    """The value to pass as ``requests``' ``verify=`` for an in-process call to *url*."""
+    """The value to pass as ``requests``' ``verify=`` for an in-process call to
+    *url*.
+
+    Built-in TLS gives a network bind an HTTPS endpoint whose leaf is signed by
+    this install's local CA, so an in-process loopback self-call (the coder
+    agent, media-job model reloads, RAG self-embedding) must trust that CA.
+    Returns the CA bundle path for a loopback HTTPS URL - or False when the CA
+    file is somehow absent, which is safe because the connection never leaves
+    127.0.0.1. Returns True (normal public verification) for plain HTTP and for
+    any non-loopback HTTPS URL, e.g. the OpenAI / Anthropic APIs - so this never
+    weakens verification of a real external endpoint."""
     low = (url or "").lower()
     if not low.startswith("https:"):
         return True
@@ -283,7 +346,13 @@ def _lock_down_dir(path: Path) -> None:
 
 
 def _write_private(path: Path, data: bytes) -> None:
-    """Write key material at 0600 from the moment it exists, then run the Windows-aware lockdown every other credential file in this project uses."""
+    """Write key material at 0600 from the moment it exists, then run the
+    Windows-aware lockdown every other credential file in this project uses.
+
+    Creating via ``os.open`` with an explicit mode (rather than
+    ``Path.write_bytes`` followed by a separate ``chmod``) means the file is
+    never briefly readable at the umask-default mode between the write and the
+    permission tightening."""
     fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
     try:
         os.write(fd, data)
@@ -307,7 +376,8 @@ def _now() -> datetime:
 
 
 def _make_ca(home: Path):
-    """Create and persist a fresh local CA (cert + private key)."""
+    """Create and persist a fresh local CA (cert + private key). Returns
+    ``(ca_cert, ca_key)``."""
     from cryptography import x509
     from cryptography.hazmat.primitives import hashes, serialization
     from cryptography.hazmat.primitives.asymmetric import rsa
@@ -374,7 +444,8 @@ def _load_or_make_ca(home: Path):
 
 
 def _make_leaf(home: Path, ca_cert, ca_key, hostnames: list[str], ips: list[str]):
-    """Create + persist the leaf cert/key signed by *ca_cert*, covering the given SANs."""
+    """Create + persist the leaf cert/key signed by *ca_cert*, covering the given
+    SANs. Records a meta.json describing what it covers."""
     from cryptography import x509
     from cryptography.hazmat.primitives import hashes, serialization
     from cryptography.hazmat.primitives.asymmetric import rsa
@@ -457,7 +528,23 @@ def _cert_sans(cert) -> tuple[set[str], set[str]]:
 
 
 def _leaf_is_reusable(home: Path, hostnames: list[str], ips: list[str]) -> bool:
-    """True when the persisted leaf is safe to reuse: it and the CA exist, neither is near its own expiry, the leaf's SIGNATURE actually verifies against the CA we currently serve for download, and the leaf already covers every required SAN."""
+    """True when the persisted leaf is safe to reuse: it and the CA exist,
+    neither is near its own expiry, the leaf's SIGNATURE actually verifies
+    against the CA we currently serve for download, and the leaf already
+    covers every required SAN. Anything else (missing, an expired leaf OR CA,
+    a signature that does not verify, a missing SAN) forces a regenerate.
+
+    LM-DA-043: the issuer check used to be ``cert.issuer != ca.subject`` -
+    this module mints EVERY CA with the identical constant subject
+    (``CN=localm local CA, O=localm``), so that compared a fixed string to
+    itself and could never tell a rotated CA keypair from the one on disk.
+    Verifying the signature is the same check a TLS client performs when it
+    validates the chain, so "reusable" and "will validate" cannot diverge -
+    and because this is the ONLY gate that reaches ensure_cert's early return,
+    it is also the only place that can force a CA regenerated in place (e.g.
+    restored from a partial backup) to bring its leaf along with it, and the
+    only place that notices the CA itself has reached expiry (the leaf's own
+    _RENEW_MARGIN_DAYS check never looked at the CA it was signed by)."""
     from cryptography import x509
     from cryptography.exceptions import InvalidSignature
     from cryptography.hazmat.primitives.asymmetric import padding
@@ -506,7 +593,22 @@ def ensure_cert(
     hostnames: Optional[Iterable[str]] = None,
     ips: Optional[Iterable[str]] = None,
 ) -> tuple[str, str]:
-    """Ensure a usable server certificate + key exist under ``<home>/tls`` and return their paths as ``(cert_path, key_path)``."""
+    """Ensure a usable server certificate + key exist under ``<home>/tls`` and
+    return their paths as ``(cert_path, key_path)``.
+
+    Generates a local CA once (persisted, reused across regenerations) and a
+    leaf certificate covering the loopback, LAN, Tailscale, and hostname SANs
+    (plus any *hostnames* / *ips* the caller supplies). Reuses an existing leaf
+    when it still covers every required SAN, chains to the CA now on disk, and
+    neither it nor that CA is near expiry; otherwise regenerates the leaf,
+    normally reusing the CA so a device that trusted localm once stays trusted.
+
+    The CA survives an ordinary leaf regeneration, but NOT unconditionally:
+    ``_load_or_make_ca`` reuses it only while it is unexpired and its files are
+    readable, and mints a fresh one otherwise. A new CA means every device
+    repeats the one-time trust step, which is why the distinction is worth
+    stating here rather than leaving a reader to infer "always".
+    """
     home = Path(home)
     _lock_down_dir(tls_dir(home))
 

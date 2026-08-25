@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""PWA Web Share Target: a phone shares an image into localm via the OS share sheet; it lands server-side and the app ingests it."""
+"""PWA Web Share Target: a phone shares an image into localm via the OS share
+sheet; it lands server-side and the app ingests it. Parsed without
+python-multipart (localm stays self-contained), so this also guards the
+hand-rolled multipart parser."""
 
 from pathlib import Path
 
@@ -86,7 +89,8 @@ def test_share_clear_all_without_ids(share_client):
 
 
 def test_clear_id_cannot_escape_inbox(share_client, tmp_path):
-    """A malicious clear id is matched as a filename prefix only - it cannot be turned into a path that deletes outside the inbox."""
+    """A malicious clear id is matched as a filename prefix only - it cannot be
+    turned into a path that deletes outside the inbox."""
     share_client.post("/share-target",
                       files={"files": ("keep.png", _PNG, "image/png")})
     victim = tmp_path / "victim.txt"
@@ -99,7 +103,14 @@ def test_clear_id_cannot_escape_inbox(share_client, tmp_path):
 
 
 def _raw_share_body(*names, boundary=b"BOUND"):
-    """A hand-built multipart body carrying *names* verbatim."""
+    """A hand-built multipart body carrying *names* verbatim.
+
+    Needed because httpx percent-encodes a NUL in the Content-Disposition it
+    generates ("photo\\x00.png" goes out as "photo%00.png", an ordinary safe
+    name), so `files=` cannot deliver one and a test written with it would pass
+    while exercising nothing. A real client writes the header itself, and the
+    route parses the body itself, so this is the reachable shape.
+    """
     out = b""
     for nm in names:
         out += (b"--" + boundary + b"\r\n"
@@ -122,7 +133,13 @@ def _inbox():
 
 
 class TestShareFilenameGuard:
-    """The shared name must clear the same lexical guard /api/upload applies."""
+    """The shared name must clear the same lexical guard /api/upload applies.
+
+    Path().name alone leaves "photo:stream.png" untouched, so the write lands in
+    an NTFS alternate data stream: the listing shows a 0-byte "photo" and the
+    payload is invisible to /api/share/pending. Not traversal (a uuid4 prefix
+    bounds the path) - content smuggling.
+    """
 
     def test_rejects_alternate_data_stream_name(self, share_client):
         r = share_client.post(
@@ -141,7 +158,10 @@ class TestShareFilenameGuard:
         assert list(_inbox().iterdir()) == []
 
     def test_still_accepts_a_legitimate_name(self, share_client):
-        """Fires-control."""
+        """Fires-control. Without it, a guard that refused everything would look
+        exactly as green as a correct one - and it also proves _post_raw builds
+        a request the route accepts, so the 400s above are the name, not the
+        hand-built body."""
         r = _post_raw(share_client, "ok.png")
         assert r.status_code == 303
         assert r.headers["location"] == "/?shared=1"
@@ -149,14 +169,15 @@ class TestShareFilenameGuard:
         assert [i["name"] for i in items] == ["ok.png"]
 
     def test_one_bad_name_writes_none_of_the_batch(self, share_client):
-        """Names are checked before any write, so a refused share cannot leave the good half of a multi-file share sitting in the inbox."""
+        """Names are checked before any write, so a refused share cannot leave
+        the good half of a multi-file share sitting in the inbox."""
         r = _post_raw(share_client, "good.png", "photo:stream.png")
         assert r.status_code == 400
         assert list(_inbox().iterdir()) == []
 
 
 # ------------------------------------------------------------------ #
-#  Cross-principal ownership (HIGH-8 / #5 in CONSOLIDATED-FINDINGS)     #
+#  Cross-principal ownership                                          #
 # ------------------------------------------------------------------ #
 #
 # The open-mode share_client fixture above has no key at all, so ownership never
@@ -230,15 +251,19 @@ class TestShareInboxOwnership:
         assert any(it["name"] == "photo.png" for it in items)
 
 
-# --- RULE 5: a delete that FAILED must not read as a clean sweep --------- #
-# Before this, share_clear caught OSError and left `removed` unchanged - the
-# exact same observable as an entry the caller never asked about. On a
-# PRIVACY-adjacent store that means the user is told their shared content is
-# gone from the server while it is still sitting there. chat.js already reads a
-# `failed` field, logs it and toasts the user; the server simply never sent it.
+# --- a delete that FAILED must not read as a clean sweep ---------------- #
+# share_clear reports a `failed` field, which is distinct from an entry the
+# caller never asked about. chat.js reads that field, logs it and toasts the
+# user.
 
 def _inject_unlink_failure(monkeypatch, fail_on_name_containing: str):
-    """Make Path.unlink raise OSError for matching entries only."""
+    """Make Path.unlink raise OSError for matching entries only.
+
+    A raising side_effect is legitimate HERE because it is the FAULT being
+    injected, not an assertion - share_clear catches OSError by design, so an
+    AssertionError raised from inside would be swallowed as an input and the
+    test would pass in both directions (diff-review item 13).
+    """
     real_unlink = Path.unlink
 
     def fake_unlink(self, *a, **kw):
@@ -256,9 +281,9 @@ def test_share_clear_reports_a_delete_that_failed(share_client, monkeypatch):
     _inject_unlink_failure(monkeypatch, "locked")
     body = share_client.post("/api/share/clear", json={}).json()
 
-    # ASSERT ON THE DATA FIRST. If the injection silently failed to match, the
-    # entry would be gone and this fails with a statement about the WORLD ("the
-    # item was deleted") rather than a number you could talk yourself out of.
+    # Assert on the data first: if the injection silently failed to match, the
+    # entry would be gone and this fails on the deletion itself rather than on a
+    # status code.
     still_there = share_client.get("/api/share/pending").json()["items"]
     assert len(still_there) == 1, "the entry was deleted, so no fault was injected"
 
@@ -291,7 +316,11 @@ def test_share_clear_partial_failure_reports_both_counts(share_client, monkeypat
 
 
 def test_share_clear_logs_the_path_of_a_failed_delete(share_client, monkeypatch, caplog):
-    """A count tells the user; the log tells whoever has to diagnose it."""
+    """A count tells the user; the log tells whoever has to diagnose it.
+
+    Asserted from OUTSIDE via caplog rather than by raising inside the handler,
+    which catches broadly and would absorb an assertion as an ordinary input.
+    """
     import logging
     share_client.post("/share-target", files={"files": ("noisy.png", _PNG, "image/png")})
     _inject_unlink_failure(monkeypatch, "noisy")

@@ -1,18 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// SEC-PULL-CONFIRM: a `?pull=<spec>` deep link (from `localm gui --pull`) used to
-// auto-click #pull-start with zero confirmation on every authenticated page load.
-// Any page - or a hidden iframe on any site, while localm runs locally - could
-// forge the same query param and trigger a real, unconfirmed model download.
-//
-// The fix has two layers:
-//  1. `localm gui --pull` mints a single-use, spec-bound `pull_token` server-side
-//     (web.py: mint_pull_grant) and passes it in the deep link. init.js redeems
-//     it via POST /api/models/pull-token/redeem; on success the pull auto-starts
-//     with ZERO friction, so unattended/scripted launches keep working.
-//  2. Without a token that redeems successfully (missing, forged, expired, or
-//     already used), init.js falls back to a native confirm() dialog - a page
-//     cannot script past, auto-dismiss, or hide it, so a foreign link can never
-//     silently trigger a download.
+// A `?pull=<spec>` deep link redeems its `pull_token` via
+// POST /api/models/pull-token/redeem and otherwise falls back to confirm().
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadAppWithPages, runScript } from "./harness.mjs";
@@ -87,7 +75,7 @@ test("no pull_token: the confirm() prompt names the spec so the user can verify 
 });
 
 // --------------------------------------------------------------------------- //
-//  A valid pull_token (the CLI's own deep link): zero-click auto-start        //
+//  A valid pull_token: zero-click auto-start                                  //
 // --------------------------------------------------------------------------- //
 
 test("a redeemed pull_token starts the pull WITHOUT showing confirm()", async () => {

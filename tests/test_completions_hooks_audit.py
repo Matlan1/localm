@@ -1,5 +1,14 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""B17 (security/privacy): /v1/completions bypassed the chat-pipeline hooks AND the audit log / transcript that /v1/chat/completions runs on every turn."""
+"""B17 (security/privacy): /v1/completions bypassed the chat-pipeline hooks AND
+the audit log / transcript that /v1/chat/completions runs on every turn. That
+let raw-completion traffic escape plugin safety/transform hooks and leave no
+audit trail - a parallel, unguarded path to the model.
+
+These tests drive the real /v1/completions handler (streaming + non-streaming)
+with a stub engine and a synthetic hook plugin, asserting the inlet/stream/outlet
+hooks run and that the exchange is handed to _audit_exchange. They mirror
+test_chat_pipeline.py but assert the text_completion response shape.
+"""
 
 import json
 import textwrap
@@ -108,7 +117,7 @@ def _sse_text(resp):
 
 
 # --------------------------------------------------------------------------- #
-#  Response shape unchanged when no hooks are present (regression guard)        #
+#  Response shape unchanged when no hooks are present                          #
 # --------------------------------------------------------------------------- #
 
 def test_no_hooks_completion_unchanged(env):
@@ -171,7 +180,7 @@ def test_failing_inlet_isolated_completion(env):
 
 
 # --------------------------------------------------------------------------- #
-#  /v1/completions is audited (the security/privacy gap)                       #
+#  /v1/completions is audited                                                  #
 # --------------------------------------------------------------------------- #
 
 def _recorder(monkeypatch):

@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Thread-pool saturation detectability (_executor_health.py) - the 'make exhaustion detectable, not silent' half of the thread-pool-exhaustion fix (dev-notes/decisions-2026-07-30-release-gate.md, Q2)."""
+"""Thread-pool saturation detectability (_executor_health.py) - the "make
+exhaustion detectable, not silent" half of the thread-pool-exhaustion fix
+(dev-notes/decisions-2026-07-30-release-gate.md, Q2).
+"""
 
 from __future__ import annotations
 
@@ -19,9 +22,8 @@ from localm.inference._executor_health import (
 
 def test_pool_health_none_executor_reports_nothing_to_watch():
     # The asyncio default executor does not exist until the first
-    # run_in_executor(None, ...) call lazily creates it - an idle server
-    # legitimately has None here, and that must read as "not saturated",
-    # never as an error.
+    # run_in_executor(None, ...) call lazily creates it, so an idle server has
+    # None here and that reads as "not saturated", never as an error.
     assert pool_health(None) == {
         "max_workers": None, "threads_spawned": 0, "queued": 0, "saturated": False}
 
@@ -79,7 +81,11 @@ class _CaptureHandler(logging.Handler):
 
 
 def test_saturation_watch_warns_once_then_throttles_to_debug():
-    """A pool saturated past the threshold for a SUSTAINED window logs exactly ONE warning, then drops to DEBUG for as long as it stays saturated - the log-once-then-throttle contract (.claude/rules/hard-won-rules.md's VRAM-probe log-flood lesson), proven here rather than assumed."""
+    """A pool saturated past the threshold for a SUSTAINED window logs
+    exactly ONE warning, then drops to DEBUG for as long as it stays
+    saturated - the log-once-then-throttle contract
+    (.claude/rules/hard-won-rules.md's VRAM-probe log-flood lesson), proven
+    here rather than assumed."""
     from localm.debuglog import logger as _dbg
 
     handler = _CaptureHandler()
@@ -96,11 +102,8 @@ def test_saturation_watch_warns_once_then_throttles_to_debug():
         fut2 = loop.run_in_executor(None, lambda: 1)   # queues behind it
         await asyncio.sleep(0.3)
 
-        # Generous margin over threshold (not a tight race): this box runs
-        # many concurrent test sessions, and a timing assertion with little
-        # headroom is exactly the flakiness class this repo's own test-slot
-        # policy has been burned by before (widened a 2s budget to 15s for
-        # the identical reason). 0.5s threshold vs a 3s window is 6x margin.
+        # Generous margin over the threshold rather than a tight race: a 0.5s
+        # threshold against a 3s window.
         stop, thread = start_executor_saturation_watch(loop, threshold=0.5, poll=0.2)
         try:
             await asyncio.sleep(3.0)
@@ -128,7 +131,9 @@ def test_saturation_watch_warns_once_then_throttles_to_debug():
 
 
 def test_saturation_watch_resets_streak_on_recovery():
-    """A pool that recovers (goes idle) and then re-saturates warns AGAIN - the streak must not stay 'already warned' forever after the first incident, or a second, unrelated exhaustion goes unreported."""
+    """A pool that recovers (goes idle) and then re-saturates warns AGAIN -
+    the streak must not stay 'already warned' forever after the first
+    incident, or a second, unrelated exhaustion goes unreported."""
     from localm.debuglog import logger as _dbg
 
     handler = _CaptureHandler()
@@ -141,8 +146,7 @@ def test_saturation_watch_resets_streak_on_recovery():
         pool = ThreadPoolExecutor(max_workers=1)
         loop.set_default_executor(pool)
 
-        # Generous margins throughout - see the identical note in
-        # test_saturation_watch_warns_once_then_throttles_to_debug.
+        # Generous margins throughout.
         stop, thread = start_executor_saturation_watch(loop, threshold=0.4, poll=0.2)
         try:
             # First saturation window.
@@ -181,14 +185,13 @@ def test_saturation_watch_resets_streak_on_recovery():
         f"{len(warnings)}: {warnings}")
 
 
-# --- anyio's default thread pool - the THIRD pool (fastapi.concurrency. ---
-# --- run_in_threadpool's pool; see _executor_health.py's module docstring) --
+# --- anyio's default thread pool - the THIRD pool, the one behind ---
+# --- fastapi.concurrency.run_in_threadpool ---
 
 def test_anyio_pool_health_none_limiter_reports_nothing_to_watch():
-    # No captured reference at all (startup capture never ran, or failed) -
-    # unlike pool_health(None)'s "not created yet", this means "cannot
-    # observe from here", but the REPORTED shape is deliberately identical:
-    # never saturated, no counts.
+    # No captured reference at all (startup capture never ran, or failed). Unlike
+    # pool_health(None)'s "not created yet" this means "cannot observe from here",
+    # and the reported shape is identical: never saturated, no counts.
     assert anyio_pool_health(None) == {
         "max_workers": None, "threads_spawned": None, "queued": None,
         "saturated": False}
@@ -206,7 +209,11 @@ def test_anyio_pool_health_idle_limiter_is_not_saturated():
 
 
 def test_anyio_pool_health_reports_saturated_and_recovers():
-    """Mirrors test_pool_health_reports_saturated_and_recovers exactly, but for anyio's CapacityLimiter instead of a ThreadPoolExecutor - shrinks the limiter to a single token so one blocked run_sync call plus one queued behind it is enough to prove real saturated/recovered transitions, not just the None/i..."""
+    """Mirrors test_pool_health_reports_saturated_and_recovers exactly, but
+    for anyio's CapacityLimiter instead of a ThreadPoolExecutor - shrinks the
+    limiter to a single token so one blocked run_sync call plus one queued
+    behind it is enough to prove real saturated/recovered transitions, not
+    just the None/idle shapes above."""
     async def scenario():
         import anyio.to_thread
         limiter = anyio.to_thread.current_default_thread_limiter()
@@ -249,7 +256,9 @@ def test_anyio_pool_health_never_raises_on_a_malformed_limiter():
 
 
 def test_executors_snapshot_includes_anyio_key():
-    """Proves the wiring, not just the standalone function: executors_snapshot (what both the saturation watch and GET /debug/stacks consume) surfaces anyio's pool under the 'anyio' key at all, with a real captured limiter."""
+    """Proves the wiring, not just the standalone function: executors_snapshot
+    (what both the saturation watch and GET /debug/stacks consume) surfaces
+    anyio's pool under the "anyio" key at all, with a real captured limiter."""
     async def scenario():
         import anyio.to_thread
         limiter = anyio.to_thread.current_default_thread_limiter()
@@ -262,7 +271,10 @@ def test_executors_snapshot_includes_anyio_key():
 
 
 def test_executors_snapshot_anyio_key_present_but_unobservable_without_capture():
-    """The default (no anyio_limiter passed) must not silently omit the key - a caller reading the snapshot should see 'anyio' present and honestly unobservable, not absent (which would look like a caller-side bug rather than an intentional 'nothing captured here' state)."""
+    """The default (no anyio_limiter passed) must not silently omit the key -
+    a caller reading the snapshot should see "anyio" present and honestly
+    unobservable, not absent (which would look like a caller-side bug rather
+    than an intentional 'nothing captured here' state)."""
     async def scenario():
         loop = asyncio.get_running_loop()
         snapshot = executors_snapshot(loop)
@@ -273,7 +285,11 @@ def test_executors_snapshot_anyio_key_present_but_unobservable_without_capture()
 
 
 def test_saturation_watch_detects_anyio_saturation():
-    """End-to-end proof the background watch (a plain daemon thread, NOT async) actually warns on anyio saturation using a limiter reference captured from async code beforehand - the exact 'cannot fetch it itself, must be handed a live reference' contract _executor_health.py's module docstring describes, e..."""
+    """End-to-end proof the background watch (a plain daemon thread, NOT
+    async) actually warns on anyio saturation using a limiter reference
+    captured from async code beforehand - the exact "cannot fetch it itself,
+    must be handed a live reference" contract _executor_health.py's module
+    docstring describes, exercised for real rather than asserted."""
     from localm.debuglog import logger as _dbg
 
     handler = _CaptureHandler()
@@ -316,7 +332,12 @@ def test_saturation_watch_detects_anyio_saturation():
 
 
 def test_debug_stacks_reports_anyio_pool_over_real_http(monkeypatch):
-    """End-to-end through a REAL request, not just the unit-level function calls above: GET /debug/stacks is an async handler with its own running loop, so it fetches anyio's default thread limiter live on every call (see http_server.py) rather than needing a captured reference the way the background satur..."""
+    """End-to-end through a REAL request, not just the unit-level function
+    calls above: GET /debug/stacks is an async handler with its own running
+    loop, so it fetches anyio's default thread limiter live on every call
+    (see http_server.py) rather than needing a captured reference the way
+    the background saturation watch does. Proves the wiring actually landed
+    in the route, not just in _executor_health.py in isolation."""
     from unittest.mock import MagicMock
 
     from fastapi.testclient import TestClient

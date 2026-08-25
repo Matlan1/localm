@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// R50: disabling a plugin in one tab used to ERROR a second tab parked on that
-// plugin's (static) page - its fetches hit the now-unmounted routes and rendered
-// a raw 404. The fix bumps a shared localStorage rev on toggle; the storage event
-// fires in the other tab, which re-syncs the plugin set and (via reconcileActiveView)
-// leaves the dead view for chat instead of erroring.
+// Toggling a plugin bumps a shared localStorage rev. The storage event fires in
+// the other tab, which re-syncs the plugin set and, via reconcileActiveView,
+// leaves a view whose plugin is now inactive for chat.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";

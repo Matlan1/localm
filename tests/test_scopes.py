@@ -33,8 +33,8 @@ def test_is_valid_scope():
 
 
 def test_privileged_scopes_are_known():
-    # Every privileged scope must be a real, known scope (kernel or an EXTRA
-    # capability variant like coder:full) - guards against a typo'd entry.
+    # Every privileged scope must be a real, known scope: a kernel scope or an
+    # EXTRA capability variant like coder:full.
     for s in scopes.PRIVILEGED_SCOPES:
         assert s in scopes.all_known_scopes()
 

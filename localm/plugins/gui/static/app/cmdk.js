@@ -1,11 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-/* localm GUI - command palette (Ctrl/Cmd+K) (split from app.js). Classic script: it
-   shares the one global lexical environment with the other app/* and
-   pages/* scripts, so every cross-section reference resolves by bare
-   name exactly as before. */
+/* localm GUI - command palette (Ctrl/Cmd+K). */
 "use strict";
 
-// --- ES module imports (auto-generated boundary; bodies unchanged) ---
+// --- ES module imports ---
 import { newConversation } from "./chat.js";
 import { $, el } from "./helpers.js";
 import { exportConversation } from "./settings-perf.js";
@@ -16,8 +13,8 @@ import { gotoSettingsSection } from "../pages/settings.js";
 /*  Command palette (Ctrl/Cmd+K)                                     */
 /* ================================================================ */
 
-// Built fresh on open so runtime-added plugin views are included. The view
-// labels are taken from the live nav buttons so they match exactly.
+// Built fresh on each open, including runtime-added plugin views. View labels
+// are read from the live nav buttons.
 export function cmdkCommands() {
   const cmds = [];
   for (const v of VIEWS) {
@@ -29,9 +26,8 @@ export function cmdkCommands() {
   cmds.push({ label: "New chat", run: () => { newConversation(); showView("chat"); } });
   cmds.push({ label: "Toggle light/dark theme", run: () => $("theme-toggle").click() });
   cmds.push({ label: "Export conversation", run: () => exportConversation() });
-  // Direct jump to the owner-only Keys & devices manager (it lives in a Settings
-  // sub-section that is otherwise easy to miss). Offered only when this key may
-  // actually manage keys - i.e. the panel is not gated-hidden for it.
+  // Jump to the Keys & devices manager. Offered only while its panel is not
+  // gated-hidden for this key.
   const keysCard = $("keys-card");
   if (keysCard && !keysCard.classList.contains("sec-hidden")) {
     cmds.push({ label: "Manage keys & devices", run: () => {
@@ -93,8 +89,7 @@ document.addEventListener("keydown", (e) => {
     cmdkIsOpen() ? closeCommandPalette() : openCommandPalette();
     return;
   }
-  // R09: Ctrl/Cmd+S saves the active Settings section. Only on the Settings page,
-  // so every other view keeps the browser's native "Save page".
+  // Ctrl/Cmd+S saves the active Settings section, on the Settings page only.
   if ((e.ctrlKey || e.metaKey) && (e.key === "s" || e.key === "S")) {
     if (isSettingsView()) {
       e.preventDefault();
@@ -115,9 +110,8 @@ document.addEventListener("keydown", (e) => {
   }
 });
 
-// R10: the browser's native unsaved-changes prompt on tab close / reload while
-// Settings has unsaved edits. An empty returnValue is what triggers it; browsers
-// ignore any custom message, so we set none.
+// Trigger the browser's native unsaved-changes prompt on tab close or reload
+// while Settings has unsaved edits. An empty returnValue triggers it.
 window.addEventListener("beforeunload", (e) => {
   if (window.settingsDirty && window.settingsDirty()) {
     e.preventDefault();

@@ -1,5 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Reach-by-name (mDNS ``localm.local`` + Tailscale MagicDNS): localm/netname.py."""
+"""Reach-by-name (mDNS ``localm.local`` + Tailscale MagicDNS): localm/netname.py.
+
+Covers name sanitization, Tailscale ``status --json`` parsing, the certificate
+SAN name list, the printed reachable-target ordering, config validation, and a
+live mDNS round-trip that proves ``<name>.local`` is actually advertised and
+browsable. Tailscale is always mocked (no real tailnet needed); the synthetic
+node/tailnet names here are fictitious, never a real machine's.
+"""
 import socket
 import time
 
@@ -79,7 +86,10 @@ def test_mdns_enabled_default_true(monkeypatch):
 
 
 def test_mdns_enabled_fails_closed_when_config_unreadable(monkeypatch):
-    """An unreadable config must resolve mdns_enabled() to FALSE, never the on-by-default True: a transiently unreadable config must not silently re-enable mDNS for a user who set mdns_enabled:false as an opt-out (mirrors netpolicy.network_mode's fail-safe)."""
+    """An unreadable config must resolve mdns_enabled() to FALSE, never the
+    on-by-default True: a transiently unreadable config must not silently
+    re-enable mDNS for a user who set mdns_enabled:false as an opt-out (mirrors
+    netpolicy.network_mode's fail-safe). Label callers still get the default."""
     def boom():
         raise OSError("config unreadable")
     monkeypatch.setattr("localm.config.load_config", boom)
@@ -207,7 +217,9 @@ def test_network_targets_names_before_ips(monkeypatch):
 
 
 def test_network_targets_omits_name_without_advertiser(monkeypatch):
-    """The LAN name is recommended ONLY when the advertiser is live (mdns_name passed)."""
+    """The LAN name is recommended ONLY when the advertiser is live (mdns_name
+    passed). Without it (loopback/isolated/name-taken/mdns-off) we never point a
+    user at a name this host does not own - only the IP."""
     monkeypatch.setattr("localm.tls.companion_addresses",
                         lambda: {"lan": "192.168.1.9", "tailscale": ""})
     monkeypatch.setattr(netname, "_run_tailscale_status", lambda: None)
@@ -285,7 +297,12 @@ def test_start_advertiser_no_lan_returns_none(monkeypatch):
 
 
 def test_start_advertiser_falls_back_to_companion_lan(monkeypatch):
-    """No explicit addresses supplied: uses companion_addresses()'s 'lan' pick (which already excludes a VPN's virtual tunnel adapter), not the raw outbound-route probe directly - regression for the 'localm doesn't like it when I have a VPN active' bug (a VPN becoming the default route used to make the mDN..."""
+    """No explicit addresses supplied: uses companion_addresses()'s "lan" pick
+    (which already excludes a VPN's virtual tunnel adapter), not the raw
+    outbound-route probe directly - regression for the "localm doesn't like
+    it when I have a VPN active" bug (a VPN becoming the default route used
+    to make the mDNS <name>.local advertisement point at the unreachable
+    VPN tunnel IP instead of the real LAN address)."""
     monkeypatch.setattr("localm.config.load_config", lambda: {"mdns_enabled": True,
                                                               "mdns_name": "localm"})
     monkeypatch.setattr("localm.tls.companion_addresses",
@@ -313,7 +330,9 @@ def test_start_advertiser_falls_back_to_companion_lan(monkeypatch):
 
 
 def test_start_advertiser_live_round_trip(monkeypatch):
-    """Start the advertiser and browse it back from a separate zeroconf instance: proves ``<name>.local`` is really published with the right host/port/address."""
+    """Start the advertiser and browse it back from a separate zeroconf instance:
+    proves ``<name>.local`` is really published with the right host/port/address.
+    Uses a unique name so it never collides with a real localm on the network."""
     from zeroconf import ServiceBrowser, Zeroconf
 
     name = "localmtest%d" % (int(time.time()) % 100000)

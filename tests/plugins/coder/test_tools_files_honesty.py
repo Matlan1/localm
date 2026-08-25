@@ -1,5 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Honesty and edge-case guards in the coder file tools (2026-07-02 sweep)."""
+"""Honesty and edge-case guards in the coder file tools (2026-07-02 sweep).
+
+Three confirmed findings from the fresh-eyes non-security audit:
+- search_replace: a write failure mid-loop left earlier files modified on disk
+  while the error read as if nothing changed.
+- edit_file: an empty `old` silently prepended `new` ('' is "in" every string)
+  and reported a bogus occurrence count.
+- read_file: offset/limit on an empty file produced a backwards range label
+  ("1-0 of 1") because splitlines() disagrees with _line_count about empty."""
 
 from unittest.mock import patch
 
@@ -11,7 +19,14 @@ from localm.plugins.coder.tools import (
 
 
 def _norm(raw: bytes) -> str:
-    """Universal-newline-normalise raw bytes for a platform-portable comparison."""
+    """Universal-newline-normalise raw bytes for a platform-portable
+    comparison. The fixtures below write via Path.write_text(), which
+    translates \\n -> the platform line separator on write (\\r\\n on
+    Windows, unchanged on Linux) - so the RAW bytes ToolResult.changes
+    reports (deliberately unnormalised, matching execution.py's own
+    snapshot convention) differ by platform even though the file's logical
+    content does not. Normalise before comparing so the assertion holds on
+    both, the same way CI's own two platforms would each see it."""
     return raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
 
 
@@ -45,10 +60,8 @@ class TestSearchReplacePartialWriteHonesty:
         # The filesystem really is in the reported state.
         assert (cwd / "f0.txt").read_text(encoding="utf-8") == "new value\n"
         assert (cwd / "f1.txt").read_text(encoding="utf-8") == "old value\n"
-        # A partial apply must still expose what it actually wrote (rule 5):
-        # the changed-files/undo tracker reads this even on a failed call, so
-        # the one real mutation must not go untracked just because the batch
-        # as a whole errored.
+        # A partial apply still exposes what it actually wrote: the changed-files
+        # and undo tracker reads this even on a failed call.
         assert len(r.changes) == 1
         name, old, new = r.changes[0]
         assert name == "f0.txt" and _norm(old) == "old value\n" and new == "new value\n"
@@ -102,7 +115,7 @@ class TestReadFileEmptyWithRange:
         (tmp_path / "empty.txt").write_text("", encoding="utf-8")
         r = tool_read_file(tmp_path, "empty.txt", offset=1, limit=1)
         assert r.ok is True
-        assert "1-0" not in r.output                 # the old backwards label
+        assert "1-0" not in r.output                 # the backwards label
         assert "<lines>1-1 of 1</lines>" in r.output
 
     def test_nonempty_range_label_unchanged(self, tmp_path):

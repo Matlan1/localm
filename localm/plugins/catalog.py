@@ -1,5 +1,20 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The first-party plugin catalog: core's ONLY knowledge of plugins it does not have installed."""
+"""The first-party plugin catalog: core's ONLY knowledge of plugins it does not
+have installed.
+
+localm itself is just a model loader + chat (chat being the preinstalled,
+protected plugin #0) + the plugin engine. It knows nothing about the other
+features except this small static catalog, which lets it:
+
+  1. Suggest installing a first-party plugin when the user invokes one of its
+     commands but it is not installed ("that needs the image plugin - install
+     it?"). The suggestion can be turned off (config: suggest_plugins=False).
+  2. Resolve WHERE to install a first-party plugin from: the bundled store on
+     disk, or - if the plugin is missing from the store - its known GitHub repo.
+  3. List what is available to install (the catalog minus what is installed).
+
+This module holds NO plugin code and imports nothing heavy; it is just data.
+"""
 
 from __future__ import annotations
 
@@ -65,17 +80,25 @@ def get(name: str) -> "CatalogEntry | None":
 
 
 def for_command(command: str) -> "CatalogEntry | None":
-    """The first-party plugin that provides *command*, if any (for the 'that needs the X plugin - install it?' hint)."""
+    """The first-party plugin that provides *command*, if any (for the
+    'that needs the X plugin - install it?' hint)."""
     return _BY_COMMAND.get(command)
 
 
 def commands() -> dict:
-    """Map of command verb -> providing plugin name, across the whole catalog."""
+    """Map of command verb -> providing plugin name, across the whole catalog.
+    Lets a command surface (CLI REPL, GUI) recognise a command that belongs to a
+    known-but-inactive plugin instead of treating it as unknown."""
     return {cmd: e.name for cmd, e in _BY_COMMAND.items()}
 
 
 def suggestion(command: str) -> "str | None":
-    """A friendly 'that command needs the X plugin' hint for *command* when it belongs to a known first-party plugin that is not handling it (because the plugin is not installed or not enabled), else None for a truly unknown command."""
+    """A friendly 'that command needs the X plugin' hint for *command* when it
+    belongs to a known first-party plugin that is not handling it (because the
+    plugin is not installed or not enabled), else None for a truly unknown
+    command. Phrased generically (install) because the catalog alone does not
+    know install/enable state; a surface that knows the state can refine the
+    verb. Callers gate this on the ``suggest_plugins`` config toggle."""
     entry = for_command(command)
     if entry is None or entry.preinstalled:
         return None

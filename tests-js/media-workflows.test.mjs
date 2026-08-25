@@ -58,8 +58,7 @@ test("workflow panel renders default + uploaded, and select round-trips", async 
   const activePick = picks.find((p) => /a\.json/.test(p.textContent));
   assert.ok(activePick, "a.json row present");
   // Selection is marked by the row's accent bar (.workflow-row.active) plus
-  // aria-current, NOT by a radio dot/ring glyph - those were removed because
-  // they duplicated the accent bar.
+  // aria-current, not by a radio dot/ring glyph.
   assert.ok(activePick.closest(".workflow-row").classList.contains("active"),
             "a.json's row carries .active (the accent-bar selection marker)");
   assert.equal(activePick.getAttribute("aria-current"), "true",
@@ -85,8 +84,8 @@ test("workflow panel renders default + uploaded, and select round-trips", async 
   assert.ok(delBtn, "an inactive workflow can be deleted");
   delBtn.click();
   await drain();
-  // Deletion now confirms via the in-page confirmDanger modal (GUI-5), not
-  // window.confirm - click its danger button.
+  // Deletion confirms via the in-page confirmDanger modal, not window.confirm:
+  // click its danger button.
   const ok = win.document.querySelector("#modal-body .btn-danger");
   assert.ok(ok, "delete-workflow confirm modal shown");
   ok.click();

@@ -1,31 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 /* localm GUI - shared gallery engine for the three Studio pages.
 
-   Images, Music and Video all present the same LIBRARY: a grid of generated
+   Images, Music and Video present the same library: a grid of generated
    artifacts you can select in bulk, open for detail, and act on (download,
-   copy path, rename, move, delete, reuse the settings that made it). That part
-   is medium-agnostic and lives here once, so a fix lands on all three instead
-   of on whichever page someone remembered.
-
-   WHAT IS DELIBERATELY *NOT* SHARED IS THE PREVIEW, because the media differ in
-   kind and pretending otherwise produces a worse page:
-
-     image  a PNG is its own thumbnail. <img src>, done.
-     video  <video preload="metadata"> seeked just past zero paints a real
-            frame. No server-side thumbnailer, no new route, no dependency.
-     music  audio has NO frame. A waveform would mean decodeAudioData over
-            every file in the grid (multi-MB decodes on page load) to draw a
-            squiggle that does not tell two synthwave tracks apart. A track's
-            identity is its TAGS and duration, which are text - so the audio
-            card is text-forward with a play control, not a fake picture.
-
-   So each page passes its own preview builders and keeps the same interaction
-   model. Layout stays consistent; only what fills the frame differs.
+   copy path, rename, move, delete, reuse the settings that made it). The grid
+   and its interactions live here; each page passes its own preview builders.
 
    Object-URL lifetime: fetchImageURL() mints a blob: URL per call and never
-   revokes one, so a gallery that re-renders on every refresh leaks them. Every
-   URL minted here is revoked once the element that needed it has loaded, or
-   when the element goes away. */
+   revokes one. Every URL minted here is revoked once the element that needed
+   it has loaded, or when the element goes away. */
 
 "use strict";
 
@@ -34,12 +17,8 @@ import { $, authHeaders, confirmDanger, el, fetchImageURL, openModal, promptText
 import { emptyState, iconEl } from "./icons.js";
 import { pickDirectory } from "./picker.js";
 
-/* Every fetch below spells its path as a template literal STARTING WITH "/"
-   (`/api/${cfg.slug}/...`, never `${cfg.api}/...`). That is not cosmetic:
-   tests/test_gui_js_route_contract.py silently SKIPS any fetch literal that
-   does not start with "/", so the convenient form would quietly opt this
-   module out of the one test that ties GUI callers to real backend routes -
-   the exact "route deleted, caller left behind" class it exists to catch. */
+/* Every fetch below spells its path as a template literal starting with "/"
+   (`/api/${cfg.slug}/...`, never `${cfg.api}/...`). */
 
 export const GRID_DEFAULT = 24;
 
@@ -55,12 +34,7 @@ async function urlFor(path, node, event) {
   return url;
 }
 
-/* A media element reports a failed src by firing an ERROR EVENT on itself, not
-   by throwing and not by rejecting - so a try/catch around `player.src = url`
-   is structurally unable to see it. Without this the player just sits there
-   dead and the user gets nothing at all, which is how a CSP that blocked every
-   blob: media URL survived unnoticed: the success path still ran and still
-   flipped the button to "hide".
+/* Toast the reason when a media element fails to load, and run onFail.
 
    Call this on any media element BEFORE assigning src. */
 export function reportMediaLoadFailure(player, what, onFail) {
@@ -109,10 +83,8 @@ export function createGallery(cfg) {
   }
 
   async function download(name) {
-    // Revoked on a TIMER, unlike every other URL here. A download is not tied
-    // to an element whose load event we could hang the release on, and the
-    // browser reads the URL asynchronously AFTER the synchronous click(), so
-    // revoking immediately cancels the download. 30s outlasts the read.
+    // Revoked on a 30s timer rather than on an element's load event: the
+    // browser reads the URL asynchronously after the synchronous click().
     const url = await fetchImageURL(`/api/${cfg.slug}/file/${encodeURIComponent(name)}`);
     const a = document.createElement("a");
     a.href = url;
@@ -133,8 +105,7 @@ export function createGallery(cfg) {
     try {
       const r = await fetch(`/api/${cfg.slug}/history`, { headers: authHeaders() });
       if (!r.ok) {
-        // A visible message beats a blank grid: a transient non-200 otherwise
-        // reads as a broken or half-loaded page.
+        // Show the failure in the grid instead of leaving it blank.
         grid.replaceChildren(emptyState("warning", `Could not load ${cfg.plural}`,
           `The server returned HTTP ${r.status}. Try refreshing the page.`));
         return;
@@ -191,7 +162,7 @@ export function createGallery(cfg) {
     };
     thumb.appendChild(sel);
 
-    // hover quick actions (top-right) - inline SVG icons (no emoji glyphs)
+    // hover quick actions (top-right)
     const acts = el("div", "thumb-acts");
     const dl = el("button", "download");
     dl.appendChild(iconEl("download"));
@@ -311,13 +282,8 @@ export function createGallery(cfg) {
 
       const rename = el("button", "btn-secondary", "rename…");
       rename.onclick = async () => {
-        // promptText() reuses the same shared #modal this item-detail view is
-        // already showing, so it replaces this modal's content while it is up
-        // (unlike the native prompt() it replaces, which floats above the page
-        // untouched). Re-open the same item's detail view on any path that
-        // isn't the success-and-closeModal() one below, so cancelling or a
-        // failed rename lands back where the user was instead of on a bare
-        // closed modal.
+        // promptText() reuses the shared #modal and replaces this detail
+        // view's content, so every path except success re-opens the view.
         const newName = await promptText("New name:", item.name);
         if (!newName || newName.trim() === item.name) { showDetail(item); return; }
         try {
@@ -370,13 +336,8 @@ export function createGallery(cfg) {
 
 /* ---- preview builders, one per medium ---------------------------------- */
 
-/* A preview that cannot be shown must SAY SO (AGENTS.md rule 5). Two distinct
-   failures both used to end as a silent blank or black rectangle: the fetch
-   rejecting, and the media element refusing to decode what it got (which fires
-   an error EVENT on the element, not an exception, so no try/catch can see it).
-   Either way the card STAYS - it still carries the checkbox, the metadata and
-   the delete/move/rename actions, and removing it would hide an item the user
-   may specifically want to get rid of. */
+/* Replace an unshowable preview with a warning icon and a reason. The card
+   itself stays, keeping its checkbox, metadata and actions. */
 function previewFailed(wrap, why) {
   wrap.replaceChildren();
   wrap.classList.add("thumb-failed");
@@ -396,10 +357,8 @@ export function imagePreview(item, ctx) {
   return wrap;
 }
 
-/** Video: a real first frame, painted by the browser. `preload="metadata"`
- *  fetches enough to decode, then we seek just past zero because frame 0 of a
- *  generated clip is often black - a poster nobody can tell apart from a
- *  failed load. Muted + playsinline so no browser blocks the decode. */
+/** Video: a first frame painted by the browser. `preload="metadata"` fetches
+ *  enough to decode, then seeks just past zero. Muted and playsinline. */
 export function videoPreview(item, ctx) {
   const wrap = el("div", "thumb-face");
   const v = document.createElement("video");
@@ -407,8 +366,8 @@ export function videoPreview(item, ctx) {
   v.muted = true;
   v.playsInline = true;
   v.addEventListener("loadedmetadata", () => {
-    // Guard against a zero/NaN duration (a still-muxing or corrupt file):
-    // assigning NaN to currentTime throws and would kill the whole card.
+    // Assigning a non-finite currentTime throws, so only seek on a finite,
+    // non-zero duration.
     if (Number.isFinite(v.duration) && v.duration > 0) {
       try { v.currentTime = Math.min(0.1, v.duration / 2); } catch (e) { /* keep frame 0 */ }
     }
@@ -422,14 +381,8 @@ export function videoPreview(item, ctx) {
   return wrap;
 }
 
-/** Music: no frame exists. Lead with what identifies a track - its tags - and
- *  a play control. Deliberately NOT a waveform (see the module header).
- *
- *  The play button is on the CARD, not only in the detail view, because the old
- *  list had one-click playback and audio has no preview at all without it: for
- *  an image or a clip you can see what you have, for a track you cannot. Making
- *  someone open a modal to hear three seconds would be a regression wearing a
- *  redesign. */
+/** Music: the card shows the track's tags plus a play control that plays it
+ *  inline. */
 export function musicPreview(item, ctx) {
   const wrap = el("div", "thumb-face thumb-audio");
   wrap.appendChild(iconEl("music", "audio-ic"));
@@ -494,16 +447,11 @@ export function durationLabel(item) {
   return `${Math.floor(secs / 60)}:${String(Math.round(secs % 60)).padStart(2, "0")}`;
 }
 
-/* The detail modal holds ONE player at a time: openModal() replaces #modal-body
-   wholesale, so the previous player is gone but its blob: URL would survive.
-   Closing the modal fires no event we can hook (it just sets display:none), so
-   rather than poll for that, the URL is released when the NEXT one is minted or
-   when any gallery re-renders. Bounded at one live URL, deterministically. */
+/* The detail modal's blob: URL. At most one is live: it is released when the
+   next one is minted and when any gallery re-renders. */
 let _detailURL = null;
 
-/* Card players are torn down by grid.replaceChildren() on the next render,
-   which fires no event and runs no cleanup - so their URLs are tracked here and
-   released with the render rather than left to leak one per playback. */
+/* blob: URLs of the inline card players, released on the next render. */
 const _cardURLs = new Set();
 
 export function releaseDetailURL() {
@@ -532,34 +480,13 @@ export function playerDetail(tag, what) {
 
 /* ---- per-plugin "reload chat model after generating" toggle ------------- */
 
-/* WHY THIS IS PER-PLUGIN AND NOT A PATCH OF reload_llm_after_imagine.
+/* POST /v1/media/config/<plugin> {"reload_after": bool} writes the per-plugin
+   key, which takes precedence over the legacy global reload_llm_after_imagine.
+   A plugin with no per-plugin value falls back to that global. */
 
-   That global key is the LEGACY fallback all three media backends read when
-   their own block has no reload_llm_after_generate:
-
-       reload_after = block.get("reload_llm_after_generate",
-                                full_config.get("reload_llm_after_imagine", True))
-
-   So it was never an Images setting. MEASURED by driving the three real
-   backend.settings() functions: with only {reload_llm_after_imagine: False}
-   set, image AND music AND video all resolve reload_after=False. The Images
-   page checkbox was therefore silently switching VRAM handover off for Music
-   and Video too, while presenting itself as an Images control - and putting
-   the same checkbox on all three pages would have made three controls fight
-   over one global key.
-
-   POST /v1/media/config/<plugin> {"reload_after": bool} writes the per-plugin
-   key, which WINS the resolution above. Reading stays backwards compatible:
-   a plugin with no per-plugin value still falls back to the global one, so an
-   existing config keeps its meaning and no migration is needed. */
-
-/* BINDING IS OFFLINE ON PURPOSE. This runs at module top level, and the boot
-   sequence must not make an authenticated /api or /v1 read until bootAuthProbe
-   has confirmed this client is authed (tests-js/keygate.test.mjs asserts the
-   exact request list). An earlier version awaited the config read here, which
-   fired three /v1/media/config reads during boot - so the READ now happens in
-   each gallery's beforeRefresh, i.e. when its page is actually opened, which is
-   already behind the probe. */
+/* Binding makes no network request: it only attaches the change handler. The
+   value is read in each gallery's beforeRefresh, once its page is opened and
+   bootAuthProbe has confirmed this client is authed. */
 export function bindReloadToggle(plugin, checkboxId) {
   const box = $(checkboxId);
   if (!box) return;
@@ -576,7 +503,7 @@ export function bindReloadToggle(plugin, checkboxId) {
                   : "This backend stays loaded - chat model reloads on next message");
     } catch (e) {
       toast("Could not save setting: " + e.message, true);
-      box.checked = !value;      // the write failed, so do not show it as saved
+      box.checked = !value;      // revert: the write failed
     }
   };
 }
@@ -592,5 +519,5 @@ export async function refreshReloadToggle(plugin, checkboxId) {
     const entry = (data.plugins || []).find((p) => p.plugin === plugin);
     const field = (entry?.fields || []).find((f) => f.key === "reload_after");
     if (field && typeof field.value === "boolean") box.checked = field.value;
-  } catch (e) { /* server unreachable - keep the current state */ }
+  } catch (e) { /* ignored - keep the current state */ }
 }

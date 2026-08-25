@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// O5: the GUI half of CLI/GUI parity for the six coder-only options.
+// GUI controls for the six coder-only CLI options:
 //
 //   --estimate       "estimate" button beside the composer
 //   --patch-mode     "Patch mode" checkbox + a "patch" download button
@@ -7,11 +7,6 @@
 //   --output-format  export offers markdown OR the last task's result JSON
 //   --episodes       "lessons" button in the setup panel
 //   --until          verification command + fix-attempt cap in the setup form
-//
-// The setup form is the interesting half: verify/auto_verify already existed on
-// CreateSessionRequest and coder.js NEVER SENT EITHER, so from the GUI you could
-// not set a verify command at all. A field that exists server-side and has no
-// control is indistinguishable, to a user, from one that does not exist.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -48,7 +43,7 @@ async function startSession(win, calls) {
 }
 
 /* ------------------------------------------------------------------ */
-/*  --until  (the verify oracle, which the GUI never sent)             */
+/*  --until                                                            */
 /* ------------------------------------------------------------------ */
 
 test("verification command: the setup form has one, and blank omits it", async () => {
@@ -124,8 +119,6 @@ test("the patch button is shown only for a patch-mode session", async () => {
   assert.notEqual(btn.style.display, "none",
     "a patch-mode session must offer its patch");
 
-  // A normal session must NOT: its writes went to disk, so the download would
-  // be empty and read as "the agent changed nothing".
   const calls2 = [];
   const { window: win2 } = loadAppWithPages({
     fetchImpl: makeFetch(calls2, { sessionInfo: { patch_mode: false } }),
@@ -212,8 +205,7 @@ test("an estimate event renders as a labelled, non-executed plan", async () => {
   const calls = [];
   const { window: win } = loadAppWithPages({ fetchImpl: makeFetch(calls) });
   await startSession(win, calls);
-  // `coder` is a module-scope binding, not a window property - reach it the way
-  // coder-sessions-rail.test.mjs does.
+  // `coder` is a module-scope binding, not a window property.
   runScript(win, "window.coderState = coder;");
   const s = win.coderState.sessions.get("s1");
   win.handleCoderEvent(s, {

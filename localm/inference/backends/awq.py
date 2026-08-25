@@ -1,5 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Native AWQ (Activation-aware Weight Quantization) dequantization and inference module."""
+"""Native AWQ (Activation-aware Weight Quantization) dequantization and inference module.
+
+Enables loading and inference of HuggingFace AWQ quantized checkpoints on all
+platforms (including Windows ROCm, Linux ROCm, NVIDIA CUDA, Intel XPU, and CPU)
+without external compiled dependencies like gptqmodel, autoawq, or torchao.
+"""
 
 from __future__ import annotations
 
@@ -122,7 +127,7 @@ def _try_create_native_awq_quantizer_cls():
             super().__init__(quantization_config, **kwargs)
 
         def validate_environment(self, *args, **kwargs):
-            # Self-contained: requires no external compiled packages (gptqmodel/autoawq)
+            # No external compiled packages (gptqmodel/autoawq) are required.
             pass
 
         def update_dtype(self, dtype):

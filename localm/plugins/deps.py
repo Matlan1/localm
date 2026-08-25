@@ -1,5 +1,16 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Host-side installer for a plugin's declared pip extras (``requires_extras``)."""
+"""Host-side installer for a plugin's declared pip extras (``requires_extras``).
+
+This module ONLY ever installs localm's own declared extra requirements,
+resolved from the installed distribution's metadata - never an arbitrary
+package name handed in by a caller. A caller passes an extra NAME (e.g.
+``"voice"``); we look up what that extra maps to in localm's ``Requires-Dist``
+and install exactly those specifiers.
+
+It runs on the HOST only: the CLI, or a loopback GUI request. A remote client
+must never reach the install path (enforced at the route). Failures surface the
+real pip/uv output instead of being swallowed (AGENTS "We do not hide problems").
+"""
 
 from __future__ import annotations
 
@@ -16,14 +27,15 @@ from localm.debuglog import logger
 #: line, or a status note). Best-effort; a raising sink never breaks an install.
 ProgressCb = Optional[Callable[[str], None]]
 
-#: The installed distribution whose extras we resolve. Kept as a module constant
-#: so a test can point it at a fixture distribution.
+#: The installed distribution whose extras are resolved. A module constant, so
+#: it can be repointed at another distribution.
 DIST_NAME = "localm"
 
 
 @dataclass
 class InstallResult:
-    """Outcome of an install attempt. ``ok`` is True only when every required package ended up satisfied."""
+    """Outcome of an install attempt. ``ok`` is True only when every required
+    package ended up satisfied."""
     ok: bool = True
     installed: list = field(default_factory=list)   # specifiers we installed
     skipped: list = field(default_factory=list)     # already satisfied, untouched
@@ -53,7 +65,9 @@ def _marker_names_extra(marker: str, extra: str) -> bool:
 
 
 def extra_requirements(extra: str) -> list:
-    """Concrete requirement strings for one pip extra, read from the installed ``localm`` metadata."""
+    """Concrete requirement strings for one pip extra, read from the installed
+    ``localm`` metadata. Falls back to the ``localm[extra]`` specifier when the
+    metadata cannot be read, so the install is still attempted."""
     import importlib.metadata as md
     try:
         reqs = md.metadata(DIST_NAME).get_all("Requires-Dist") or []
@@ -87,7 +101,10 @@ def _req_name(req: str) -> str:
 
 
 def is_satisfied(req: str) -> bool:
-    """True when *req* is already installed."""
+    """True when *req* is already installed. Version-aware when ``packaging`` is
+    importable, otherwise name-presence only. An ``extra`` specifier form
+    (``localm[voice]``) is never treated as satisfied - it means we could not
+    resolve concrete packages, so the install should still run."""
     if "[" in req:                       # unresolved localm[extra] fallback form
         return False
     name = _req_name(req)
@@ -103,7 +120,7 @@ def is_satisfied(req: str) -> bool:
         spec = Requirement(req).specifier
         return spec.contains(installed, prereleases=True) if str(spec) else True
     except Exception:
-        # packaging missing or an odd specifier: present-by-name is good enough.
+        # packaging missing or an odd specifier: fall back to present-by-name.
         return True
 
 
@@ -118,7 +135,16 @@ def _tail(text: str, limit: int = 600) -> str:
 
 
 def _run_pip(reqs: list, *, on_progress: ProgressCb = None):
-    """Install *reqs* into the CURRENT interpreter's environment."""
+    """Install *reqs* into the CURRENT interpreter's environment. Tries ``uv pip
+    install`` first, then ``pip``, streaming output to *on_progress*. Returns
+    ``(ok, combined_output)``. ``--python sys.executable`` pins uv to this venv
+    regardless of the ambient VIRTUAL_ENV.
+
+    ``env`` pins uv's AND pip's caches inside the data dir (rule 4: self-contained).
+    Both are set because the uv attempt runs first and pip second, and each caches to
+    a per-user location OUTSIDE the data dir when left to its default - so without this
+    a plugin-extra install silently leaks wheels to ``%LOCALAPPDATA%`` / ``~/.cache``.
+    See ``config.contained_pip_env``."""
     env = config.contained_pip_env()
     attempts = (
         ["uv", "pip", "install", "--python", sys.executable, *reqs],
@@ -152,7 +178,9 @@ def _run_pip(reqs: list, *, on_progress: ProgressCb = None):
 
 def install_requirements(reqs: Iterable[str], *,
                          on_progress: ProgressCb = None) -> InstallResult:
-    """Install any of *reqs* that are not already satisfied."""
+    """Install any of *reqs* that are not already satisfied. Re-checks after the
+    install so a pip that exits 0 but did not actually provide a package is still
+    reported as failed."""
     reqs = list(reqs)
     todo = missing_requirements(reqs)
     res = InstallResult(ok=True, skipped=[r for r in reqs if r not in todo])
@@ -182,7 +210,8 @@ def install_requirements(reqs: Iterable[str], *,
 
 def install_plugin_extras(extras: Iterable[str], *,
                           on_progress: ProgressCb = None) -> InstallResult:
-    """Resolve *extras* to requirements and install the missing ones."""
+    """Resolve *extras* to requirements and install the missing ones. A plugin
+    with no extras is a no-op success."""
     reqs = plugin_requirements(extras)
     if not reqs:
         _emit(on_progress, "No pip extras declared for this plugin.")

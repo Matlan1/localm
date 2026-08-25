@@ -1,5 +1,24 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""ComfyUI backend for the image plugin."""
+"""ComfyUI backend for the image plugin.
+
+Thin wrapper over the shared Comfy HTTP plumbing (``localm.image_gen.comfy``)
+that feeds it THIS plugin's per-plugin config (resolved through
+``media_config``, honouring the "use config from" share-config selector). The
+generic transport stays shared; only the config binding lives here, so a future
+non-ComfyUI image backend is just another module selected by ``backend`` name.
+
+Legacy global keys (comfy_launch_cmd / comfy_workdir / comfy_output_dir /
+reload_llm_after_imagine) seed the defaults until the user saves per-plugin
+values, so existing setups keep working with no migration step. api_url /
+launch_cmd / workdir specifically - both the legacy global key AND this
+plugin's own per-plugin comfy_blk override - are suppressed entirely while
+the managed ComfyUI instance is active (comfy_target == "own" and installed;
+see managed_comfy.managed_comfy_active). A per-plugin value set before the
+user ever touched comfy_target, or before switching it back to "own", reads
+identically to a deliberate override and used to silently defeat managed
+routing (NEW-COMFY-TARGET-OWN-DEFEATED-BY-STALE-PERPLUGIN-FIELD). Only
+comfy_target == "user" lets any of these three fields win - "own" means own.
+"""
 
 from __future__ import annotations
 
@@ -83,7 +102,9 @@ def _comfy_free_vram(s: dict) -> bool:
 
 
 def _comfy_model_slots(s: dict) -> Optional[list]:
-    """Every model-file slot in the ACTIVE image workflow, resolved against the currently-reachable ComfyUI."""
+    """Every model-file slot in the ACTIVE image workflow, resolved against the
+    currently-reachable ComfyUI. None when ComfyUI is not reachable (the caller
+    shows a clear message instead of a silently-empty picker)."""
     import json
     try:
         workflow = json.loads(_comfy.workflow_path().read_text(encoding="utf-8"))
@@ -93,13 +114,31 @@ def _comfy_model_slots(s: dict) -> Optional[list]:
 
 
 def _comfy_model_roles(s: dict, roles: list) -> dict:
-    """This plugin's model-picker payload: the live ComfyUI slots joined to the localm registry's ``model_type`` slice and to the roles the plugin declared through ``host.register_model_role``."""
+    """This plugin's model-picker payload: the live ComfyUI slots joined to the
+    localm registry's ``model_type`` slice and to the roles the plugin declared
+    through ``host.register_model_role``.
+
+    The backend owns this seam (rather than the route) because resolving which
+    models exist IS backend work: a future non-ComfyUI backend for this media
+    type implements this one function and the route, the GUI and the role
+    contract are unchanged.
+
+    One ComfyUI round trip and one registry read per call - both blocking, so the
+    caller runs it off the event loop exactly as it already does for
+    ``_comfy_model_slots``."""
     from localm.plugins import media_roles
     return media_roles.resolve_model_roles(_comfy_model_slots(s), roles)
 
 
 def _comfy_lora_options(s: dict) -> Optional[list]:
-    """LoRA filenames the live ComfyUI currently has installed (``LoraLoader``'s ``lora_name`` combo from ``/object_info``)."""
+    """LoRA filenames the live ComfyUI currently has installed (``LoraLoader``'s
+    ``lora_name`` combo from ``/object_info``). Independent of
+    ``_comfy_model_slots`` / ``workflow_model_slots``, which only walks nodes
+    already PRESENT in the active workflow JSON - a LoraLoader node is not one
+    of them, since the image plugin injects it fresh at generation time only
+    when a LoRA is actually requested (see comfy.py's ``_build_image_workflow``).
+    None when ComfyUI is not reachable, matching ``_comfy_model_slots``'s
+    reachability contract."""
     info = _comfy.comfy_object_info(s["api_url"])
     if info is None:
         return None

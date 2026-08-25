@@ -1,5 +1,17 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Tests for the localm agent-memory layer (localm/memory)."""
+"""
+Tests for the localm agent-memory layer (localm/memory).
+
+Covers the DONE oracle for the library: persistence, recency+importance+relevance
+retrieval (incl. the optional embedder-agnostic vector blend), the ADD/UPDATE/
+DELETE/NO_OP consolidation loop, decay/forgetting, privacy gating (writes skipped +
+the model never called), (principal, agent, scope_key) isolation, poisoning
+resistance, and empty/edge/adversarial inputs.
+
+Stores are constructed with ``root=tmp_path`` so no test touches a developer's
+real data dir; privacy mode is driven by the LOCALM_MODE env var (which
+``effective_mode`` honours first), so no config file is needed.
+"""
 
 from __future__ import annotations
 
@@ -62,13 +74,14 @@ def test_corrupt_jsonl_line_skipped(tmp_path, caplog):
     with caplog.at_level(logging.WARNING, logger="localm"):
         s2 = _store(tmp_path)
     assert {r.text for r in s2.all()} == {"good fact one", "good fact two"}
-    # LM-DA-002: the skip is surfaced (the next save erases the line), never
-    # silent. The blank line is deliberate formatting, not counted.
+    # The skip is surfaced (the next save erases the line), never silent. The
+    # blank line is deliberate formatting, not counted.
     assert "skipped 1 unparseable line" in caplog.text
 
 
 def test_non_object_json_line_skipped_with_warning(tmp_path, caplog):
-    """A line that is valid JSON but not a record object (e.g. a list) is as unusable as garbage; it must be skipped WITH the warning, not crash load."""
+    """A line that is valid JSON but not a record object (e.g. a list) is as
+    unusable as garbage; it must be skipped WITH the warning, not crash load."""
     s = _store(tmp_path)
     s.add(_rec("keep me"))
     with open(s.path, "a", encoding="utf-8") as fh:
@@ -88,7 +101,8 @@ def test_clean_load_logs_no_skip_warning(tmp_path, caplog):
 
 
 def test_save_stamps_format_version(tmp_path):
-    """LM-DA-002: every saved line carries the JSONL format version so a future breaking schema change has a migration hook instead of a silent skip."""
+    """LM-DA-002: every saved line carries the JSONL format version so a future
+    breaking schema change has a migration hook instead of a silent skip."""
     s = _store(tmp_path)
     s.add(_rec("alpha"))
     s.add(_rec("beta"))
@@ -99,7 +113,8 @@ def test_save_stamps_format_version(tmp_path):
 
 
 def test_unversioned_legacy_file_loads_and_upgrades(tmp_path):
-    """Files written before the per-line 'v' tag load unchanged (backward compat), and the next save stamps every line with the current version."""
+    """Files written before the per-line "v" tag load unchanged (backward
+    compat), and the next save stamps every line with the current version."""
     s = _store(tmp_path)
     s.path.parent.mkdir(parents=True, exist_ok=True)
     s.path.write_text(json.dumps({"id": "abc1", "text": "legacy fact"}) + "\n",
@@ -151,7 +166,8 @@ def test_recall_empty_query_or_store(tmp_path):
 
 
 def test_blend_beats_bare_topk(tmp_path):
-    """A recent + important memory outranks a stale + trivial one that a bare lexical top-k would rank higher (blend != bare BM25)."""
+    """A recent + important memory outranks a stale + trivial one that a bare
+    lexical top-k would rank higher (blend != bare BM25)."""
     s = _store(tmp_path)
     _seed_many(s, TINY_CORPUS)          # ensure relevance signal is active
     # M2: keyword-stuffed junk (high BM25) but stale + trivial + synth.
@@ -170,7 +186,9 @@ def test_blend_beats_bare_topk(tmp_path):
 
 
 def test_tiny_corpus_ranks_by_recency_importance(tmp_path):
-    """Below TINY_CORPUS, relevance is skipped; among records that CLEAR the relevance gate (here both share the query's content words), recency+importance decide the order."""
+    """Below TINY_CORPUS, relevance is skipped; among records that CLEAR the
+    relevance gate (here both share the query's content words), recency+importance
+    decide the order."""
     s = _store(tmp_path)
     old = s.add(_rec("project atlas shipped last spring", importance=0.3,
                      last_used=NOW - 20 * DAY))
@@ -182,7 +200,8 @@ def test_tiny_corpus_ranks_by_recency_importance(tmp_path):
 
 
 def test_all_zero_scores_returns_empty(tmp_path):
-    """A non-empty store of stale, unimportant, off-topic memories yields nothing (raw recency decay lets everything fall below the floor)."""
+    """A non-empty store of stale, unimportant, off-topic memories yields nothing
+    (raw recency decay lets everything fall below the floor)."""
     s = _store(tmp_path)
     for i in range(10):
         s.add(_rec(f"zzz archived note {i}", importance=0.0,
@@ -259,7 +278,9 @@ def test_vector_dim_mismatch_degrades(tmp_path):
 
 
 def _kw_embed(texts):
-    """Keyword stub where 'alpha' and 'beta' share an axis (so a 'beta' record is cosine-identical to an 'alpha' query) and 'delta' is a separate axis."""
+    """Keyword stub where 'alpha' and 'beta' share an axis (so a 'beta' record is
+    cosine-identical to an 'alpha' query) and 'delta' is a separate axis. Lets a test
+    separate the SEMANTIC signal from the LEXICAL one."""
     out = []
     for t in texts:
         lo = t.lower()
@@ -270,10 +291,8 @@ def _kw_embed(texts):
 
 def test_relevance_weights_semantic_over_lexical(tmp_path):
     # A record that matches SEMANTICALLY (cosine) but shares no query token must
-    # out-rank one that only matches LEXICALLY. The blend weights cosine above BM25
-    # when vectors are present (REL_LEX_SHARE < 0.5); this tuning tripled recall@1 in
-    # the memory benchmark. Under the old 50/50 blend the lexical-only record won, so
-    # this guards the change.
+    # out-rank one that only matches LEXICALLY: the blend weights cosine above
+    # BM25 when vectors are present (REL_LEX_SHARE < 0.5).
     s = _store(tmp_path)
     for i in range(TINY_CORPUS):        # >= TINY_CORPUS so the relevance signal is used
         s.add(_rec(f"unrelated filler note {i}", importance=0.5), embed_fn=_kw_embed)
@@ -297,7 +316,7 @@ def test_user_facts_exempt_from_recency_decay(tmp_path):
                    importance=0.5, last_used=NOW - i * 60))
     # All share the query's content word ("language") so all clear the relevance
     # gate; < TINY_CORPUS -> ranked by recency + importance, where the user fact's
-    # recency exemption (the fix under test) must keep it on top of recent synth.
+    # recency exemption keeps it on top of recent synth.
     top = s.recall("language", k=6, now=NOW)
     assert top and top[0].source == "user"
 
@@ -402,7 +421,9 @@ def test_consolidation_idempotent(tmp_path):
 
 
 def test_consolidation_idempotent_with_embedder(tmp_path):
-    """Idempotency holds even when an embed_fn is supplied: matching uses difflib on text (not vectors), and store.replace keeps record ids stable + re-embeds deterministically, so a re-run makes no new records."""
+    """Idempotency holds even when an embed_fn is supplied: matching uses difflib on
+    text (not vectors), and store.replace keeps record ids stable + re-embeds
+    deterministically, so a re-run makes no new records."""
     s = _store(tmp_path)
     c = _extract_stub([{"fact": "User is a data scientist", "confidence": 0.9},
                        {"fact": "User uses pandas daily", "confidence": 0.8}])
@@ -581,24 +602,15 @@ def test_neutralise_hoist_matches_coder_reexport():
 # --------------------------------------------------------------------------
 # "my friend X" IS NOT A QUESTION ABOUT THE ASKER.
 #
-# Reported live 2026-08-14. "Greet my friend Memo, who is watching right now"
-# was classified self-referential on the bare "my". With vector coverage degraded
-# the trusted-fact fallback then promoted TRUST_FALLBACK_K profile facts by
-# IMPORTANCE, and the model answered by recalling a person named Fishy from a
-# conversation days earlier. The log for that exact turn:
-#
-#     memory recall: injected 2 record(s), degrade=low_coverage
-#
-# i.e. exactly the fallback count, none of it related to the request.
-#
-# The fallback itself is right (REG-590: profile facts must survive a degraded
-# semantic signal). What was wrong is the discriminator letting a query ABOUT
-# SOMEONE ELSE through it.
+# A bare "my" must not classify a query about someone else as self-referential.
+# With vector coverage degraded, the trusted-fact fallback promotes
+# TRUST_FALLBACK_K profile facts by IMPORTANCE, so a query about someone else
+# reaching it comes back with unrelated profile facts.
 
 def test_a_possessive_naming_another_person_is_not_self_referential():
     from localm.memory.store import _is_self_referential as sr
 
-    # The reported case, and its family. These are about the OTHER person.
+    # These queries are about the OTHER person, not the asker.
     assert sr("Greet my friend Memo, who is watching right now") is False
     assert sr("say hello to my colleague") is False
     assert sr("my friend likes fish") is False
@@ -606,7 +618,8 @@ def test_a_possessive_naming_another_person_is_not_self_referential():
 
 
 def test_first_person_questions_are_still_self_referential():
-    """REG-590's contract, which the fix above must not break: the user's own profile facts still have to survive a degraded semantic signal."""
+    """REG-590's contract, which the fix above must not break: the user's own
+    profile facts still have to survive a degraded semantic signal."""
     from localm.memory.store import _is_self_referential as sr
 
     assert sr("what is my name") is True
@@ -629,21 +642,20 @@ def test_a_query_about_the_world_is_still_not_self_referential():
 # A LEXICAL HIT SAYS WHAT THE QUERY IS ABOUT. Do not pad cosine-only records
 # in behind it.
 #
-# Reported 2026-08-14: "Greet my friend Memo, who is watching right now" also
-# injected "User once discussed a person named Fishy", which measured cos=0.5584
-# against a REL_COS_MIN of 0.55 - over the floor by 0.008.
-#
-# WHY NOT JUST RAISE THE FLOOR: measured on real bge-small over 16 query/record
-# pairs, no absolute threshold separates the two sets. The lowest TRUE pair was
-# 0.4480 ("what do I do for work" vs "User works on localm"); the highest FALSE
-# pair was 0.5965 ("what is my name" vs "User has a friend called Memo"). Raising
-# REL_COS_MIN drops a genuine hit before it drops a wrong one, and a
-# relative-to-best gate fails too (that false pair is 91% of its query's best).
-# Lexical overlap over the same 16 pairs: FP=0. It is never wrong; it just misses
-# paraphrases, which is what cosine is for.
+# No absolute cosine threshold separates the two sets: measured on real
+# bge-small over 16 query/record pairs, the lowest TRUE pair was 0.4480 and the
+# highest FALSE pair 0.5965, and a relative-to-best gate fails too (that false
+# pair is 91% of its query's best). Lexical overlap over the same 16 pairs has
+# no false positives; it only misses paraphrases, which is what cosine is for.
 
 def _cos_embed(query, cosines):
-    """An embed_fn where *query* sits at angle 0 and each record sits at the angle whose cosine to it is the MEASURED value."""
+    """An embed_fn where *query* sits at angle 0 and each record sits at the angle
+    whose cosine to it is the MEASURED value.
+
+    Keyed to ONE query on purpose: cos(a, b) here is the cosine of the angle
+    DIFFERENCE, so a table shared across several queries silently produces
+    similarities nobody chose. Anything unlisted is far away (0.05).
+    """
     import math
 
     def embed(texts):
@@ -658,7 +670,7 @@ def _cos_embed(query, cosines):
     return embed
 
 
-# Measured on real bge-small, 2026-08-14, for these exact strings.
+# Cosine values measured on real bge-small for these exact strings.
 _GREET = "Greet my friend Memo, who is watching right now"
 _GREET_COS = {
     "user has a friend called memo": 0.7586,
@@ -689,7 +701,8 @@ def test_a_marginal_cosine_record_does_not_ride_in_behind_a_lexical_hit(tmp_path
 
 
 def test_cosine_still_carries_a_paraphrase_when_nothing_matches_lexically(tmp_path):
-    """The bar must not become 'lexical only': with NO lexical hit at all the semantic gate still answers, which is REG-590's contract."""
+    """The bar must not become 'lexical only': with NO lexical hit at all the
+    semantic gate still answers, which is REG-590's contract."""
     q = "what is my name"
     embed = _cos_embed(q, {"user is called sam": 0.6526})
     st = _store_with(tmp_path, ["User is called Sam"], embed)

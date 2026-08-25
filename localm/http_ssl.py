@@ -1,5 +1,41 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""One verified HTTPS opener for localm's OUTBOUND clients."""
+"""One verified HTTPS opener for localm's OUTBOUND clients.
+
+localm reaches out over HTTPS in a few places: `setup-llama` downloads the native
+llama.cpp runtime from GitHub releases, `localm update` checks for and downloads a
+new build (proxy + release CDN), the issues list reads the proxy, and a bug report
+is uploaded to it. They all share :func:`verified_urlopen` so every outbound client
+verifies the SAME way and none can silently regress on its own.
+
+Verification order, and why:
+
+1. The platform's NATIVE certificate store first (``ssl.create_default_context()``
+   with no override - on Windows this is the ROOT store, on Linux/macOS the
+   system trust store). This is the SAME trust a browser already uses, and the
+   same store an IT department provisions a corporate/security-product TLS-
+   intercepting proxy's root into - so a managed machine behind one of those
+   verifies correctly on the very first attempt, with no flag and no retry ever
+   visible. This matches uv's own ``--system-certs``/``UV_SYSTEM_CERTS`` (see
+   setup.bat / setup.sh), so every outbound client in this project makes the
+   same trust choice.
+
+2. certifi's bundled Mozilla root list, ONLY if step 1 fails with a certificate
+   verification error specifically. This rescues the one case native-store-first
+   does not cover: a freshly-imaged Windows box whose ROOT store has not yet
+   cached a legitimate CA chain - Windows' OpenSSL reads only the store's current
+   snapshot and does not trigger Windows' on-demand root-certificate auto-update
+   (only SChannel / the browser does), so ``CERTIFICATE_VERIFY_FAILED`` ("unable
+   to get local issuer certificate") can happen even though a browser fetches the
+   same URL fine. certifi carries the full bundle in-process, independent of
+   the machine's cert-store state.
+
+Any OTHER failure (HTTP error, timeout, DNS, or a certificate failure that survives
+BOTH attempts) propagates unchanged - never silently swallowed (AGENTS.md rule 5).
+
+Verifying the FIRST hop is only half of it, which is why :class:`HttpsOnlyRedirect`
+below is installed by default: see its docstring for the downgrade a verified
+opener otherwise follows without complaint.
+"""
 
 from __future__ import annotations
 
@@ -13,11 +49,36 @@ from localm.debuglog import logger
 
 
 class RedirectDowngradeRefused(urllib.error.URLError):
-    """An outbound request was redirected off HTTPS and localm refused to follow."""
+    """An outbound request was redirected off HTTPS and localm refused to follow.
+
+    A ``URLError`` subclass ON PURPOSE: every outbound caller in this project
+    already funnels ``URLError`` either into its own domain error (interpolating
+    the reason, so the refusal is quoted to the user) or into a LOGGED
+    best-effort fallback. Checked call site by call site, not assumed. So a
+    refusal is reported wherever it happens, needs no new handling to be
+    visible, and can never read as a success. Two sites catch it explicitly
+    ahead of that funnel - setup_llama._download and updater.download - because
+    their generic transport wording would misdescribe it as a network fault.
+    """
 
 
 class HttpsOnlyRedirect(urllib.request.HTTPRedirectHandler):
-    """Refuse a redirect that leaves HTTPS for a weaker scheme."""
+    """Refuse a redirect that leaves HTTPS for a weaker scheme.
+
+    urllib's own redirect handler follows up to 10 hops and, in
+    ``http_error_302``, admits any target whose scheme is in
+    ``('http', 'https', 'ftp', '')`` - so a plain ``http://`` Location IS
+    followed, in cleartext, off a connection the caller verified. Verifying the
+    first hop's certificate says nothing about the hops after it. That is what
+    this closes, for every :func:`verified_urlopen` caller at once rather than
+    one guard per client (hoisted here out of updater.py, which had the only one).
+
+    The rule is DOWNGRADE, not https-only: the target scheme is compared to the
+    scheme of the request being redirected, so each hop is judged on its own. A
+    caller that legitimately started on plain http (a user-configured http
+    endpoint) has no confidentiality left to lose and keeps working; a caller on
+    https can never be walked off it.
+    """
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         # newurl is already absolute: http_error_302 urljoins it before calling us.
@@ -38,7 +99,16 @@ def _open(req, timeout, context, handlers):
 
 
 def _with_redirect_guard(handlers: Sequence[type]) -> tuple:
-    """*handlers* with :class:`HttpsOnlyRedirect` prepended, unless the caller already supplied a redirect policy of its own."""
+    """*handlers* with :class:`HttpsOnlyRedirect` prepended, unless the caller
+    already supplied a redirect policy of its own.
+
+    That is the ONLY opt-out, and it is deliberately the explicit one: a caller
+    states its policy by passing a handler (comfy_client's ``_RefuseRedirect``
+    refuses every hop outright), and build_opener drops the stdlib default
+    whenever a subclass of it is passed. There is no argument, and no empty
+    ``handlers=()``, that reaches urllib's permissive default - which is exactly
+    how the six unguarded call sites came to have no guard at all.
+    """
     handlers = tuple(handlers)
     # Accepts a class or an instance, mirroring build_opener's own test.
     if any(issubclass(h, urllib.request.HTTPRedirectHandler) if isinstance(h, type)
@@ -50,7 +120,16 @@ def _with_redirect_guard(handlers: Sequence[type]) -> tuple:
 
 def verified_urlopen(req, *, timeout: Optional[float] = None,
                       handlers: Sequence[type] = ()):
-    """Open *req* verifying TLS as described in the module docstring: the platform's native certificate store first, falling back to certifi's bundled root list only on a certificate-verification failure specifically."""
+    """Open *req* verifying TLS as described in the module docstring: the
+    platform's native certificate store first, falling back to certifi's
+    bundled root list only on a certificate-verification failure specifically.
+
+    A redirect off HTTPS is refused (:class:`HttpsOnlyRedirect`, raising
+    :class:`RedirectDowngradeRefused`) unless *handlers* carries a redirect
+    policy of its own. *handlers* are extra ``urllib.request`` handler classes
+    installed ahead of the HTTPS handler. Returns whatever the underlying open
+    call returns (a context-manager-compatible response).
+    """
     handlers = _with_redirect_guard(handlers)
     try:
         return _open(req, timeout, ssl.create_default_context(), handlers)

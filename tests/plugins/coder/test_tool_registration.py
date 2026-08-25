@@ -1,5 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Tests for localm.plugins.coder.tool_registration.register_foreign_tool - the shared namespacing/collision-handling/description-neutralisation/insertion helper extracted from mcp.py's register_mcp_tools and plugin_tools.py's register_plugin_tools (CF-7)."""
+"""Tests for localm.plugins.coder.tool_registration.register_foreign_tool -
+the shared namespacing/collision-handling/description-neutralisation/insertion
+helper extracted from mcp.py's register_mcp_tools and plugin_tools.py's
+register_plugin_tools (CF-7). The two adapters themselves stay separate
+(different transports); this only covers the shared insertion mechanics.
+"""
 
 from unittest.mock import patch
 

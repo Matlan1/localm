@@ -22,7 +22,9 @@ _warned_bad_config: set = set()
 
 
 def _warn_unconfigured_home(path: Path) -> None:
-    """Surface (once) that no data dir was configured, so a missing / lost config is VISIBLE instead of silently masked (do-not-hide-problems). stderr, not the logger: this runs at import time before logging is wired."""
+    """Surface (once) that no data dir was configured, so a missing / lost config
+    is VISIBLE instead of silently masked (do-not-hide-problems). stderr, not the
+    logger: this runs at import time before logging is wired."""
     # setup.bat / setup.sh run setup-llama before the data dir is chosen and set
     # LOCALM_SETUP=1 to suppress this warning during that phase. The only
     # suppressor; it must never be set outside the setup scripts.
@@ -39,7 +41,23 @@ def _warn_unconfigured_home(path: Path) -> None:
 
 
 def _detect_home() -> Path:
-    """Resolve the localm data directory (config, registry, models, logs, sessions, generated images/music)."""
+    """
+    Resolve the localm data directory (config, registry, models, logs,
+    sessions, generated images/music).
+
+    Priority - each install is self-contained and agnostic of others:
+      1. LOCALM_HOME env var (explicit override / custom install location)
+      2. Portable mode: a checkout carrying its own data - when this package
+         sits in a source tree (pyproject.toml next to it) that contains a
+         ``localm-home.cfg`` (one line: the data path) or a ``home``
+         directory, that wins.  Created by setup.bat's "keep data in this
+         folder" option.
+      3. Contained fallback: ``./home`` INSIDE the install, with a stderr
+         warning, when NOTHING is configured. Reaching here is a special case
+         (setup never ran, or the config/marker was lost), not a normal default -
+         so it is surfaced, and it NEVER silently falls back to a shared
+         ~/.localm outside the install.
+    """
     env = os.environ.get("LOCALM_HOME", "").strip()
     if env:
         return Path(env).expanduser()
@@ -77,22 +95,64 @@ def home_dir() -> Path:
 
 
 def cache_dir() -> Path:
-    """Root for caches localm's OWN subprocesses write (rule 4: self-contained)."""
+    """Root for caches localm's OWN subprocesses write (rule 4: self-contained).
+
+    Anything localm downloads on the way to installing something - pip's wheel/http
+    cache while provisioning the managed ComfyUI venv, the Whisper STT model - belongs
+    INSIDE the data dir, not in the user's home profile. Left to their defaults those
+    tools cache to a per-user location (under ``%LOCALAPPDATA%`` on Windows,
+    ``~/.cache`` on POSIX) that has nothing to do with localm: measured live, the
+    managed-ComfyUI provisioning path alone had put ~11 GB of pip cache there, outside
+    the data dir, without ever asking or telling the user.
+
+    Derived from ``home_dir()`` (never a hardcoded path, rule 1), so the cache follows
+    LOCALM_HOME: point the data dir somewhere and localm's caches go with it. This is
+    deliberately NOT conditional on an ambient ``PIP_CACHE_DIR`` / ``HF_HUB_CACHE``:
+    containment is a guarantee of where localm's own bytes land, and a guarantee that
+    any unrelated environment variable can silently switch off is not one. LOCALM_HOME
+    is the knob."""
     return home_dir() / "cache"
 
 
 def pip_cache_dir() -> Path:
-    """localm's OWN pip cache, inside the data dir (rule 4: self-contained)."""
+    """localm's OWN pip cache, inside the data dir (rule 4: self-contained).
+
+    Shared by every pip subprocess localm drives itself - plugin-extra installs
+    (plugins/deps.py), the native runtime wheel (setup_llama.py), and managed-ComfyUI
+    provisioning (media/managed_comfy_provision.py delegates here) - so wheels are
+    cached once, contained, and removed with the data dir. Left unset, pip caches to a
+    per-user location OUTSIDE the data dir (``%LOCALAPPDATA%\\pip\\cache`` on Windows,
+    ``~/.cache/pip`` on POSIX); measured live, provisioning alone had put multi-GB
+    there. A cache (not ``--no-cache-dir``) because those wheels are multi-GB and a
+    re-run would otherwise re-download all of it; the cost is disk INSIDE the data dir,
+    where it is visible and reclaimed with it."""
     return cache_dir() / "pip"
 
 
 def uv_cache_dir() -> Path:
-    """localm's OWN uv cache, inside the data dir (rule 4: self-contained)."""
+    """localm's OWN uv cache, inside the data dir (rule 4: self-contained).
+
+    uv keeps a SEPARATE cache from pip (its own ``UV_CACHE_DIR``, default
+    ``%LOCALAPPDATA%\\uv\\cache`` on Windows / ``~/.cache/uv`` on POSIX). localm's
+    installers try ``uv pip install`` BEFORE falling back to ``python -m pip``, so uv's
+    cache has to be pinned too or the uv path silently leaks GBs outside the data dir
+    exactly as pip would. Same location root as pip's (``cache_dir()``), a sibling
+    subdir since the two tools' cache formats differ."""
     return cache_dir() / "uv"
 
 
 def contained_pip_env(base: Optional[dict] = None) -> dict:
-    """A subprocess environment with pip's AND uv's caches pinned inside the data dir."""
+    """A subprocess environment with pip's AND uv's caches pinned inside the data dir.
+
+    *base* defaults to a copy of the current process environment. localm's package
+    installers (plugins/deps.py, setup_llama.py) shell out to ``uv pip install`` first
+    and ``python -m pip install`` second; BOTH tools cache to a per-user location
+    outside the data dir when left to their defaults, so BOTH ``PIP_CACHE_DIR`` and
+    ``UV_CACHE_DIR`` are set here - pinning only one still leaks via the other. This
+    OVERRIDES any ambient value on purpose (see ``cache_dir()``): containment a stray
+    environment variable can silently switch off is not a guarantee. Callers pass the
+    returned dict as ``subprocess``'s ``env=``; a subprocess that runs neither tool
+    simply ignores the two extra vars, so it is safe to use everywhere."""
     env = dict(os.environ if base is None else base)
     env["PIP_CACHE_DIR"] = str(pip_cache_dir())
     env["UV_CACHE_DIR"] = str(uv_cache_dir())
@@ -508,7 +568,27 @@ PORT_RANGE = (8642, 8741)
 
 
 def port_in_use(port: int, host: str = "127.0.0.1") -> bool:
-    """True when something is already listening on host:port."""
+    """True when something is already listening on host:port.
+
+    Resolves *host* first instead of assuming a family. The old shape was a bare
+    ``socket.socket()``, which is AF_INET, so ``connect_ex(("::1", port))`` raised
+    ``socket.gaierror`` before it ever probed anything - and nothing between here
+    and the top-level CLI handler caught it, so ``localm gui -H ::`` died at
+    startup with a bug-report offer (NEW-IPV6-HOST-CRASH). Any IPv6 host hit it.
+
+    A name that resolves to several addresses (``localhost`` on a dual-stack box
+    is both ``::1`` and ``127.0.0.1``) is in use when ANY of them answers. That is
+    the conservative direction on purpose: reporting a busy port free hands the
+    bind a collision, while reporting a free port busy only moves us to the next
+    one in the range.
+
+    An unresolvable host returns False rather than raising. This function answers
+    "is the port taken", and it is not the right place to fail a bad address: the
+    caller goes on to bind it, and the bind produces the accurate error naming the
+    real problem. A config-driven bind has already been screened by
+    ``cli._bind_preflight_error`` before reaching here. The resolution failure is
+    logged rather than dropped, so it is never invisible.
+    """
     try:
         infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
     except OSError as e:
@@ -531,7 +611,15 @@ def port_in_use(port: int, host: str = "127.0.0.1") -> bool:
 
 
 class PortInUseError(RuntimeError):
-    """An explicitly requested port is already in use."""
+    """An explicitly requested port is already in use.
+
+    An explicit ``--port`` is honored exactly or not at all: if it is busy,
+    ``pick_port`` raises this instead of quietly binding a different port. The old
+    fallback scanned from ``PORT_RANGE[0]``, so a deliberately chosen high port
+    that was busy landed back on the shared default 8642 - the opposite of what a
+    user who picked a specific port to avoid a collision asked for. The default (no
+    ``--port``) still auto-bumps through the range; only an explicit request refuses.
+    """
 
     def __init__(self, port: int):
         self.port = port
@@ -539,7 +627,18 @@ class PortInUseError(RuntimeError):
 
 
 def pick_port(requested: Optional[int] = None, host: str = "127.0.0.1"):
-    """Resolve the port to serve on."""
+    """
+    Resolve the port to serve on. Returns ``(port, default_port_was_busy)``.
+
+    An explicit ``requested`` port is honored exactly: returned if free, otherwise
+    :class:`PortInUseError` is raised. It is never silently relocated to a
+    different port (see that class for why).
+
+    With no explicit port, uses the configured default (``config['port']``, 8642)
+    and, if that is busy, walks localm's range (8642-8741) for the next free port,
+    falling back to an OS-assigned port. The returned flag is True only in that
+    auto-bump case; an explicit request never returns True (it raises instead).
+    """
     if requested is not None:
         if port_in_use(requested, host):
             raise PortInUseError(requested)
@@ -554,7 +653,24 @@ def pick_port(requested: Optional[int] = None, host: str = "127.0.0.1"):
 
 
 def _mkdir_or_explain(path: Path, *, is_home: bool) -> None:
-    """``path.mkdir(parents=True, exist_ok=True)`` with one user-error case turned into a clean message instead of a crash."""
+    """``path.mkdir(parents=True, exist_ok=True)`` with one user-error case turned
+    into a clean message instead of a crash.
+
+    ``parents=True`` so an explicit ``LOCALM_HOME`` a level or two below a
+    not-yet-existing folder (a fresh ``D:\\localm\\data``) is created like
+    ``mkdir -p`` rather than crashing with WinError 3 - LOCALM_HOME is an explicit
+    "keep my data here" choice, so localm creates the whole path (AUD-ENSUREDIRS).
+
+    ``exist_ok=True`` already swallows "exists AND is a directory", so a
+    ``FileExistsError`` from mkdir means exactly "exists but is NOT a directory"
+    (a regular file / symlink; WinError 183 on Windows, EEXIST on POSIX). That is
+    user misconfiguration - typically ``LOCALM_HOME`` set to a file - not a localm
+    bug, so we surface it as a ``click.ClickException``: the CLI's cross-cutting
+    handler passes those straight through (a clean "Error: ..." line, exit 1),
+    never routing them to the generic "unexpected error" + bug-report path. This
+    SURFACES the real problem with an actionable fix (do-not-hide-problems); it
+    does not swallow it. Other OSErrors (permission denied) are left to propagate
+    unchanged - they are not this case."""
     try:
         path.mkdir(parents=True, exist_ok=True)
     except FileExistsError:
@@ -576,7 +692,11 @@ def ensure_dirs() -> None:
 
 
 def _perm_warn(path: Path, why: str) -> None:
-    """Record a failed permission tightening at debug level."""
+    """Record a failed permission tightening at debug level.
+
+    Discoverable rather than silent (AGENTS.md rule 5), but not escalated: the
+    data dir is already user-scoped, so a failure here degrades defence in depth,
+    it does not expose a plaintext secret."""
     try:
         from localm.debuglog import logger
         logger.debug("could not restrict permissions on %s (%s); the data "
@@ -586,7 +706,37 @@ def _perm_warn(path: Path, why: str) -> None:
 
 
 def restrict_file_perms(path: Path, *, mode: int = 0o600) -> bool:
-    """Best-effort: restrict *path* to the current user (POSIX chmod *mode*, or Windows icacls - which grants sole full control regardless of *mode*, since ACLs do not encode POSIX bits)."""
+    """Best-effort: restrict *path* to the current user (POSIX chmod *mode*, or
+    Windows icacls - which grants sole full control regardless of *mode*, since
+    ACLs do not encode POSIX bits). Returns True when the tightening is believed
+    to have happened, False when it did not. No-op on failure - the data dir is
+    already user-scoped, so this per-file tightening is defence in depth.
+
+    *mode* defaults to 0o600 for a FILE. A caller locking down a DIRECTORY must
+    pass 0o700 (or another mode with the execute/search bit set) - 0o600 on a
+    directory removes POSIX traversal (x), so every file inside becomes
+    unreachable by path even though it still lists in a directory scan.
+
+    The return value exists so a caller doing the atomic temp+replace dance can
+    restrict the TEMP file (which already holds the whole payload) and skip a
+    second call on the destination in the happy path. MEASURED on Windows:
+    os.replace carries the source's ACL onto the destination, overwriting the
+    destination's inherited one, so one call is normally enough; POSIX rename
+    likewise carries the source's mode. Callers should still retry on the
+    destination when this returns False, so a failed first attempt is not the
+    single point of failure for a security property.
+
+    Lives here, not in auth.py, because THREE files need it and only one used to
+    get it (CodeQL 88). ``auth.key`` holds the owner key in PLAINTEXT and got the
+    full treatment; ``sessions.json`` and ``jobs.json`` hold the SAME sha256
+    digest the keystore stores (``http_server.principal_id`` returns
+    ``key_hash``) and had a POSIX-only chmod or nothing at all - so on Windows
+    the digest was readable by any local account while the plaintext was not.
+    An unsalted sha256 of a 256-bit ``secrets.token_urlsafe(32)`` is not
+    crackable, but a digest is still a credential artefact and the asymmetry was
+    the actual defect. One implementation so a fourth caller cannot get a
+    weaker fourth variant.
+    """
     try:
         if os.name == "posix":
             os.chmod(path, mode)
@@ -622,7 +772,71 @@ def restrict_file_perms(path: Path, *, mode: int = 0o600) -> bool:
 
 
 def atomic_write_private(path: Path, text: str) -> bool:
-    """Write *text* to *path* atomically, owner-restricted from the moment the bytes first exist on disk."""
+    """Write *text* to *path* atomically, owner-restricted from the moment the
+    bytes first exist on disk. Returns whether the PRE-RENAME restriction
+    succeeded (see below).
+
+    Every credential-bearing file in this project is written with the same
+    temp+replace dance, and each one used to create its temp with
+    ``tmp.write_text(...)`` - so on POSIX the whole payload existed at the umask
+    default (commonly 0644) between the create and the chmod that followed it.
+
+    TWO precedents are needed and NEITHER closes both halves alone:
+
+    * ``tls._write_private`` creates via ``os.open`` with an explicit 0600, so
+      the file is never briefly at the umask default. POSIX-only: on Windows the
+      mode argument writes no ACL at all.
+    * :func:`restrict_file_perms` on the TEMP file before the rename is what
+      covers Windows, and it is the contract that function documents -
+      ``os.replace`` carries the source's ACL (and POSIX mode) onto the
+      destination, MEASURED there, so the single call covers both names. The
+      destination is retried only when the first attempt failed, so one failure
+      is not the single point of failure for the property.
+
+    The pre-rename restrict also covers the one case ``os.open`` cannot: a stale
+    ``.tmp`` left by an earlier crash is opened, not created, so its existing
+    mode survives O_CREAT.
+
+    Lives HERE, next to ``restrict_file_perms``, for that function's own stated
+    reason: one implementation so a fourth caller cannot get a weaker fourth
+    variant. FIVE call sites need this exact dance (auth.key, auth.json and the
+    owner-KDF file in auth.py; sessions.json; the instance registry entry from
+    both ``register_instance`` and ``set_mode``; the GPU coordination entry),
+    and the two details below are invisible when they are wrong, so a private
+    copy per module is five chances to lose one of them.
+
+    The RETURN VALUE is the pre-rename ``ok`` every call site used to compute
+    for itself, passed through so a caller that logs its own subsystem-named
+    warning on failure (``gpu_registry.write_entry``) keeps that signal.
+
+    Best-effort by contract, unchanged: a tightening that fails is reported by
+    ``restrict_file_perms`` (which warns) and retried, never raised. Writing a
+    credential must not become conditional on a permissions nicety.
+
+    Uses a BARE ``os.replace``, deliberately, not :func:`_replace_atomic`. That
+    helper's transient-sharing-violation retry sleeps up to ~1 s, and two of
+    these callers (``sessions._save``, reached from session_login, create_key_ep
+    and _gui_index) run ON THE ASYNCIO EVENT LOOP. Every call site here used a
+    bare ``os.replace`` before this function existed, so keeping it preserves
+    their behaviour exactly; adding the retry would be a separate change with
+    its own latency argument to make.
+
+    THE BYTES ON DISK ARE UNCHANGED by this, deliberately - a permissions fix
+    must not quietly rewrite every credential file. Do NOT "correct" this by
+    adding ``os.O_BINARY``. MEASURED on Windows: ``os.open`` without it opens in
+    TEXT mode, so ``os.write`` expands ``\\n`` to ``\\r\\n`` exactly as the
+    ``Path.write_text`` this replaced did, and the resulting file is
+    byte-identical on both platforms. Adding O_BINARY would silently switch
+    every Windows install's credential and registry files to LF on the next
+    write.
+
+    The write LOOPS because ``os.write`` is a single syscall that may consume
+    less than the whole buffer (ENOSPC after a partial write returns the short
+    count rather than raising). ``Path.write_text`` looped internally, so
+    dropping to raw ``os.write`` without this would newly allow a SILENTLY
+    truncated file - rule 5 - and a truncated keystore or session store
+    replacing a good one is the worst outcome available here. Raising leaves the
+    temp file behind and the destination untouched, which is the safe half."""
     tmp = path.with_name(path.name + ".tmp")
     data = text.encode("utf-8")
     fd = os.open(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
@@ -662,12 +876,31 @@ _REPLACE_BACKOFF_CAP = 0.1   # seconds
 
 
 def _transient_backoff(attempt: int) -> None:
-    """Sleep before the next retry, escalating linearly to a cap so a lock that lingers on a busy machine is ridden out without a hot spin."""
+    """Sleep before the next retry, escalating linearly to a cap so a lock that
+    lingers on a busy machine is ridden out without a hot spin."""
     time.sleep(min(_REPLACE_BACKOFF * (attempt + 1), _REPLACE_BACKOFF_CAP))
 
 
 def _is_transient_permission_error(e: OSError) -> bool:
-    """True when a PermissionError plausibly reflects a TRANSIENT file lock worth riding out, rather than a stable denial no retry can change."""
+    """True when a PermissionError plausibly reflects a TRANSIENT file lock worth
+    riding out, rather than a stable denial no retry can change.
+
+    Windows is the only platform with the race this retry exists for: another
+    handle (a concurrent atomic replace, antivirus, the indexer, Windows Search)
+    holds the file open for microseconds and open()/os.replace raises
+    PermissionError - ERROR_SHARING_VIOLATION (32), or ERROR_ACCESS_DENIED (5)
+    when a replace collides with an AV lock. A genuine Windows ACL denial also
+    surfaces as winerror 5 and is indistinguishable from the AV case at this
+    layer, so Windows keeps retrying it: ~1s to be sure is the documented,
+    accepted trade there.
+
+    POSIX has no such race. open() raises EACCES/EPERM only when the mode or ACL
+    genuinely denies us (a mode-000 or root-owned file left by an earlier sudo
+    run), which is a stable state - the retry can never succeed and just burns
+    ~1s of time.sleep while holding _io_lock, which serializes config access
+    process-wide, including the per-request auth path (auth.require_auth ->
+    load_config). So on POSIX we fall back at once (the failure is still
+    surfaced by the caller, never hidden - it just is not retried)."""
     if os.name != "nt":
         return False
     # winerror is absent only if this was not raised by the Windows layer at all
@@ -677,7 +910,20 @@ def _is_transient_permission_error(e: OSError) -> bool:
 
 
 def _replace_atomic(src: Path, dst: Path) -> None:
-    """``os.replace(src, dst)`` with a bounded retry on a transient Windows sharing violation."""
+    """``os.replace(src, dst)`` with a bounded retry on a transient Windows
+    sharing violation.
+
+    os.replace IS atomic, but on Windows it raises PermissionError (WinError 5)
+    when another handle has *dst* open at that instant: a second localm process
+    reading the file, an antivirus / indexer / backup scanner, Windows Search.
+    That window is short, so retrying briefly rides it out instead of crashing
+    the save. A genuine, persistent permission problem still surfaces (re-raised
+    after the last attempt) - we retry the transient race, we never hide a real
+    failure. On POSIX os.replace does not hit this, so the loop succeeds first
+    try; if it does raise there it is a STABLE denial (see
+    _is_transient_permission_error), re-raised at once rather than stalling ~1s
+    under _io_lock AND the cross-process lock for a retry that cannot succeed
+    (REG-566)."""
     for attempt in range(_REPLACE_RETRIES):
         try:
             os.replace(src, dst)
@@ -689,7 +935,23 @@ def _replace_atomic(src: Path, dst: Path) -> None:
 
 
 def _atomic_write_json(path: Path, data) -> None:
-    """Write *data* as JSON to *path* atomically (temp file + os.replace)."""
+    """Write *data* as JSON to *path* atomically (temp file + os.replace).
+
+    Keeps a one-step .bak of the previous good file so a corrupt read can
+    recover. os.replace is atomic on Windows and POSIX when src/dst share a
+    filesystem, which they do (same directory); _replace_atomic additionally
+    rides out the transient Windows sharing violation a concurrent reader causes.
+
+    The temp file gets a UNIQUE per-write name (mkstemp), NOT a fixed ``<name>.tmp``.
+    Two localm processes writing the same file concurrently (a CLI ``pull``/``config``
+    alongside the running GUI, or two CLI invocations) would otherwise both open the
+    SAME ``<name>.tmp`` and collide - one save then crashes when the other's replace
+    has already consumed the shared temp (Windows WinError 2/32), or on POSIX their
+    writes interleave into a torn temp. ``_io_lock`` only serialises writers WITHIN
+    one process; _replace_atomic's retry rides out a locked DESTINATION but not two
+    writers sharing one temp SOURCE. A unique temp per writer removes the collision
+    at the source, so cross-process contention degrades to the documented
+    last-writer-wins on the final file, with no crash or torn write."""
     fd, tmp_name = tempfile.mkstemp(dir=str(path.parent),
                                     prefix=path.name + ".", suffix=".tmp")
     tmp = Path(tmp_name)
@@ -721,16 +983,35 @@ def _atomic_write_json(path: Path, data) -> None:
 
 
 class ConfigUnreadable(RuntimeError):
-    """A config/registry file EXISTS but could not be read, so a read-modify-write must not proceed (it would persist defaults over the user's real settings)."""
+    """A config/registry file EXISTS but could not be read, so a
+    read-modify-write must not proceed (it would persist defaults over the
+    user's real settings). Raised by update_config / update_registry only."""
 
 
 def _read_json(path: Path, default):
-    """Read JSON from *path*, falling back to its .bak then *default* on any corruption - a damaged file must never take the whole app down."""
+    """Read JSON from *path*, falling back to its .bak then *default* on any
+    corruption - a damaged file must never take the whole app down."""
     return _read_json_checked(path, default)[0]
 
 
 def _read_json_checked(path: Path, default):
-    """``(value, read_ok)``. ``read_ok`` is False ONLY when a file was PRESENT and no candidate (neither *path* nor its ``.bak``) could be read - the one state in which the returned *default* is indistinguishable from a genuinely absent file."""
+    """``(value, read_ok)``. ``read_ok`` is False ONLY when a file was PRESENT
+    and no candidate (neither *path* nor its ``.bak``) could be read - the one
+    state in which the returned *default* is indistinguishable from a genuinely
+    absent file.
+
+    Read-only consumers want that fallback and keep calling _read_json: a
+    damaged file must never take the whole app down, and they fail safe on
+    defaults (auth, netpolicy, netname and updater all rely on this). A
+    read-modify-write MUST NOT, because writing the default back is what
+    silently replaces every setting the user had - see update_config /
+    update_registry, which refuse on ``read_ok`` False (AGENTS.md rule 5: a
+    step that fails must never report success).
+
+    Note the asymmetry: a file that PARSES but holds the wrong shape (a JSON
+    string, a list) is read_ok True and keeps its documented fall-back-to-
+    defaults behaviour, because nothing recoverable was stored in it. Only an
+    unreadable file can be hiding settings that still exist."""
     saw_file = False
     for candidate in (path, path.with_name(path.name + ".bak")):
         if not candidate.is_file():
@@ -764,7 +1045,25 @@ def _read_json_checked(path: Path, default):
 
 
 def instance_id() -> str:
-    """Stable, unguessable identifier for THIS install's data directory."""
+    """Stable, unguessable identifier for THIS install's data directory. Minted
+    once (uuid4 hex) on first call and reused for the life of the install by
+    persisting it to a small file under the data dir; never regenerated on a
+    normal restart. References the bare ``HOME_DIR`` global (like
+    ``ensure_dirs``), not a path frozen at import, so it always tracks whichever
+    data directory is actually configured (and so a test can point HOME_DIR
+    elsewhere via monkeypatch and this follows immediately).
+
+    Why this exists (AUD-INSTANCEID): browser localStorage is scoped by ORIGIN
+    (protocol+host+port) only - never by which backend DATA DIRECTORY is
+    actually running behind it. localm's server binds to a fixed default port
+    that only changes when it is already busy, so a fresh install opened after a
+    prior instance closed typically reuses the SAME origin, and therefore the
+    SAME localStorage bucket, as a totally unrelated data directory. The GUI
+    fetches this id from /v1/config and compares it against the id it last saw
+    for this browser origin, so it can tell "a normal restart of the same
+    install" apart from "a different install that happens to share this
+    browser" and never render, merge, or re-upload the other install's cached
+    conversation history into this one's own data directory."""
     ensure_dirs()
     path = HOME_DIR / "instance_id.txt"
     with _io_lock:
@@ -793,7 +1092,15 @@ def instance_id() -> str:
 
 
 def _merge_stored_config(cfg: dict, stored) -> None:
-    """Overlay the persisted config delta *stored* onto *cfg* (the defaults)."""
+    """Overlay the persisted config delta *stored* onto *cfg* (the defaults).
+
+    A present-but-non-dict config.json - valid JSON that is a list / string /
+    number / null, or any non-object - is ignored so it cannot corrupt the merge,
+    but that discard is SURFACED once per process (do-not-hide-problems): the
+    user's saved settings are being dropped, which must never be silent. A MISSING
+    file arrives here as the ``{}`` default (a dict) and is a normal no-op, not a
+    warning; a genuinely unparseable file already warned in _read_json and also
+    arrives as ``{}``. stderr, not the logger (see _detect_home / AUD-DETECTHOME)."""
     if isinstance(stored, dict):
         cfg.update(stored)
         return
@@ -806,7 +1113,12 @@ def _merge_stored_config(cfg: dict, stored) -> None:
 
 
 def load_config_checked() -> tuple:
-    """``(config, read_ok)``. ``read_ok`` is False ONLY when config.json (or its ``.bak``) was PRESENT and could not be read, so *config* is DEFAULT_CONFIG with nothing merged in - the same shape a genuinely absent config.json produces (see _read_json_checked)."""
+    """``(config, read_ok)``. ``read_ok`` is False ONLY when config.json (or its
+    ``.bak``) was PRESENT and could not be read, so *config* is DEFAULT_CONFIG
+    with nothing merged in - the same shape a genuinely absent config.json
+    produces (see _read_json_checked). A caller that needs to tell "no config
+    yet" apart from "a config exists but is corrupt" (e.g. bug-report
+    diagnostics) uses this instead of load_config()."""
     ensure_dirs()
     # Deep copy: a shallow .copy() shares the nested mutable defaults (e.g. the
     # "plugins" dict) with DEFAULT_CONFIG, so a caller mutating cfg["plugins"][x]
@@ -823,7 +1135,11 @@ def load_config() -> dict:
 
 
 def keep_diagnostics_enabled() -> bool:
-    """Whether to keep diagnostic traces/logs even in privacy mode."""
+    """Whether to keep diagnostic traces/logs even in privacy mode. Resolved from
+    the ``LOCALM_KEEP_DIAGNOSTICS`` env (set by the launcher checkbox / the
+    ``--keep-diagnostics`` flag, a per-run override) OR the persistent
+    ``keep_diagnostics`` config key (the WebUI Settings > Privacy toggle). So the
+    launcher and the in-app toggle both take effect. Never raises."""
     if os.environ.get("LOCALM_KEEP_DIAGNOSTICS", "").strip().lower() in (
             "1", "true", "on", "yes"):
         return True
@@ -834,13 +1150,42 @@ def keep_diagnostics_enabled() -> bool:
 
 
 def _user_delta(cfg: dict) -> dict:
-    """Reduce *cfg* to the keys that need persisting: values that differ from the CURRENT DEFAULT_CONFIG, plus keys DEFAULT_CONFIG does not know (a config written by a newer version, or version-scoped state such as plugins_first_use_done)."""
+    """Reduce *cfg* to the keys that need persisting: values that differ from
+    the CURRENT DEFAULT_CONFIG, plus keys DEFAULT_CONFIG does not know (a
+    config written by a newer version, or version-scoped state such as
+    plugins_first_use_done).
+
+    Persisting only this user-set delta is what lets a later change to a
+    DEFAULT_CONFIG value reach existing installs (LM-DA-001): an absent key
+    means "follow the default" and load_config() reconstructs it at read
+    time. The old scheme wrote the full merged dict, freezing every default
+    at its then-current value on the user's first save - commit cfa25d5's
+    max_tokens 1024 -> 4096 fix never reached a config saved before it.
+
+    Two documented consequences of delta persistence:
+      - A value set EQUAL to the current default is indistinguishable from
+        "follow the default" and is dropped, so it tracks future default
+        changes (the usual user-settings-file semantics).
+      - One-time migration ambiguity for config.json files written under the
+        old full-dump scheme: a stored key equal to the CURRENT default is
+        safely dropped on the next save, but a stored value that differs
+        (for example a frozen OLD default such as max_tokens 1024) cannot be
+        told apart from a deliberate user choice - provenance was destroyed
+        at the original save - so it is KEPT, preserving the user-choice
+        reading rather than silently changing a value the user may have set.
+    """
     return {k: v for k, v in cfg.items()
             if k not in DEFAULT_CONFIG or v != DEFAULT_CONFIG[k]}
 
 
 def save_config(cfg: dict) -> None:
-    """Persist *cfg* atomically, writing ONLY the user-set delta."""
+    """Persist *cfg* atomically, writing ONLY the user-set delta.
+
+    Callers keep passing the full defaults-merged dict (usually from
+    load_config()); keys whose value equals the current default are not
+    written to disk and are reconstructed by load_config(), so a shipped
+    default-value fix applies to existing installs. See _user_delta for the
+    exact rules and the migration of old full-dump files."""
     ensure_dirs()
     with _io_lock:
         _atomic_write_json(CONFIG_FILE, _user_delta(cfg))
@@ -869,7 +1214,10 @@ def _cross_lock_backoff(attempt: int) -> None:
 
 
 def _lock_owner_pid(raw: bytes):
-    """Extract the PID from a lock file's ``<pid>:<nonce>`` token (or a bare ``<pid>``, what a test double may write directly)."""
+    """Extract the PID from a lock file's ``<pid>:<nonce>`` token (or a bare
+    ``<pid>``, what a test double may write directly). None if unparseable -
+    including an orphaned/empty file left by a write that failed partway
+    through (see _cross_process_lock's acquire-failure cleanup)."""
     try:
         return int(raw.split(b":", 1)[0])
     except (ValueError, IndexError):
@@ -886,7 +1234,8 @@ _held_lock_tokens_guard = threading.Lock()
 
 
 def _lock_is_held_by_us(lockpath: Path, held: bytes) -> bool:
-    """True only when *held* is a fencing token THIS process wrote and still holds - i.e. a genuine nested acquisition, not a pid collision."""
+    """True only when *held* is a fencing token THIS process wrote and still
+    holds - i.e. a genuine nested acquisition, not a pid collision."""
     if not held:
         return False
     with _held_lock_tokens_guard:
@@ -895,7 +1244,48 @@ def _lock_is_held_by_us(lockpath: Path, held: bytes) -> bool:
 
 @contextlib.contextmanager
 def _cross_process_lock(target: Path):
-    """Hold an exclusive, cross-process lock on *target* (a sibling ``<name>.lock`` marker file) for the duration of the ``with`` block."""
+    """Hold an exclusive, cross-process lock on *target* (a sibling ``<name>.lock``
+    marker file) for the duration of the ``with`` block.
+
+    Bounded retry with an escalating backoff, matching _replace_atomic's
+    established pattern, but on a wall-clock budget (_CROSS_LOCK_TIMEOUT) rather
+    than a fixed attempt count, since a full read-modify-write held by another
+    process can legitimately take longer than a single os.replace. Timing out
+    raises TimeoutError rather than silently proceeding unprotected - a lock that
+    cannot be acquired must never be treated as "acquired" (do-not-hide-problems).
+
+    FENCING TOKEN: each acquisition writes a unique ``<pid>:<nonce>`` token into
+    the lock file, not just a bare marker. This closes a real hole a bare
+    create/delete marker has: a holder whose critical section legitimately
+    outlasts _CROSS_LOCK_STALE_AGE (not crashed, just slow - heavy antivirus
+    scanning, a paused debugger) would otherwise have its lock silently stolen
+    by a waiter that assumes staleness means "crashed," and when the ORIGINAL
+    holder finally finishes and unconditionally deletes "the lock file," it
+    would actually be deleting the NEW holder's still-active lock, letting a
+    THIRD writer in - reopening the exact silent-clobber race this whole
+    mechanism exists to close, via its own recovery path. With the token,
+    release only removes the file if it still holds the token THIS call wrote;
+    if it doesn't (this call's lock was reclaimed as stale while still legitimately
+    held), the file is left alone - whoever's token is on disk owns cleanup, so a
+    stale-reclaim can never cascade into deleting a live holder's lock.
+
+    The same token also turns a same-thread NESTED call (a mutator passed to
+    update_config()/update_registry() that calls back into either for the same
+    file - not supported, this lock is not reentrant like _io_lock) from a
+    confusing _CROSS_LOCK_TIMEOUT-long stall into an immediate, clear error: the
+    token on disk matches one in _held_lock_tokens, which is only possible via
+    the calling process's own nested acquisition (a sibling thread in this
+    process would already be blocked on the outer _io_lock before ever reaching
+    here). Ownership is decided by that exact token, NOT by the pid recorded in
+    the file: pids are reused across process lifetimes, so a leaked lock carrying
+    our own pid must still be treated as foreign, and stay eligible for the
+    staleness reclaim below (REG-586 - a self-pid check here wedged every write
+    for the process's whole life, defeating that reclaim).
+
+    A lock file older than _CROSS_LOCK_STALE_AGE that we do not hold is assumed
+    to belong to a crashed holder (a killed CLI, a hard-killed server) and is
+    reclaimed instead of wedging every future config/registry write for the rest
+    of the install's life; the reclaim is logged, never silent."""
     lockpath = target.with_name(target.name + ".lock")
     token = f"{os.getpid()}:{uuid.uuid4().hex}".encode("ascii")
     deadline = time.time() + _CROSS_LOCK_TIMEOUT
@@ -991,7 +1381,17 @@ def _cross_process_lock(target: Path):
 
 
 def update_config(mutator: Callable[[dict], None]) -> dict:
-    """Atomically read-modify-write the config."""
+    """Atomically read-modify-write the config.
+
+    Holds _io_lock (serializes threads within this process) AND a cross-process
+    lock file (serializes separate localm OS processes - e.g. the CLI
+    `localm config` racing a running server's PATCH /v1/config, or two CLI
+    invocations) across the WHOLE read-modify-write, so no writer, in this
+    process or another, can read a stale copy and silently clobber a concurrent
+    change. *mutator* receives the loaded config dict (defaults merged) and edits
+    it in place; the result is persisted with a single atomic write. Use this
+    instead of a bare load_config()/save_config() pair wherever a lost update
+    would matter."""
     ensure_dirs()
     with _io_lock, _cross_process_lock(CONFIG_FILE):
         cfg = copy.deepcopy(DEFAULT_CONFIG)   # deep: see load_config (nested dicts)
@@ -1029,7 +1429,20 @@ def save_registry(reg: dict) -> None:
 
 
 def update_registry(mutator: Callable[[dict], None]) -> dict:
-    """Atomically read-modify-write the registry."""
+    """Atomically read-modify-write the registry.
+
+    Holds _io_lock (serializes threads within this process) AND a cross-process
+    lock file (serializes separate localm OS processes - e.g. a CLI `pull`
+    running alongside the GUI, or two CLI invocations) across the WHOLE
+    read-modify-write, so no writer, in this process or another, can read a
+    stale copy and silently clobber a concurrent change (the same closed gap as
+    update_config(), see its docstring / _cross_process_lock). *mutator*
+    receives the registry dict and edits it in place; the result is persisted
+    with a single atomic write. Use this instead of a bare
+    load_registry()/save_registry() pair wherever a lost update would matter.
+    (save_registry() itself remains a blind overwrite - last-writer-wins by
+    design, not a read-modify-write, so it needs no lock beyond the atomic
+    write it already has.)"""
     with _io_lock, _cross_process_lock(REGISTRY_FILE):
         reg, read_ok = _read_json_checked(REGISTRY_FILE, {})
         if not read_ok:
@@ -1058,7 +1471,14 @@ def _loadable_lib_names() -> tuple:
 
 
 def find_binary_dir() -> Optional[Path]:
-    """Return the directory holding the native llama.cpp binaries (llama.dll, plus optional llama-cli/llama-server exes), used by `localm info` and `localm doctor`, or None when unprovisioned."""
+    """Return the directory holding the native llama.cpp binaries (llama.dll,
+    plus optional llama-cli/llama-server exes), used by `localm info` and
+    `localm doctor`, or None when unprovisioned.
+
+    Project-local resolution only: the user-configured binary_dir, then the
+    localm-llama-runtime wheel bundled in this venv. No absolute path is ever
+    assumed as a default; an unprovisioned install resolves to None and the
+    user runs `localm setup-llama` (or sets binary_dir)."""
     cfg = load_config()
     candidates = []
     if cfg.get("binary_dir"):

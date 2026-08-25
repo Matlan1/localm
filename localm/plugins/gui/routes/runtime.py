@@ -1,5 +1,49 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""GUI llama.cpp runtime routes: check what is provisioned, and provision it - the same space as /api/update/* (localm/inference/routes/admin.py) but for the NATIVE runtime `localm setup-llama` provisions, not the Python source tree."""
+"""GUI llama.cpp runtime routes: check what is provisioned, and provision it -
+the same space as /api/update/* (localm/inference/routes/admin.py) but for the
+NATIVE runtime `localm setup-llama` provisions, not the Python source tree.
+
+  GET  /api/runtime/check   -> read-only: is a different build available for
+                               the currently installed backend, per
+                               setup_llama.check_runtime_update().
+  POST /api/runtime/update  -> dispatch `localm setup-llama --backend <b>
+                               [--tag <t> | --rollback] --force --yes` as a
+                               background JOB (a real download + native
+                               load-test can take a while, same shape as
+                               /api/comfy/update); returns {"job_id"} to stream.
+
+WHY THE POST TAKES A BACKEND, A TAG AND A ROLLBACK FLAG. It used to hardcode
+the INSTALLED backend and refuse (409) when nothing was installed, which left
+a user who has only the GUI unable to reach the CLI: installing a runtime in
+the first place, switching backend, choosing a build, and going back to the
+build that worked before a bad upstream release. `localm doctor` and the
+GUI's own Settings copy both told such a user to run a command they cannot
+reach.
+Dropping that 409 also removes a trap of its own: a box whose runtime failed to
+provision had NO route back, so the one surface still working refused the one
+action that would fix it.
+
+Why a background job and not a blocking call like /api/update/apply: this is
+closer in shape to /api/comfy/update (a multi-step operation worth streaming
+progress for) than to the code-tree swap, which is comparatively quick.
+
+Nothing about provisioning is decided here. The route validates its two inputs
+and hands them to the EXISTING command, so the backend-resolution, load-test,
+fallback and pin rules stay in setup_llama.py with one implementation - notably
+_provision_with_fallback, which is what keeps a backend that cannot load on
+this machine from being left installed.
+
+Safety: setup-llama's own _provisioning_lock (localm/setup_llama.py) is what
+actually serializes this against a concurrent `localm update` re-provision or
+a user's own terminal `setup-llama` run - a cross-process race this route
+introduces as a genuinely new, second trigger onto the same directory (see
+diff-review-discipline.md item 26, the identical hazard /api/comfy/update hit
+before its own lock existed). jobs.has_running() below is a fast, same-process
+UX guard for the common double-click case; the file lock is the real
+cross-process guarantee and needs no help from this route. The job KIND stays
+one string for every variant, so an install, a switch and an update cannot be
+started concurrently through this route either.
+"""
 
 from __future__ import annotations
 
@@ -25,7 +69,17 @@ def register(app: FastAPI, ctx) -> None:
     @app.get("/api/runtime/check",
              dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
     async def runtime_check_ep():
-        """Whether a different llama.cpp build is available for the backend actually installed on this box."""
+        """Whether a different llama.cpp build is available for the backend
+        actually installed on this box. Read-only; never provisions anything.
+        See setup_llama.check_runtime_update() for the comparison rules
+        (pin-aware, amd-rocm uses its fixed tag, never queries a release
+        listing needlessly).
+
+        Unchanged by the POST below gaining a backend/tag body, deliberately:
+        the value set that POST accepts is a CONSTANT (setup_llama.BACKENDS),
+        so the Settings card carries the option list in its own markup and a
+        test binds that markup to the constant, rather than the card being
+        unable to offer a backend until a check has succeeded."""
         from localm import setup_llama
         try:
             return await run_in_threadpool_bounded(
@@ -37,7 +91,25 @@ def register(app: FastAPI, ctx) -> None:
               dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
     async def runtime_update_ep(request: Request,
                                 req: Optional[RuntimeSetupRequest] = None):
-        """Provision the llama.cpp runtime, by running the EXISTING `localm setup-llama` entry point as a background job (--force so it actually replaces the build; --yes so the unattended subprocess never blocks on a prompt nothing will answer - see _apply_update.post_swap_command's docstring for the same rea..."""
+        """Provision the llama.cpp runtime, by running the EXISTING `localm
+        setup-llama` entry point as a background job (--force so it actually
+        replaces the build; --yes so the unattended subprocess never blocks on
+        a prompt nothing will answer - see _apply_update.post_swap_command's
+        docstring for the same reasoning applied to the full updater's runtime
+        class).
+
+        The backend is the one asked for, else the one already installed, else
+        'auto' - so an empty body still means exactly what it meant before this
+        route took one, and a box with nothing provisioned gets the same
+        hardware detection a bare `localm setup-llama` performs. `rollback`
+        pins and installs the previous build recorded for that backend
+        instead of `tag`'s explicit one; the two are mutually exclusive, same
+        as the CLI.
+
+        Refuses (409) only when a runtime job is already running. A concurrent
+        `localm update` re-provision or a bare terminal `setup-llama` is
+        refused honestly by the job itself (setup-llama's own cross-process
+        provisioning lock), not by this route - see the module docstring."""
         from localm import setup_llama
         req = req or RuntimeSetupRequest()
 

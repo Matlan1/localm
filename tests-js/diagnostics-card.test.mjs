@@ -1,13 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Settings > Diagnostics card (pages/settings.js). The five ACTIVE self-checks
-// from `localm doctor`, run from the app.
-//
-// The probes themselves are Python and are covered there. What can only go wrong
-// HERE is the rendering, and the risk is specific: this card has to state a
-// conclusion where a terminal would show a transcript, so the failure mode is a
-// card that OVERCLAIMS - "all good" on a run that never happened, a stale phase
-// that reads as still-running, or a failure whose reassuring half is the line the
-// user sees. Those are what these assert.
+// Settings > Diagnostics card (pages/settings.js): rendering of the five
+// active `localm doctor` self-checks.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadAppWithPages } from "./harness.mjs";
@@ -60,9 +53,6 @@ test("before any run the card names the five checks instead of showing a bare bu
 });
 
 test("an unrun check gets the NEUTRAL pill, never a warning colour", () => {
-  // Every ordinary box has an optional backend it does not have installed. If
-  // "not run" painted yellow, every ordinary box would show warnings and the
-  // colour would stop carrying information.
   const win = load();
   win.renderDoctorReport(body());
   for (const row of rows(win)) {
@@ -88,7 +78,7 @@ test("an all-clear verdict says what it checked and does not claim more", () => 
     ] },
   }));
   const text = statusText(win);
-  // 4 ran, 1 skipped: the count must be what actually ran.
+  // 4 ran, 1 skipped.
   assert.match(text, /All 4 active checks passed/);
   assert.match(text, /not everything about your system/);
 });
@@ -112,8 +102,6 @@ test("a failing check is counted and the row carries the failure pill", () => {
 });
 
 test("a run that could NOT happen never renders as a clean result", () => {
-  // The sharpest way this card could lie: an unrunnable diagnostic looking like
-  // a pass. The verdict is "error", so nothing may say "passed".
   const win = load();
   win.renderDoctorReport(body({
     report: { verdict: "error", checks: [],
@@ -126,9 +114,8 @@ test("a run that could NOT happen never renders as a clean result", () => {
 });
 
 test("the reassuring half of a failure is not what the row leads with", () => {
-  // The library check reports a GREEN "found it" line and then the BLAS kernel
-  // failure underneath. The headline must be the failure; the green line is
-  // context below it.
+  // The library check carries an "ok" finding and a "fail" finding; the row
+  // headline is the failure and the ok line renders as a hint below it.
   const win = load();
   win.renderDoctorReport(body({
     report: { verdict: "fail", checks: [
@@ -176,8 +163,6 @@ test("a running card names the check in flight and counts only what finished", (
 });
 
 test("a run with no progress yet does not invent a number", () => {
-  // ADR-0008 R1: an operation that has not established where it is is at an
-  // UNKNOWN point, never at 0 of 5.
   const win = load();
   win.renderDoctorReport(body({ running: true, progress: { phase: "", done: 0, total: 5 } }));
   assert.equal(statusText(win), "Running the checks...");
@@ -197,8 +182,6 @@ test("the button is re-enabled once the run finishes", () => {
 // --------------------------------------------------------------------------- //
 
 test("refreshDiagnosticsCard paints a run that is already in flight elsewhere", async () => {
-  // ADR-0008: a run started in another tab, or in this one before a reload, must
-  // not be undiscoverable just because this page did not start it.
   const { window: win } = loadAppWithPages({
     fetchImpl: async (url) => {
       if (String(url) === "/api/doctor") {
@@ -225,10 +208,8 @@ test("a refresh that cannot reach the server leaves the card as it was", async (
 });
 
 test("mid-run, each row says where IT is rather than all claiming to be waiting", () => {
-  // The card said "4 of 5 done" on the line above while every row said
-  // "waiting..." - not false (the browser has no per-check result until the run
-  // ends) but self-contradictory. A finished row says it was checked and that
-  // the result is coming; it does NOT guess a verdict.
+  // A finished row says it was checked and that the result is coming; it does
+  // not carry a verdict.
   const win = load();
   win.renderDoctorReport(body({
     running: true,
@@ -242,6 +223,6 @@ test("mid-run, each row says where IT is rather than all claiming to be waiting"
     "checking now...",
     "waiting...",
   ]);
-  // And still no verdict pill on any of them.
+  // No verdict pill on any of them.
   for (const row of rows(win)) assert.equal(pillOf(row).textContent, "not run");
 });

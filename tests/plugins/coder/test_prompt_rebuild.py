@@ -1,5 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The coder system prompt is rebuilt at several points in a session (set_cwd, reindex, reload_memory, and the per-write project-map refresh)."""
+"""The coder system prompt is rebuilt at several points in a session (set_cwd,
+reindex, reload_memory, and the per-write project-map refresh). A prior bug
+rebuilt with only the MCP tool docs, so plugin tools and agent skills silently
+vanished from the prompt mid-session and the model "forgot" they existed. These
+tests pin that every rebuild path keeps the COMBINED mcp + plugin + skill docs.
+"""
 
 from __future__ import annotations
 
@@ -69,9 +74,8 @@ def _per_write_refresh(agent, tmp_path):
 
 
 def _build_messages_when_dirty(agent, tmp_path):
-    # The other rebuild-trigger sites call _rebuild_system_prompt directly;
-    # this one is reached only through _build_messages's own dirty check
-    # (context.py) - a distinct call site that must keep the same docs.
+    # This rebuild site is reached only through _build_messages's own dirty
+    # check.
     agent._project_map.dirty = True
     agent._build_messages()
 
@@ -88,8 +92,7 @@ def _build_messages_when_dirty(agent, tmp_path):
     ],
 )
 def test_rebuild_keeps_plugin_and_skill_docs(tmp_path, action):
-    # Each row pins a distinct rebuild call site as its own regression guard -
-    # keep all 5 separate so a bug in any single path still fails its own case.
+    # Each row pins a distinct rebuild call site.
     agent = _make_agent(tmp_path)
     _seed_docs(agent)
     action(agent, tmp_path)
@@ -107,14 +110,8 @@ def test_empty_docs_do_not_crash_rebuild(tmp_path):
 # --------------------------------------------------------------------------- #
 #  Which tools actually trigger a refresh (_MUTATING_TOOLS coverage)          #
 #                                                                              #
-#  A different property from the parametrize above: THAT test only checks    #
-#  that a refresh which DOES fire preserves the combined docs. These check   #
-#  whether _refresh_map_for_tool actually calls refresh_file for a given     #
-#  tool at all - patch_file and edit_notebook_cell were silently missing     #
-#  despite having a real resolvable path (a pre-existing gap, unrelated to   #
-#  search_replace - found auditing _MUTATING_TOOLS for the same root cause   #
-#  search_replace's own gap had), and search_replace needed a second data    #
-#  source entirely (ToolResult.changes) since it has no `path` arg at all.   #
+#  Whether _refresh_map_for_tool calls refresh_file for a given tool at all.   #
+#  search_replace has no `path` arg, so it is driven from ToolResult.changes.  #
 # --------------------------------------------------------------------------- #
 
 class TestIncrementalMapRefreshCoverage:
@@ -134,7 +131,9 @@ class TestIncrementalMapRefreshCoverage:
             (tmp_path / "n.ipynb").resolve())
 
     def test_search_replace_refreshes_the_map_via_result_changes(self, tmp_path):
-        """search_replace has no `path` arg at all - _call_target_paths() alone finds nothing for it."""
+        """search_replace has no `path` arg at all - _call_target_paths()
+        alone finds nothing for it. The optional *result* parameter, reading
+        ToolResult.changes, is what makes this work."""
         agent = _make_agent(tmp_path)
         call = _make_call("search_replace", pattern="x", replacement="y",
                           glob="*.py")
@@ -145,7 +144,9 @@ class TestIncrementalMapRefreshCoverage:
             (tmp_path / "a.py").resolve())
 
     def test_omitting_result_does_not_crash_an_existing_caller(self, tmp_path):
-        """Existing callers (including this file's own _per_write_refresh above) call _refresh_map_for_tool with just *call* - the new parameter must not become mandatory."""
+        """Existing callers (including this file's own _per_write_refresh
+        above) call _refresh_map_for_tool with just *call* - the new
+        parameter must not become mandatory."""
         agent = _make_agent(tmp_path)
         (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
         agent._refresh_map_for_tool(_make_call("write_file", path="a.py"))
@@ -153,7 +154,11 @@ class TestIncrementalMapRefreshCoverage:
             (tmp_path / "a.py").resolve())
 
     def test_run_shell_marks_the_map_dirty_instead_of_refreshing(self, tmp_path):
-        """run_shell has no `path`-shaped arg at all (only `command`), so a per-file refresh_file() call is not possible ahead of time - see _MUTATING_TOOLS's own comment."""
+        """run_shell has no `path`-shaped arg at all (only `command`), so a
+        per-file refresh_file() call is not possible ahead of time - see
+        _MUTATING_TOOLS's own comment. Marking the whole map dirty is the fix
+        that replaced the old known-gap (a real ProjectMap's resulting
+        stat-diff rescan is exercised directly in test_indexer.py)."""
         agent = _make_agent(tmp_path)
         call = _make_call("run_shell", command="echo hi")
         agent._refresh_map_for_tool(call)
@@ -161,7 +166,11 @@ class TestIncrementalMapRefreshCoverage:
         agent._project_map.refresh_file.assert_not_called()
 
     def test_run_shell_does_not_eagerly_rebuild_the_prompt(self, tmp_path):
-        """Marking dirty must NOT be immediately followed by a rebuild here, unlike every other tool this method handles - see this method's own docstring for why: an eager rebuild would scan on every run_shell call instead of once for however many happen before the map is next actually read (context._build_me..."""
+        """Marking dirty must NOT be immediately followed by a rebuild here,
+        unlike every other tool this method handles - see this method's own
+        docstring for why: an eager rebuild would scan on every run_shell call
+        instead of once for however many happen before the map is next
+        actually read (context._build_messages, once per turn)."""
         agent = _make_agent(tmp_path)
         with patch.object(agent, "_rebuild_system_prompt") as mock_rebuild:
             call = _make_call("run_shell", command="echo hi")
@@ -170,7 +179,10 @@ class TestIncrementalMapRefreshCoverage:
 
 
 class TestBuildMessagesDeferredRescan:
-    """_build_messages (context.py) is where a run_shell-dirtied map actually gets reconciled - the one place guaranteed to run before the model's next turn."""
+    """_build_messages (context.py) is where a run_shell-dirtied map actually
+    gets reconciled - the one place guaranteed to run before the model's next
+    turn. These pin the gate itself, separately from the "docs preserved"
+    property already covered by build_messages_when_dirty above."""
 
     def test_rebuilds_when_dirty(self, tmp_path):
         agent = _make_agent(tmp_path)
@@ -187,7 +199,10 @@ class TestBuildMessagesDeferredRescan:
             mock_rebuild.assert_not_called()
 
     def test_a_mocked_project_map_never_spuriously_rebuilds(self, tmp_path):
-        """A MagicMock's un-configured `.dirty` attribute is itself a MagicMock, which is truthy - if the gate used plain truthiness instead of `is True`, every test in this file (and any other that mocks ProjectMap wholesale) would rebuild on every _build_messages call."""
+        """A MagicMock's un-configured `.dirty` attribute is itself a
+        MagicMock, which is truthy - if the gate used plain truthiness instead
+        of `is True`, every test in this file (and any other that mocks
+        ProjectMap wholesale) would rebuild on every _build_messages call."""
         agent = _make_agent(tmp_path)
         assert not isinstance(agent._project_map.dirty, bool)   # sanity: it's a MagicMock
         with patch.object(agent, "_rebuild_system_prompt") as mock_rebuild:
@@ -196,7 +211,12 @@ class TestBuildMessagesDeferredRescan:
 
 
 class TestRunShellEndToEnd:
-    """A REAL Agent with a REAL ProjectMap (unlike _make_agent above, which mocks ProjectMap entirely) driven through the actual dispatch path - the integration-level regression test for the bug the unit-level tests above and in test_indexer.py exercise piece by piece."""
+    """A REAL Agent with a REAL ProjectMap (unlike _make_agent above, which
+    mocks ProjectMap entirely) driven through the actual dispatch path -
+    the integration-level regression test for the bug the unit-level tests
+    above and in test_indexer.py exercise piece by piece. Runs a real
+    `echo` via the real run_shell tool; nothing here is mocked except the
+    LLM backend, which is never called."""
 
     def _make_real_agent(self, tmp_path: Path):
         from localm.plugins.coder.agent import Agent

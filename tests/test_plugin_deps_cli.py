@@ -1,5 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Engine + CLI behaviour for auto-installing a plugin's pip extras."""
+"""Engine + CLI behaviour for auto-installing a plugin's pip extras.
+
+The actual pip run and metadata resolution are unit-tested in
+test_plugin_deps.py; here we drive the ENGINE methods and the `localm plugin`
+commands, mocking the deps layer so nothing is really installed. A synthetic
+store plugin ``withdeps`` declares ``requires_extras = ["fakeextra"]``.
+"""
 
 import pytest
 from click.testing import CliRunner
@@ -60,7 +66,8 @@ def _none_missing(monkeypatch):
 
 
 def _fake_catalog(monkeypatch):
-    """Point catalog.CATALOG at the synthetic plugins so `plugin setup` (which validates selections against the catalog) accepts them."""
+    """Point catalog.CATALOG at the synthetic plugins so `plugin setup` (which
+    validates selections against the catalog) accepts them."""
     from localm.plugins import catalog as cat
     fake = (
         cat.CatalogEntry("chat", "Chat", preinstalled=True, protected=True),
@@ -331,7 +338,9 @@ def test_doctor_ok_when_no_missing_deps(env, monkeypatch, capsys):
 
 
 def test_setup_interactive_prompt_records_and_installs(env, monkeypatch):
-    """Drive the interactive branch directly (CliRunner's stdin is not a tty, so the no-flag path would skip)."""
+    """Drive the interactive branch directly (CliRunner's stdin is not a tty, so
+    the no-flag path would skip). A faked tty stdin feeds the plugin pick and a
+    'yes' to the deps prompt; the choice is persisted and the install runs."""
     import io
     from localm.cli import plugins as plug
     from localm.config import load_config

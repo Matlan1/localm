@@ -1,5 +1,32 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Give a scheduled CHAT job the same web-search tool the interactive chat has."""
+"""Give a scheduled CHAT job the same web-search tool the interactive chat has.
+
+A scheduled chat job runs its prompt straight against the engine, with no tools, so
+a web-lookup job ("look up the weather") answers "I have no real-time access" every
+run (U-3). This module runs a small, BOUNDED server-side ReAct loop that mirrors the
+GUI's web tool: a system prompt teaches the model the
+``<tool_call>{"name":"web_search","args":{"query":"..."}}</tool_call>`` protocol
+(plus ``fetch_url``); when the model emits a call we run it through the same
+policy-enforced ``localm.netpolicy`` search/fetch the GUI uses, inject the result as
+the next message, and let the model answer and cite it.
+
+Policy: web access is offered only when ``localm.netpolicy.network_mode() != "off"``.
+A scheduled job the user created and enabled is a pre-authorised standing action
+(netpolicy treats explicit user actions as consent), so there is no separate per-run
+"ask" prompt - there is nobody to ask in an unattended run. ``net_mode=off`` still
+kills it, exactly like every other model-initiated request. When web is off the model
+is given an offline-honesty floor so it says it cannot verify rather than inventing.
+The loop is capped so a job can never spin on the web forever.
+
+Search results and fetched page text are UNTRUSTED content (LM-DA-014) spliced
+straight into the model's message list, with NO human review after the job is
+scheduled - unlike interactive chat, there is nobody here to notice a forged
+turn. This module calls ``localm.netpolicy`` directly rather than the chat
+plugin's ``/api/web/search``/``/api/web/fetch`` HTTP endpoints, so it cannot
+inherit their server-side ``neutralise()`` (``web/plug.py``) and neutralises
+its own copy in ``run_web_call`` instead, then fences the result the same way
+the coder plugin's ``provenance.py`` frames its own untrusted tool output.
+"""
 
 from __future__ import annotations
 
@@ -93,7 +120,17 @@ _FENCE_CLOSE_RE = re.compile(r"\r?\n[ \t]*```")
 
 
 def _strip_think(text: str) -> str:
-    """Remove ``<think>`` / ``<reasoning>`` / ``<r>`` blocks from a model reply."""
+    """Remove ``<think>`` / ``<reasoning>`` / ``<r>`` blocks from a model reply.
+
+    The closing tag is located with ``str.find`` rather than by letting a lazy
+    ``.*?`` hunt for it. ``find`` is a linear C-level scan that returns -1
+    immediately when the tag is absent, so an unterminated opener costs one pass
+    over the tail instead of one pass PER OPENER - which is what made
+    ``'<r >' * 8000`` (32 KB, entirely plausible model output) cost 1.22s.
+
+    Once a closer is missing there cannot be one for any LATER opener either, so
+    the loop stops rather than re-walking the tail once per opener.
+    """
     if not text:
         return text
     lowered = text.lower()
@@ -114,7 +151,8 @@ def _strip_think(text: str) -> str:
 
 
 def _lenient_json(body: str):
-    """Parse JSON, tolerating the mangles local finetunes emit (single-quoted keys, trailing commas)."""
+    """Parse JSON, tolerating the mangles local finetunes emit (single-quoted keys,
+    trailing commas). Returns a dict or None."""
     fixes = (
         lambda s: s,
         lambda s: re.sub(r"'([^']+)'\s*:", r'"\1":', s),
@@ -145,7 +183,15 @@ def _as_web_call(obj):
 
 
 def _top_level_objects(text: str):
-    """Yield each brace-balanced top-level ``{...}`` region (string-aware)."""
+    """Yield each brace-balanced top-level ``{...}`` region (string-aware).
+
+    Bounded by the LAST ``}`` in the text. Without that bound every ``{`` that
+    never balances scans to end-of-text, once per opening brace: measured
+    0.158 / 0.591 / 2.84s at 2,000 / 4,000 / 8,000 unmatched braces, on model
+    output. With it, text containing no closing brace after a given point costs
+    nothing there. This is not a regex, which is exactly why the CodeQL sweep
+    that found the pattern versions of this defect never flagged it.
+    """
     last_close = text.rfind("}")
     i, n = 0, len(text)
     while i < n:
@@ -191,7 +237,14 @@ def _top_level_objects(text: str):
 
 
 def _pair_scan(text: str, opener_re, closer_re):
-    """Yield ``(opener, closer)`` matches, opener paired with the NEXT closer."""
+    """Yield ``(opener, closer)`` matches, opener paired with the NEXT closer.
+
+    The ``return`` on a missing closer is the whole cost fix: a closer search
+    that fails from one opener can never succeed from a later one, because a
+    later opener ends further right and would search a suffix of the range that
+    just came up empty. Without it, hostile text plants thousands of unterminated
+    openers and each one pays a scan to end-of-text.
+    """
     pos = 0
     while True:
         opener = opener_re.search(text, pos)
@@ -222,7 +275,22 @@ def _iter_fenced_bodies(text: str):
 
 
 def parse_web_calls(text: str, limit: int | None = None) -> list:
-    """Every web tool call in *text*, in the order the parser considers them, stopping once *limit* have been found."""
+    """Every web tool call in *text*, in the order the parser considers them,
+    stopping once *limit* have been found. Tolerates the ``<tool_call>`` wrapper,
+    code fences, and bare JSON, plus the JSON mangles local models emit -
+    mirroring the GUI so a real attempt is not silently dropped.
+
+    THE LAYERING IS LOAD-BEARING, NOT TIDINESS. The bare top-level-JSON scan is a
+    LAST RESORT and must stay one: the JSON inside a ``<tool_call>`` wrapper (or a
+    ```json fence) is ALSO a bare top-level object in the same text, so running
+    both layers unconditionally reports one ordinary call as two - and the caller
+    would then tell the model, on every run, that a second call it never made had
+    been ignored.
+
+    *limit* keeps ``parse_web_call``'s original early-out cost: without it a reply
+    carrying one real call followed by a pile of junk fences would parse every one
+    of them to answer a question the caller had already settled.
+    """
     clean = _strip_think(text or "")
     candidates = []
     candidates.extend(_iter_wrapped_bodies(clean))
@@ -255,7 +323,15 @@ def parse_web_call(text: str):
 
 
 def ignored_calls_note(calls: list) -> str:
-    """Note appended to a tool result when the reply carried MORE than one call."""
+    """Note appended to a tool result when the reply carried MORE than one call.
+
+    This loop runs ONE call per round (a sequential search -> read -> answer ReAct
+    loop, deliberately retained here rather than routed through the coder agent's
+    parallel ``parse_tool_calls``/``_execute_tools`` machinery). The extras used to
+    be dropped in silence, so the model could not tell its second call had never
+    run and answered as though it held those results. Returns "" when there is
+    nothing to report. Mirrors the GUI's ``ignoredCallsNote``.
+    """
     if not calls or len(calls) < 2:
         return ""
     return (
@@ -272,7 +348,7 @@ def ignored_calls_note(calls: list) -> str:
 # --------------------------------------------------------------------------- #
 
 def web_enabled() -> bool:
-    """True when scheduled jobs may use the web (net_mode is not 'off')."""
+    """True when scheduled jobs may use the web (net_mode is not "off")."""
     try:
         from localm.netpolicy import network_mode
         return network_mode() != "off"
@@ -281,7 +357,15 @@ def web_enabled() -> bool:
 
 
 def run_web_call(call: dict) -> str:
-    """Execute one web tool call through ``localm.netpolicy`` and return the text to feed back to the model (results, or a failure note it can adapt to)."""
+    """Execute one web tool call through ``localm.netpolicy`` and return the text to
+    feed back to the model (results, or a failure note it can adapt to).
+
+    Bypasses the chat plugin's HTTP endpoints (``web/plug.py``) entirely - this
+    loop calls ``netpolicy`` directly, in-process - so it cannot inherit
+    ``web/plug.py``'s server-side ``neutralise()`` and applies its own copy here
+    before fencing the result (LM-DA-014, indirect prompt injection; there is no
+    human review of this content before it re-enters the model in an unattended
+    job run)."""
     from localm import netpolicy
 
     name = call.get("name")
@@ -315,7 +399,11 @@ def _complete(engine, messages: list) -> str:
 
 
 def _final_answer(reply: str) -> str:
-    """The visible answer of *reply* for storage as a job result."""
+    """The visible answer of *reply* for storage as a job result. Thinking
+    models prepend a reasoning channel; stored raw it made job results
+    unreadable scratchpad (memory-audit 2026-07-02). Uses the shared
+    textnorm strip (handles UNCLOSED think blocks, unlike _THINK_RE above,
+    which stays closed-tag-only for in-loop tool-call parsing)."""
     from localm.textnorm import strip_think
     text = strip_think(reply).strip()
     if reply.strip() and not text:
@@ -327,7 +415,12 @@ def _final_answer(reply: str) -> str:
 
 
 def run_chat_with_web(engine, prompt: str, *, max_rounds: int = _MAX_ROUNDS) -> str:
-    """Run a scheduled chat *prompt* against *engine*, giving it the web tool when network access is on."""
+    """Run a scheduled chat *prompt* against *engine*, giving it the web tool when
+    network access is on. Returns the model's final answer.
+
+    Mirrors the GUI: a system prompt teaches the tool protocol, the model emits a
+    tool call, we run it and feed the result back, and the model answers. Capped at
+    *max_rounds* search rounds so a job can never spin on the web forever (U-3 / R36)."""
     if not web_enabled():
         messages = [{"role": "system", "content": OFFLINE_SYSTEM},
                     {"role": "user", "content": prompt}]

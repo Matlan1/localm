@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""GGUF file-format helpers: split-part detection, the gguf magic check, safe model filenames, and SHA256 hashing."""
+"""GGUF file-format helpers: split-part detection, the gguf magic check,
+safe model filenames, and SHA256 hashing. Leaf utilities, no registry/pull deps."""
 
 import localm.model_manager as _mm  # read package-patchable names at call time
 
@@ -37,7 +38,11 @@ _SPLIT_GGUF_RE = re.compile(
 
 
 def split_gguf_parts(filename: str) -> Optional[List[str]]:
-    """If *filename* follows the llama.cpp split convention (``model-00001-of-00003.gguf``), return the full ordered list of part filenames."""
+    """
+    If *filename* follows the llama.cpp split convention
+    (``model-00001-of-00003.gguf``), return the full ordered list of part
+    filenames. Returns None for regular single-file GGUFs.
+    """
     m = _SPLIT_GGUF_RE.match(Path(filename).name)
     if not m:
         return None
@@ -59,7 +64,11 @@ def first_split_part(filename: str) -> str:
 
 
 def missing_split_parts(first_part: Path) -> List[Path]:
-    """Given the path of any part of a split GGUF, return sibling part paths that are missing on disk."""
+    """
+    Given the path of any part of a split GGUF, return sibling part paths
+    that are missing on disk. Empty list means all parts present (or the
+    file is not a split GGUF at all).
+    """
     parts = split_gguf_parts(first_part.name)
     if not parts:
         return []
@@ -69,55 +78,30 @@ def missing_split_parts(first_part: Path) -> List[Path]:
 
 
 
-# Model files are multi-GB, so the read size and the read/hash overlap both
-# matter. MEASURED on this box (AMD Ryzen 5600X, local SSD, a 10GB GGUF, each
-# variant reading a DISTINCT never-touched 1.5GB region so no variant inherits
-# another's page cache):
-#
-#     read only, 64KB blocks                          290.7 MB/s
-#     read only, 4MB blocks                           485.4 MB/s   <- I/O ceiling
-#     hash only, in RAM                               598.7 MB/s   <- CPU ceiling
-#     serial hash, 64KB blocks  (what this was)       233.0 MB/s
-#     serial hash, 4MB blocks                         479.0 MB/s   2.06x
-#     reader thread + 4MB blocks                      481.6 MB/s   2.07x
-#
-# So on THIS box essentially the whole win is the block size: at 4MB the serial
-# loop already runs at 98.8% of the pure-read ceiling, because the OS readahead
-# is already overlapping the read with the hashing. The reader thread measured
-# at parity (481.6 vs 479.0 is inside the noise), NOT as a speedup.
-#
-# It is kept anyway, and the reason is the point: readahead is what makes the
-# serial loop fast, and readahead is exactly what a network share, a FUSE mount
-# or a cold NFS/SMB path does not reliably give you. There the explicit overlap
-# is the difference between max(read, hash) and read + hash. Parity on a local
-# SSD is the price of not regressing on storage that this box does not have
-# (design for every setup, not the one it was measured on).
-#
-# What is NOT done, and was measured rather than assumed: parallel READERS on
-# disjoint regions. Cold, on an untouched 6GB file, 1 thread reads 464.5 MB/s
-# and 4 threads 532.8 MB/s (1.15x, plateauing at 4). Against the 598.7 MB/s CPU
-# ceiling that caps the whole approach at about 1.11x on top of what is here,
-# and it would mean holding several GB of read-ahead slices in RAM and
-# reassembling them in order to keep the digest byte-identical. SHA-256 is
-# strictly sequential, so no amount of threading parallelises the hash itself.
-# Not a good trade in the function that verifies a downloaded model.
+# Block size for the hashing read. A reader thread overlaps the read with the
+# hash, which matters on storage without reliable readahead (a network share, a
+# FUSE mount, a cold NFS/SMB path).
 _HASH_BLOCK_BYTES = 4 * 1024 * 1024
 
 # How many blocks the reader may run ahead. Bounds peak memory at roughly
-# _HASH_BLOCK_BYTES * (_HASH_READAHEAD_BLOCKS + 1), i.e. ~20MB, which is what
-# makes an unbounded queue on a 10GB file a non-issue.
+# _HASH_BLOCK_BYTES * (_HASH_READAHEAD_BLOCKS + 1).
 _HASH_READAHEAD_BLOCKS = 4
 
-# Below this, hash inline: spawning a thread to read a small file costs more
-# than the overlap it buys.
+# Below this size, hash inline on the calling thread instead of spawning the
+# reader.
 _HASH_THREAD_MIN_BYTES = 32 * 1024 * 1024
 
 
 def _iter_file_blocks(path: Path):
-    """Yield *path*'s bytes in ``_HASH_BLOCK_BYTES`` chunks."""
+    """Yield *path*'s bytes in ``_HASH_BLOCK_BYTES`` chunks.
+
+    Large files are read by a background thread one block ahead of the consumer
+    so the read and whatever the consumer does with the block overlap; small
+    ones are read inline. An error in the reader is re-raised in the CONSUMER's
+    thread, so a caller sees the same exception it would have seen from a plain
+    ``open()``/``read()`` and nothing is swallowed."""
     # Read through _mm so a test can shrink the thresholds and exercise the
-    # threaded path without writing a 32MB fixture (this module's convention -
-    # see the _mm import at the top).
+    # threaded path without a 32MB fixture.
     block_bytes = _mm._HASH_BLOCK_BYTES
     try:
         size = path.stat().st_size
@@ -153,15 +137,8 @@ def _iter_file_blocks(path: Path):
             except queue.Empty:
                 if not t.is_alive():
                     # The reader exited without posting eof OR an exception.
-                    # Unreachable while _reader's try/except/else stands, since
-                    # every exit path posts one of the two - but a plain
-                    # `q.get()` here turns any future edit that breaks that
-                    # invariant into a SILENT FOREVER HANG on a multi-GB verify,
-                    # with no output to diagnose it from. Measured while
-                    # fires-controlling this function: swapping the reader's
-                    # handler for `except BaseException: pass` hung a test run
-                    # until it was killed at 2 minutes, printing nothing.
-                    # Failing loudly is the whole difference.
+                    # Raising here rather than blocking on q.get() turns that
+                    # state into a loud failure instead of a silent hang.
                     raise RuntimeError(
                         f"the reader thread for '{path.name}' exited without "
                         "delivering data or an error; the digest would be "
@@ -173,11 +150,9 @@ def _iter_file_blocks(path: Path):
                 raise item
             yield item
     finally:
-        # If the consumer abandons us (its own exception, or a progress callback
-        # that raised despite its contract) the reader can be parked forever on
-        # a full queue. Drain until it exits so the thread and its buffered
-        # blocks are released instead of leaking for the life of a long-running
-        # server. On the normal path the reader has already finished here.
+        # If the consumer abandons the generator, the reader can be parked on a
+        # full queue. Drain until it exits so the thread and its buffered blocks
+        # are released. On the normal path the reader has already finished.
         while t.is_alive():
             try:
                 q.get(timeout=0.05)
@@ -190,7 +165,15 @@ def _sha256_file(
     path: Path,
     progress: Optional[Callable[[int, int], None]] = None,
 ) -> str:
-    """Return the hex SHA256 digest of a file."""
+    """Return the hex SHA256 digest of a file.
+
+    When *progress* is given it is called ``progress(bytes_done, total_bytes)``
+    after each block so a caller can drive a progress bar; *total_bytes* is the
+    file size (0 if it cannot be stat'd). The callback must not raise.
+
+    *progress* is invoked on the CALLER's own thread, not on the reader thread,
+    which is what ``_hash_with_progress`` relies on: it calls this from a worker
+    thread and drives a rich progress bar from the callback."""
     h = hashlib.sha256()
     total = 0
     if progress is not None:
@@ -216,29 +199,15 @@ def _sha256_file_bytes(data: bytes) -> str:
 
 
 
-# Every character Windows itself refuses to let a real filename contain
-# (docs.microsoft.com/windows/win32/fileio/naming-a-file - "Naming Conventions"),
-# plus the C0 control range. ':' is the one that matters most here: it does not
-# fail file creation at all - it opens an NTFS Alternate Data Stream instead, so
-# 'somefile.exe:mmproj.gguf' both passes a naive "no separators" check AND lands
-# INSIDE base_dir (the confinement check that guards against a directory escape
-# genuinely holds), while writing its content into a stream hidden from a normal
-# directory listing behind an innocuous, zero-byte 'somefile.exe'. That is not a
-# path-injection escape (CWE-22, what CodeQL's py/path-injection checks) - it is a
-# hidden-payload / filename-confusion primitive on TOP of a confined write, and
-# _sanitize_name (registry.py, the sibling chokepoint for registry KEYS) already
-# excludes every one of these characters via its 'A-Za-z0-9._-' whitelist. This
-# validator used a blacklist instead and never learned that lesson for ':'.
+# Every character Windows refuses to let a real filename contain, plus the C0
+# control range. ':' is included because it opens an NTFS Alternate Data Stream
+# instead of failing: 'somefile.exe:mmproj.gguf' stays inside base_dir while
+# writing its content into a stream hidden behind a zero-byte 'somefile.exe'.
 _WINDOWS_RESERVED_CHARS = frozenset('<>:"/\\|?*') | frozenset(chr(c) for c in range(32))
 
-# Windows treats these as reserved DEVICE names regardless of extension - the
-# part of a filename before its FIRST '.', compared case-insensitively (so
-# "con.mmproj.gguf" is reserved, matching Windows's own rule, not just a bare
-# "CON"). Verified live on this box: a bare "CON" and "CON.gguf" both currently
-# write as ordinary files under Python's open() (modern NTFS does not extend the
-# legacy MS-DOS device reservation to this API path), so this is defense in
-# depth against other tooling/versions that DO enforce it, not a demonstrated
-# escape - unlike ':', which is a live, confirmed bypass (see above).
+# Windows reserved DEVICE names, matched against the part of a filename before
+# its FIRST '.', case-insensitively, so 'con.mmproj.gguf' is reserved as well as
+# a bare 'CON'.
 _WINDOWS_RESERVED_STEMS = frozenset({
     "CON", "PRN", "AUX", "NUL",
     "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
@@ -246,31 +215,33 @@ _WINDOWS_RESERVED_STEMS = frozenset({
 })
 
 
-# READ THIS BEFORE ADDING ANOTHER CHARACTER TO A DENY LIST HERE (or anywhere
-# else that validates a filename by blacklisting known-bad characters instead
-# of whitelisting known-good ones). Two DIFFERENT, independently-discovered
-# bypasses landed in this one function in a single review pass:
-#   1. ':' - opens an NTFS Alternate Data Stream. Not a member of any
-#      "obviously dangerous" character set anyone would think to blacklist
-#      up front; it only makes sense as a hazard once you already know what
-#      NTFS does with it.
-#   2. an 8.3 short-name-shaped candidate (e.g. "LONGMO~1.GGU") - not a
-#      character at all. No blacklist of individual characters, however
-#      complete, was ever going to catch this: it is a WHOLE-STRING alias
-#      to a different file, closed by re-checking what the resolved
-#      destination actually IS (below), not by rejecting any symbol in it.
-# The pattern is that a blacklist can only reject the hazards its author
-# already knew about. _sanitize_name (registry.py, the sibling chokepoint
-# for registry KEYS, not filenames) sidesteps the whole class with a
-# WHITELIST (only 'A-Za-z0-9._-' survives) - it cannot be caught out by a
-# Windows quirk nobody has thought of yet, because it never enumerates the
-# bad ones. This function still blacklists (a whitelist as strict as
-# _sanitize_name's would reject real HF filenames containing spaces,
-# parentheses, '+', etc. - verified against real-world naming conventions
-# during this review), so treat every future addition here as evidence the
-# list was incomplete again, not as the list now being complete.
 def _safe_models_filename(filename: str, base_dir: Optional[Path] = None) -> Optional[str]:
-    """Return a single-component filename confined to *base_dir* (``MODELS_DIR`` by default)."""
+    """Return a single-component filename confined to *base_dir* (``MODELS_DIR``
+    by default).
+
+    A model download must never write outside its destination folder.
+    ``filename`` is derived from untrusted input (a URL path, an
+    ``owner/repo:file`` spec, or a remote HF repo's own file listing), so a
+    value like ``../../evil.gguf`` or ``sub/dir/evil.gguf`` must be rejected
+    rather than used as a destination. Returns the bare filename when it is a
+    single, non-traversing, non-hazardous path component, else ``None``
+    (GAP-CLI-2). *base_dir* lets a caller routing a download to a non-default
+    destination (e.g. a ComfyUI models subfolder) validate against the REAL
+    destination instead of always against ``MODELS_DIR``.
+
+    Beyond directory-escape (the CWE-22 class this exists to close), this also
+    rejects the Windows filename-CONFUSION hazards verified against this exact
+    codebase: any reserved character (notably ':' - an NTFS Alternate Data
+    Stream name, which stays confined to *base_dir* and so is invisible to a
+    pure escape check, but hides its content behind an innocuous-looking,
+    apparently-empty sibling file - see ``_WINDOWS_RESERVED_CHARS``), a
+    reserved device stem (``_WINDOWS_RESERVED_STEMS``), and a trailing '.' or
+    ' ' (Windows silently strips these when resolving a path, so
+    ``evil.gguf.`` and ``evil.gguf`` name the SAME file - a download using the
+    former would silently overwrite an existing model the user already has,
+    with the collision invisible in any directory listing, which only ever
+    shows the stripped form).
+    """
     base_dir = base_dir if base_dir is not None else _mm.MODELS_DIR
     if not filename:
         return None
@@ -281,10 +252,9 @@ def _safe_models_filename(filename: str, base_dir: Optional[Path] = None) -> Opt
     stem = filename.split(".", 1)[0].upper()
     if stem in _WINDOWS_RESERVED_STEMS:
         return None
-    # Reject anything that is not a single path component (no separators, no
-    # drive/absolute prefixes, no '.'/'..'). '/'/'\\' are already excluded by
-    # the reserved-character check above; this additionally catches a lone
-    # '.'/'..' and any OS-specific separator quirk Path.name normalises away.
+    # Reject anything that is not a single path component: no separators, no
+    # drive or absolute prefixes, no lone '.' or '..'. Path separators are
+    # already excluded by the reserved-character check above.
     name = Path(filename).name
     if name != filename or name in ("", ".", ".."):
         return None
@@ -293,35 +263,23 @@ def _safe_models_filename(filename: str, base_dir: Optional[Path] = None) -> Opt
         if dest.parent != base_dir.resolve():
             return None
         if dest.exists() and dest.name.lower() != name.lower():
-            # An OS-level alias (an NTFS 8.3 short name is the live-confirmed
-            # case: on a volume with short-name generation enabled, a crafted
-            # candidate like "LONGMO~1.GGU" passes every check above yet
-            # resolves to a pre-existing, differently-named file) - same
-            # filename-confusion class as the ':' ADS hazard above: this
-            # write stays confined to base_dir, so it is not a directory
-            # escape, but "download the file named X" would silently act on
-            # an unrelated file Y instead. A production caller's own
-            # `dest.exists()` "already downloaded" convention (pull.py) then
-            # treats the alias as a legitimate prior download and registers
-            # the WRONG file's content under the requested name - a
-            # confused-deputy substitution, not a crash. Case-insensitive:
-            # Windows path resolution returns the ON-DISK casing regardless
-            # of the requested casing, so re-requesting an existing
-            # 'model.gguf' as 'MODEL.GGUF' must still be accepted as the
-            # same file, not rejected as a fabricated alias.
+            # The resolved destination is an OS-level alias for a
+            # differently-named existing file (an NTFS 8.3 short name such as
+            # 'LONGMO~1.GGU'). Compared case-insensitively, since Windows path
+            # resolution returns the on-disk casing: requesting an existing
+            # 'model.gguf' as 'MODEL.GGUF' is the same file and stays accepted.
             return None
     except (OSError, ValueError):
-        # ValueError also covers a null/odd path that slipped past the check above
-        # (belt and suspenders); either way, an unresolvable name is not safe.
+        # ValueError also covers a null/odd path that slipped past the check
+        # above; either way, an unresolvable name is not safe.
         return None
     return name
 
 
 
 
-# Files at or below this size hash inline (silently); larger ones get the
-# off-main-thread progress bar - the threading/UI overhead isn't worth it for
-# small files. ~0.5 GB, matching the prior notice threshold.
+# Files at or below this size hash inline and silently; larger ones get the
+# off-main-thread progress bar.
 _HASH_PROGRESS_MIN_BYTES = 512 * 1024 * 1024
 
 
@@ -329,7 +287,19 @@ _HASH_PROGRESS_MIN_BYTES = 512 * 1024 * 1024
 
 def _hash_with_progress(path: Path,
                         *, purpose: str = "for duplicate detection") -> Optional[str]:
-    """SHA256 a model file, showing live progress for large files."""
+    """SHA256 a model file, showing live progress for large files.
+
+    For files larger than ``_HASH_PROGRESS_MIN_BYTES`` the hash runs in a
+    background worker thread so the main thread stays responsive and can render a
+    progress bar (a one-time cost stored in the registry for duplicate
+    detection); smaller files hash inline without any UI. Returns None for
+    directories (HF models are identified by path only).
+
+    *purpose* completes the bar's label ("Hashing <file> <purpose>"). It exists
+    because the same wait happens for two unrelated reasons and telling the user
+    the wrong one is its own small dishonesty: duplicate detection is bookkeeping
+    the user did not ask for, while verifying a download against --sha256 is the
+    thing they are waiting on. The default preserves the original label."""
     if not path.is_file():
         return None
     try:
@@ -377,16 +347,27 @@ def _hash_with_progress(path: Path,
 
 
 
-# Conservative size floor for a plausible GGUF. The fixed header alone (magic +
-# version + tensor count + KV count) is 24 bytes, and every real model carries a
-# metadata KV block (general.architecture, tokenizer, ...) plus tensor infos well
-# past 1 KiB before the first weight byte; even the tiniest test GGUFs are tens of
-# KB. Kept deliberately low so no legitimate model can ever be rejected.
+# Conservative size floor for a plausible GGUF. The fixed header alone (magic,
+# version, tensor count, KV count) is 24 bytes, and every real model carries a
+# metadata KV block plus tensor infos well past 1 KiB before the first weight
+# byte.
 _GGUF_MIN_BYTES = 1024
 
 
 def _has_gguf_magic(path: Path) -> bool:
-    """True when *path* begins with the GGUF magic ``b'GGUF'`` and is at least ``_GGUF_MIN_BYTES`` long."""
+    """True when *path* begins with the GGUF magic ``b"GGUF"`` and is at least
+    ``_GGUF_MIN_BYTES`` long.
+
+    Auto-registration (sync_models_dir) keys on the ``.gguf`` extension alone, so
+    a foreign file renamed ``.gguf``, a 0-byte placeholder, or a partial copy that
+    never received its header would otherwise be registered and then crash a later
+    load - in the worst case wedging the app if it became the active model (R45,
+    "copying a file into models/ broke the whole app"). A real GGUF always starts
+    with this 4-byte magic; an unreadable file is treated as not-a-GGUF and
+    skipped. The size floor additionally rejects a header-only truncated copy or
+    placeholder that got just the magic, which would pass the magic check and then
+    fail a later load with an opaque ggml error. (A mid-copy of a *valid* GGUF that
+    already passed the floor stays a best-effort gap.)"""
     floor = _mm._GGUF_MIN_BYTES
     try:
         with open(path, "rb") as fh:
@@ -405,23 +386,20 @@ def _has_gguf_magic(path: Path) -> bool:
     return True
 
 
-# How long a file's mtime must be untouched before auto-registration treats it
-# as finished rather than still being written. An in-progress external copy
-# (Explorer, robocopy, a browser download, an `scp`) keeps touching mtime on
-# every write, so a file whose mtime is this fresh cannot yet be trusted to be
-# complete - even though it may already have passed the magic+size floor above
-# (R45: a mid-copy of a *valid* GGUF can clear that floor long before the copy
-# finishes, since the floor only needs ~1KiB to have landed). This is a
-# best-effort quiet-period heuristic, not a lock: a copy that itself pauses for
-# longer than this window (e.g. a stalled network share) would be read as
-# settled mid-transfer. sync_models_dir runs on every launch and every
-# `models list`, so a file that fails this check simply gets picked up on a
-# later call once writes have stopped - no retry loop or sleep needed here.
+# How long a file's mtime must be untouched before auto-registration treats it as
+# finished rather than still being written. An in-progress external copy keeps
+# touching mtime on every write. A best-effort quiet period, not a lock: a copy
+# that itself stalls for longer than this window reads as settled.
+# sync_models_dir runs on every launch and every `models list`, so a file that
+# fails this check is picked up on a later call.
 _GGUF_SETTLE_SECONDS = 5.0
 
 
 def _gguf_recently_written(path: Path) -> bool:
-    """True when *path*'s mtime is within ``_GGUF_SETTLE_SECONDS`` of now, i.e. it may still be mid-copy."""
+    """True when *path*'s mtime is within ``_GGUF_SETTLE_SECONDS`` of now, i.e.
+    it may still be mid-copy. An unreadable file is treated as NOT recently
+    written so it falls through to whatever check runs next (fails safe: this
+    function only ever defers registration, never blocks it outright)."""
     try:
         mtime = path.stat().st_mtime
     except OSError:
@@ -430,7 +408,15 @@ def _gguf_recently_written(path: Path) -> bool:
 
 
 def _gguf_first_parts(d: Path, max_depth: int = 3) -> List[Path]:
-    """First-part GGUF files inside *d*, scanning up to *max_depth* levels deep."""
+    """First-part GGUF files inside *d*, scanning up to *max_depth* levels deep.
+
+    *max_depth* counts the filename as level 1 (depth 1 = files directly in *d*,
+    depth 3 = up to two subfolders down), so batch imports of models organised in
+    subdirectories are picked up. Split GGUFs (``model-00001-of-00003.gguf``)
+    contribute only their first part - llama.cpp finds the siblings on its own;
+    loose single-file GGUFs contribute themselves. Mirrors the first-part filter
+    in sync_models_dir.
+    """
     out: List[Path] = []
     for f in sorted(d.rglob("*.gguf")):
         try:
@@ -454,18 +440,13 @@ def _gguf_first_parts(d: Path, max_depth: int = 3) -> List[Path]:
 #  GGUF embedding-model detection (hard metadata, not a filename guess) #
 # ------------------------------------------------------------------ #
 
-# llama.cpp's own LLM_ARCH_NAMES entries for encoder/embedding-only
-# architectures (verified against src/llama-arch.cpp) - a GGUF whose
-# general.architecture is one of these is unambiguously an embedding/encoder
-# model, never a causal-chat LLM.
+# llama.cpp's LLM_ARCH_NAMES entries for encoder/embedding-only architectures. A
+# GGUF whose general.architecture is one of these is an embedding/encoder model,
+# never a causal-chat LLM.
 #
-# SECOND CONSUMER: localm.discover.classify_hf_metadata also reads this set,
-# to badge a HuggingFace SEARCH result from HF's server-side gguf.architecture
-# expand field - not just this module's own post-download header parse. An
-# edit here (adding/renaming/tightening an entry) changes what the search page
-# reports as well as local detection, with no test near THIS file failing to
-# say so. See classify_hf_metadata's docstring for that comparison's own
-# failure mode (HF's parse vs. this module's parse of the same field).
+# Also read by localm.discover.classify_hf_metadata, which badges a HuggingFace
+# search result from HF's server-side gguf.architecture expand field, so an edit
+# here changes what the search page reports as well as local detection.
 _GGUF_EMBEDDING_ARCHITECTURES = frozenset({
     "bert", "modern-bert", "nomic-bert", "nomic-bert-moe", "neo-bert",
     "jina-bert-v2", "jina-bert-v3", "eurobert", "gemma-embedding",
@@ -473,8 +454,8 @@ _GGUF_EMBEDDING_ARCHITECTURES = frozenset({
 })
 
 # GGUF metadata value types (ggml gguf.h `enum gguf_type`). STRING(8) and
-# ARRAY(9) are variable-length and handled specially; every other type here
-# maps to its fixed byte width.
+# ARRAY(9) are variable-length and handled separately; every other type here maps
+# to its fixed byte width.
 _GGUF_FIXED_TYPE_SIZES = {
     0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8,
 }
@@ -488,12 +469,11 @@ _GGUF_SCALAR_FORMATS = {
     6: "<f", 7: "<?", 10: "<Q", 11: "<q", 12: "<d",
 }
 
-# The "<architecture>."-prefixed keys describing the attention shape, i.e. what
-# the KV cache actually costs per token. Stored as suffixes because llama.cpp
-# namespaces them under general.architecture ("llama.block_count",
-# "qwen3moe.attention.head_count_kv", ...). Deliberately does NOT include any
-# expert/MoE key: expert weights cost VRAM but contribute nothing to KV, and
-# conflating the two is the bug this exists to fix.
+# The '<architecture>.'-prefixed keys describing the attention shape, i.e. what
+# the KV cache costs per token. Stored as suffixes because llama.cpp namespaces
+# them under general.architecture ('llama.block_count',
+# 'qwen3moe.attention.head_count_kv', ...). No expert/MoE key belongs here:
+# expert weights contribute nothing to the KV cache.
 _GGUF_KV_SHAPE_SUFFIXES = (
     ".block_count",
     ".embedding_length",
@@ -508,17 +488,16 @@ _GGUF_KV_SHAPE_SUFFIXES = (
 _GGUF_KV_HEADS_SUFFIX = ".attention.head_count_kv"
 
 # Integer element types a per-layer array may use, keyed identically to
-# _GGUF_FIXED_TYPE_SIZES. Real files write int32 (type 5); the smaller widths
-# are accepted because nothing stops a writer using them. Floats, bools and
-# strings are deliberately ABSENT: an array of those is not a head count, and
-# reading it as one would be the silent mis-read this module refuses to do.
+# _GGUF_FIXED_TYPE_SIZES. Real files write int32 (type 5); the smaller widths are
+# accepted too. Floats, bools and strings are absent, so an array of those is
+# never read as a head count.
 _GGUF_INT_ARRAY_FORMATS = {
     0: "<B", 1: "<b", 2: "<H", 3: "<h", 4: "<I", 5: "<i", 10: "<Q", 11: "<q",
 }
 
-# Upper bound on a per-layer array, as a mis-parse guard. llama.cpp's own
-# LLAMA_MAX_LAYERS is 512, so anything past this many entries is a wrong offset
-# rather than a real model, and we must not allocate a list from a bogus count.
+# Upper bound on a per-layer array, as a mis-parse guard. llama.cpp's
+# LLAMA_MAX_LAYERS is 512, so a longer array means a wrong offset, and no list is
+# allocated from such a count.
 _GGUF_MAX_LAYER_ARRAY = 4096
 
 # Mis-parse guards for the tensor-info walk, generous against any real model.
@@ -526,45 +505,42 @@ _GGUF_MAX_TENSOR_COUNT = 1_000_000
 _GGUF_MAX_TENSOR_DIMS = 8
 
 # Key families that mark an architecture as keeping a FIXED-size recurrent state
-# (state-space / linear attention / short convolution) in place of a growing KV
-# cache on some layers. Matched as "<arch>" + infix so an mmproj's or another
-# tower's keys can never vote, exactly like the shape keys above.
-#
-# Deliberately a marker, NOT an architecture-name table: a name list goes stale
-# every time upstream adds a family. Its miss mode is also the safe one - an
-# unmarked hybrid simply keeps today's behaviour, it is never made worse. NOTE
-# that ".ssm." alone is NOT sufficient: lfm2 is hybrid via short convolution and
-# declares no ssm.* key at all (measured on a real LFM2-1.2B header).
+# (state-space, linear attention, short convolution) in place of a growing KV
+# cache on some layers. Matched as '<arch>' plus infix, so an mmproj's or another
+# tower's keys cannot vote, like the shape keys above. A marker rather than an
+# architecture-name table; an unmarked hybrid keeps today's behaviour. '.ssm.'
+# alone is not sufficient: lfm2 is hybrid via short convolution and declares no
+# ssm.* key at all.
 _GGUF_RECURRENT_KEY_INFIXES = (".ssm.", ".shortconv.")
 
-# Bounded read for the metadata probe: real GGUF writers put general.* and
-# <arch>.pooling_type keys before the (often large) tokenizer vocab arrays and
-# all tensor data, so a few MB is always enough; this guarantees the probe
-# never reads a multi-GB model file just to classify it.
+# Bounded read for the metadata probe. Real GGUF writers put general.* and
+# <arch>.pooling_type keys before the tokenizer vocab arrays and all tensor data,
+# so the probe never reads a multi-GB model file just to classify it.
 _GGUF_META_PROBE_BYTES = 4 * 1024 * 1024
 
-# A SECOND, larger bound used only for the tensor-name pass below. The tensor
-# list sits after the whole metadata block (tokenizer vocab included), so it is
-# past the budget above - measured 5.71 MiB into a real Qwen3-Next file. This is
-# paid ONLY by a hybrid that states a single head count, never on the common
-# path, and it is still a bounded prefix rather than a multi-GB model read.
+# A second, larger bound used only by the tensor-name pass below: the tensor list
+# sits after the whole metadata block, past the budget above. Paid only by a
+# hybrid that states a single head count, and still a bounded prefix.
 _GGUF_TENSOR_PROBE_BYTES = 32 * 1024 * 1024
 
 
 def _gguf_read_string(buf: bytes, off: int):
-    """Read a GGUF length-prefixed string at *off*; returns (value, new_offset)."""
+    """Read a GGUF length-prefixed string at *off*; returns (value, new_offset).
+    Raises struct.error/UnicodeDecodeError/IndexError on malformed input -
+    callers catch and treat that as 'no signal', never crash."""
     (n,) = struct.unpack_from("<Q", buf, off)
     off += 8
     if n > len(buf) - off or n > 1_000_000:
-        # No real GGUF key or architecture NAME is anywhere near 1 MB; a huge
-        # length here means we're mis-parsing (or past our bounded read), not
-        # that this is a legitimately giant string - bail out cleanly.
+        # No real GGUF key or architecture name approaches 1 MB, so a length this
+        # large means a mis-parse or a read past the bounded prefix.
         raise struct.error("gguf string length implausible or out of bounds")
     return buf[off:off + n].decode("utf-8"), off + n
 
 
 def _gguf_skip_value(buf: bytes, off: int, vtype: int) -> int:
-    """Advance past one GGUF metadata VALUE of type *vtype* at *off*, returning the new offset."""
+    """Advance past one GGUF metadata VALUE of type *vtype* at *off*, returning
+    the new offset. Raises on an unsupported/malformed type (caught by the
+    caller) rather than silently mis-parsing the rest of the file."""
     if vtype == _GGUF_TYPE_STRING:
         _, off = _gguf_read_string(buf, off)
         return off
@@ -588,7 +564,12 @@ def _gguf_skip_value(buf: bytes, off: int, vtype: int) -> int:
 
 
 def _gguf_read_scalar(buf: bytes, off: int, vtype: int):
-    """Read one FIXED-WIDTH GGUF scalar at *off*; returns (value, new_offset)."""
+    """Read one FIXED-WIDTH GGUF scalar at *off*; returns (value, new_offset).
+
+    Raises struct.error for a string/array/unknown type rather than guessing, so
+    a key whose value is not a plain number (e.g. a per-layer head_count_kv
+    ARRAY) can never be silently read as one. Callers catch and treat that as
+    'no signal'."""
     fmt = _GGUF_SCALAR_FORMATS.get(vtype)
     if fmt is None:
         raise struct.error(f"gguf value type {vtype} is not a fixed-width scalar")
@@ -597,7 +578,18 @@ def _gguf_read_scalar(buf: bytes, off: int, vtype: int):
 
 
 def _gguf_read_int_array(buf: bytes, off: int):
-    """Read a GGUF array of FIXED-WIDTH INTEGERS at *off*; returns (list, new_offset)."""
+    """Read a GGUF array of FIXED-WIDTH INTEGERS at *off*; returns (list, new_offset).
+
+    Exists because a hybrid architecture states ``attention.head_count_kv`` as one
+    entry PER LAYER, and those entries are the exact per-layer truth - a 0 marks a
+    layer that keeps a fixed-size recurrent state and holds no KV cache at all.
+    ``_gguf_read_scalar`` deliberately REFUSES an array so a per-layer value can
+    never be silently read as a whole-stack one, so reading it needs its own
+    function rather than a relaxation of that contract.
+
+    Raises struct.error for a non-integer element type, an implausible length, or
+    a count running past the bounded read, rather than guessing. Callers catch and
+    treat that as 'no signal'."""
     (elem_type,) = struct.unpack_from("<I", buf, off)
     (count,) = struct.unpack_from("<Q", buf, off + 4)
     off += 12
@@ -613,7 +605,25 @@ def _gguf_read_int_array(buf: bytes, off: int):
 
 
 def _gguf_attending_layer_count(path: Path, n_layers: int) -> int:
-    """How many of *n_layers* blocks actually hold a KV cache, read from the file's TENSOR NAMES."""
+    """How many of *n_layers* blocks actually hold a KV cache, read from the
+    file's TENSOR NAMES. Returns 0 - never raises - when that cannot be
+    determined, which callers treat as 'no signal'.
+
+    A hybrid that states ONE head_count_kv for a stack whose layers differ does
+    not record which layers attend anywhere in its metadata (verified against a
+    real Qwen3-Next file: 44 keys, none naming the pattern). The tensor list does
+    record it, unambiguously and with NO architecture table: an attending layer
+    carries blk.<i>.attn_k / attn_v weights, and a linear-attention, state-space
+    or short-convolution layer does not.
+
+    Keyed on attn_k/attn_v SPECIFICALLY, never on a bare "attn": all three real
+    hybrids measured carry blk.<i>.attn_norm.weight on every layer whether it
+    attends or not, so matching the norm tensor would count the whole stack and
+    silently reproduce the very over-charge this exists to remove.
+
+    Cross-checked against the per-layer head_count_kv array on the two real files
+    that publish both, where the two independent sources agree exactly (Granite
+    4.0 H Tiny: layers 5/15/25/35; LFM2-1.2B: 2/5/8/10/12/14)."""
     try:
         with open(path, "rb") as f:
             buf = f.read(_GGUF_TENSOR_PROBE_BYTES)
@@ -647,10 +657,9 @@ def _gguf_attending_layer_count(path: Path, n_layers: int) -> int:
             except ValueError:
                 return 0        # an unexpected layout - refuse rather than guess
     except (struct.error, IndexError, UnicodeDecodeError):
-        # Ran past the bounded read, or a malformed layout. Unlike the metadata
-        # walk this CANNOT answer from a partial result: a truncated tensor list
-        # under-counts attending layers, which would UNDER-charge the KV cache
-        # and let it overflow VRAM. Refusing is the only safe partial answer.
+        # Ran past the bounded read, or a malformed layout. A truncated tensor
+        # list under-counts attending layers and would under-charge the KV cache,
+        # so this refuses rather than answering from a partial result.
         return 0
     # More attending layers than the stack has means the two disagree about what
     # they describe, so neither can be trusted.
@@ -658,7 +667,43 @@ def _gguf_attending_layer_count(path: Path, n_layers: int) -> int:
 
 
 def gguf_kv_bytes_per_token(path: Path) -> int:
-    """f16 KV-cache bytes per token, computed from *path*'s own GGUF header."""
+    """f16 KV-cache bytes per token, computed from *path*'s own GGUF header.
+
+    Same formula as ``LlamaCpp._read_kv_bytes_per_token``, but read from the
+    FILE rather than from a loaded model. That is the entire point: the offload
+    decision (how many layers fit in VRAM) has to be made BEFORE the model is
+    loaded, so until now it charged KV from the file's SIZE - which is wrong in
+    both directions. A sparse MoE inflates the file with expert weights that
+    cost no KV at all, so it was over-charged; a wide-KV dense model was
+    under-charged (~2.6x low on a 12B) and could be judged to fit when its KV
+    cache actually overflows VRAM.
+
+    K and V cache = (total KV heads across all layers) * head_dim, times 2 (K and
+    V) and times 2 bytes/element (llama.cpp's default f16 type_k/type_v).
+
+    "Across all layers" is the part a plain n_layers * n_head_kv gets wrong on a
+    HYBRID architecture (Qwen3-Next, Granite 4 H, LFM2, Jamba, Falcon-H1 ...),
+    where most layers use linear attention / a state-space model / a short
+    convolution and keep a FIXED-size recurrent state instead of a KV cache that
+    grows with the context. Those layers cost no per-token KV at all, so charging
+    every layer over-charges by the ratio of attention layers to total layers -
+    measured 4.0x on a real Qwen3-Next header (12 of its 48 layers attend).
+
+    Such a file states head_count_kv one entry PER LAYER, and that array is the
+    exact truth rather than an estimate, zeros included, so it is summed. When a
+    hybrid instead states a single scalar (Qwen3-Next does) the file simply does
+    not record which layers attend, so this returns 0 rather than a number that
+    is confidently wrong.
+
+    head_dim comes from
+    the explicit ``attention.key_length``/``value_length`` keys when present
+    (several architectures set a head_dim that is NOT n_embd/n_head) and falls
+    back to n_embd // n_head otherwise.
+
+    Returns 0 - never raises - when the file is not a readable GGUF, or the
+    shape keys are absent, non-scalar, or non-positive. 0 means 'no signal', and
+    the caller keeps its previous heuristic; a wrong number here would silently
+    mis-size every load, so refusing to answer is the safe failure."""
     try:
         with open(path, "rb") as f:
             buf = f.read(_GGUF_META_PROBE_BYTES)
@@ -684,11 +729,10 @@ def gguf_kv_bytes_per_token(path: Path) -> int:
             if key == "general.architecture" and vtype == _GGUF_TYPE_STRING:
                 architecture, off = _gguf_read_string(buf, off)
                 continue
-            # Collect by FULL key and resolve against the architecture at the
-            # end, so key order does not matter and an mmproj's parallel
-            # "clip.*" attention block can never be mistaken for the LLM's.
-            # A hybrid stack states head_count_kv once PER LAYER. Read it -
-            # skipping it would throw away the only exact answer in the file.
+            # Collect by FULL key and resolve against the architecture at the end,
+            # so key order does not matter and an mmproj's parallel 'clip.*'
+            # attention block is not read as the LLM's. A hybrid stack states
+            # head_count_kv once PER LAYER, so that array is read here.
             if key.endswith(_GGUF_KV_HEADS_SUFFIX) and vtype == _GGUF_TYPE_ARRAY:
                 try:
                     per_layer_kv[key], off = _gguf_read_int_array(buf, off)
@@ -701,8 +745,8 @@ def gguf_kv_bytes_per_token(path: Path) -> int:
                     continue
                 except struct.error:
                     pass        # not a scalar (array/string) - skip it normally
-            # Note (by NAME only, no value read) that this file declares a
-            # recurrent-state layer family, resolved against the architecture at
+            # Note by NAME only, with no value read, that this file declares a
+            # recurrent-state layer family; resolved against the architecture at
             # the end like everything else here.
             if any(infix in key for infix in _GGUF_RECURRENT_KEY_INFIXES):
                 recurrent_keys.add(key)
@@ -726,10 +770,8 @@ def gguf_kv_bytes_per_token(path: Path) -> int:
     # uniform architecture; on a hybrid only the attending layers do.
     per_layer = per_layer_kv.get(f"{architecture}{_GGUF_KV_HEADS_SUFFIX}")
     if per_layer is not None:
-        # The array is the per-layer truth, so this is exact. Require it to
-        # describe the same stack block_count does: a length mismatch means one
-        # of the two is not what we think it is, and answering anyway would be
-        # the confidently-wrong number this function exists to refuse.
+        # The array is the per-layer truth, so this is exact. It must describe the
+        # same stack block_count does; a length mismatch returns 0.
         if not n_layers or len(per_layer) != n_layers:
             return 0
         total_kv_heads = sum(v for v in per_layer if v > 0)
@@ -739,10 +781,9 @@ def gguf_kv_bytes_per_token(path: Path) -> int:
             return 0
         if any(k.startswith(f"{architecture}{infix}")
                for infix in _GGUF_RECURRENT_KEY_INFIXES for k in recurrent_keys):
-            # Hybrid, but stated as ONE number for a stack whose layers differ,
-            # so n_layers is the wrong multiplier and the metadata block does not
-            # say what the right one is. The TENSOR NAMES do, exactly, so ask
-            # them rather than either guessing or giving up.
+            # Hybrid stated as ONE number for a stack whose layers differ, so
+            # n_layers is the wrong multiplier and the metadata block does not
+            # carry the right one. The tensor names give it exactly.
             attending = _gguf_attending_layer_count(path, n_layers)
             if not attending:
                 return 0        # could not tell - no signal, caller falls back
@@ -767,7 +808,16 @@ def gguf_kv_bytes_per_token(path: Path) -> int:
 
 
 def gguf_expert_count(path: Path) -> int:
-    """Number of EXPERTS in *path*, or 0 when it is not a Mixture-of-Experts model."""
+    """Number of EXPERTS in *path*, or 0 when it is not a Mixture-of-Experts model.
+
+    Read from the header's ``<arch>.expert_count`` before the model is loaded, so
+    a placement decision that only makes sense for an MoE can tell the difference
+    rather than silently doing nothing on a dense model.
+
+    Deliberately separate from ``gguf_kv_bytes_per_token``: expert weights cost
+    VRAM but contribute NOTHING to the KV cache, and conflating the two is the bug
+    that function exists to fix. Returns 0 - never raises - on an unreadable or
+    non-GGUF file, same 'no signal' contract as the other probes here."""
     try:
         with open(path, "rb") as f:
             buf = f.read(_GGUF_META_PROBE_BYTES)
@@ -807,37 +857,39 @@ def gguf_expert_count(path: Path) -> int:
     return int(value) if isinstance(value, int) and value > 0 else 0
 
 
-# The FUSED per-layer expert weight tensors, exactly as llama.cpp's converters
-# name them: blk.<i>.ffn_gate_exps / ffn_down_exps / ffn_up_exps - one tensor
-# PER PROJECTION with every expert fused into it, not one tensor per expert.
-# The router (ffn_gate_inp) and any SHARED expert are deliberately excluded:
-# they are read every token and are tiny, so llama.cpp never moves them.
+# The FUSED per-layer expert weight tensors, as llama.cpp's converters name them:
+# blk.<i>.ffn_gate_exps / ffn_down_exps / ffn_up_exps - one tensor PER PROJECTION
+# with every expert fused into it, not one tensor per expert. The router
+# (ffn_gate_inp) and any SHARED expert are excluded; llama.cpp never moves them.
 #
-# SINGLE SOURCE OF TRUTH: llamacpp/llama.py's _apply_cpu_moe builds its native
-# tensor_buft_overrides regex from these SAME _MOE_TENSOR_PREFIX/_SUFFIX
-# constants (imported from here), and gguf_moe_pinned_expert_bytes below sums
-# exactly the tensors this pattern matches for its VRAM preflight estimate -
-# so the two can never silently disagree about what n_cpu_moe actually pins.
-# Built by concatenation rather than a format string so the literal stays a
-# plain regex with no interpolation machinery around it (mirrors the
-# original comment in llama.py, preserved here since this is now that
-# constant's home).
+# llamacpp/llama.py's _apply_cpu_moe imports these same constants to build its
+# native tensor_buft_overrides regex, and gguf_moe_pinned_expert_bytes below sums
+# exactly the tensors this pattern matches, so the two cannot disagree about what
+# n_cpu_moe pins. Built by concatenation, so the literal stays a plain regex with
+# no interpolation.
 _MOE_TENSOR_PREFIX = r"blk\."
 _MOE_TENSOR_SUFFIX = r"\.ffn_(gate|down|up)_exps"
 # General matcher (not tied to one layer index) with the index as a capture
-# group, derived from the SAME prefix/suffix so it can never drift from what
-# _apply_cpu_moe actually builds per-layer.
+# group, derived from the same prefix and suffix _apply_cpu_moe builds per-layer.
 _MOE_EXPERT_TENSOR_RE = re.compile(_MOE_TENSOR_PREFIX + r"(\d+)" + _MOE_TENSOR_SUFFIX)
 
 
 def _gguf_read_string_stream(f) -> str:
-    """Read a length-prefixed GGUF string from an open, positioned file handle, advancing past it."""
+    """Read a length-prefixed GGUF string from an open, positioned file
+    handle, advancing past it. Streaming counterpart to ``_gguf_read_string``
+    (which reads from an in-memory buffer) - needed because tensor-info
+    parsing (see ``gguf_moe_pinned_expert_bytes``) must read PAST the entire
+    metadata KV block, including whatever tokenizer vocabulary array it
+    contains (routinely several MB for a 100k+-token vocab), which is why
+    that function cannot reuse the bounded-4MB-slurp style
+    ``gguf_kv_bytes_per_token``/``gguf_expert_count`` use - those only need
+    EARLY keys and can stop (or silently truncate-and-still-answer) before
+    reaching the vocab; a fixed bound here would be a real correctness risk
+    on a preflight decision, not just cosmetic."""
     (n,) = struct.unpack("<Q", f.read(8))
     if n > 10_000_000:
-        # No real GGUF tensor/key name is anywhere near 10 MB; a huge length
-        # here means the stream is misaligned (or genuinely corrupt), not
-        # that this is a legitimately giant string - bail out cleanly rather
-        # than attempt a multi-MB read that can only be wrong either way.
+        # No real GGUF tensor or key name approaches 10 MB, so a length this large
+        # means the stream is misaligned or corrupt.
         raise struct.error("gguf string length implausible")
     data = f.read(n)
     if len(data) != n:
@@ -846,7 +898,9 @@ def _gguf_read_string_stream(f) -> str:
 
 
 def _gguf_skip_value_stream(f, vtype: int) -> None:
-    """Streaming counterpart to ``_gguf_skip_value`` - advance *f* past one GGUF metadata VALUE of type *vtype* by seeking, not by reading array/blob bytes into memory that nothing here needs."""
+    """Streaming counterpart to ``_gguf_skip_value`` - advance *f* past one
+    GGUF metadata VALUE of type *vtype* by seeking, not by reading array/blob
+    bytes into memory that nothing here needs."""
     if vtype == _GGUF_TYPE_STRING:
         _gguf_read_string_stream(f)
         return
@@ -868,20 +922,42 @@ def _gguf_skip_value_stream(f, vtype: int) -> None:
     f.seek(size, 1)
 
 
-# GGUF pads the tensor-info section to this many bytes before tensor DATA
-# begins (the format's default; a file may override it via a general.alignment
-# KV key). gguf_moe_pinned_expert_bytes deliberately does not read that key -
-# see its own docstring for why the resulting error is negligible.
+# GGUF pads the tensor-info section to this many bytes before tensor DATA begins.
+# A file may override it via a general.alignment KV key, which
+# gguf_moe_pinned_expert_bytes does not read.
 _GGUF_DEFAULT_ALIGNMENT = 32
 
 # Sanity ceiling on a single tensor's dimension count, generous against
-# GGML_MAX_DIMS (4 in every real ggml build) - guards against a corrupt/
-# misaligned stream being read as an implausibly large dims array.
+# GGML_MAX_DIMS (4 in every real ggml build).
 _GGUF_MAX_TENSOR_DIMS = 8
 
 
 def gguf_moe_pinned_expert_bytes(path: Path, n_pinned_layers: int) -> Optional[int]:
-    """Bytes occupied by the routed-expert weight tensors of the FIRST *n_pinned_layers* transformer layers - the exact tensors ``_apply_cpu_moe`` (llamacpp/llama.py) pins to system RAM for an ``n_cpu_moe=N`` load (see ``_MOE_EXPERT_TENSOR_RE`` above for which tensors and why)."""
+    """Bytes occupied by the routed-expert weight tensors of the FIRST
+    *n_pinned_layers* transformer layers - the exact tensors ``_apply_cpu_moe``
+    (llamacpp/llama.py) pins to system RAM for an ``n_cpu_moe=N`` load (see
+    ``_MOE_EXPERT_TENSOR_RE`` above for which tensors and why).
+
+    Computed from each matching tensor's OFFSET DELTA in the file's own
+    tensor-info section (the next tensor's offset minus this one's, sorted by
+    offset; the last tensor's size comes from the file's total size instead)
+    rather than decoding ggml's per-quantization-type block format. This
+    needs no per-type size table (Q4_K, IQ2_XS, Q8_0, ... each have a
+    different bytes-per-block, and getting even one entry wrong would
+    silently mis-size every load using it) and is EXACT regardless of
+    quantization scheme, as long as tensors are laid out contiguously in
+    offset order - true for every llama.cpp-produced GGUF (the only writer
+    that matters here: llama.cpp is also what reads the file back and pins
+    these exact tensors).
+
+    Returns ``None`` - never raises - when the file cannot be parsed as a
+    GGUF, or *n_pinned_layers* is <= 0: the caller then falls back to
+    charging the whole file (today's behavior), never inventing a discount
+    it cannot prove (AGENTS.md rule 5). Returns ``0`` (a real answer, not a
+    failure) when parsing succeeds but nothing in the pinned layer range
+    matches - e.g. a dense model, where ``_apply_cpu_moe`` already treats
+    ``n_cpu_moe`` as a no-op via its own ``gguf_expert_count() == 0`` guard,
+    so charging the whole file here is correct, not a fallback."""
     if n_pinned_layers <= 0:
         return None
     try:
@@ -917,12 +993,9 @@ def gguf_moe_pinned_expert_bytes(path: Path, n_pinned_layers: int) -> Optional[i
         return None
     remainder = data_start % _GGUF_DEFAULT_ALIGNMENT
     if remainder:
-        # Only the LAST tensor's size below depends on this: every other
-        # tensor's size comes from the delta to the NEXT tensor's offset,
-        # which cancels any alignment padding out entirely. A file that
-        # overrides the default alignment (rare; not read here) would only
-        # skew the last tensor's size by at most one alignment unit -
-        # negligible against GB-scale tensors.
+        # Only the LAST tensor's size below depends on this: every other tensor's
+        # size comes from the delta to the NEXT tensor's offset, which cancels the
+        # alignment padding.
         data_start += _GGUF_DEFAULT_ALIGNMENT - remainder
 
     entries.sort(key=lambda e: e[1])
@@ -939,7 +1012,21 @@ def gguf_moe_pinned_expert_bytes(path: Path, n_pinned_layers: int) -> Optional[i
 
 
 def _gguf_metadata_probe(path: Path) -> dict:
-    """Best-effort read of the GGUF header metadata needed for embedding-model detection: ``general.architecture`` and whether any ``*.pooling_type`` key is present."""
+    """Best-effort read of the GGUF header metadata needed for embedding-model
+    detection: ``general.architecture`` and whether any ``*.pooling_type`` key
+    is present. Reads only a bounded prefix of the file (see
+    ``_GGUF_META_PROBE_BYTES`` - real metadata always precedes the large
+    tokenizer vocab arrays and tensor data), never the whole model. Returns
+    ``{}`` on any parse failure or truncation within that bound - this must
+    NEVER raise or crash a caller; an unreadable/unexpected header just means
+    'no signal', exactly like ``_has_gguf_magic``'s existing defensive style,
+    and the caller falls back to its pre-existing classification. A truncation
+    or malformed key AFTER a definitive signal was already resolved (e.g. a
+    huge multilingual tokenizer vocab array following an early
+    general.architecture="bert" key) returns that already-resolved signal
+    rather than discarding it - the early-exit below stops as soon as either
+    signal is definitively known, so this is the normal case, not just a
+    fallback."""
     try:
         with open(path, "rb") as f:
             buf = f.read(_GGUF_META_PROBE_BYTES)
@@ -952,9 +1039,8 @@ def _gguf_metadata_probe(path: Path) -> dict:
             return {}
         (version,) = struct.unpack_from("<I", buf, 4)
         if version < 2:
-            # v1 used 32-bit tensor/kv counts and predates every architecture
-            # this detector cares about; no signal rather than mis-parsing it
-            # with the v2+ 64-bit layout.
+            # v1 used 32-bit tensor/kv counts, so it reports no signal rather than
+            # being parsed with the v2+ 64-bit layout.
             return {}
         tensor_count, kv_count = struct.unpack_from("<QQ", buf, 8)
         off = 24
@@ -968,23 +1054,40 @@ def _gguf_metadata_probe(path: Path) -> dict:
                 if key.endswith(".pooling_type"):
                     has_pooling_type = True
                 off = _gguf_skip_value(buf, off, vtype)
-            # Stop as soon as the final answer is already decided: a definitive
-            # embedding architecture, or any pooling_type key at all, makes the
-            # rest of the KV block irrelevant to classification. Requiring only
-            # ONE of the two (not both) means a truncation past this point can
-            # never discard an already-confirmed signal.
+            # Stop as soon as the answer is decided: a definitive embedding
+            # architecture, or any pooling_type key. Either one alone is enough,
+            # so a truncation past this point cannot discard a confirmed signal.
             if has_pooling_type or architecture in _GGUF_EMBEDDING_ARCHITECTURES:
                 break
     except (struct.error, IndexError, UnicodeDecodeError):
-        # Truncated within our bounded read, or a malformed/unexpected layout -
-        # fall through and report whatever was already resolved before the
-        # failure, rather than discarding a signal found earlier in the walk.
+        # Truncated within the bounded read, or a malformed layout - fall through
+        # and report whatever resolved before the failure.
         pass
     return {"architecture": architecture, "has_pooling_type": has_pooling_type}
 
 
 def gguf_embedding_signal(path: Path, meta: Optional[dict] = None) -> bool:
-    """True when *path*'s own GGUF metadata marks it as an embedding/pooling model rather than a causal-chat LLM: either its ``general.architecture`` is one of llama.cpp's dedicated encoder/embedding architectures (``_GGUF_EMBEDDING_ARCHITECTURES``), or it carries a ``'<architecture>.pooling_type'`` key at..."""
+    """True when *path*'s own GGUF metadata marks it as an embedding/pooling
+    model rather than a causal-chat LLM: either its ``general.architecture`` is
+    one of llama.cpp's dedicated encoder/embedding architectures
+    (``_GGUF_EMBEDDING_ARCHITECTURES``), or it carries a
+    ``"<architecture>.pooling_type"`` key at all - llama.cpp's converter only
+    writes that key for a pooling-configured export (e.g. Qwen3-Embedding,
+    gte-Qwen2, e5-mistral all reuse a decoder architecture whose
+    general.architecture is unchanged from the chat variant, so the pooling-type
+    key is the only signal that catches them). Both are hard metadata baked
+    into the file itself - never a filename guess. Used by
+    ``_detect_local_model_type`` (local add + folder auto-sync) and by
+    ``pull.py`` (a freshly-downloaded remote GGUF).
+
+    *meta*, when given, is an already-computed ``_gguf_metadata_probe(path)``
+    result - MEASURED on a real 6.6 GB model: a bare probe costs ~205-260ms
+    (Python-level KV-block parsing, not raw disk I/O - repeated warm-cache
+    calls did not collapse toward zero), so a caller that already has one
+    (F8-PERSIST-ARCH-AND-EXPERT-COUNT's ``_detect_local_model_type``, which
+    also needs the architecture string) passes it in rather than paying for a
+    second read of the same bytes. Defaults to None (reads *path* itself, the
+    original behavior) so every existing caller is unaffected."""
     if meta is None:
         meta = _gguf_metadata_probe(path)
     if meta.get("architecture") in _GGUF_EMBEDDING_ARCHITECTURES:
@@ -992,25 +1095,58 @@ def gguf_embedding_signal(path: Path, meta: Optional[dict] = None) -> bool:
     return bool(meta.get("has_pooling_type"))
 
 
-# llama.cpp's clip.cpp writes this exact general.architecture value for every
-# vision-projector (mmproj) GGUF it exports - llava, idefics3, siglip and every
-# other projector variant share it, distinguished instead by a "clip.projector_type"
-# key. Verified against a real ggml-org/SmolVLM-256M-Instruct-GGUF mmproj file,
-# which also carries a parallel general.type="clip-vision" and a
-# "clip.vision.*"-prefixed metadata block (never a "<arch>.*"-prefixed one, so it
-# can never collide with gguf_embedding_signal's architecture check above).
+# llama.cpp's clip.cpp writes this general.architecture value for every
+# vision-projector (mmproj) GGUF it exports; projector variants are distinguished
+# by a 'clip.projector_type' key instead. Such a file also carries
+# general.type='clip-vision' and a 'clip.vision.*'-prefixed metadata block, never
+# a '<arch>.*'-prefixed one, so it cannot collide with gguf_embedding_signal's
+# architecture check above.
 _GGUF_MMPROJ_ARCHITECTURE = "clip"
 
 
 def gguf_is_mmproj(path: Path, meta: Optional[dict] = None) -> bool:
-    """True when *path*'s own GGUF metadata marks it as a vision projector (mmproj) rather than a standalone text LLM: its ``general.architecture`` is ``'clip'``."""
+    """True when *path*'s own GGUF metadata marks it as a vision projector
+    (mmproj) rather than a standalone text LLM: its ``general.architecture`` is
+    ``"clip"``. Hard metadata baked into the file itself by every llama.cpp
+    mmproj export - never a filename guess (contrast ``find_sibling_mmproj``
+    in registry.py, which only pairs a model with a co-located projector file
+    and is a filename heuristic by necessity). Used by
+    ``_detect_local_model_type`` (local add + folder auto-sync) and by
+    ``pull.py`` (a freshly-downloaded remote GGUF), the same two call sites as
+    ``gguf_embedding_signal``.
+
+    *meta*, when given, is an already-computed ``_gguf_metadata_probe(path)``
+    result - see ``gguf_embedding_signal``'s docstring for why and the
+    measured cost. Defaults to None (reads *path* itself)."""
     if meta is None:
         meta = _gguf_metadata_probe(path)
     return meta.get("architecture") == _GGUF_MMPROJ_ARCHITECTURE
 
 
 def gguf_registry_metadata(path: Path, meta: Optional[dict] = None) -> dict:
-    """Architecture family and MoE expert count for a GGUF file, to persist on its registry entry at registration time (F8-PERSIST-ARCH-AND-EXPERT-COUNT) - the same real header the HuggingFace SEARCH page already reads to badge a remote repo's architecture/MoE-ness, now captured for a LOCAL file too instea..."""
+    """Architecture family and MoE expert count for a GGUF file, to persist on
+    its registry entry at registration time (F8-PERSIST-ARCH-AND-EXPERT-COUNT)
+    - the same real header the HuggingFace SEARCH page already reads to badge
+    a remote repo's architecture/MoE-ness, now captured for a LOCAL file too
+    instead of only ever being available as a name-guess.
+
+    Returns ``{"architecture": Optional[str], "expert_count": Optional[int]}``.
+    Both are None together when the header could not be read/parsed at all
+    (unreadable file, bad magic, a v1 GGUF, or a truncated read that never
+    reached ``general.architecture``) - genuinely UNKNOWN, never coerced to a
+    false "0 experts" that would misreport a real MoE model as confirmed
+    dense the moment a caller trusted it. ``expert_count`` is 0 (not None)
+    only once ``architecture`` was actually resolved, since that is the one
+    condition under which "no expert_count key" is a real, confirmed answer
+    rather than a guess about a read that did not get far enough to know.
+
+    *meta*, when given, is an already-computed ``_gguf_metadata_probe(path)``
+    result (see ``gguf_embedding_signal``'s docstring) - avoids a THIRD read of
+    the same header when the caller already ran mmproj/embedding detection.
+    ``gguf_expert_count`` still does its own separate, equally-bounded read
+    regardless (a different key scan, not captured by the shared probe) -
+    MEASURED on a real 6.6 GB model: ~205ms for that one remaining read plus
+    parse, called once per registration, never per request."""
     if meta is None:
         meta = _gguf_metadata_probe(path)
     architecture = meta.get("architecture")

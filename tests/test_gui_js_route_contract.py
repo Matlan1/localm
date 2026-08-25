@@ -1,5 +1,23 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Contract test: every HTTP path the GUI's JavaScript fetches must be declared as a real route somewhere in the Python source."""
+"""Contract test: every HTTP path the GUI's JavaScript fetches must be declared
+as a real route somewhere in the Python source.
+
+This exists because of REG-585: PR #585 deleted the ``/v1/plugins`` routes (and
+the Python tests that covered them) but left ``pages/plugins.js`` fetching them,
+so the GUI's whole external-plugin surface 404'd for every user while the suite
+stayed green. Nothing tied the frontend to the backend, so nothing noticed.
+
+The check is static (it reads source, it does not build an app) on purpose: the
+route table of a live app depends on which plugins happen to be installed and
+loaded, which would make the test's coverage depend on fixture state. Route paths
+are declared as literals repo-wide (``@_router.get("/api/coder/sessions")``, no
+router prefixes), so scanning the source sees all of them, deterministically.
+
+Known, deliberate limits: a ``fetch(url)`` whose URL is built in a variable is
+not seen, and a route that is declared in source but never registered on the app
+still counts as declared. This test catches the "route deleted, caller left
+behind" class, which is the one that actually shipped.
+"""
 
 import re
 from pathlib import Path
@@ -26,7 +44,8 @@ _WILD = "\x00"                                # normalized wildcard segment mark
 
 
 def _norm_route(path: str) -> str:
-    """A declared route path -> comparable form ({name} and f-string {media} both become a wildcard: the JS interpolates exactly where the route varies)."""
+    """A declared route path -> comparable form ({name} and f-string {media} both
+    become a wildcard: the JS interpolates exactly where the route varies)."""
     return _PY_PARAM.sub(_WILD, path).split("?")[0].rstrip("/") or "/"
 
 
@@ -67,7 +86,7 @@ def _declared_routes() -> set:
 
 
 def _js_fetches() -> dict:
-    """{normalized path: {'raw': literal, 'files': [...]}} for every GUI fetch."""
+    """{normalized path: {"raw": literal, "files": [...]}} for every GUI fetch."""
     found: dict = {}
 
     def _add(raw: str, f: Path):
@@ -126,5 +145,6 @@ def test_every_gui_fetch_hits_a_declared_route():
 
 @pytest.mark.parametrize("path", ["/api/plugins", "/api/models", "/v1/chat/completions"])
 def test_known_live_routes_are_seen_by_the_scanner(path):
-    """Guards the scanner itself: if the route regex silently stopped matching, every fetch would 'pass' vacuously and this test would go quiet."""
+    """Guards the scanner itself: if the route regex silently stopped matching,
+    every fetch would 'pass' vacuously and this test would go quiet."""
     assert any(_matches(path, r) for r in _declared_routes())

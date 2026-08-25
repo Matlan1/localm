@@ -1,5 +1,18 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""In-process coder backend backed by the inference Engine."""
+"""
+In-process coder backend backed by the inference Engine.
+
+Used for a CPU-RESIDENT reviewer model: a small local model loaded in the coder's
+OWN process, separate from the localm server's GPU model. That gives a genuinely
+HETEROGENEOUS review (a different model than the one that wrote the code) that is
+also fully LOCAL and PRIVATE - no cloud, no off-machine traffic - and on CPU
+(``n_gpu_layers=0`` / ``device="cpu"``) so it never touches the server's GPU VRAM
+or evicts the main model. The trade-off is latency: a CPU load plus slow CPU
+inference, paid only when the (opt-in) reviewer runs.
+
+The model is loaded lazily on first use; a load failure surfaces through the
+caller, which for the reviewer is fail-open (a broken reviewer never blocks).
+"""
 
 from __future__ import annotations
 
@@ -16,7 +29,9 @@ _ENGINE_GEN_KWARGS = frozenset({
 
 
 class LocalEngineBackend(BaseLLMBackend):
-    """A BaseLLMBackend that runs an in-process inference Engine (e.g. a small GGUF on CPU)."""
+    """A BaseLLMBackend that runs an in-process inference Engine (e.g. a small GGUF
+    on CPU). Construction validates the model path but does NOT load weights; the
+    first chat() loads them."""
 
     def __init__(self, model_path: str, *, device: str = "cpu",
                  n_gpu_layers: int = 0, display_name=None) -> None:
@@ -75,7 +90,7 @@ class LocalEngineBackend(BaseLLMBackend):
         return self._model_id
 
     def unload(self) -> None:
-        """Free the model (CPU RAM)."""
+        """Free the model (CPU RAM). Best-effort."""
         try:
             self._engine.unload()
         finally:

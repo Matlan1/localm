@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The live-read version signal (localm/_version) the self-updater compares against the latest release tag."""
+"""The live-read version signal (localm/_version) the self-updater compares against
+the latest release tag. Editable installs do not refresh dist-info on a code swap,
+so the running version MUST come from the VERSION file at runtime, not metadata."""
 
 from localm import _version
 
@@ -48,16 +50,16 @@ def test_is_newer_edge_cases():
 
 
 def test_is_newer_prerelease_truth_table():
-    """The full truth table this fix is built from - drive is_newer() directly rather than asserting on the parser's internals, so a future refactor of _parse/_prerelease_suffix is free as long as this table still holds."""
+    """The full truth table this fix is built from - drive is_newer() directly
+    rather than asserting on the parser's internals, so a future refactor of
+    _parse/_prerelease_suffix is free as long as this table still holds."""
     # A stable release always outranks a prerelease of the SAME numeric version -
     # the filed bug: upgrading FROM an rc TO the matching final release.
     assert _version.is_newer("0.1.4", "0.1.4-rc1") is True
     # ...and never the other direction (never "downgrade" final -> rc automatically).
     assert _version.is_newer("0.1.4-rc1", "0.1.4") is False
-    # Between two prereleases of the same numeric version, the higher ordinal wins -
-    # a second bug the truth table surfaced beyond the filed one (rc1<->rc2 tied
-    # at False in BOTH directions before this fix, i.e. neither was ever offered
-    # as an upgrade over the other).
+    # Between two prereleases of the same numeric version, the higher ordinal
+    # wins.
     assert _version.is_newer("0.1.4-rc2", "0.1.4-rc1") is True
     assert _version.is_newer("0.1.4-rc1", "0.1.4-rc2") is False
     # Identical prerelease, or identical final: a true tie, never newer.
@@ -70,22 +72,24 @@ def test_is_newer_prerelease_truth_table():
 
 
 def test_is_newer_prerelease_never_more_permissive_than_before():
-    """Anti-rollback load-bearing property (updater._refuse_downgrade calls is_newer directly): the prerelease tie-break must only ADD resolution to cases that previously tied at False, never flip an already-correct numeric verdict."""
+    """Anti-rollback load-bearing property (updater._refuse_downgrade calls
+    is_newer directly): the prerelease tie-break must only ADD resolution to
+    cases that previously tied at False, never flip an already-correct numeric
+    verdict. A malformed/adversarial version must still never be treated as
+    newer than a well-formed one it is not actually ahead of."""
     assert _version.is_newer("0.1.3", "0.1.4") is False          # plain older candidate
     assert _version.is_newer("0.1.3-rc1", "0.1.4") is False      # older AND a prerelease
     assert _version.is_newer("not-a-version", "0.1.3") is False  # malformed candidate
     assert _version.is_newer("0.1.4", "not-a-version") is True   # malformed current (unchanged: fails open toward offering, not toward accepting a downgrade)
 
 
-# ---------------------- comparable() (the honesty fix) ---------------------
+# ------------------------------ comparable() -------------------------------
 #
-# is_newer() silently returns False both for a genuine tie/older release AND
-# for a tag it could not parse as a version at all - "stable"/"nightly"/
-# "release-5" all degrade to the same (0,) tuple _parse() gives a real
-# "0.0.0"-shaped version, so the caller cannot tell "not newer" from "could
-# not tell" from the bool alone. comparable() is the second signal a caller
-# reads ALONGSIDE is_newer()'s result to make that distinction (see
-# updater.check()/localm/cli/maintenance.py's update_cmd).
+# is_newer() returns False both for a genuine tie/older release AND for a tag
+# it could not parse as a version at all - "stable"/"nightly"/"release-5" all
+# degrade to the same (0,) tuple _parse() gives a real "0.0.0"-shaped version,
+# so the caller cannot tell "not newer" from "could not tell" from the bool
+# alone. comparable() is the second signal a caller reads ALONGSIDE is_newer().
 
 def test_comparable_true_for_two_real_versions():
     assert _version.comparable("0.2.0", "0.1.0") is True
@@ -100,9 +104,8 @@ def test_comparable_true_for_a_genuine_tie_or_older():
 
 
 def test_comparable_false_for_non_numeric_leading_candidate():
-    # The filed bug, reproduced: each of these silently ties at False against a
-    # real version, and none of them is actually "not newer" - they are
-    # unrecognized.
+    # Each of these ties at False against a real version, and none of them is
+    # actually "not newer" - they are unrecognized.
     for tag in ("stable", "nightly", "release-5"):
         assert _version.is_newer(tag, "0.1.4") is False
         assert _version.comparable(tag, "0.1.4") is False, tag
@@ -123,15 +126,12 @@ def test_comparable_false_for_empty_candidate():
     assert _version.comparable("", "0.1.0") is False
 
 
-# ------------- pinned to the ACTUAL shipped tag shape (unhyphenated) -------
+# ---------- pinned to the ACTUAL shipped tag shape (unhyphenated) ----------
 #
 # Every truth-table test above uses the hyphenated "0.1.4-rc1" form. This
-# project's real tags and VERSION file use the UNHYPHENATED form instead - see
-# VERSION at repo root (0.1.5rc2) and the git tags (v0.1.5rc1, v0.1.5rc2). The
-# code already handles both by construction (_prerelease_suffix's
-# `.lstrip("-_")`), but nothing previously pinned the shape that actually
-# ships - a refactor of the parsing could silently stop handling it while
-# every existing hyphenated-form test kept passing.
+# project's real tags and VERSION file use the UNHYPHENATED form instead. The
+# code handles both by construction (_prerelease_suffix's `.lstrip("-_")`);
+# these pin the shape that actually ships.
 
 def test_is_newer_pinned_to_shipped_tag_shape():
     assert _version.is_newer("v0.1.5rc2", "v0.1.5rc1") is True
@@ -145,7 +145,14 @@ def test_is_newer_pinned_to_shipped_tag_shape():
 
 
 def test_shipping_version_is_offered_as_an_update_to_every_earlier_tag():
-    """The version in VERSION must compare NEWER than every published tag before it, or `localm update` silently never offers this release to the users already on one of them. `_refuse_downgrade` is gated on the same call, so a break here is quiet in both directions."""
+    """The version in VERSION must compare NEWER than every published tag before
+    it, or `localm update` silently never offers this release to the users
+    already on one of them. `_refuse_downgrade` is gated on the same call, so a
+    break here is quiet in both directions.
+
+    Reads VERSION rather than hard-coding a pair: a hard-coded one stops
+    describing the release the moment someone bumps VERSION without touching
+    this file, which is exactly when the check is load-bearing."""
     shipping = _version.read_version()
     for earlier in ("0.1.0", "0.1.1", "0.1.2", "0.1.3", "0.1.4",
                     "0.1.5rc1", "0.1.5rc2"):

@@ -1,5 +1,18 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Review guard: flag coder edits that a passing check cannot vouch for."""
+"""
+Review guard: flag coder edits that a passing check cannot vouch for.
+
+A coding agent can make a green check meaningless by editing the check itself -
+rewriting a test's assertions to match new (possibly wrong) behaviour, or
+weakening a CI / linter config so the gate stops failing. A test suite that goes
+green over rewritten assertions proves nothing. This module classifies the files
+a session changed into "tests" and "ci_config" so the CLI can surface them for a
+human to review by hand, rather than trusting the green (R19, agentic code
+review). It does not block anything - it only makes the edit visible.
+
+Pure and dependency-free so it is trivially unit-testable; the Agent supplies the
+changed-file list (``Agent.changed_files()``).
+"""
 
 from __future__ import annotations
 
@@ -54,7 +67,13 @@ def _is_ci_config(path: str) -> bool:
 
 
 def classify_sensitive_changes(changed_files: list) -> dict:
-    """Split a changed-file list into the categories a green check cannot vouch for."""
+    """Split a changed-file list into the categories a green check cannot vouch for.
+
+    *changed_files* is the list of dicts from ``Agent.changed_files()`` (each with
+    a ``path`` key), or a plain list of path strings. Returns
+    ``{"tests": [...], "ci_config": [...]}`` of relative paths, sorted and de-duped.
+    A file is at most one category (test wins over config).
+    """
     tests: list[str] = []
     ci: list[str] = []
     for entry in changed_files or []:
@@ -72,7 +91,7 @@ def classify_sensitive_changes(changed_files: list) -> dict:
 
 
 def render_warning(flags: dict) -> str:
-    """A human-readable warning for the classified changes, or '' if there are none."""
+    """A human-readable warning for the classified changes, or "" if there are none."""
     tests = flags.get("tests") or []
     ci = flags.get("ci_config") or []
     if not tests and not ci:

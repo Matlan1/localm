@@ -1,5 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""localm.storekit: the atomic-write + per-namespace-lock mechanics hoisted out of rag/store.py and memory/store.py's independently hand-written copies (CF-9/CF-10)."""
+"""localm.storekit: the atomic-write + per-namespace-lock mechanics hoisted out
+of rag/store.py and memory/store.py's independently hand-written copies
+(CF-9/CF-10). Regression: both stores must delegate to this ONE implementation
+(not a re-copied one), and memory's copy must gain rag's PermissionError retry
+it previously lacked.
+"""
 
 import threading
 
@@ -33,7 +38,9 @@ def test_atomic_write_leaves_no_temp_file_behind(tmp_path):
 
 
 def test_atomic_write_retries_on_permission_error(tmp_path, monkeypatch):
-    """The Windows AV-lock workaround (PR #566): a transient PermissionError on replace() must be retried, not raised immediately - this is the property memory/store.py's old hand-written copy LACKED (CF-10)."""
+    """The Windows AV-lock workaround (PR #566): a transient PermissionError
+    on replace() must be retried, not raised immediately - this is the
+    property memory/store.py's old hand-written copy LACKED (CF-10)."""
     target = tmp_path / "data.json"
     calls = {"n": 0}
     real_replace = type(target).replace
@@ -62,7 +69,9 @@ def test_atomic_write_gives_up_after_five_attempts(tmp_path, monkeypatch):
 
 
 def test_atomic_write_temp_names_unique_per_thread(tmp_path):
-    """Two concurrent writers to DIFFERENT files must not collide on the temp name even if called from different threads at the same instant (CHK-MEM-LOCK's rationale for a unique temp name, preserved from memory/store.py's copy)."""
+    """Two concurrent writers to DIFFERENT files must not collide on the temp
+    name even if called from different threads at the same instant (CHK-MEM-LOCK's
+    rationale for a unique temp name, preserved from memory/store.py's copy)."""
     results = {}
 
     def writer(n):
@@ -108,7 +117,9 @@ def test_lock_is_reentrant():
 
 
 def test_registries_are_independent_between_instances():
-    """rag/store.py and memory/store.py each own their OWN registry instance (keyed by collection name vs. namespace hash) - they must not share locks just because a key string happens to collide."""
+    """rag/store.py and memory/store.py each own their OWN registry instance
+    (keyed by collection name vs. namespace hash) - they must not share locks
+    just because a key string happens to collide."""
     reg1 = NamespaceLockRegistry()
     reg2 = NamespaceLockRegistry()
     assert reg1.get("same-key") is not reg2.get("same-key")

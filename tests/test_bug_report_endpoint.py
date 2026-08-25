@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""R47: the GUI needs a manual 'file a bug report' trigger."""
+"""R47: the GUI needs a manual "file a bug report" trigger. The CLI has
+`localm bug-report`; this is the server endpoint a GUI button posts to. It is
+management-gated (same-origin / shell-token + config-write scope) because a report
+carries local diagnostics.
+"""
 
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -29,13 +33,19 @@ def test_no_token_refused_in_open_mode(monkeypatch):
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
     with TestClient(create_app(_engine())) as c:
-        # NEGATIVE: a no-Origin/no-token client must not be able to drive it.
+        # A no-Origin/no-token client must not be able to drive it.
         r = c.post("/api/bug-report", json={"message": "x"})
     assert r.status_code == 403
 
 
 def test_save_does_not_run_on_the_event_loop(monkeypatch):
-    """Filing a report does a synchronous log read + scrub + file write (bugreport.save_user_report) - measured loop_lag=0.67s in the field, stalling every concurrent request for the duration."""
+    """Filing a report does a synchronous log read + scrub + file write
+    (bugreport.save_user_report) - measured loop_lag=0.67s in the field,
+    stalling every concurrent request for the duration. Oracle:
+    asyncio.get_running_loop() succeeds only on the event-loop thread and
+    raises RuntimeError in a threadpool worker (same technique as
+    test_comfy_models_offloaded_638.py) - structural, no sleeps or timing, so
+    it cannot be load-sensitive or flaky."""
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
     import asyncio
@@ -48,9 +58,9 @@ def test_save_does_not_run_on_the_event_loop(monkeypatch):
     def _probing_save(*a, **kw):
         try:
             asyncio.get_running_loop()
-            seen["on_loop"] = True      # ON the event-loop thread: the defect
+            seen["on_loop"] = True      # on the event-loop thread
         except RuntimeError:
-            seen["on_loop"] = False     # off-loop (threadpool worker): correct
+            seen["on_loop"] = False     # off-loop (threadpool worker)
         return real_save(*a, **kw)
 
     monkeypatch.setattr(bugreport, "save_user_report", _probing_save)
@@ -68,7 +78,15 @@ def test_save_does_not_run_on_the_event_loop(monkeypatch):
 
 
 def test_upload_does_not_run_on_the_event_loop(monkeypatch):
-    """QA 2026-08-20 sweep: the optional UPLOAD had the same defect the SAVE above was already fixed for, three lines below that fix's own comment."""
+    """QA 2026-08-20 sweep: the optional UPLOAD had the same defect the SAVE
+    above was already fixed for, three lines below that fix's own comment.
+
+    upload_report is a blocking HTTPS POST to the proxy on a 15s socket
+    timeout, so an unreachable proxy froze every other client for up to 15s -
+    strictly worse than the 0.67s loop_lag that earned the save its offload.
+    Same oracle as that sibling test, deliberately: asyncio.get_running_loop()
+    succeeds only on the event-loop thread, so this is structural rather than
+    timed and cannot go flaky under load."""
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
     import asyncio
@@ -80,9 +98,9 @@ def test_upload_does_not_run_on_the_event_loop(monkeypatch):
     def _probing_upload(title, body, **kw):
         try:
             asyncio.get_running_loop()
-            seen["on_loop"] = True      # ON the event-loop thread: the defect
+            seen["on_loop"] = True      # on the event-loop thread
         except RuntimeError:
-            seen["on_loop"] = False     # off-loop (threadpool worker): correct
+            seen["on_loop"] = False     # off-loop (threadpool worker)
         return {"url": "https://example.invalid/issues/1"}
 
     monkeypatch.setattr(bugreport, "upload_report", _probing_upload)
@@ -103,7 +121,15 @@ def test_upload_does_not_run_on_the_event_loop(monkeypatch):
 
 
 def test_a_scrub_failure_does_not_write_or_report_success(monkeypatch):
-    """save_user_report SCRUBS before it saves (home paths, secrets - HON-03/ HON-15)."""
+    """save_user_report SCRUBS before it saves (home paths, secrets - HON-03/
+    HON-15). Moving the whole call into a worker thread via
+    run_in_threadpool_bounded must not let a scrub failure quietly become a
+    success: an exception raised inside the offloaded closure has to reach
+    the caller as a failure, not be swallowed en route with an unscrubbed (or
+    any) report left on disk (AGENTS.md rule 5 - a privacy step that fails
+    must never report success). build_report() calls _scrub_secrets(summary)
+    unconditionally as its very first line, before save_report() is ever
+    reached, so a raise there proves the whole chain fails closed."""
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
     from localm import bugreport
@@ -148,7 +174,9 @@ def test_files_a_report_with_shell_token(monkeypatch):
 
 
 def test_gui_button_description_payload(monkeypatch):
-    """The GUI 'Report a bug' button posts ``description`` (+ optional ``include_log``); the response carries the filename + maintainer the GUI shows. ``description`` and ``message`` are interchangeable aliases."""
+    """The GUI "Report a bug" button posts ``description`` (+ optional
+    ``include_log``); the response carries the filename + maintainer the GUI
+    shows. ``description`` and ``message`` are interchangeable aliases."""
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
     app = create_app(_engine())
@@ -183,7 +211,9 @@ def test_blank_description_rejected(monkeypatch):
 
 
 def test_response_carries_report_markdown_for_download(monkeypatch):
-    """The response includes the saved report's markdown so the GUI can offer a browser download for manual sending (a phone/LAN tester cannot open a server-side path)."""
+    """The response includes the saved report's markdown so the GUI can offer a
+    browser download for manual sending (a phone/LAN tester cannot open a
+    server-side path)."""
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
     app = create_app(_engine())
@@ -199,7 +229,9 @@ def test_response_carries_report_markdown_for_download(monkeypatch):
 
 
 def test_what_expected_and_happened_fields_land_in_their_own_sections(monkeypatch):
-    """#958: the GUI's two new optional fields must render as their OWN sections, distinct from ``description`` and from each other - not all three collapsed into one duplicated sentence."""
+    """#958: the GUI's two new optional fields must render as their OWN
+    sections, distinct from ``description`` and from each other - not all
+    three collapsed into one duplicated sentence."""
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
     app = create_app(_engine())
@@ -218,13 +250,13 @@ def test_what_expected_and_happened_fields_land_in_their_own_sections(monkeypatc
     assert "## What I expected" in body
     assert "a picture of a cat" in body
     assert "a blank grey square appeared instead" in body
-    # The title comes from "what happened" (more useful than the truncated
-    # "what I was doing" text) - and the upload title (below) must match it.
+    # The title comes from what-happened, and the upload title below matches it.
     assert body.startswith("# localm bug report: a blank grey square")
 
 
 def test_blank_description_with_what_happened_still_accepted(monkeypatch):
-    """A blank ``description`` is fine as long as ``what_happened`` carries the report - the two are independent, optional inputs."""
+    """A blank ``description`` is fine as long as ``what_happened`` carries
+    the report - the two are independent, optional inputs."""
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
     app = create_app(_engine())
@@ -240,7 +272,12 @@ def test_blank_description_with_what_happened_still_accepted(monkeypatch):
 
 
 def test_gui_upload_does_not_publish_the_edit_disclaimer(monkeypatch):
-    """LM-DA-PUBTEXT end to end through the REAL route: unlike the other upload tests here, bugreport.upload_report is NOT mocked - only the network transport is, so this exercises the actual strip logic that runs in production."""
+    """LM-DA-PUBTEXT end to end through the REAL route: unlike the other
+    upload tests here, bugreport.upload_report is NOT mocked - only the
+    network transport is, so this exercises the actual strip logic that
+    runs in production. The GUI's report_markdown (for the download button)
+    must KEEP the disclaimer; the bytes that would actually reach GitHub
+    must NOT carry it or the maintainer's email."""
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
     from localm import bugreport
@@ -277,11 +314,11 @@ def test_gui_upload_does_not_publish_the_edit_disclaimer(monkeypatch):
     data = r.json()
     assert data["uploaded"] is True
 
-    # Download copy: disclaimer present (a human can still edit + send it themselves).
+    # Download copy: disclaimer present.
     assert bugreport.MAINTAINER_EMAIL in data["report_markdown"]
     assert "You can edit anything above before sending" in data["report_markdown"]
 
-    # What actually reached "GitHub" (the mocked transport): disclaimer gone.
+    # What reached the mocked GitHub transport: disclaimer gone.
     assert "body" in captured, "upload never reached the transport layer"
     assert bugreport.MAINTAINER_EMAIL not in captured["body"]
     assert "You can edit anything above before sending" not in captured["body"]
@@ -289,7 +326,9 @@ def test_gui_upload_does_not_publish_the_edit_disclaimer(monkeypatch):
 
 
 def test_upload_title_prefers_what_happened_over_description(monkeypatch):
-    """The uploaded (public GitHub issue) title must match the report body's own H1 - both derived from what_happened when present, not the (different, older) description-only derivation."""
+    """The uploaded (public GitHub issue) title must match the report body's
+    own H1 - both derived from what_happened when present, not the
+    (different, older) description-only derivation."""
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
     from localm import bugreport
@@ -317,7 +356,8 @@ def test_upload_title_prefers_what_happened_over_description(monkeypatch):
 
 
 def test_upload_failure_returns_stage_and_message(monkeypatch):
-    """A failed upload is surfaced with the diagnosed stage + friendly message (not a false success), and the report file + downloadable markdown are still there."""
+    """A failed upload is surfaced with the diagnosed stage + friendly message (not
+    a false success), and the report file + downloadable markdown are still there."""
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
     from localm import bugreport
@@ -345,7 +385,9 @@ def test_upload_failure_returns_stage_and_message(monkeypatch):
 
 
 def test_browser_client_context_lands_in_report(monkeypatch):
-    """The GUI attaches a ``client`` block (user agent, page, viewport, recent JS console errors)."""
+    """The GUI attaches a ``client`` block (user agent, page, viewport, recent JS
+    console errors). It is rendered into the report; unknown fields are dropped by
+    the server-side sanitizer and never reach the file."""
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
     app = create_app(_engine())

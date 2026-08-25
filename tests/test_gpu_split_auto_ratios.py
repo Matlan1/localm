@@ -1,5 +1,41 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Automatic free-VRAM-proportional GPU split distribution."""
+"""Automatic free-VRAM-proportional GPU split distribution.
+
+Feature under test: when ``gpu_split_indices`` names 2+ devices and
+``gpu_split_ratios`` is UNSET (None or []), localm distributes the model
+across the split devices proportionally to each device's CURRENT free VRAM
+instead of the historical equal split - "query free vram from each card,
+compare and distribute" (the maintainer's feature request). An explicitly
+configured ``gpu_split_ratios`` is never overridden (hard rule: never
+silently override an explicit user choice); every unmeasurable case falls
+back to the equal split, byte-identical to the pre-feature behavior.
+
+The decision is made ONCE, parent-side (discover.resolve_auto_split_ratios),
+and PINNED into the isolated worker via the load params
+(gguf.py -> GgufWorker -> LlamaCpp -> apply_gpu_split(ratios_override=...);
+embedder: IsolatedEmbedder._reload -> GGUFEmbedder). The worker never probes:
+on Windows + AMD a torch import inside a native-runtime process is the known
+DLL-identity conflict (#754/#771), and only the parent has the #697/#700
+device-global corrected readings anyway. On the vulkan build the per-device
+reading comes from discover.native_gpu_devices() (#768) - the ONLY source in
+ggml-vulkan's own index space, the space tensor_split actually consumes
+(GPU-SPLIT-VKINDEX).
+
+gpu_split_shortfall computes its per-device shares with the same auto ratios
+(from its own fresh reading), which makes the asymmetric-occupancy refusal
+(one device short while the aggregate fits) structurally impossible in auto
+mode: needed_i = R * free_i / total_free <= free_i whenever R <= total_free.
+switch_engine's shortfall branch therefore only fires in auto mode when the
+COMBINED estimate is short - where it now defers to the backend's split-aware
+sizing (#770) exactly like the single-GPU path has since #753 - while pinned
+ratios keep today's hard per-device 503 (sizing budgets the split's COMBINED
+capacity, never one pinned share, so the gate is still the only protection
+there).
+
+Mocking style mirrors tests/test_gpu_split_wiring.py (mocked ctypes api, REAL
+apply_gpu_split) and tests/test_vram_eviction_safety.py (TestClient +
+FakeEngine + probe_double) - the functions under test always run for real.
+"""
 
 import ctypes
 from types import SimpleNamespace
@@ -22,11 +58,9 @@ GB = 1024 ** 3
 # --------------------------------------------------------------------------- #
 
 class TestResolveAutoSplitRatios:
-    # free_scope=device on every entry: this class's fixtures represent a
-    # TRUSTED reading throughout (the normal/healthy case every OTHER test
-    # here builds on) - the untrusted-scope cases get their own dedicated
-    # tests below (TestScopeTrust), which build their own fixtures instead
-    # of mutating this shared one.
+    # free_scope=device on every entry: this class's fixtures represent a TRUSTED
+    # reading throughout. The untrusted-scope cases live in TestScopeTrust below
+    # and build their own fixtures rather than mutating this shared one.
     _GPUS = [
         {"index": 0, "name": "A", "total": 16 * GB, "free": 12 * GB,
          "free_scope": discover.FREE_SCOPE_DEVICE},
@@ -45,7 +79,9 @@ class TestResolveAutoSplitRatios:
         assert ratios == pytest.approx([0.75, 0.25])
 
     def test_ratios_align_with_configured_index_order(self, monkeypatch):
-        """The returned list pairs by POSITION with gpu_split_indices, exactly the contract resolve_gpu_split's re-pairing relies on - so a config listing the small card first gets the small share first."""
+        """The returned list pairs by POSITION with gpu_split_indices, exactly
+        the contract resolve_gpu_split's re-pairing relies on - so a config
+        listing the small card first gets the small share first."""
         self._no_vulkan(monkeypatch)
         monkeypatch.setattr(discover, "list_gpus", probe_double(self._GPUS))
         ratios = resolve_auto_split_ratios(
@@ -53,7 +89,8 @@ class TestResolveAutoSplitRatios:
         assert ratios == pytest.approx([0.25, 0.75])
 
     def test_pinned_ratios_disable_auto(self, monkeypatch):
-        """Never override an explicit user choice: a configured gpu_split_ratios means auto must not even compute."""
+        """Never override an explicit user choice: a configured
+        gpu_split_ratios means auto must not even compute."""
         self._no_vulkan(monkeypatch)
         called = {"probe": False}
 
@@ -67,7 +104,8 @@ class TestResolveAutoSplitRatios:
         assert not called["probe"], "auto must not probe when ratios are pinned"
 
     def test_empty_list_ratios_count_as_unset(self, monkeypatch):
-        """[] has always meant 'unset' (resolve_gpu_split's own falsy check), so it engages auto exactly like None."""
+        """[] has always meant "unset" (resolve_gpu_split's own falsy check),
+        so it engages auto exactly like None."""
         self._no_vulkan(monkeypatch)
         monkeypatch.setattr(discover, "list_gpus", probe_double(self._GPUS))
         ratios = resolve_auto_split_ratios(
@@ -89,7 +127,9 @@ class TestResolveAutoSplitRatios:
         assert not called["probe"], "no split -> auto must answer from config alone"
 
     def test_missing_free_on_one_device_all_or_nothing(self, monkeypatch):
-        """A split where one device's free is unmeasurable cannot be distributed honestly - guessing a share for the blind device could overload it."""
+        """A split where one device's free is unmeasurable cannot be
+        distributed honestly - guessing a share for the blind device could
+        overload it. All-or-nothing, mirroring vram_capacity's 'free' key."""
         self._no_vulkan(monkeypatch)
         gpus = [
             {"index": 0, "name": "A", "total": 16 * GB, "free": 12 * GB,
@@ -108,13 +148,20 @@ class TestResolveAutoSplitRatios:
 
     @staticmethod
     def _stale_probe(gpus, status):
-        """A status-CAPABLE list_gpus double with a NAMED return_status param: _list_gpus_reading's signature inspection deliberately treats a **kwargs-only double (conftest's probe_double) as the historical bare contract (= completed probe), so simulating a non-OK probe needs the explicit signature - same pat..."""
+        """A status-CAPABLE list_gpus double with a NAMED return_status param:
+        _list_gpus_reading's signature inspection deliberately treats a
+        **kwargs-only double (conftest's probe_double) as the historical bare
+        contract (= completed probe), so simulating a non-OK probe needs the
+        explicit signature - same pattern as test_discover.py's own
+        probe-freshness tests."""
         def fake(*a, return_status=False, **k):
             return (gpus, status) if return_status else gpus
         return fake
 
     def test_stale_probe_disables_auto(self, monkeypatch):
-        """A TIMEOUT/BUSY probe serves a frozen last-known-good reading; distributing by a stale snapshot is the rule-5 gap the probe-status contract exists to prevent (same posture as gpu_split_shortfall)."""
+        """A TIMEOUT/BUSY probe serves a frozen last-known-good reading;
+        distributing by a stale snapshot is the rule-5 gap the probe-status
+        contract exists to prevent (same posture as gpu_split_shortfall)."""
         self._no_vulkan(monkeypatch)
         monkeypatch.setattr(
             discover, "list_gpus",
@@ -123,7 +170,11 @@ class TestResolveAutoSplitRatios:
             {"gpu_split_indices": [0, 1], "gpu_split_ratios": None}) is None
 
     def test_zero_free_device_keeps_a_positive_share(self, monkeypatch):
-        """resolve_gpu_split discards the WHOLE ratio list on any entry <= 0, which would silently hand a completely full card an EQUAL share - the exact overload auto exists to avoid."""
+        """resolve_gpu_split discards the WHOLE ratio list on any entry <= 0,
+        which would silently hand a completely full card an EQUAL share - the
+        exact overload auto exists to avoid. A 0-free device therefore gets a
+        tiny positive share (~nothing lands on it), never a 0 that would
+        invalidate the list."""
         self._no_vulkan(monkeypatch)
         gpus = [
             {"index": 0, "name": "A", "total": 16 * GB, "free": 8 * GB,
@@ -140,7 +191,9 @@ class TestResolveAutoSplitRatios:
         assert ratios[1] < 1e-6
 
     def test_injected_gpus_skip_the_probe(self, monkeypatch):
-        """gpu_split_shortfall already holds a fresh GPU_PROBE_OK reading; the gpus= injection lets it reuse that snapshot instead of paying (and possibly disagreeing with) a second probe."""
+        """gpu_split_shortfall already holds a fresh GPU_PROBE_OK reading; the
+        gpus= injection lets it reuse that snapshot instead of paying (and
+        possibly disagreeing with) a second probe."""
         self._no_vulkan(monkeypatch)
 
         def _boom(*a, **k):
@@ -159,7 +212,10 @@ class TestResolveAutoSplitRatios:
             {"gpu_split_indices": ["x", 1], "gpu_split_ratios": None}) is None
 
     def test_success_logged_at_info(self, monkeypatch, caplog):
-        """The distribution decision must reach the INFO+ ring buffer (a bug report about a lopsided split needs to show WHAT was decided and from WHICH readings), same rationale as gpu_split_shortfall's vulkan-skip INFO line."""
+        """The distribution decision must reach the INFO+ ring buffer (a bug
+        report about a lopsided split needs to show WHAT was decided and from
+        WHICH readings), same rationale as gpu_split_shortfall's vulkan-skip
+        INFO line."""
         self._no_vulkan(monkeypatch)
         monkeypatch.setattr(discover, "list_gpus", probe_double(self._GPUS))
         with caplog.at_level("INFO"):
@@ -169,7 +225,8 @@ class TestResolveAutoSplitRatios:
                    for r in caplog.records)
 
     def test_unmeasurable_split_fallback_logged_at_info(self, monkeypatch, caplog):
-        """A user who configured a split should be able to see WHY it fell back to the equal distribution (rule 5: surface, do not hide)."""
+        """A user who configured a split should be able to see WHY it fell
+        back to the equal distribution (rule 5: surface, do not hide)."""
         self._no_vulkan(monkeypatch)
         monkeypatch.setattr(
             discover, "list_gpus",
@@ -181,7 +238,15 @@ class TestResolveAutoSplitRatios:
 
 
 class TestScopeTrust:
-    """The scope half of this function's trustworthiness audit (see its docstring's TRUSTWORTHINESS section): unlike gpu_split_shortfall's refuse-only use of the same reading, a PROPORTIONAL split cannot accept a PROCESS-scoped (or untagged) free-VRAM figure on the list_gpus() branch - a reading equally bl..."""
+    """The scope half of this function's trustworthiness audit (see its
+    docstring's TRUSTWORTHINESS section): unlike gpu_split_shortfall's
+    refuse-only use of the same reading, a PROPORTIONAL split cannot accept
+    a PROCESS-scoped (or untagged) free-VRAM figure on the list_gpus()
+    branch - a reading equally blind on every device makes an empty card and
+    a nearly-full one look equally free, silently steering too much of a
+    real split onto the full one. This is a materially wrong allocation, not
+    merely an imprecise refusal, so it fails toward the safe equal-split
+    fallback rather than trusting an unverifiable ratio (AGENTS.md rule 5)."""
 
     def _no_vulkan(self, monkeypatch):
         monkeypatch.setattr(discover, "_native_backend_has_vulkan", lambda: False)
@@ -194,7 +259,10 @@ class TestScopeTrust:
     ]
 
     def test_one_process_scoped_device_disables_auto(self, monkeypatch):
-        """A SINGLE process-scoped device corrupts the WHOLE proportional comparison (ratios are computed by comparing devices against each other), so any one failing scope must decline the entire split, not just that device's share."""
+        """A SINGLE process-scoped device corrupts the WHOLE proportional
+        comparison (ratios are computed by comparing devices against each
+        other), so any one failing scope must decline the entire split, not
+        just that device's share."""
         self._no_vulkan(monkeypatch)
         gpus = [
             self._GPUS_DEVICE[0],
@@ -205,7 +273,10 @@ class TestScopeTrust:
             {"gpu_split_indices": [0, 1], "gpu_split_ratios": None}) is None
 
     def test_untagged_free_scope_disables_auto(self, monkeypatch):
-        """No free_scope key at all never happens from real list_gpus() (_apply_device_global_free tags every entry, every platform) - it is what a synthetic/legacy double looks like, and must be rejected the same as an explicit PROCESS tag rather than silently trusted."""
+        """No free_scope key at all never happens from real list_gpus()
+        (_apply_device_global_free tags every entry, every platform) - it is
+        what a synthetic/legacy double looks like, and must be rejected the
+        same as an explicit PROCESS tag rather than silently trusted."""
         self._no_vulkan(monkeypatch)
         gpus = [dict(self._GPUS_DEVICE[0]), dict(self._GPUS_DEVICE[1])]
         del gpus[1]["free_scope"]
@@ -214,7 +285,8 @@ class TestScopeTrust:
             {"gpu_split_indices": [0, 1], "gpu_split_ratios": None}) is None
 
     def test_both_device_scoped_succeeds(self, monkeypatch):
-        """The trusted case succeeds exactly as before this check existed - this fix must not regress the healthy path."""
+        """The trusted case succeeds exactly as before this check existed -
+        this fix must not regress the healthy path."""
         self._no_vulkan(monkeypatch)
         monkeypatch.setattr(discover, "list_gpus", probe_double(self._GPUS_DEVICE))
         ratios = resolve_auto_split_ratios(
@@ -235,7 +307,14 @@ class TestScopeTrust:
         assert any("device-global" in r.message for r in caplog.records)
 
     def test_vulkan_branch_is_not_scope_gated(self, monkeypatch):
-        """Deliberate asymmetry, not an oversight (see the docstring's TRUSTWORTHINESS section): no measurement in this codebase shows ggml-vulkan's own ggml_backend_dev_memory query is cross-process blind the way torch's mem_get_info / llama.cpp's bundled HIP runtime are - the confirmed comparison was HIP-vs-..."""
+        """Deliberate asymmetry, not an oversight (see the docstring's
+        TRUSTWORTHINESS section): no measurement in this codebase shows
+        ggml-vulkan's own ggml_backend_dev_memory query is cross-process
+        blind the way torch's mem_get_info / llama.cpp's bundled HIP runtime
+        are - the confirmed comparison was HIP-vs-HIP, not HIP-vs-Vulkan.
+        So a platform gpu_usage flags as HIP-blind must NOT stop the vulkan
+        branch from computing real ratios - asserting an unmeasured
+        blindness would itself be a rule-5 violation in the other direction."""
         monkeypatch.setattr(discover, "_native_backend_has_vulkan", lambda: True)
         monkeypatch.setattr(discover, "native_gpu_devices", lambda: [
             {"index": 0, "name": "Radeon", "total": 16 * GB, "free": 8 * GB},
@@ -249,7 +328,11 @@ class TestScopeTrust:
 
 
 class TestResolveAutoSplitRatiosVulkan:
-    """On the vulkan build list_gpus() (torch/nvidia-smi) is structurally blind to the real split devices AND speaks a different index space (GPU-SPLIT-VKINDEX), so auto must read per-device free from native_gpu_devices() (#768) - the crash-isolated probe daemon's view of ggml's own registry - and never fr..."""
+    """On the vulkan build list_gpus() (torch/nvidia-smi) is structurally
+    blind to the real split devices AND speaks a different index space
+    (GPU-SPLIT-VKINDEX), so auto must read per-device free from
+    native_gpu_devices() (#768) - the crash-isolated probe daemon's view of
+    ggml's own registry - and never from list_gpus()."""
 
     _NATIVE = [
         {"index": 0, "name": "Radeon", "total": 16 * GB, "free": 8 * GB},
@@ -297,7 +380,15 @@ class TestResolveAutoSplitRatiosVulkan:
 
     def test_vulkan_absent_device_is_not_reported_as_unmeasurable(
             self, monkeypatch, caplog):
-        """An index past the end of the device list and a device that reported no VRAM are DIFFERENT problems and must not share a message."""
+        """An index past the end of the device list and a device that reported
+        no VRAM are DIFFERENT problems and must not share a message.
+
+        native_gpu_devices now yields llama.cpp's own device list (integrated
+        GPUs and accelerators removed, the rest renumbered), which makes the
+        ABSENT case materially more likely - the ordinary cause being a split
+        saved before that filtering existed. Calling it "reported no free-VRAM
+        figure" would send a reader hunting a driver fault instead of a stale
+        setting."""
         self._vulkan(monkeypatch)
         monkeypatch.setattr(discover, "native_gpu_devices", lambda: self._NATIVE)
         with caplog.at_level("INFO"):
@@ -309,7 +400,10 @@ class TestResolveAutoSplitRatiosVulkan:
 
     def test_vulkan_present_but_unmeasurable_device_keeps_the_vram_wording(
             self, monkeypatch, caplog):
-        """The other arm, and what makes the test above discriminating: a device that IS in the list but reported no bytes must still say so."""
+        """The other arm, and what makes the test above discriminating: a
+        device that IS in the list but reported no bytes must still say so.
+        Without this pair, one message covering both cases passes either test
+        alone."""
         self._vulkan(monkeypatch)
         native = [
             {"index": 0, "name": "Radeon", "total": 16 * GB, "free": 8 * GB},
@@ -349,7 +443,9 @@ class TestApplyGpuSplitRatiosOverride:
         assert values[1] == pytest.approx(0.25)
 
     def test_override_none_keeps_config_ratios(self, monkeypatch):
-        """ratios_override=None is 'no parent decision arrived' - the config path (pinned or equal) must behave byte-identically to before the kwarg existed."""
+        """ratios_override=None is 'no parent decision arrived' - the config
+        path (pinned or equal) must behave byte-identically to before the
+        kwarg existed."""
         monkeypatch.setattr(discover, "list_gpus",
                             lambda: [{"index": 0}, {"index": 1}])
         mp = self._mp()
@@ -360,7 +456,9 @@ class TestApplyGpuSplitRatiosOverride:
         assert values == [pytest.approx(3.0), pytest.approx(1.0)]
 
     def test_override_beats_config_ratios(self, monkeypatch):
-        """The parent resolved the effective ratios for THIS load; a config value read in the worker (possibly newer/edited mid-flight) must not produce a split the parent's admission gate never checked."""
+        """The parent resolved the effective ratios for THIS load; a config
+        value read in the worker (possibly newer/edited mid-flight) must not
+        produce a split the parent's admission gate never checked."""
         monkeypatch.setattr(discover, "list_gpus",
                             lambda: [{"index": 0}, {"index": 1}])
         mp = self._mp()
@@ -372,7 +470,9 @@ class TestApplyGpuSplitRatiosOverride:
 
     def test_override_length_mismatch_degrades_to_equal_with_warning(
             self, monkeypatch, caplog):
-        """Same degradation contract as a misconfigured gpu_split_ratios: a malformed override falls back to the equal split with a WARNING, never a crash or a silent truncation."""
+        """Same degradation contract as a misconfigured gpu_split_ratios: a
+        malformed override falls back to the equal split with a WARNING, never
+        a crash or a silent truncation."""
         monkeypatch.setattr(discover, "list_gpus",
                             lambda: [{"index": 0}, {"index": 1}])
         mp = self._mp()
@@ -390,7 +490,10 @@ class TestApplyGpuSplitRatiosOverride:
 # --------------------------------------------------------------------------- #
 
 class TestShortfallAutoShares:
-    """With unset ratios the gate must judge each device by the share the loader will ACTUALLY give it (the auto free-proportional ratio), not the historical equal split - otherwise it refuses exactly the loads the feature makes possible."""
+    """With unset ratios the gate must judge each device by the share the
+    loader will ACTUALLY give it (the auto free-proportional ratio), not the
+    historical equal split - otherwise it refuses exactly the loads the
+    feature makes possible."""
 
     _GPUS = [
         {"index": 0, "name": "A", "total": 16 * GB, "free": 2 * GB,
@@ -403,14 +506,19 @@ class TestShortfallAutoShares:
         monkeypatch.setattr(discover, "_native_backend_has_vulkan", lambda: False)
 
     def test_auto_shares_absorb_asymmetric_occupancy(self, monkeypatch):
-        """THE headline case: 8 GB ask, devices at 2/14 GB free."""
+        """THE headline case: 8 GB ask, devices at 2/14 GB free. The equal
+        split flagged GPU 0 (4 GB share vs 2 GB free) even though the load
+        fits combined; auto gives GPU 0 only its proportional 1 GB share, so
+        nothing is short."""
         self._no_vulkan(monkeypatch)
         monkeypatch.setattr(discover, "list_gpus", probe_double(self._GPUS))
         assert discover.gpu_split_shortfall(
             8 * GB, {"gpu_split_indices": [0, 1], "gpu_split_ratios": None}) == []
 
     def test_pinned_equal_ratio_still_flags(self, monkeypatch):
-        """An EXPLICIT [1, 1] must keep today's behavior exactly - the user pinned the shares, so the loader will not adapt, and the gate must still catch the device that cannot hold its pinned share."""
+        """An EXPLICIT [1, 1] must keep today's behavior exactly - the user
+        pinned the shares, so the loader will not adapt, and the gate must
+        still catch the device that cannot hold its pinned share."""
         self._no_vulkan(monkeypatch)
         monkeypatch.setattr(discover, "list_gpus", probe_double(self._GPUS))
         result = discover.gpu_split_shortfall(
@@ -418,7 +526,10 @@ class TestShortfallAutoShares:
         assert result == [{"index": 0, "needed": 4 * GB, "free": 2 * GB}]
 
     def test_auto_aggregate_short_flags_proportionally(self, monkeypatch):
-        """When even the COMBINED free cannot cover the ask, every device is short by its proportional share - the honest per-device figures for the caller's message (and switch_engine's cue to defer, in auto mode, to the backend's combined-aware sizing)."""
+        """When even the COMBINED free cannot cover the ask, every device is
+        short by its proportional share - the honest per-device figures for
+        the caller's message (and switch_engine's cue to defer, in auto
+        mode, to the backend's combined-aware sizing)."""
         self._no_vulkan(monkeypatch)
         monkeypatch.setattr(discover, "list_gpus", probe_double(self._GPUS))
         result = discover.gpu_split_shortfall(
@@ -426,7 +537,9 @@ class TestShortfallAutoShares:
         assert {d["index"] for d in result} == {0, 1}
 
     def test_auto_unmeasurable_falls_back_to_equal_shares(self, monkeypatch):
-        """One device without a 'free' reading: auto declines (all-or-nothing) and the gate keeps the historical equal-split math - which then skips the unmeasurable device exactly as before."""
+        """One device without a 'free' reading: auto declines (all-or-nothing)
+        and the gate keeps the historical equal-split math - which then skips
+        the unmeasurable device exactly as before."""
         self._no_vulkan(monkeypatch)
         gpus = [
             {"index": 0, "name": "A", "total": 16 * GB},   # no "free"
@@ -435,13 +548,17 @@ class TestShortfallAutoShares:
         monkeypatch.setattr(discover, "list_gpus", probe_double(gpus))
         result = discover.gpu_split_shortfall(
             8 * GB, {"gpu_split_indices": [0, 1], "gpu_split_ratios": None})
-        # Equal split: device 1's 4 GB share vs 3 GB free is short; device 0
-        # is skipped (unmeasurable), exactly the pre-feature behavior.
+        # Equal split: device 1's 4 GB share vs 3 GB free is short; device 0 is
+        # skipped as unmeasurable.
         assert result == [{"index": 1, "needed": 4 * GB, "free": 3 * GB}]
 
 
 class TestShortfallSharesAdaptiveFlag:
-    """return_shares_adaptive: the refuse-vs-defer caller (switch_engine) must know which math produced the shares - True only when the live auto ratios were actually used."""
+    """return_shares_adaptive: the refuse-vs-defer caller (switch_engine) must
+    know which math produced the shares - True only when the live auto ratios
+    were actually used. Keying the defer on the CONFIG shape instead admitted
+    exactly the declined-auto case (equal fallback, per-device hazard fully
+    live) - the confirmed review finding on this feature's first cut."""
 
     _GPUS = [
         {"index": 0, "name": "A", "total": 16 * GB, "free": 2 * GB,
@@ -462,15 +579,17 @@ class TestShortfallSharesAdaptiveFlag:
         assert shortfall == [] and adaptive is True
 
     def test_false_when_auto_declines_on_a_stale_index(self, monkeypatch):
-        """A configured index no longer detected: auto declines all-or-nothing, the surviving devices get the equal fallback, and the flag must say static - a non-empty result here is the pre-feature hazard."""
+        """A configured index no longer detected: auto declines all-or-nothing,
+        the surviving devices get the equal fallback, and the flag must say
+        static - a non-empty result here is the pre-feature hazard."""
         self._no_vulkan(monkeypatch)
         monkeypatch.setattr(discover, "list_gpus", probe_double(self._GPUS))
         shortfall, adaptive = discover.gpu_split_shortfall(
             8 * GB, {"gpu_split_indices": [0, 1, 5], "gpu_split_ratios": None},
             return_shares_adaptive=True)
         assert adaptive is False
-        # Equal fallback across the two survivors: device 0's 4 GB share is
-        # short of its 2 GB free - the exact case the 503 must still catch.
+        # Equal fallback across the two survivors: device 0's 4 GB share is short
+        # of its 2 GB free, which the 503 still catches.
         assert shortfall == [{"index": 0, "needed": 4 * GB, "free": 2 * GB}]
 
     def test_false_for_pinned_ratios(self, monkeypatch):
@@ -509,7 +628,10 @@ class TestShortfallSharesAdaptiveFlag:
 
 
 class TestWaitForInflightForwarding:
-    """resolve_auto_split_ratios(wait_for_inflight=True): the load-path callers must JOIN a concurrent heartbeat probe instead of taking an instant BUSY that silently declines auto into the equal fallback on exactly the asymmetric box the feature targets."""
+    """resolve_auto_split_ratios(wait_for_inflight=True): the load-path
+    callers must JOIN a concurrent heartbeat probe instead of taking an
+    instant BUSY that silently declines auto into the equal fallback on
+    exactly the asymmetric box the feature targets."""
 
     def test_forwarded_to_a_production_signature_probe(self, monkeypatch):
         monkeypatch.setattr(discover, "_native_backend_has_vulkan", lambda: False)
@@ -531,7 +653,9 @@ class TestWaitForInflightForwarding:
         assert seen["wfi"] is True
 
     def test_not_forced_on_a_double_without_the_kwarg(self, monkeypatch):
-        """A status-capable double lacking wait_for_inflight (and **kwargs) must not be handed a kwarg it never agreed to accept - same tolerance contract as _list_gpus_reading's return_status inspection."""
+        """A status-capable double lacking wait_for_inflight (and **kwargs)
+        must not be handed a kwarg it never agreed to accept - same tolerance
+        contract as _list_gpus_reading's return_status inspection."""
         monkeypatch.setattr(discover, "_native_backend_has_vulkan", lambda: False)
 
         def fake(*a, return_status=False):
@@ -616,7 +740,10 @@ class TestChatParamChain:
         assert captured.get("gpu_split_ratios") == [0.7, 0.3]
 
     def test_llamacpp_ctor_override_reaches_tensor_split(self, monkeypatch):
-        """End of the chain: LlamaCpp built with pinned ratios writes them into mp.tensor_split (real apply_gpu_split, mocked ctypes api) even though the worker-side config carries NO ratios - proving the load uses the parent's decision, not a worker-side guess."""
+        """End of the chain: LlamaCpp built with pinned ratios writes them
+        into mp.tensor_split (real apply_gpu_split, mocked ctypes api) even
+        though the worker-side config carries NO ratios - proving the load
+        uses the parent's decision, not a worker-side guess."""
         from localm.inference.backends.llamacpp.llama import LlamaCpp
         monkeypatch.setattr(
             "localm.config.load_config",
@@ -690,7 +817,14 @@ class TestEmbedderParamChain:
 # --------------------------------------------------------------------------- #
 
 class TestSwitchEngineAutoDefer:
-    """Pre-feature, ANY non-empty shortfall was a hard 503."""
+    """Pre-feature, ANY non-empty shortfall was a hard 503. In auto mode the
+    only way shortfall is non-empty is a combined-short estimate (see
+    TestShortfallAutoShares), where the backend's own sizing is the accurate
+    judge (#770: _auto_gpu_layers/_check_vram budget the split's COMBINED
+    capacity) and partial offload can still make the load work - the exact
+    #753 philosophy already shipped for the single-GPU path. Pinned ratios
+    keep the hard refusal: sizing never checks one pinned share, so the gate
+    remains the only protection against a per-device abort there."""
 
     def _install(self, monkeypatch, tmp_path, *, gpus, gpu_split_ratios=None,
                  gpu_split_indices=(0, 1), fails_to_fit=False):
@@ -733,7 +867,9 @@ class TestSwitchEngineAutoDefer:
     ]
 
     def test_auto_combined_short_defers_to_backend(self, monkeypatch, tmp_path):
-        """5 GiB combined free vs the ~6.15 GiB estimate: pre-feature this was a hard 503; in auto mode the backend's split-aware sizing decides - and (like a real partial offload would) it makes the load work."""
+        """5 GiB combined free vs the ~6.15 GiB estimate: pre-feature this was
+        a hard 503; in auto mode the backend's split-aware sizing decides -
+        and (like a real partial offload would) it makes the load work."""
         self._install(monkeypatch, tmp_path, gpus=self._TIGHT_GPUS)
         app = hs.create_app(None)
         client = TestClient(app)
@@ -745,7 +881,9 @@ class TestSwitchEngineAutoDefer:
 
     def test_auto_combined_short_backend_refusal_stays_clean(
             self, monkeypatch, tmp_path):
-        """Deferral must not turn a genuinely impossible load into a native abort: the backend's own _check_vram-style hard refusal still comes back as the same clean 503 shape."""
+        """Deferral must not turn a genuinely impossible load into a native
+        abort: the backend's own _check_vram-style hard refusal still comes
+        back as the same clean 503 shape."""
         self._install(monkeypatch, tmp_path, gpus=self._TIGHT_GPUS,
                       fails_to_fit=True)
         app = hs.create_app(None)
@@ -755,7 +893,9 @@ class TestSwitchEngineAutoDefer:
         assert "cannot fit" in r.text
 
     def test_pinned_ratios_keep_the_hard_refusal(self, monkeypatch, tmp_path):
-        """Explicit ratios: aggregate fits (32 GiB) but GPU 0 cannot hold its pinned equal share - the per-device 503 must fire exactly as today, naming the short device."""
+        """Explicit ratios: aggregate fits (32 GiB) but GPU 0 cannot hold its
+        pinned equal share - the per-device 503 must fire exactly as today,
+        naming the short device."""
         gpus = [
             {"index": 0, "name": "A", "total": 16 * GB, "free": 2 * GB},
             {"index": 1, "name": "B", "total": 32 * GB, "free": 30 * GB},
@@ -770,7 +910,14 @@ class TestSwitchEngineAutoDefer:
         assert "GPU 0" in r.text
 
     def test_declined_auto_keeps_the_hard_refusal(self, monkeypatch, tmp_path):
-        """THE review-finding regression pin (confirmed by live repro on the first cut): ratios UNSET but a configured index is no longer detected, so auto declines all-or-nothing and the LOADER will apply the equal fallback across the survivors - the per-device hazard is fully live, and keying the defer on th..."""
+        """THE review-finding regression pin (confirmed by live repro on the
+        first cut): ratios UNSET but a configured index is no longer detected,
+        so auto declines all-or-nothing and the LOADER will apply the equal
+        fallback across the survivors - the per-device hazard is fully live,
+        and keying the defer on the config shape alone silently removed this
+        503. The gate must key on whether ADAPTIVE shares were actually in
+        effect: here they were not, so the pre-feature refusal fires, naming
+        the short device."""
         gpus = [
             {"index": 0, "name": "A", "total": 16 * GB, "free": 2 * GB,
              "free_scope": discover.FREE_SCOPE_DEVICE},

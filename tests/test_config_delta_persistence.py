@@ -1,5 +1,14 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""save_config / update_config persist only the user-set delta (LM-DA-001)."""
+"""save_config / update_config persist only the user-set delta (LM-DA-001).
+
+The old scheme wrote the full defaults-merged dict to config.json, freezing
+every default at its then-current value on the user's first save; a later
+change to a DEFAULT_CONFIG value (e.g. commit cfa25d5's max_tokens
+1024 -> 4096 fix) never reached an existing install. Now a key equal to the
+current default is dropped at save time and reconstructed by load_config(),
+so shipped default-value fixes propagate; a differing value (user-set, or a
+frozen old default whose provenance was destroyed by the old scheme) is kept.
+"""
 
 import json
 
@@ -20,12 +29,12 @@ def _stored(config_file) -> dict:
 
 
 # --------------------------------------------------------------------------- #
-#  The LM-DA-001 regression: a changed default reaches an existing install     #
+#  A changed default reaches an existing install                               #
 # --------------------------------------------------------------------------- #
 
 def test_changed_default_reaches_config_saved_under_old_default(
         config_file, monkeypatch):
-    # An "old release" whose max_tokens default is 1024 (the cfa25d5 scenario).
+    # An "old release" whose max_tokens default is 1024.
     monkeypatch.setitem(cfg.DEFAULT_CONFIG, "max_tokens", 1024)
     # The user changes an unrelated setting; the config is saved.
     c = cfg.load_config()
@@ -50,7 +59,11 @@ def test_user_set_value_survives_a_default_change(config_file, monkeypatch):
 
 
 def test_old_full_dump_migrates_on_next_save(config_file, monkeypatch):
-    """A config.json written by the old full-dump scheme converges to the delta on its next save: keys equal to the CURRENT default are dropped (safe), a key differing from it is kept - it cannot be told apart from a user choice (the documented one-time ambiguity), so the user-choice reading wins."""
+    """A config.json written by the old full-dump scheme converges to the
+    delta on its next save: keys equal to the CURRENT default are dropped
+    (safe), a key differing from it is kept - it cannot be told apart from a
+    user choice (the documented one-time ambiguity), so the user-choice
+    reading wins."""
     full = json.loads(json.dumps(cfg.DEFAULT_CONFIG))  # JSON-clean deep copy
     full["max_tokens"] = 1024                 # frozen OLD default
     full["port"] = 9999                       # genuine user choice

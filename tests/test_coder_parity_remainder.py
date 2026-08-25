@@ -1,5 +1,23 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""O5b: the parity remainder the O5 brief undercounted."""
+"""O5b: the parity remainder the O5 brief undercounted.
+
+O5 shipped six flags. Measured afterwards, 15 localcoder options still had no web
+form. These are the seven that were closable without a product decision:
+
+  --seed                  seed on CreateSessionRequest -> gen_kwargs
+  --interactive-confirm   interactive_confirm -> Agent.always_confirm
+  --episodes-archive      GET  /api/coder/episodes/archive
+  --forget-episode        POST /api/coder/episodes/{id}/forget
+  --restore-episode       POST /api/coder/episodes/{id}/restore
+  --forget-episodes       DELETE /api/coder/episodes
+  --consolidate-episodes  POST /api/coder/episodes/consolidate
+
+The property most of these tests exist to pin is HONESTY, because the CLI draws
+distinctions here that are easy to flatten and expensive to get wrong: an
+unreadable archive is not an empty one, a restore that is immediately re-evicted
+is not a plain success, and an erase that only half happened must never be
+reported as cleared.
+"""
 
 from pathlib import Path
 
@@ -71,7 +89,9 @@ def _seed(proj, lesson, **kw):
 # --------------------------------------------------------------------------- #
 
 def test_seed_reaches_the_agents_generation_kwargs(tmp_path, monkeypatch):
-    """A plain generation kwarg beside temperature and max_tokens, which were already web fields."""
+    """A plain generation kwarg beside temperature and max_tokens, which were
+    already web fields. It reaches gen_kwargs, which is what every LLM call
+    forwards."""
     app, proj, owner = _owner(tmp_path, monkeypatch)
     with TestClient(app) as client:
         r = client.post("/api/coder/sessions", headers=owner,
@@ -82,7 +102,9 @@ def test_seed_reaches_the_agents_generation_kwargs(tmp_path, monkeypatch):
 
 
 def test_seed_omitted_leaves_sampling_unpinned(tmp_path, monkeypatch):
-    """Blank must mean NO seed, not seed 0 - which is a real, reproducible value."""
+    """Blank must mean NO seed, not seed 0 - which is a real, reproducible
+    value. Coercing the two together would silently pin every session that left
+    the field alone."""
     app, proj, owner = _owner(tmp_path, monkeypatch)
     with TestClient(app) as client:
         r = client.post("/api/coder/sessions", headers=owner,
@@ -103,7 +125,9 @@ def test_seed_omitted_leaves_sampling_unpinned(tmp_path, monkeypatch):
 
 def test_interactive_confirm_keeps_shell_gated_under_auto_approve(tmp_path,
                                                                   monkeypatch):
-    """The whole point: auto-approve lets file writes through, and shell execution STILL stops for a human."""
+    """The whole point: auto-approve lets file writes through, and shell
+    execution STILL stops for a human. Asserted on the agent's always_confirm
+    set, which is what the dispatch gate actually consults."""
     app, proj, owner = _owner(tmp_path, monkeypatch)
     from localm.plugins.coder.agent.constants import _SHELL_EXEC_TOOLS
     with TestClient(app) as client:
@@ -128,7 +152,8 @@ def test_interactive_confirm_defaults_off_and_adds_nothing(tmp_path, monkeypatch
 
 def test_interactive_confirm_names_no_tools_a_restricted_session_lacks(
         tmp_path, monkeypatch):
-    """A scoped-key session has no shell tools at all, so listing them as always-confirm would advertise a gate on capabilities it does not have."""
+    """A scoped-key session has no shell tools at all, so listing them as
+    always-confirm would advertise a gate on capabilities it does not have."""
     app, proj, owner = _owner(tmp_path, monkeypatch)
     from localm import auth
     with TestClient(app) as client:
@@ -162,7 +187,9 @@ def test_archive_lists_dropped_lessons(tmp_path, monkeypatch):
 
 def test_an_unreadable_archive_is_not_reported_as_an_empty_one(tmp_path,
                                                                monkeypatch):
-    """The distinction this endpoint exists for."""
+    """The distinction this endpoint exists for. A 200 with an empty list would
+    say the lesson is gone, when it may be sitting in the archive, recoverable.
+    The CLI refuses that collapse by exiting non-zero; here it is a 503."""
     app, proj, owner = _owner(tmp_path, monkeypatch)
     with TestClient(app) as client:
         ep = _seed(proj, "still recoverable")
@@ -205,7 +232,9 @@ def test_forget_then_restore_round_trips(tmp_path, monkeypatch):
 
 
 def test_forget_reports_when_the_drop_is_not_recoverable(tmp_path, monkeypatch):
-    """The lesson IS gone from recall, so this is a caveat on a real outcome, not a failure."""
+    """The lesson IS gone from recall, so this is a caveat on a real outcome, not
+    a failure. Saying nothing would leave the user believing they can restore
+    it - which they would discover at the worst possible moment."""
     app, proj, owner = _owner(tmp_path, monkeypatch)
     with TestClient(app) as client:
         ep = _seed(proj, "unarchivable")
@@ -231,7 +260,9 @@ def test_forget_and_restore_404_on_an_unknown_id(tmp_path, monkeypatch):
 
 def test_restore_does_not_claim_no_such_id_when_it_could_not_look(tmp_path,
                                                                   monkeypatch):
-    """An unreadable archive means the id could not be LOOKED UP."""
+    """An unreadable archive means the id could not be LOOKED UP. Answering 404
+    would assert the episode does not exist, which is a claim we cannot make and
+    which sends the user away from a lesson that is still there."""
     app, proj, owner = _owner(tmp_path, monkeypatch)
     with TestClient(app) as client:
         from localm.plugins.coder import episodes as _eps
@@ -248,7 +279,8 @@ def test_restore_does_not_claim_no_such_id_when_it_could_not_look(tmp_path,
 
 
 def test_restore_surfaces_the_immediately_re_evicted_case(tmp_path, monkeypatch):
-    """A restore that lands and is dropped again at the cap SUCCEEDED, and reporting only 'restored' would be contradicted by the very next read."""
+    """A restore that lands and is dropped again at the cap SUCCEEDED, and
+    reporting only "restored" would be contradicted by the very next read."""
     app, proj, owner = _owner(tmp_path, monkeypatch)
     with TestClient(app) as client:
         from localm.plugins.coder import episodes as _eps
@@ -275,7 +307,8 @@ def test_restore_surfaces_the_immediately_re_evicted_case(tmp_path, monkeypatch)
 
 def test_erase_removes_the_archive_too_and_counts_what_it_destroyed(
         tmp_path, monkeypatch):
-    """The archive has to go: 'cleared episodic memory' while the lesson text still sat in a sidecar would be a privacy claim that is not true."""
+    """The archive has to go: "cleared episodic memory" while the lesson text
+    still sat in a sidecar would be a privacy claim that is not true."""
     app, proj, owner = _owner(tmp_path, monkeypatch)
     from localm.plugins.coder.episodes import EpisodeStore
     with TestClient(app) as client:
@@ -297,7 +330,9 @@ def test_erase_removes_the_archive_too_and_counts_what_it_destroyed(
 
 
 def test_a_partial_erase_is_never_reported_as_cleared(tmp_path, monkeypatch):
-    """The one episode operation with no undo, so 'erased' has to be a MEASURED claim."""
+    """The one episode operation with no undo, so "erased" has to be a MEASURED
+    claim. A clear() that left records behind while answering 200 would be a
+    privacy promise that was not kept."""
     app, proj, owner = _owner(tmp_path, monkeypatch)
     with TestClient(app) as client:
         _seed(proj, "stubborn")
@@ -314,13 +349,13 @@ def test_a_partial_erase_is_never_reported_as_cleared(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- #
 
 def test_consolidate_reports_what_it_did(tmp_path, monkeypatch):
-    """Memory that rewrites itself without saying so is how a bad merge becomes invisible, so the report is the feature, not decoration."""
+    """Memory that rewrites itself without saying so is how a bad merge becomes
+    invisible, so the report is the feature, not decoration."""
     app, proj, owner = _owner(tmp_path, monkeypatch)
     with TestClient(app) as client:
         from localm.plugins.coder import episodes as _eps
-        # The route imports consolidate INSIDE its worker, so patching the
-        # module attribute is seen at call time. The stub never calls `complete`,
-        # so the HTTPBackend the route builds is never dialled.
+        # The route imports consolidate inside its worker, so patching the module
+        # attribute is seen at call time. The stub never calls `complete`.
         monkeypatch.setattr(
             _eps, "consolidate",
             lambda store, **kw: {"groups": 2, "merged": 2, "replaced": 5,
@@ -336,7 +371,8 @@ def test_consolidate_reports_what_it_did(tmp_path, monkeypatch):
 
 
 def test_consolidate_needs_the_gui_server(tmp_path, monkeypatch):
-    """It takes a model turn, so without the shared services there is nothing to ask - said plainly rather than answered with an empty report."""
+    """It takes a model turn, so without the shared services there is nothing to
+    ask - said plainly rather than answered with an empty report."""
     app, proj, owner = _owner(tmp_path, monkeypatch)
     with TestClient(app) as client:
         app.state.self_url = None
@@ -356,7 +392,16 @@ def test_consolidate_needs_the_gui_server(tmp_path, monkeypatch):
 ])
 def test_every_episode_write_is_owner_only(tmp_path, monkeypatch, method,
                                            path_tpl):
-    """A scoped key is excluded from episodic memory entirely - it neither recalls a lesson nor writes one - so it must not be able to destroy the owner's."""
+    """A scoped key is excluded from episodic memory entirely - it neither
+    recalls a lesson nor writes one - so it must not be able to destroy the
+    owner's.
+
+    The id in the path is the REAL seeded one, not a made-up string. With a
+    placeholder id the forget and restore arms passed with the owner gate
+    REMOVED, because the route then answered 404 for "no such episode" - the
+    same status, for the opposite reason, and the survival assertion was
+    toothless because a nonexistent lesson cannot be destroyed either way.
+    Caught by the fires-control sweep, not by review."""
     app, proj, owner = _owner(tmp_path, monkeypatch)
     from localm import auth
     from localm.plugins.coder.episodes import EpisodeStore
@@ -368,14 +413,19 @@ def test_every_episode_write_is_owner_only(tmp_path, monkeypatch, method,
                            headers={"Authorization": "Bearer %s" % scoped["key"]},
                            json={"cwd": str(proj)})
         assert r.status_code in (403, 404), r.text
-        # Assert on the DATA, not only the status: the lesson surviving is the
-        # property, and the status code is a proxy for it.
+        # Assert on the data, not only the status.
         assert [e.id for e in EpisodeStore(Path(proj)).all()] == [ep.id], (
             "the owner's lesson did not survive a scoped key's write")
 
 
 def test_restore_is_owner_only_and_leaks_no_archived_text(tmp_path, monkeypatch):
-    """restore gets its own test because it is not DESTRUCTIVE, so the lesson-survived property every other write is checked with cannot detect a missing gate here - the fires-control sweep proved exactly that, passing this arm with the owner gate removed."""
+    """restore gets its own test because it is not DESTRUCTIVE, so the
+    lesson-survived property every other write is checked with cannot detect a
+    missing gate here - the fires-control sweep proved exactly that, passing this
+    arm with the owner gate removed.
+
+    Its two real risks are resurrecting a lesson the owner deliberately dropped,
+    and leaking the archived lesson TEXT, which the success body carries."""
     app, proj, owner = _owner(tmp_path, monkeypatch)
     from localm import auth
     from localm.plugins.coder.episodes import EpisodeStore
@@ -402,7 +452,10 @@ def test_restore_is_owner_only_and_leaks_no_archived_text(tmp_path, monkeypatch)
     ("POST", "/api/coder/episodes/consolidate"),
 ])
 def test_every_episode_route_refuses_unc(tmp_path, monkeypatch, method, path):
-    """The spy covers resolve AND is_dir rather than whichever one the shared guard happens to call today: a spy pointed at a single method goes structurally dead the moment the code reaches for the other, and a dead fault injector looks exactly like a guard that found nothing to refuse."""
+    """The spy covers resolve AND is_dir rather than whichever one the shared
+    guard happens to call today: a spy pointed at a single method goes
+    structurally dead the moment the code reaches for the other, and a dead
+    fault injector looks exactly like a guard that found nothing to refuse."""
     real = {"resolve": Path.resolve, "is_dir": Path.is_dir}
 
     def make_spy(name):

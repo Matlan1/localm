@@ -1,5 +1,23 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Role presets for spawned sub-agents: narrowed toolsets that only ever subtract."""
+"""Role presets for spawned sub-agents: narrowed toolsets that only ever subtract.
+
+Before roles existed, ``spawn_agent`` handed the child the parent's entire
+toolset, so a child asked only to "review this diff" still held write_file,
+run_shell and git_push. ``build_subagent_system_prompt`` had been written to give
+a child a specialised role but was never wired up (zero callers), and it printed
+the RAW cwd, so wiring it in as-was would have leaked the absolute machine path
+and OS username into the prompt (AGENTS.md rule 2).
+
+These tests drive REAL parent and child Agent objects through the REAL dispatch
+path (``_execute_tool``, exactly what ``run_task``/``_loop`` call), never a mock
+of the thing under test: the security boundary is ``disabled_tools`` enforced at
+agent/execution.py, so a test that only inspected constructor kwargs would prove
+nothing about whether the tool can actually run.
+
+The invariant under test throughout: a role only ever REMOVES capability. It can
+never re-enable a tool the parent disabled, nor one a restricted (shareable,
+non-owner) session forbids.
+"""
 
 import re
 from unittest.mock import patch
@@ -22,7 +40,9 @@ class _StubBackend:
 
 
 def _spawn_child(tmp_path, role=None, parent_kwargs=None):
-    """Spawn a real child through tool_spawn_agent, short-circuiting run_task so no LLM call is needed, and return (result, child) for direct inspection of the code path spawn_agent actually exercises."""
+    """Spawn a real child through tool_spawn_agent, short-circuiting run_task so
+    no LLM call is needed, and return (result, child) for direct inspection of
+    the code path spawn_agent actually exercises."""
     parent = Agent(_StubBackend(), cwd=tmp_path, **(parent_kwargs or {}))
     captured = {}
 
@@ -37,7 +57,11 @@ def _spawn_child(tmp_path, role=None, parent_kwargs=None):
 
 
 def _dispatch(agent, _tool_name, _args=None, **kwargs):
-    """Run a tool through the child's REAL dispatch path."""
+    """Run a tool through the child's REAL dispatch path.
+
+    The tool args go in a dict (or kwargs when they cannot collide): read_env's
+    own parameter is called ``name``, which shadows a ``name=`` helper argument.
+    """
     args = dict(_args or {})
     args.update(kwargs)
     return agent._execute_tool(
@@ -64,7 +88,7 @@ class TestRoleNarrowsTheChild:
         result = _dispatch(child, tool, args)
         assert not result.ok, f"reviewer was able to run {tool}"
         assert "disabled for this session" in result.output
-        # The refusal is real, not just prompt-level: the file was never written.
+        # The file was never written.
         assert not (tmp_path / "evil.txt").exists()
 
     def test_reviewer_can_still_read_and_inspect(self, tmp_path):
@@ -105,7 +129,8 @@ class TestRoleNarrowsTheChild:
 
 class TestRoleIsStrictlySubtractive:
     def test_role_cannot_reenable_a_tool_the_parent_disabled(self, tmp_path):
-        """read_file is in every role's allowlist, so a naive implementation that ASSIGNED the role's set instead of UNIONing would resurrect it here."""
+        """read_file is in every role's allowlist, so a naive implementation that
+        ASSIGNED the role's set instead of UNIONing would resurrect it here."""
         (tmp_path / "secret.txt").write_text("classified\n")
         for role in ROLE_PRESETS:
             _, child = _spawn_child(
@@ -117,7 +142,9 @@ class TestRoleIsStrictlySubtractive:
             assert "classified" not in result.output
 
     def test_role_cannot_reenable_a_tool_a_restricted_session_forbids(self, tmp_path):
-        """A restricted (shareable, non-owner) key forbids run_tests as RCE."""
+        """A restricted (shareable, non-owner) key forbids run_tests as RCE. The
+        test-writer role's allowlist DOES include run_tests, so this is the exact
+        case where a role could smuggle execution back into a shared session."""
         _, child = _spawn_child(tmp_path, role="test-writer",
                                 parent_kwargs={"restricted": True})
         assert "run_tests" in child.disabled_tools
@@ -138,7 +165,8 @@ class TestRoleIsStrictlySubtractive:
                     f"role {role} gained {sorted(child_enabled - parent_enabled)}")
 
     def test_role_denies_a_dynamically_registered_tool_by_default(self, tmp_path):
-        """Roles are ALLOWLISTS: an MCP/plugin/skill tool registered at runtime must be denied to a role it was never listed in, not silently inherited."""
+        """Roles are ALLOWLISTS: an MCP/plugin/skill tool registered at runtime
+        must be denied to a role it was never listed in, not silently inherited."""
         from localm.plugins.coder.tools.registry import ToolDef
         TOOL_REGISTRY["mcp_exfiltrate"] = ToolDef(
             name="mcp_exfiltrate", fn=lambda cwd, **kw: None,
@@ -175,7 +203,8 @@ class TestUnknownRoleFailsClosed:
 
     @pytest.mark.parametrize("bad", [123, ["reviewer"], {"name": "reviewer"}, True])
     def test_a_non_string_role_fails_closed(self, tmp_path, bad):
-        """A model can emit anything for an argument; it must not become a full-capability child or an obscure AttributeError."""
+        """A model can emit anything for an argument; it must not become a
+        full-capability child or an obscure AttributeError."""
         result, child = _spawn_child(tmp_path, role=bad)
         assert not result.ok
         assert "unknown role" in result.output
@@ -198,7 +227,9 @@ class TestUnknownRoleFailsClosed:
 # --------------------------------------------------------------------------- #
 
 class TestModelEmittedRoleReachesTheChild:
-    """The tests above call tool_spawn_agent directly."""
+    """The tests above call tool_spawn_agent directly. This one goes through the
+    parent's own dispatch, the path a model-emitted tool call really takes, so the
+    `role` argument is proven to plumb from the tool schema to the narrowing."""
 
     def test_role_from_a_tool_call_narrows_the_child(self, tmp_path):
         parent = Agent(_StubBackend(), cwd=tmp_path)
@@ -233,7 +264,9 @@ class TestModelEmittedRoleReachesTheChild:
 
 class TestChildPromptHygiene:
     def test_child_prompt_never_contains_the_raw_absolute_cwd(self, tmp_path):
-        """The bug that made the dead builder unwirable: it interpolated {cwd} directly, so the absolute machine path and OS username went into the prompt (and thus into anything the model echoes back)."""
+        """The bug that made the dead builder unwirable: it interpolated {cwd}
+        directly, so the absolute machine path and OS username went into the
+        prompt (and thus into anything the model echoes back)."""
         for role in ROLE_PRESETS:
             _, child = _spawn_child(tmp_path, role=role)
             prompt = child._system_prompt
@@ -244,7 +277,9 @@ class TestChildPromptHygiene:
             assert _display_cwd(tmp_path) in prompt, role
 
     def test_codebase_map_header_is_home_anchored_too(self, tmp_path):
-        """The map is only emitted for a NON-EMPTY project, so an empty tmp_path would not exercise it."""
+        """The map is only emitted for a NON-EMPTY project, so an empty tmp_path
+        would not exercise it. Its header printed the raw absolute root into the
+        same prompt, undoing the anchoring three lines above it."""
         (tmp_path / "app.py").write_text("def main():\n    return 1\n")
         _, child = _spawn_child(tmp_path, role="reviewer")
         prompt = child._system_prompt
@@ -266,16 +301,19 @@ class TestChildPromptHygiene:
         assert _display_cwd(tmp_path) in brief
 
     def test_child_prompt_carries_the_role_mission(self, tmp_path):
-        """The role must add real signal. Before this, parent and child prompts differed by exactly ONE line (the agent name)."""
+        """The role must add real signal. Before this, parent and child prompts
+        differed by exactly ONE line (the agent name)."""
         _, plain = _spawn_child(tmp_path, role=None)
         _, reviewer = _spawn_child(tmp_path, role="reviewer")
         assert "YOUR ROLE: reviewer" in reviewer._system_prompt
         assert "YOUR ROLE" not in plain._system_prompt
-        # Not cosmetic: the mission text is actually present.
+        # The mission text is present.
         assert ROLE_PRESETS["reviewer"].mission[:40] in reviewer._system_prompt
 
     def test_child_prompt_keeps_the_full_agent_safety_sections(self, tmp_path):
-        """A role must not DOWNGRADE the child."""
+        """A role must not DOWNGRADE the child. The dead lean builder produced a
+        ~500-char prompt with no RULES and no untrusted-content framing; the
+        child keeps the full prompt and gains the role brief on top."""
         _, child = _spawn_child(tmp_path, role="reviewer")
         prompt = child._system_prompt
         assert "RULES" in prompt
@@ -283,14 +321,16 @@ class TestChildPromptHygiene:
         assert "AVAILABLE TOOLS" in prompt
 
     def test_narrowed_child_is_not_told_to_use_tools_it_cannot_call(self, tmp_path):
-        """REC-N1-PROSE: advertising a disabled capability wastes turns and is a confusing info-leak."""
+        """REC-N1-PROSE: advertising a disabled capability wastes turns and is a
+        confusing info-leak. Every role disables spawn_agent and run_shell."""
         _, child = _spawn_child(tmp_path, role="reviewer")
         prompt = child._system_prompt
         assert "use spawn_agent to delegate" not in prompt
         assert "run_shell" not in prompt
 
     def test_read_only_role_is_not_told_to_edit_or_run_tests(self, tmp_path):
-        """A reviewer told to 'prefer edit_file' three lines above a brief saying it cannot edit contradicts itself and wastes turns on refusals."""
+        """A reviewer told to "prefer edit_file" three lines above a brief saying
+        it cannot edit contradicts itself and wastes turns on refusals."""
         _, child = _spawn_child(tmp_path, role="reviewer")
         rules = child._system_prompt.split("RULES")[-1].split("YOUR ROLE")[0]
         for gone in ("edit_file", "patch_file", "write_file", "run_tests", "run_shell"):

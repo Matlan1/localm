@@ -1,5 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""rag_list_collections / rag_search (ADR-0006): the coder's read access to RAG Knowledge collections."""
+"""rag_list_collections / rag_search (ADR-0006): the coder's read access to RAG
+Knowledge collections. Covers the unit-level tool functions, registration
+(SAFE_RESTRICTED_TOOLS exclusion, the ask_by_default confirmation flag,
+untrusted_output), and the real dispatch path (a restricted session never
+sees these tools; rag_search asks by default; retrieved text is neutralised
+AND provenance-fenced)."""
 
 from __future__ import annotations
 
@@ -141,7 +146,9 @@ def test_search_passes_k_clamped_1_to_20():
 
 
 def test_search_uses_lexical_only_embed_fn():
-    """No HTTP request context is available to a coder tool, so retrieval must stay lexical-only (embed_fn=None) - the same default `localm rag query` uses on the CLI without --embed (docs/rag.md)."""
+    """No HTTP request context is available to a coder tool, so retrieval must
+    stay lexical-only (embed_fn=None) - the same default `localm rag query`
+    uses on the CLI without --embed (docs/rag.md)."""
     fake_coll = MagicMock()
     fake_coll.exists.return_value = True
     fake_coll.query.return_value = []
@@ -152,8 +159,7 @@ def test_search_uses_lexical_only_embed_fn():
 
 
 # --------------------------------------------------------------------------- #
-#  SECURITY: retrieved text must be neutralised (ADR-0006's central finding - #
-#  Collection.query() itself does NOT neutralise; only the HTTP route does)   #
+#  SECURITY: retrieved text is neutralised by the tool wrapper                #
 # --------------------------------------------------------------------------- #
 
 def test_search_neutralises_control_tokens_in_hit_text():
@@ -224,8 +230,8 @@ def test_rag_list_collections_flags():
 def test_rag_search_flags():
     from localm.plugins.coder.tools import TOOL_REGISTRY
     td = TOOL_REGISTRY["rag_search"]
-    # Non-mutating - destructive=True would also trigger dry-run-skip and
-    # undo-snapshot machinery meant for state mutation (ADR-0006).
+    # Non-mutating: destructive=True would trigger the dry-run-skip and
+    # undo-snapshot machinery meant for state mutation.
     assert td.destructive is False
     assert td.ask_by_default is True
     assert td.untrusted_output is True
@@ -238,7 +244,7 @@ def test_tooldef_ask_by_default_defaults_false():
 
 
 # --------------------------------------------------------------------------- #
-#  Real dispatch: restricted-session exclusion (ADR-0006's real boundary)     #
+#  Real dispatch: restricted-session exclusion                                #
 # --------------------------------------------------------------------------- #
 
 class _Stub:
@@ -294,7 +300,9 @@ def test_restricted_call_to_rag_search_is_denied(tmp_path):
 # --------------------------------------------------------------------------- #
 
 def test_rag_search_asks_when_auto_approve_off(tmp_path):
-    """needs_confirm must fire for rag_search under auto_approve=False, and - no confirm_handler wired, non-interactive - fail CLOSED (RULE 5: a confirmation gate that cannot be satisfied denies rather than passes)."""
+    """needs_confirm must fire for rag_search under auto_approve=False, and -
+    no confirm_handler wired, non-interactive - fail CLOSED (RULE 5: a
+    confirmation gate that cannot be satisfied denies rather than passes)."""
     a = _agent(tmp_path, restricted=False, auto_approve=False)
     with patch.object(a, "confirm_handler", None):
         result = _call(a, "rag_search", collection="manuals", query="toner")
@@ -340,7 +348,9 @@ def test_rag_search_auto_approve_skips_confirmation(tmp_path):
 
 
 def test_rag_list_collections_never_needs_confirmation(tmp_path):
-    """Metadata-only tool, same trust tier as list_dir - must run even under auto_approve=False with no confirm_handler, proving it never reaches the confirmation gate at all."""
+    """Metadata-only tool, same trust tier as list_dir - must run even under
+    auto_approve=False with no confirm_handler, proving it never reaches the
+    confirmation gate at all."""
     a = _agent(tmp_path, restricted=False, auto_approve=False)
     with patch.object(a, "confirm_handler", None), \
          patch("localm.rag.store.collection_names", return_value=[]):
@@ -353,7 +363,10 @@ def test_rag_list_collections_never_needs_confirmation(tmp_path):
 # --------------------------------------------------------------------------- #
 
 def test_rag_search_result_is_provenance_fenced(tmp_path):
-    """rag_search's untrusted_output=True must make the coder's OWN provenance layer fence the whole result, matching fetch_url/web_search - complementary to (not a substitute for) the per-hit neutralise() in tool_rag_search itself."""
+    """rag_search's untrusted_output=True must make the coder's OWN provenance
+    layer fence the whole result, matching fetch_url/web_search - complementary
+    to (not a substitute for) the per-hit neutralise() in tool_rag_search
+    itself."""
     a = _agent(tmp_path, restricted=False, auto_approve=True)
     fake_coll = MagicMock()
     fake_coll.exists.return_value = True

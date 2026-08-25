@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The agentic loop: the public run/chat entry points, the turn loop itself, and parallel tool dispatch."""
+"""The agentic loop: the public run/chat entry points, the turn loop itself, and
+parallel tool dispatch. Mixed into Agent (see core.py)."""
 
 from __future__ import annotations
 
@@ -25,7 +26,27 @@ _RE_WORKSPACE = None      # compiled on first use
 
 
 def implies_action(text: str) -> bool:
-    """True when *text* asks for something that needs a TOOL rather than an explanation - the precondition for escalating a turn that produced no tool call (NEW-CODER-NO-TOOLCALL-SILENT)."""
+    """True when *text* asks for something that needs a TOOL rather than an
+    explanation - the precondition for escalating a turn that produced no tool
+    call (NEW-CODER-NO-TOOLCALL-SILENT).
+
+    Two independent signals, either of which is enough: an imperative action
+    verb (``_ACTION_VERBS``), or a reference to this workspace - a path, a
+    filename with an extension, or a project noun (``_WORKSPACE_HINT``). Read
+    verbs count: "show me what is in config.py" needs read_file exactly as much
+    as "write config.py" needs write_file, and a model answering either from
+    imagination is the same defect.
+
+    THE BAR IS DELIBERATELY LOW, and that is a judgement about relative cost,
+    not sloppiness. A false POSITIVE costs one extra turn whose re-prompt says
+    in as many words that a plain answer is acceptable if no tool is needed, so
+    the model can decline and the loop finishes normally. A false NEGATIVE is
+    the defect this whole ladder exists to remove: the request is silently
+    answered with prose and nothing happens. Those are not symmetric, so this
+    leans toward firing.
+
+    Pure and module-level so it can be tested directly on the request strings
+    that matter, without constructing an Agent."""
     global _RE_WORKSPACE
     if not text:
         return False
@@ -48,32 +69,45 @@ def response_similarity(a: str, b: str) -> float:
 
 class _LoopMixin:
     def run_task(self, task: str) -> str:
-        """Run a single task to completion (non-interactive)."""
+        """
+        Run a single task to completion (non-interactive).
+
+        Returns the agent's final text response.
+        Used by spawn_agent and the CLI `run` command.
+        """
         if self._episodic and not self._episode_task:
             self._episode_task = task
         if not self._review_task:
             self._review_task = task   # remembered for the pre-done diff review
         if not self._session_title:
-            self._session_title = task   # resume-listing display title (item 3)
-        # The RAW request, before _with_episodes can prepend a lessons preamble:
-        # implies_action() must judge what the USER asked for, not boilerplate
-        # that happens to contain an action verb.
+            self._session_title = task   # resume-listing display title
+        # The raw request, before _with_episodes can prepend a lessons preamble.
         self._last_user_request = task
         self._add_user(self._with_episodes(task))
         return self._loop(interactive=False)
 
     def continue_task(self, message: str) -> str:
-        """Continue the current session with another non-interactive instruction, preserving history."""
+        """
+        Continue the current session with another non-interactive instruction,
+        preserving history.
+
+        Unlike :meth:`run_task` it does not re-inject episodic recall (already
+        injected on the first task). Used by the CLI goal loop to feed a
+        verification failure back to the agent for another fix attempt.
+        """
         self._last_user_request = message
         self._add_user(message)
         return self._loop(interactive=False)
 
     def chat(self, user_input: str) -> str:
-        """Send one user message in an ongoing interactive session."""
+        """
+        Send one user message in an ongoing interactive session.
+
+        History is preserved between calls.
+        Returns the agent's final text response for this turn.
+        """
         if not self._session_title:
-            # Captured from the RAW input, before _with_episodes below can
-            # prepend a "relevant past lessons" preamble - a resume listing
-            # must show what the user asked for, not that boilerplate.
+            # The raw input, before _with_episodes can prepend a lessons preamble.
             self._session_title = user_input
         # Recall relevant past lessons on the first turn of a session (the turn
         # that sets the session's task); later turns keep the same context.
@@ -87,7 +121,13 @@ class _LoopMixin:
         return self._loop(interactive=True)
 
     def _with_episodes(self, task: str) -> str:
-        """Prepend relevant past lessons (episodic memory) to *task*, if any."""
+        """Prepend relevant past lessons (episodic memory) to *task*, if any.
+        Best-effort: a retrieval failure just returns the task unchanged.
+
+        Also RECORDS which lessons were injected (id + text), on the agent, on the
+        event stream, and in the audit trail. Retrieval used to render the lessons
+        and throw the Episode objects away, so a lesson that steered a run badly
+        was invisible after the fact and there was no handle to forget it by."""
         if not self._episodic or self._episode_store is None:
             return task
         try:
@@ -95,8 +135,8 @@ class _LoopMixin:
             episodes = self._episode_store.search(task)
             block = render_for_prompt(episodes)
         except Exception as e:
-            # Rule 5: a failed recall is a real event, not a no-op. It stays
-            # best-effort (the task still runs), but it leaves a trace.
+            # A failed recall is recorded rather than silently ignored; the task
+            # still runs.
             self._record_episodes_used([], reason="recall failed: %s" % e)
             return task
         if not block:
@@ -106,7 +146,13 @@ class _LoopMixin:
         return block + "\n\n## Task\n" + task
 
     def _record_episodes_used(self, episodes: list, reason: str = "") -> None:
-        """Stash + surface the recalled lessons for this run."""
+        """Stash + surface the recalled lessons for this run.
+
+        Mirrors the chat plugin's ``_stash_memory_used``: metadata plus the lesson
+        text that was ALREADY injected into the prompt, so this adds no disclosure
+        beyond what the prompt itself carries (and the audit log already records
+        the prompt). Best-effort and side-effect free - a surfacing failure must
+        never break the run."""
         try:
             used = [{"id": e.id, "outcome": e.outcome,
                      "lesson": (e.lesson or e.summary or "")[:200]}
@@ -117,9 +163,6 @@ class _LoopMixin:
             logger.debug("episodic recall: injected %d lesson(s)%s", len(used),
                          (" (%s)" % reason) if reason else "")
             if used:
-                # Privacy/restricted sessions never reach here (recall is off), and
-                # in privacy-recall opt-in the audit log is a NullAuditLog, so the
-                # trail stays fail-safe by construction.
                 self._audit.episodes_recalled(used)
                 self._emit("episodes_recalled", episodes=used)
         except Exception as e:
@@ -127,54 +170,43 @@ class _LoopMixin:
             logger.debug("episodic recall surfacing skipped: %s", e)
 
     def _loop(self, interactive: bool) -> str:
-        """Agentic loop: call LLM → parse tool calls → execute → repeat."""
+        """
+        Agentic loop: call LLM → parse tool calls → execute → repeat.
+        Returns the final response text.
+        """
         # Record whether this session owns a terminal it can prompt on. A spawned
-        # child always runs _loop(interactive=False), so without this a child had
-        # no way to tell an unattended run (nobody to ask -> fail closed) from a
-        # parent sitting in the REPL (a user who can answer). REG-507.
+        # child always runs _loop(interactive=False).
         self._interactive = interactive
-        # Live-attribute access so tests patching agent.parse_tool_calls /
-        # confirm / print_warning / TOOL_REGISTRY are honoured (the names moved
-        # into this submodule when agent.py became a package).
+        # Live attribute lookup, so a patched agent.parse_tool_calls / confirm /
+        # print_warning / TOOL_REGISTRY is honoured.
         parse_tool_calls = _agent.parse_tool_calls
         confirm = _agent.confirm
         print_warning = _agent.print_warning
         TOOL_REGISTRY = _agent.TOOL_REGISTRY
         final_response = ""
         self._stop_requested = False       # a stale stop must not kill a new task
-        self._user_stopped = False         # per-run: a stop in an EARLIER run must
-                                           # not mute this run's failure lesson
-        self._last_run_ok = True           # per-run: an EARLIER run's failure must
-                                           # not label THIS run failed. Without this
-                                           # the flag only ever went False, so after
-                                           # one bad turn every later turn of a REPL
-                                           # or GUI session was reported as failed
-                                           # too. The session-wide "did anything
-                                           # fail" answer lives in _had_any_failure,
-                                           # recorded in the finally below.
-        self._last_verify_state = None     # per-run, same reasoning: this run has
-                                           # not been verified until its own gate says so
+        self._user_stopped = False         # per-run: an earlier run's stop does not
+                                           # mute this run's failure lesson
+        self._last_run_ok = True           # per-run: an earlier run's failure does not
+                                           # label this run failed. _had_any_failure is
+                                           # the session-wide flag, set in the finally.
+        self._last_verify_state = None     # per-run: this run is unverified until
+                                           # its own gate says otherwise
         start_turns = self._turns          # turns used by *this* task only
         budget_escalated = False           # uncertainty escalation fires at most once per task
-        # Per-task one-shot flags for the no-tool-calls handler (split out below):
-        # self-verification + pre-done review fire once each; repair re-prompts are
-        # capped. Held on a namespace so the helper can persist them across turns.
-        # The verify_* fields drive the exit-code oracle gate (_run_verify_gate).
-        # verify_checked_at is the write count the check last passed at, seeded
-        # with the count on entry: the gate fires only when THIS task has written
-        # something since, so a follow-up question in a REPL session whose EARLIER
-        # turn edited files does not trigger the suite - and a fix made after a
-        # pass (the reviewer can prompt one) is re-checked rather than riding in
-        # on the earlier green.
+        # Per-task one-shot flags for the no-tool-calls handler: self-verification
+        # and pre-done review fire once each, repair re-prompts are capped. Held on
+        # a namespace so the helper can persist them across turns. The verify_*
+        # fields drive the exit-code oracle gate (_run_verify_gate);
+        # verify_checked_at is the write count the check last passed at, so the
+        # gate fires only once this task has written something since.
         st = SimpleNamespace(verify_nudged=False, review_done=False, repair_count=0,
                              verify_retries=0, verify_settled=False,
                              verify_checked_at=self._write_total(),
                              partial_notice_count=0, partial_notice_cap_announced=False,
-                             # Zero-tool-call escalation (NEW-CODER-NO-TOOLCALL-SILENT):
-                             # how many rungs of the ladder this task has used, and
-                             # whether the model has managed ANY call yet. The second
-                             # is what keeps the ladder off a task that is genuinely
-                             # working and simply finished with a prose summary.
+                             # Zero-tool-call escalation: how many rungs of the
+                             # ladder this task has used, and whether the model
+                             # has produced any call yet.
                              nocall_escalation=0, tool_calls_made=0,
                              writes_at_start=self._write_total())
 
@@ -198,11 +230,9 @@ class _LoopMixin:
                     if interactive:
                         print_info("(steering note delivered)")
 
-                # Background sub-agents that finished since the last turn are
-                # absorbed HERE, on this thread, at a defined point - never from
-                # the worker thread that ran them (see _drain_background_agents).
-                # Same place as steering notes so the model reads the result
-                # before its next call.
+                # Absorb background sub-agents that finished since the last turn,
+                # on this thread only, at the same point as steering notes so the
+                # model reads the result before its next call.
                 for note in self._drain_background_agents():
                     self._add_user(f"[background sub-agent result]\n{note}")
                     self._emit("info", text="background sub-agent result absorbed")
@@ -224,9 +254,8 @@ class _LoopMixin:
                 self._audit.set_turn(self._turns)
 
                 # ---- uncertainty escalation ------------------------------
-                # When the task exceeds its turn budget, stop guessing:
-                # interactively ask the user whether to keep going; in
-                # non-interactive mode tell the model to surface blockers.
+                # Past the turn budget: interactively ask the user whether to keep
+                # going; non-interactively tell the model to surface blockers.
                 task_turns = self._turns - start_turns
                 if not budget_escalated and task_turns > self.turn_budget:
                     budget_escalated = True
@@ -264,12 +293,9 @@ class _LoopMixin:
                 # ---- call LLM -------------------------------------------
                 messages = self._build_messages()
                 response = self._call_llm(messages, interactive=interactive)
-                # One-shot: the forcing grammar applies to the turn the ladder
-                # armed it for and no further. Cleared HERE, next to the single
-                # call that consumes it, so no later path can inherit a
-                # constrained sampler it never asked for - including the error
-                # paths below, which is why this is not in a finally further
-                # down or inside _llm_kwargs (see that method's docstring).
+                # One-shot: the forcing grammar applies only to the turn the
+                # ladder armed it for. Cleared here, next to the single call that
+                # consumes it, so no later path inherits a constrained sampler.
                 self._force_tool_grammar = False
 
                 if self._stop_requested:
@@ -282,46 +308,17 @@ class _LoopMixin:
                     break
 
                 # ---- parse tool calls ------------------------------------
-                # Pass the known tool names so the lenient, name-gated formats
-                # (bare JSON and ```json / bare fences) are recognised without
-                # mistaking a JSON example in prose for a call.
+                # Pass the known tool names so the name-gated formats (bare JSON
+                # and json / bare fences) are recognised.
                 tool_names = set(TOOL_REGISTRY) - self.disabled_tools
                 calls = parse_tool_calls(response, tool_names=tool_names)
 
-                # ---- repeated-scaffold breaker (REC-CODER-LOOPBREAK) ------
-                # A stuck model can restate the same non-answer over and over
-                # (the "Message 1..4 / I will now wait" narration, or the same
-                # refusal reworded) making no progress. The error-streak
-                # breakers only catch FAILED tool calls; this catches
-                # NON-failing repetition.
-                #
-                # SIMILARITY, NOT EQUALITY, AND AGAINST ANY EARLIER TURN, NOT
-                # ONLY THE LAST. The original compared exact stripped strings
-                # and reset to zero on ANY difference, so one changed character
-                # - a renumbered "Message 3", a reworded apology - made a stuck
-                # model look like it was progressing, forever. Measured on the
-                # live NEW-CODER-NO-TOOLCALL-SILENT session the successive
-                # near-duplicates scored 0.91 / 0.75 / 0.72 and the exact-match
-                # breaker never once fired. A bounded history rather than only
-                # the previous turn also catches an A-B-A-B alternation, which
-                # a consecutive-only check can never see.
-                #
-                # SIMILAR TEXT ALONE IS NOT ENOUGH - THE CALL SIGNATURE MUST
-                # REPEAT TOO. Turns that reach here at all are overwhelmingly
-                # turns WITH tool calls: a turn with none ends the task in
-                # _handle_no_tool_calls, so only the capped continue-paths (the
-                # verify nudge, a repair, an escalation rung) ever produce two
-                # call-less turns in a row. That makes "count only call-less
-                # turns" a breaker that can essentially never fire, and
-                # "count every turn on text similarity alone" one that fires on
-                # honest work: reading five files differs only in the path and
-                # scores ~0.97 similar, so a working session would be aborted at
-                # turn five for doing exactly what it was asked.
-                #
-                # Requiring BOTH separates them exactly. Different args mean the
-                # model is advancing through real work; the same call plus the
-                # same narration, however reworded, is the stuck scaffold this
-                # breaker exists for.
+                # ---- repeated-scaffold breaker ---------------------------
+                # Counts a turn whose response is SIMILAR (not identical) to any
+                # turn in a bounded history AND whose tool-call signature matches
+                # that turn's. Both conditions must hold. Matching against a
+                # history rather than only the previous turn also catches an
+                # A-B-A-B alternation.
                 fp = (response or "").strip()
                 sig = " | ".join(
                     f"{c.name}({sorted((c.args or {}).items())!r})" for c in calls)
@@ -362,8 +359,7 @@ class _LoopMixin:
 
                 # ---- there are tool calls --------------------------------
                 # Recorded before execution: the escalation ladder asks whether
-                # the model can produce a CALL at all, which is answered by
-                # parsing one, not by that call then succeeding.
+                # the model can produce a CALL at all, not whether it succeeded.
                 st.tool_calls_made += len(calls)
 
                 # Show the non-tool-call text parts first
@@ -373,26 +369,13 @@ class _LoopMixin:
                         if isinstance(seg, str) and seg.strip():
                             console.print(seg.strip())
 
-                # The event-sink (GUI) surface already streamed the RAW response
-                # live, token by token, WHILE it was still generating - long before
-                # parse_tool_calls (just above) could know which spans were real
-                # calls. _stream_and_record's live hider (context.py) only
-                # recognises the unconditional <tool_call>/<|tool_call> wrapper
-                # dialects, so a call written in one of parser.py's OTHER
-                # recognised shapes (an explicit ```tool_call/```tool_code fence, a
-                # name-gated ```json/bare fence, or a bare top-level JSON object)
-                # streamed to the browser as plain visible text even though it is
-                # about to be EXECUTED by _execute_tools below - the harness runs
-                # it, but the already-rendered chat bubble never learns that. This
-                # is the authoritative fix-up: `calls`/`segments` just above are
-                # the single source of truth for what was actually consumed as a
-                # real call, so tell the GUI to replace whatever it streamed with
-                # the real leftover text, for every shape, instead of teaching a
-                # second, streaming-constrained detector every format parser.py
-                # grows (the exact copy-drift this codebase avoids elsewhere - see
-                # strip_xml_tool_calls's docstring). A no-op when nothing leaked:
-                # the live hider already got the common <tool_call> case right, so
-                # this usually just re-sends the same text the browser already has.
+                # The event-sink (GUI) surface streamed the RAW response live,
+                # before parse_tool_calls could know which spans were real calls,
+                # and its live hider (context.py) only recognises the
+                # <tool_call>/<|tool_call> wrappers. `calls`/`segments` above are
+                # the source of truth for what was consumed as a call, so re-send
+                # the real leftover text and the GUI replaces what it streamed,
+                # for every call shape. A no-op when nothing leaked.
                 self._emit("assistant_text",
                           text="".join(seg for seg in segments if isinstance(seg, str)))
 
@@ -401,28 +384,16 @@ class _LoopMixin:
                 # Execute tools - run non-destructive batches in parallel
                 result_blocks = self._execute_tools(calls, interactive=interactive)
 
-                # A PARTIAL parse failure is otherwise invisible: parse_tool_calls
-                # silently drops any tool-call-shaped block whose body could not
-                # be recovered (malformed JSON that exhausts every lenient-parse
-                # fallback), and the only downstream check for a parse problem is
-                # "calls came back empty" (_handle_no_tool_calls) - which never
-                # fires when a SIBLING call in the same response parsed fine.
-                # Measured live: an edit_file on an existing file (large, more
-                # escaping-prone content) silently vanished while a sibling
-                # write_file and run_shell in the same turn executed for real -
-                # the model never found out and, without this, neither would the
-                # session record. `segments` already has the successfully-parsed
-                # call spans excised (split_response), so anything tool-call-
-                # shaped left in it is exactly what failed to parse.
+                # parse_tool_calls silently drops a tool-call-shaped block whose
+                # body could not be recovered, and the only downstream check
+                # (_handle_no_tool_calls) fires solely when NO call parsed.
+                # `segments` has the successfully-parsed call spans excised, so
+                # anything tool-call-shaped left in it is what failed to parse:
+                # tell the model that part was NOT run.
                 #
-                # Capped at _MAX_TOOL_REPAIRS (matching the repair-turn's own
-                # cap, same reasoning): the notice's own example text is itself
-                # tool-call-shaped (a literal <tool_call> block with "name"/
-                # "args" keys), so a model that echoes it back verbatim as
-                # commentary - confirmed live: constructing exactly that echo
-                # alongside one real call reproduces looks_like_tool_attempt()
-                # returning True on the leftover - would otherwise re-trigger
-                # this notice indefinitely, once per turn, forever.
+                # Capped at _MAX_TOOL_REPAIRS: the notice's own example text is
+                # itself tool-call-shaped, so a model echoing it back would
+                # re-trigger the notice every turn.
                 leftover = "".join(seg for seg in segments if isinstance(seg, str))
                 if looks_like_tool_attempt(leftover, tool_names):
                     if st.partial_notice_count < _MAX_TOOL_REPAIRS:
@@ -437,14 +408,9 @@ class _LoopMixin:
                             '"args": {...}}\n</tool_call> format.'
                         )
                     elif not st.partial_notice_cap_announced:
-                        # Rule 5 (AGENTS.md "we do not hide problems"): the cap
-                        # bounds REPETITION, not VISIBILITY. Going fully silent
-                        # here would trade the loud bug #920 fixed - a dropped
-                        # call nobody hears about - for a quiet one, in exactly
-                        # the sessions hitting this the most. One final notice
-                        # naming the change, then a durable debug trace (below)
-                        # for every further occurrence so the drop stays
-                        # discoverable even once the model stops being told.
+                        # The cap bounds repetition, not visibility: one final
+                        # notice naming the change, then a debug trace for every
+                        # further occurrence.
                         st.partial_notice_cap_announced = True
                         result_blocks.append(
                             "[tool-call format] Another part of this response "
@@ -504,48 +470,45 @@ class _LoopMixin:
             self.clear_checkpoint()
 
         finally:
-            # Fold this run's outcome into the session-level flag before the
-            # per-run one is re-armed by the next run. One place, so every
-            # failure path (max_turns, either circuit breaker) is captured and
-            # a future one cannot forget to - the close-time episodic
-            # reflection depends on this not being lost.
-            # A USER STOP IS EXCLUDED, and the exclusion belongs HERE, not only
-            # at the close-time trigger (REG-594 residual). _last_run_ok and
-            # _user_stopped are both per-run and re-armed above; _had_any_failure
-            # is session-level and cleared only by reset(). So folding a stop in
-            # here armed the trigger PERMANENTLY: one declined "keep going?" and
-            # every later clean, no-file-change turn still paid the CLI's
-            # synchronous, 30s-capped reflection at quit, because the trigger's
-            # own guard could only see whether the LAST run was stopped. A stop
-            # is the user asking to leave, not a lesson, so it must never enter
-            # the session record in the first place.
+            # Fold this run's outcome into the session-level flag before the next
+            # run re-arms the per-run one, so every failure path (max_turns,
+            # either circuit breaker) is captured in one place. A user stop is
+            # excluded: _last_run_ok and _user_stopped are per-run and re-armed
+            # above, while _had_any_failure is session-level and cleared only by
+            # reset().
             if not self._last_run_ok and not self._user_stopped:
                 self._had_any_failure = True
 
         return final_response
 
     def _handle_no_tool_calls(self, response, interactive, st) -> "tuple[bool, str]":
-        """Handle a turn that produced no tool calls (split out of _loop)."""
-        # Live-attribute access, same reasoning as _loop's own TOOL_REGISTRY read:
-        # tests patch agent.TOOL_REGISTRY, and disabled_tools can differ per agent.
+        """Handle a turn that produced no tool calls (split out of _loop).
+
+        Runs, in order: the harness-run exit-code oracle (when a verify command is
+        configured), the one-shot self-verification nudge, the tool-call repair
+        re-prompt (capped), the give-up surface for an unparseable attempt, the
+        one-shot pre-done reviewer pass, and finally accepting the response as the
+        final answer. ``st`` carries the per-task one-shot flags (verify_nudged,
+        repair_count, review_done, verify_retries/verify_settled) so they persist
+        across turns.
+
+        Returns ``(should_break, final_response)``: ``(False, "")`` to continue the
+        loop, ``(True, text)`` to end it with that final response."""
+        # Live attribute lookup, so a patched agent.TOOL_REGISTRY is honoured;
+        # disabled_tools can differ per agent.
         tool_names = set(_agent.TOOL_REGISTRY) - self.disabled_tools
 
-        # The exit-code oracle goes FIRST among the finish gates: it is the only
-        # un-gameable one (the harness runs a command and reads its exit code, so
-        # the model cannot talk its way past it), and it costs no tokens. Running
-        # it before the self-graded nudge and the reviewer means a failing check
-        # goes straight back as a fix request instead of spending an LLM review
-        # pass on code that does not pass. Skipped for a response that only LOOKS
-        # like a broken tool call - that model is not finished, it is mid-call,
-        # and the repair turn below handles it.
+        # The exit-code oracle runs FIRST among the finish gates, before the
+        # self-graded nudge and the reviewer, so a failing check goes straight
+        # back as a fix request. Skipped for a response that only looks like a
+        # broken tool call - the repair turn below handles that.
         if not looks_like_tool_attempt(response, tool_names):
             gated = self._run_verify_gate(response, interactive, st)
             if gated is not None:
                 return gated
 
-        # Self-verification: don't accept a final answer while code
-        # changes sit unverified - nudge the agent to check its work.
-        # Fires at most once per task to avoid infinite loops.
+        # Self-verification: nudge the agent to check its work while code changes
+        # sit unverified. Fires at most once per task.
         if (
             self.self_verify
             and not st.verify_nudged
@@ -555,9 +518,8 @@ class _LoopMixin:
             st.verify_nudged = True
             files = ", ".join(sorted(self._unverified_writes))
             self._add_assistant(response)
-            # Name the project's REAL check when one is known, so "verify your
-            # work" means running it rather than re-reading the file it just
-            # wrote (which is the model grading its own homework from memory).
+            # Name the project's real check when one is known, so the nudge asks
+            # for a command run rather than a re-read.
             if self.verify_cmd is not None:
                 from ..verify import command_text
                 how = (f"run `{command_text(self.verify_cmd)}` (via run_shell, "
@@ -577,12 +539,9 @@ class _LoopMixin:
                 )
             return (False, "")
 
-        # Repair turn: the response looks like a tool call that
-        # failed to parse (a marker/fence, or a name+args object the
-        # lenient parser still could not recover - malformed JSON,
-        # an unknown tool name, or Python-style tool_code). Re-prompt
-        # once with the exact format instead of printing the broken
-        # call as the final answer.
+        # Repair turn: the response looks like a tool call that failed to parse
+        # (a marker/fence, or a name+args object the lenient parser could not
+        # recover). Re-prompt once with the exact format.
         if (
             st.repair_count < _MAX_TOOL_REPAIRS
             and self._turns < self.max_turns
@@ -609,11 +568,9 @@ class _LoopMixin:
                 )
             return (False, "")
 
-        # Give-up case: it STILL looks like a tool call we could not parse
-        # after the repair attempts. SURFACE the raw attempt instead of
-        # finalising a hidden <tool_call> block - which the streaming
-        # display hides, leaving an empty bubble + "task finished" + no
-        # file (a silent no-op the user gets zero feedback on).
+        # Still looks like an unparseable tool call after the repair attempts:
+        # surface the raw attempt instead of finalising a hidden <tool_call>
+        # block, which the streaming display hides.
         if looks_like_tool_attempt(response, tool_names):
             self._emit("info", text=(
                 "the model tried to call a tool but emitted invalid output "
@@ -629,19 +586,17 @@ class _LoopMixin:
             self._add_assistant(response)
             return (True, notice)
 
-        # Zero-attempt escalation: the model produced NOTHING tool-shaped on a
+        # Zero-attempt escalation: the model produced nothing tool-shaped on a
         # request that needs a tool. Every branch above is reached only via
-        # looks_like_tool_attempt(), so before this the TOTAL failure was the
-        # one case with no handling at all - it fell through and was accepted.
+        # looks_like_tool_attempt().
         escalated = self._escalate_no_tool_attempt(response, interactive, st)
         if escalated is not None:
             return escalated
 
-        # Pre-done review: before accepting the final answer, let a
-        # reviewer model check the cumulative diff and feed any blocking
-        # issues back for one more fix pass. Fires at most once per loop,
-        # only when there is a real diff and turns remain. Fail-open: a
-        # reviewer error never blocks the answer (see _run_pre_done_review).
+        # Pre-done review: a reviewer model checks the cumulative diff and any
+        # blocking issues go back for one more fix pass. Fires at most once per
+        # loop, only when there is a real diff and turns remain. Fail-open: a
+        # reviewer error never blocks the answer.
         if (
             self._reviewer is not None
             and not st.review_done
@@ -663,17 +618,11 @@ class _LoopMixin:
                             "feeding them back)")
                     return (False, "")
 
-        # No tool calls → this is the final answer. Ground it in what the
-        # session actually recorded (see _grounding_footer) rather than
-        # sending the model's own prose out unchallenged - that prose is
-        # exactly what every OTHER gate above has just failed to have an
-        # opinion on (nothing to verify, no unverified writes, no reviewer
-        # configured or nothing to review).
-        # Rung 3, and ONLY here: the ladder ran and the model still never
-        # produced a call. Reached when the rungs are exhausted, when forcing is
-        # unavailable, or when turns ran out mid-ladder. Stated as a fact about
-        # what this run could not make happen - never as advice to change model,
-        # which is the user's choice to make and not this code's to second-guess.
+        # No tool calls, so this is the final answer; _grounding_footer grounds it
+        # in what the session actually recorded.
+        # Rung 3, and only here: the ladder ran and the model still never produced
+        # a call. Reached when the rungs are exhausted, when forcing is
+        # unavailable, or when turns ran out mid-ladder.
         enforcement = ""
         if st.nocall_escalation and not self._used_tools_this_task(st):
             why = ("" if self.can_force_tool_calls() else
@@ -700,13 +649,56 @@ class _LoopMixin:
         return (True, final_text)
 
     def _used_tools_this_task(self, st) -> bool:
-        """Has the model demonstrated, THIS TASK, that it can drive a tool?"""
+        """Has the model demonstrated, THIS TASK, that it can drive a tool?
+
+        Three independent pieces of evidence, any one of which settles it. Only
+        the first is about parsing; the other two are about what the harness
+        actually recorded happening, which is the same grounding rule
+        _grounding_footer follows - never the model's own account of itself.
+
+        Both artifact checks are needed, and neither subsumes the other: a
+        write is recorded in _unverified_writes the moment it lands, while
+        _write_total() is the cumulative counter, snapshotted at task start so
+        an EARLIER task's writes in a long REPL session cannot be mistaken for
+        this one's. A task that has written something is self-evidently not a
+        task in which the model refuses to act, and escalating at it would
+        nag a model that is working."""
         return bool(st.tool_calls_made
                     or self._unverified_writes
                     or self._write_total() > st.writes_at_start)
 
     def _escalate_no_tool_attempt(self, response, interactive, st):
-        """Escalate a turn that produced NO tool call and no attempt at one, on a request that needs a tool (NEW-CODER-NO-TOOLCALL-SILENT)."""
+        """Escalate a turn that produced NO tool call and no attempt at one, on a
+        request that needs a tool (NEW-CODER-NO-TOOLCALL-SILENT).
+
+        Returns None to fall through to the remaining gates, or the same
+        ``(should_break, final_response)`` pair the caller propagates.
+
+        THE POINT IS TO MAKE THE CALL HAPPEN, NOT TO REPORT THAT IT DID NOT.
+        Reporting already existed (_grounding_footer's "no files changed") and
+        it left the user with a model that never touched a tool across six
+        turns. The rungs, in order:
+
+          1. Re-prompt with the exact format block - the same treatment the
+             MALFORMED case has always had, triggered by ABSENCE instead. Some
+             models simply never saw the wrapper in a prompt this long and
+             produce a correct call the moment it is shown to them again.
+          2. Re-run the turn with the tool-call grammar bound from the FIRST
+             token (see context.can_force_tool_calls). At this point the
+             sampler cannot emit anything except an optional reasoning block
+             and a structurally valid call, so the model's willingness stops
+             being the deciding factor.
+          3. Only once forcing has actually been tried and still failed - or is
+             genuinely unavailable on this backend - tell the user. That
+             message is a report of FAILED ENFORCEMENT, never a suggestion to
+             pick a different model: which model to run is the user's choice
+             and this code's job is to make their choice work.
+
+        Deliberately NOT gated on the response's wording. Every phrasing-based
+        check inherits the unreliability of the self-report it is reading (see
+        _grounding_footer); "did the harness parse a call" is an observable
+        fact about this turn and "does the request need one" is a fact about
+        the user's own text, so neither can be talked past."""
         if self._used_tools_this_task(st):
             return None                      # this model calls tools fine
         if not implies_action(getattr(self, "_last_user_request", "") or ""):
@@ -772,7 +764,26 @@ class _LoopMixin:
         return (False, "")
 
     def _grounding_footer(self) -> str:
-        """A factual line grounding the final answer in the session's own record, appended UNCONDITIONALLY - never gated on what the response text itself claims."""
+        """A factual line grounding the final answer in the session's own
+        record, appended UNCONDITIONALLY - never gated on what the response
+        text itself claims.
+
+        The literature calls a model's own completion claim going unchecked
+        "false success" / "silent failure": up to 75.8% of failures in
+        agentic coding trajectories that emit an explicit completion signal
+        turn out to contradict the real environment state, and verifiability
+        of the environment - not the model's phrasing - is what predicts it.
+        Every approach that actually closes this gap grounds on the
+        observable artifact instead of the model's self-report (a diff, a
+        test exit code), never on parsing the claim itself - a keyword-gated
+        caveat would inherit the same unreliability being guarded against.
+
+        This reuses the exact facts loop.py already tracks for the self-
+        verify nudge and the exit-code oracle (changed_files(),
+        _last_verify_state) rather than re-deriving anything or reading the
+        response text, so it cannot be gamed by phrasing: it never looks at
+        what the model said, only at what the harness actually recorded.
+        """
         changed = self.changed_files()
         if changed:
             names = ", ".join(sorted(f["path"] for f in changed))
@@ -784,7 +795,18 @@ class _LoopMixin:
         return "\n\n[session record: " + "; ".join(parts) + "]"
 
     def _run_pre_done_review(self, diff: str) -> str:
-        """Run the pre-done review over *diff* and return the feedback to feed back (``''`` when the answer stands)."""
+        """Run the pre-done review over *diff* and return the feedback to feed
+        back (``""`` when the answer stands).
+
+        Fail-OPEN is kept exactly as it was: a reviewer that crashes or emits
+        garbage never blocks the agent. What changes is that such a review is no
+        longer SILENT. ReviewResult.ok=False used to have zero readers anywhere,
+        so ``review_feedback()`` handed back the same "" for "approved" and for
+        "the reviewer threw an exception" - a verification step that failed
+        reported as success (AGENTS.md rule 5). It is now surfaced as a warning +
+        an audit entry, distinct from an approval, so the user knows the diff went
+        out unchecked. Visibility only: control flow is unchanged.
+        """
         print_warning = _agent.print_warning  # live: honour a patched agent.print_warning
         result = self._reviewer.review(diff, self._review_task)
         warning = self._reviewer.failure_warning(result)
@@ -794,16 +816,30 @@ class _LoopMixin:
             self._audit.notice("review_failed", warning)
         return self._reviewer.feedback_for(result)
     def _write_total(self) -> int:
-        """Total file writes recorded this session."""
+        """Total file writes recorded this session. Compared against a per-task
+        snapshot so the verify gate can tell "this task changed something" from
+        "an earlier turn in this REPL session did"."""
         return sum(int(f.get("writes", 0)) for f in self._changed_files.values())
 
     def _run_verify_gate(self, response, interactive, st):
-        """The harness-run exit-code oracle at the pre-done boundary."""
+        """The harness-run exit-code oracle at the pre-done boundary.
+
+        This is the same un-gameable check goal mode runs (``cli/goal.py``'s
+        ``--until``), reaching the interactive REPL and the GUI, where the only
+        finish gates were otherwise self-graded (the verify nudge) or advisory
+        (the reviewer's diff opinion). The HARNESS runs the command and reads its
+        exit code; the model's own claim of success is not consulted, so it
+        cannot declare a premature one.
+
+        Returns None to fall through to the remaining gates, or the
+        ``(should_break, final_response)`` pair ``_handle_no_tool_calls`` returns.
+
+        Only the CLI's outer ``--until`` loop or an interactive/GUI session sets
+        ``verify_cmd``, and never both for the same run, so the command is never
+        executed twice per iteration."""
         if self.verify_cmd is None or st.verify_settled:
             return None
-        # Nothing written since the last passing check -> nothing to verify. A
-        # question in an ongoing REPL session must not trigger the project's test
-        # suite just because an earlier turn edited a file.
+        # Nothing written since the last passing check means nothing to verify.
         if self._write_total() <= st.verify_checked_at:
             return None
 
@@ -815,19 +851,16 @@ class _LoopMixin:
             print_info(f"(verification: running `{label}`)")
         outcome = _verify.run_verify(cmd, self.cwd)
         code, output = outcome
-        # Whether the command STARTED is the runner's own knowledge, carried on
-        # the outcome; inferring it from the exit code would misread a genuine
-        # 127 from a check that ran as "nothing was verified".
+        # Whether the command STARTED is carried on the outcome, never inferred
+        # from the exit code.
         did_not_start = _verify.launch_failed(outcome)
 
         if code == 0:
-            # Passing is not terminal: anything written AFTER this point (a fix
-            # the reviewer asks for) must be checked again rather than inheriting
-            # this green. Only the inconclusive and exhausted cases settle.
+            # Passing is not terminal: anything written after this point is
+            # checked again. Only the inconclusive and exhausted cases settle.
             st.verify_checked_at = self._write_total()
-            # A REAL check just passed, so the self-verification nudge - a
-            # self-graded proxy for exactly this - has nothing left to ask for,
-            # and the writes it guards are genuinely verified.
+            # A real check just passed, so the self-verification nudge has
+            # nothing left to ask for and its writes count as verified.
             st.verify_nudged = True
             self._unverified_writes.clear()
             self._last_verify_state = "passed"
@@ -838,11 +871,8 @@ class _LoopMixin:
 
         if _verify.is_inconclusive(cmd, code, did_not_start):
             # Not a pass and not a fixable failure: the check either could not
-            # start or collected nothing. Retrying would burn every attempt on
-            # something no code change can affect, so stop - but say plainly that
-            # nothing was verified rather than letting an exit code the model
-            # never saw look like success, and record the third state so a
-            # programmatic consumer is not left reading an unqualified ok.
+            # start or collected nothing, so settle instead of retrying, state
+            # that nothing was verified, and record the third state.
             st.verify_settled = True
             self._last_verify_state = "inconclusive"
             msg = (f"verification inconclusive: `{label}` "
@@ -863,9 +893,8 @@ class _LoopMixin:
                 _agent.print_warning(f"({msg})")
             return (False, "")
 
-        # Retries exhausted and the check still fails. Report that honestly: the
-        # answer is surfaced (the work may still be useful) but it is marked
-        # not-ok and the failure is stated, never papered over as success.
+        # Retries exhausted and the check still fails: surface the answer but
+        # mark it not-ok and state the failure.
         st.verify_settled = True
         self._last_run_ok = False
         self._last_verify_state = "failed"
@@ -879,15 +908,13 @@ class _LoopMixin:
             "not a false success"))
         _agent.print_warning(notice.strip())
         self._add_assistant(response)
-        # The grounding footer is unconditional (see _grounding_footer) - this
-        # is the one path that used to return before reaching it, which made
-        # the worst case (a verified failure) the one case with no session
-        # record at all. _last_verify_state is already "failed" here, so the
-        # SAME call naturally includes it; no separate variant needed.
+        # The grounding footer is unconditional. _last_verify_state is already
+        # "failed" here, so the same call includes it.
         return (True, response + notice + self._grounding_footer())
 
     def _check_post_batch_breakers(self) -> "str | None":
-        """After a tool batch, return a circuit-breaker message (and mark the run not-ok + emit it) if a breaker tripped, else None."""
+        """After a tool batch, return a circuit-breaker message (and mark the run
+        not-ok + emit it) if a breaker tripped, else None. Split out of _loop."""
         print_warning = _agent.print_warning  # live: honour a patched agent.print_warning
         # Circuit breaker: a tool that keeps failing identically wastes
         # the whole turn budget - stop and hand control back instead.
@@ -906,9 +933,7 @@ class _LoopMixin:
             self._last_run_ok = False
             return final_response
 
-        # No-progress breaker: many tool calls failed in a row across ANY
-        # tools (a weak model spinning on varied junk calls). Stop instead
-        # of burning the whole budget.
+        # No-progress breaker: many tool calls failed in a row across ANY tools.
         if self._abort_no_progress:
             self._abort_no_progress = False
             self._global_error_streak = 0
@@ -925,7 +950,14 @@ class _LoopMixin:
         return None
 
     def _result_block(self, call, result) -> str:
-        """The <tool_result> XML for a finished tool call, provenance-tagged."""
+        """The <tool_result> XML for a finished tool call, provenance-tagged.
+
+        Results from untrusted (network / MCP) tools are re-framed as
+        data-not-instructions with a hardened boundary (provenance.py); trusted
+        tools keep the plain frame. The outer <tool_result> tag is preserved
+        either way so the rest of the agent (audit / transcript skips) is
+        unaffected. When the feature is off, every result uses the plain frame.
+        """
         TOOL_REGISTRY = _agent.TOOL_REGISTRY  # live: honour a patched agent.TOOL_REGISTRY
         if not getattr(self, "_untrusted_provenance", True):
             return result.to_xml(call.name)
@@ -934,7 +966,22 @@ class _LoopMixin:
         return build_result_block(call.name, result, untrusted)
 
     def _execute_tools(self, calls: list, interactive: bool) -> list[str]:
-        """Execute a list of tool calls and return their XML result blocks."""
+        """
+        Execute a list of tool calls and return their XML result blocks.
+
+        Groups consecutive non-destructive calls and runs each group in parallel
+        with a ``ThreadPoolExecutor``.  Destructive calls are always run alone,
+        in order, to avoid unintended interactions (file corruption, overlapping
+        shell commands, etc.).
+
+        The grouping strategy preserves the original ordering of destructive
+        calls relative to non-destructive ones: given [read, read, write, read],
+        the two leading reads run in parallel, then the write runs alone, then
+        the final read runs alone.  This is conservative but safe.
+
+        A call that ARMS a dispatch-time restriction runs alone too, whatever its
+        destructive flag says.  See the segmentation below for why.
+        """
         TOOL_REGISTRY = _agent.TOOL_REGISTRY  # live: honour a patched agent.TOOL_REGISTRY
         result_blocks: list[str] = []
 
@@ -942,39 +989,14 @@ class _LoopMixin:
         #
         # A call that ARMS this session's active-skill restriction (use_skill,
         # _SKILL_STATE_TOOLS) is a segment boundary on BOTH sides, so it runs
-        # alone despite being non-destructive. Without that, one model reply of
-        # [use_skill, read_env] put both calls in the same parallel group, and
-        # the sibling could clear the dispatch gate (execution._execute_tool)
-        # before _activate_skill had armed it - a skill's allowed-tools escaped
-        # by whichever thread started first. The gate was never wrong; its ARMING
-        # raced.
+        # alone despite being non-destructive.
         #
-        # THE ORDERING GUARANTEE THIS BUYS, written down because it is exactly
-        # the kind of property that otherwise holds only by accident of the
-        # execution model and disappears silently when someone regroups these
-        # segments: everything emitted BEFORE the arming call has finished before
-        # it runs, and nothing emitted AFTER it starts until the restriction is
-        # armed. Narrowing therefore applies FORWARD ONLY, which is the same
-        # sequential reading the paragraph above already promises to preserve - a
-        # call the model emitted before any skill was loaded is not refused
-        # retroactively.
+        # Ordering invariant any regrouping must preserve: everything emitted
+        # BEFORE the arming call finishes before it runs, and nothing emitted
+        # AFTER it starts until the restriction is armed. Narrowing therefore
+        # applies FORWARD ONLY.
         #
-        # Why here and not elsewhere. Marking use_skill destructive would also
-        # serialise it, but `destructive` is the CONFIRMATION axis (it drives the
-        # user prompt, the undo snapshot and the dry-run skip), so it would put a
-        # confirmation card in front of a read - see skills.py for why both skill
-        # tools are deliberately non-destructive. Arming at PARSE time would have
-        # to re-decide, from the call args alone, what tool_use_skill decides at
-        # execution time: that a file= read arms nothing, that an unknown skill
-        # arms nothing, that an absent allowed-tools arms nothing. A second
-        # derivation of the same decision diverges exactly where it costs most.
-        #
-        # WHAT THIS GIVES UP, stated rather than glossed: a singleton segment runs
-        # serially and so has no batch deadline, and splitting here turns some
-        # previously-batched calls into singletons. It widens an existing hole by
-        # one shape rather than opening a new one - a lone call was already
-        # undeadlined - and use_skill is bounded local file IO (_MAX_BODY), with
-        # no network and no subprocess.
+        # A singleton segment runs serially and so has no batch deadline.
         segments: list[tuple[bool, list]] = []
         extendable = False              # may the last segment take another call?
         for call in calls:
@@ -989,21 +1011,12 @@ class _LoopMixin:
             extendable = not solo
 
         # Non-destructive peers abandoned at a batch deadline, as (future, tool
-        # name). A destructive tool is marked destructive precisely so it runs
-        # ALONE; the timeout path cancels (a no-op on a running future) and shuts
-        # the pool down without joining, so before this the next segment started
-        # while the abandoned thread was still executing. run_tests is
-        # non-destructive and a real suite comfortably outlives the 120s deadline,
-        # so [run_tests, check_shell_job, dispatch_parallel] could put a whole test
-        # run and two freshly dispatched child agents on the box at once - the exact
-        # stacked concurrency the flag exists to prevent.
+        # name). The timeout path cancels (a no-op on a running future) and shuts
+        # the pool down without joining, so an abandoned thread can still be
+        # executing when the next segment starts.
         #
-        # Kept on the AGENT, not in this frame: _execute_tools runs once per turn,
-        # and a tool that outlived a 120s deadline is very likely still running on
-        # the next one. A per-call list would be empty by then, so "call it again
-        # next turn" - which is what the refusal below tells the model - would walk
-        # straight through an ungated path into the peer this exists to avoid.
-        # Drop the ones that have since finished so the list cannot grow.
+        # Stored on the agent, not in this frame, so it outlives the turn. Ones
+        # that have since finished are dropped so the list cannot grow.
         self._abandoned_peers = [(f, n) for f, n in self._abandoned_peers
                                  if not f.done()]
         abandoned = self._abandoned_peers
@@ -1018,10 +1031,8 @@ class _LoopMixin:
                 # Serial execution
                 for call in group:
                     if still_live:
-                        # REFUSE rather than run alongside it. The model can call it
-                        # again next turn, by which time the peer has usually ended;
-                        # quietly running it anyway would break the guarantee the
-                        # destructive flag is supposed to give.
+                        # Refuse rather than run alongside it. The model can call
+                        # it again next turn.
                         peers = ", ".join(sorted({n for _f, n in still_live}))
                         result = ToolResult.error(
                             f"{call.name} was not run: it is a destructive tool, so "
@@ -1038,10 +1049,10 @@ class _LoopMixin:
                         result = self._execute_tool(call, interactive=interactive)
                     result_blocks.append(self._result_block(call, result))
             else:
-                # Parallel execution for non-destructive batch. The pool is
-                # shut down without waiting so one hung tool (network fetch,
-                # slow disk) cannot block the whole batch past the deadline -
-                # the stuck thread is abandoned and reported as a timeout.
+                # Parallel execution for a non-destructive batch. The pool is
+                # shut down without waiting, so one hung tool cannot block the
+                # batch past the deadline; the stuck thread is abandoned and
+                # reported as a timeout.
                 ordered: dict[int, str] = {}
                 pool = ThreadPoolExecutor(max_workers=min(len(group), 8))
                 futures = {
@@ -1066,10 +1077,9 @@ class _LoopMixin:
                         if i not in ordered:
                             fut.cancel()
                             if not fut.done():
-                                # cancel() cannot stop a RUNNING future, so this one
-                                # is still executing. Remember it: a destructive
-                                # segment later in this batch must not start
-                                # alongside it.
+                                # cancel() cannot stop a RUNNING future, so this
+                                # one is still executing. Remember it: a later
+                                # destructive segment must not start alongside it.
                                 abandoned.append((fut, call.name))
                             result = ToolResult.error(
                                 f"{call.name} did not finish within "
@@ -1087,7 +1097,12 @@ class _LoopMixin:
         return result_blocks
 
     def _await_abandoned_peers(self, abandoned: list) -> list:
-        """Wait a bounded grace for abandoned non-destructive peers to end."""
+        """Wait a bounded grace for abandoned non-destructive peers to end.
+
+        Returns the ones STILL running, so the caller can refuse to start a
+        destructive tool beside them. Bounded, because an unbounded join here would
+        reintroduce the very hang the batch deadline exists to avoid.
+        """
         deadline = time.monotonic() + self._ABANDONED_PEER_GRACE_S
         for fut, _name in abandoned:
             remaining = deadline - time.monotonic()
@@ -1096,9 +1111,8 @@ class _LoopMixin:
             try:
                 fut.result(timeout=remaining)
             except Exception:
-                # We only care THAT it ended, not how. Its outcome was already
-                # turned into a result block for the model in the segment that
-                # abandoned it, so re-reporting it here would duplicate it.
+                # Only THAT it ended matters. Its outcome was already turned into
+                # a result block in the segment that abandoned it.
                 pass
         return [(f, n) for f, n in abandoned if not f.done()]
 

@@ -1,15 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Branch A: the Models page one-click set-type control. Every row (including a
-// type='unknown' model, which otherwise has no actionable controls) gets a type
-// <select>; changing it POSTs the chosen type to /api/models/type. This is how a
-// bulk-imported / mis-detected 'unknown' model is corrected without the CLI.
+// The Models page one-click set-type control. Every row, including a
+// type='unknown' model that has no other actionable controls, gets a type
+// <select>; changing it POSTs the chosen type to /api/models/type.
 //
-// Both fixtures here hold ONE model, and it is an 'unknown' - which is a type
-// with no tab of its own, so it now lives on the Other tab rather than in All
-// (All lists it too once the merge toggle asks for it, and says so meanwhile).
-// So each test navigates to Other first. That is also the honest repair path a
-// user walks: the Other tab is where a mis-detected model is found and fixed.
-// The assertions about the control itself are unchanged.
+// Both fixtures hold one 'unknown' model, a type with no tab of its own, so it
+// sits on the Other tab; each test navigates there first.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";

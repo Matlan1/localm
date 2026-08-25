@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Custom coder system-instructions (rec#584): a `.localcoder/system.md` file and the `--system` CLI flag inject user-authored guidance under '## User Instructions' in the agent system prompt, distinct from LOCALCODER.md project memory."""
+"""Custom coder system-instructions (rec#584): a `.localcoder/system.md` file and
+the `--system` CLI flag inject user-authored guidance under "## User Instructions"
+in the agent system prompt, distinct from LOCALCODER.md project memory.
+"""
 
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -34,7 +37,8 @@ def test_build_system_prompt_injects_user_instructions(tmp_path):
 # --------------------------------------------------------------------------- #
 
 def _make_agent(tmp_path: Path, **kwargs):
-    """Build an Agent with the heavy bits stubbed but the real memory / custom-instructions loaders running against tmp_path."""
+    """Build an Agent with the heavy bits stubbed but the real memory /
+    custom-instructions loaders running against tmp_path."""
     from localm.plugins.coder.agent import Agent
 
     backend = MagicMock()

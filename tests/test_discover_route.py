@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The GUI /api/discover/search route: the `formats` toggle CSV must reach hf_search, and the response must carry `hf_backend_available` so the search page can warn (without blocking) that a transformers model needs the .[gpu] extra to run. hf_search itself (the format merge) is unit-tested in test_dis..."""
+"""The GUI /api/discover/search route: the `formats` toggle CSV must reach
+hf_search, and the response must carry `hf_backend_available` so the search page
+can warn (without blocking) that a transformers model needs the .[gpu] extra to
+run. hf_search itself (the format merge) is unit-tested in test_discover.py; this
+covers the thin route plumbing end to end through the mounted GUI app."""
 
 from pathlib import Path
 
@@ -12,7 +16,14 @@ from localm.plugins.gui.web import attach_gui
 
 
 def _vram_dict_stub(payload):
-    """A vram_info()/list_gpus()-shaped test double that honors return_status the same way the real functions do: a bare value by default, (value, GPU_PROBE_OK) when the caller opts in via return_status=True (and any other kwarg, e.g. deadline/wait_for_inflight, is accepted and ignored). _vram_total() (use..."""
+    """A vram_info()/list_gpus()-shaped test double that honors return_status
+    the same way the real functions do: a bare value by default, (value,
+    GPU_PROBE_OK) when the caller opts in via return_status=True (and any
+    other kwarg, e.g. deadline/wait_for_inflight, is accepted and ignored).
+    _vram_total() (used by every /api/discover/* route) always calls
+    vram_capacity(return_status=True) so it can gate `free` on
+    sysstats._vram_reading_trusted() - a bare no-arg/no-status stand-in would
+    either TypeError or return the wrong shape for that unpack."""
     def _inner(*a, **kw):
         return (payload, GPU_PROBE_OK) if kw.get("return_status") else payload
     return _inner
@@ -20,7 +31,9 @@ def _vram_dict_stub(payload):
 
 @pytest.fixture
 def gui_app(tmp_path, monkeypatch):
-    """GUI mounted on a throwaway home with an owner key, so MODELS_READ passes and no real HuggingFace call or GPU probe happens (both are monkeypatched per test)."""
+    """GUI mounted on a throwaway home with an owner key, so MODELS_READ passes
+    and no real HuggingFace call or GPU probe happens (both are monkeypatched per
+    test). Mirrors tests/test_key_scope_gui.py's scoped_app."""
     home = tmp_path / ".localm"
     monkeypatch.setenv("LOCALM_HOME", str(home))
     monkeypatch.setenv("LOCALM_API_KEY", "ownersecret")   # owner = admin (all scopes)
@@ -37,7 +50,7 @@ def gui_app(tmp_path, monkeypatch):
     attach_gui(app, self_url="http://127.0.0.1:9/v1",
                switch_model=lambda name: None,
                active_model=lambda: "model-a")
-    # No real network / GPU: vram_info is deterministic; hf_search/backend are
+    # No real network or GPU: vram_info is deterministic, hf_search/backend are
     # replaced per test. The route imports these from localm.discover at call
     # time, so patching the module attribute is what the closure resolves.
     import localm.discover as disc
@@ -114,7 +127,8 @@ def test_types_param_reaches_hf_search(gui_app, monkeypatch):
 
 
 def test_empty_types_maps_to_none(gui_app, monkeypatch):
-    """An empty/absent `types` maps to model_types=None - the legacy untyped request shape, protecting any caller that predates the `types` param."""
+    """An empty/absent `types` maps to model_types=None - the legacy untyped
+    request shape, protecting any caller that predates the `types` param."""
     app, disc = gui_app
     seen = {}
 
@@ -179,7 +193,12 @@ def test_hf_result_gets_fit_from_size(gui_app, monkeypatch):
 
 
 def test_vram_free_withheld_when_reading_is_untrusted(gui_app, monkeypatch):
-    """_vram_total() must gate `vram.free` on sysstats._vram_reading_trusted() (fresh AND device-global) exactly like /api/vram-estimate and /api/stats already do - forwarding an untrusted free verbatim would let this route's own API contract present the same wrong-number-as-fact this repo already fixed on..."""
+    """_vram_total() must gate `vram.free` on sysstats._vram_reading_trusted()
+    (fresh AND device-global) exactly like /api/vram-estimate and /api/stats
+    already do - forwarding an untrusted free verbatim would let this route's
+    own API contract present the same wrong-number-as-fact this repo already
+    fixed on the CLI/GUI VRAM surfaces (AGENTS.md rule 5). `total` is a static
+    hardware fact and stands regardless."""
     app, disc = gui_app
 
     def spy(query, limit=20, formats=("gguf",), model_types=None):
@@ -219,7 +238,9 @@ def test_vram_free_shown_when_reading_is_trusted(gui_app, monkeypatch):
 
 
 def _configure_split(monkeypatch, gpu_split_indices):
-    """Overlay gpu_split_indices onto the REAL (test-isolated) config rather than replacing load_config() outright - other GUI routes read other config keys too, and a stripped-down fake dict would break those unrelated paths."""
+    """Overlay gpu_split_indices onto the REAL (test-isolated) config rather
+    than replacing load_config() outright - other GUI routes read other config
+    keys too, and a stripped-down fake dict would break those unrelated paths."""
     from localm.config import load_config as real_load_config
     base_cfg = real_load_config()
 
@@ -230,7 +251,10 @@ def _configure_split(monkeypatch, gpu_split_indices):
 
 
 def test_hf_result_fit_reflects_combined_split_capacity(gui_app, monkeypatch):
-    """AUDIT-GPU-SPLIT-1: with a configured 2-GPU split, the fit badge must weigh a result against the COMBINED capacity, not just vram_info()'s single main-GPU number - a model too big for one GPU alone but that fits split across both must badge 'fits', not 'too-big'."""
+    """AUDIT-GPU-SPLIT-1: with a configured 2-GPU split, the fit badge must
+    weigh a result against the COMBINED capacity, not just vram_info()'s
+    single main-GPU number - a model too big for one GPU alone but that fits
+    split across both must badge "fits", not "too-big"."""
     app, disc = gui_app
 
     def spy(query, limit=20, formats=("gguf",), model_types=None):
@@ -253,11 +277,9 @@ def test_hf_result_fit_reflects_combined_split_capacity(gui_app, monkeypatch):
     assert body["vram"]["total"] == 24_000_000_000   # combined, not just the 16 GB main GPU
     assert body["results"][0]["fit"] == "fits"
 
-    # Guard: the SAME result against only the single main GPU (no split
-    # configured) must NOT fit - proves the badge genuinely depends on the split,
-    # not a coincidence of the fit_label threshold math. vram_capacity() falls
-    # back to vram_info() here, so pin that directly to the single-GPU number
-    # (same convention test_hf_result_gets_fit_from_size already uses above).
+    # The same result against only the single main GPU (no split configured)
+    # must NOT fit. vram_capacity() falls back to vram_info() here, so pin that
+    # directly to the single-GPU number.
     monkeypatch.setattr(disc, "vram_info", _vram_dict_stub(
         {"total": 16_000_000_000, "free": 16_000_000_000}))
     _configure_split(monkeypatch, None)

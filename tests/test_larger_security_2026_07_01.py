@@ -1,5 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Regression tests for the 2026-07-01 larger-security backlog cluster."""
+"""Regression tests for the 2026-07-01 larger-security backlog cluster.
+
+  REC-MEDIA-CMD  - setting a media backend launch_cmd/api_url requires admin
+  REC-SEC3-ESCAPE - `localm key recover` mints a fresh owner key (lockout escape)
+
+(SSRF-ASK is an honesty text change; SSRF-PULL/REBIND and REC-SETUP-CHECKSUM are
+deferred - see the commit message / issues.txt.)
+"""
 
 import pytest
 from fastapi.testclient import TestClient
@@ -19,7 +26,7 @@ def env(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-#  REC-MEDIA-CMD
+#  Media launch_cmd requires admin                                             #
 # --------------------------------------------------------------------------- #
 
 def test_media_launch_cmd_requires_admin(env):
@@ -67,7 +74,7 @@ def test_media_launch_cmd_allowed_in_open_mode(env):
 
 
 # --------------------------------------------------------------------------- #
-#  REC-SEC3-ESCAPE
+#  Owner key recovery                                                          #
 # --------------------------------------------------------------------------- #
 
 def test_key_recover_mints_fresh_owner_key(env):

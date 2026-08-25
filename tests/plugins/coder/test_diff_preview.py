@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Tests for display.print_diff_preview and agent._confirm_tool diff path."""
+"""
+Tests for display.print_diff_preview and agent._confirm_tool diff path.
+"""
 
 from unittest.mock import MagicMock, patch
 
@@ -174,7 +176,10 @@ class TestAgentConfirmTool:
 
     def test_unreadable_existing_file_warns_at_the_consent_point(
             self, tmp_path, capsys):
-        """The file EXISTS and could not be READ, so old_content is '' for a reason print_diff_preview cannot express: its contract reads '' as 'the file doesn't exist yet', so the diff renders the overwrite as a pure addition with nothing deleted."""
+        """The file EXISTS and could not be READ, so old_content is "" for a
+        reason print_diff_preview cannot express: its contract reads "" as "the
+        file doesn't exist yet", so the diff renders the overwrite as a pure
+        addition with nothing deleted. The user must be told before approving."""
         from pathlib import Path as _P
 
         agent = self._make_agent(tmp_path)
@@ -199,7 +204,8 @@ class TestAgentConfirmTool:
             "contents we could not read, with no indication of it")
 
     def test_new_file_does_not_warn(self, tmp_path, capsys):
-        """The control: a genuinely new file must stay silent, or the warning would fire on every create and mean nothing."""
+        """The control: a genuinely new file must stay silent, or the warning
+        would fire on every create and mean nothing."""
         agent = self._make_agent(tmp_path)
         call = self._call("write_file", path="brand_new.py", content="hello\n")
 

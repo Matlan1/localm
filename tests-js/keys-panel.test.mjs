@@ -23,8 +23,8 @@ function router(routes) {
                  json: async () => res.body || {}, text: async () => res.text || "" };
       }
     }
-    // Default for unmatched routes: a benign models shape so app.js boot helpers
-    // (which read modelCache.models) don't trip during loadAppWithPages.
+    // Default for unmatched routes: a benign models shape for app.js's boot
+    // helpers, which read modelCache.models.
     return { ok: true, status: 200,
              json: async () => ({ models: [], active: "" }), text: async () => "" };
   };
@@ -36,8 +36,7 @@ test("keys panel: hides the card for a non-owner (/v1/keys 403)", async () => {
   });
   await tick();
   await window.refreshKeysPanel();
-  // The keys card is a settings section; a non-owner hides it via the sec-hidden
-  // class (so the section nav drops its link), not an inline display style.
+  // The card is hidden via the sec-hidden class, not an inline display style.
   assert.ok(window.document.getElementById("keys-card").classList.contains("sec-hidden"));
 });
 
@@ -133,9 +132,6 @@ test("keys panel: all five privileged scopes are disabled for a non-owner", asyn
   await tick();
   const byVal = {};
   for (const c of window.document.querySelectorAll(".key-scope-cb")) byVal[c.value] = c;
-  // S12: keys:admin / plugins:admin / config:write used to have no checkbox at
-  // all; now that they do, they must be gated exactly like admin / coder:full
-  // always were - never enabled for a device that is merely keys:admin.
   for (const priv of ["admin", "coder:full", "keys:admin", "plugins:admin", "config:write"]) {
     assert.equal(byVal[priv].disabled, true, `${priv} must be disabled for a non-owner`);
     assert.ok(byVal[priv].closest(".key-scope").classList.contains("key-scope-danger"),
@@ -189,8 +185,8 @@ test("keys panel: owner can save and delete a preset (PATCH /v1/config)", async 
   assert.ok(del, "owner sees a delete affordance");
   del.onclick({ stopPropagation() {} });
   await tick();
-  // Deletion now confirms via the in-page confirmDanger modal (GUI-5), not
-  // window.confirm - click its danger button.
+  // Deletion confirms via the in-page confirmDanger modal; click its danger
+  // button.
   const ok = window.document.querySelector("#modal-body .btn-danger");
   assert.ok(ok, "delete-preset confirm modal shown");
   ok.click();

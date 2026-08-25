@@ -1,5 +1,42 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""api-mode (``localm serve`` without the GUI) regression tests for the RAG plugin (checkup audit, CONSOLIDATED-FINDINGS-2026-07-09 items 8 and 9; then memory-audit 2026-07-02 cluster 24 / batch F14)."""
+"""api-mode (``localm serve`` without the GUI) regression tests for the RAG
+plugin (checkup audit, CONSOLIDATED-FINDINGS-2026-07-09 items 8 and 9; then
+memory-audit 2026-07-02 cluster 24 / batch F14).
+
+Item 8 (HIGH): rag_add / rag_upload / rag_query read
+``request.app.state.self_url`` / ``.active_model`` / ``.jobs`` unguarded. Those
+are only published by ``attach_gui`` - a bare ``localm serve`` never calls it -
+so any client hitting the documented REST API directly got an unhandled
+AttributeError -> opaque HTTP 500. First fixed (2026-07-09) by mirroring the
+coder plugin's ``getattr(..., None)`` guard so the crash became a clean 503.
+
+Cluster 24 / F14 (memory campaign): a clean 503 stopped the crash but headless
+API users still could not index at all ("run localm gui"). Now /add and /upload
+run the index SYNCHRONOUSLY on the plugin pool (off the event loop, like
+/extract) when no background job manager is attached, and ``_self_services``
+derives self_url/active_model from the kernel's own bind coordinates so
+self-embedding works headless too - so a bare ``localm serve`` can actually
+index, not just fail cleanly.
+
+Item 9 (HIGH): rag_extract ran extract_bytes() synchronously inside an async
+route with no executor offload, freezing the whole single-worker event loop for
+every route/user for the duration of an archive extraction. Fixed by offloading
+to loop.run_in_executor, mirroring rag_upload's background-job offload.
+
+LM-DA-015 (design audit, Low): the headless sync call sites (this file's
+subject) called add_paths/add_uploads with no ``on_progress``, unlike the
+job-manager and CLI paths. The embed-failure degrade warning
+("embeddings unavailable ... indexing lexical-only", store.py) is only ever
+surfaced through ``on_progress``, so it was silently discarded headless - a
+doc that fell back to lexical-only looked like an ordinary success. Fixed by
+passing a logging-backed on_progress (``plug._log_progress``).
+
+LM-DA-018 (design audit, Low): /add had no path/file-count cap, unlike
+/upload's explicit 50-file cap, despite running on the same shared, bounded
+plugin ThreadPoolExecutor (also used by /extract, /query, web fetch, voice
+transcription, coder sessions) since #593. Fixed with a 50-path cap mirroring
+/upload's.
+"""
 
 from __future__ import annotations
 
@@ -19,7 +56,25 @@ def _b64(data: bytes) -> str:
 
 @pytest.fixture
 def api_mode_app(tmp_path, monkeypatch):
-    """The rag plugin mounted with NO ``attach_gui`` call - exactly what a bare ``localm serve`` (api-mode) looks like. ``.self_url`` / ``.active_model`` are absent, unlike every existing rag test fixture (which calls attach_gui and so never exercised this path)."""
+    """The rag plugin mounted with NO ``attach_gui`` call - exactly what a bare
+    ``localm serve`` (api-mode) looks like. ``.self_url`` / ``.active_model``
+    are absent, unlike every existing rag test fixture (which calls attach_gui
+    and so never exercised this path).
+
+    ``app.state.jobs`` IS present, because since ADR-0008 the background-job
+    registry is created by ``attach_engine`` rather than ``attach_gui``, so a
+    headless server has one. This fixture publishes it directly instead of
+    running the whole of attach_engine, which is what makes it api-mode rather
+    than a bare app - see ``api_mode_app_no_jobs`` for the app that genuinely
+    has none.
+
+    Pins ``Path.home`` under tmp_path, mirroring test_rag_confinement.py's
+    ``home_env`` fixture: rag_add's whitelist confinement only allows paths
+    under home/cwd/an allowed root, and pytest's tmp_path is NOT reliably
+    nested under the real home (it happens to be on Windows, but is a sibling
+    of $HOME under Linux CI's /tmp) - without pinning it, a test target file
+    placed directly under tmp_path would spuriously 409 on confinement instead
+    of ever reaching the 503 guard under test."""
     from localm.plugins.engine import PluginManager
     home = tmp_path / "userhome"
     home.mkdir()
@@ -42,7 +97,10 @@ def api_mode_app(tmp_path, monkeypatch):
 
 @pytest.fixture
 def api_mode_app_no_jobs(tmp_path, monkeypatch):
-    """An app whose routes were mounted WITHOUT attach_engine, so it has no job registry at all."""
+    """An app whose routes were mounted WITHOUT attach_engine, so it has no job
+    registry at all. Not a real serving mode - it is a construction error - but
+    it is the shape audit item 8 was about, and the guard must still turn it
+    into a clean 503 rather than an unguarded AttributeError -> opaque 500."""
     from localm.plugins.engine import PluginManager
     home = tmp_path / "userhome"
     home.mkdir()
@@ -74,12 +132,21 @@ def _await_job(app, job_id, timeout=30.0):
 
 
 # --------------------------------------------------------------------------- #
-#  Item 8 / cluster 24: api-mode must not crash AND must actually index        #
+#  api-mode must not crash AND must actually index                             #
 # --------------------------------------------------------------------------- #
 
 class TestApiModeIndexesHeadless:
     def test_add_runs_as_a_background_job_headless(self, api_mode_app):
-        """A headless ``localm serve`` indexes through the SAME streamed background job the GUI uses (ADR-0008)."""
+        """A headless ``localm serve`` indexes through the SAME streamed
+        background job the GUI uses (ADR-0008).
+
+        History, because this assertion has now been inverted twice: originally
+        /add 503'd headless ("run localm gui"); then cluster 24 made it index
+        SYNCHRONOUSLY and return the result inline, because no job manager
+        existed outside the GUI; now the registry is kernel-level, so headless
+        gets a job_id like everyone else and can follow progress instead of
+        blocking on one long request. The doc is really indexed - a query
+        returns it."""
         with TestClient(api_mode_app) as c:
             c.post("/api/rag/collections", json={"name": "kb"})
             # Under Path.home() (pinned by the fixture), so the confinement
@@ -100,7 +167,8 @@ class TestApiModeIndexesHeadless:
             assert hits and "gfx1030" in hits[0]["text"].lower()
 
     def test_upload_runs_as_a_background_job_headless(self, api_mode_app):
-        """Same for device-file /upload: a streamed job headless, not a 503 and no longer a synchronous inline result."""
+        """Same for device-file /upload: a streamed job headless, not a 503 and
+        no longer a synchronous inline result."""
         with TestClient(api_mode_app) as c:
             c.post("/api/rag/collections", json={"name": "kb"})
             r = c.post("/api/rag/collections/kb/upload", json={
@@ -114,7 +182,11 @@ class TestApiModeIndexesHeadless:
             assert job.status == "done", f"job ended {job.status}"
 
     def test_add_without_a_job_registry_is_a_clean_503(self, api_mode_app_no_jobs):
-        """Audit item 8 stays fixed."""
+        """Audit item 8 stays fixed. An app whose routes were mounted without
+        attach_engine has no registry, and that must still be a clean 503 rather
+        than an unguarded AttributeError -> opaque 500. The message must NOT
+        blame the GUI, which stopped being the reason when the registry moved to
+        kernel level."""
         with TestClient(api_mode_app_no_jobs) as c:
             c.post("/api/rag/collections", json={"name": "kb"})
             target = Path.home() / "doc.txt"
@@ -126,7 +198,23 @@ class TestApiModeIndexesHeadless:
                 "the GUI is no longer why a job registry might be missing")
 
     def test_add_logs_embed_degrade_when_headless(self, api_mode_app, caplog):
-        """LM-DA-015: a headless /add whose embedder is broken must not silently report ordinary success."""
+        """LM-DA-015: a headless /add whose embedder is broken must not silently
+        report ordinary success. Pre-fix, add_paths' on_progress-or-noop
+        (store.py) discarded the "embeddings unavailable ... indexing
+        lexical-only" line entirely when on_progress was None, which it always
+        was for the headless sync call sites - the response looked identical
+        to a fully-vectored success. Now the headless call sites pass
+        plug._log_progress, so the degrade reaches the debug logger.
+
+        Publishes a real (but unreachable) self_url/active_model on
+        app.state, exactly what ``_self_services`` derives ``self_embed``
+        from (see ``_make_self_embed``), so ``embed_fn`` genuinely raises
+        (a connection error) the same way a real down/misconfigured embedder
+        would - not a mocked-away shortcut. The plugin module under test is
+        loaded fresh by ``PluginManager`` via ``importlib`` under a private
+        ``sys.modules`` key, so monkeypatching the normally-imported
+        ``localm.plugins.builtin.rag.plug`` would silently miss the live
+        route entirely."""
         api_mode_app.state.self_url = "http://127.0.0.1:1"   # nothing listens
         api_mode_app.state.active_model = lambda: "test-model"
         with TestClient(api_mode_app) as c:
@@ -136,21 +224,24 @@ class TestApiModeIndexesHeadless:
             with caplog.at_level("WARNING", logger="localm"):
                 r = c.post("/api/rag/collections/kb/add",
                            json={"paths": [str(target)], "embed": True})
-                # The degrade must not fail the request - it still indexes,
-                # lexically. Since ADR-0008 this runs as a job even headless, so
-                # wait for it INSIDE the caplog block or the warning lands after
-                # capture stops and this passes for the wrong reason.
+                # The degrade must not fail the request: it still indexes,
+                # lexically. The indexing runs as a job even headless, so wait
+                # for it INSIDE the caplog block or the warning lands after
+                # capture stops.
                 assert r.status_code == 200, r.text
                 job = _await_job(api_mode_app, r.json()["job_id"])
                 assert job.status == "done", f"job ended {job.status}"
-        # THE POINT survives the move to the job path: the degrade must still
-        # reach the LOG, not only the job's ephemeral event stream, because the
-        # log is what a bug report carries (LM-DA-015). See plug._job_progress.
+        # The degrade must reach the LOG, not only the job's ephemeral event
+        # stream. See plug._job_progress.
         assert "embeddings unavailable" in caplog.text
         assert "indexing lexical-only" in caplog.text
 
     def test_add_rejects_too_many_paths(self, api_mode_app):
-        """LM-DA-018: /add had no cap on path count, unlike /upload's 50-file cap, despite both running on the same shared, bounded executor headless."""
+        """LM-DA-018: /add had no cap on path count, unlike /upload's 50-file
+        cap, despite both running on the same shared, bounded executor headless.
+        A 51-path request must be rejected the same way /upload already rejects
+        a 51-file one - before the missing-file check, so this does not depend
+        on any of the paths actually existing."""
         with TestClient(api_mode_app) as c:
             c.post("/api/rag/collections", json={"name": "kb"})
             paths = [str(Path.home() / f"doc{i}.txt") for i in range(51)]
@@ -160,7 +251,11 @@ class TestApiModeIndexesHeadless:
             assert "too many paths" in r.text.lower()
 
     def test_embedding_set_starts_a_job_headless(self, api_mode_app):
-        """Embedding-model setup needs a job for its download-progress stream, and headless now has one, so it starts the job instead of 503-ing with 'run localm gui'. confirm=True: the unconfirmed dry-run (see TestEmbeddingSetConfirmGate below) never reaches the job registry at all, so this must actually conf..."""
+        """Embedding-model setup needs a job for its download-progress stream,
+        and headless now has one, so it starts the job instead of 503-ing with
+        "run localm gui". confirm=True: the unconfirmed dry-run (see
+        TestEmbeddingSetConfirmGate below) never reaches the job registry at
+        all, so this must actually confirm to exercise that path."""
         with TestClient(api_mode_app) as c:
             r = c.post("/api/rag/embedding",
                        json={"model": "bge-small-en-v1.5", "confirm": True})
@@ -169,7 +264,8 @@ class TestApiModeIndexesHeadless:
 
     def test_embedding_set_without_a_job_registry_is_a_clean_503(
             self, api_mode_app_no_jobs):
-        """The other half of audit item 8: still a 503, never a 500. confirm=True: only the confirmed path touches the job registry."""
+        """The other half of audit item 8: still a 503, never a 500.
+        confirm=True: only the confirmed path touches the job registry."""
         with TestClient(api_mode_app_no_jobs) as c:
             r = c.post("/api/rag/embedding",
                        json={"model": "bge-small-en-v1.5", "confirm": True})
@@ -178,16 +274,18 @@ class TestApiModeIndexesHeadless:
 
     def test_embedding_set_unconfirmed_needs_no_job_registry(
             self, api_mode_app_no_jobs):
-        """The dry-run report is answered synchronously and reads meta.json only - it must work even where _require_jobs would 503, since it never reaches that gate."""
+        """The dry-run report is answered synchronously and reads meta.json
+        only - it must work even where _require_jobs would 503, since it
+        never reaches that gate."""
         with TestClient(api_mode_app_no_jobs) as c:
             r = c.post("/api/rag/embedding", json={"model": "bge-small-en-v1.5"})
             assert r.status_code == 200, r.text
             assert r.json()["needs_confirm"] is True
 
     def test_query_succeeds_and_degrades_to_lexical_only(self, api_mode_app):
-        # THE POINT (finding 1): with no bind coordinates on app.state (this bare
-        # fixture never runs advertise()), _self_services derives no self_url, so
-        # query has no embedder and degrades to the store's lexical-only fallback
+        # With no bind coordinates on app.state (this bare fixture never runs
+        # advertise()), _self_services derives no self_url, so query has no
+        # embedder and degrades to the store's lexical-only fallback
         # (embed_fn=None) instead of 503-ing or crashing.
         from localm.rag.store import Collection
         with TestClient(api_mode_app) as c:
@@ -213,11 +311,16 @@ class TestApiModeIndexesHeadless:
 
 
 # --------------------------------------------------------------------------- #
-#  Cluster 24: self-services derived from the kernel's bind coordinates        #
+#  Self-services derived from the kernel's bind coordinates                    #
 # --------------------------------------------------------------------------- #
 
 def test_self_services_derived_from_kernel_state_when_headless():
-    """attach_gui (the GUI shell) is the only setter of app.state.self_url / active_model, but a bare ``localm serve`` still advertises its bind coordinates (instance_scheme / instance_port)."""
+    """attach_gui (the GUI shell) is the only setter of app.state.self_url /
+    active_model, but a bare ``localm serve`` still advertises its bind
+    coordinates (instance_scheme / instance_port). The rag plugin derives
+    self_url + a live-engine active_model from those, so self-embedding (and the
+    format / image self-classify helpers) work headless instead of every index
+    silently degrading to lexical-only (memory-audit cluster 24)."""
     from types import SimpleNamespace
 
     from localm.plugins.builtin.rag import plug
@@ -232,7 +335,9 @@ def test_self_services_derived_from_kernel_state_when_headless():
 
 
 def test_self_services_none_when_no_coordinates():
-    """With neither the GUI services nor bind coordinates on app.state (a bare create_app, or before advertise()), self-embedding stays off (None trio) and indexing degrades cleanly to lexical-only rather than dialling a bogus URL."""
+    """With neither the GUI services nor bind coordinates on app.state (a bare
+    create_app, or before advertise()), self-embedding stays off (None trio) and
+    indexing degrades cleanly to lexical-only rather than dialling a bogus URL."""
     from types import SimpleNamespace
 
     from localm.plugins.builtin.rag import plug
@@ -242,11 +347,17 @@ def test_self_services_none_when_no_coordinates():
 
 
 # --------------------------------------------------------------------------- #
-#  Item 9: rag_extract must offload to a thread, not block the event loop     #
+#  rag_extract must offload to a thread, not block the event loop             #
 # --------------------------------------------------------------------------- #
 
 def test_rag_extract_offloads_extraction_off_the_event_loop(monkeypatch):
-    """A single-worker server means a synchronous extract_bytes() call inside the async route would freeze EVERY route for EVERY user for its duration."""
+    """A single-worker server means a synchronous extract_bytes() call inside
+    the async route would freeze EVERY route for EVERY user for its duration.
+    Proven by racing a lightweight ticker coroutine against a deliberately slow
+    (but thread-safe, since it is meant to run off-loop) extract_bytes: with the
+    executor offload the ticker keeps landing WHILE extraction is in flight;
+    without it (the pre-fix inline call) the ticker would get no chance to run
+    until the slow call returns."""
     import localm.rag as ragpkg
     from localm.plugins.builtin.rag.plug import RagExtractRequest, rag_extract
 
@@ -260,10 +371,9 @@ def test_rag_extract_offloads_extraction_off_the_event_loop(monkeypatch):
 
     async def ticker(t0: float, stop_at: float):
         # Timestamps relative to a start captured BEFORE either task exists, not
-        # to whenever the ticker coroutine happens to get its first turn - if it
-        # measured its own start, a fully-blocked loop would just delay the
-        # ticker's first tick rather than skip it, making the test pass either
-        # way (this bug was caught by running it against the pre-fix code).
+        # to whenever the ticker coroutine gets its first turn: measuring its own
+        # start would let a fully-blocked loop merely delay the first tick rather
+        # than skip it.
         while time.monotonic() - t0 < stop_at:
             ticks.append(time.monotonic() - t0)
             await asyncio.sleep(0.02)
@@ -288,15 +398,9 @@ def test_rag_extract_offloads_extraction_off_the_event_loop(monkeypatch):
 
 
 # --- an attachment must be the WHOLE file, not a preview --------------------
-# REGRESSION, reported by the maintainer 2026-08-13: "attach file needs to
-# actually attach the file, the whole file, for n number of files attached".
-# RagExtractRequest.max_chars defaulted to 24_000 and NEITHER chat.js NOR
-# coder.js ever sent the field, so every attachment over ~24k characters was cut
-# to a preview. The chip said "trimmed" and the message said "(truncated)", but
-# a user who attached a document and asked about its later pages got a confident
-# answer drawn only from the opening. Images were never affected - they take a
-# different path (data URI -> image_url) - which is why attachments could look
-# like they worked and be truncated at the same time.
+# Neither chat.js nor coder.js sends RagExtractRequest.max_chars, so an
+# attachment must not be trimmed by a default cap. Images take a different path
+# (data URI -> image_url) and are unaffected.
 
 def _extract(client, name, blob, **body):
     import base64
@@ -315,9 +419,9 @@ def test_extract_returns_the_whole_file_by_default(api_mode_app):
     assert r.status_code == 200, r.text
     d = r.json()
     assert len(blob.decode()) > 24_000, "fixture must exceed the OLD 24k default to be meaningful"
-    # ASSERT ON THE CONTENT FIRST: a length check alone would pass on a
-    # different 24k-plus string. The tail canary can only be present if nothing
-    # was cut off the end.
+    # Assert on the CONTENT first: a length check alone would pass on a
+    # different 24k-plus string, while the tail canary is present only if
+    # nothing was cut off the end.
     assert "QA-ATTACH-TAIL-CANARY" in d["text"], "the END of the file did not survive"
     assert d["truncated"] is False
     assert d["chars"] == len(d["text"])
@@ -329,9 +433,7 @@ def test_extract_still_honours_an_explicit_max_chars(api_mode_app):
     with TestClient(api_mode_app) as c:
         r = _extract(c, "big.txt", blob, max_chars=1000)
         # The FULL length comes from an unbounded call, not from the raw bytes:
-        # extraction normalises text, so len(blob) is not the extracted length
-        # and comparing against it fails for a reason that has nothing to do
-        # with the property under test.
+        # extraction normalises text, so len(blob) is not the extracted length.
         full = _extract(c, "big.txt", blob).json()["text"]
     assert r.status_code == 200, r.text
     d = r.json()

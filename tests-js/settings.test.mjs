@@ -4,8 +4,8 @@ import assert from "node:assert/strict";
 import { loadAppWithPages, runScript } from "./harness.mjs";
 
 // A canned /v1/config/schema response covering every control type the form
-// must render. Mirrors the shape settings_schema.schema_json() emits: a flat
-// field list, each non-secret field carrying its current value as `default`.
+// renders, in the shape settings_schema.schema_json() emits: a flat field list,
+// each non-secret field carrying its current value as `default`.
 const SCHEMA = {
   fields: [
     { key: "mode", widget: "select", label: "Session persistence",
@@ -18,7 +18,7 @@ const SCHEMA = {
     { key: "net_allow", widget: "list", label: "Allowed domains", help: "",
       group: "Network", owner: "web", default: ["a.com", "b.com"] },
     { key: "fake_secret", widget: "secret", label: "Fake secret", help: "",
-      group: "Security", owner: "core", secret: true },   // NO default
+      group: "Security", owner: "core", secret: true },   // no default
     { key: "plugins_enabled", widget: "hidden", label: "Enabled plugins",
       help: "", group: "Plugins", owner: "core", default: [] },
     { key: "chat_system_prompt", widget: "textarea", label: "Default system prompt",
@@ -29,7 +29,7 @@ const SCHEMA = {
 
 /** Build a fetch stub that serves the schema and records PATCH calls. The
  *  default branch returns a model-list shape so app.js's init block
- *  (refreshModels -> populateSetupModels) does not throw while our awaits drain. */
+ *  (refreshModels -> populateSetupModels) does not throw while the awaits drain. */
 function makeFetch(patches) {
   return async (url, opts = {}) => {
     if (url === "/v1/config/schema") {
@@ -90,10 +90,8 @@ test("settings renders a typed control per schema field, split into sections", a
   assert.equal(doc.querySelector('[data-key="plugins_enabled"]'), null,
     "hidden fields are not rendered");
 
-  // PLACEMENT IS BY `group`, NOT BY `owner`. net_allow is owner="web" but
-  // group="Network", so it files under Server & network > Outbound access - it is
-  // a host-wide egress policy, not a web-plugin preference. Before 2026-08-13 the
-  // owner won and this rendered under Plugins > Web access.
+  // Placement is by `group`, not by `owner`: net_allow is owner="web" but
+  // group="Network", so it files under Server & network > Outbound access.
   const webInput = doc.querySelector('input[data-key="net_allow"]');
   const webSec = webInput.closest(".settings-section");
   assert.ok(webSec.querySelector(".settings-section-save"),
@@ -106,8 +104,8 @@ test("settings renders a typed control per schema field, split into sections", a
   assert.notEqual(nctx.closest(".settings-section"), webSec,
     "different groups are different sections");
 
-  // Same rule for chat: owner="chat" but group="Chat", so the generation defaults
-  // sit under Model, not beside optional installable plugins.
+  // Same rule for chat: owner="chat" but group="Chat", so the generation
+  // defaults sit under Model.
   const chatSec = doc.querySelector('[data-key="chat_system_prompt"]')
     .closest(".settings-section");
   assert.equal(chatSec.dataset.group, "model",
@@ -115,14 +113,14 @@ test("settings renders a typed control per schema field, split into sections", a
   assert.notEqual(chatSec, nctx.closest(".settings-section"),
     "Generation defaults is its own section within Model");
 
-  // Nav lists one link per top-level group that actually HAS a section. This
-  // schema has nothing owned by a plugin-nav group, so Plugins is absent.
+  // Nav lists one link per top-level group that has a section. This schema has
+  // nothing owned by a plugin-nav group, so Plugins is absent.
   const navLabels = [...doc.querySelectorAll("#settings-nav .settings-nav-link")]
     .map((l) => l.textContent);
   assert.ok(navLabels.includes("Server & network"), "Server & network is listed");
   assert.ok(navLabels.includes("Privacy & data"), "Privacy & data is listed");
   assert.equal(new Set(navLabels).size, navLabels.length, "no duplicate nav links");
-  // A group shows all its sections stacked; only ONE group is active at a time.
+  // A group shows all its sections stacked; only one group is active at a time.
   const active = [...doc.querySelectorAll("#settings-content .settings-section.active")];
   assert.ok(active.length >= 1, "the default group shows its section(s)");
   const activeGroups = new Set(active.map((s) => s.dataset.group));
@@ -137,7 +135,7 @@ test("group nav shows all of a group's sections; require_auth + keys live in Sec
   const doc = win.document;
 
   // Click Server & network -> the Outbound access section (net_allow) becomes
-  // visible. It used to live under Plugins; placement now follows `group`.
+  // visible.
   const links = [...doc.querySelectorAll("#settings-nav .settings-nav-link")];
   const server = links.find((l) => l.textContent === "Server & network");
   assert.ok(server, "Server & network group link exists");
@@ -157,9 +155,9 @@ test("group nav shows all of a group's sections; require_auth + keys live in Sec
 });
 
 test("pathlist renders a folder-row editor and reads back an array", async () => {
-  // The owner-only rag_allowed_roots field: a stack of folder rows (each with a
-  // Browse + remove) rather than the flat comma LIST. Host FS access is required
-  // (like FOLDER/PATH controls), so grant it before rendering.
+  // The owner-only rag_allowed_roots field renders a stack of folder rows, each
+  // with a Browse and a remove button, rather than the flat comma list. It needs
+  // host FS access, granted below before rendering.
   const PATHLIST_SCHEMA = { fields: [
     { key: "rag_allowed_roots", widget: "pathlist",
       label: "Folders allowed for indexing", help: "extra folders",
@@ -174,9 +172,8 @@ test("pathlist renders a folder-row editor and reads back an array", async () =>
       patches.push(JSON.parse(opts.body));
       return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
     }
-    // Everything else (incl. /api/capabilities) grants host FS, so caps.fsAccess
-    // resolves to "host" the way it does for an owner on the loopback GUI - the
-    // folder editor only renders for a host-FS caller.
+    // Everything else, including /api/capabilities, reports host FS, so
+    // caps.fsAccess resolves to "host" and the folder editor renders.
     return { ok: true, status: 200, text: async () => "",
              json: async () => ({ models: [], active: "", conversations: [],
                                   plugins: [], fs_access: "host" }) };
@@ -205,7 +202,7 @@ test("pathlist renders a folder-row editor and reads back an array", async () =>
 });
 
 test("pathlist is hidden without host filesystem access", async () => {
-  // A non-host caller must not get the folder editor at all (server also enforces).
+  // A non-host caller gets no folder editor.
   const PATHLIST_SCHEMA = { fields: [
     { key: "rag_allowed_roots", widget: "pathlist", label: "Folders", help: "h",
       group: "Knowledge", owner: "rag", admin_only: true, default: ["F:\\docs"] },
@@ -249,7 +246,7 @@ test("indexing mode marks the active list; both stay visible", async () => {
   const deny = doc.querySelector('[data-field-key="rag_denied_roots"]');
   const sel = doc.querySelector('select[data-key="rag_indexing_mode"]');
   assert.ok(allow && deny && sel, "all three RAG controls render for the owner");
-  // BOTH lists stay visible (editable) in every mode.
+  // Both lists stay visible and editable in every mode.
   assert.notEqual(allow.style.display, "none", "Allowed visible");
   assert.notEqual(deny.style.display, "none", "Denied visible");
   // whitelist (default): the "in use" tag is on Allowed, not Denied.
@@ -296,12 +293,6 @@ test("each section saves only its own keys (per-section PATCH)", async () => {
 });
 
 test("blanking the default system prompt textarea saves an empty string, not null", async () => {
-  // Regression guard: the textarea widget used to treat a blank box as "leave
-  // unchanged" (right for a SECRET field, wrong here - chat_system_prompt's
-  // own default IS "" and its help text says "Empty = no default system
-  // prompt"). Sending null for this field made the server 400 the whole
-  // section's PATCH (TEXTAREA is not in _validate_one's null-tolerant widget
-  // list), so a user could never actually clear a saved prompt.
   const patches = [];
   const { window: win } = loadAppWithPages({ fetchImpl: makeFetch(patches) });
   await render(win);

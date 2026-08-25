@@ -1,5 +1,19 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""`localcoder` attaching to an already-running localm instance must authenticate with the OWNER KEY when this install has one configured, not the discovered instance's raw per-instance attach token (``auth.verify()`` has no notion of instance tokens at all and 401s once any key is configured), and not..."""
+"""`localcoder` attaching to an already-running localm instance must
+authenticate with the OWNER KEY when this install has one configured, not the
+discovered instance's raw per-instance attach token (``auth.verify()`` has no
+notion of instance tokens at all and 401s once any key is configured), and
+not the ``--api-key`` option's literal ``"localm"`` placeholder default
+either. checkup 2026-08-11 item 12; same class already fixed for `localm
+run`'s attach (tests/test_cli_run_keyed_attach_auth.py) and cli/models.py's
+unload_cmd/stop_cmd (tests/test_cli_unload_stop_open_mode_auth.py).
+
+An EXPLICIT ``--api-key`` / ``$LOCALM_API_KEY`` must still win (hard-won
+rule: never silently override an explicit user choice) - covered here too,
+for both the discovered-instance attach and the newly-autostarted-server
+attach (two separate call sites in _build_backend that share the same
+_api_key_explicit computation).
+"""
 
 from click.testing import CliRunner
 
@@ -28,7 +42,10 @@ def _no_existing_instance(monkeypatch):
 
 
 def _capture_http_backend(monkeypatch, module=cli_main):
-    """HTTPBackend is a plain top-level import in _main.py (unlike make_localm_backend, which has an explicit live-attribute-access indirection for exactly this reason) - patch it on the submodule that actually holds the reference, not the localm.plugins.coder.cli package re-export."""
+    """HTTPBackend is a plain top-level import in _main.py (unlike
+    make_localm_backend, which has an explicit live-attribute-access indirection
+    for exactly this reason) - patch it on the submodule that actually holds
+    the reference, not the localm.plugins.coder.cli package re-export."""
     captured = {}
 
     def fake_backend(base_url, model, api_key="localm", **kw):
@@ -86,7 +103,12 @@ class TestAttachToDiscoveredInstance:
 
 
 class TestAttachToAutoStartedInstance:
-    """The other _tgt branch: no instance was running, this process spawns `localm gui` itself and then attaches once it comes up - same _api_key_explicit computation, a separate HTTPBackend construction site that must not silently diverge from the branch above (diff-review- discipline.md item 23: a fix te..."""
+    """The other _tgt branch: no instance was running, this process spawns
+    `localm gui` itself and then attaches once it comes up - same
+    _api_key_explicit computation, a separate HTTPBackend construction site
+    that must not silently diverge from the branch above (diff-review-
+    discipline.md item 23: a fix tested at one of two near-identical call
+    sites can leave the other one broken)."""
 
     def _drive_autostart(self, monkeypatch, target):
         _bypass_plugin_gate(monkeypatch)
@@ -103,9 +125,7 @@ class TestAttachToAutoStartedInstance:
             return _AliveProc()
 
         def fake_attach_target(*a, **k):
-            # None on the first probe (still starting), the real target from
-            # then on - matches the loop's own "poll until it appears" shape
-            # without an unbounded loop in the test.
+            # Returns None on the first probe, the real target from then on.
             calls["n"] += 1
             return target if calls["n"] > 1 else None
 

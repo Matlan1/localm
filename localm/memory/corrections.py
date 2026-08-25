@@ -1,5 +1,25 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""A PENDING CORRECTION: a proposed supersession of a TRUSTED (user/import) memory that the user has not yet reviewed."""
+"""
+A PENDING CORRECTION: a proposed supersession of a TRUSTED (user/import) memory
+that the user has not yet reviewed.
+
+A synth candidate distilled from chat may NEVER silently overwrite or delete a
+user-typed fact (it could be a hallucination), but the OLD unconditional NO_OP
+downgrade meant a stale user fact was uncorrectable by the system - the user's own
+later words ("actually I moved to Munich") could not supersede an earlier typed
+fact ("I live in Berlin"); the new info was silently dropped (memory-audit
+2026-07-02 cluster [9]).
+
+The fix keeps the "synth never rewrites a trusted fact unchecked" guarantee but
+stops the silent drop: when a synth candidate contradicts a trusted record with
+HIGH confidence, consolidation records one of these instead of a NO_OP, and the
+memory modal surfaces it for the user to ACCEPT (apply the update/delete, old text
+archived and recoverable) or REJECT (keep the fact, reset its staleness). Nothing
+is silently lost and the user decides.
+
+Stored one-per-line in a ``<ns>.corrections.jsonl`` sidecar next to the record
+store, kept out of the record list so recall/prune never touch it.
+"""
 
 from __future__ import annotations
 
@@ -27,7 +47,18 @@ def _clamp01(x: Any, default: float = 0.5) -> float:
 
 @dataclass
 class PendingCorrection:
-    """A proposed update/delete of a trusted memory, awaiting user review."""
+    """A proposed update/delete of a trusted memory, awaiting user review.
+
+      target_id      the trusted record this proposes to change
+      action         "update" (replace text with proposed_text) | "delete"
+      proposed_text  the candidate text (the new fact) for an update; "" for delete
+      target_text    snapshot of the target's text when proposed (for display, and
+                     so the proposal is still meaningful if the record later drifts)
+      confidence     the decide-step confidence that drove the proposal
+      source         who proposed it (always "synth" today - the distiller)
+      created        unix seconds
+      id             stable 16-hex id (what the accept/reject routes key on)
+    """
 
     target_id: str
     action: str
@@ -48,7 +79,9 @@ class PendingCorrection:
             self.created = time.time()
 
     def dedup_key(self) -> tuple:
-        """Identity for de-duplication: two proposals with the same target, action, and proposed text are the same suggestion (do not stack duplicates when the same contradiction is distilled run after run)."""
+        """Identity for de-duplication: two proposals with the same target, action,
+        and proposed text are the same suggestion (do not stack duplicates when the
+        same contradiction is distilled run after run)."""
         return (self.target_id, self.action, self.proposed_text.casefold())
 
     def to_dict(self) -> dict:

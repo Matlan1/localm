@@ -3,17 +3,12 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-// COMMENTS ARE STRIPPED FIRST, and that is not tidiness. Both rules below carry a
-// comment NAMING the declaration that must be absent - it explains what was removed
-// and why - so a raw match reports "max-width: 680px is still here" against prose
-// while the declaration itself is long gone. The same trap the hw-stats tests hit.
+// Comments are stripped so text inside them cannot match a declaration assertion.
 const css = () => readFileSync(
   fileURLToPath(new URL("../localm/plugins/gui/static/style.css", import.meta.url)), "utf8")
   .replace(/\/\*[\s\S]*?\*\//g, "");
 
-// Sliced rather than matched with a built RegExp: the selectors here contain `#`,
-// `.` and spaces, and escaping them into a pattern is a second thing to get wrong
-// for no benefit. indexOf cannot misparse.
+// Returns the declaration block of the given selector's rule.
 const rule = (sel) => {
   const text = css();
   const at = text.indexOf("\n" + sel + " {");

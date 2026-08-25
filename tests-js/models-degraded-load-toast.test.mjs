@@ -1,13 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// AGENTS.md rule 5: a model too big to fully fit VRAM still loads (the backend
-// deliberately defers to a partial/zero GPU offload rather than refusing - see
-// llamacpp/_sizing.py), and /api/models/load now carries gpu_layers_offloaded/
-// gpu_layers_total/degraded so a caller can tell that apart from a full GPU
-// load. Without this, the sidebar's "Model switched to X" toast reads as an
-// unqualified success even when the load silently fell back to slow CPU
-// layers. These tests drive the REAL modelSelect.onchange -> switchModel ->
-// toastLoadResult path (not toastLoadResult in isolation), so a regression in
-// the wiring - not just the helper - would be caught.
+// A model too big to fully fit VRAM still loads with a partial or zero GPU
+// offload, and /api/models/load reports gpu_layers_offloaded /
+// gpu_layers_total / degraded. These tests drive the real
+// modelSelect.onchange -> switchModel -> toastLoadResult path and check the
+// toast wording and class for each payload shape.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
@@ -88,9 +84,7 @@ test("a zero-offload (fully CPU) load still warns, not just a full offload", asy
 });
 
 test("a backend that cannot report placement (no gpu_layers_* fields) still toasts plain success", async () => {
-  // Old-client-shape payload: the fields are absent entirely (HF backend, or
-  // any client predating this change) - must not crash and must not fabricate
-  // a degraded warning it has no evidence for.
+  // The gpu_layers_* fields are absent entirely, as from the HF backend.
   const { window } = loadApp();
   stubLoad(window, { status: "loaded", model: "hf-model" });
 

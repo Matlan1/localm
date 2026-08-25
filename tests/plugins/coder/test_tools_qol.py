@@ -1,5 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Tests for the tools QoL round: read_file offset/limit slicing, explicit truncation markers (grep, tree, read_file), edit_file closest-match hints - plus coverage holes flagged in the audit: read_env redaction and edit_notebook_cell."""
+"""
+Tests for the tools QoL round: read_file offset/limit slicing, explicit
+truncation markers (grep, tree, read_file), edit_file closest-match hints -
+plus coverage holes flagged in the audit: read_env redaction and
+edit_notebook_cell.
+"""
 
 import json
 
@@ -102,7 +107,7 @@ class TestEditFileClosestMatch:
     def test_near_miss_shows_the_real_text(self, tmp_path):
         (tmp_path / "a.py").write_text(
             "def greet(name):\n    return f'hi {name}'\n", encoding="utf-8")
-        # Model got the indentation wrong - classic near miss
+        # Indentation does not match the file: a near miss.
         r = tool_edit_file(tmp_path, "a.py",
                            old="def greet( name ):", new="def hello(name):")
         assert not r.ok
@@ -119,7 +124,7 @@ class TestEditFileClosestMatch:
 
 
 # ---------------------------------------------------------------------------
-#  read_env redaction (audit hole)
+#  read_env redaction
 # ---------------------------------------------------------------------------
 
 class TestReadEnvRedaction:
@@ -143,7 +148,7 @@ class TestReadEnvRedaction:
 
 
 # ---------------------------------------------------------------------------
-#  edit_notebook_cell (audit hole)
+#  edit_notebook_cell
 # ---------------------------------------------------------------------------
 
 def _notebook(cells):

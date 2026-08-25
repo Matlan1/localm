@@ -1,5 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""F10 regression suite (memory-audit 2026-07-02): the loaded model's resolved context ceiling must be reported and consumed, so compaction budgets against the real window."""
+"""F10 regression suite (memory-audit 2026-07-02): the loaded model's resolved
+context ceiling must be reported and consumed, so compaction budgets against the
+real window.
+
+Pre-fix Engine.context_capacity() read attributes the GGUF backend does not have
+and ALWAYS returned None, so the server safety net never fired, the CLI budgeted
+the static config, and the coder measured fill against the initial 4096-token
+window (over-compacting at ~5% of a large model's real capacity).
+"""
 
 from __future__ import annotations
 

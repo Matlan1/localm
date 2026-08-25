@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// jsdom tests for the Settings "Main GPU" selector (setupMainGpuSelector /
+// The Settings "Main GPU" selector (setupMainGpuSelector /
 // refreshMainGpuSelector in app/settings-perf.js): populated from GET
 // /api/gpus, hidden on a single-GPU box, and PATCHes main_gpu_index on change.
 
@@ -64,13 +64,12 @@ test("a single detected GPU keeps the selector hidden", async () => {
   const { window } = loadApp({ fetchImpl: makeFetch(calls, { gpus, mainGpuIndex: null }) });
   const row = window.document.getElementById("perf-gpu-select-row");
   const sel = window.document.getElementById("perf-main-gpu");
-  // Give the async populate a chance to run before asserting it stayed hidden.
+  // Let the async populate run before asserting the row stayed hidden.
   await waitFor(() => calls.some((c) => c.u.includes("/api/gpus")));
   await settle(30);
   assert.equal(row.hidden, true, "no useful choice on a single-GPU box");
-  // The row starts `hidden` in the markup by default - also check the code
-  // path actually ran (and returned early before populating options), not
-  // just that it never touched the row.
+  // The row starts `hidden` in the markup, so also check the populate ran and
+  // returned early.
   assert.equal(sel.options.length, 0, "selector left unpopulated for a single GPU");
 });
 

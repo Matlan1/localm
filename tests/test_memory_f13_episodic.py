@@ -1,5 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""F13 regression suite (memory-audit 2026-07-02 cluster [14]): chat-side episodic capture."""
+"""F13 regression suite (memory-audit 2026-07-02 cluster [14]): chat-side episodic
+capture.
+
+Pre-fix, synthesize_memory summarised the CONCATENATION of every recent session
+into at most ONE episodic record (no per-session capture, no cursor), so N sessions
+collapsed into <=1 episode and the same sessions were re-summarised every run. Now
+each NEW session file (past a persisted watermark) becomes its own episode, tagged
+with its source session, and a processed session is never re-summarised.
+"""
 
 from __future__ import annotations
 
@@ -62,7 +70,7 @@ def test_one_episode_per_session(memhome):
     _write_session(memhome, "s3", "Let us review the budget", 3000)
     plug.synthesize_memory(_episode_stub())
     eps = _episodics(plug._chat_store())
-    assert len(eps) == 3                   # one per session (pre-fix: <=1 for the blob)
+    assert len(eps) == 3                   # one per session
     joined = " ".join(e.text for e in eps)
     assert "Rust" in joined and "hiking" in joined and "budget" in joined
 
@@ -97,8 +105,8 @@ def test_only_new_sessions_processed_after_watermark(memhome):
 
 
 def test_watermark_advances_even_with_no_usable_summary(memhome):
-    # A session whose summary is unusable ("{}") must still advance the watermark,
-    # so it is not retried forever (rule 5: no silent infinite reprocessing).
+    # A session whose summary is unusable ("{}") still advances the watermark, so
+    # it is not retried forever.
     _write_session(memhome, "s1", "an unrelated topic with no stub match", 1000)
     plug.synthesize_memory(_episode_stub())
     assert len(_episodics(plug._chat_store())) == 0

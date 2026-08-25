@@ -1,5 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Unit tests for GgufWorker - the child-process-resident class that owns the real native LlamaCpp instance (see llamacpp/_worker.py)."""
+"""Unit tests for GgufWorker - the child-process-resident class that owns the
+real native LlamaCpp instance (see llamacpp/_worker.py). No subprocess is
+involved here: these exercise the class directly, in-process, the same way
+GgufBackend's own unit tests always have - only the isolation BOUNDARY around
+this class is new (see test_gguf_runner_isolation.py for that), not its logic.
+"""
 
 import sys
 from unittest.mock import MagicMock, patch
@@ -47,7 +52,13 @@ class _StubLlm:
 
 class TestLoad:
     def test_load_wires_check_context_fit_and_returns_metadata(self, tmp_path):
-        """End to end: GgufWorker.load() must pass ITS OWN bound _check_context_fit as LlamaCpp's vram_check (context-growth guard), and report back the metadata GgufBackend needs to cache (n_layers/kv_bytes_per_token/supports_images) - this is the exact wiring test retargeted from test_vram_preflight.py's tes..."""
+        """End to end: GgufWorker.load() must pass ITS OWN bound
+        _check_context_fit as LlamaCpp's vram_check (context-growth guard),
+        and report back the metadata GgufBackend needs to cache
+        (n_layers/kv_bytes_per_token/supports_images) - this is the exact
+        wiring test retargeted from test_vram_preflight.py's
+        test_load_native_wires_check_context_fit_into_llamacpp, now that the
+        real LlamaCpp construction lives here instead of on GgufBackend."""
         w = _worker(str(tmp_path / "m.gguf"))
         fake_llamacpp_module = MagicMock()
         fake_llamacpp_module.LlamaCpp.return_value = _StubLlm(
@@ -66,7 +77,12 @@ class TestLoad:
         assert w._loaded is True
 
     def test_load_passes_through_weight_placement_from_llamacpp(self, tmp_path):
-        """GgufWorker is the only process that can see llama.cpp's own load_tensors report (LlamaCpp.weight_placement, parsed from the captured native stderr) - load() must forward it verbatim in the returned meta so the parent (GgufBackend._load_native) can report it, and must default to [] ('not reported'),..."""
+        """GgufWorker is the only process that can see llama.cpp's own
+        load_tensors report (LlamaCpp.weight_placement, parsed from the
+        captured native stderr) - load() must forward it verbatim in the
+        returned meta so the parent (GgufBackend._load_native) can report it,
+        and must default to [] ("not reported"), never fabricate 0-byte
+        entries, when the stub/real LlamaCpp has nothing to report."""
         w = _worker(str(tmp_path / "m.gguf"))
         placement = [{"backend": "ROCm0", "mib": 3.35, "is_ram": False},
                      {"backend": "ROCm_Host", "mib": 3.20, "is_ram": True}]
@@ -80,7 +96,12 @@ class TestLoad:
         assert meta["weight_placement"] == placement
 
     def test_load_passes_through_moe_skip_reason_from_llamacpp(self, tmp_path):
-        """Same shape as weight_placement above, for the OTHER fact only this isolated child can see: WHY n_cpu_moe did not apply (see llama.py's _apply_cpu_moe / MOE_SKIP_MESSAGES). load() must forward LlamaCpp.moe_skip_reason verbatim - GgufBackend._load_native() is the only process allowed to render the cor..."""
+        """Same shape as weight_placement above, for the OTHER fact only this
+        isolated child can see: WHY n_cpu_moe did not apply (see
+        llama.py's _apply_cpu_moe / MOE_SKIP_MESSAGES). load() must forward
+        LlamaCpp.moe_skip_reason verbatim - GgufBackend._load_native() is the
+        only process allowed to render the corresponding message, and it can
+        only do that if this worker actually carries the fact out."""
         w = _worker(str(tmp_path / "m.gguf"))
         stub = _StubLlm()
         stub.moe_skip_reason = "no_experts"
@@ -93,7 +114,9 @@ class TestLoad:
         assert meta["moe_skip_reason"] == "no_experts"
 
     def test_load_passes_resolved_gpu_layers_and_ctx_max_verbatim(self, tmp_path):
-        """The worker never re-derives auto-sizing - it trusts whatever the parent already resolved, so preflight and the actual load can never disagree."""
+        """The worker never re-derives auto-sizing - it trusts whatever the
+        parent already resolved, so preflight and the actual load can never
+        disagree."""
         w = _worker(str(tmp_path / "m.gguf"), n_gpu_layers=24, n_ctx_max=32768)
         assert w.effective_gpu_layers == 24   # mirrors n_gpu_layers, set in __init__
         fake_llamacpp_module = MagicMock()
@@ -108,11 +131,7 @@ class TestLoad:
 
 
 # --------------------------------------------------------------------------- #
-#  load_lib()'s own console-corruption regression - the native banner        #
-#  (e.g. "ggml_cuda_init: found 1 ROCm devices...") had no capture scope of  #
-#  its own: the only one that exists opens inside LlamaCpp.__init__, AFTER   #
-#  load_lib() has already CDLL'd the native libs. Same spy-order pattern as  #
-#  test_moe_placement_report.py's TestMergedNativeCallScope.                 #
+#  load_lib()'s native banner and its capture scope                           #
 # --------------------------------------------------------------------------- #
 
 class TestLoadLibConsoleScope:
@@ -162,7 +181,10 @@ class TestLoadLibConsoleScope:
 
     def test_load_lib_runs_inside_one_mirror_and_capture_scope(self, monkeypatch,
                                                                  tmp_path):
-        """The regression this class guards: load_lib() must run strictly between the mirror/capture enter and their exit, not before either opens - a call before mirror_enter would still reach the terminal raw."""
+        """The regression this class guards: load_lib() must run strictly
+        between the mirror/capture enter and their exit, not before either
+        opens - a call before mirror_enter would still reach the terminal
+        raw."""
         events = []
         self._drive(monkeypatch, events, tmp_path)
         assert events == [
@@ -173,7 +195,11 @@ class TestLoadLibConsoleScope:
 
     def test_captured_diagnostics_survive_a_load_lib_failure(self, monkeypatch,
                                                                tmp_path):
-        """The trap this scope closes wrong if done carelessly: capturing load_lib()'s native output must never SWALLOW the reason a genuine failure happened (AGENTS.md rule 5)."""
+        """The trap this scope closes wrong if done carelessly: capturing
+        load_lib()'s native output must never SWALLOW the reason a genuine
+        failure happened (AGENTS.md rule 5). Whatever landed in the
+        suppressed stream must be appended to the propagated error, not
+        discarded with the temp file."""
         events = []
         err = RuntimeError(
             "Cannot find llama.dll - the native inference runtime is not "
@@ -185,7 +211,9 @@ class TestLoadLibConsoleScope:
 
     def test_no_diagnostics_appended_when_nothing_was_captured(self, monkeypatch,
                                                                  tmp_path):
-        """The common case (an ordinary failure with nothing on stdout/stderr): the error message must stay exactly as load_lib() raised it, no empty 'Captured native output' tacked on."""
+        """The common case (an ordinary failure with nothing on stdout/stderr):
+        the error message must stay exactly as load_lib() raised it, no empty
+        "Captured native output" tacked on."""
         events = []
         err = RuntimeError("some ordinary failure")
         raised = self._drive(monkeypatch, events, tmp_path, load_lib_error=err,
@@ -225,7 +253,17 @@ class TestTokenisation:
         assert args[1] == [{"role": "user", "content": "part one part two"}]
 
     def test_count_messages_tokens_passes_str_not_bytes_to_tokenize(self, tmp_path):
-        """#956 fast/always-run regression pin, paired with the slow real-model test in test_gguf_smoke_integration.py (marked real_gguf, excluded from every routine `-m 'not integration'` selection - a real GGUF load is not something every test run should pay for). _StubLlm.tokenize above ignores its `text` a..."""
+        """#956 fast/always-run regression pin, paired with the slow real-model
+        test in test_gguf_smoke_integration.py (marked real_gguf, excluded
+        from every routine `-m "not integration"` selection - a real GGUF load
+        is not something every test run should pay for). _StubLlm.tokenize
+        above ignores its `text` argument entirely, so it would happily accept
+        bytes and never catch a regression of the original
+        `prompt.encode("utf-8")` bug (LlamaCpp.tokenize takes str, not bytes -
+        its _Tokenizer.encode does `text.encode(...)` itself, so bytes has no
+        such method). This stub asserts the type directly instead, so a
+        regression fails immediately here, in every test run, with no model
+        and no subprocess needed."""
         w = _worker(str(tmp_path / "m.gguf"))
 
         class _TypeCheckedLlm(_StubLlm):
@@ -262,7 +300,9 @@ class TestTokenisation:
 
 
 class _ChatStreamLlm:
-    """Stub whose create_chat_completion can fail once (grammar fault) then succeed on retry, or fail unconditionally, mirroring the real native OSError-on-grammar-fault shape."""
+    """Stub whose create_chat_completion can fail once (grammar fault) then
+    succeed on retry, or fail unconditionally, mirroring the real native
+    OSError-on-grammar-fault shape."""
 
     def __init__(self, fail_with_grammar=False, fail_always=False, tokens=("a", "b", "c")):
         self.fail_with_grammar = fail_with_grammar
@@ -294,7 +334,12 @@ class TestChatStream:
         assert w._llm.calls[1]["grammar"] is None
 
     def test_non_grammar_fault_propagates_uncaught(self, tmp_path):
-        """A fault unrelated to grammar (or one after tokens were already yielded) must NOT be softened here - it propagates out of the generator uncaught, so the runner's dispatch loop (and ultimately the whole child process) is allowed to die, matching voice.py's crash containment philosophy: an unknown-stat..."""
+        """A fault unrelated to grammar (or one after tokens were already
+        yielded) must NOT be softened here - it propagates out of the
+        generator uncaught, so the runner's dispatch loop (and ultimately the
+        whole child process) is allowed to die, matching voice.py's crash
+        containment philosophy: an unknown-state native fault should not
+        limp along in a possibly-corrupted context."""
         w = _worker(str(tmp_path / "m.gguf"))
         w._llm = _ChatStreamLlm(fail_always=True)
         gen = w.chat_stream([{"role": "user", "content": "hi"}])
@@ -302,7 +347,8 @@ class TestChatStream:
             list(gen)
 
     def test_fault_after_partial_yield_propagates_even_with_grammar(self, tmp_path):
-        """If tokens were already emitted, a later fault must not silently retry (that would duplicate/corrupt output) - propagate as-is."""
+        """If tokens were already emitted, a later fault must not silently
+        retry (that would duplicate/corrupt output) - propagate as-is."""
         class _PartialThenFail:
             def create_chat_completion(self, **kwargs):
                 yield {"choices": [{"delta": {"content": "a"}, "finish_reason": None}]}

@@ -1,5 +1,27 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""setup.sh's localm-entry-point install/retry block, and localm.sh's own diagnosis of the same failure mode."""
+"""setup.sh's localm-entry-point install/retry block, and localm.sh's own
+diagnosis of the same failure mode.
+
+Regression for a filed residual: setup.sh:342-360 retries the `uv pip install`
+once if `.venv/bin/localm` did not land (a real, reproduced WSL2/DrvFs quirk
+where uv reports success but drops exactly one file), then warns loudly and
+CONTINUES if it is still missing afterwards - by design, since the rest of
+setup does not depend on this entry point. But the retry call itself was a
+bare command under `set -euo pipefail`, the one unguarded command in that
+block: a retry that ERRORS (not just "ran but didn't create the file") kills
+setup right there, so the loud "STILL missing" warning a few lines below never
+prints - contradicting the block's own comment.
+
+No test covered any of the three already-verified-live branches (present /
+recovered-by-retry / still-missing-after-retry), let alone the retry-errors
+case this file adds coverage for. Extracts and runs ONLY the install/retry
+block (not the whole script) against a stub `uv`, in the extract-a-source-
+slice style of tests/test_setup_gpu_detect.py.
+
+Also covers localm.sh's own misdiagnosis of this exact failure mode: it used
+to report "No .venv found" even when the venv was fine and only the console
+script was missing.
+"""
 
 from __future__ import annotations
 
@@ -44,8 +66,7 @@ def _heartbeat_functions() -> str:
     # The install block calls heartbeat_start/heartbeat_stop, defined earlier
     # in the real script (near ask()/offer_report()). Extract them the same
     # way _install_block() extracts its own slice, so the synthetic script
-    # below actually has them - and stays in sync if the implementation
-    # changes - instead of failing on "heartbeat_start: command not found".
+    # below has them.
     src = SETUP_SH.read_text(encoding="utf-8")
     start = src.index("HB_SEQ=0")
     stop_def = src.index("heartbeat_stop() {", start)
@@ -56,9 +77,7 @@ def _heartbeat_functions() -> str:
 def _make_uv_stub(bin_dir: Path) -> None:
     # Records its own call count in a file RELATIVE to cwd (the test sets cwd
     # to tmp_path for the whole run, so both this stub and the extracted
-    # setup.sh block agree on where ".venv/bin/localm" and the counter live -
-    # no absolute path needs to survive translation into the bash script
-    # text, which is what makes this portable across a Windows tmp_path).
+    # setup.sh block agree on where ".venv/bin/localm" and the counter live).
     # Call N's exit code / whether it creates .venv/bin/localm are read from
     # STUB_RC_<N> / STUB_CREATE_<N> env vars, set per-test.
     _make_executable(
@@ -134,11 +153,9 @@ def test_still_missing_after_retry_warns_and_continues(tmp_path):
 
 
 def test_retry_itself_erroring_still_reaches_the_still_missing_warning(tmp_path):
-    # THE FIX under test. Before it, setup.sh:344's retry call was a bare
-    # command under `set -euo pipefail`: a non-zero exit here killed the
-    # extracted block right at this line, "COMPLETED" and the STILL-missing
-    # warning never printed, and the process exit code was the retry's own
-    # (7 here) instead of 0. Revert the `|| true` guard to see this go red.
+    # The retry call is guarded with `|| true`, so a non-zero exit does not
+    # kill the extracted block under `set -euo pipefail`: "COMPLETED" and the
+    # still-missing warning both print, and the process exit code is 0.
     result = _run_install_block(tmp_path, call_specs={1: (0, False), 2: (7, False)})
     assert result.returncode == 0, result.stderr
     assert "COMPLETED" in result.stdout
@@ -147,7 +164,13 @@ def test_retry_itself_erroring_still_reaches_the_still_missing_warning(tmp_path)
 
 
 def test_retry_install_is_guarded_in_source():
-    """Static backstop that holds even without bash on PATH: the retry install must not be a bare command under `set -euo pipefail`."""
+    """Static backstop that holds even without bash on PATH: the retry
+    install must not be a bare command under `set -euo pipefail`.
+
+    setup.sh builds EXTRAS from a variable (coder,voice,monitor, optionally
+    plus desktop) rather than a hardcoded literal, so the source text always
+    reads `-e ".[${EXTRAS}]"` at both call sites, never the resolved value.
+    """
     block = _install_block()
     needle = 'uv pip install -p .venv -e ".[${EXTRAS}]"'
     first = block.index(needle)
@@ -184,8 +207,8 @@ def test_localm_sh_reports_no_venv_when_venv_truly_absent(tmp_path):
 
 
 def test_localm_sh_distinguishes_missing_entrypoint_from_missing_venv(tmp_path):
-    # THE FIX under test: the venv is fine (python present), only the console
-    # script is missing - must NOT be misreported as "No .venv found".
+    # The venv is fine (python present), only the console script is missing -
+    # it must NOT be reported as "No .venv found".
     result = _run_localm_sh(tmp_path, venv_python=True, venv_localm=False)
     assert result.returncode == 1
     assert "No .venv found" not in result.stderr

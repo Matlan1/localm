@@ -1,5 +1,15 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""BRING-IN-1: `localm add/pull PATH --store copy|move` brings an external model file/dir INTO <data dir>/models before registering it, instead of only ever registering it in place."""
+"""BRING-IN-1: `localm add/pull PATH --store copy|move` brings an external model
+file/dir INTO <data dir>/models before registering it, instead of only ever
+registering it in place. Covers the shared helper (_store_into_models_dir /
+_store_loose_gguf_dir) directly, add_local()'s and pull_model()'s --store
+threading, and the `localm add` / `localm pull` CLI options.
+
+Split GGUFs, a sibling mmproj vision-projector file, an HF-style model
+directory, and a folder of several independent loose GGUFs (including a
+model+mmproj pair) all have to travel together correctly - see registry.py's
+_store_into_models_dir / _store_loose_gguf_dir docstrings for why.
+"""
 
 from pathlib import Path
 
@@ -14,12 +24,10 @@ from localm.model_manager import add_local, pull_model
 @pytest.fixture
 def isolated_home(tmp_path, monkeypatch):
     # load_registry/save_registry/ensure_dirs read config.py's own module-level
-    # HOME_DIR/MODELS_DIR (patched below), so registry.json / config.json land
-    # in the throwaway dir. But _store_into_models_dir and pull.py read
-    # MODELS_DIR/HOME_DIR through the localm.model_manager PACKAGE attribute -
-    # a plain-value copy taken once at import time, never refreshed - so it
-    # must be patched separately, or a --store copy/move would silently land
-    # in a developer's real data dir instead of this test's tmp_path.
+    # HOME_DIR/MODELS_DIR (patched below), so registry.json / config.json land in
+    # the throwaway dir. _store_into_models_dir and pull.py read MODELS_DIR and
+    # HOME_DIR through the localm.model_manager PACKAGE attribute, a plain-value
+    # copy taken once at import time, so that has to be patched separately.
     import localm.config as cfg
     home = tmp_path / ".localm"
     home.mkdir(parents=True, exist_ok=True)
@@ -133,7 +141,8 @@ class TestStoreSplitGguf:
         assert reg["big"]["path"] == str((_models_dir() / "big-00001-of-00003.gguf").resolve())
 
     def test_copy_via_non_first_part_still_moves_all(self, tmp_path, isolated_home):
-        """`add PATH` on a non-first split part must normalise to the first part (existing behavior) AND still bring every part along under --store."""
+        """`add PATH` on a non-first split part must normalise to the first part
+        (existing behavior) AND still bring every part along under --store."""
         p1, p2, p3 = self._split(tmp_path)
         assert add_local(str(p2), store="copy") is True
         for p in (p1, p2, p3):
@@ -167,7 +176,8 @@ class TestStoreMmproj:
         assert (_models_dir() / mmproj.name).is_file()
 
     def test_mmproj_findable_after_move(self, tmp_path, isolated_home):
-        """The whole point: get_model_mmproj must still resolve the projector for the model once both live under MODELS_DIR."""
+        """The whole point: get_model_mmproj must still resolve the projector
+        for the model once both live under MODELS_DIR."""
         model, mmproj = self._model_and_mmproj(tmp_path)
         add_local(str(model), store="move")
         from localm.model_manager import get_model_mmproj
@@ -231,7 +241,20 @@ class TestStoreLooseGgufDir:
 
     def test_model_with_mmproj_in_batch_dir_no_double_processing(
             self, tmp_path, isolated_home):
-        """A model + its mmproj both appear as their own entries in _gguf_first_parts (mmproj isn't filtered out) - naively calling the single-file helper on EVERY entry would try to move/copy the mmproj TWICE (once as the model's sibling, once as its own top-level entry), which either crashes (move: source al..."""
+        """A model + its mmproj both appear as their own entries in
+        _gguf_first_parts (mmproj isn't filtered out) - naively calling the
+        single-file helper on EVERY entry would try to move/copy the mmproj
+        TWICE (once as the model's sibling, once as its own top-level entry),
+        which either crashes (move: source already gone) or false-positives a
+        name collision (copy: dest already exists from the sibling copy).
+        _store_loose_gguf_dir's claimed-sibling precompute must avoid this.
+
+        Deliberately only two files: find_sibling_mmproj auto-resolves to the
+        SOLE mmproj-named candidate in a folder regardless of naming
+        correlation, so a third, unrelated model in the same folder would hit
+        that pre-existing (out-of-scope-here) ambiguity heuristic, not this
+        feature's own logic.
+        """
         d = tmp_path / "drop"
         _gguf(d, "modelA.gguf")
         _gguf(d, "mmproj-modelA-f16.gguf")
@@ -320,7 +343,9 @@ class TestStoreDiskSpacePreflight:
 class TestStoreCopyVerification:
     def test_copy_verification_failure_is_surfaced_and_cleaned_up(
             self, tmp_path, isolated_home, monkeypatch):
-        """Simulate a copy that silently corrupted: force the pre/post digest to disagree even though the bytes are identical. Must fail loudly (return False, nothing registered) and not leave the bad copy behind."""
+        """Simulate a copy that silently corrupted: force the pre/post digest
+        to disagree even though the bytes are identical. Must fail loudly
+        (return False, nothing registered) and not leave the bad copy behind."""
         calls = {"n": 0}
 
         def _fake_sha256(path, progress=None):
@@ -360,7 +385,8 @@ class TestPullModelThreadsStore:
         assert (_models_dir() / "mymodel.gguf").is_file()
 
     def test_pull_remote_spec_ignores_store(self, monkeypatch):
-        """store is meaningless for an HF/URL spec - must never reach add_local and must never break a normal remote pull."""
+        """store is meaningless for an HF/URL spec - must never reach add_local
+        and must never break a normal remote pull."""
         called = {"add_local": False}
         monkeypatch.setattr(mm, "add_local",
                              lambda *a, **k: called.__setitem__("add_local", True) or True)
@@ -420,11 +446,12 @@ class TestCliStoreOption:
 
 
 # --------------------------------------------------------------------------- #
-#  REG-450: a SAME-VOLUME move needs no free space (it is an os.rename)         #
+#  A SAME-VOLUME move needs no free space (it is an os.rename)                #
 # --------------------------------------------------------------------------- #
 
 def _tiny_free(monkeypatch, free_bytes):
-    """Force the free-space reading _check_disk_space takes, without filling a real disk."""
+    """Force the free-space reading _check_disk_space takes, without filling a
+    real disk. The model files stay real; only the free-space number is staged."""
     import shutil as _sh
     from localm.model_manager import pull as _pull
     real = _sh.disk_usage
@@ -437,7 +464,9 @@ def _tiny_free(monkeypatch, free_bytes):
 
 
 def test_same_volume_is_detected_for_real_paths(isolated_home, tmp_path):
-    """The volume check itself, against REAL paths (no mocks): a dir and its own subdir are on one volume."""
+    """The volume check itself, against REAL paths (no mocks): a dir and its own
+    subdir are on one volume. If this ever stops holding, the move fast-path
+    below would silently start skipping a check it must not skip."""
     from localm.model_manager.registry import _same_volume
     sub = tmp_path / "sub"
     sub.mkdir()
@@ -448,7 +477,11 @@ def test_same_volume_is_detected_for_real_paths(isolated_home, tmp_path):
 
 
 def test_same_volume_move_does_not_demand_copy_sized_free_space(isolated_home, tmp_path):
-    """REG-450: `localm add <path> --on-duplicate move` on the SAME volume is an os.rename needing ~0 extra bytes, but the preflight demanded the full model size for move as well as copy - so moving a 40 GB model onto a drive with 30 GB free (exactly when a user picks move over copy) failed with a false 'N..."""
+    """REG-450: `localm add <path> --on-duplicate move` on the SAME volume is an
+    os.rename needing ~0 extra bytes, but the preflight demanded the full model
+    size for move as well as copy - so moving a 40 GB model onto a drive with
+    30 GB free (exactly when a user picks move over copy) failed with a false
+    'Not enough disk space'. Pre-#450 the bare shutil.move succeeded here."""
     import pytest as _pytest
     src = _gguf(tmp_path / "ext", "big.gguf", b"G" * 4096)
     with _pytest.MonkeyPatch.context() as mp:
@@ -460,7 +493,8 @@ def test_same_volume_move_does_not_demand_copy_sized_free_space(isolated_home, t
 
 
 def test_copy_still_refuses_when_the_volume_is_actually_full(isolated_home, tmp_path):
-    """Negative case: a COPY really does need the bytes, so the preflight must still refuse."""
+    """Negative case: a COPY really does need the bytes, so the preflight must
+    still refuse. If the fix disabled the check for both actions, this fails."""
     import pytest as _pytest
     src = _gguf(tmp_path / "ext", "big.gguf", b"G" * 4096)
     with _pytest.MonkeyPatch.context() as mp:
@@ -472,7 +506,8 @@ def test_copy_still_refuses_when_the_volume_is_actually_full(isolated_home, tmp_
 
 
 def test_cross_volume_move_still_requires_space(isolated_home, tmp_path):
-    """Negative case: a CROSS-volume move is a real copy+delete, so it still needs the bytes."""
+    """Negative case: a CROSS-volume move is a real copy+delete, so it still needs
+    the bytes. The skip must be conditioned on the volume, not on the verb."""
     import pytest as _pytest
     from localm.model_manager import registry as _reg
     src = _gguf(tmp_path / "ext", "big.gguf", b"G" * 4096)

@@ -1,5 +1,22 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Adversarial /v1 request-validation hardening."""
+"""Adversarial /v1 request-validation hardening.
+
+Three break-it findings, each a clean-rejection or info-leak guard:
+
+  BUG-4  max_tokens <= 0 was neither rejected nor honored: it collided with the
+         internal "<=0 == unlimited" sentinel, so a client asking for 0/short
+         tokens got a full, unbounded generation (silent-wrong + soft DoS). Now a
+         request-level max_tokens must be >= 1 (a clean 422), matching OpenAI.
+
+  BUG-5  temperature / top_p / repeat_penalty accepted NaN/Infinity (stdlib json
+         parses the bare tokens; pydantic's default allow_inf_nan admitted them),
+         feeding a non-finite value straight into the native sampler. Now non-finite
+         values are rejected with a clean 422.
+
+  BUG-3  GET /v1/models/{id} for an entry with an empty path ran
+         Path("").rglob("*") -> a walk of the server CWD (aggregate-size info leak
+         + filesystem-walk DoS). The size branch is now guarded on a real path.
+"""
 
 import os
 from unittest.mock import MagicMock, patch
@@ -10,7 +27,9 @@ from localm.inference.http_server import create_app
 
 
 def _client():
-    """A client over a fully-working engine stub: a REJECTED request 422s at validation before the handler (engine untouched); an ACCEPTED request reaches generation and returns 200 with a trivial reply."""
+    """A client over a fully-working engine stub: a REJECTED request 422s at
+    validation before the handler (engine untouched); an ACCEPTED request reaches
+    generation and returns 200 with a trivial reply."""
     os.environ.pop("LOCALM_API_KEY", None)
     engine = MagicMock()
     engine.display_name = "m"
@@ -32,7 +51,7 @@ def _chat(client, **extra):
 
 
 # --------------------------------------------------------------------------- #
-# BUG-4: max_tokens <= 0
+# max_tokens <= 0
 # --------------------------------------------------------------------------- #
 
 def test_max_tokens_zero_rejected_chat():
@@ -46,7 +65,8 @@ def test_max_tokens_negative_rejected_chat():
 
 
 def test_max_tokens_one_is_allowed():
-    """The boundary value 1 is valid (only <= 0 is rejected): it passes validation and generates normally (guards against over-rejection)."""
+    """The boundary value 1 is valid (only <= 0 is rejected): it passes validation
+    and generates normally (guards against over-rejection)."""
     r = _chat(_client(), max_tokens=1, stream=False)
     assert r.status_code == 200, r.text
 
@@ -58,7 +78,7 @@ def test_max_tokens_zero_rejected_completions():
 
 
 # --------------------------------------------------------------------------- #
-# BUG-5: NaN / Infinity numeric params
+# NaN / Infinity numeric params
 # --------------------------------------------------------------------------- #
 
 def _chat_raw(client, raw_json: str):
@@ -88,7 +108,10 @@ def test_infinity_repeat_penalty_rejected():
 
 
 def test_nan_int_field_is_422_not_500():
-    """A non-finite value in an INT field (top_k) fails validation; the 422 error body includes the offending `input`, which Starlette's JSONResponse cannot serialize (allow_nan=False) - a live 500 before the safe validation handler."""
+    """A non-finite value in an INT field (top_k) fails validation; the 422 error
+    body includes the offending `input`, which Starlette's JSONResponse cannot
+    serialize (allow_nan=False) - a live 500 before the safe validation handler.
+    Must be a clean 422, not a 500."""
     r = _chat_raw(_client(),
                   '{"model":"m","messages":[{"role":"user","content":"hi"}],'
                   '"top_k":NaN,"max_tokens":4}')
@@ -103,13 +126,15 @@ def test_nan_seed_is_422_not_500():
 
 
 def test_finite_out_of_range_still_accepted():
-    """A large but FINITE value is not the target of this guard (llama tolerates it and the server did not crash); only non-finite values are rejected."""
+    """A large but FINITE value is not the target of this guard (llama tolerates it
+    and the server did not crash); only non-finite values are rejected. So a finite
+    temperature must be accepted, not a 422."""
     r = _chat(_client(), temperature=1000.0, max_tokens=1)
     assert r.status_code == 200, r.text
 
 
 # --------------------------------------------------------------------------- #
-# BUG-3: GET /v1/models/{id} with an empty path must not walk the CWD
+# GET /v1/models/{id} with an empty path must not walk the CWD
 # --------------------------------------------------------------------------- #
 
 def test_model_detail_empty_path_does_not_walk_cwd():
@@ -124,29 +149,19 @@ def test_model_detail_empty_path_does_not_walk_cwd():
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["path"] == "", body
-    # The vulnerable code did Path("").rglob("*") -> a CWD walk that returns a real
-    # aggregate size; the guard leaves size_bytes None for an empty path.
+    # The guard leaves size_bytes None for an empty path.
     assert body["size_bytes"] is None, \
         "an empty registry path must not be stat/walked (server-CWD walk + size leak)"
 
 
 # --------------------------------------------------------------------------- #
-# LM-FZ-002: a deeply-nested body must not turn a 422 into a 500
+# A deeply-nested body must not turn a 422 into a 500
 # --------------------------------------------------------------------------- #
-#
-# pydantic records the offending value under `input` verbatim, so the nesting
-# lands in the error object and `jsonable_encoder` walks it recursively. A ~2 KB
-# body raised RecursionError INSIDE the validation handler, so FastAPI could not
-# build a response and the documented 422 became an opaque 500 - measured at
-# ~0.25 s of event-loop CPU each, and a 147x latency rise on unrelated requests
-# under four connections.
-#
-# These assert on the STATUS CODE, which is the property. Deliberately NOT on
-# elapsed time: a duration assertion measures a proxy for the defect, and it is
-# the kind of number that gets "adjusted" until it passes rather than fixed.
 
 def _raw_client():
-    """Like _client(), but surfacing server errors as real 500 RESPONSES instead of re-raising them, so the 422-vs-500 contract is observable exactly as a real HTTP client sees it."""
+    """Like _client(), but surfacing server errors as real 500 RESPONSES instead
+    of re-raising them, so the 422-vs-500 contract is observable exactly as a
+    real HTTP client sees it."""
     os.environ.pop("LOCALM_API_KEY", None)
     engine = MagicMock()
     engine.display_name = "m"
@@ -156,12 +171,24 @@ def _raw_client():
 
 
 def _deep_json(depth: int) -> bytes:
-    """A body that PARSES (well inside the JSON parser's own depth limit) but whose nesting the error object then carries."""
+    """A body that PARSES (well inside the JSON parser's own depth limit) but
+    whose nesting the error object then carries."""
     return ("[" * depth + "]" * depth).encode()
 
 
 def test_deeply_nested_body_is_422_not_500():
-    """THE STATUS CODE ALONE IS NOT A SUFFICIENT ORACLE HERE, and finding that out is why this test also asserts on `errors`."""
+    """THE STATUS CODE ALONE IS NOT A SUFFICIENT ORACLE HERE, and finding that
+    out is why this test also asserts on `errors`.
+
+    The handler carries a RecursionError fallback that returns a 422 with an
+    EMPTY `errors` list. That fallback is deliberate, but it means the status
+    code is 422 whether the depth prune worked or whether it failed and the net
+    caught it - and in the second case the CPU cost, which is the actual finding,
+    is entirely still there. MEASURED: with the prune reverted, an
+    assert-on-422-only version of this test still PASSED.
+
+    So the real property is "the prune worked", and its observable is that the
+    structured detail SURVIVED rather than being discarded by the fallback."""
     r = _raw_client().post("/v1/chat/completions", content=_deep_json(1500),
                            headers={"Content-Type": "application/json"})
     assert r.status_code == 422, (
@@ -174,7 +201,8 @@ def test_deeply_nested_body_is_422_not_500():
 
 
 def test_deeply_nested_body_reports_the_elision():
-    """The pruning must be OBSERVABLE, not merely inferred from the absence of a crash - otherwise this test would also pass if the body were simply empty."""
+    """The pruning must be OBSERVABLE, not merely inferred from the absence of a
+    crash - otherwise this test would also pass if the body were simply empty."""
     r = _raw_client().post("/v1/chat/completions", content=_deep_json(1500),
                            headers={"Content-Type": "application/json"})
     assert r.status_code == 422
@@ -184,7 +212,8 @@ def test_deeply_nested_body_reports_the_elision():
 
 
 def test_a_shallow_but_wide_body_is_unaffected():
-    """The cap is on DEPTH, not on size."""
+    """The cap is on DEPTH, not on size. A wide-but-flat body must still get its
+    ordinary validation error, with nothing elided."""
     r = _raw_client().post("/v1/chat/completions",
                            content=b"[" + b"1," * 5000 + b"1]",
                            headers={"Content-Type": "application/json"})

@@ -1,5 +1,14 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The GUI remote-image proxy (localm/plugins/gui/routes/imgproxy.py)."""
+"""The GUI remote-image proxy (localm/plugins/gui/routes/imgproxy.py).
+
+A model reply can link a remote image. The shell CSP refuses it, so it renders
+broken - the one place localm showed less than the comparable UIs. Those render
+it by letting the BROWSER fetch it, which leaks the user's IP/User-Agent/referrer
+to the remote host. This route fetches server-side instead, off by default.
+
+These tests pin the refusals, because that is where the value is: the feature is
+one route whose whole job is to say no in five different ways before it says yes.
+"""
 
 import pytest
 from fastapi.testclient import TestClient
@@ -9,7 +18,12 @@ from localm.plugins.gui.routes import imgproxy
 
 
 def _client(monkeypatch, *, enabled, fetch=None):
-    """A GUI app with the proxy route mounted and config forced on/off."""
+    """A GUI app with the proxy route mounted and config forced on/off.
+
+    load_config is patched where the ROUTE imports it (inside the handler, from
+    localm.config), not where it is defined, so the patch is on the path the code
+    under test actually takes.
+    """
     from fastapi import FastAPI
     app = FastAPI()
     imgproxy.register(app, MagicMock())
@@ -38,9 +52,7 @@ def test_refused_by_default_and_nothing_is_fetched(monkeypatch):
     c = _client(monkeypatch, enabled=False, fetch=_spy)
     r = c.get("/api/image-proxy", params={"url": "https://example.com/a.png"})
     assert r.status_code == 403, r.text
-    # The refusal must come BEFORE any outbound request. Asserting only on the
-    # status code would pass on a version that fetched first and refused after,
-    # which is the failure that would actually matter here.
+    # The refusal must come BEFORE any outbound request.
     assert called == [], f"an outbound fetch was made while the feature was OFF: {called}"
 
 
@@ -56,7 +68,15 @@ def test_proxies_the_bytes_when_enabled(monkeypatch):
 
 
 def test_the_response_is_never_cached(monkeypatch):
-    """Turning the feature OFF must take effect immediately."""
+    """Turning the feature OFF must take effect immediately.
+
+    MEASURED: with `private, max-age=300` the browser kept serving an
+    already-fetched image for five minutes after the owner switched the setting
+    off, so the control they had just used appeared to do nothing - and
+    model-influenced bytes sat in the on-disk HTTP cache of an offline-first
+    product. The client keeps its own in-page blob cache, so a streaming
+    re-render still does not refetch; the HTTP cache was buying almost nothing.
+    """
     c = _client(monkeypatch, enabled=True, fetch=_ok_fetch)
     r = c.get("/api/image-proxy", params={"url": "https://example.com/a.png"})
     assert r.status_code == 200
@@ -67,7 +87,11 @@ def test_the_response_is_never_cached(monkeypatch):
 
 
 def test_ssrf_refusal_from_netpolicy_is_surfaced_not_swallowed(monkeypatch):
-    """The SSRF guard lives in netpolicy; this pins that the route lets it refuse."""
+    """The SSRF guard lives in netpolicy; this pins that the route lets it refuse.
+
+    A loopback target is the canonical case: without the guard, the proxy would
+    be a confused deputy able to read this machine's own private services.
+    """
     from localm.netpolicy import NetworkPolicyError
 
     def _refuse(url, **kw):
@@ -114,7 +138,14 @@ def test_non_image_content_types_are_refused(monkeypatch, ctype):
 
 
 def test_svg_is_refused_even_though_it_is_an_image_type(monkeypatch):
-    """The sharpest edge in the feature, so it gets its own test."""
+    """The sharpest edge in the feature, so it gets its own test.
+
+    image/svg+xml passes any naive `startswith("image/")` check. Served from our
+    OWN origin it renders as a document when opened directly, and SVG can carry
+    script - so allowing it would turn a model-chosen URL into script execution
+    on localm's origin. If someone ever "fixes" the allowlist by loosening it to
+    a prefix match, this is the test that must stop them.
+    """
     c = _client(monkeypatch, enabled=True,
                 fetch=lambda url, **kw: (url, "image/svg+xml",
                                          b"<svg xmlns='http://www.w3.org/2000/svg'></svg>"))
@@ -133,7 +164,11 @@ def test_content_type_parameters_do_not_defeat_the_allowlist(monkeypatch):
 
 
 def test_the_byte_cap_is_passed_to_the_fetch_layer(monkeypatch):
-    """The cap is netpolicy's to enforce; this pins that the route asks for one."""
+    """The cap is netpolicy's to enforce; this pins that the route asks for one.
+
+    Without it the default (1 MB) or no bound at all would apply, and one rendered
+    reply could make this server pull an unbounded body.
+    """
     seen = {}
 
     def _capture(url, **kw):
@@ -147,7 +182,15 @@ def test_the_byte_cap_is_passed_to_the_fetch_layer(monkeypatch):
 
 
 def test_a_truncated_oversize_image_is_REFUSED_not_served_corrupt(monkeypatch):
-    """safe_fetch_bytes truncates at the cap; serving that would be a false success."""
+    """safe_fetch_bytes truncates at the cap; serving that would be a false success.
+
+    netpolicy breaks out of its chunk loop at max_bytes and returns what it has.
+    For a text fetch a clipped body is degraded but usable. For an IMAGE it is a
+    corrupt file, and returning it with a 200 and a valid image/* type reports
+    success for a step that failed (AGENTS.md rule 5) - the browser renders a
+    half-decoded strip or nothing, and the client cannot tell that apart from a
+    small image.
+    """
     truncated = b"IMGDATA" * ((imgproxy._MAX_BYTES // 7) + 2)
     c = _client(monkeypatch, enabled=True,
                 fetch=lambda url, **kw: (url, "image/png", truncated[:imgproxy._MAX_BYTES]))
@@ -197,7 +240,13 @@ def test_the_setting_is_owner_only_and_visible_in_the_schema():
 
 
 def test_the_schema_still_shows_the_toggle_in_a_keyless_install():
-    """admin_only must not make the toggle unreachable for the ordinary user."""
+    """admin_only must not make the toggle unreachable for the ordinary user.
+
+    routes/config.py computes `is_owner = held is None or ADMIN in held`, so open
+    mode counts as owner. If that ever changes, admin_only would hide this control
+    from the default single-user GUI and the feature would be unusable rather than
+    merely off.
+    """
     from localm.settings_schema import schema_json
     keys = {f["key"] for f in schema_json(values={}, is_owner=True)}
     assert "gui_proxy_remote_images" in keys
@@ -207,19 +256,14 @@ def test_the_schema_still_shows_the_toggle_in_a_keyless_install():
 
 
 # --------------------------------------------------------------------------- #
-#  QA 2026-08-20 (#6): the fetch must not run ON the event loop.               #
+#  The fetch must not run ON the event loop.                                   #
 #                                                                             #
-#  safe_fetch_bytes is a blocking urlopen with a 15s connect and a 15s read.   #
-#  Called inline from this `async def` handler it stopped the WHOLE server for #
-#  the length of the fetch - MEASURED, an unrelated GET /api/activity went     #
-#  from 0.018s to 13.76s with one in-flight proxy fetch to an unroutable host, #
-#  and the hang alarm fired independently with this frame on top. The URL      #
-#  comes from a model-authored <img src>, so a rendered reply chose how long   #
-#  the server stalled.                                                        #
+#  safe_fetch_bytes is a blocking urlopen with a 15s connect and a 15s read,   #
+#  and the URL comes from a model-authored <img src>.                          #
 #                                                                             #
 #  Behavioural, not structural: it holds a real blocking call and requires an  #
 #  unrelated coroutine to still get its turn, so it fails for any handler that #
-#  stops offloading regardless of how the offload was written.                #
+#  stops offloading regardless of how the offload was written.                 #
 # --------------------------------------------------------------------------- #
 
 def test_the_fetch_does_not_block_the_event_loop(monkeypatch):
@@ -274,7 +318,17 @@ def test_the_fetch_does_not_block_the_event_loop(monkeypatch):
 
 
 def test_the_fetch_budget_stays_above_netpolicy_s_own_worst_case():
-    """The offload's deadline must never fire for a slow-but-WORKING fetch, only for a wedged one - so it has to sit above safe_fetch_bytes' real worst case."""
+    """The offload's deadline must never fire for a slow-but-WORKING fetch, only
+    for a wedged one - so it has to sit above safe_fetch_bytes' real worst case.
+
+    That case is not one timeout. netpolicy applies its timeout separately to
+    the connect and to each read, and follows redirects manually, so every hop
+    re-pays both. This asserts the RELATION rather than the number, because the
+    two bounds live in netpolicy and the arithmetic lives in imgproxy - the shape
+    that breaks quietly when someone retunes one side. A literal 40.0 (the first
+    version of this) covered a single connect+read pair and would have expired
+    part-way down a legitimate three-hop CDN chain, turning a working image into
+    a 504."""
     from localm import netpolicy
     worst_case = (netpolicy._MAX_REDIRECTS + 1) * 2 * netpolicy._DEFAULT_TIMEOUT
     assert imgproxy._fetch_budget_s() > worst_case, (

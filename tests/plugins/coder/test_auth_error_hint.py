@@ -1,5 +1,15 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""U9: a coder 401/403 must surface an actionable API-key hint, not a bare '401 Client Error'."""
+"""U9: a coder 401/403 must surface an actionable API-key hint, not a bare
+'401 Client Error'. The HTTP backend raises CoderAuthError (carrying how to
+find/set the key) for auth statuses, and behaves normally otherwise.
+
+Also covers #964's client-side gap: a non-auth error status whose response
+carries server-provided detail (FastAPI's {"detail": ...} body, e.g. the
+grammar-worker-fault 503 from inference/routes/chat.py) must surface that
+detail to the user - requests.raise_for_status() never reads the body at
+all, which is why a careful server-side error message like "the model
+worker faulted" never reached the reporter of #964.
+"""
 
 from unittest.mock import MagicMock, patch
 
@@ -49,7 +59,8 @@ def test_chat_stream_401_raises_auth_error():
 
 
 def test_non_auth_status_still_raises_plain_httperror():
-    """No JSON/text detail available on the response - falls back to the original resp.raise_for_status() behaviour unchanged."""
+    """No JSON/text detail available on the response - falls back to the
+    original resp.raise_for_status() behaviour unchanged."""
     err = requests.HTTPError("500 Server Error")
     with patch(_PATCH, return_value=_resp(500, raise_exc=err)):
         with pytest.raises(requests.HTTPError):
@@ -57,7 +68,9 @@ def test_non_auth_status_still_raises_plain_httperror():
 
 
 def test_grammar_worker_fault_503_surfaces_server_detail():
-    """#964: the exact shape inference/routes/chat.py's grammar-worker-fault 503 sends (a FastAPI {'detail': '...'} body) must reach the raised exception's message, not just the bare status line."""
+    """#964: the exact shape inference/routes/chat.py's grammar-worker-fault
+    503 sends (a FastAPI {"detail": "..."} body) must reach the raised
+    exception's message, not just the bare status line."""
     body = {"detail": "Grammar validation failed: the model worker faulted "
                       "(the model process crashed)."}
     with patch(_PATCH, return_value=_resp(503, json_body=body)):
@@ -69,7 +82,8 @@ def test_grammar_worker_fault_503_surfaces_server_detail():
 
 
 def test_non_json_text_body_detail_still_surfaces():
-    """A server that returns a plain-text error body (not FastAPI's JSON shape) still gets its detail surfaced, not silently dropped."""
+    """A server that returns a plain-text error body (not FastAPI's JSON
+    shape) still gets its detail surfaced, not silently dropped."""
     with patch(_PATCH, return_value=_resp(502, text_body="upstream refused the connection")):
         with pytest.raises(CoderServerError) as ei:
             _backend().chat([{"role": "user", "content": "hi"}])
@@ -77,7 +91,8 @@ def test_non_json_text_body_detail_still_surfaces():
 
 
 def test_response_detail_never_raises_on_a_malformed_response():
-    """A response whose .json()/.text access themselves misbehave must not turn an error-reporting helper into a NEW crash - degrade to ''."""
+    """A response whose .json()/.text access themselves misbehave must not
+    turn an error-reporting helper into a NEW crash - degrade to ""."""
     r = MagicMock()
     r.json.side_effect = RuntimeError("boom")
     type(r).text = property(lambda self: (_ for _ in ()).throw(RuntimeError("boom")))

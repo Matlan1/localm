@@ -182,14 +182,12 @@ def test_active_requests_protection_from_eviction(setup_multi_model, monkeypatch
 
     # model-a stays resident (busy, cannot be evicted) - prove THAT part of the
     # protection holds regardless of how model-b's own load turns out.
-    # Attempting to load model-b: since #753, switch_engine no longer hard-
-    # refuses on its own crude whole-model estimate once local+cooperative
-    # eviction is exhausted - it falls through and lets the backend's own
-    # sizing decide (partial GPU-layer offload / system-RAM spillover can
-    # still make it fit). Simulate the backend genuinely being unable to fit
-    # it (0 GPU layers included) so this test keeps covering the case where
-    # eviction protection is the ONLY thing standing between the request and
-    # a 503 - a busy peer never gets sacrificed for it either way.
+    # switch_engine does not hard-refuse on its own crude whole-model estimate
+    # once local+cooperative eviction is exhausted: it falls through and lets the
+    # backend's own sizing decide (partial GPU-layer offload / system-RAM
+    # spillover can still make it fit). Simulate the backend genuinely being
+    # unable to fit it (0 GPU layers included) so this keeps covering the case
+    # where eviction protection is the ONLY thing between the request and a 503.
     def _failing_engine_factory(name):
         engine = FakeEngine(name)
         engine.load = lambda: (_ for _ in ()).throw(

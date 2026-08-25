@@ -1,5 +1,26 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""In-process tests for portmux's server-lifecycle functions: ``run_server``, ``_serve_async`` and ``_serve_async_plain``, plus the real (non-faked) ``_relay`` round trip."""
+"""In-process tests for portmux's server-lifecycle functions: ``run_server``,
+``_serve_async`` and ``_serve_async_plain``, plus the real (non-faked) ``_relay``
+round trip.
+
+tests/test_portmux.py drives these in a SUBPROCESS (real uvicorn, real TLS),
+which is valuable black-box evidence but registers no coverage in this process.
+tests/test_portmux_redirect.py covers the pure/fast pieces with fake streams.
+This module fills the remaining gap: the async lifecycle functions themselves,
+started as real asyncio tasks against real ephemeral (port 0) sockets in THIS
+process, so both the happy path and the "internal server never came up"
+failure path are exercised for real.
+
+The one deliberate substitution: on the PLAIN (no-TLS) path the internal
+uvicorn always binds to a hardcoded ``127.0.0.1:0`` (an ephemeral loopback
+port), which cannot practically be made to fail in a test - there is no
+reachable way to make that bind raise without mocking something. So the
+"internal server startup failed" branch is exercised via a minimal fake
+``uvicorn.Server`` there. The TLS variant gets the SAME branch exercised for
+real instead, via a genuinely bad certificate path - a real, reachable trust-
+relevant failure mode (a corrupt/missing cert must not hang or silently fall
+back to plaintext).
+"""
 from __future__ import annotations
 
 import asyncio
@@ -18,7 +39,10 @@ from localm import portmux, tls
 # --------------------------------------------------------------------------- #
 
 async def _tiny_asgi_app(scope, receive, send):
-    """A minimal real ASGI app: implements lifespan (so uvicorn's startup completes cleanly) and answers every HTTP request with a fixed body and an explicit Content-Length (avoids chunked encoding, keeping response assertions simple)."""
+    """A minimal real ASGI app: implements lifespan (so uvicorn's startup
+    completes cleanly) and answers every HTTP request with a fixed body and an
+    explicit Content-Length (avoids chunked encoding, keeping response
+    assertions simple)."""
     if scope["type"] == "lifespan":
         while True:
             msg = await receive()
@@ -61,7 +85,8 @@ async def _wait_connectable(port: int, timeout: float = 10.0) -> None:
 
 
 async def _shutdown(task: asyncio.Task, timeout: float = 10.0) -> None:
-    """Cancel a running server-lifecycle task and wait for its finally-block teardown (demux.close()/wait_closed(), wakeup_task cancel) to finish."""
+    """Cancel a running server-lifecycle task and wait for its finally-block
+    teardown (demux.close()/wait_closed(), wakeup_task cancel) to finish."""
     task.cancel()
     with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
         await asyncio.wait_for(task, timeout=timeout)
@@ -88,10 +113,9 @@ async def _make_echo_server():
 
 
 def test_relay_pumps_bytes_both_directions_byte_for_byte():
-    # Proves the module docstring's trust claim - "TLS still terminates at
-    # uvicorn; we only shuffle bytes" - by round-tripping arbitrary bytes
-    # through a real internal listener and asserting the reply is byte-for-
-    # byte identical: no header rewriting, no injected/dropped bytes.
+    # Round-trips arbitrary bytes through a real internal listener and asserts
+    # the reply is byte-for-byte identical: no header rewriting, no injected or
+    # dropped bytes.
     async def go():
         echo_server, internal_port = await _make_echo_server()
 
@@ -171,7 +195,15 @@ def test_serve_async_tls_relays_a_real_handshake_and_shuts_down_cleanly(tmp_path
 
 
 def test_serve_async_plain_cancels_an_inflight_connection_on_shutdown():
-    """Regression for issue #963 / F2: asyncio.start_server()'s client_connected_cb creates a Task for each connection that nothing keeps a reference to, so a connection still blocked in _relay's pumps at shutdown was invisible to demux.wait_closed() (which only waits for the LISTENING socket, never for ha..."""
+    """Regression for issue #963 / F2: asyncio.start_server()'s
+    client_connected_cb creates a Task for each connection that nothing keeps
+    a reference to, so a connection still blocked in _relay's pumps at
+    shutdown was invisible to demux.wait_closed() (which only waits for the
+    LISTENING socket, never for handler tasks already running) and was
+    silently destroyed mid-flight instead of being closed ("Task was
+    destroyed but it is pending!"). With the fix, shutdown cancels and awaits
+    the tracked task, whose finally closes the writer - so the client sees a
+    clean EOF as PART of shutdown, not eventually or never."""
     async def go():
         port = _free_port()
         task = asyncio.ensure_future(
@@ -181,19 +213,16 @@ def test_serve_async_plain_cancels_an_inflight_connection_on_shutdown():
         try:
             # One byte only, never the rest of a request line: the internal
             # uvicorn never gets a full HTTP request, so both pump directions
-            # block on read() and the connection's task stays pending - the
-            # exact state the bug describes.
+            # block on read() and the connection's task stays pending.
             writer.write(b"G")
             await writer.drain()
             await asyncio.sleep(0.1)   # let accept + relay-connect land
 
             await _shutdown(task)
 
-            # The server must have closed THIS connection as part of its OWN
-            # shutdown - not left it for the OS to reap whenever the process
-            # exits. A short timeout distinguishes "closed promptly by the
-            # fix" from "never closed" (hangs until wait_for's own timeout -
-            # a clear failure, not a slow pass).
+            # The server must close THIS connection as part of its OWN
+            # shutdown, not leave it for the OS to reap. A short timeout
+            # distinguishes "closed promptly" from "never closed".
             data = await asyncio.wait_for(reader.read(-1), timeout=2)
             assert data == b""
         finally:
@@ -202,7 +231,9 @@ def test_serve_async_plain_cancels_an_inflight_connection_on_shutdown():
 
 
 def test_serve_async_tls_cancels_an_inflight_connection_on_shutdown(tmp_path):
-    """Same regression, TLS variant - the bug report names only the plain path's _on_conn, but _serve_async wires an identical untracked callback and must not be the one left unfixed."""
+    """Same regression, TLS variant - the bug report names only the plain
+    path's _on_conn, but _serve_async wires an identical untracked callback
+    and must not be the one left unfixed."""
     cert, key = tls.ensure_cert(tmp_path, hostnames=["127.0.0.1"])
     ca = str(tls.ca_cert_path(tmp_path))
 
@@ -232,19 +263,15 @@ def test_serve_async_tls_cancels_an_inflight_connection_on_shutdown(tmp_path):
 
 
 def test_serve_async_propagates_a_bad_tls_cert_instead_of_hanging(tmp_path):
-    # Trust-relevant: a corrupt/missing certificate must surface loudly (the
-    # server never comes up, the caller finds out immediately) rather than
-    # hang forever or silently fall through to an unprotected bind.
+    # A corrupt or missing certificate must surface loudly - the server never
+    # comes up and the caller finds out immediately - rather than hang forever
+    # or fall through to an unprotected bind.
     #
-    # The outer wait_for(timeout=10) is a safety net so a regression can't hang
-    # the suite, NOT the behavioural assertion: asyncio.TimeoutError (raised by
-    # wait_for on expiry) is itself an Exception subclass, so a bare
-    # `pytest.raises(Exception)` here would pass identically whether the cert
-    # error propagated in milliseconds OR the code hung for the full 10s and
-    # wait_for's own timeout fired instead - exactly the "hang forever"
-    # regression this test exists to catch, silently swallowed. The isinstance
-    # check below is what actually pins "failed fast", and it's a type check,
-    # not a wall-clock one, so it stays meaningful under shared-box load.
+    # The outer wait_for(timeout=10) is a safety net so a regression cannot hang
+    # the suite, NOT the behavioural assertion: asyncio.TimeoutError is itself
+    # an Exception subclass, so a bare pytest.raises(Exception) would pass
+    # either way. The isinstance check below is what pins "failed fast", and it
+    # is a type check rather than a wall-clock one.
     async def go():
         port = _free_port()
         missing_cert = str(tmp_path / "does-not-exist.crt")
@@ -261,7 +288,14 @@ def test_serve_async_propagates_a_bad_tls_cert_instead_of_hanging(tmp_path):
 
 
 class _FailFastServer:
-    """Stand-in for uvicorn.Server whose serve() fails before startup completes - simulates the internal loopback uvicorn never coming up."""
+    """Stand-in for uvicorn.Server whose serve() fails before startup
+    completes - simulates the internal loopback uvicorn never coming up. A
+    REAL bind failure on 127.0.0.1:0 is not practically reproducible (an
+    ephemeral loopback port essentially never collides or exhausts in a test
+    run), so this narrow substitution is the pragmatic way to exercise
+    portmux's OWN response to that failure: it must propagate the error, not
+    hang or silently continue with no backend listening. See the module
+    docstring for why the TLS variant gets a REAL failure instead."""
     def __init__(self, config):
         self.config = config
         self.started = False
@@ -291,7 +325,9 @@ def test_serve_async_plain_propagates_internal_server_startup_failure(monkeypatc
 # --------------------------------------------------------------------------- #
 
 def _patch_bugreport(monkeypatch):
-    """Record calls to the crash-guard hooks without touching disk: run_server is tested here for its OWN wiring/ordering, not bugreport's own (already tested, hermetic-per-LOCALM_HOME) behaviour."""
+    """Record calls to the crash-guard hooks without touching disk: run_server
+    is tested here for its OWN wiring/ordering, not bugreport's own (already
+    tested, hermetic-per-LOCALM_HOME) behaviour."""
     calls = []
     monkeypatch.setattr(bugreport_mod, "check_and_report_prior_crash",
                         lambda *a, **k: calls.append(("checked",)))

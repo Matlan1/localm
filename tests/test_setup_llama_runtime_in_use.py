@@ -1,5 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Provisioning must refuse BEFORE deleting when the runtime is in use, and `doctor` must fail an install whose BLAS kernel data is missing."""
+"""Provisioning must refuse BEFORE deleting when the runtime is in use, and
+`doctor` must fail an install whose BLAS kernel data is missing.
+
+Both come from one real incident: a `setup-llama --force` on a machine that had
+the runtime loaded left the install with 14 of 24 libraries and 0 of 995 rocBLAS
+kernels, while every existing check still reported it healthy.
+"""
 
 import ctypes
 import shutil
@@ -30,7 +36,12 @@ def test_clear_target_preserves_the_git_sentinels(tmp_path):
 
 
 def test_clear_target_reports_a_file_it_could_not_remove(tmp_path, monkeypatch):
-    """The regression this whole change exists for."""
+    """The regression this whole change exists for.
+
+    Asserted from OUTSIDE via the return value, not by raising from a patched
+    unlink: `_clear_target` catches OSError by design, so an exception-based
+    assertion would be swallowed by the code under test and the test would pass
+    in both directions (diff-review-discipline item 13)."""
     (tmp_path / "llama.dll").write_bytes(b"\x00")
     (tmp_path / "ggml-base.dll").write_bytes(b"\x00")
 
@@ -53,7 +64,8 @@ def test_clear_target_reports_a_file_it_could_not_remove(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- #
 
 def test_clear_target_or_refuse_deletes_nothing_when_a_file_is_in_use(tmp_path, monkeypatch):
-    """The point of the pre-flight: not merely an honest error, but an INTACT install."""
+    """The point of the pre-flight: not merely an honest error, but an INTACT
+    install. Reporting after the fact would still leave a half-cleared dir."""
     (tmp_path / "llama.dll").write_bytes(b"\x00")
     (tmp_path / "ggml-base.dll").write_bytes(b"\x00")
     (tmp_path / "rocblas.dll").write_bytes(b"\x00")
@@ -72,7 +84,9 @@ def test_clear_target_or_refuse_deletes_nothing_when_a_file_is_in_use(tmp_path, 
 
 
 def test_clear_target_or_refuse_flags_the_probe_to_unlink_race_as_partial(tmp_path, monkeypatch):
-    """If a file is locked AFTER the probe passes, files are already gone."""
+    """If a file is locked AFTER the probe passes, files are already gone. That
+    cannot be prevented here, but it must never be silent, and it must not claim
+    the install is intact."""
     (tmp_path / "llama.dll").write_bytes(b"\x00")
     (tmp_path / "ggml-base.dll").write_bytes(b"\x00")
 
@@ -93,7 +107,13 @@ def test_clear_target_or_refuse_flags_the_probe_to_unlink_race_as_partial(tmp_pa
 
 
 def test_exit_runtime_in_use_exits_non_zero(capsys):
-    """The self-updater runs `setup-llama` as a post-swap command and ROLLS THE WHOLE UPDATE BACK on a non-zero exit (updater.py `_rollback_or_raise`)."""
+    """The self-updater runs `setup-llama` as a post-swap command and ROLLS THE
+    WHOLE UPDATE BACK on a non-zero exit (updater.py `_rollback_or_raise`). That
+    is the wanted behaviour here and it is why this contract is pinned: a runtime
+    that could not be re-provisioned beside freshly swapped code is exactly the
+    ABI mismatch the isolation exists to avoid, so completing the update would be
+    worse than undoing it. Before this change the same situation could silently
+    fall back to a different backend and report success."""
     with pytest.raises(SystemExit) as ei:
         setup_llama._exit_runtime_in_use(
             setup_llama.RuntimeInUseError([Path("llama.dll")], partial=False))
@@ -138,7 +158,11 @@ def test_files_in_use_ignores_the_preserved_sentinels(tmp_path):
                            "POSIX unlinks an open file happily, so there is no "
                            "half-state to detect and the probe correctly finds none")
 def test_files_in_use_detects_a_genuinely_loaded_library(tmp_path):
-    """The probe against a REAL loaded DLL, not a mock of one."""
+    """The probe against a REAL loaded DLL, not a mock of one.
+
+    Uses the machine's own provisioned runtime as the specimen (copied out, never
+    touched in place). Skips rather than asserts when no runtime is provisioned,
+    since that is an environment fact and not a defect."""
     from localm.config import find_binary_dir
     src_dir = find_binary_dir()
     if not src_dir:
@@ -198,19 +222,24 @@ def test_blas_flags_a_missing_kernel_directory(tmp_path):
     ["llama.dll"],
 ])
 def test_blas_never_flags_a_backend_that_has_no_rocblas(tmp_path, libs):
-    """Backend-awareness without a platform test or a backend marker: an install that does not ship the vendor library cannot be missing its data."""
+    """Backend-awareness without a platform test or a backend marker: an install
+    that does not ship the vendor library cannot be missing its data."""
     d = _install(tmp_path / "i", libs)
     assert setup_llama.blas_kernel_problems(d) == []
 
 
 def test_blas_matches_the_posix_library_naming(tmp_path):
-    """librocblas.so.4 must match as readily as rocblas.dll, or the check is silently Windows-only on a project that ships Linux ROCm archives too."""
+    """librocblas.so.4 must match as readily as rocblas.dll, or the check is
+    silently Windows-only on a project that ships Linux ROCm archives too."""
     d = _install(tmp_path / "i", ["libllama.so", "librocblas.so.4"])
     assert len(setup_llama.blas_kernel_problems(d)) == 1
 
 
 def test_blas_does_not_require_hipblaslt_kernels(tmp_path):
-    """MEASURED on the shipped b1307 gfx103X archive: libhipblaslt is installed with NO hipblaslt/ directory at all, and that install is healthy."""
+    """MEASURED on the shipped b1307 gfx103X archive: libhipblaslt is installed
+    with NO hipblaslt/ directory at all, and that install is healthy. Requiring
+    one would fire on every normal AMD install, which is how a check gets
+    ignored."""
     d = _install(tmp_path / "i",
                  ["llama.dll", "rocblas.dll", "libhipblaslt.dll"],
                  {"rocblas/library": 3})
@@ -245,7 +274,9 @@ def test_blas_ignores_a_path_that_is_not_a_directory(tmp_path):
     (None,       "cuda",     "Replacing unrecorded build with cuda", None),
 ])
 def test_provision_notice_reads_sensibly(have, want, expect, forbid, capsys):
-    """`--force` on an already-provisioned box used to announce 'Replacing amd-rocm build with amd-rocm' (it is a re-download) or '...with auto' (auto is not a backend, it is how one gets picked)."""
+    """`--force` on an already-provisioned box used to announce "Replacing
+    amd-rocm build with amd-rocm" (it is a re-download) or "...with auto" (auto
+    is not a backend, it is how one gets picked)."""
     from localm.setup_llama import console
     if not have:
         console.print(f"[yellow]Replacing unrecorded build with {want}.[/yellow]")
@@ -264,7 +295,12 @@ def test_provision_notice_reads_sensibly(have, want, expect, forbid, capsys):
 
 
 def test_redownload_names_the_build_it_is_fetching(capsys):
-    """'Re-downloading the amd-rocm build' alone reads as a no-op; the case this came from was a real b1288 -> b1307 upgrade."""
+    """"Re-downloading the amd-rocm build" alone reads as a no-op; the case this
+    came from was a real b1288 -> b1307 upgrade. The OLD version cannot be named
+    (the marker records the backend only), so naming the target is the honest
+    maximum - and only for amd-rocm, whose tag is a pinned constant. The upstream
+    backends resolve theirs with a network call, which a print statement does not
+    get to make."""
     from localm.setup_llama import console, _ROCM_TAG
     console.print(f"[yellow]Re-downloading the amd-rocm build ({_ROCM_TAG}).[/yellow]")
     out = " ".join(capsys.readouterr().out.split())

@@ -1,5 +1,23 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""LBUG-VIEWS regression: a GUI ES module must never REASSIGN a name it imports."""
+"""LBUG-VIEWS regression: a GUI ES module must never REASSIGN a name it imports.
+
+ES module import bindings are read-only. ``import { X } from "./m.js"; X = ...``
+throws ``TypeError: Assignment to constant variable`` in the REAL browser and
+aborts the function mid-way. Two such reassignments shipped and broke the app:
+
+  * settings-perf.js reassigned the imported ``VIEWS`` in rebuildViews(), so the
+    throw aborted renderNav() right after the plugin nav buttons were appended:
+    VIEWS stayed at CORE_VIEWS, _applyActiveClasses (which iterates VIEWS) could
+    never toggle a plugin view active, and every plugin tab (Coder / Images /
+    Music / Video / Knowledge / Jobs) rendered an empty page / did not switch.
+  * chat.js reassigned the imported ``webAskSession`` when clearing the session.
+
+Neither was caught by the JS suite because the jsdom harness STRIPS import/export
+into ONE shared scope, where the reassignment silently works. Only the real ESM
+browser fails. This static check reads the GUI modules as text and fails if any
+reassigns a name it imports; mutate a shared object in place (``VIEWS.length = 0;
+VIEWS.push(...)``) or add a setter in the owning module instead.
+"""
 
 import re
 from pathlib import Path
@@ -14,7 +32,7 @@ def _strip_comments(src: str) -> str:
 
 
 def _imported_names(src: str) -> set:
-    """Local names introduced by ``import { a, b as c } from '...'`` statements."""
+    """Local names introduced by ``import { a, b as c } from "..."`` statements."""
     names = set()
     for m in re.finditer(r"import\s*\{([^}]*)\}\s*from", src):
         for part in m.group(1).split(","):
@@ -25,7 +43,9 @@ def _imported_names(src: str) -> set:
 
 
 def _reassigns(src: str, name: str) -> bool:
-    """True if *name* is assigned as a bare binding (``name = ...``), excluding a local (re)declaration, a member/index write (``name.x =`` / ``name[i] =``), and a comparison (``name ==`` / ``name =>``)."""
+    """True if *name* is assigned as a bare binding (``name = ...``), excluding a
+    local (re)declaration, a member/index write (``name.x =`` / ``name[i] =``), and
+    a comparison (``name ==`` / ``name =>``)."""
     esc = re.escape(name)
     for line in src.splitlines():
         if re.search(r"\b(?:const|let|var)\s+" + esc + r"\b", line):

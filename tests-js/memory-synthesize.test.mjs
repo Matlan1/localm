@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// F7 (memory-audit 2026-07-02): the memory modal exposes a "Synthesize now"
-// button that POSTs /api/memory/consolidate for immediate feedback (a tester
-// can chat, click it, and watch facts appear). This verifies the button POSTs
-// and surfaces the result count.
+// The memory modal's "Synthesize now" button POSTs /api/memory/consolidate and
+// reports the result in its status element.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";

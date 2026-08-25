@@ -1,5 +1,36 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""`localm plugin setup` - the installer's plugin-selection step."""
+"""`localm plugin setup` - the installer's plugin-selection step.
+
+Out of the box only chat is active; setup lets the user (or the installer, or a
+script via --plugins/--all/--defaults) turn on the first-party plugins they want.
+Driven through Click's CliRunner against the real bundled store, with a throwaway
+LOCALM_HOME so installs land in tmp.
+
+EVERY setup invocation here passes --no-deps (or with_deps=False when calling the
+callback directly), and that is load-bearing, not tidiness.
+
+A throwaway LOCALM_HOME isolates the DATA dir. It does not isolate the
+INTERPRETER, and a plugin's pip extras go to the interpreter: `--all` includes
+voice, whose extra is faster-whisper, so this file used to run a real
+`uv pip install --python <the venv running the suite> faster-whisper>=1.2.1`.
+That is the isolation blind spot - the author isolated the obvious thing and the
+install went somewhere else entirely.
+
+The damage was not "a slow test". numpy arrives as a transitive dependency of
+faster-whisper, and WHILE THE WHEEL UNPACKS, site-packages/numpy exists with no
+__init__.py yet - a PEP 420 namespace package, so `import numpy` SUCCEEDS and
+hands back a module with no attributes. Any test in any other xdist worker that
+touched numpy inside that window died with
+`AttributeError: module 'numpy' has no attribute 'asarray'` from rag/store.py,
+hundreds of lines from the cause, and the install then completed and erased the
+evidence. It reddened windows CI at roughly 1 in 3 across unrelated branches for
+a day. Run locally, the same line installs into the developer's shared venv.
+
+The deps orchestration itself is covered in tests/test_plugin_deps_cli.py with
+_run_pip mocked, so nothing is lost by disabling it here. tests/conftest.py now
+BLOCKS an install aimed at the running interpreter, so a regression fails
+immediately, in the test that caused it, instead of somewhere else an hour later.
+"""
 
 import pytest
 from click.testing import CliRunner
@@ -70,8 +101,8 @@ def test_setup_unknown_name_is_skipped_not_fatal(home_env):
 
 
 # --------------------------------------------------------------------------- #
-# R21 / SETUP-3: the interactive prompt parses ranges, de-dups, and re-asks on  #
-# an all-junk entry (never silently leaves zero plugins). Blank still skips.    #
+# The interactive prompt parses ranges, de-dups, and re-asks on an all-junk     #
+# entry, never leaving zero plugins. A blank entry still skips.                 #
 # --------------------------------------------------------------------------- #
 
 def _available():
@@ -91,7 +122,9 @@ def test_parse_plugin_selection_expands_range_and_dedups():
 
 
 def test_parse_plugin_selection_junk_yields_empty():
-    """Pure junk (e.g. 'ewew') and an out-of-range range both parse to nothing, which is what makes the interactive caller re-prompt instead of installing zero plugins."""
+    """Pure junk (e.g. 'ewew') and an out-of-range range both parse to nothing,
+    which is what makes the interactive caller re-prompt instead of installing
+    zero plugins."""
     from localm.cli import _parse_plugin_selection
     avail = _available()
     assert _parse_plugin_selection("ewew", avail) == []
@@ -100,14 +133,18 @@ def test_parse_plugin_selection_junk_yields_empty():
 
 
 def test_parse_plugin_selection_exotic_unicode_digit_no_crash():
-    """A pasted exotic 'digit' (str.isdigit() True but int() rejects, e.g. the superscripts in 'b2-3') must be flagged and skipped, not crash the range branch."""
+    """A pasted exotic 'digit' (str.isdigit() True but int() rejects, e.g. the
+    superscripts in 'b2-3') must be flagged and skipped, not crash the range
+    branch. Guards the isdecimal (not isdigit) gate."""
     from localm.cli import _parse_plugin_selection
     avail = _available()
     assert _parse_plugin_selection("²-³", avail) == []   # superscript 2-3
 
 
 def test_interactive_reprompts_on_junk_then_installs(home_env, monkeypatch):
-    """SETUP-3: typing 'ewew' must NOT silently leave zero plugins - the prompt re-asks, and a valid follow-up entry installs."""
+    """SETUP-3: typing 'ewew' must NOT silently leave zero plugins - the prompt
+    re-asks, and a valid follow-up entry installs. Driven by calling the command
+    callback directly with a forced-tty + scripted prompt answers."""
     from localm import cli
     monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
     answers = iter(["ewew", "1"])   # junk, then the first plugin by index
@@ -118,7 +155,8 @@ def test_interactive_reprompts_on_junk_then_installs(home_env, monkeypatch):
 
 
 def test_interactive_blank_skips_without_reprompt(home_env, monkeypatch):
-    """A blank entry is a deliberate skip: it must NOT re-prompt and must install nothing (only one prompt is consumed)."""
+    """A blank entry is a deliberate skip: it must NOT re-prompt and must install
+    nothing (only one prompt is consumed)."""
     from localm import cli
     monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
     answers = iter([""])            # a single blank; a re-prompt would StopIteration

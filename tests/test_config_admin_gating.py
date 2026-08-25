@@ -1,5 +1,38 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Owner-only gating for the two config keys that decide WHAT THE PROCESS LOADS (CodeQL WS7: alerts 100-107, 122-125, 127)."""
+"""Owner-only gating for the two config keys that decide WHAT THE PROCESS LOADS
+(CodeQL WS7: alerts 100-107, 122-125, 127).
+
+``binary_dir`` names the directory the native llama runtime is loaded from: the
+loader prepends it to the OS search path, CDLL()s every ``ggml*`` in it and loads
+``llama.dll`` from it, so setting it is arbitrary native code execution in the
+server process. ``embedding_model`` names a GGUF this process opens, and
+``_sizing`` reads it on the CHAT model load path, so a poisoned value fires on
+the owner's own next action.
+
+Both were plain ``config:write`` fields with no ``admin_only``, which is a wider
+trust widening than ``rag_index_paths`` / ``net_allow_private`` / ``cors_origins``
+- all of which were already owner-only. ``embedding_model`` additionally had a
+SECOND writer, ``POST /api/rag/embedding``, mounted under the plugin's ``rag``
+scope; ``rag`` is not in ``scopes.PRIVILEGED_SCOPES`` and ``--scope chat --scope
+rag`` is the documented restricted key, so the schema flag alone would not have
+covered it.
+
+OWNERSHIP NOTE. The two ``admin_only=True`` schema flags themselves are NOT set by
+this branch. ``localm/settings_schema.py`` is owned, for this remediation program,
+by the 88-field CORE_FIELDS gating sweep, so both flags (and the exact-equality pin
+in ``tests/test_settings_schema.py``) were handed to that lane rather than edited
+here - three lanes writing the same kind of flag into one schema file risks a
+rebase silently dropping one, and a missing security flag has no conflict marker.
+
+That makes the first two test groups below a CROSS-LANE GUARD rather than a
+self-check: they fail on THIS branch if that sweep does not land the flags, or
+lands them without the gate actually consulting them. They assert MEMBERSHIP in
+``admin_only_keys()`` AND drive the real PATCH route end to end, because set
+membership alone cannot detect a gate that stopped reading the set - and
+membership is exactly what nobody checked when ``binary_dir`` sat unprotected.
+The ``test_owner_can_still_set_*`` cases are the other direction: they fail if the
+sweep OVER-gates and takes a documented owner capability away.
+"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -17,7 +50,8 @@ OWNER_KEY = "owner-admin-key-ws7-abc123"
 # --------------------------------------------------------------------------- #
 
 def test_load_selecting_keys_are_admin_only():
-    """The gate at routes/config.py consults admin_only_keys(); a field that is not in that SET is not gated, however owner-ish its help text looks."""
+    """The gate at routes/config.py consults admin_only_keys(); a field that is
+    not in that SET is not gated, however owner-ish its help text looks."""
     from localm.settings_schema import admin_only_keys
     keys = admin_only_keys()
     assert "binary_dir" in keys, \
@@ -32,7 +66,8 @@ def test_load_selecting_keys_are_admin_only():
 
 @pytest.fixture
 def app_env(tmp_path, monkeypatch):
-    """Protected-mode app: an owner (ADMIN) key via env plus a scoped config:read/config:write key in the keystore, under an isolated data dir."""
+    """Protected-mode app: an owner (ADMIN) key via env plus a scoped
+    config:read/config:write key in the keystore, under an isolated data dir."""
     import localm.config as cfg
     home = tmp_path / ".localm"
     home.mkdir(parents=True, exist_ok=True)
@@ -60,7 +95,8 @@ def _scoped(key):
 
 @pytest.mark.parametrize("key", ["binary_dir", "embedding_model"])
 def test_scoped_key_cannot_set_load_selecting_key(app_env, key):
-    """403 for the non-owner config:write key AND the stored value is unchanged - a refused write that still landed would be the worst of both."""
+    """403 for the non-owner config:write key AND the stored value is unchanged
+    - a refused write that still landed would be the worst of both."""
     from localm.config import load_config
     c, scoped, tmp_path = app_env
     evil = tmp_path / "planted"
@@ -83,7 +119,9 @@ def test_scoped_key_cannot_set_load_selecting_key(app_env, key):
 
 @pytest.mark.parametrize("key", ["binary_dir", "embedding_model"])
 def test_owner_can_still_set_load_selecting_key(app_env, key):
-    """admin_only HIDES a field from a non-owner; it must not remove it."""
+    """admin_only HIDES a field from a non-owner; it must not remove it. A custom
+    llama.cpp build (binary_dir) and a hand-picked GGUF (embedding_model) are
+    both supported OWNER setups."""
     from localm.config import load_config
     c, _scoped_key, tmp_path = app_env
     d = tmp_path / "custom-build"
@@ -96,7 +134,8 @@ def test_owner_can_still_set_load_selecting_key(app_env, key):
 
 
 def test_gate_is_specific_not_a_blanket_block(app_env):
-    """The same scoped key still writes an ordinary config:write field, so this is a targeted trust gate rather than a general loss of the scope."""
+    """The same scoped key still writes an ordinary config:write field, so this
+    is a targeted trust gate rather than a general loss of the scope."""
     c, scoped, _ = app_env
     assert c.patch("/v1/config", headers=_scoped(scoped),
                    json={"net_allow": ["x.com"]}).status_code == 200
@@ -108,7 +147,9 @@ def test_gate_is_specific_not_a_blanket_block(app_env):
 
 @pytest.fixture
 def rag_app_env(tmp_path, monkeypatch):
-    """The rag plugin mounted on a real auth-enforcing app, with a rag-only key."""
+    """The rag plugin mounted on a real auth-enforcing app, with a rag-only key.
+    This is the documented restricted key shape (docs/cli.md offers
+    ``--scope chat --scope rag``)."""
     import localm.config as cfg
     home = tmp_path / ".localm"
     home.mkdir(parents=True, exist_ok=True)
@@ -128,7 +169,9 @@ def rag_app_env(tmp_path, monkeypatch):
 
 
 def test_rag_scoped_key_cannot_set_embedding_model(rag_app_env):
-    """The rag scope reaches this route by mount, but the route writes an admin_only key, so it must demand an owner principal itself."""
+    """The rag scope reaches this route by mount, but the route writes an
+    admin_only key, so it must demand an owner principal itself. Without this the
+    plugin route is a back door around the PATCH /v1/config gate."""
     from localm.config import load_config
     c, rag_key, tmp_path = rag_app_env
     before = load_config().get("embedding_model")
@@ -142,7 +185,10 @@ def test_rag_scoped_key_cannot_set_embedding_model(rag_app_env):
 
 
 def test_rag_get_embedding_is_not_a_file_existence_oracle(rag_app_env):
-    """GET reports `installed` only for a localm-managed identity (a known key or a registered model)."""
+    """GET reports `installed` only for a localm-managed identity (a known key or
+    a registered model). For a bare path it must neither stat the file nor echo
+    the path back to a non-owner - `embedding_model` is admin_only, so GET
+    /v1/config already withholds that same value."""
     from localm.config import update_config
     c, rag_key, tmp_path = rag_app_env
     secret = tmp_path / "owner-only-secret.gguf"
@@ -155,7 +201,7 @@ def test_rag_get_embedding_is_not_a_file_existence_oracle(rag_app_env):
     assert body["status"] == "unknown"
     assert str(secret) not in str(body), "the owner's path must not be echoed back"
 
-    # The OWNER still gets the real answer, so this is a boundary, not a downgrade.
+    # The OWNER still gets the real answer.
     owner_body = c.get("/api/rag/embedding", headers=_owner()).json()
     assert owner_body["installed"] is True
     assert owner_body["model"] == str(secret)
@@ -171,7 +217,8 @@ def test_rag_get_embedding_is_not_a_file_existence_oracle(rag_app_env):
 
 
 def test_owner_key_can_still_select_the_embedding_model(rag_app_env):
-    """The owner is not blocked by the new gate: the route gets past the principal check and fails later (or succeeds), never with a 403."""
+    """The owner is not blocked by the new gate: the route gets past the
+    principal check and fails later (or succeeds), never with a 403."""
     c, _rag_key, _tmp = rag_app_env
     r = c.post("/api/rag/embedding", headers=_owner(),
                json={"model": "bge-small-en-v1.5"})
@@ -192,7 +239,15 @@ def test_owner_key_can_still_select_the_embedding_model(rag_app_env):
 ])
 def test_resolve_embedding_model_path_rejects_nonlocal_spec(tmp_path, monkeypatch,
                                                             caplog, spec, marker):
-    """A single is_file()/stat()/resolve() on a UNC path hands the string to the Windows SMB redirector - minutes of stall on an unroutable host, and an outbound net-NTLMv2 credential to a reachable one."""
+    """A single is_file()/stat()/resolve() on a UNC path hands the string to the
+    Windows SMB redirector - minutes of stall on an unroutable host, and an
+    outbound net-NTLMv2 credential to a reachable one. So the refusal must land
+    BEFORE any filesystem call, not after it.
+
+    Asserted by SPYING on the three syscall entry points and proving the spec
+    never reached any of them. A spy that delegates (rather than one that raises)
+    keeps this deterministic off-Windows and keeps pytest's own internal Path use
+    working - patching Path.stat to raise takes down the test runner itself."""
     import localm.config as cfg
     from localm.inference import embedder
     home = tmp_path / ".localm"
@@ -225,14 +280,14 @@ def test_resolve_embedding_model_path_rejects_nonlocal_spec(tmp_path, monkeypatc
     assert result is None
     offenders = [t for t in touched if marker in t]
     assert not offenders, f"the non-local spec reached the filesystem: {offenders}"
-    # Rule 5: an ignored setting must not be indistinguishable from "not
-    # downloaded yet" - the reason is logged, not swallowed.
+    # The reason an ignored setting was refused is logged, not swallowed.
     assert "embedding_model" in caplog.text
 
 
 def test_resolve_embedding_model_path_still_accepts_a_local_gguf(tmp_path,
                                                                  monkeypatch):
-    """The rejection is narrow: an ordinary local path is still resolved, so the documented owner behavior (point it at a GGUF anywhere) is intact."""
+    """The rejection is narrow: an ordinary local path is still resolved, so the
+    documented owner behavior (point it at a GGUF anywhere) is intact."""
     import localm.config as cfg
     from localm.inference import embedder
     home = tmp_path / ".localm"
@@ -273,25 +328,38 @@ def test_nonlocal_spec_reason_rejects(spec):
     "bge-small-en-v1.5", "my-registered-model",
 ])
 def test_nonlocal_spec_reason_allows_ordinary_paths(spec):
-    """The over-rejection control."""
+    """The over-rejection control. Pointing embedding_model at a GGUF anywhere
+    local is DOCUMENTED owner behaviour, so a rule that ate ordinary paths would
+    be a worse bug than the one being fixed."""
     from localm.inference.embedder import _nonlocal_spec_reason
     assert _nonlocal_spec_reason(spec) is None, f"{spec!r} must be allowed"
 
 
 @pytest.mark.parametrize("spec", ["\\/host\\share\\x", "/\\host/share/x"])
 def test_mixed_separator_unc_is_rejected(spec):
-    """Windows accepts \\ and / interchangeably in a UNC prefix, so these two spellings ARE UNC to the OS, and a spec-rejection rule that only matched the doubled spellings would be bypassable by writing the path differently."""
+    """Windows accepts \\ and / interchangeably in a UNC prefix, so these two
+    spellings ARE UNC to the OS, and a spec-rejection rule that only matched the
+    doubled spellings would be bypassable by writing the path differently.
+
+    The rejection now comes from pathsafe's shared predicate (it originally did
+    not - that was a live bypass this lane reported, fixed upstream by a prefix
+    table plus an ntpath.splitdrive backstop). The OS-level fact is asserted here
+    INDEPENDENTLY of the implementation, so this test cannot drift with the code
+    it guards, and it keeps failing loudly if a future pathsafe refactor narrows
+    the predicate back to a startswith."""
     import ntpath
     from pathlib import PureWindowsPath
     from localm.inference.embedder import _nonlocal_spec_reason
-    # The OS-level fact this rule exists for, asserted, not assumed.
+    # The OS-level fact this rule covers.
     assert PureWindowsPath(spec).drive == "\\\\host\\share"
     assert ntpath.splitdrive(spec)[0] != ""
     assert _nonlocal_spec_reason(spec)
 
 
 def test_policy_actually_calls_the_shared_pathsafe_predicate(monkeypatch):
-    """Guard against the local policy silently drifting into a FORK of the shared primitive: it must delegate the plain UNC case to pathsafe rather than reimplementing it, so a future fix there reaches this call site."""
+    """Guard against the local policy silently drifting into a FORK of the
+    shared primitive: it must delegate the plain UNC case to pathsafe rather
+    than reimplementing it, so a future fix there reaches this call site."""
     import localm.pathsafe as ps
     from localm.inference import embedder
     calls = []
@@ -307,7 +375,11 @@ def test_policy_actually_calls_the_shared_pathsafe_predicate(monkeypatch):
 # --------------------------------------------------------------------------- #
 
 def test_mcp_setup_embeddings_refuses_a_raw_path(tmp_path, monkeypatch):
-    """stdio has no principal to gate on - the MCP client already runs as the owner - so the gate there is on the VALUE."""
+    """stdio has no principal to gate on - the MCP client already runs as the
+    owner - so the gate there is on the VALUE. The client is normally an LLM
+    steerable by injected content, and this writes the admin_only
+    `embedding_model` key, so a raw path is refused (loudly, per rule 5) while a
+    known key still works."""
     import localm.config as cfg
     home = tmp_path / ".localm"
     home.mkdir(parents=True, exist_ok=True)
@@ -328,8 +400,7 @@ def test_mcp_setup_embeddings_refuses_a_raw_path(tmp_path, monkeypatch):
     assert "Refusing" in str(out)
     assert cfg.load_config().get("embedding_model") == before, \
         "a refused MCP call must not have written the key"
-    # The restriction is stated in the tool DESCRIPTION too - that string is what
-    # the calling model reads, so a silent refusal would just make it retry.
+    # The restriction is stated in the tool DESCRIPTION too.
     assert "known" in tools["setup_embeddings"]["inputSchema"][
         "properties"]["model"]["description"].lower()
 
@@ -339,7 +410,11 @@ def test_mcp_setup_embeddings_refuses_a_raw_path(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- #
 
 def test_setup_embeddings_cli_registers_a_known_model(tmp_path, monkeypatch):
-    """`localm setup-embeddings` is the owner path and must be untouched: a known key downloaded into <home>/models/embeddings is still registered into the Model Manager."""
+    """`localm setup-embeddings` is the owner path and must be untouched: a known
+    key downloaded into <home>/models/embeddings is still registered into the
+    Model Manager. Also pins the guard alert 127's triage wrongly called a
+    sanitizer: the `p.parent == _embeddings_dir()` check is what stops an
+    EXTERNAL user-pointed GGUF being auto-registered, and it stays."""
     import localm.config as cfg
     home = tmp_path / ".localm"
     (home / "models" / "embeddings").mkdir(parents=True, exist_ok=True)
@@ -369,7 +444,9 @@ def test_setup_embeddings_cli_registers_a_known_model(tmp_path, monkeypatch):
 
 def test_setup_embeddings_cli_does_not_register_an_external_gguf(tmp_path,
                                                                  monkeypatch):
-    """The negative control for the guard above (the one alert 127 would have had us delete): a GGUF OUTSIDE the embeddings dir is used but never registered, so a user-pointed external model keeps whatever registration it already had."""
+    """The negative control for the guard above (the one alert 127 would have had
+    us delete): a GGUF OUTSIDE the embeddings dir is used but never registered,
+    so a user-pointed external model keeps whatever registration it already had."""
     import localm.config as cfg
     home = tmp_path / ".localm"
     (home / "models" / "embeddings").mkdir(parents=True, exist_ok=True)
@@ -401,7 +478,9 @@ def test_setup_embeddings_cli_does_not_register_an_external_gguf(tmp_path,
 def test_loader_warns_when_the_runtime_dir_is_not_the_bundled_wheel(tmp_path,
                                                                     caplog,
                                                                     monkeypatch):
-    """Everything in that directory gets native code execution in this process, so an override must be VISIBLE in the log rather than silent (rule 5)."""
+    """Everything in that directory gets native code execution in this process,
+    so an override must be VISIBLE in the log rather than silent (rule 5). It is
+    not an error: binary_dir stays a supported owner setting."""
     from localm.inference.backends.llamacpp import _loader
     monkeypatch.setattr(_loader, "_warned_foreign_binary_dir", False)
     monkeypatch.setenv("LLAMA_CPP_LIB", str(tmp_path / "custom" / "llama.dll"))
@@ -419,7 +498,8 @@ def test_loader_warns_when_the_runtime_dir_is_not_the_bundled_wheel(tmp_path,
 
 
 def test_loader_is_silent_for_the_bundled_wheel_dir(tmp_path, caplog, monkeypatch):
-    """The negative control: the normal self-contained install must NOT warn, or the warning is noise everyone learns to ignore."""
+    """The negative control: the normal self-contained install must NOT warn, or
+    the warning is noise everyone learns to ignore."""
     import sys
     import types
     from localm.inference.backends.llamacpp import _loader

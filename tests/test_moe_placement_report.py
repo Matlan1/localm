@@ -1,5 +1,33 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""MoE expert placement OBSERVABILITY: n_cpu_moe (test_moe_cpu_placement.py) had no way to confirm it actually moved anything - the worker never reported llama.cpp's own load placement back to the parent, and even the load-FAILURE diagnostic was silently broken."""
+"""MoE expert placement OBSERVABILITY: n_cpu_moe (test_moe_cpu_placement.py) had
+no way to confirm it actually moved anything - the worker never reported
+llama.cpp's own load placement back to the parent, and even the load-FAILURE
+diagnostic was silently broken. This file covers:
+
+  * _MODEL_BUFFER_RE / _CapturedStderr.model_buffers() - parsing llama.cpp's
+    own "load_tensors: <backend> model buffer size = N MiB" report, the ONLY
+    source for a per-backend weight-placement split (no llama.h API exists
+    for it - verified: no buffer-size introspection function is bound in
+    llamacpp/_api.py, and none exists to bind).
+  * _capture_stderr's temp-file lifetime: a real, pre-existing bug found
+    while building this - the temp file was unlinked in the context
+    manager's OWN finally block, before the caller (outside the `with`)
+    ever read it, so BOTH the existing load-failure detail (captured.tail())
+    and this file's new success-path placement report would silently return
+    ""/[] forever. Verified live against a real load-failure RuntimeError
+    before the fix (message carried none of the native reason) and after
+    (the real "invalid magic characters" detail appeared). Fixed by reading
+    inside the `with` block instead of after it exits.
+  * GgufWorker.load()'s meta dict carries weight_placement through the
+    isolated-worker process boundary (see test_gguf_worker.py for the
+    worker-level wiring test).
+  * GgufBackend._load_native() prints a one-line placement summary, gated on
+    n_cpu_moe>0 so an ordinary load stays as quiet as before.
+  * A REAL end-to-end load (@pytest.mark.integration) of a genuine tiny MoE
+    GGUF through the full GgufBackend -> isolated worker pipeline, proving
+    the printed numbers are real and non-trivial - a field-presence test
+    alone proves plumbing, not truth.
+"""
 
 import os
 import re
@@ -20,7 +48,10 @@ def _s(text: str) -> bytes:
 
 
 def _dense_gguf(path):
-    """A REAL minimal GGUF header for an architecture with NO expert_count key - the 'no_experts' skip path _apply_cpu_moe reports via MOE_SKIP_MESSAGES."""
+    """A REAL minimal GGUF header for an architecture with NO expert_count
+    key - the "no_experts" skip path _apply_cpu_moe reports via
+    MOE_SKIP_MESSAGES. Same construction as test_moe_cpu_placement.py's own
+    _gguf() helper, trimmed to just this one shape."""
     kv = [
         ("general.architecture", _T_STRING, "llama"),
         ("llama.block_count", _T_UINT32, 32),
@@ -42,8 +73,7 @@ def _dense_gguf(path):
 # --------------------------------------------------------------------------- #
 
 # Captured verbatim from a real load of mradermacher/tiny-random-granite-moe-GGUF
-# (Q8_0, n_cpu_moe=1) on this platform's ROCm build - see dev-notes for the full
-# capture. Confirms the regex against genuine llama.cpp output, not a guess.
+# (Q8_0, n_cpu_moe=1) on this platform's ROCm build.
 _REAL_LOAD_TENSORS_EXCERPT = """\
 load_tensors: loading model tensors, this can take a while... (mmap = false, direct_io = false)
 load_tensors: layer   0 assigned to device ROCm0, is_swa = 0
@@ -94,12 +124,23 @@ class TestModelBufferParsing:
         assert llama_mod._CapturedStderr(str(missing)).model_buffers() == []
 
     def test_adversarial_input_stays_linear_time(self, tmp_path):
-        """CodeQL (py/polynomial-redos, PR #1007) correctly flagged an earlier version of _MODEL_BUFFER_RE that used \\S+ for the backend-name group: captured native stderr is technically uncontrolled data, and a string with many 'load_tensors:' restart points that never complete the rest of the pattern let \\S+..."""
+        """CodeQL (py/polynomial-redos, PR #1007) correctly flagged an earlier
+        version of _MODEL_BUFFER_RE that used \\S+ for the backend-name group:
+        captured native stderr is technically uncontrolled data, and a string
+        with many "load_tensors:" restart points that never complete the rest
+        of the pattern let \\S+ backtrack across the whole remaining text at
+        EVERY restart point - O(n^2) total. Measured live before the fix:
+        0.019s/0.081s/0.330s/1.140s for n=500/1000/2000/4000 repetitions (a
+        clean quadratic curve, up to 1853x slower than the fixed version at
+        n=4000). [A-Za-z0-9_]+ has no character overlap with "load_tensors:"'s
+        colon or the following literal's leading space, so a failed attempt
+        terminates immediately with no backtracking - this test proves that
+        property directly (wall-clock IS the security property here, not a
+        proxy for one) rather than merely asserting the regex text changed."""
         import time
         p = tmp_path / "adversarial.log"
-        # 20_000 repetitions, no valid completion anywhere - extrapolating the
-        # measured quadratic curve above, the pre-fix \S+ pattern would take
-        # roughly 25-30s here; the fixed pattern finishes in well under 0.1s.
+        # 20_000 repetitions with no valid completion anywhere; the pattern still
+        # finishes in well under 0.1s.
         p.write_text("load_tensors:" * 20_000 + "!", encoding="utf-8")
         start = time.perf_counter()
         result = llama_mod._CapturedStderr(str(p)).model_buffers()
@@ -112,12 +153,13 @@ class TestModelBufferParsing:
 
 
 # --------------------------------------------------------------------------- #
-#  _capture_stderr temp-file lifetime (the bug found while building this)      #
+#  _capture_stderr temp-file lifetime                                         #
 # --------------------------------------------------------------------------- #
 
 class TestCaptureStderrLifetime:
     def test_reading_inside_the_block_sees_the_written_text(self):
-        """The correct usage - .tail()/.model_buffers() called INSIDE the `with` block, before the finally clause's unlink fires."""
+        """The correct usage - .tail()/.model_buffers() called INSIDE the
+        `with` block, before the finally clause's unlink fires."""
         with llama_mod._capture_stderr() as captured:
             os.write(2, b"load_tensors: ROCm0 model buffer size =   9.00 MiB\n")
             tail = captured.tail()
@@ -126,14 +168,26 @@ class TestCaptureStderrLifetime:
         assert buffers == [{"backend": "ROCm0", "mib": 9.0, "is_ram": False}]
 
     def test_reading_after_the_block_exits_is_empty_not_stale(self):
-        """Regression lock for the bug this file's module docstring describes: _capture_stderr unlinks its temp file in its OWN finally, so a caller that reads captured.tail()/.model_buffers() AFTER the `with` block has exited must see ''/[] - never raise, and never silently look like a successful-but-empty re..."""
+        """Regression lock for the bug this file's module docstring describes:
+        _capture_stderr unlinks its temp file in its OWN finally, so a caller
+        that reads captured.tail()/.model_buffers() AFTER the `with` block has
+        exited must see ""/[] - never raise, and never silently look like a
+        successful-but-empty read. This is exactly the shape llama.py's load
+        call used to have (reads happened after the block) and no longer does
+        (see the _load_ctx restructuring in llama.py's __init__)."""
         with llama_mod._capture_stderr() as captured:
             os.write(2, b"load_tensors: ROCm0 model buffer size =   9.00 MiB\n")
         assert captured.tail() == ""
         assert captured.model_buffers() == []
 
     def test_debug_mode_tees_captured_text_into_the_debug_log(self, tmp_path):
-        """The other half of the fix: when debug mode is on, the captured text must ALSO reach the debug log file before the temp file is removed - matching _quiet_stderr's 'debug mode sees the native stream' contract at its other call sites. _capture_stderr's own docstring notes this load span is the one _qui..."""
+        """The other half of the fix: when debug mode is on, the captured text
+        must ALSO reach the debug log file before the temp file is removed -
+        matching _quiet_stderr's "debug mode sees the native stream" contract
+        at its other call sites. _capture_stderr's own docstring notes this
+        load span is the one _quiet_stderr does not cover, which is why
+        without this the load's own native report was invisible even under
+        LOCALM_DEBUG=1."""
         log_path = tmp_path / "debug.log"
         log_path.write_bytes(b"")
 
@@ -146,20 +200,26 @@ class TestCaptureStderrLifetime:
         assert "ROCm0 model buffer size" in log_path.read_text(encoding="utf-8")
 
     def test_debug_mode_off_does_not_touch_the_log(self):
-        """No debug log target (the normal case) must not attempt anything beyond the existing temp-file capture/cleanup - never raise."""
+        """No debug log target (the normal case) must not attempt anything
+        beyond the existing temp-file capture/cleanup - never raise."""
         with patch("localm.debuglog.native_stderr_target", return_value=None):
             with llama_mod._capture_stderr():
                 os.write(2, b"hello\n")   # must not raise
 
 
 # --------------------------------------------------------------------------- #
-#  Load-failure detail actually reaches the raised error (the bug's other     #
-#  visible symptom, at the layer a real caller sees)                          #
+#  Load-failure detail reaches the raised error, at the layer a caller sees   #
 # --------------------------------------------------------------------------- #
 
 class TestLoadFailureDetailSurvivesUnlink:
     def test_null_model_ptr_with_captured_detail_is_included_in_the_error(self, monkeypatch):
-        """Drives LlamaCpp.__init__'s actual restructured load block (not just _capture_stderr in isolation) with the native call faked to return NULL after writing a diagnosable reason to fd 2 - proving the RuntimeError's message carries that reason, not just the generic '(run with LOCALM_DEBUG=1 ...)' hint t..."""
+        """Drives LlamaCpp.__init__'s actual restructured load block (not just
+        _capture_stderr in isolation) with the native call faked to return
+        NULL after writing a diagnosable reason to fd 2 - proving the
+        RuntimeError's message carries that reason, not just the generic
+        '(run with LOCALM_DEBUG=1 ...)' hint the pre-fix code always fell
+        back to (verified live against this exact code path: a corrupted
+        GGUF's RuntimeError contained zero native detail before this fix)."""
         # Layout-agnostic here: only tensor_buft_overrides is touched, and it is
         # at the same offset in both llama_model_params layouts (guarded by
         # test_moe_cpu_placement.test_tensor_buft_overrides_offset_is_layout_agnostic).
@@ -197,13 +257,10 @@ class TestLoadFailureDetailSurvivesUnlink:
 
 
 # --------------------------------------------------------------------------- #
-#  ONE contiguous native-call scope - the "0:00:00" spinner bug's regression   #
-#  lock. llama_backend_init() used to get its own SEPARATE _quiet_stderr()     #
-#  scope that exited before _apply_cpu_moe ran, leaving a gap where neither    #
-#  fd 2 nor the debug-mode console mirror was managed - exactly where a        #
-#  debug-mode _dbg.info() call from _apply_cpu_moe reached the shared          #
-#  terminal raw, desyncing the parent's Rich Progress cursor tracking and      #
-#  stranding a stuck "0:00:00" spinner frame on screen.                        #
+#  ONE contiguous native-call scope covering llama_backend_init() and         #
+#  _apply_cpu_moe, so neither fd 2 nor the debug-mode console mirror is       #
+#  left unmanaged between them and no _dbg.info() output reaches the          #
+#  shared terminal raw.                                                       #
 # --------------------------------------------------------------------------- #
 
 class TestMergedNativeCallScope:
@@ -259,7 +316,10 @@ class TestMergedNativeCallScope:
                                    verbose=verbose, n_cpu_moe=n_cpu_moe)
 
     def test_backend_init_and_load_share_one_scope_not_two(self, monkeypatch):
-        """The regression this whole file guards: before the fix, llama_backend_init() ran inside its OWN _quiet_stderr() that had already exited by the time _capture_stderr's scope began - two separate enter/exit pairs with a gap between them, not one."""
+        """The regression this whole file guards: before the fix,
+        llama_backend_init() ran inside its OWN _quiet_stderr() that had
+        already exited by the time _capture_stderr's scope began - two
+        separate enter/exit pairs with a gap between them, not one."""
         events = []
         self._drive(monkeypatch, events, n_cpu_moe=0)
         assert events == [
@@ -269,7 +329,10 @@ class TestMergedNativeCallScope:
         ], events
 
     def test_apply_cpu_moe_runs_inside_the_same_scope(self, monkeypatch):
-        """The concrete bug: _apply_cpu_moe (and the _dbg.info call inside it - see TestMoeSkipReasonPrint above for what it can log) must run strictly BETWEEN the one mirror/capture enter and the one exit, never outside it."""
+        """The concrete bug: _apply_cpu_moe (and the _dbg.info call inside it
+        - see TestMoeSkipReasonPrint above for what it can log) must run
+        strictly BETWEEN the one mirror/capture enter and the one exit, never
+        outside it."""
         events = []
         self._drive(monkeypatch, events, n_cpu_moe=2)
         assert events == [
@@ -279,13 +342,18 @@ class TestMergedNativeCallScope:
         ], events
 
     def test_apply_cpu_moe_skipped_entirely_when_n_cpu_moe_is_zero(self, monkeypatch):
-        """The default (off) load must not pay for or touch MoE placement at all - matches _apply_cpu_moe's own opt-in contract, unchanged by this scope merge."""
+        """The default (off) load must not pay for or touch MoE placement at
+        all - matches _apply_cpu_moe's own opt-in contract, unchanged by
+        this scope merge."""
         events = []
         self._drive(monkeypatch, events, n_cpu_moe=0)
         assert "apply_cpu_moe" not in events
 
     def test_verbose_mode_skips_both_wraps(self, monkeypatch):
-        """verbose=True means 'let native output through unfiltered' - ALL of it, including via the console mirror - so neither wrap engages, exactly like the pre-merge code's own contextlib.nullcontext branch for both _quiet_stderr and _capture_stderr individually."""
+        """verbose=True means "let native output through unfiltered" - ALL
+        of it, including via the console mirror - so neither wrap engages,
+        exactly like the pre-merge code's own contextlib.nullcontext branch
+        for both _quiet_stderr and _capture_stderr individually."""
         events = []
         self._drive(monkeypatch, events, n_cpu_moe=2, verbose=True)
         assert "mirror_enter" not in events
@@ -298,7 +366,13 @@ class TestMergedNativeCallScope:
 
 
 class TestConsoleMirrorGenuinelySilentDuringMoeLoad:
-    """The end-to-end proof, not just 'the wrap was entered': with a REAL console-mirror handler attached to the shared logger (the exact debug-mode state _add_console_handler produces) and n_cpu_moe set high enough that _apply_cpu_moe's own _dbg.info call fires for real, the mirror stream must receive NOT..."""
+    """The end-to-end proof, not just "the wrap was entered": with a REAL
+    console-mirror handler attached to the shared logger (the exact
+    debug-mode state _add_console_handler produces) and n_cpu_moe set high
+    enough that _apply_cpu_moe's own _dbg.info call fires for real, the
+    mirror stream must receive NOTHING while LlamaCpp.__init__'s merged scope
+    is open - this is the actual observable fix for the stuck "0:00:00"
+    spinner line, not just a spy-order assertion."""
 
     def test_mirror_stream_receives_nothing_from_apply_cpu_moe(self, monkeypatch, tmp_path):
         import io
@@ -313,14 +387,10 @@ class TestConsoleMirrorGenuinelySilentDuringMoeLoad:
         mirror.setFormatter(logging.Formatter("%(levelname)-7s %(name)s: %(message)s"))
         saved_level = debuglog.logger.level
         # suppress_console_mirror() identifies "the mirror" as the FIRST
-        # non-FileHandler StreamHandler on the logger. In the shipped product that
-        # is unambiguous - the only other handlers are a ring buffer (a plain
-        # logging.Handler) and file handlers, which the predicate excludes - but a
-        # sibling test in the same xdist worker can leave one attached, and then
-        # the suppressor detaches THAT one and this stand-in keeps receiving.
-        # That is why this failed on the Linux leg only: worker composition, not
-        # platform. Reproduced verbatim on Windows by attaching one decoy handler.
-        # Detach any pre-existing ones so this stand-in IS unambiguously the mirror.
+        # non-FileHandler StreamHandler on the logger. A sibling test in the same
+        # xdist worker can leave one attached, in which case the suppressor detaches
+        # THAT one and this stand-in keeps receiving. Detach any pre-existing ones
+        # so this stand-in IS unambiguously the mirror.
         preexisting = [h for h in list(debuglog.logger.handlers)
                        if isinstance(h, logging.StreamHandler)
                        and not isinstance(h, logging.FileHandler)]
@@ -338,10 +408,9 @@ class TestConsoleMirrorGenuinelySilentDuringMoeLoad:
             def _fake_load_model_from_file(path, params):
                 return None
 
-            # A real, parseable dense-model GGUF header (no expert_count key)
-            # so _apply_cpu_moe's own real code (not mocked here - this test
-            # wants the REAL _dbg.info call to fire) reaches its "no experts"
-            # skip path and actually logs.
+            # A real, parseable dense-model GGUF header (no expert_count key) so
+            # _apply_cpu_moe's own real code (not mocked here) reaches its "no
+            # experts" skip path and logs.
             model_path = _dense_gguf(tmp_path / "tiny.gguf")
 
             monkeypatch.setattr(llama_mod.api, "llama_backend_init", _fake_backend_init)
@@ -403,7 +472,8 @@ class TestPlacementSummaryPrint:
         assert "n_cpu_moe=2" in out
 
     def test_silent_when_n_cpu_moe_is_off(self, tmp_path, capsys):
-        """The default (off) load must stay exactly as quiet as before this change - the summary is opt-in observability, not new noise."""
+        """The default (off) load must stay exactly as quiet as before this
+        change - the summary is opt-in observability, not new noise."""
         b = _backend(tmp_path, n_cpu_moe=0)
         _load(b, weight_placement=[
             {"backend": "ROCm0", "mib": 800.0, "is_ram": False},
@@ -412,7 +482,9 @@ class TestPlacementSummaryPrint:
         assert "moe placement" not in out
 
     def test_honest_when_n_cpu_moe_set_but_not_reported(self, tmp_path, capsys):
-        """verbose mode or a parse miss reports [] - which must never be silently read as '0 bytes everywhere' (AGENTS.md rule 5): say plainly that it was not reported."""
+        """verbose mode or a parse miss reports [] - which must never be
+        silently read as "0 bytes everywhere" (AGENTS.md rule 5): say
+        plainly that it was not reported."""
         b = _backend(tmp_path, n_cpu_moe=2)
         _load(b, weight_placement=[])
         out = capsys.readouterr().out
@@ -421,7 +493,15 @@ class TestPlacementSummaryPrint:
 
 
 class TestMoeSkipReasonPrint:
-    """The message _apply_cpu_moe used to print directly from the ISOLATED CHILD (garbling the parent's spinner - issues/MoE model issues.txt) now renders from the PARENT, from the moe_skip_reason fact carried through GgufWorker.load()'s metadata (see test_gguf_worker.py's test_load_passes_through_moe_skip..."""
+    """The message _apply_cpu_moe used to print directly from the ISOLATED
+    CHILD (garbling the parent's spinner - issues/MoE model issues.txt) now
+    renders from the PARENT, from the moe_skip_reason fact carried through
+    GgufWorker.load()'s metadata (see test_gguf_worker.py's
+    test_load_passes_through_moe_skip_reason_from_llamacpp for that leg, and
+    test_moe_cpu_placement.py's test_skip_reasons_never_console_print_from_
+    this_function for proof the child itself stays silent). This class
+    closes the loop: given the fact arrives, does the PARENT actually print
+    the right message."""
 
     def test_no_experts_reason_prints_the_exact_message(self, tmp_path, capsys):
         b = _backend(tmp_path, n_cpu_moe=2)
@@ -438,7 +518,8 @@ class TestMoeSkipReasonPrint:
         assert "experts were NOT moved" in out
 
     def test_no_skip_reason_prints_neither_message(self, tmp_path, capsys):
-        """The success path (override applied) must not ALSO print a skip message - the two are mutually exclusive facts about the same load."""
+        """The success path (override applied) must not ALSO print a skip
+        message - the two are mutually exclusive facts about the same load."""
         b = _backend(tmp_path, n_cpu_moe=2)
         _load(b, weight_placement=[
             {"backend": "ROCm0", "mib": 800.0, "is_ram": False},
@@ -449,7 +530,11 @@ class TestMoeSkipReasonPrint:
 
     def test_skip_reason_uses_the_shared_message_table(self, tmp_path, monkeypatch,
                                                         capsys):
-        """Regression lock for message drift: the parent must render from llama.MOE_SKIP_MESSAGES, the SAME table the child-side test (test_every_skip_reason_has_a_rendered_message) checks is complete - not a second, independently-typed copy of the strings that could silently diverge from it."""
+        """Regression lock for message drift: the parent must render from
+        llama.MOE_SKIP_MESSAGES, the SAME table the child-side test
+        (test_every_skip_reason_has_a_rendered_message) checks is complete -
+        not a second, independently-typed copy of the strings that could
+        silently diverge from it."""
         from localm.inference.backends.llamacpp import llama as llama_mod
         monkeypatch.setitem(llama_mod.MOE_SKIP_MESSAGES, "no_experts",
                             "[yellow]  n_cpu_moe:[/yellow] CANARY-MESSAGE")
@@ -460,7 +545,17 @@ class TestMoeSkipReasonPrint:
             "the parent did not read from the shared MOE_SKIP_MESSAGES table")
 
     def test_skipped_override_never_prints_a_placement_line(self, tmp_path, capsys):
-        """The trap this class exists to close: a load can report a moe_skip_reason AND a non-empty weight_placement in the SAME metadata dict (the placement report is populated from every load_tensors line regardless of whether n_cpu_moe applied - see _worker.py's load() docstring)."""
+        """The trap this class exists to close: a load can report a
+        moe_skip_reason AND a non-empty weight_placement in the SAME
+        metadata dict (the placement report is populated from every
+        load_tensors line regardless of whether n_cpu_moe applied - see
+        _worker.py's load() docstring). When the override was skipped, the
+        placement numbers describe an ordinary, unrelated load and must
+        never be printed alongside the skip message - a reader sees
+        "n_cpu_moe: ... does nothing here" immediately followed by
+        "moe placement: ... across N backend buffer(s) (n_cpu_moe=2)" and
+        reasonably concludes the setting moved something. It did not run at
+        all."""
         b = _backend(tmp_path, n_cpu_moe=2)
         _load(b, weight_placement=[
             {"backend": "ROCm0", "mib": 630.59, "is_ram": False},
@@ -484,7 +579,13 @@ _MOE_FILE = "tiny-random-granite-moe.Q8_0.gguf"
 @pytest.mark.integration
 @pytest.mark.real_gguf
 def test_real_moe_load_reports_nontrivial_placement(capsys):
-    """No mocks: loads a genuine tiny MoE GGUF (a few MB) through the full GgufBackend -> isolated worker pipeline with n_cpu_moe set, and confirms the printed summary carries REAL, non-trivial numbers - not just that the line is present (a field-presence test alone proves plumbing, not truth)."""
+    """No mocks: loads a genuine tiny MoE GGUF (a few MB) through the full
+    GgufBackend -> isolated worker pipeline with n_cpu_moe set, and confirms
+    the printed summary carries REAL, non-trivial numbers - not just that
+    the line is present (a field-presence test alone proves plumbing, not
+    truth). Checks the SHAPE (positive figures, a plausible backend count)
+    rather than hardcoding exact floats, which would break on any other GPU
+    vendor/build than the one this was verified on by hand."""
     try:
         from localm.inference.backends.llamacpp._loader import load_lib
         load_lib()

@@ -1,5 +1,23 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Scheduled RAG folder re-sync: persisted roots + Collection.resync()."""
+"""Scheduled RAG folder re-sync: persisted roots + Collection.resync().
+
+The point of the feature is drift a plain re-index CANNOT see, so these tests
+mutate a real folder on disk between runs and assert against the real index:
+
+  * a file ADDED to an indexed folder after the initial index is picked up;
+  * a file DELETED from it is FLAGGED, not dropped (the documented semantics),
+    and its chunks stay searchable;
+  * the flag clears by itself when the file comes back;
+  * deletion happens only with the explicit prune opt-in;
+  * an unreachable root (unplugged drive / unmounted share) is skipped WHOLE -
+    nothing under it is indexed, flagged, or pruned;
+  * the confinement policy is applied to a scheduled re-sync exactly as it is to
+    an interactive add;
+  * roots survive a store reload.
+
+No mocks of the thing under test: every case drives Collection.add_paths /
+Collection.resync against a tmp_path collection dir.
+"""
 
 from __future__ import annotations
 
@@ -59,7 +77,8 @@ def test_roots_survive_a_store_reload(base, docs):
 
 
 def test_individually_added_file_is_not_recorded_as_a_root(base, tmp_path):
-    """Adding ONE file must not silently enlist its whole parent folder - that would index every sibling on the next re-sync."""
+    """Adding ONE file must not silently enlist its whole parent folder - that
+    would index every sibling on the next re-sync."""
     f = tmp_path / "loose" / "note.txt"
     f.parent.mkdir()
     f.write_text("a single note", encoding="utf-8")
@@ -71,7 +90,8 @@ def test_individually_added_file_is_not_recorded_as_a_root(base, tmp_path):
 
 
 def test_empty_folder_is_still_recorded_as_a_root(base, tmp_path):
-    """An add that indexes nothing must still record the folder, or the first document dropped into it tomorrow is invisible forever."""
+    """An add that indexes nothing must still record the folder, or the first
+    document dropped into it tomorrow is invisible forever."""
     empty = tmp_path / "empty"
     empty.mkdir()
     coll = Collection("kb", base=base)
@@ -185,7 +205,8 @@ def test_a_returning_file_clears_its_missing_flag(base, docs):
 
 
 def test_a_file_that_comes_back_changed_is_still_reported_restored(base, docs):
-    """The re-index rewrites the doc entry and drops the flag as a side effect, so the run must not lose track of the fact that the file had been missing."""
+    """The re-index rewrites the doc entry and drops the flag as a side effect,
+    so the run must not lose track of the fact that the file had been missing."""
     coll = _indexed(base, docs)
     path = docs / "beta.txt"
     path.unlink()
@@ -232,7 +253,8 @@ def test_an_upload_doc_is_never_reported_missing(base, docs):
 # --------------------------------------------------------------------------- #
 
 def test_an_unavailable_root_touches_nothing(base, docs):
-    """A folder that is gone at re-sync time (unplugged drive, unmounted share) must NOT be read as 'every file under it was deleted'."""
+    """A folder that is gone at re-sync time (unplugged drive, unmounted share)
+    must NOT be read as 'every file under it was deleted'."""
     import shutil
     coll = _indexed(base, docs)
     before = _sources(coll)
@@ -249,7 +271,8 @@ def test_an_unavailable_root_touches_nothing(base, docs):
 
 
 def test_prune_missing_cannot_delete_under_an_unavailable_root(base, docs):
-    """The guard holds even when the caller explicitly asked to prune: an unreachable folder yields no verdict at all, so there is nothing to prune."""
+    """The guard holds even when the caller explicitly asked to prune: an
+    unreachable folder yields no verdict at all, so there is nothing to prune."""
     import shutil
     coll = _indexed(base, docs)
     before = _sources(coll)
@@ -279,7 +302,13 @@ def test_a_root_replaced_by_a_file_is_reported_as_such(base, docs):
 # --------------------------------------------------------------------------- #
 
 def test_a_root_outside_the_policy_is_skipped_and_reported(base, docs):
-    """The owner put the folder on their deny list after the collection was built."""
+    """The owner put the folder on their deny list after the collection was
+    built. The scheduled re-sync must refuse the root, say so, and leave its
+    documents alone - not index it because it was legal once.
+
+    An explicit deny (rather than a whitelist miss) so the test is deterministic
+    wherever tmp_path lives: whitelist mode always allows the home folder and the
+    working directory, and a pytest tmp dir can be under either."""
     coll = _indexed(base, docs)
     policy = {"mode": "blacklist", "allowed": [], "denied": [docs.resolve()]}
     # Prove the same policy really does refuse this path through the shared gate.
@@ -298,7 +327,8 @@ def test_a_root_outside_the_policy_is_skipped_and_reported(base, docs):
 
 
 def test_a_permissive_policy_still_resyncs(base, docs):
-    """Negative control for the test above: with the folder allowed, the same call indexes it - so the skip really was the policy, not a broken path."""
+    """Negative control for the test above: with the folder allowed, the same
+    call indexes it - so the skip really was the policy, not a broken path."""
     coll = _indexed(base, docs)
     policy = {"mode": "blacklist", "allowed": [], "denied": []}
     (docs / "gamma.txt").write_text("gamma content", encoding="utf-8")
@@ -310,11 +340,11 @@ def test_a_permissive_policy_still_resyncs(base, docs):
 
 
 def test_a_secret_file_dropped_into_an_indexed_folder_is_not_swept_in(base, docs):
-    """The folder-walk filters that protect an interactive add protect the unattended re-sync too."""
+    """The folder-walk filters that protect an interactive add protect the
+    unattended re-sync too."""
     coll = _indexed(base, docs)
     # The filters key on the NAME and suffix (is_secret_index_name /
-    # SECRET_SUFFIXES), never on content, so placeholder bodies are enough - and
-    # this repo's hygiene gate rightly refuses a real key header in a tracked file.
+    # SECRET_SUFFIXES), never on content, so placeholder bodies are enough.
     (docs / "id_rsa").write_text("placeholder key material", encoding="utf-8")
     (docs / "deploy.pem").write_text("placeholder key material", encoding="utf-8")
 

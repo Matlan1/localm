@@ -2,12 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadApp, loadAppWithPages } from "./harness.mjs";
 
-// ASYNC + a settle tick, for the reason banked while building the rail-side
-// unit: loadApp boots the real app, whose startup fetches resolve on a later
-// microtask. A test that returns first is torn down underneath them and the
-// continuation dies on an undefined `document`, which node:test reports as
-// "asynchronous activity after the test ended" - reading exactly like a defect
-// in the code under test, and not being one.
+// loadApp's startup fetches resolve on a later microtask, so every test here is
+// async and awaits a settle tick before it returns.
 const settle = () => new Promise((r) => setTimeout(r, 0));
 
 const PAYLOAD = {
@@ -62,14 +58,12 @@ test("rail: past sessions from OTHER projects are listed, not only the current o
   await settle();
   await window.refreshDormant();
 
-  // The headings are what stop "Open" and "Past" reading as one list.
   assert.deepEqual(texts(window), ["Past sessions here", "Other projects"],
     "with no live session there is no Open group, and both dormant groups render");
 
   const titles = [...rail(window).querySelectorAll(".coder-session-item .title")]
     .map((n) => n.textContent);
   assert.ok(titles.includes("build a calculator"), "the current project's past session");
-  // THE POINT OF THE FEATURE: reachable without typing the project path first.
   assert.ok(titles.includes("write a csv parser"), "another project's past session");
 
   const groups = [...rail(window).querySelectorAll(".coder-rail-project summary .title")]
@@ -81,8 +75,7 @@ test("rail: past sessions from OTHER projects are listed, not only the current o
 test("rail: continuing another project's session uses THAT project, not the form's", async () => {
   const { window, posts } = boot();
   await settle();
-  // The form points somewhere else entirely - which is the normal case when
-  // you click a row under "Other projects".
+  // The form points at a different project than the row clicked below.
   window.document.getElementById("setup-cwd").value = "/work/here";
   await window.refreshDormant();
 
@@ -95,9 +88,6 @@ test("rail: continuing another project's session uses THAT project, not the form
   const create = posts.find((p) => p.url.startsWith("/api/coder/sessions"));
   assert.ok(create, "clicking a past session starts one");
   const sent = JSON.parse(create.opts.body);
-  // ASSERT ON THE DESTINATION FIRST. Taking the form's cwd would start a real
-  // session in the WRONG FOLDER while every status code stayed 200 - a silent
-  // wrong-directory start, not a visible error.
   assert.equal(sent.cwd, "/work/elsewhere",
     "started in the row's own project, not the one in the form");
   assert.equal(sent.resume_checkpoint_id, "bbb222",
@@ -112,8 +102,6 @@ test("rail: a session whose folder is gone is shown but not offered", async () =
 
   const row = [...rail(window).querySelectorAll(".coder-session-item.dormant")]
     .find((n) => n.querySelector(".title").textContent === "an old experiment");
-  // Listed, because the conversation outlives the directory and losing the
-  // folder is exactly when someone wants it back.
   assert.ok(row, "the row is present rather than silently dropped");
   assert.ok(row.classList.contains("unavailable"));
   assert.equal(row.onclick, null, "no click handler - it would fail at the server");
@@ -127,8 +115,6 @@ test("rail: the privacy note is the server's text and shows on a NON-empty list"
   await window.refreshDormant();
 
   const note = window.document.getElementById("coder-rail-note");
-  // Not a string in the JS: one wording, which cannot drift from what the
-  // endpoint actually guarantees.
   assert.equal(note.textContent, PAYLOAD.privacy_note);
   assert.ok(rail(window).querySelectorAll(".coder-session-item").length > 0,
     "this arm must be the NON-empty one - a note that only appears on an empty "
@@ -136,11 +122,7 @@ test("rail: the privacy note is the server's text and shows on a NON-empty list"
 });
 
 test("rail: a failed dormant fetch leaves what is already shown alone", async () => {
-  // Succeed once, then fail. Asserting on the DOM rather than on internal
-  // state, because the DOM is the property that matters and because a
-  // top-level `const` in a classic script is never a window property - the
-  // first version of this test read `window.dormant` and got undefined, which
-  // would have "passed" against almost any behaviour once coerced.
+  // The dormant fetch succeeds once, then fails. Assertions read the DOM.
   let fail = false;
   const { window } = loadApp({
     fetchImpl: async (url) => {
@@ -165,8 +147,6 @@ test("rail: a failed dormant fetch leaves what is already shown alone", async ()
   fail = true;
   await window.refreshDormant();
 
-  // A listing that blanks on a transient error looks exactly like "you have no
-  // past work" - which is a lie about the user's own history.
   assert.equal(rail(window).querySelectorAll(".coder-session-item").length, before,
     "a failed refresh must not clear the rail");
   assert.equal(window.document.getElementById("coder-rail-note").textContent,
@@ -204,17 +184,13 @@ test("rail: a failed side save puts the rail back rather than lying about it", a
   window.document.getElementById("coder-rail-flip").onclick();
   await settle();
 
-  // Back where it started: a side that silently reverts on the next page load
-  // is worse than one that refuses now.
   assert.equal(view.dataset.rail, undefined,
     "the unsaved flip was undone, so the screen matches what was stored");
 });
 
 test("rail: arriving at the coder view loads past sessions by itself", async () => {
-  // loadAppWithPages, not loadApp: `onViewShown` is installed ONLY by
-  // pages/dispatch.js, and the harness names that omission as fixture blindness
-  // rather than a passing test. With plain loadApp this test throws instead of
-  // measuring anything.
+  // loadAppWithPages, not loadApp: `onViewShown` is installed only by
+  // pages/dispatch.js.
   const posts = [];
   const { window } = loadAppWithPages({
     fetchImpl: async (url, opts = {}) => {
@@ -226,12 +202,7 @@ test("rail: arriving at the coder view loads past sessions by itself", async () 
     },
   });
   await settle();
-  // NOT calling refreshDormant() here, deliberately - that is the whole point.
-  // Every other test in this file calls it, so none of them could see that
-  // nothing TRIGGERS it on arrival. A browser found this: the rail read
-  // "No sessions yet" for a user with past work in three projects until they
-  // happened to type a directory, which is a false statement about their own
-  // history and exactly what the rail exists to prevent.
+  // refreshDormant() is not called here: arriving at the view must trigger it.
   window.onViewShown("coder");
   await settle();
 

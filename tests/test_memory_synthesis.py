@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Memory consolidation: distil durable user facts from recent session logs into the structured chat memory store (localm/memory) via the ADD/UPDATE/DELETE/NO_OP loop, runnable as the jobs 'memory' task."""
+"""Memory consolidation: distil durable user facts from recent session logs into
+the structured chat memory store (localm/memory) via the ADD/UPDATE/DELETE/NO_OP
+loop, runnable as the jobs "memory" task. The model call is injected so the logic
+is testable without a model; privacy mode must SKIP and say so (never a silent
+success, never a model call)."""
 
 import json
 
@@ -28,7 +32,8 @@ def memhome(tmp_path, monkeypatch):
 
 
 def _facts_stub(*facts, decision="NO_OP", conf=0.9):
-    """A model stub: returns the given facts for the extract prompt and *decision* for a consolidation decision prompt."""
+    """A model stub: returns the given facts for the extract prompt and *decision*
+    for a consolidation decision prompt."""
     payload = json.dumps({"facts": [{"fact": t, "confidence": c} for t, c in facts]})
     dec = json.dumps({"decision": decision, "confidence": conf})
 
@@ -142,8 +147,8 @@ def test_run_job_memory_kind(memhome):
 
 
 def test_run_job_memory_surfaces_pending_corrections(memhome):
-    # A background memory job must TELL the user when a saved fact has a pending
-    # supersede suggestion (rule 5: do not hide), reporting the total outstanding.
+    # A background memory job tells the user when a saved fact has a pending
+    # supersede suggestion, reporting the total outstanding.
     from localm.plugins.builtin.jobs import runner
     from localm.plugins.builtin.jobs.store import Job
 
@@ -169,7 +174,7 @@ def test_run_job_memory_surfaces_pending_corrections(memhome):
               schedule_kind="interval", schedule=3600)
     res = runner.run_job(job, engine=FakeEng())
     assert res["status"] == "ok"
-    assert "await review" in res["output"], res["output"]     # rule-5 surfacing
+    assert "await review" in res["output"], res["output"]     # the surfacing
     # the trusted fact is untouched and the correction is pending, not applied
     assert any("Berlin" in r.text for r in plug._chat_store().all())
     assert len(plug._chat_store().corrections()) == 1

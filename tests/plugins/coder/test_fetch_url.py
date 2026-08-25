@@ -1,5 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Tests for tool_fetch_url / tool_web_search in localm.plugins.coder.tools."""
+"""
+Tests for tool_fetch_url / tool_web_search in localm.plugins.coder.tools.
+
+Both route through localm.netpolicy. All network calls are mocked - no real
+HTTP is made. The policy itself is tested in tests/test_netpolicy.py; here we
+test the tool-level behaviour (stripping, truncation, errors, privacy audit,
+and that policy refusals surface as tool errors).
+"""
 
 from pathlib import Path
 from unittest.mock import patch
@@ -37,7 +44,9 @@ _LOOPBACK_DNS = [(2, 1, 6, "", ("127.0.0.1", 8642))]
 
 
 class _FakeSession:
-    """Doubles netpolicy._session_for (the pinned-transport seam) so the fetch path is exercised without a live socket. get may be a fixed response or a responder callable (url, **kw)."""
+    """Doubles netpolicy._session_for (the pinned-transport seam) so the fetch
+    path is exercised without a live socket. get may be a fixed response or a
+    responder callable (url, **kw)."""
 
     def __init__(self, get=None):
         self._get = get
@@ -321,10 +330,8 @@ class TestPolicyEnforcement:
         assert "hi" in result.output
 
     def test_localhost_blocked_by_default(self):
-        # Changed with the netpolicy rework: loopback/private targets are an
-        # SSRF surface (the localm API itself, ComfyUI, router admin pages)
-        # and are refused unless net_allow_private is set. The error message
-        # names the escape hatch.
+        # Loopback and private targets are refused unless net_allow_private is
+        # set; the error message names that setting.
         with patch("requests.get") as m, \
              patch("socket.getaddrinfo", return_value=_LOOPBACK_DNS):
             r = _call("http://127.0.0.1:8642/health")

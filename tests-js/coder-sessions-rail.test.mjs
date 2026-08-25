@@ -1,8 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// R17: the coder gains a right-side open-sessions rail (mirroring the chat
-// conversation list) so multiple sessions are reachable without the cramped
-// dropdown. (The full-width treatment is CSS-only and not jsdom-testable; verify
-// it visually.) Here we test the rail's DOM behaviour.
+// DOM behaviour of the coder's right-side open-sessions rail.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -47,8 +44,6 @@ test("R17: the rail shows an empty state when there are no sessions at all", () 
   const { window } = loadApp();
   runScript(window, "coder.sessions.clear(); renderCoderSessionList();");
   const list = window.document.getElementById("coder-session-list");
-  // Wording widened deliberately when the rail stopped being only about OPEN
-  // sessions: it now also lists past ones, so "No open sessions" would assert
-  // the absence of one kind while the empty state actually covers both.
+  // The rail lists both open and past sessions, so the empty state covers both.
   assert.match(list.textContent, /No sessions yet/);
 });

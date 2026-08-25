@@ -1,12 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// jobStatusWord (app/helpers.js): a streamJob() end status, worded for
-// dropping into "<Operation> " + jobStatusWord(status) style messages.
-// "disconnected" (streamJob gave up reconnecting, or the job was already
-// gone - never a job OUTCOME, see streamjob-reconnect.test.mjs) reads as
-// jargon substituted raw ("Generation disconnected"); every non-hardcoded
-// streamJob caller (images/music/video toasts, knowledge.js's
-// index/re-embed/upload toasts, slash.js's inline chat messages) now runs
-// its end.status through this helper instead of interpolating it directly.
+// jobStatusWord (app/helpers.js) turns a streamJob() end status into a word for
+// "<Operation> " + jobStatusWord(status) messages: "disconnected" becomes
+// "interrupted", every other status passes through unchanged. streamJob callers
+// run their end.status through it instead of interpolating it directly.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadApp, loadAppWithPages, runScript } from "./harness.mjs";
@@ -40,7 +36,7 @@ test("jobStatusWord: cancelled/failed/anything else pass through unchanged", () 
 });
 
 // --------------------------------------------------------------------------- //
-//  Wiring: a representative caller of each pattern actually uses it           //
+//  Wiring: a representative caller of each pattern uses it                    //
 // --------------------------------------------------------------------------- //
 
 const tick = () => new Promise((r) => setTimeout(r, 0));

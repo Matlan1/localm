@@ -1,18 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 /* localm GUI ES-module entry (loaded as <script type="module"> from index.html).
- * Imports every app/* and pages/* module in the original load order (so top-level
- * side effects run in order), then attaches every public binding to window so the
- * index.html install-UI module + runtime-injected client plugins reach them as
- * window.X, as the pre-module global functions were reachable.
+ * Imports every app/* and pages/* module in load order, so their top-level side
+ * effects run in order, then attaches every public binding to window, where the
+ * index.html install-UI module and runtime-injected client plugins read it as
+ * window.X.
  *
- * Each window.X is a getter into the module namespace object, not a one-time value
- * copy: several `export let` bindings (modelCache, timer ids, caches, ...) are
- * REASSIGNED at runtime, and a namespace object's properties are live bindings back
- * to the module's own variables, so the getter always reads the current value.
- *
- * A getter with no setter makes window.X effectively read-only: reassigning it
- * (`window.X = ...`) throws in strict mode (every ES module is strict), loudly
- * rather than silently. Reassign the binding via the module itself instead. */
+ * Each window.X is a getter into the module namespace object, so it always reads
+ * the current value of an `export let` binding that was reassigned at runtime.
+ * There is no setter, so `window.X = ...` throws in strict mode; reassign the
+ * binding through the module itself. */
 import * as m0 from "./client-log.js";
 import * as m1 from "./helpers.js";
 import * as mIcons from "./icons.js";

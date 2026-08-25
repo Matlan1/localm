@@ -1,11 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// The Models page "Unload all" button's toast counted only `unloaded_models`
-// (chat engines). The shared embedding model is a separate lifecycle
-// (localm.inference.embedder) reported via a new `embedder_unloaded` flag on
-// the same response - without counting it too, a session where ONLY the
-// embedder was resident (no chat model loaded) unloaded it successfully but
-// still toasted "Nothing was loaded", the same class of user-facing lie the
-// backend fix (#unload_all_models) closes for the VRAM itself.
+// The Models page "Unload all" button's toast counts `unloaded_models` (chat
+// engines) plus the `embedder_unloaded` flag on the same response, which covers
+// the shared embedding model's separate lifecycle (localm.inference.embedder).
 
 import { test } from "node:test";
 import assert from "node:assert/strict";

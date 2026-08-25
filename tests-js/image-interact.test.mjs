@@ -1,8 +1,4 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// VIS-2: chat images are interactable - click to open a full-view lightbox with
-// Save (download to disk) + Copy, and the per-message copy button copies the
-// IMAGE for an image-only message instead of the empty prompt text.
-
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadApp } from "./harness.mjs";
@@ -100,12 +96,6 @@ test("VIS-2: copy on a text message still copies the text", async () => {
   assert.deepEqual(writes, ["hello world"], "plain text copy is unchanged");
 });
 
-// #1078 post-merge review bug 4: navigator.clipboard.writeText() was fired
-// without await/catch, so a real rejection (permission denied, insecure
-// context) left the button claiming "copied" anyway - reporting a step
-// succeeded when it did not (AGENTS.md rule 5). The image-copy branch just
-// above already awaits + checks + toasts on failure; this is the same fix
-// applied to the plain-text branch.
 test("copy on a text message toasts instead of claiming success when the clipboard write fails", async () => {
   const { window } = loadApp({ fetchImpl: okFetch });
   await tick();

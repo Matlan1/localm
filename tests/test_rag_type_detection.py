@@ -65,8 +65,7 @@ def test_cached_llm_classification(monkeypatch):
     # The format label is derived by classify_format (heuristic-first); the LLM
     # tie-break only fires for an unknown extension whose structure is unclear,
     # and its guess is cached per extension so a same-extension corpus classifies
-    # at most once. (Extraction no longer takes a classify_fn - that dead path,
-    # which computed a guess and discarded it, was removed in audit Branch F.)
+    # at most once.
     from localm.rag.extract import classify_format
     import localm.config as cfg
     monkeypatch.setattr(cfg, "load_config",

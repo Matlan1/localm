@@ -1,5 +1,88 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""ctypes Structure definitions for the llama.cpp C API."""
+"""
+ctypes Structure definitions for the llama.cpp C API.
+
+These layouts were derived by diffing the ACTUAL ``include/llama.h`` at the
+ACTUAL upstream commit each prebuilt was built from, and corroborated by probing
+the shipped DLL's ``*_default_params()`` return bytes.
+
+upstream appends fields to the params structs several times a quarter with no ABI
+or soname bump, so localm OVER-allocates both by-value params structs (a named
+trailing field for what we know plus a reserved pad) and round-trips
+``*_default_params()`` - we only overwrite the fields we name, so any field we do
+not know keeps its native default and a newer build never reads past our buffer
+in ``llama_load_model_from_file`` / ``llama_init_from_model``. A trailing append
+is therefore harmless.
+
+A mid-struct REORDER is NOT harmless, and upstream did one:
+
+TWO TAG NAMESPACES, AND THEY COLLIDE - READ THIS BEFORE RESOLVING ANY TAG BELOW
+-------------------------------------------------------------------------------
+``b1288`` / ``b1307`` are **lemonade-sdk/llamacpp-rocm** tags: the bundled AMD
+build. ``b9xxx`` / ``b10xxx`` are **ggml-org/llama.cpp** tags: upstream itself.
+They are different numbering schemes and they OVERLAP on a real string -
+``b1288`` also exists upstream, published 2023-09-28, as an unrelated
+three-year-old release. So resolving a lemonade tag against upstream does not
+give you a 404, it gives you a plausible WRONG ARTIFACT with no signal that
+anything is off. Every tag below therefore names its repository.
+
+TWO llama_model_params LAYOUTS EXIST, BOTH 72 BYTES
+---------------------------------------------------
+``llama_model_params`` was reordered in place between llama.cpp `7c158fbb4aec`
+(lemonade b1288, ggml 0.13.1) and `07132750825a` (lemonade b1307, ggml 0.18.1).
+The change is PINNED, not bracketed: it landed in upstream release **b10105**
+(commit `e6dd0e29a675`, ggml-org/llama.cpp#20834, "args: refactor
+mlock/mmap/directio into load-mode", published 2026-07-24). Upstream b10103 is
+the last release with the old layout; b10104 was never tagged. ``sizeof`` is 72
+on BOTH sides, so nothing about the size trips - the fields simply moved:
+
+    offset   V1 (lemonade b1288,       V2 (lemonade b1307,
+             upstream <= b10103)        upstream >= b10105)
+    [16]     n_gpu_layers                      n_gpu_layers
+    [20]     split_mode                        split_mode
+    [24]     main_gpu                          load_mode      <-- INSERTED
+    [28]     (pad)                             main_gpu       <-- MOVED
+    [64]     vocab_only                        vocab_only
+    [65]     use_mmap                          check_tensors  <-- use_mmap,
+    [66]     use_direct_io                     use_extra_bufts    use_direct_io
+    [67]     use_mlock                         no_host            and use_mlock
+    [68]     check_tensors                     no_alloc           DELETED; mmap /
+    [69]     use_extra_bufts                   load_mtp           mlock / direct-io
+    [70]     no_host                           (pad)              are now the
+    [71]     no_alloc                          (pad)              load_mode enum
+
+Writing a V1 ``main_gpu`` into a V2 build lands in ``load_mode`` and silently
+drops the user's GPU selection while changing how the weights are mapped; writing
+``check_tensors`` at the V1 offset lands in V2's ``no_alloc``, which loads
+metadata and no weights at all. None of it raises.
+
+localm therefore ships BOTH layouts and picks one per loaded library at load time
+(``_abi.detect_model_params_layout``), rather than binding one and hoping. There
+is deliberately NO bare ``LlamaModelParams`` name: a caller must go through
+``_abi.model_params_class()`` / ``_api.llama_model_default_params()`` so it is not
+possible to construct the wrong one by habit.
+
+Fields at offsets that did NOT move (``devices``, ``tensor_buft_overrides``,
+``n_gpu_layers``, ``split_mode``, ``tensor_split``, the callbacks,
+``kv_overrides``, ``vocab_only``) are named identically in both classes, so call
+sites can set them directly. ``main_gpu`` is also named in both, at its own
+correct offset in each, so ``mp.main_gpu = i`` is right once the class is right.
+The ONE field with no V2 counterpart is ``use_mmap``; use :func:`set_use_mmap`.
+
+Verified NATIVE sizes:
+    llama_model_params   = 72 bytes (V1 and V2 alike)
+    llama_context_params = 152 bytes on lemonade b1288; 160 bytes on
+                           upstream b9682+ / lemonade b1307
+                           (adds a trailing ``ctx_other`` pointer). Trailing
+                           append only - no mid-struct movement, re-diffed
+                           7c158fbb4aec -> 07132750825a on 2026-08-05.
+    llama_batch          = 56 bytes (7 pointers + 1 int32 + padding)
+
+The ``sizeof`` asserts below guard against editing these definitions wrong; they
+do NOT validate against the loaded DLL (a struct is the same size whatever the
+DLL contains).  The runtime cross-check against the ACTUAL native layout lives in
+``_abi.py`` (``verify_abi``), called from ``_loader.load_lib`` on first load.
+"""
 
 from __future__ import annotations
 
@@ -12,36 +95,22 @@ llama_pos     = ctypes.c_int32   # position in sequence
 llama_seq_id  = ctypes.c_int32   # sequence id
 
 
-# enum llama_load_mode  (V2 builds only - lemonade b1307 / upstream >= b10105)
+# enum llama_load_mode  (V2 builds only)
 #
 # Replaces V1's separate use_mmap / use_mlock / use_direct_io booleans with a
-# single enum. Values read from llama.h at 07132750825a, then re-read at b10373
-# for the AUTO addition below.
-#
-# AUTO IS NEGATIVE AND THAT IS NOT A MISREAD. Upstream added it between b10361
-# and b10373 and made it the new default, so `llama_model_default_params()` on a
-# current build returns -1 where an older one returned 1 (MMAP). MEASURED on the
-# real prebuilt Windows Vulkan runtimes, load_lib() called directly in-process:
-#
-#     b10361   split_mode=1  load_mode= 1  main_gpu=0
-#     b10373   split_mode=1  load_mode=-1  main_gpu=0
-#
-# The NEIGHBOURS are what prove this is a value change rather than a layout
-# shift: split_mode@20 and main_gpu@28 read identically and correctly on both
-# builds, and a shifted struct corrupts its neighbours. The header confirms it
-# independently - llama_model_params has 16 fields at BOTH tags, an identical
-# field list, so there is no V3 layout and nothing to re-bind.
+# single enum. AUTO is negative: llama_model_default_params() returns -1 on a
+# build whose default is AUTO and 1 (MMAP) on an older one. The surrounding
+# llama_model_params layout is the same either way, so only the value differs.
 LLAMA_LOAD_MODE_AUTO       = -1  # let the build decide from device capabilities
 LLAMA_LOAD_MODE_NONE       = 0   # no special loading mode (i.e. no mmap)
-LLAMA_LOAD_MODE_MMAP       = 1   # memory map the model (older builds' default)
+LLAMA_LOAD_MODE_MMAP       = 1   # memory map the model
 LLAMA_LOAD_MODE_MLOCK      = 2   # keep in RAM, no swap/compress
 LLAMA_LOAD_MODE_MMAP_MLOCK = 3   # both
 LLAMA_LOAD_MODE_DIRECT_IO  = 4   # direct I/O where available
 
 # This tuple MIRRORS llama.h's enumerators. It is not a policy knob and not a
-# tolerance - widening it to silence a refusal would destroy the misaligned-read
-# tripwire that reads it (see _abi.py's evaluate). AUTO is here because upstream
-# defines it, which is the only reason any value belongs here.
+# tolerance: _abi.evaluate reads it as a misaligned-read tripwire, so widening
+# it disables that check.
 _VALID_LOAD_MODES = (
     LLAMA_LOAD_MODE_AUTO,
     LLAMA_LOAD_MODE_NONE,
@@ -54,9 +123,7 @@ _VALID_LOAD_MODES = (
 
 # llama_model_params V1  (72 bytes)
 #
-# llama.cpp <= 7c158fbb4aec (lemonade b1288; upstream b10103 and older).
-# Native defaults from llama_model_default_params(), probed live on the shipped
-# amd-rocm lemonade b1288 build 2026-08-05 (ggml_commit() == "7c158fb"):
+# Native defaults from llama_model_default_params():
 #   - [0-7]   ptr  devices                = NULL
 #   - [8-15]  ptr  tensor_buft_overrides  = NULL
 #   - [16]    i32  n_gpu_layers           = -1 (default: all layers)
@@ -84,17 +151,10 @@ _VALID_LOAD_MODES = (
 #     };
 #
 # An ARRAY of these, terminated by an entry whose pattern is NULL, is what
-# llama_model_params.tensor_buft_overrides points at. Each entry says "any tensor
-# whose name matches this regex goes to that buffer type instead of where the
-# layer assignment would have put it" - the mechanism behind llama.cpp's own
+# llama_model_params.tensor_buft_overrides points at. Each entry sends any
+# tensor whose name matches the pattern to that buffer type instead of where
+# the layer assignment would have put it, the same effect as llama.cpp's own
 # --override-tensor / --cpu-moe / --n-cpu-moe flags.
-#
-# Layout VERIFIED empirically on 2026-07-28 against the shipped amd-rocm build
-# b1-7c158fb, not read off a header (the runtime wheel ships no headers): an array
-# built to this definition and pointed at by tensor_buft_overrides moved 478 MiB of
-# matched tensors from the GPU buffer to the host buffer on a real load, exactly
-# matching the same override expressed through the CLI's -ot flag. A wrong layout
-# would have crashed or silently done nothing; it did neither.
 
 class LlamaModelTensorBuftOverride(ctypes.Structure):
     _fields_ = [
@@ -123,18 +183,16 @@ class LlamaModelParamsV1(ctypes.Structure):
         ("use_extra_bufts",             ctypes.c_bool),
         ("no_host",                     ctypes.c_bool),
         ("no_alloc",                    ctypes.c_bool),
-        # Forward-compat headroom (see the module docstring). The native struct
-        # ends at no_alloc (72 bytes); we over-allocate so a newer build that
-        # appends trailing fields never reads past our buffer.
+        # Forward-compat headroom. The native struct ends at no_alloc (72
+        # bytes); over-allocating keeps a newer build's appended trailing
+        # fields inside our buffer.
         ("_reserved",                   ctypes.c_uint8 * 32),
     ]
 
 
 # llama_model_params V2  (72 bytes)
 #
-# llama.cpp >= the load_mode reorder (lemonade b1307 / 07132750825a, upstream
-# >= b10105). Native defaults read from llama_model_default_params() in
-# src/llama-model.cpp at 07132750825a:
+# Native defaults from llama_model_default_params():
 #   - [16]    i32  n_gpu_layers    = -1
 #   - [20]    i32  split_mode      = 1 (LLAMA_SPLIT_MODE_LAYER)
 #   - [24]    i32  load_mode       = 1 (LLAMA_LOAD_MODE_MMAP)
@@ -167,22 +225,20 @@ class LlamaModelParamsV2(ctypes.Structure):
         ("no_alloc",                    ctypes.c_bool),
         ("load_mtp",                    ctypes.c_bool),
         ("_pad0",                       ctypes.c_uint8 * 2),
-        # Forward-compat headroom, same rationale as V1.
+        # Forward-compat headroom, same as V1.
         ("_reserved",                   ctypes.c_uint8 * 32),
     ]
 
 
 # Self-consistency guards ONLY (these do NOT validate against the DLL - that is
-# _abi.verify_abi). 72 native bytes + 32 reserved = 104, for BOTH layouts: the
-# reorder did not change the size, which is exactly why it needed catching.
+# _abi.verify_abi). 72 native bytes + 32 reserved = 104, for BOTH layouts.
 assert ctypes.sizeof(LlamaModelParamsV1) == 104, (
     f"LlamaModelParamsV1 size mismatch: {ctypes.sizeof(LlamaModelParamsV1)} != 104"
 )
 assert ctypes.sizeof(LlamaModelParamsV2) == 104, (
     f"LlamaModelParamsV2 size mismatch: {ctypes.sizeof(LlamaModelParamsV2)} != 104"
 )
-# The offsets are the whole point of having two classes, so assert them rather
-# than trusting that the field lists above were transcribed correctly.
+# Assert the field offsets each layout is required to have.
 for _cls, _off in (
     (LlamaModelParamsV1, {"n_gpu_layers": 16, "split_mode": 20, "main_gpu": 24,
                           "vocab_only": 64, "use_mmap": 65, "use_direct_io": 66,
@@ -200,7 +256,18 @@ del _cls, _off, _name, _want, _got
 
 
 def set_use_mmap(mp, enabled: bool) -> None:
-    """Express 'memory-map the weights (or do not)' on EITHER layout."""
+    """Express "memory-map the weights (or do not)" on EITHER layout.
+
+    V1 has a ``use_mmap`` bool; V2 folded mmap / mlock / direct-io into the
+    ``load_mode`` enum, so there is no field of that name to assign and a plain
+    ``mp.use_mmap = False`` on a V2 struct would raise (or, if the wrong class
+    were bound, silently write into ``check_tensors``). Call sites use this
+    instead of naming either field.
+
+    Any mlock the caller already asked for is preserved across the flip -
+    localm does not set mlock today, but mapping "no mmap" onto a bare
+    LLAMA_LOAD_MODE_NONE would silently drop it if that ever changes.
+    """
     if isinstance(mp, LlamaModelParamsV2):
         keep_mlock = mp.load_mode in (LLAMA_LOAD_MODE_MLOCK,
                                       LLAMA_LOAD_MODE_MMAP_MLOCK)
@@ -215,7 +282,21 @@ def set_use_mmap(mp, enabled: bool) -> None:
 
 
 def get_use_mmap(mp) -> bool:
-    """Read back whether the weights will be memory-mapped, on either layout."""
+    """Read back whether the weights will be memory-mapped, on either layout.
+
+    DIRECT_IO is deliberately NOT mmap: upstream documents it as taking
+    precedence over mmap, and V1 carried it as its own separate flag.
+
+    AUTO reports False, and that is a KNOWN IMPRECISION rather than an answer:
+    under LLAMA_LOAD_MODE_AUTO the build picks at load time from device
+    capabilities, so whether the weights end up mapped is not knowable from the
+    params at all, and a bool cannot say "undetermined". Left as-is deliberately
+    - every localm call site writes an explicit mode through set_use_mmap before
+    any read, so AUTO does not reach here in practice (there is no production
+    caller of this function today; only tests). Anyone who DOES start calling it
+    on unmodified default params on a b10373-or-newer build must not read False
+    as "mmap is off".
+    """
     if isinstance(mp, LlamaModelParamsV2):
         return mp.load_mode in (LLAMA_LOAD_MODE_MMAP, LLAMA_LOAD_MODE_MMAP_MLOCK)
     return bool(mp.use_mmap)
@@ -223,46 +304,31 @@ def get_use_mmap(mp) -> bool:
 
 # TWO llama_context_params LAYOUTS EXIST, BOTH 224 BYTES (152/160 native + pad)
 # -------------------------------------------------------------------------
-# upstream inserted a new uint32_t field, n_outputs_max_per_seq, directly
-# before n_threads, sometime between llama.cpp 07132750825a (lemonade b1307,
-# 2026-08-04 - confirmed ABSENT: re-diffed against that exact commit's
-# include/llama.h) and ggml-org b10360 (2026-08-11 - confirmed PRESENT, both
-# against the header and empirically against the real prebuilt's raw bytes).
-# The exact commit that introduced it was not bisected; only that it falls in
-# that window. Every field from n_threads onward shifts +4 as a result:
+# V2 carries an extra uint32_t field, n_outputs_max_per_seq, directly before
+# n_threads. Every field from n_threads onward sits 4 bytes later as a result:
 #
-#     offset   V1 (<= 07132750825a /       V2 (>= somewhere before b10360)
-#              lemonade b1307, upstream
-#              b9870 and older, confirmed)
+#     offset   V1                               V2
 #     [20]     n_outputs_max                    n_outputs_max
-#     [24]     n_threads                        n_outputs_max_per_seq  <-- INSERTED
-#     [28]     n_threads_batch                  n_threads               <-- MOVED
+#     [24]     n_threads                        n_outputs_max_per_seq
+#     [28]     n_threads_batch                  n_threads
 #     [32]     ctx_type                         n_threads_batch
 #     [36]     rope_scaling_type                ctx_type
 #     [40]     pooling_type                     rope_scaling_type
 #     [44]     attention_type                   pooling_type
 #     [48]     flash_attn_type                  attention_type
 #     [52]     rope_freq_base                   flash_attn_type
-#     [84]     _pad1 (alignment filler)         (none - no longer needed:
-#                                                 defrag_thold now ends at 88,
-#                                                 already 8-aligned for cb_eval)
+#     [84]     _pad1 (alignment filler)         (none: defrag_thold ends at 88,
+#                                                already 8-aligned for cb_eval)
 #     [88]     cb_eval                          cb_eval
 #
-# This is why localm's own AbiMismatch check (a keystone fingerprint reading
-# rope_scaling_type/pooling_type/attention_type at fixed offsets, expecting
-# -1) started refusing to load ANY freshly-provisioned build: those three
-# fields really did move, and a version that only loosened the check without
-# adding a second layout would have accepted a genuinely wrong offset on
-# whichever of V1/V2 it did NOT calibrate against - exactly the corruption
-# risk the check exists to catch. localm therefore ships BOTH layouts and
-# picks one per loaded library at load time (`_abi.detect_context_params_layout`),
-# same as the model_params V1/V2 split above. There is deliberately NO bare
-# `LlamaContextParams` name, for the same reason model_params has none: a
-# caller must go through `_abi.context_params_class()` /
-# `_api.llama_context_default_params()`.
+# localm ships BOTH layouts and picks one per loaded library at load time
+# (`_abi.detect_context_params_layout`), same as the model_params V1/V2 split
+# above. There is NO bare `LlamaContextParams` name: a caller must go through
+# `_abi.context_params_class()` / `_api.llama_context_default_params()`.
 #
 # Fields that did not move (everything before n_threads, and everything from
-# cb_eval onward) are named identically in both classes, so call sites that
+# cb_eval onward) are named identically in both classes.
+#
 # enum llama_context_type
 LLAMA_CONTEXT_TYPE_DEFAULT = 0
 LLAMA_CONTEXT_TYPE_MTP     = 1
@@ -316,14 +382,13 @@ class LlamaContextParamsV1(ctypes.Structure):
         # --- sampler chain hooks ---
         ("samplers",    ctypes.c_void_p),         # [136]
         ("n_samplers",  ctypes.c_uint64),         # [144]
-        # ctx_other was appended upstream after the lemonade b1288 build localm's layout
-        # was first probed (present b9682+; absent on older builds, which simply
-        # ignore this trailing field). Naming it keeps the round-trip through
+        # ctx_other is a trailing field older builds lack; they ignore it.
+        # Naming it keeps the round-trip through
         # llama_context_default_params() correct on newer builds.
         ("ctx_other",   ctypes.c_void_p),         # [152] struct llama_context*
-        # Forward-compat headroom (see the module docstring): future trailing
-        # fields land here, keep their native default via the default_params
-        # round-trip, and never cause llama_init_from_model to read past us.
+        # Forward-compat headroom: future trailing fields land here, keep their
+        # native default via the default_params round-trip, and never cause
+        # llama_init_from_model to read past us.
         ("_reserved",   ctypes.c_uint8 * 64),     # [160]
     ]
 
@@ -357,9 +422,8 @@ class LlamaContextParamsV2(ctypes.Structure):
         ("yarn_orig_ctx",     ctypes.c_uint32),   # [80]
         ("defrag_thold",      ctypes.c_float),    # [84]
         # --- backend eval callback ---
-        # No manual pad here: defrag_thold now ends at byte 88, which is
-        # already 8-byte aligned for the pointer below - unlike V1, where an
-        # explicit pad was needed because it is one uint32_t field shorter.
+        # No manual pad here: defrag_thold ends at byte 88, already 8-byte
+        # aligned for the pointer below.
         ("cb_eval",           ctypes.c_void_p),   # [88]
         ("cb_eval_user_data", ctypes.c_void_p),   # [96]
         # --- KV cache types ---
@@ -380,16 +444,16 @@ class LlamaContextParamsV2(ctypes.Structure):
         ("samplers",    ctypes.c_void_p),         # [136]
         ("n_samplers",  ctypes.c_uint64),         # [144]
         ("ctx_other",   ctypes.c_void_p),         # [152] struct llama_context*
-        # Forward-compat headroom (see the module docstring): future trailing
-        # fields land here, keep their native default via the default_params
-        # round-trip, and never cause llama_init_from_model to read past us.
+        # Forward-compat headroom: future trailing fields land here, keep their
+        # native default via the default_params round-trip, and never cause
+        # llama_init_from_model to read past us.
         ("_reserved",   ctypes.c_uint8 * 64),     # [160]
     ]
 
 # Self-consistency guards ONLY (these do NOT validate against the DLL - that
-# is _abi.verify_abi). Both layouts land at the same total size: V2 adds the
-# 4-byte n_outputs_max_per_seq field but no longer needs V1's 4-byte manual
-# alignment pad before cb_eval, so the two changes exactly cancel out.
+# is _abi.verify_abi). Both layouts land at 224 bytes: V2's extra 4-byte
+# n_outputs_max_per_seq takes the place of V1's 4-byte alignment pad before
+# cb_eval.
 assert ctypes.sizeof(LlamaContextParamsV1) == 224, (
     f"LlamaContextParamsV1 size mismatch: {ctypes.sizeof(LlamaContextParamsV1)} != 224"
 )
@@ -449,7 +513,12 @@ class LlamaSamplerChainParams(ctypes.Structure):
 # llama_chat_message  (used by llama_chat_apply_template)
 
 class LlamaChatMessage(ctypes.Structure):
-    """typedef struct llama_chat_message { const char * role; const char * content; } llama_chat_message;."""
+    """
+    typedef struct llama_chat_message {
+        const char * role;
+        const char * content;
+    } llama_chat_message;
+    """
     _fields_ = [
         ("role",    ctypes.c_char_p),
         ("content", ctypes.c_char_p),

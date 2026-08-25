@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Full round trip for the ComfyUI missing-model auto-download feature: preflight detects a missing curated file -> resolve its HF source and ComfyUI destination -> download it (HF network layer mocked) -> the file lands exactly where ComfyUI would look for it -> re-running preflight now passes."""
+"""Full round trip for the ComfyUI missing-model auto-download feature:
+preflight detects a missing curated file -> resolve its HF source and ComfyUI
+destination -> download it (HF network layer mocked) -> the file lands exactly
+where ComfyUI would look for it -> re-running preflight now passes."""
 
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -70,8 +73,8 @@ def test_missing_model_detected_downloaded_and_preflight_now_passes(
         {"managed_comfy_enabled": False, "comfy_workdir": str(comfy_workdir)})
     assert dest_dir == comfy_workdir / "models" / "unet"
 
-    # 4. Download it (HF network layer mocked - never a real multi-GB pull in
-    # a test), routed to dest_dir, not registered in localm's own catalog.
+    # 4. Download it (HF network layer mocked), routed to dest_dir and not
+    # registered in localm's own catalog.
     fake_bytes = b"pretend-this-is-a-real-gguf"
 
     def _fake_download(repo_id, filename, local_dir, **kw):
@@ -108,9 +111,11 @@ def test_missing_model_detected_downloaded_and_preflight_now_passes(
 
 
 def test_managed_destination_variant_of_the_same_round_trip(home, monkeypatch):
-    """Same round trip, but with the MANAGED ComfyUI active instead of an external workdir - the file must land under <LOCALM_HOME>/comfyui-models, not the external path."""
+    """Same round trip, but with the MANAGED ComfyUI active instead of an
+    external workdir - the file must land under <LOCALM_HOME>/comfyui-models,
+    not the external path."""
     # is_managed_comfy_installed() also requires the provisioning completion
-    # marker (not just main.py + venv) - see its docstring / test_managed_comfy_s1.py.
+    # marker, not just main.py + venv.
     from localm.media.managed_comfy_provision import MARKER_FILENAME
     paths = mc.managed_comfy_paths()
     paths.main_py.parent.mkdir(parents=True, exist_ok=True)

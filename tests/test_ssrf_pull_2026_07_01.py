@@ -1,5 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Regression tests for SSRF-PULL (model-pull SSRF + net_mode kill switch)."""
+"""Regression tests for SSRF-PULL (model-pull SSRF + net_mode kill switch).
+
+The full DNS-rebinding TOCTOU fix (SSRF-REBIND, a pinned HTTPAdapter) is a
+separate, TLS-sensitive effort; these cover the safe core: the net_mode=off gate
+and per-hop check_url validation of the pull URL / its redirects.
+"""
 
 import pytest
 

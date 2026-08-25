@@ -1,5 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""F7 (memory-audit 2026-07-02): the chat model must grow its memory UNATTENDED."""
+"""F7 (memory-audit 2026-07-02): the chat model must grow its memory
+UNATTENDED. After a turn, a debounced background pass distils durable facts
+into the store, so a default (opted-in) install accumulates memory with no
+manual step - the capability the audit found missing.
+
+These tests exercise the real trigger logic in localm.plugins.builtin.chat.plug
+(the gating, debounce, privacy block, and single-flight guard), driving the
+background pass synchronously via a stubbed engine so no real model is needed.
+"""
 
 from __future__ import annotations
 
@@ -27,7 +35,8 @@ def chat_home(tmp_path, monkeypatch):
 
 
 class _SyncThread:
-    """Drop-in for threading.Thread that runs the target synchronously on .start(), so the background consolidation is deterministic in tests."""
+    """Drop-in for threading.Thread that runs the target synchronously on
+    .start(), so the background consolidation is deterministic in tests."""
 
     def __init__(self, target=None, daemon=None):
         self._target = target
@@ -38,7 +47,8 @@ class _SyncThread:
 
 
 def _record_thread(sink):
-    """A Thread stub that records the spawned target instead of running it, so a test can assert whether a background pass would have been spawned."""
+    """A Thread stub that records the spawned target instead of running it, so a
+    test can assert whether a background pass would have been spawned."""
     class _Rec:
         def __init__(self, target=None, daemon=None):
             sink.append(target)

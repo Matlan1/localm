@@ -43,7 +43,9 @@ class ScanResult(NamedTuple):
     method: str
 
 class ScanPreview(NamedTuple):
-    """Dry-run result: counts by model_type for NEW (not-yet-registered) files only, plus how many discovered files are already registered. `method` carries the same human-decodable reason ScanResult.method does."""
+    """Dry-run result: counts by model_type for NEW (not-yet-registered) files
+    only, plus how many discovered files are already registered. `method`
+    carries the same human-decodable reason ScanResult.method does."""
     counts: Dict[str, int]
     already_registered: int
     method: str
@@ -72,7 +74,18 @@ def get_comfy_workdir() -> Optional[str]:
     return cfg.get("comfy_workdir")
 
 def _resolve_explicit_workdir_models_path(workdir: str) -> Path:
-    """An explicit *workdir* override (the guided Import-from-ComfyUI flow) is normally a real ComfyUI checkout root picked via Browse or typed by hand, so its models live at <workdir>/models exactly as ComfyUI itself expects."""
+    """An explicit *workdir* override (the guided Import-from-ComfyUI flow) is
+    normally a real ComfyUI checkout root picked via Browse or typed by hand, so
+    its models live at <workdir>/models exactly as ComfyUI itself expects. The
+    one exception is the "Use localm's own ComfyUI" quick-fill, which hands back
+    the managed checkout root itself (managed-status's `path` field is also
+    legitimately shown elsewhere as "installed at", so it cannot just be
+    changed to return the models dir instead). A managed install's models live
+    in a SIBLING directory, never inside a `models` subfolder under the
+    checkout - managed_comfy_provision.py's copy step excludes "models" from
+    what gets copied there, so <root>/models never exists. Recognize that one
+    specific, unambiguous root and redirect to the real managed models dir
+    rather than guessing at a subfolder that provably never exists for it."""
     from localm.media.managed_comfy import managed_comfy_paths
     paths = managed_comfy_paths()
     if Path(workdir).resolve() == paths.root.resolve():
@@ -81,7 +94,20 @@ def _resolve_explicit_workdir_models_path(workdir: str) -> Path:
 
 
 def _resolve_scan_models_path(workdir: Optional[str]) -> Optional[Path]:
-    """Resolve the actual directory scan_comfy_models/preview_comfy_models should walk."""
+    """Resolve the actual directory scan_comfy_models/preview_comfy_models
+    should walk. An explicit *workdir* is a one-off override (see
+    _resolve_explicit_workdir_models_path). With none given, this mirrors the
+    same managed-routing check get_comfy_workdir() makes, but - unlike
+    get_comfy_workdir() - resolves straight to the managed ComfyUI's actual
+    models directory rather than its checkout root: the managed instance's
+    models live directly under <LOCALM_HOME>/comfyui-models, a SIBLING of the
+    checkout root (managed_comfy.py's module docstring; comfy_models_dest_dir()
+    downloads there), never inside a `models` subfolder under the checkout.
+    get_comfy_workdir() correctly reports the checkout root for OTHER purposes
+    (e.g. display), but appending "/models" to it - the only thing a scan can
+    do with a bare workdir string - always finds nothing for a managed
+    install. Falls back to get_comfy_workdir() + "/models" exactly as before
+    when not managed. Returns None when nothing is configured/resolvable."""
     if workdir:
         return _resolve_explicit_workdir_models_path(workdir)
     from localm.media.managed_comfy import managed_comfy_active, managed_comfy_paths
@@ -107,7 +133,11 @@ def get_comfy_api_url() -> str:
     return default_api_url()
 
 def _existing_registered_paths(reg: dict) -> set:
-    """Resolved on-disk paths of every validly-pathed registry entry, skipping a malformed entry (non-dict, or a null / non-string / empty path). `'path' in entry` TypeErrors on a null entry and `Path(entry['path'])` raises on a null / int path; routing every entry through _entry_path keeps one corrupt row..."""
+    """Resolved on-disk paths of every validly-pathed registry entry, skipping a
+    malformed entry (non-dict, or a null / non-string / empty path). `"path" in
+    entry` TypeErrors on a null entry and `Path(entry["path"])` raises on a null
+    / int path; routing every entry through _entry_path keeps one corrupt row
+    from crashing a scan or preview. Mirrors #562's registry consumers."""
     existing = set()
     for entry in reg.values():
         epath = _entry_path(entry)
@@ -121,7 +151,16 @@ def _existing_registered_paths(reg: dict) -> set:
 
 
 def _discover_comfy_files(models_path: Path, comfy_url: Optional[str] = None):
-    """Walk *models_path* (pass 1) and, if ComfyUI answers /object_info, reconcile types against its loader specs (pass 2)."""
+    """Walk *models_path* (pass 1) and, if ComfyUI answers /object_info,
+    reconcile types against its loader specs (pass 2). Shared by scan_comfy_models
+    and preview_comfy_models so both use the EXACT same discovery logic.
+    *models_path* is the already-resolved directory to walk (see
+    _resolve_scan_models_path) - a real ComfyUI's <checkout>/models, or the
+    managed instance's own models dir; this function never derives it.
+
+    Returns (found_files, method). found_files is None (method explains why)
+    only when the models folder itself is missing - the one discovery-level
+    error a caller must treat specially rather than as an empty result."""
     if not models_path.is_dir():
         return None, f"none (models folder not found under {models_path})"
 
@@ -185,7 +224,18 @@ def _discover_comfy_files(models_path: Path, comfy_url: Optional[str] = None):
 
 def scan_comfy_models(comfy_url: Optional[str] = None, workdir: Optional[str] = None,
                        *, progress_cb=None) -> ScanResult:
-    """Scan ComfyUI folders and/or /object_info and register newly discovered files. *workdir* overrides the configured comfy_workdir for a one-off scan of an arbitrary folder (e.g. the guided Import-from-ComfyUI flow) WITHOUT reading or mutating the persistent comfy_workdir config value."""
+    """Scan ComfyUI folders and/or /object_info and register newly discovered
+    files. *workdir* overrides the configured comfy_workdir for a one-off scan
+    of an arbitrary folder (e.g. the guided Import-from-ComfyUI flow) WITHOUT
+    reading or mutating the persistent comfy_workdir config value.
+
+    *progress_cb*, when given, is called as ``progress_cb(done, total, name)``
+    once per discovered file as it is registered (or found already registered)
+    - the one point in this function with an honest denominator (the directory
+    walk above it has none). The GUI route wires this to Job.progress() so the
+    guided Import-from-ComfyUI flow can show a real "registering model N of M"
+    count instead of a silent wait; a caller that passes nothing (every
+    existing caller) sees no behavior change."""
     models_path = _resolve_scan_models_path(workdir)
     if models_path is None:
         return ScanResult(added=0, skipped=0, method="none (comfy_workdir not configured)")
@@ -230,7 +280,10 @@ def scan_comfy_models(comfy_url: Optional[str] = None, workdir: Optional[str] = 
 
 
 def preview_comfy_models(comfy_url: Optional[str] = None, workdir: Optional[str] = None) -> ScanPreview:
-    """Dry-run of scan_comfy_models: identical discovery, but registers NOTHING."""
+    """Dry-run of scan_comfy_models: identical discovery, but registers NOTHING.
+    Returns per-type counts of NEW (not-yet-registered) files plus how many
+    discovered files are already registered, so the guided Import-from-ComfyUI
+    flow can show what a real scan WOULD do before the user confirms it."""
     models_path = _resolve_scan_models_path(workdir)
     if models_path is None:
         return ScanPreview(counts={}, already_registered=0,

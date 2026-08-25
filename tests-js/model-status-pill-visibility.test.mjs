@@ -1,13 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// The sidebar status pill used to be shown in every state, including "ok" -
-// where its text is just the active model's name (or "no model"), which the
-// MODEL dropdown directly above already displays, placeholder included. That
-// was two controls saying one thing, so "ok" now renders as the select alone.
-//
-// THE POINT OF THIS FILE IS THE OTHER HALF: "busy" and "err" must SURVIVE.
-// Folding them into the same hide would delete the only surface localm has for
-// "server unreachable", "load failed", "unload failed", "models unavailable"
-// and "page out of date" - a rule 5 violation dressed as a decluttering.
+// The sidebar status pill is hidden in the "ok" state, where its text is the
+// active model's name (or "no model") that the MODEL dropdown above already
+// displays. "busy" and "err" stay visible.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -17,10 +11,9 @@ import { loadApp } from "./harness.mjs";
 const box = (win) => win.document.getElementById("model-status");
 const pill = (win) => win.document.getElementById("status-text");
 
-// loadApp() boots the real app, which kicks off refreshModels(). Letting that
-// settle BEFORE asserting is not cosmetic: a test that ends with it in flight
-// touches an already-closed window from the root after-hook and surfaces as an
-// unhandledRejection rather than as a clean failure.
+// loadApp() boots the real app, which kicks off refreshModels(). Let that
+// settle before asserting: a test that ends with it in flight touches an
+// already-closed window.
 const drain = async () => { for (let i = 0; i < 8; i++) await new Promise((r) => setTimeout(r, 0)); };
 
 async function boot(fetchImpl = async () => ({ ok: true, json: async () => ({}) })) {
@@ -63,8 +56,6 @@ test("status pill: every 'err' STAYS VISIBLE (rule 5)", async () => {
 });
 
 test("status pill: a real unreachable server surfaces through refreshModels", async () => {
-  // Driven through the actual caller rather than setStatus directly, so the
-  // wiring is exercised, not just the setter.
   const win = await boot(async () => { throw new Error("boom"); });
   win.setStatus("ok", "some-model");
   assert.equal(box(win).hidden, true, "precondition: hidden while ok");
@@ -81,11 +72,9 @@ test("status pill: recovering from an error re-hides the pill", async () => {
   assert.equal(box(win).hidden, true, "a resolved error must not leave a stale visible pill");
 });
 
-// Bound to the REAL shipped stylesheet, not a fixture. `#model-status` sets
-// `display: flex`, which BEATS the user-agent `[hidden] { display: none }` - so
-// without an explicit override the `hidden` toggles above are a silent no-op in
-// the browser while every jsdom assertion here still passes. jsdom does not
-// apply the cascade, so this is the only place that gap can be caught.
+// Reads the shipped stylesheet. `#model-status` sets `display: flex`, which
+// beats the user-agent `[hidden] { display: none }`, so hiding needs an
+// explicit override. jsdom does not apply the cascade.
 test("status pill: style.css overrides display:flex for [hidden]", () => {
   const css = readFileSync(
     fileURLToPath(new URL("../localm/plugins/gui/static/style.css", import.meta.url)), "utf8");

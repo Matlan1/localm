@@ -1,5 +1,34 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""`localm unload` and `localm stop` must actually authenticate against the server they manage, in BOTH populations the pre-fix code missed:."""
+"""`localm unload` and `localm stop` must actually authenticate against the
+server they manage, in BOTH populations the pre-fix code missed:
+
+1. Open (keyless) mode - the default. Both commands read ONLY
+   ``os.environ.get("LOCALM_API_KEY")`` and never fell back to the discovered
+   instance's own attach token, so ``localm unload`` hard-403'd
+   ("Open-mode management requires the localm GUI shell..."), reproduced live.
+2. A keyed server whose owner key lives in ``<home>/auth.key`` (``localm key
+   generate`` / the launcher) but was never exported to the environment - env-
+   only misses it entirely, the same bug #1094/#1114 already fixed for
+   ``read_activity``/``self_request`` in ``selfclient.py``. Neither command
+   imported ``get_api_key`` at all.
+
+The fix: both commands now resolve the owner key via ``auth.get_api_key()``
+(env, else the persisted file) and, when none is configured, fall back to the
+discovered registry entry's own ``token`` field - the same per-instance attach
+token ``localm status`` already threads through to ``read_activity`` (see
+``test_cli_ps_status.py::test_status_passes_the_registry_token_to_activity``),
+and the same credential #1114 wired into the chat<->media VRAM handover's own
+self-calls. No widening of the server-side gate; the credential it already
+accepts was simply never sent by these two callers.
+
+Unit tests below mirror this repo's established pattern for these commands
+(monkeypatch ``instances.find_attachable``/``list_entries`` + ``requests.post``,
+see ``test_cli_ps_status.py``) and isolate CREDENTIAL SELECTION only. The
+``RealHttp`` classes drive the real HTTP path against a real loopback server
+running the real ``_origin_guard`` middleware, in both populations above - the
+mock-blind spot this bug lived in (a mocked ``requests.post`` cannot see
+whether the server's own auth gate would have accepted what was sent).
+"""
 
 from __future__ import annotations
 
@@ -57,7 +86,8 @@ class TestUnloadCredentialSelection:
         assert captured["headers"]["Authorization"] == "Bearer the-attach-token"
 
     def test_keyed_via_persisted_auth_key_file_only(self, monkeypatch):
-        """The exact gap: env-only missed a launcher/`localm key generate` server whose key lives in auth.key, not the environment."""
+        """The exact gap: env-only missed a launcher/`localm key generate`
+        server whose key lives in auth.key, not the environment."""
         monkeypatch.delenv("LOCALM_API_KEY", raising=False)
         auth.set_api_key("file-only-key-999")
         monkeypatch.setattr(instances, "find_attachable",
@@ -93,7 +123,9 @@ class TestUnloadCredentialSelection:
         assert captured["headers"]["Authorization"] == "Bearer env-key-1"
 
     def test_no_token_available_sends_no_auth_header(self, monkeypatch):
-        """Unchanged pre-fix behaviour when the caller genuinely has neither - the registry entry carries no token (an older server, or discovery returning a bare entry)."""
+        """Unchanged pre-fix behaviour when the caller genuinely has neither -
+        the registry entry carries no token (an older server, or discovery
+        returning a bare entry)."""
         monkeypatch.delenv("LOCALM_API_KEY", raising=False)
         monkeypatch.setattr(instances, "find_attachable",
                             lambda *a, **k: _entry())  # no token
@@ -117,7 +149,9 @@ class TestUnloadCredentialSelection:
 
 class TestStopCredentialSelection:
     def test_open_mode_uses_each_targets_own_instance_token(self, monkeypatch):
-        """--all can span several instances, each with its OWN attach token - the fallback must be resolved per target, not a single header reused across all of them."""
+        """--all can span several instances, each with its OWN attach token -
+        the fallback must be resolved per target, not a single header reused
+        across all of them."""
         monkeypatch.delenv("LOCALM_API_KEY", raising=False)
         entries = [
             _entry(iid="aaaa1111", pid=111, port=8642, token="token-a"),
@@ -226,7 +260,11 @@ class TestUnloadRealHttp:
             rs.stop()
 
     def test_keyed_via_persisted_auth_key_file_only_succeeds(self, monkeypatch):
-        """The real server is genuinely in KEYED mode (an owner key persisted to auth.key, matching what a real `localm key generate` leaves on disk) - _origin_guard's open-mode branch never engages, and the route's own scope check must accept the CLI's key."""
+        """The real server is genuinely in KEYED mode (an owner key persisted
+        to auth.key, matching what a real `localm key generate` leaves on
+        disk) - _origin_guard's open-mode branch never engages, and the
+        route's own scope check must accept the CLI's key. No env var set,
+        so this only passes if the CLI actually reads the persisted file."""
         monkeypatch.delenv("LOCALM_API_KEY", raising=False)
         auth.set_api_key("real-owner-key-abcdef123456")
         rs = _start_real_server()
@@ -245,7 +283,22 @@ class TestUnloadRealHttp:
 class TestStopRealHttp:
     def test_open_mode_graceful_shutdown_via_discovered_instance_token(
             self, monkeypatch):
-        """Not run live by the original report (it would have killed the test server) - exercised here against a real throwaway instance instead."""
+        """Not run live by the original report (it would have killed the test
+        server) - exercised here against a real throwaway instance instead.
+        The real /v1/server/shutdown route must accept the instance token and
+        actually invoke the real shutdown sequence, rather than 403ing into
+        the direct-kill fallback.
+
+        _do_shutdown's REAL body ends in os._exit(0) - letting that run for
+        real in-process would kill this pytest worker, not a throwaway
+        server. So it is replaced with a recorder that proves it was reached
+        (the real route ran its real logic) without actually exiting. The
+        patch must still be active when _request_shutdown's background
+        thread fires its 0.25s-delayed call, so this test waits for that
+        call INSIDE its own scope, before monkeypatch reverts anything -
+        waiting only for the HTTP response back would race the delayed
+        thread against test teardown and could let the REAL os._exit through
+        after the patch is gone."""
         monkeypatch.delenv("LOCALM_API_KEY", raising=False)
         shutdown_calls = []
         monkeypatch.setattr(_hs, "_do_shutdown",
@@ -257,10 +310,8 @@ class TestStopRealHttp:
             monkeypatch.setattr(instances, "reap_stale", lambda *a, **k: [])
             monkeypatch.setattr(instances, "list_entries",
                                 lambda *a, **k: [entry])
-            # A fake pid that was never real: pid_alive() must read False so
-            # the graceful path is credited as the confirmation, and kill_pid
-            # must never be needed - if it were reached, it would be asked to
-            # signal a pid this test does not own.
+            # A pid that was never real: pid_alive() reads False, so the
+            # graceful path is the confirmation and kill_pid is never called.
             monkeypatch.setattr(instances, "pid_alive", lambda pid: False)
             monkeypatch.setattr(
                 instances, "kill_pid",

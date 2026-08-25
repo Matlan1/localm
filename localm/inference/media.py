@@ -25,7 +25,15 @@ _IMAGE_MAX_BYTES = 25_000_000
 
 
 def decode_image_url(url: str):
-    """Return a PIL.Image.Image from a data-URI or http(s) URL."""
+    """Return a PIL.Image.Image from a data-URI or http(s) URL.
+
+    A remote (http/https) URL is fetched through localm.netpolicy so a chat
+    'image_url' content part cannot turn the server into an SSRF proxy: the
+    private-address guard, net_mode, and net_allow/net_deny all apply, every
+    redirect hop is re-validated, and the body is size-capped. (Chat is the
+    baseline capability - any key can send an image_url - so this fetch must be
+    policy-checked like every other model-triggered request.)
+    """
     try:
         from PIL import Image
     except ImportError as e:

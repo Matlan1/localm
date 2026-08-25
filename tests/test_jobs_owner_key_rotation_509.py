@@ -1,5 +1,32 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""REG-509 (regression audit 2026-07-14, HIGH): rotating the owner key silently and PERMANENTLY stripped shell access from the owner's OWN scheduled shell jobs."""
+"""REG-509 (regression audit 2026-07-14, HIGH): rotating the owner key silently
+and PERMANENTLY stripped shell access from the owner's OWN scheduled shell jobs.
+
+LM-DA-014 made the runner re-validate a shell-opt-in job's owning key on every
+run, so a revoked/expired scoped key cannot keep an unattended job running with
+shell forever. That is right for a KEYSTORE key. But it re-validated by KEY
+VALUE: ``_hash_key(get_api_key()) == job.owner``. The owner key is not a keystore
+entry, so once the owner rotated it (``localm keys regenerate`` / GUI roll /
+``key clear``) the stamped hash of the OLD key matched neither the new key's hash
+nor any keystore entry, and ``key_hash_live`` said "not live" - downgrading the
+owner's own job to restricted, forever, with no notice.
+
+The ambiguity is not resolvable at RUN time: revoking a keystore key deletes its
+record, so a revoked scoped key and a rotated-away owner key are indistinguishable
+(both are "a hash that is in no keystore entry"). The creating credential's nature
+must therefore be captured at CREATION, while it is still resolvable. Job now
+carries ``owner_is_owner_key``, stamped by the create route as "the credential was
+the owner key / owner session, NOT a minted keystore entry" (auth.py's own
+precedent: an owner/ADMIN session is exempt from key_hash_live so an owner-key
+roll does not log the owner out; memory_principal collapses the owner for the same
+"a rotation must not orphan the owner's data" reason, AUDIT-MED-14).
+
+The negative cases matter as much as the fix: ADMIN is in PRIVILEGED_SCOPES, so
+the owner CAN mint an ADMIN-scoped keystore key. Exempting "the caller had ADMIN"
+would have re-opened LM-DA-014 for that key. The stamp keys off KEYSTORE
+MEMBERSHIP (the owner key is never in the keystore; every minted key is), so a
+revoked ADMIN/coder:full key still loses shell.
+"""
 
 from __future__ import annotations
 
@@ -13,25 +40,28 @@ from fastapi.testclient import TestClient
 
 from localm import scopes as S
 
-# The privileged "run the full shell-capable coder" opt-in flag, as a named
-# constant so the test never spells the literal that the subprocess-shell linter
-# heuristic flags (this is a job config field, not a subprocess call) - same
-# pattern as tests/test_jobs_shell_key_liveness.py.
+# The privileged run-the-full-shell-capable-coder opt-in flag, kept as a named
+# constant so the literal is not spelled out in this file.
 OPT_IN = True
 
 # The jobs plugin owns the scope named after it (is_valid_scope accepts a bare
-# plugin-name scope); there is no scopes.py constant to import. A key needs it
-# explicitly to reach /api/jobs - ADMIN implies it, coder:full does not.
+# plugin-name scope). A key needs it explicitly to reach /api/jobs: ADMIN
+# implies it, coder:full does not.
 JOBS = "jobs"
 
-# Owner keys used across a rotation. Long enough for auth.MIN_KEY_LEN, and
-# obviously fake (no real secret ever appears in a tracked file).
+# Owner keys used across a rotation. Long enough for auth.MIN_KEY_LEN, and fake.
 KEY_ONE = "owner-key-one-0123456789abcdef"
 
 
 @pytest.fixture
 def home(tmp_path, monkeypatch):
-    """Throwaway data dir + no ambient owner key."""
+    """Throwaway data dir + no ambient owner key.
+
+    LOCALM_API_KEY is deliberately UNSET: get_api_key() prefers the env var over
+    the persisted auth.key file, so an env key could not be rotated on disk and
+    the whole scenario would be untestable. The real rotation path writes the
+    file, so the test drives the file.
+    """
     monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
@@ -46,7 +76,16 @@ def home(tmp_path, monkeypatch):
 
 @pytest.fixture
 def jobs_app(home, tmp_path):
-    """The REAL jobs plugin mounted on a real app, so the create route (and the owner stamp it writes) is exercised for real rather than hand-constructed. runner.run_job is NOT mocked here - the tests drive the real runner."""
+    """The REAL jobs plugin mounted on a real app, so the create route (and the
+    owner stamp it writes) is exercised for real rather than hand-constructed.
+    runner.run_job is NOT mocked here - the tests drive the real runner.
+
+    The REAL session-login route is mounted alongside it, so the cookie tests below
+    mint their session the way a browser actually does (POST /api/session) instead
+    of hand-calling sessions.create. That matters: the mint site is half of the
+    fix, and a test that constructs the record itself would pass with that half
+    reverted.
+    """
     store_root = Path(__file__).resolve().parents[1] / "localm" / "plugins" / "builtin"
     from localm.inference.routes import session as _routes_session
     from localm.plugins.engine import PluginManager
@@ -62,7 +101,9 @@ def _h(key):
 
 
 def _fake_agent_capture(monkeypatch):
-    """Patch the runner's backend + Agent and capture the Agent kwargs, mirroring tests/test_jobs_shell_key_liveness.py. ``restricted`` is the observable that decides whether the coder gets the run_shell tool at all."""
+    """Patch the runner's backend + Agent and capture the Agent kwargs, mirroring
+    tests/test_jobs_shell_key_liveness.py. ``restricted`` is the observable that
+    decides whether the coder gets the run_shell tool at all."""
     from localm.plugins.builtin.jobs import runner
     captured: dict = {}
 
@@ -95,7 +136,8 @@ def _create_shell_job(app, key, cwd) -> dict:
 
 
 def _login(app, key) -> str:
-    """Sign in through the REAL POST /api/session and return the session id the server put in the cookie - i.e. exactly what a browser ends up holding."""
+    """Sign in through the REAL POST /api/session and return the session id the
+    server put in the cookie - i.e. exactly what a browser ends up holding."""
     from localm.inference import http_server as hs
     with TestClient(app) as c:
         r = c.post("/api/session", json={"key": key})
@@ -106,7 +148,13 @@ def _login(app, key) -> str:
 
 
 def _create_shell_job_over_cookie(app, sid, cwd) -> dict:
-    """POST a shell-opt-in coder job through the real route carrying a SESSION COOKIE - the browser GUI's credential - rather than a bearer key."""
+    """POST a shell-opt-in coder job through the real route carrying a SESSION
+    COOKIE - the browser GUI's credential - rather than a bearer key.
+
+    Fetches the CSRF token from GET /api/session first and echoes it in
+    X-CSRF-Token, exactly as the GUI does: a cookie-authenticated state change is
+    CSRF-gated (_enforce_request), and that gate is live here. Doing it the real
+    way rather than bypassing it keeps this driving the production flow."""
     from localm.inference import http_server as hs
     with TestClient(app) as c:
         c.cookies.set(hs.SESSION_COOKIE, sid)
@@ -131,12 +179,14 @@ def _stored(job_id):
 
 
 # --------------------------------------------------------------------------- #
-#  THE REGRESSION: owner rotates their key; their own shell job keeps shell    #
+#  Owner rotates their key; their own shell job keeps shell                    #
 # --------------------------------------------------------------------------- #
 
 def test_owner_created_shell_job_survives_owner_key_rotation(
         jobs_app, tmp_path, monkeypatch):
-    """The reported break, end to end: create a shell job as the owner through the real route, rotate the owner key, then run it through the real runner."""
+    """The reported break, end to end: create a shell job as the owner through
+    the real route, rotate the owner key, then run it through the real runner.
+    The owner's own automation must keep its shell step."""
     from localm import auth
     work = tmp_path / "proj"
     work.mkdir()
@@ -163,7 +213,9 @@ def test_owner_created_shell_job_survives_owner_key_rotation(
 
 
 def test_owner_created_shell_job_survives_key_clear(jobs_app, tmp_path, monkeypatch):
-    """``localm key clear`` returns the server to open mode."""
+    """``localm key clear`` returns the server to open mode. Open mode IS the
+    loopback owner (_caller_can_allow_shell returns True with no key configured),
+    so the owner's existing shell job must keep running shell-capable."""
     from localm import auth
     work = tmp_path / "proj"
     work.mkdir()
@@ -182,7 +234,8 @@ def test_owner_created_shell_job_survives_key_clear(jobs_app, tmp_path, monkeypa
 
 def test_scheduler_tick_keeps_shell_after_owner_key_rotation(
         jobs_app, tmp_path, monkeypatch):
-    """The autonomous path (no request/caller in sight) is the one the finding is actually about: drive the real scheduler tick after a rotation."""
+    """The autonomous path (no request/caller in sight) is the one the finding is
+    actually about: drive the real scheduler tick after a rotation."""
     from localm import auth
     from localm.plugins.builtin.jobs.scheduler import JobScheduler
     from localm.plugins.builtin.jobs.store import JobStore
@@ -203,12 +256,15 @@ def test_scheduler_tick_keeps_shell_after_owner_key_rotation(
 
 
 # --------------------------------------------------------------------------- #
-#  NEGATIVE: the fix must NOT re-open LM-DA-014 for revocable keystore keys    #
+#  A revocable keystore key does not gain shell from the owner-key path        #
 # --------------------------------------------------------------------------- #
 
 def test_revoked_admin_scoped_keystore_key_still_loses_shell(
         jobs_app, tmp_path, monkeypatch):
-    """The load-bearing negative."""
+    """The load-bearing negative. ADMIN is in PRIVILEGED_SCOPES, so the owner can
+    mint an ADMIN-scoped KEYSTORE key. Such a key is revocable, so revoking it
+    MUST still strip shell - i.e. the exemption keys off keystore membership, not
+    off 'the caller had ADMIN'. A fix that exempted ADMIN would fail here."""
     from localm import auth
     work = tmp_path / "proj"
     work.mkdir()
@@ -232,7 +288,8 @@ def test_revoked_admin_scoped_keystore_key_still_loses_shell(
 
 def test_revoked_coder_full_key_still_loses_shell_after_owner_rotation(
         jobs_app, tmp_path, monkeypatch):
-    """A coder:full key's job must not be rescued by the owner-key exemption, and an owner rotation must not accidentally authorize it either."""
+    """A coder:full key's job must not be rescued by the owner-key exemption, and
+    an owner rotation must not accidentally authorize it either."""
     from localm import auth
     work = tmp_path / "proj"
     work.mkdir()
@@ -251,7 +308,8 @@ def test_revoked_coder_full_key_still_loses_shell_after_owner_rotation(
 
 
 def _cookie_request(sid):
-    """A minimal Request-alike carrying a session cookie, enough for principal_id/caller_scopes (which read only cookies + headers)."""
+    """A minimal Request-alike carrying a session cookie, enough for
+    principal_id/caller_scopes (which read only cookies + headers)."""
     from localm.inference import http_server as hs
 
     class _Req:
@@ -261,7 +319,20 @@ def _cookie_request(sid):
 
 
 def test_expired_admin_keystore_key_over_a_live_cookie_is_not_the_owner(home):
-    """THE HOLE the pre-merge security review caught, pinned so it cannot come back."""
+    """THE HOLE the pre-merge security review caught, pinned so it cannot come
+    back.
+
+    revoke_key DELETES a keystore record, but EXPIRY does not - and
+    _principal_from_token exempts an ADMIN session from key_hash_live, so an
+    expired ADMIN-scoped keystore key's cookie session still resolves a principal
+    that key_hash_live calls dead. The first version of this fix asked the
+    NEGATIVE question ("absent from the keystore, so it must be the owner") and
+    therefore stamped that expired, revocable key as the OWNER - handing it
+    permanent shell and re-opening LM-DA-014.
+
+    Note the bearer path canNOT show this (verify() rejects an expired key), which
+    is exactly why the original negative test missed it: it used a Bearer header.
+    """
     from localm import auth, sessions
     from localm.inference.http_server import caller_scopes, principal_id
     from localm.plugins.builtin.jobs.plug import _caller_is_owner_key
@@ -279,7 +350,7 @@ def test_expired_admin_keystore_key_over_a_live_cookie_is_not_the_owner(home):
     auth._save_keystore(ks)
 
     req = _cookie_request(sid)
-    # Preconditions: this is the exact state that fooled the negative test.
+    # Preconditions for the state under test.
     assert auth.verify(created["key"]) is None          # bearer would be rejected
     assert auth.key_hash_live(kh) is False              # "not live"...
     assert sessions.lookup(sid) is not None             # ...and the RAW record lives
@@ -288,23 +359,18 @@ def test_expired_admin_keystore_key_over_a_live_cookie_is_not_the_owner(home):
         "an EXPIRED admin-scoped keystore key was stamped as the owner key - "
         "that hands a revoked credential permanent shell (LM-DA-014)")
 
-    # UPDATED, and the change is the point: this session is now rejected OUTRIGHT
-    # rather than merely failing to count as the owner. The exemption from the
-    # per-request keystore re-check used to key on the ADMIN scope, so this
-    # expired ADMIN-scoped KEYSTORE key's cookie still resolved a principal
-    # everywhere; it now keys on the owner-key proof, which this record does not
-    # have. The assertions below previously read
-    #     caller_scopes(req) == {S.ADMIN}   and   principal_id(req) == kh
-    # i.e. the session resolved despite its key being dead. That was the weaker
-    # state this fix removes, so the LM-DA-014 property above now holds for a
-    # strictly stronger reason: not "resolves but is not the owner", but "does
-    # not resolve at all".
+    # This session is rejected outright rather than merely failing to count as the
+    # owner: the exemption from the per-request keystore re-check keys on the
+    # owner-key proof, which this record does not have.
     assert caller_scopes(req) is None
     assert principal_id(req) is None
 
 
 def test_an_unreadable_keystore_cannot_promote_a_key_to_owner(home, monkeypatch):
-    """The other half: _load_keystore() swallows OSError/ValueError and returns [], so key_hash_live says 'not live' for a perfectly LIVE key on a transient corrupt/locked auth.json."""
+    """The other half: _load_keystore() swallows OSError/ValueError and returns
+    [], so key_hash_live says "not live" for a perfectly LIVE key on a transient
+    corrupt/locked auth.json. A PERMANENT privilege stamp must never be derived
+    from a fail-open read."""
     from localm import auth, sessions
     from localm.plugins.builtin.jobs.plug import _caller_is_owner_key
 
@@ -322,7 +388,8 @@ def test_an_unreadable_keystore_cannot_promote_a_key_to_owner(home, monkeypatch)
 
 
 def test_the_owner_key_over_a_cookie_session_is_the_owner(home):
-    """Positive control for the two negatives above: the owner's own session (minted by the owner key, key unchanged) IS recognised."""
+    """Positive control for the two negatives above: the owner's own session
+    (minted by the owner key, key unchanged) IS recognised."""
     from localm import auth, sessions
     from localm.plugins.builtin.jobs.plug import _caller_is_owner_key
 
@@ -333,16 +400,20 @@ def test_the_owner_key_over_a_cookie_session_is_the_owner(home):
 
 
 # --------------------------------------------------------------------------- #
-#  THE RESIDUAL: the job is created over a COOKIE SESSION minted BEFORE the     #
-#  roll. The entry's own named trigger ("GUI roll"), and the case none of the   #
-#  cookie tests above could express - each of them creates its session AFTER    #
-#  the key is already in its final state, so the frozen key_hash never goes     #
-#  stale and the value comparison alone answers correctly.                      #
+#  The job is created over a COOKIE SESSION minted BEFORE the roll             #
 # --------------------------------------------------------------------------- #
 
 def test_owner_session_job_keeps_shell_when_the_key_rolled_after_sign_in(
         jobs_app, tmp_path, monkeypatch):
-    """The reported chain, end to end and entirely through real routes: the owner signs into the GUI under K1, rolls the key to K2 (which deliberately does NOT sign the browser out), then schedules a shell job from that still-valid session."""
+    """The reported chain, end to end and entirely through real routes: the owner
+    signs into the GUI under K1, rolls the key to K2 (which deliberately does NOT
+    sign the browser out), then schedules a shell job from that still-valid
+    session. The runner must keep the shell step.
+
+    Before the fix the session froze hash(K1); after the roll that matched neither
+    the new owner key nor any keystore entry, so the job was stamped as not the
+    owner's and the runner downgraded it - silently, permanently, on the owner's
+    own automation."""
     from localm import auth
     work = tmp_path / "proj"
     work.mkdir()
@@ -354,7 +425,7 @@ def test_owner_session_job_keeps_shell_when_the_key_rolled_after_sign_in(
     new_key = auth.regenerate_key()          # 2. roll to K2
     assert new_key != KEY_ONE and auth.get_api_key() == new_key
 
-    # The session survives the roll BY DESIGN; that is the premise, not a bug.
+    # The session survives the roll.
     from localm import sessions
     assert sessions.lookup(sid) is not None, \
         "premise broken: the roll signed the browser out, so this cannot test REG-509"
@@ -372,7 +443,8 @@ def test_owner_session_job_keeps_shell_when_the_key_rolled_after_sign_in(
 
 def test_scheduler_tick_keeps_shell_for_a_job_made_over_a_pre_roll_session(
         jobs_app, tmp_path, monkeypatch):
-    """Same chain, driven through the real scheduler tick - the autonomous path the finding is actually about, where no request or caller exists any more."""
+    """Same chain, driven through the real scheduler tick - the autonomous path
+    the finding is actually about, where no request or caller exists any more."""
     from localm import auth
     from localm.plugins.builtin.jobs.scheduler import JobScheduler
     from localm.plugins.builtin.jobs.store import JobStore
@@ -393,7 +465,15 @@ def test_scheduler_tick_keeps_shell_for_a_job_made_over_a_pre_roll_session(
 
 def test_a_keystore_key_session_is_not_stamped_and_still_loses_shell(
         jobs_app, tmp_path, monkeypatch):
-    """The load-bearing negative for the cookie path, mirroring the bearer one at the top of this section."""
+    """The load-bearing negative for the cookie path, mirroring the bearer one at
+    the top of this section.
+
+    An ADMIN-scoped KEYSTORE key can sign into the GUI too, and its session is
+    equally ADMIN-scoped - so a fix that stamped "this session holds ADMIN", or
+    that inferred the owner from the session merely EXISTING, would mark it as the
+    owner and hand a revocable credential permanent shell (LM-DA-014). The stamp
+    must come from the key VALUE proven at mint, so this session is never marked
+    and revoking the key still strips shell."""
     from localm import auth, sessions
     work = tmp_path / "proj"
     work.mkdir()
@@ -422,7 +502,8 @@ def test_a_keystore_key_session_is_not_stamped_and_still_loses_shell(
 
 
 def test_the_owner_login_records_the_stamp_and_a_scoped_login_does_not(jobs_app):
-    """Unit-pin the mint site itself, at the real route: the recorded flag tracks the KEY VALUE presented, not the scopes it happens to carry."""
+    """Unit-pin the mint site itself, at the real route: the recorded flag tracks
+    the KEY VALUE presented, not the scopes it happens to carry."""
     from localm import auth, sessions
     auth.set_api_key(KEY_ONE)
     scoped = auth.create_key("device", [S.ADMIN, JOBS], allow_privileged=True)
@@ -437,7 +518,20 @@ def test_the_owner_login_records_the_stamp_and_a_scoped_login_does_not(jobs_app)
 
 
 def test_a_session_recorded_before_this_field_existed_is_backfilled(home):
-    """A session minted by an older build carries no ``owner_key_minted`` key, so the raw record still reads False - it never inherits a privilege it did not prove."""
+    """A session minted by an older build carries no ``owner_key_minted`` key, so
+    the raw record still reads False - it never inherits a privilege it did not
+    prove. But it IS recognised as the owner's by key VALUE, and that proof is now
+    WRITTEN BACK while it still holds.
+
+    UPDATED: this test previously asserted the opposite tail - that once the owner
+    rolled, an un-stamped legacy session stopped matching - and called that "the
+    pre-existing behaviour rather than a new hole". That limitation was real and
+    is now removed deliberately. Once the exemption from the keystore re-check
+    keys on the owner-key proof rather than on the ADMIN scope, a legacy session
+    that lost the proof at the roll would not merely stop counting as the owner's,
+    it would be SIGNED OUT - which is precisely the promise ("a GUI key roll must
+    not log the browser out") this whole design exists to keep. Back-filling on
+    first sight closes it."""
     from localm import auth, sessions
     from localm.plugins.builtin.jobs.plug import _caller_is_owner_key
 
@@ -464,7 +558,9 @@ def test_a_session_recorded_before_this_field_existed_is_backfilled(home):
 
 
 def test_a_truthy_non_bool_in_the_store_is_not_the_owner_stamp(home):
-    """A hand-edited or corrupted store row holding a truthy STRING must not read as the stamp. create() only ever writes a real bool, so anything else is not something this server wrote."""
+    """A hand-edited or corrupted store row holding a truthy STRING must not read
+    as the stamp. create() only ever writes a real bool, so anything else is not
+    something this server wrote."""
     from localm import auth, sessions
     from localm.plugins.builtin.jobs.plug import _caller_is_owner_key
 
@@ -483,7 +579,10 @@ def test_a_truthy_non_bool_in_the_store_is_not_the_owner_stamp(home):
 
 
 def test_clearing_the_owner_key_destroys_the_stamp_with_the_session(jobs_app):
-    """The design call, pinned."""
+    """The design call, pinned. A key ROLL leaves sessions (and so the stamp)
+    alive on purpose - that is the whole fix. The containment path for a leaked
+    owner key is ``key clear`` / sign out everywhere, which revokes every session,
+    so the stamp can never outlive the credential that carries it."""
     from localm import auth, sessions
     auth.set_api_key(KEY_ONE)
     sid = _login(jobs_app, KEY_ONE)
@@ -497,7 +596,9 @@ def test_clearing_the_owner_key_destroys_the_stamp_with_the_session(jobs_app):
 
 
 def test_the_legacy_identity_relink_preserves_the_stamp(home):
-    """The owner key's identity moved to a salted KDF, and relink_key_hash rewrites existing sessions to the derived value."""
+    """The owner key's identity moved to a salted KDF, and relink_key_hash
+    rewrites existing sessions to the derived value. It must carry the stamp
+    across: dropping it there would re-open REG-509 through the upgrade path."""
     from localm import auth, sessions
     auth.set_api_key(KEY_ONE)
     legacy = auth._legacy_owner_identity(KEY_ONE)
@@ -513,7 +614,10 @@ def test_the_legacy_identity_relink_preserves_the_stamp(home):
 
 
 def test_a_revoked_scoped_session_is_never_read_for_the_stamp(home, monkeypatch):
-    """The stamp is read through the same re-validation every other cookie consumer uses, never a bare sessions.lookup()."""
+    """The stamp is read through the same re-validation every other cookie
+    consumer uses, never a bare sessions.lookup(). So a scoped-key session whose
+    key has been revoked is rejected outright - even if its record somehow carried
+    the flag, which only a tampered store could produce."""
     from localm import auth, sessions
     from localm.inference.http_server import caller_minted_by_owner_key
 
@@ -523,9 +627,8 @@ def test_a_revoked_scoped_session_is_never_read_for_the_stamp(home, monkeypatch)
                           fs_access="none", owner_key_minted=True)
     assert caller_minted_by_owner_key(_cookie_request(sid)) is True   # control
 
-    # revoke_key ALSO drops the key's sessions, which would end the test early by
-    # a different mechanism. Neutralise that so what is measured here is purely
-    # the per-request key_hash_live re-validation.
+    # revoke_key also drops the key's sessions; neutralised here so only the
+    # per-request key_hash_live re-validation is exercised.
     monkeypatch.setattr(sessions, "revoke_by_key_hash", lambda *a, **kw: 0)
     assert auth.revoke_key(created["id"]) is True
     assert sessions.lookup(sid) is not None, "the session was dropped, not re-validated"
@@ -535,7 +638,8 @@ def test_a_revoked_scoped_session_is_never_read_for_the_stamp(home, monkeypatch)
 
 
 def test_a_bearer_caller_is_never_stamped_from_a_session(home):
-    """caller_minted_by_owner_key answers only for a cookie."""
+    """caller_minted_by_owner_key answers only for a cookie. A bearer caller has
+    no session, and its correct answer comes from the key value comparison."""
     from localm import auth, sessions
     from localm.inference.http_server import caller_minted_by_owner_key
     auth.set_api_key(KEY_ONE)
@@ -551,7 +655,9 @@ def test_a_bearer_caller_is_never_stamped_from_a_session(home):
 
 def test_legacy_owner_job_is_restamped_so_a_later_rotation_cannot_strip_it(
         home, tmp_path, monkeypatch):
-    """A job persisted BEFORE this field existed must not stay exposed: the first run that proves it is the owner's (the key still matches by value) records that, so the owner's NEXT roll does not strip its shell."""
+    """A job persisted BEFORE this field existed must not stay exposed: the first
+    run that proves it is the owner's (the key still matches by value) records
+    that, so the owner's NEXT roll does not strip its shell."""
     from localm import auth
     from localm.plugins.builtin.jobs.store import Job, JobStore
     work = tmp_path / "proj"
@@ -582,7 +688,8 @@ def test_legacy_owner_job_is_restamped_so_a_later_rotation_cannot_strip_it(
 
 
 def test_restamp_failure_does_not_break_the_run(home, tmp_path, monkeypatch):
-    """The re-stamp is best-effort: a store write failure must not fail the job (this run is authorized either way), and must not be silent."""
+    """The re-stamp is best-effort: a store write failure must not fail the job
+    (this run is authorized either way), and must not be silent."""
     from localm import auth
     from localm.plugins.builtin.jobs import runner as runner_mod
     from localm.plugins.builtin.jobs.store import Job
@@ -605,7 +712,8 @@ def test_restamp_failure_does_not_break_the_run(home, tmp_path, monkeypatch):
 
 
 def test_owner_stamp_is_not_set_for_a_keystore_key(jobs_app, tmp_path):
-    """Unit-pin the stamp itself: a minted key is a keystore entry, so the job it creates must NOT be marked owner-key-created."""
+    """Unit-pin the stamp itself: a minted key is a keystore entry, so the job it
+    creates must NOT be marked owner-key-created."""
     from localm import auth
     work = tmp_path / "proj"
     work.mkdir()
@@ -625,7 +733,8 @@ def test_owner_stamp_is_set_for_the_owner_key(jobs_app, tmp_path):
 
 
 def test_owner_stamp_is_never_exposed_to_the_client(jobs_app, tmp_path):
-    """``owner`` is stripped from the API response as an internal principal binding; the flag derived from it is equally internal."""
+    """``owner`` is stripped from the API response as an internal principal
+    binding; the flag derived from it is equally internal."""
     from localm import auth
     work = tmp_path / "proj"
     work.mkdir()
@@ -641,7 +750,9 @@ def test_owner_stamp_is_never_exposed_to_the_client(jobs_app, tmp_path):
 
 def test_legacy_owner_job_without_the_stamp_still_works_while_key_matches(home,
                                                                          monkeypatch):
-    """A job persisted before this field existed loads with owner_is_owner_key False (from_dict keeps only known fields)."""
+    """A job persisted before this field existed loads with owner_is_owner_key
+    False (from_dict keeps only known fields). While the owner key still matches
+    by value, the legacy comparison must keep authorizing it."""
     monkeypatch.setenv("LOCALM_API_KEY", "ownersecret")
     from localm.auth import _hash_key
     from localm.plugins.builtin.jobs.runner import _shell_still_authorized
@@ -656,7 +767,8 @@ def test_legacy_owner_job_without_the_stamp_still_works_while_key_matches(home,
 
 
 def test_unknown_owner_hash_still_fails_closed(home):
-    """Unchanged: a hash matching neither the owner key nor any keystore entry, with no owner stamp, must stay denied."""
+    """Unchanged: a hash matching neither the owner key nor any keystore entry,
+    with no owner stamp, must stay denied."""
     from localm.plugins.builtin.jobs.runner import _shell_still_authorized
     from localm.plugins.builtin.jobs.store import Job
     job = Job(name="x", task_kind="coder", prompt="p", cwd=".",
@@ -666,12 +778,13 @@ def test_unknown_owner_hash_still_fails_closed(home):
 
 
 # --------------------------------------------------------------------------- #
-#  Rule 5: a job that genuinely cannot be re-authorized is SURFACED            #
+#  A job that genuinely cannot be re-authorized is surfaced                    #
 # --------------------------------------------------------------------------- #
 
 def test_unauthorized_shell_downgrade_is_surfaced_not_silent(home, tmp_path,
                                                              monkeypatch, caplog):
-    """A downgrade is a real loss of the behaviour the owner asked for."""
+    """A downgrade is a real loss of the behaviour the owner asked for. It must
+    be visible (log + job output), never a silent degrade (AGENTS.md rule 5)."""
     from localm import auth
     work = tmp_path / "proj"
     work.mkdir()
@@ -694,7 +807,8 @@ def test_unauthorized_shell_downgrade_is_surfaced_not_silent(home, tmp_path,
 
 
 def test_authorized_run_adds_no_downgrade_note(home, tmp_path, monkeypatch):
-    """Negative for the surfacing: a properly authorized run must NOT be littered with a downgrade note."""
+    """Negative for the surfacing: a properly authorized run must NOT be
+    littered with a downgrade note."""
     from localm import auth
     work = tmp_path / "proj"
     work.mkdir()
@@ -711,17 +825,17 @@ def test_authorized_run_adds_no_downgrade_note(home, tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-#  THE REMAINING RESIDUAL: a legacy job that never ran while the owner key      #
-#  still matched (disabled / long-cron / created shortly before a roll) has NO #
-#  repair path in the runner alone - _remember_owner_key_job never got a run   #
-#  to prove it during. run_now and update_job repair it instead, because an    #
-#  authenticated REQUEST from the job's own creator, proven as the owner key,  #
-#  is a second, independent proof the runner cannot make after the roll.       #
+#  A legacy job that never ran while the owner key still matched: run_now and  #
+#  update_job repair it; the runner alone cannot.                              #
 # --------------------------------------------------------------------------- #
 
 def test_run_now_repairs_a_pre_roll_cookie_job_and_keeps_shell_after_rotation(
         jobs_app, tmp_path, monkeypatch):
-    """The exact gap the runner's own backfill cannot close: a shell job stamped False (created before the field existed, or before #1171's cookie-session fix) that never ran while the owner key still matched."""
+    """The exact gap the runner's own backfill cannot close: a shell job stamped
+    False (created before the field existed, or before #1171's cookie-session
+    fix) that never ran while the owner key still matched. Before this fix the
+    only remedy was delete-and-recreate. The owner's still-valid PRE-ROLL cookie
+    session triggering a manual run must repair the stamp on the spot."""
     from localm import auth, sessions
     from localm.inference import http_server as hs
     from localm.plugins.builtin.jobs.store import Job, JobStore
@@ -737,9 +851,8 @@ def test_run_now_repairs_a_pre_roll_cookie_job_and_keeps_shell_after_rotation(
         "name": "legacy-cookie", "task_kind": "coder", "prompt": "x",
         "cwd": str(work), "schedule_kind": "interval", "schedule": 3600,
         "allow_shell": OPT_IN, "owner": auth._hash_key(KEY_ONE),
-        # no owner_is_owner_key key at all -> defaults False, and (unlike every
-        # other legacy-job test in this file) it never RUNS before the roll, so
-        # the runner's own one-shot backfill never gets a chance either.
+        # No owner_is_owner_key key at all -> defaults False, and it never runs
+        # before the roll, so the runner's one-shot backfill never fires.
     })
     store.add(legacy)
     assert store.get(legacy.id).owner_is_owner_key is False
@@ -748,8 +861,8 @@ def test_run_now_repairs_a_pre_roll_cookie_job_and_keeps_shell_after_rotation(
     assert sessions.lookup(sid) is not None, \
         "premise broken: the roll signed the browser out"
 
-    # Control: the autonomous scheduler alone cannot repair this - there is no
-    # request in sight to prove ownership from, which is exactly the residual.
+    # The autonomous scheduler alone cannot repair this: no request in sight to
+    # prove ownership from.
     result = runner.run_job(store.get(legacy.id), engine=None)
     assert result["status"] == "ok"
     assert captured["restricted"] is True, (
@@ -757,8 +870,7 @@ def test_run_now_repairs_a_pre_roll_cookie_job_and_keeps_shell_after_rotation(
         "legacy job with no caller in sight")
     assert store.get(legacy.id).owner_is_owner_key is False
 
-    # THE FIX: the owner triggers a manual run over their still-valid pre-roll
-    # session (exactly what the GUI's "Run now" button sends).
+    # The owner triggers a manual run over their still-valid pre-roll session.
     captured.clear()
     with TestClient(jobs_app) as c:
         c.cookies.set(hs.SESSION_COOKIE, sid)
@@ -773,8 +885,7 @@ def test_run_now_repairs_a_pre_roll_cookie_job_and_keeps_shell_after_rotation(
     assert store.get(legacy.id).owner_is_owner_key is True, \
         "run_now proved ownership but never repaired the stamp"
 
-    # The repair persisted, so the AUTONOMOUS path keeps shell too, now with no
-    # caller in sight at all.
+    # The repair persisted, so the autonomous path keeps shell with no caller.
     captured.clear()
     result = runner.run_job(store.get(legacy.id), engine=None)
     assert result["status"] == "ok"
@@ -783,7 +894,12 @@ def test_run_now_repairs_a_pre_roll_cookie_job_and_keeps_shell_after_rotation(
 
 def test_run_now_by_owner_does_not_restamp_another_principals_job(
         jobs_app, tmp_path, monkeypatch):
-    """The load-bearing negative for the repair path. ``job_owner_ok`` lets an ADMIN caller (the owner) reach ANOTHER principal's job; acting on it must NOT upgrade that job to permanent owner-key shell."""
+    """The load-bearing negative for the repair path. ``job_owner_ok`` lets an
+    ADMIN caller (the owner) reach ANOTHER principal's job; acting on it must
+    NOT upgrade that job to permanent owner-key shell. Only the job's OWN
+    creator, proven as the owner key, may repair it - the
+    ``job.owner == principal_id(request)`` conjunction in
+    ``_needs_owner_key_restamp``."""
     from localm import auth
     work = tmp_path / "proj"
     work.mkdir()
@@ -794,9 +910,7 @@ def test_run_now_by_owner_does_not_restamp_another_principals_job(
     job_id = _create_shell_job(jobs_app, created["key"], work)["id"]
     assert _stored(job_id).owner_is_owner_key is False
 
-    # Revoke the creating key so a WRONGFUL re-stamp would be observable: if the
-    # owner's run_now upgraded this job to owner-key shell, it would keep
-    # running unrestricted even though the key that actually created it is dead.
+    # Revoke the creating key so a wrongful re-stamp would be observable.
     assert auth.revoke_key(created["id"]) is True
 
     with TestClient(jobs_app) as c:
@@ -811,7 +925,8 @@ def test_run_now_by_owner_does_not_restamp_another_principals_job(
 
 
 def test_update_job_repairs_a_pre_roll_cookie_job(jobs_app, tmp_path, monkeypatch):
-    """Same repair, through PUT instead of run-now: ``update_job`` never re-stamped at all before this fix."""
+    """Same repair, through PUT instead of run-now: ``update_job`` never
+    re-stamped at all before this fix."""
     from localm import auth, sessions
     from localm.inference import http_server as hs
     from localm.plugins.builtin.jobs.store import Job, JobStore
@@ -874,7 +989,10 @@ def test_update_job_by_owner_does_not_restamp_another_principals_job(
 
 def test_downgrade_wording_does_not_assert_revoked_or_expired_as_certain(
         home, tmp_path, monkeypatch):
-    """The downgrade note used to STATE 'revoked or expired' as fact, which is FALSE for exactly this scenario: a job whose owner turns out to have been the owner key, rolled since creation."""
+    """The downgrade note used to STATE 'revoked or expired' as fact, which is
+    FALSE for exactly this scenario: a job whose owner turns out to have been
+    the owner key, rolled since creation. It must hedge, name that possibility,
+    and point at the repair path (run/edit as the owner) this fix adds."""
     from localm import auth
     from localm.plugins.builtin.jobs.store import Job
     work = tmp_path / "proj"

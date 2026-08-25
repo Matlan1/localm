@@ -1,5 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""RAG tools: rag_list_collections and rag_search."""
+"""RAG tools: rag_list_collections and rag_search.
+
+Both delegate to localm.rag.store (the RAG plugin's own data model) directly,
+in-process - no HTTP round-trip, no dependency on the rag plugin's router
+being mounted. See ADR-0006 (dev-notes/) for why: RAG collections have no
+per-collection ownership to check against, so there is nothing an HTTP hop
+would add here that the coder's own restricted/unrestricted toolset split
+(SAFE_RESTRICTED_TOOLS, registry.py) does not already provide."""
 
 from __future__ import annotations
 
@@ -9,7 +16,10 @@ from .base import ToolResult
 
 
 def tool_rag_list_collections(cwd: Path) -> ToolResult:
-    """List every indexed RAG collection with its stats."""
+    """List every indexed RAG collection with its stats.
+
+    Metadata only (names, doc/chunk counts, retrieval mode) - no document
+    content - so this is auto-approved, the same trust tier as list_dir."""
     from localm.rag.store import Collection, collection_names
 
     names = collection_names()
@@ -35,7 +45,26 @@ def tool_rag_list_collections(cwd: Path) -> ToolResult:
 
 
 def tool_rag_search(cwd: Path, collection: str, query: str, k: int = 4) -> ToolResult:
-    """Query a RAG collection and return the top-k matching excerpts."""
+    """Query a RAG collection and return the top-k matching excerpts.
+
+    SECURITY: retrieved chunk text is UNTRUSTED - it comes from a file the
+    owner indexed, but its CONTENT was never vetted for injected
+    instructions (the same reasoning as any indexed document, see
+    plugins/builtin/rag/plug.py's _neutralise_hits docstring). Collection.query()
+    itself does NOT neutralise its output - that defense lives only at the RAG
+    plugin's HTTP route (plug.py:638), applied AFTER query() returns. A direct
+    in-process caller (this function) must therefore call neutralise() itself,
+    or it silently reopens the indirect-prompt-injection hole the route
+    already closed. This tool is also registered with untrusted_output=True
+    (registry.py), so the coder's provenance layer additionally fences the
+    whole result for the model, matching fetch_url/web_search - the two
+    defenses are complementary (per-chunk content vs. whole-result framing),
+    not redundant.
+
+    Embeddings are not used here (embed_fn=None): a coder tool call has no
+    HTTP request to source a running embedding model's self-URL from, so
+    retrieval is lexical-only (BM25) - the same default `localm rag query`
+    uses on the CLI without --embed. Still fully functional; just not hybrid."""
     from localm.rag.store import Collection, collection_names
     from localm.textguard import neutralise
 

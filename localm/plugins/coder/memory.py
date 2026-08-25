@@ -1,5 +1,24 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Persistent project memory for localcoder."""
+"""
+Persistent project memory for localcoder.
+
+Looks for memory files in cwd (in priority order):
+  1. LOCALCODER.md
+  2. .localcoder/memory.md
+
+Both files use free-form markdown. The content is injected into the system
+prompt under a "## Project Memory" heading so the LLM always sees it, capped at
+_MAX_MEMORY_CHARS so it cannot crowd out the repo map and the conversation.
+
+The file is USER-managed, not agent-managed: it changes only when the user runs
+/remember or /forget (or edits it by hand). The agent has no tool that writes it,
+and close-time reflection writes episodes to the localm home data dir, not here.
+
+REPL commands:
+  /remember <text>     append a bullet to the memory file
+  /forget  <pattern>   remove all bullets whose text contains <pattern>
+                       (case-insensitive substring match)
+"""
 
 from __future__ import annotations
 
@@ -35,7 +54,17 @@ _MAX_CUSTOM_INSTRUCTIONS_CHARS = 3_000
 
 
 def _split_for_injection(text: str, limit: int) -> tuple:
-    """Split *text* into ``(kept, omitted_chars)`` at the injection budget."""
+    """
+    Split *text* into ``(kept, omitted_chars)`` at the injection budget.
+
+    Returns ``(text, 0)`` when it already fits. Otherwise the kept part is cut
+    back to a line boundary (unless that would cost more than half the budget),
+    because slicing mid-line can invert a bullet's meaning: "- never force-push
+    to master" truncated at "- never force-push" reads as the opposite advice.
+
+    Both the in-band notice and the user-facing warning derive their numbers from
+    this one function, so they can never disagree about how much was dropped.
+    """
     if len(text) <= limit:
         return text, 0
 
@@ -48,7 +77,14 @@ def _split_for_injection(text: str, limit: int) -> tuple:
 
 
 def _cap_for_injection(text: str, limit: int, what: str, remedy: str) -> str:
-    """Trim *text* to the injection budget, leaving a notice the MODEL can see."""
+    """
+    Trim *text* to the injection budget, leaving a notice the MODEL can see.
+
+    Returns *text* unchanged when it fits, so the common case is byte-identical
+    to no capping at all. When it does not fit, a bracketed notice naming the
+    omitted character count is appended, so the model reads a file it knows is
+    partial instead of silently trusting a truncated one.
+    """
     kept, omitted = _split_for_injection(text, limit)
     if not omitted:
         return kept
@@ -87,7 +123,18 @@ def default_memory_file(cwd: Path) -> Path:
 
 
 def _read_injectable(p: Optional[Path]) -> tuple:
-    """Read *p* for injection."""
+    """
+    Read *p* for injection. Returns ``(stripped_text, unreadable)``.
+
+    ``unreadable`` distinguishes the two cases the old bare ``except OSError:
+    return ""`` collapsed into one: a file that is simply ABSENT (normal, nothing
+    to say) versus one that EXISTS but could not be read (a locked, corrupt, or
+    permission-denied file). The second silently dropped the user's whole memory
+    out of the system prompt while reporting nothing, so it is surfaced by the
+    *_warning helpers below rather than swallowed (AGENTS.md rule 5). The empty
+    return itself is kept, so an unreadable file degrades to "no memory" instead
+    of killing the session.
+    """
     if p is None:
         return "", False
     try:
@@ -100,13 +147,24 @@ _MEMORY_REMEDY = "Trim it, or use /forget <pattern> to drop stale entries."
 
 
 def load_memory(cwd: Path) -> str:
-    """Return memory file content, stripped and capped for injection, or empty string if none exists."""
+    """Return memory file content, stripped and capped for injection, or empty
+    string if none exists.
+
+    Capped at _MAX_MEMORY_CHARS: content over the budget is cut back with a
+    visible notice rather than dropped silently. Use :func:`memory_warning` to
+    tell the user when that happened.
+    """
     text, _ = _read_injectable(find_memory_file(cwd))
     return _cap_for_injection(text, _MAX_MEMORY_CHARS, "project memory", _MEMORY_REMEDY)
 
 
 def memory_warning(cwd: Path) -> str:
-    """A user-facing warning about the project-memory file, or '' when all is well."""
+    """
+    A user-facing warning about the project-memory file, or "" when all is well.
+
+    Covers both ways the injected memory can differ from what is on disk: the
+    file is over the injection budget, or it exists but could not be read.
+    """
     p = find_memory_file(cwd)
     raw, unreadable = _read_injectable(p)
     if unreadable:
@@ -137,20 +195,36 @@ def _existing_instructions_file(cwd: Path) -> Optional[Path]:
 
 
 def load_custom_instructions(cwd: Path) -> str:
-    """Return the contents of ``.localcoder/system.md`` (stripped and capped for injection), or empty string when the file does not exist or cannot be read."""
+    """Return the contents of ``.localcoder/system.md`` (stripped and capped for
+    injection), or empty string when the file does not exist or cannot be read.
+
+    Capped at _MAX_CUSTOM_INSTRUCTIONS_CHARS. These are the user's own explicit
+    directives, so the cap is deliberately loud rather than quiet: the model sees
+    a notice that the file was cut, and :func:`custom_instructions_warning` tells
+    the user which of their instructions are not being followed.
+    """
     text, _ = _read_injectable(_existing_instructions_file(cwd))
     return _cap_for_injection(text, _MAX_CUSTOM_INSTRUCTIONS_CHARS,
                               "user instructions", _INSTRUCTIONS_REMEDY)
 
 
 def cap_user_instructions(text: str) -> str:
-    """Cap an explicit ``--system`` string to the same budget as system.md."""
+    """Cap an explicit ``--system`` string to the same budget as system.md.
+
+    The flag bypasses :func:`load_custom_instructions` entirely, so without this
+    the documented way to set user instructions would still be uncapped and the
+    "## User Instructions" section would stay unbounded.
+    """
     return _cap_for_injection(text.strip(), _MAX_CUSTOM_INSTRUCTIONS_CHARS,
                               "user instructions", _INSTRUCTIONS_REMEDY)
 
 
 def custom_instructions_warning(cwd: Path, override: Optional[str] = None) -> str:
-    """A user-facing warning about the user instructions, or '' when fine."""
+    """A user-facing warning about the user instructions, or "" when fine.
+
+    When *override* is given (the ``--system`` flag) it is what actually gets
+    injected, so the file on disk is not consulted.
+    """
     if override is not None:
         raw = override.strip()
         kept, omitted = _split_for_injection(raw, _MAX_CUSTOM_INSTRUCTIONS_CHARS)
@@ -172,7 +246,14 @@ def custom_instructions_warning(cwd: Path, override: Optional[str] = None) -> st
 
 
 def remember(cwd: Path, text: str) -> Path:
-    """Append a new bullet point to the memory file."""
+    """
+    Append a new bullet point to the memory file.
+
+    Creates ``LOCALCODER.md`` in cwd if no memory file exists yet.
+    Silently skips if the exact bullet is already present.
+
+    Returns the path of the file that was written.
+    """
     text = text.strip()
     if not text:
         raise ValueError("Memory entry cannot be empty.")
@@ -198,7 +279,14 @@ def remember(cwd: Path, text: str) -> Path:
 
 
 def forget(cwd: Path, pattern: str) -> tuple:
-    """Remove all bullet lines whose text contains *pattern* (case-insensitive)."""
+    """
+    Remove all bullet lines whose text contains *pattern* (case-insensitive).
+
+    Non-bullet lines (headers, blank lines, etc.) are always preserved.
+
+    Returns ``(file_path, removed_count)``.
+    Returns ``(None, 0)`` if no memory file exists.
+    """
     p = find_memory_file(cwd)
     if p is None:
         return None, 0

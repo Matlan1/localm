@@ -1,11 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-/* localm GUI - Settings page (split from pages.js). Classic script: it
-   shares the one global lexical environment with app.js and the other
-   page scripts, so the helpers it uses ($, el, authHeaders, toast, ...)
-   resolve by bare name exactly as before. */
+/* localm GUI - Settings page. */
 "use strict";
 
-// --- ES module imports (auto-generated boundary; bodies unchanged) ---
+// --- ES module imports ---
 import { pickDirectory, pickFile } from "../app/picker.js";
 import { $, authHeaders, clearImageProxyCache, confirmDanger, el, openModal, promptText, streamJob, toast } from "../app/helpers.js";
 import { emptyState } from "../app/icons.js";
@@ -15,22 +12,19 @@ import { applyServerTtsConfig, browserVoiceOverride, caps, capsReady, clearBrows
 /*  Settings page                                                    */
 /* ================================================================ */
 
-// The settings form is now schema-driven: it fetches /v1/config/schema (the
-// typed CORE_FIELDS metadata with each non-secret field's current value as its
+// The settings form is schema-driven: it fetches /v1/config/schema (the typed
+// CORE_FIELDS metadata with each non-secret field's current value as its
 // `default`) and renders the right control per field - a <select> for a fixed
 // choice set, a checkbox for a bool, a number input with min/max, a masked
-// input for a secret, a comma-edited LIST sent back as a JSON array. This kills
-// the old blind text-dumper (and its _CONFIG_SKIP hack for list keys: lists are
-// now real LIST inputs that round-trip as arrays). plugins_enabled / plugins
-// stay HIDDEN (the schema marks them widget=hidden) - they are plugin STATE
-// managed by the Plugins page, not settings. On save we PATCH native types
-// (numbers/bools/arrays), which validate_update accepts.
+// input for a secret, a comma-edited LIST sent back as a JSON array. Fields the
+// schema marks widget=hidden (plugins_enabled / plugins) are never rendered:
+// they are plugin STATE managed by the Plugins page. Save PATCHes native types
+// (numbers/bools/arrays).
 
 // The schema field list from the last successful fetch, keyed by field for the
 // save pass. Each entry mirrors a control: { field, read() }.
 export let _settingsControls = [];
-// Monotonic token so overlapping refreshes don't both render (the old text
-// dumper doubled every field when two refreshes raced; we keep the guard).
+// Monotonic token so overlapping refreshes do not both render.
 export let _settingsRenderToken = 0;
 // The top-level GROUP the user is on (a group id below). Survives re-renders so
 // saving a section keeps you on its group. Null = use the default (first) group.
@@ -40,8 +34,8 @@ export let _activeSettingsGroup = null;
 // one of these via its data-group attribute (static cards carry it in index.html;
 // schema + media sections get it set when rendered). A group nav link shows all of
 // its sections stacked; conditionally-hidden cards (Updates/Issues via the `hidden`
-// attribute, the owner-gated keys card via .sec-hidden) simply do not appear inside
-// their group until they apply. This replaces the old one-tab-per-section sprawl.
+// attribute, the owner-gated keys card via .sec-hidden) do not appear inside their
+// group until they apply.
 export const SETTINGS_GROUPS = [
   { id: "model",    label: "Model" },
   { id: "server",   label: "Server & network" },
@@ -53,8 +47,7 @@ export const SETTINGS_GROUPS = [
 ];
 
 // Per-section icon + category-colour class for the settings nav (icon names from
-// app/icons.js; the `cat-*` class drives the hue via --nav-cat in style.css). Color
-// tells you which area at a glance, matching the planning mockup.
+// app/icons.js; the `cat-*` class drives the hue via --nav-cat in style.css).
 export const SETTINGS_NAV_META = {
   model:    { icon: "sliders",  cat: "cat-blue" },
   server:   { icon: "web",      cat: "cat-cyan" },
@@ -66,9 +59,8 @@ export const SETTINGS_NAV_META = {
 };
 
 /** A .card-head (category icon + the section's h3) for a schema/plugin settings
- *  section, so it reads like the static cards. The h3 keeps its
- *  .settings-section-head class + text (its divider now comes from .card-head). The
- *  icon + hue follow the section's top-level group (SETTINGS_NAV_META). */
+ *  section. The h3 keeps its .settings-section-head class and text; the icon and
+ *  hue follow the section's top-level group (SETTINGS_NAV_META). */
 export function settingsSectionHead(heading, groupId) {
   const head = el("div", "card-head");
   const nav = SETTINGS_NAV_META[groupId] || {};
@@ -81,9 +73,7 @@ export function settingsSectionHead(heading, groupId) {
 
 /** A smaller .card-head for a sub-panel nested one level down inside a settings
  *  section (a "Shared"/"Advanced"/"Experimental" box, or the managed-ComfyUI
- *  panel): a category-hued icon + the sub-head's own .media-sub-head <h4>, same
- *  icon+divider shell as settingsSectionHead above (docs/gui-design.md rule 4).
- *  The .media-sub-head class keeps its existing (smaller) sizing. */
+ *  panel): a category-hued icon plus the sub-head's own .media-sub-head <h4>. */
 function subCardHead(heading, iconName, cat) {
   const head = el("div", "card-head");
   head.appendChild(iconEl(iconName, "ic cat-ic " + cat));
@@ -93,18 +83,11 @@ function subCardHead(heading, iconName, cat) {
   return head;
 }
 
-// Which top-level group a core schema `group` string belongs to. Plugin (owner)
-// sections go to "plugins"; the Media section is its own top-level group (built
-// directly with dataset.group = "media", not looked up here). Anything unmapped
-// falls back to "system" (the residual app drawer), so a new core group never
-// vanishes.
-// TOTAL, deliberately: every `group` the schema can produce is listed. It used to
-// map nine names and fall back to "system" for the rest, which was safe only
-// because `owner` intercepted the six missing ones before they ever reached here.
-// Now that `group` alone decides placement (see settingsSectionOf), a missing entry
-// would silently drop a whole section into System - the same "renders somewhere
-// nobody looks" failure this overhaul exists to remove. Unmapped is therefore LOUD
-// (see settingsTopGroupFor), never a quiet default.
+// Which top-level group a core schema `group` string belongs to. The Media
+// section is its own top-level group (built directly with dataset.group =
+// "media", not looked up here). This map is TOTAL: every `group` the schema can
+// produce is listed, and an unmapped one warns before falling back to "system"
+// (see settingsTopGroupFor).
 export const CORE_GROUP_TO_TOP = {
   Engine: "model", Timeouts: "model", Chat: "model", Models: "model",
   Embeddings: "model",

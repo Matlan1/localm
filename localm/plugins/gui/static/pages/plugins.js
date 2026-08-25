@@ -1,11 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-/* localm GUI - Plugins page (split from pages.js). Classic script: it
-   shares the one global lexical environment with app.js and the other
-   page scripts, so the helpers it uses ($, el, authHeaders, toast, ...)
-   resolve by bare name exactly as before. */
+/* localm GUI - Plugins page. */
 "use strict";
 
-// --- ES module imports (auto-generated boundary; bodies unchanged) ---
+// --- ES module imports ---
 import { $, authHeaders, confirmDanger, el, readSSE, toast } from "../app/helpers.js";
 import { emptyState, iconEl } from "../app/icons.js";
 import { refreshPluginCommands } from "../app/settings-perf.js";
@@ -16,15 +13,13 @@ import { refreshPluginCommands } from "../app/settings-perf.js";
 
 /* First-party catalog plugins, driven by the engine (/api/plugins). Each row
    shows install/enable/disable/uninstall depending on its state; chat is the
-   protected #0 and has no actions. After any change the catalog table AND the
-   slash-command hint cache re-derive from one fetch (nav follows in Phase 4). */
-// Each call supersedes the previous one (a newer refresh or leaving the page);
-// the staggered populate below checks the token so a stale render stops. The
-// per-row delay is a module var so tests can drop it to 0.
+   protected #0 and has no actions. After any change the catalog table and the
+   slash-command hint cache re-derive from one fetch. */
+// Each render call supersedes the previous one; the staggered populate below
+// checks the token and stops a stale render. The per-row delay is a module var.
 export let _catalogRenderToken = 0;
 export let _catalogStaggerMs = 24;
-// Mirrors the auto_install_plugin_deps setting from the last /api/plugins fetch,
-// so an install/enable can auto-kick the host-side dependency install.
+// Mirrors the auto_install_plugin_deps setting from the last /api/plugins fetch.
 export let _autoInstallDeps = true;
 
 /** A "sub" line reporting a plugin load error, prefixed with the warning icon. */
@@ -38,9 +33,7 @@ function pluginErrorLine(name, err) {
 export function _catalogRow(p) {
   const tr = el("tr");
   const nameTd = el("td", "name-cell shrink-cell");
-  // The icon/name/badge flex line lives on this inner span, never on the td: a
-  // display:flex td stops being a table-cell, so its border-bottom draws under
-  // its own content and breaks the row separator partway across (style.css).
+  // The icon/name/badge flex line goes on this inner span, never on the td.
   const nameLine = el("span", "cell-line");
   nameTd.appendChild(nameLine);
   nameLine.appendChild(iconEl("plugins", "ic ic-plugin"));
@@ -50,16 +43,14 @@ export function _catalogRow(p) {
     : p.active ? "active"
     : p.installed ? "installed (off)"
     : "available";
-  // docs/gui-design.md rule 6: state renders as a .job-state pill, not plain
-  // .mono text. protected -> on (accent, "special/can't be disabled"),
-  // active -> st-ok (green), installed-but-off -> st-pending (neutral/idle),
-  // available (never installed) -> base pill (neutral, no variant).
+  // State renders as a .job-state pill: protected -> on, active -> st-ok,
+  // installed-but-off -> st-pending, available -> the base pill.
   const statusCls = p.protected ? "on" : p.active ? "st-ok" : p.installed ? "st-pending" : "";
   const statusTd = el("td", "shrink-cell");
   statusTd.appendChild(el("span", ("job-state " + statusCls).trim(), status));
   tr.appendChild(statusTd);
   const descTd = el("td", "grow-cell", p.description);
-  // Warn when a plugin needs other plugins that are not installed (B15).
+  // Warn when a plugin needs other plugins that are not installed.
   const missing = Array.isArray(p.missing_requires) ? p.missing_requires : [];
   if (missing.length) {
     descTd.appendChild(el("div", "sub plugin-missing-req",
@@ -80,14 +71,13 @@ export function _catalogRow(p) {
       actions.appendChild(p.enabled
         ? _catalogBtn("disable", p.name, "", "Disable")
         : _catalogBtn("enable", p.name, "primary", "Enable"));
-      // Re-copy this builtin from the bundled store if a localm upgrade shipped
-      // newer code (the installed copy would otherwise keep shadowing it). Only
-      // builtins refresh from the store; a third-party install is never a target.
+      // Re-copy this builtin from the bundled store. Only builtins refresh
+      // from the store; a third-party install is never a target.
       if (p.builtin) actions.appendChild(_catalogBtn("refresh", p.name, "", "Refresh"));
       actions.appendChild(_catalogBtn("uninstall", p.name, "danger", "Uninstall"));
     }
   }
-  // One-click install of any missing requirements (B15).
+  // One-click install of any missing requirements.
   if (missing.length) {
     const req = el("button", "btn-primary", "Install requirements");
     req.style.marginLeft = "6px";
@@ -126,7 +116,7 @@ export async function renderCatalogPlugins() {
   _autoInstallDeps = data.auto_install_plugin_deps !== false;
   const plugins = (data.plugins || []).filter((p) => p.builtin);
 
-  // A status line that tells the user what is loading / what loaded (U2).
+  // A status line naming what is loading and what loaded.
   const status = el("div", "sub catalog-status");
   box.appendChild(status);
 
@@ -140,9 +130,8 @@ export async function renderCatalogPlugins() {
   table.appendChild(tbody);
   box.appendChild(table);
 
-  // Populate the rows one after another so the catalog visibly fills in instead
-  // of flashing all at once (U2). The token guard cancels a stale populate if a
-  // newer refresh started or the user left the page mid-fill.
+  // Populate the rows one after another. The token guard cancels a stale
+  // populate if a newer refresh started or the user left the page mid-fill.
   for (let i = 0; i < plugins.length; i++) {
     if (myToken !== _catalogRenderToken) return;
     tbody.appendChild(_catalogRow(plugins[i]));
@@ -157,8 +146,7 @@ export async function renderCatalogPlugins() {
     `${active}/${plugins.length} plugins active` + (failed ? ` · ${failed} failed` : "");
 
   if (data.errors) {
-    // First-party errors only: an external plugin's error belongs to the
-    // External plugins card, which renders the other half of this same dict.
+    // First-party errors only; the External plugins card renders the rest.
     const names = new Set(plugins.map((p) => p.name));
     for (const [name, err] of Object.entries(data.errors)) {
       if (!names.has(name)) continue;
@@ -174,9 +162,8 @@ export function _catalogBtn(action, name, cls, label) {
   return b;
 }
 
-// Install every plugin a given plugin requires but that is not yet installed
-// (B15). Best-effort and sequential; each result is toasted, then the catalog
-// re-renders so the warnings clear.
+// Install every plugin a given plugin requires but that is not yet installed.
+// Sequential; each result is toasted, then the catalog re-renders.
 export async function installRequirements(name, missing) {
   for (const dep of missing) {
     try {
@@ -197,9 +184,8 @@ export async function installRequirements(name, missing) {
 }
 
 // Install a plugin's missing pip extras on the HOST, streaming progress. The
-// server refuses (403) a non-local caller, in which case we tell the user to
-// install on the host instead. `opts.silent` suppresses that note for the
-// auto-triggered path (a remote GUI just leaves the manual button in place).
+// server refuses (403) a non-local caller, which is reported as a note to
+// install on the host; `opts.silent` suppresses that note.
 export async function installPluginDeps(name, opts = {}) {
   const box = $("catalog-table");
   let r;
@@ -257,8 +243,7 @@ export async function installPluginDeps(name, opts = {}) {
 }
 
 // After an install/enable, kick the host-side dependency install when the
-// setting is on and the plugin is still missing packages. Best-effort and
-// silent (a remote GUI leaves the manual "Install dependencies" button).
+// setting is on and the plugin is still missing packages. Silent.
 export async function _maybeAutoInstallDeps(name) {
   if (!_autoInstallDeps) return;
   try {
@@ -294,12 +279,10 @@ export function pluginCatalogAction(action, name) {
     // Re-derive from one place: the catalog table and the slash-hint cache.
     renderCatalogPlugins();
     refreshPluginCommands();
-    // R50: tell other open tabs (which may be parked on this plugin's page) so
-    // they re-sync and leave a now-disabled view instead of erroring on its
-    // dead routes.
+    // Tell other open tabs to re-sync, so one parked on this plugin's page
+    // leaves a now-disabled view instead of calling its dead routes.
     if (window.bumpPluginsRev) window.bumpPluginsRev();
-    // Auto-install the plugin's pip extras when the setting is on (host-only;
-    // a remote GUI silently leaves the manual "Install dependencies" button).
+    // Auto-install the plugin's pip extras when the setting is on (host-only).
     if (action === "install" || action === "enable") _maybeAutoInstallDeps(name);
   };
   if (action === "uninstall") {
@@ -310,12 +293,10 @@ export function pluginCatalogAction(action, name) {
   }
 }
 
-/* External (third-party) plugins, from the same engine API as the catalog above:
-   /api/plugins lists every INSTALLED plugin, and an external one is simply an
+/* External (third-party) plugins, from the same engine API as the catalog
+   above: /api/plugins lists every INSTALLED plugin, and an external one is an
    installed plugin that is not first-party (builtin = in the bundled store or
-   the static catalog). This page used to call a separate /v1/plugins API that
-   was removed with the second plugin mechanism (REG-585); the engine is the one
-   mechanism now, exactly as `localm plugin install/uninstall` uses it. */
+   the static catalog). */
 export async function refreshPluginsPage() {
   const box = $("plugins-table");
   box.replaceChildren();
@@ -327,9 +308,8 @@ export async function refreshPluginsPage() {
       .map((p) => p.name));
     const data = {
       plugins: (all.plugins || []).filter((p) => p.installed && !p.builtin),
-      // errors is keyed by plugin name; a broken external plugin folder is keyed
-      // by its directory name, so anything not first-party belongs to this card
-      // (the catalog card above renders the first-party half).
+      // errors is keyed by plugin name, or by directory name for a broken
+      // external plugin folder; anything not first-party belongs to this card.
       errors: Object.entries(all.errors || {})
         .filter(([name]) => !builtins.has(name)),
     };

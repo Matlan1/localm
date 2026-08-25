@@ -1,5 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""#621 follow-up: `localm doctor` must actually verify that a nested venv can be created (the exact mechanism the managed-ComfyUI installer depends on), not just that the isolated worker process can spawn."""
+"""#621 follow-up: `localm doctor` must actually verify that a nested venv can be
+created (the exact mechanism the managed-ComfyUI installer depends on), not just
+that the isolated worker process can spawn. The reporter's own repro showed
+ComfyUI setup silently failing with "[WinError 2]" - a doctor run at the time
+would have shown everything green, since nothing probed venv creation at all.
+"""
 
 from __future__ import annotations
 
@@ -22,7 +27,8 @@ def _run_check_capturing_output(monkeypatch):
 
 
 def test_venv_creation_check_passes_for_a_real_venv(monkeypatch):
-    """A REAL `-m venv` invocation on this (unaffected) machine must report OK - the exact mechanism managed_comfy_fresh.py uses, exercised for real."""
+    """A REAL `-m venv` invocation on this (unaffected) machine must report OK -
+    the exact mechanism managed_comfy_fresh.py uses, exercised for real."""
     out = _run_check_capturing_output(monkeypatch)
     assert "venv creation" in out
     line = next(ln for ln in out.splitlines() if "venv creation" in ln)
@@ -31,7 +37,9 @@ def test_venv_creation_check_passes_for_a_real_venv(monkeypatch):
 
 
 def test_venv_creation_check_reports_failure_when_venv_creation_is_broken(monkeypatch):
-    """Simulates the #621 failure mode (the resolved interpreter cannot actually create a venv) and confirms doctor surfaces it as a FAILED check, rather than silently passing like a doctor run did before this check existed."""
+    """Simulates the #621 failure mode (the resolved interpreter cannot actually
+    create a venv) and confirms doctor surfaces it as a FAILED check, rather than
+    silently passing like a doctor run did before this check existed."""
     import subprocess
 
     class _BrokenResult:
@@ -49,7 +57,14 @@ def test_venv_creation_check_reports_failure_when_venv_creation_is_broken(monkey
 
 
 def test_venv_creation_check_reports_failure_when_pip_did_not_land(monkeypatch):
-    """NEW-MANAGED-COMFY-VENV-MISSING-PIP: `-m venv` can report success (return code 0, the interpreter file present) while its own mandatory ensurepip bootstrap silently failed - the managed-ComfyUI installer immediately pip-installs into a venv it just created, so a pip-less venv used to read as doctor-g..."""
+    """NEW-MANAGED-COMFY-VENV-MISSING-PIP: `-m venv` can report success (return
+    code 0, the interpreter file present) while its own mandatory ensurepip
+    bootstrap silently failed - the managed-ComfyUI installer immediately
+    pip-installs into a venv it just created, so a pip-less venv used to read as
+    doctor-green right up until provisioning failed deep inside with an opaque
+    "No module named pip". Runs a REAL `-m venv` (unmocked) and fakes only the
+    follow-up `-m pip --version` probe failing, so this proves the check reads
+    that SECOND subprocess call rather than merely reacting to any failure."""
     import subprocess
 
     real_run = subprocess.run

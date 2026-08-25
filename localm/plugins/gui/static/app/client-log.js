@@ -1,15 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-/* localm GUI - vanilla JS, no build step.
-   Talks to the localm FastAPI server: /v1 (OpenAI-compatible) + /api (GUI).
-   All model/agent-originating strings go through textContent or DOMPurify -
-   never raw innerHTML. pages.js builds on the helpers defined here. */
+/* localm GUI - client error capture. */
 
 "use strict";
 
-// Client error capture (for bug reports): an in-memory ring of recent JS errors
-// the "Report a bug" control can attach. Client-side only; leaves the machine
-// solely inside a report the user reviews and sends. Installed first to catch
-// early failures.
+// An in-memory ring of the last 50 JS errors, which the "Report a bug" control
+// can attach. Loaded before the other app modules so early failures land here.
 
 window.__localmClientLog = window.__localmClientLog || [];
 export function __localmPushClientError(msg) {
@@ -18,7 +13,7 @@ export function __localmPushClientError(msg) {
     const log = window.__localmClientLog;
     log.push(new Date().toISOString().slice(11, 19) + "  " + line);
     if (log.length > 50) log.splice(0, log.length - 50);
-  } catch (_) { /* never let logging break the app */ }
+  } catch (_) { /* ignored */ }
 }
 window.addEventListener("error", (e) => {
   __localmPushClientError(

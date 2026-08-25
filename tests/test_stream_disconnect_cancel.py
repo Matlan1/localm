@@ -1,5 +1,20 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""A mid-stream client disconnect must not orphan the producer thread."""
+"""A mid-stream client disconnect must not orphan the producer thread.
+
+Regression guard: `_stream_sse` / `_stream_sse_completion` run
+`engine.chat_stream(...)` on a daemon thread. llama.py's `_generate` holds the
+per-model `_inference_lock` across its whole generator body. Before the fix, a
+disconnect released the request SEMAPHORE but left the producer thread running to
+end-of-generation, so it kept holding `_inference_lock` and the NEXT request to
+the same model blocked on it.
+
+These tests drive the REAL streaming coroutines. The engine stand-in's
+`chat_stream` holds a REAL `threading.Lock` for the whole generator body and
+releases it on exhaustion OR on close() - exactly the lock discipline of
+`_generate`'s `with self._inference_lock:`. The only faked piece is native token
+production, which is not what the fix changed: the fix is the cancel path in the
+HTTP layer plus the generator-close cascade, and both run for real here.
+"""
 
 from __future__ import annotations
 
@@ -15,7 +30,10 @@ from localm.inference.http_server import (
 
 
 class _LockingEngine:
-    """Engine whose chat_stream holds a real lock for its whole body, like llama.py `_generate` holds `_inference_lock`."""
+    """Engine whose chat_stream holds a real lock for its whole body, like
+    llama.py `_generate` holds `_inference_lock`. With `ntokens=None` it never
+    ends on its own, so the lock is released ONLY via the cancel path - a broken
+    fix leaves it held forever and the test times out."""
 
     def __init__(self, ntokens: int | None = None, per_token_delay: float = 0.005):
         self.display_name = "lock-model"
@@ -51,7 +69,9 @@ class _LockingEngine:
 
 
 async def _wait(cond, want=True, timeout: float = 3.0) -> bool:
-    """Poll *cond* on the event loop until it equals *want* or *timeout* elapses."""
+    """Poll *cond* on the event loop until it equals *want* or *timeout* elapses.
+    The condition flips from another (worker) thread, so we cannot just read it
+    once."""
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
     while loop.time() < deadline:
@@ -121,7 +141,9 @@ def test_completions_stream_disconnect_releases_inference_lock():
 
 
 def test_disconnect_through_pin_engine_releases_lock():
-    """Production path: Starlette acloses the OUTER `_pin_engine` wrapper, not the inner `_stream_sse` directly."""
+    """Production path: Starlette acloses the OUTER `_pin_engine` wrapper, not the
+    inner `_stream_sse` directly. Closing the wrapper must propagate the cancel
+    into the inner stream so the lock is released here and now."""
     async def scenario():
         eng = _LockingEngine()
         sem = asyncio.Semaphore(1)
@@ -140,7 +162,9 @@ def test_disconnect_through_pin_engine_releases_lock():
 
 
 def test_normal_chat_stream_completes_and_releases_lock():
-    """Happy path is unbroken: a finite generation streams all tokens, ends with [DONE]/finish_reason=stop, and leaves the lock free (the new try/finally + cancel_event must not corrupt a clean completion)."""
+    """Happy path is unbroken: a finite generation streams all tokens, ends with
+    [DONE]/finish_reason=stop, and leaves the lock free (the new try/finally +
+    cancel_event must not corrupt a clean completion)."""
     async def scenario():
         eng = _LockingEngine(ntokens=3, per_token_delay=0.0)
         sem = asyncio.Semaphore(1)
@@ -158,7 +182,10 @@ def test_normal_chat_stream_completes_and_releases_lock():
 
 
 def test_close_cascades_through_scrub_stream_releases_lock():
-    """The cancel path relies on `.close()` cascading through the real backend wrapper generators. `engine.chat_stream` wraps the token stream in `textnorm.scrub_stream` (the outermost production wrapper); closing it must propagate GeneratorExit into the inner generator and release its lock."""
+    """The cancel path relies on `.close()` cascading through the real backend
+    wrapper generators. `engine.chat_stream` wraps the token stream in
+    `textnorm.scrub_stream` (the outermost production wrapper); closing it must
+    propagate GeneratorExit into the inner generator and release its lock."""
     from localm.textnorm import scrub_stream
 
     lock = threading.Lock()
@@ -187,17 +214,19 @@ def test_close_cascades_through_scrub_stream_releases_lock():
 # NON-streaming disconnect (the _complete / _generate_full twin of the above).
 #
 # A non-streaming handler is a plain coroutine, so Starlette does NOT aclose it on
-# a client disconnect the way it acloses a StreamingResponse's generator. The fix
-# instead polls request.is_disconnected() and, on disconnect, signals the executor
-# worker to stop and gen.close() the chain - releasing _inference_lock now rather
-# than at end-of-generation. These tests drive the REAL _generate_full / _complete
-# coroutines; the only faked pieces are token production (the lock-holding engine,
-# same discipline as _generate) and the disconnect signal (a controllable request).
+# a client disconnect the way it acloses a StreamingResponse's generator. The
+# handler instead polls request.is_disconnected() and, on disconnect, signals the
+# executor worker to stop and gen.close() the chain - releasing _inference_lock
+# now rather than at end-of-generation. These tests drive the REAL
+# _generate_full / _complete coroutines; the only faked pieces are token
+# production (the lock-holding engine) and the disconnect signal (a controllable
+# request).
 # --------------------------------------------------------------------------- #
 
 
 class _FakeRequest:
-    """Stands in for a Starlette Request purely for is_disconnected() polling."""
+    """Stands in for a Starlette Request purely for is_disconnected() polling.
+    Flip .disconnected from the test to simulate the client aborting."""
 
     def __init__(self, disconnected: bool = False):
         self.disconnected = disconnected
@@ -241,7 +270,8 @@ def test_generate_full_disconnect_releases_inference_lock():
 
 
 def test_generate_full_completes_and_releases_lock():
-    """Happy path: a finite generation returns the full joined text and leaves the lock free (the cancel_event + watcher must not corrupt a clean completion)."""
+    """Happy path: a finite generation returns the full joined text and leaves the
+    lock free (the cancel_event + watcher must not corrupt a clean completion)."""
 
     from localm.inference.http_server import _generate_full
 
@@ -257,7 +287,8 @@ def test_generate_full_completes_and_releases_lock():
 
 
 def test_generate_full_none_request_runs_to_completion():
-    """request=None (a caller with no disconnect signal) is inert: the generation runs to completion and the lock is released, never a spurious cancel."""
+    """request=None (a caller with no disconnect signal) is inert: the generation
+    runs to completion and the lock is released, never a spurious cancel."""
 
     from localm.inference.http_server import _generate_full
 
@@ -272,7 +303,9 @@ def test_generate_full_none_request_runs_to_completion():
 
 
 def test_complete_disconnect_releases_inference_lock():
-    """End-to-end through the real chat non-streaming handler _complete: a mid- generation disconnect must release _inference_lock (and the semaphore) so the next request to the same model is not blocked."""
+    """End-to-end through the real chat non-streaming handler _complete: a mid-
+    generation disconnect must release _inference_lock (and the semaphore) so the
+    next request to the same model is not blocked."""
 
     from localm.inference.http_server import _complete
 
@@ -306,7 +339,8 @@ def test_complete_disconnect_releases_inference_lock():
 
 
 def test_complete_happy_path_returns_response_and_releases_lock():
-    """A non-streaming request that runs to completion still returns a valid ChatResponse JSON and leaves the lock free."""
+    """A non-streaming request that runs to completion still returns a valid
+    ChatResponse JSON and leaves the lock free."""
 
     import json as _json
 
@@ -331,11 +365,10 @@ def test_complete_happy_path_returns_response_and_releases_lock():
 
 # --------------------------------------------------------------------------- #
 # REAL native inference: the unit tests above stub token production with a
-# lock-holding generator. This one proves the ACTUAL llama.py _generate releases
-# the ACTUAL _inference_lock when the real backend generator chain
-# (scrub_stream -> gguf -> create_chat_completion -> _stream_chunks ->
-# _decode_stream -> _generate) is closed mid-stream - closing the gap that would
-# otherwise let the fix pass on a mock of exactly the thing that was broken.
+# lock-holding generator. This one drives the ACTUAL llama.py _generate and
+# asserts it releases the ACTUAL _inference_lock when the real backend generator
+# chain (scrub_stream -> gguf -> create_chat_completion -> _stream_chunks ->
+# _decode_stream -> _generate) is closed mid-stream.
 # @integration + @real_gguf: needs the native runtime + a small real model.
 # --------------------------------------------------------------------------- #
 
@@ -372,7 +405,19 @@ def gguf_backend():
 @pytest.mark.integration
 @pytest.mark.real_gguf
 def test_real_gguf_midstream_close_releases_inference_lock(gguf_backend):
-    """Close the REAL generator chain mid-generation and prove the model is NOT left wedged: a follow-up generation on the same loaded model must start and produce output promptly."""
+    """Close the REAL generator chain mid-generation and prove the model is
+    NOT left wedged: a follow-up generation on the same loaded model must
+    start and produce output promptly. This is the production mechanism the
+    disconnect fix relies on.
+
+    Cannot inspect the real `_inference_lock` object directly anymore - the
+    real LlamaCpp instance (and its lock) now live inside an isolated worker
+    PROCESS (see llamacpp/_runner.py), not in this one, so no Python object in
+    THIS process can observe its state. The property this test actually cares
+    about - "closing mid-stream doesn't leave the model unusable for the next
+    request" - is proven instead by timing: a bounded wall-clock assertion
+    that the next generation starts promptly rather than hanging behind a
+    still-held lock in the child."""
     import time
 
     be = gguf_backend
@@ -408,9 +453,7 @@ def test_real_gguf_midstream_close_releases_inference_lock(gguf_backend):
 
 
 # --------------------------------------------------------------------------- #
-# REAL uvicorn server: the unit tests above prove the cancel MECHANISM with a
-# fake request whose is_disconnected() we flip by hand. This one closes the gap
-# they cannot: that a REAL client abort of a REAL non-streaming request over a
+# REAL uvicorn server: a REAL client abort of a REAL non-streaming request over a
 # REAL uvicorn server makes request.is_disconnected() fire, so the lock is freed.
 # No model or network needed - a lock-holding fake engine stands in for the
 # native backend, exactly as in the unit tests, so this runs in the default gate.
@@ -418,7 +461,8 @@ def test_real_gguf_midstream_close_releases_inference_lock(gguf_backend):
 
 
 class _ServerLockingEngine(_LockingEngine):
-    """_LockingEngine wired to satisfy the real chat handler + get_engine: it must look loaded (so get_engine returns it directly) and text-only."""
+    """_LockingEngine wired to satisfy the real chat handler + get_engine: it must
+    look loaded (so get_engine returns it directly) and text-only."""
 
     def __init__(self):
         super().__init__()               # ntokens=None -> never ends on its own
@@ -452,7 +496,11 @@ def _raw_chat_request(port: int) -> bytes:
 
 
 def test_real_uvicorn_nonstream_disconnect_releases_inference_lock():
-    """Production path: a client that opens a non-streaming /v1/chat/completions request and then drops the socket mid-generation must make the server release _inference_lock (via request.is_disconnected() polling), so the model is not wedged for the next caller."""
+    """Production path: a client that opens a non-streaming /v1/chat/completions
+    request and then drops the socket mid-generation must make the server release
+    _inference_lock (via request.is_disconnected() polling), so the model is not
+    wedged for the next caller. Proves the disconnect DETECTION, not just the
+    cancel mechanism."""
     import socket as _socket
 
     import uvicorn
@@ -510,18 +558,18 @@ def test_real_uvicorn_nonstream_disconnect_releases_inference_lock():
 #
 # Engine.chat_stream is NOT a generator: it eagerly runs the auto-reload
 # (self._backend.load()) and load_config() BEFORE returning the token generator,
-# so it can RAISE at call time (a reload that OOMs, a since-removed GGUF). The
-# producer body used to call it OUTSIDE its try/finally, so such a raise killed
-# the thread before the sentinel was enqueued and the consumer blocked forever at
-# `await token_queue.get()` inside `async with sem` - a permanent per-model
-# deadlock (every later request to that model hangs). These tests drive the REAL
-# _stream_sse / _stream_sse_completion coroutines and require the failure to be
-# surfaced and the semaphore released.
+# so it can RAISE at call time (a reload that OOMs, a since-removed GGUF). If the
+# producer raises before the sentinel is enqueued, the consumer blocks forever at
+# `await token_queue.get()` inside `async with sem`, deadlocking every later
+# request to that model. These tests drive the REAL _stream_sse /
+# _stream_sse_completion coroutines and require the failure to be surfaced and
+# the semaphore released.
 # --------------------------------------------------------------------------- #
 
 
 class _EagerRaiseEngine:
-    """Engine whose chat_stream raises EAGERLY, before returning a generator - exactly what Engine.chat_stream does when its auto-reload load() fails."""
+    """Engine whose chat_stream raises EAGERLY, before returning a generator -
+    exactly what Engine.chat_stream does when its auto-reload load() fails."""
 
     def __init__(self):
         self.display_name = "raise-model"

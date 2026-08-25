@@ -1,5 +1,18 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Static tripwire for the slash-command menu (B2)."""
+"""Static tripwire for the slash-command menu (B2).
+
+Bug (from the field report): typing "/remember some note" then Enter discarded
+the args. The slash autocomplete menu filtered on the first token only and never
+closed once the user typed past the command, so Enter triggered the menu's
+pick(), which overwrites the input with "/cmd " and drops the typed args instead
+of sending the whole line.
+
+Fix: attachSlashMenu's render() closes the menu as soon as a space is typed (the
+command token is complete and the user is entering args), so Enter falls through
+to the send path and handleSlashSubmit parses "/cmd args" correctly.
+
+The GUI has no JS test harness, so this is a source-level guard: it fails if the
+close-on-space behavior is removed. The behavioral proof is the live GUI test."""
 
 import re
 from pathlib import Path
@@ -9,7 +22,9 @@ _STATIC = (Path(__file__).resolve().parents[1]
 
 
 def _all_js() -> str:
-    """All shipped GUI JS as one string."""
+    """All shipped GUI JS as one string. ARCH-1 split app.js into ES modules under
+    app/, so read every .js under static/ (recursively, minus vendored libs);
+    attachSlashMenu is unique by name, so which module holds it does not matter."""
     return "\n".join(
         p.read_text(encoding="utf-8")
         for p in sorted(_STATIC.rglob("*.js"))
@@ -36,7 +51,9 @@ def _strip_line_comments(src: str) -> str:
 
 
 def test_slash_menu_closes_once_past_the_command_token():
-    """attachSlashMenu must close the menu when the input has a space after the command (args being typed), so Enter sends the full line instead of pick() discarding the args."""
+    """attachSlashMenu must close the menu when the input has a space after the
+    command (args being typed), so Enter sends the full line instead of pick()
+    discarding the args."""
     body = _strip_line_comments(_func_body(_all_js(), "attachSlashMenu"))
     # A guard that, when the post-"/" text contains a space, closes the menu.
     assert re.search(r'includes\("\s"\)\s*\)\s*\{\s*close\(\)', body), (

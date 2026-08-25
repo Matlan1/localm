@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// The Models page "rename" control must report the name the SERVER stored, not
-// the raw text the user typed - rename_model sanitizes server-side exactly like
-// alias_model does (REG-562's same discipline, applied to the new control).
+// The Models page "rename" control toasts the name the server stored;
+// rename_model sanitizes server-side.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -56,10 +55,6 @@ test("models-rename: the toast names the SANITIZED name the server stored", asyn
 });
 
 test("models-rename: server migration notes (e.g. the unreachable .localcoder case) reach the toast", async () => {
-  // CONTROL review: the notes rename_model_with_notes reports must not be
-  // dropped between the server response and the user - a bare "Renamed"
-  // toast with no mention of what could not be migrated silently hides a
-  // real gap (AGENTS.md rule 5).
   const toasts = [];
   const NOTE = "A per-project .localcoder/config.toml 'model' setting (if any) "
     + "lives outside <data dir> and was NOT updated - fix it by hand in any "

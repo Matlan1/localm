@@ -2,14 +2,12 @@
 // jsdom tests for the jobs plugin client_entry (localm/plugins/builtin/jobs/
 // static/jobs.js).
 //
-// Unlike the GUI's app.js (a top-level script), jobs.js is an ES MODULE that
-// exports register(ctx). loadClientPlugins() in app.js does
-//   const mod = await import(`${base}/${p.client_entry}`); await mod.register(ctx)
-// with ctx = { registerTTS, toast, authHeaders, voicesChanged }. We mirror that
-// here: build a jsdom document that has a <main id="main"> (the GUI views
-// container), install it as the global document/window, stub fetch with canned
-// /api/jobs data, import the module, call register(ctx), trigger the jobs view,
-// and assert the list renders + Run-now POSTs.
+// jobs.js is an ES MODULE exporting register(ctx); loadClientPlugins() in app.js
+// imports it and calls register(ctx) with
+// { registerTTS, toast, authHeaders, voicesChanged }. Each test mirrors that:
+// build a jsdom document with a <main id="main">, install it as the global
+// document/window, stub fetch with canned /api/jobs data, import the module,
+// call register(ctx), then trigger the jobs view.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -164,10 +162,8 @@ test("the Model field is a dropdown populated from /api/models", async () => {
 });
 
 // --- the rag (knowledge re-sync) task kind ---------------------------------
-// A rag job re-syncs a NAMED COLLECTION against the folders it was indexed
-// from, so it is fully specified without a prompt - but it is useless without
-// the collection. The form has to invert its required-field rule for that kind,
-// which is exactly the kind of branch that silently rots.
+// A rag job re-syncs a named collection: the form requires a collection for that
+// kind and no prompt.
 
 async function openForm() {
   const env = makeEnv();
@@ -196,7 +192,7 @@ test("a rag job posts task_kind + collection and needs no prompt", async () => {
   setField(win, "jobs-name", "sync manuals");
   task.value = "rag";
   setField(win, "jobs-collection", "manuals");
-  // Prompt deliberately left empty.
+  // Prompt left empty.
   win.document.getElementById("jobs-add").click();
   await settle();
 
@@ -222,8 +218,6 @@ test("a rag job without a collection is refused before any POST", async () => {
 });
 
 test("a chat job still requires a prompt", async () => {
-  // Negative control: relaxing the prompt rule for rag must not relax it for
-  // every other kind.
   const { win, calls, toasts } = await openForm();
 
   setField(win, "jobs-name", "no prompt");
@@ -262,13 +256,9 @@ test("authHeaders() is applied to the list fetch", async () => {
     "the list is fetched from GET /api/jobs");
 });
 
-// --- the .data-table list pattern (JOBS-DATA-TABLE) -------------------------
-// Jobs used to hand-roll a flexbox card list (.job-row/.job-head/.job-meta/
-// .job-actions), which is why it was the one list page with no row hover: the
-// hover, name-cell icon layout and mobile card stacking all hang off
-// `.data-table` in style.css and were never restated here. These assert the
-// STRUCTURE that earns those rules, not the rules themselves (CSS is not applied
-// in jsdom) - the shared stylesheet is what turns the structure into the look.
+// --- the .data-table list pattern -------------------------------------------
+// The shared `.data-table` rules in style.css hang off this structure. CSS is not
+// applied in jsdom, so these assert the structure, not the rendered look.
 
 async function renderedJobs(jobs) {
   const env = makeEnv(jobs ? { jobs } : undefined);
@@ -292,8 +282,6 @@ test("the jobs list renders as a .data-table, one tbody row per job", async () =
     ["Name", "State", "Schedule", "Task", "Last run", ""],
     "the header names every column, with a trailing actions column");
 
-  // The hand-rolled card classes are gone: leaving them behind would mean two
-  // list vocabularies on one page, which is the thing being removed.
   assert.equal(win.document.querySelectorAll("#view-jobs .job-row").length, 0,
     "no .job-row cards remain in the list");
   assert.equal(win.document.querySelectorAll("#view-jobs .job-actions").length, 0,
@@ -315,9 +303,8 @@ test("each row's cells carry the job's own fields", async () => {
 });
 
 test("the name cell leads with the shared icon helper", async () => {
-  // window.iconEl is the GUI's own icon renderer (app/icons.js), reachable from a
-  // client plugin via app/main.js's window-export loop. Spying on it is the only
-  // way to tell "used the shared icon set" from "drew something icon-shaped".
+  // window.iconEl is the GUI's icon renderer (app/icons.js), reachable from a
+  // client plugin via app/main.js's window-export loop.
   const env = makeEnv();
   const seen = [];
   env.win.iconEl = (name, cls) => {
@@ -334,17 +321,12 @@ test("the name cell leads with the shared icon helper", async () => {
 
   const nameTd = env.win.document.querySelector("#view-jobs tbody tr td.name-cell");
   assert.ok(nameTd, "the first cell is a .name-cell");
-  // Filter to the ROW icon's own call rather than asserting the whole history:
-  // the card heads legitimately call window.iconEl too, so a whole-history match
-  // would key this test on traffic that is not its subject.
+  // The card heads call window.iconEl too, so filter to the row icon's own calls.
   assert.deepEqual(seen.filter((c) => c.cls === "ic ic-job"),
     [{ name: "clock", cls: "ic ic-job" }],
     "the row icon comes from window.iconEl, using the jobs surface's own clock icon,"
     + " exactly once for the one job");
-  // The icon/name line sits on an inner .cell-line span, not on the <td>: the flex
-  // row has to live on a child, because a display:flex <td> stops being a
-  // table-cell and its border-bottom then draws under its own content instead of
-  // at the row's foot, breaking the separator partway across the row.
+  // The icon/name line sits on an inner .cell-line span, not on the <td>.
   const line = nameTd.querySelector(":scope > .cell-line");
   assert.ok(line, "the name cell wraps its contents in a .cell-line");
   assert.equal(nameTd.children.length, 1,
@@ -356,15 +338,10 @@ test("the name cell leads with the shared icon helper", async () => {
 });
 
 test("row action buttons use the in-table tiers, not the page .btn-* classes", async () => {
-  // docs/gui-design.md rule 3: inside a dense .data-table the compact
-  // `.data-table button` styling wins, so a row action states its tier with
-  // .primary / .secondary / .danger. A .btn-secondary here renders as a large
-  // page-level button crammed into a table cell.
+  // A row action states its tier with .primary / .secondary / .danger, not a
+  // page-level .btn-* class.
   const { win } = await renderedJobs();
   const cells = win.document.querySelectorAll("#view-jobs tbody tr td");
-  // Named rather than indexed blind: without it, a row that renders no cells at
-  // all makes this test die on a TypeError, which reads as a broken test instead
-  // of as the missing table it actually is.
   assert.ok(cells.length, "the row renders table cells to look in");
   const actions = cells[cells.length - 1];
   const tiers = [...actions.querySelectorAll("button")].map(
@@ -379,16 +356,12 @@ test("row action buttons use the in-table tiers, not the page .btn-* classes", a
     "no page-level .btn-* button survives inside the table");
 });
 
-// --- delete confirmation (JOBS-CONFIRM-DANGER) ------------------------------
-// Delete used to call the native confirm(). Some mobile / PWA browsers suppress
-// window.confirm() outright, where it returns falsy and the delete silently never
-// happens. confirmDanger() is the app's own in-page modal and is what every other
-// destructive action in the GUI uses.
+// --- delete confirmation ----------------------------------------------------
+// Delete confirms through window.confirmDanger, the app's in-page modal; a native
+// confirm() fallback exists for the no-GUI-shell case.
 
-// Install a controllable window.confirmDanger and a confirm() that RECORDS being
-// called. The native fallback still exists for the no-GUI-shell case, so a test
-// that only asserted "the delete was confirmed somehow" would pass either way;
-// these assert WHICH one ran.
+// Installs a controllable window.confirmDanger and a confirm() that records being
+// called, so the tests can tell which one ran.
 function withConfirmSpy(win, { autoConfirm = true } = {}) {
   const seen = { danger: [], native: 0 };
   win.confirmDanger = (title, message, label, onConfirm) => {
@@ -426,10 +399,6 @@ test("Delete confirms with the app's confirmDanger modal, never native confirm()
 });
 
 test("declining the confirm deletes nothing", async () => {
-  // Assert on the DATA (no DELETE was issued, the row is still listed), not on a
-  // status code: converting a synchronous `if (!confirm()) return` into a callback
-  // is exactly the edit that can make the action fire before the user answers, and
-  // a request count is the only thing that reports that.
   const env = makeEnv();
   const seen = withConfirmSpy(env.win, { autoConfirm: false });
   const mod = await importJobs();
@@ -452,11 +421,7 @@ test("declining the confirm deletes nothing", async () => {
 
 // --- the schedule builder's dynamic fields (updateSchedDetails) -------------
 // The Add-job form swaps its detail fields whenever the Schedule preset changes,
-// and each preset builds a DIFFERENT schedule_kind/schedule pair. That behaviour
-// was correct and completely untested, which made it the thing most likely to be
-// broken silently by an edit to the surrounding markup. These are a
-// characterization guard, not a proof of the data-table change: they hold on both
-// sides of it by design, and exist so the NEXT edit here cannot pass unnoticed.
+// and each preset builds its own schedule_kind/schedule pair.
 
 async function pickPreset(win, value) {
   const sel = win.document.getElementById("jobs-sched-preset");
@@ -495,9 +460,7 @@ test("the schedule preset swaps the detail fields, leaving none of the old ones"
 });
 
 test("each schedule preset posts its own schedule_kind and schedule", async () => {
-  // The presets are the whole point of the builder: 'day'/'week' are CRON under
-  // the hood while 'hours'/'interval' are second counts. Asserting the POSTed
-  // pair is the only way to catch a preset quietly building the wrong one.
+  // 'day'/'week' build cron expressions; 'hours'/'interval' build second counts.
   const cases = [
     { preset: "hours", set: ["jobs-sched-hours", "6"], kind: "interval", schedule: 21600 },
     { preset: "interval", set: ["jobs-sched-interval", "90"], kind: "interval", schedule: 90 },

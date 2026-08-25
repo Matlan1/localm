@@ -1,5 +1,22 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Multi-instance GPU/VRAM coordination: localm/gpu_registry.py + the switch_engine() cooperative-unload fallback + POST /v1/instances/cooperate- unload."""
+"""Multi-instance GPU/VRAM coordination: localm/gpu_registry.py + the
+switch_engine() cooperative-unload fallback + POST /v1/instances/cooperate-
+unload.
+
+Covers: atomic registry write/read/reap (mirrors instances.py's own tested
+pattern), list_gpu_peers' liveness+identity double-check (mocked pid_alive
+and the /whoami handshake), request_cooperative_unload's advisory HTTP call,
+switch_engine()'s new eviction-exhausted branch (falls back to today's exact
+503 when no coordination/no peers/cooperation fails; succeeds and loads when
+a peer cooperates), and the new endpoint's token-only auth (never reachable
+via a real API key/shell token alone).
+
+Every test here redirects gpu_registry.registry_dir() to a per-test tmp_path
+(autouse fixture below) so nothing ever touches the real machine-wide
+``%TEMP%/localm/gpu`` directory - that directory could hold a REAL running
+localm instance's entry, and this suite must never probe or ask a real
+process to unload its model.
+"""
 
 from __future__ import annotations
 
@@ -19,7 +36,9 @@ from tests.conftest import probe_double
 
 @pytest.fixture(autouse=True)
 def _isolated_registry_dir(tmp_path, monkeypatch):
-    """Redirect the module-wide registry location to a throwaway directory for every test in this file, and guarantee hs._gpu_coord starts and ends each test as None (no cross-test leakage of coordination state)."""
+    """Redirect the module-wide registry location to a throwaway directory for
+    every test in this file, and guarantee hs._gpu_coord starts and ends each
+    test as None (no cross-test leakage of coordination state)."""
     d = tmp_path / "gpu"
     monkeypatch.setattr(gpu_registry, "registry_dir", lambda: d)
     hs._gpu_coord = None
@@ -77,7 +96,18 @@ class TestRegistryReadWrite:
         assert gpu_registry.list_entries(d) == []
 
     def test_write_entry_failure_is_best_effort(self, tmp_path, monkeypatch):
-        """A write failure must never raise into the caller - it returns None instead (RULE 5: logged, never a crash in the caller's request path)."""
+        """A write failure must never raise into the caller - it returns None
+        instead (RULE 5: logged, never a crash in the caller's request path).
+
+        The fault is injected at ``config.atomic_write_private``, the writer
+        this function delegates to. It used to be injected at
+        ``pathlib.Path.write_text``, which write_entry called directly; once the
+        create moved to ``os.open`` inside the shared writer that patch stopped
+        intercepting anything, and a fault injector that silently fails to fire
+        is indistinguishable from a guard that correctly found nothing to
+        refuse. The ``is None`` assertion is itself the proof the injection
+        took: without it the function returns the written path.
+        """
         d = tmp_path / "reg"
 
         def boom(*a, **k):
@@ -144,12 +174,9 @@ class TestAgeSeconds:
 
 class TestListGpuPeers:
     def _write(self, d, iid, port, model=None, pid=None):
-        # Default pid is deliberately NOT os.getpid(): these entries stand in
-        # for a genuinely different process. A pid equal to this test
-        # process's own would now (correctly) be excluded as self by
-        # list_gpu_peers() regardless of exclude_self_id - see
-        # test_self_pid_excluded_even_without_exclude_self_id below, which
-        # tests that behaviour on purpose.
+        # The default pid is NOT os.getpid(): these entries stand in for a
+        # genuinely different process. A pid equal to this test process's own is
+        # excluded as self by list_gpu_peers() regardless of exclude_self_id.
         if pid is None:
             pid = os.getpid() + 1
         return gpu_registry.write_entry(
@@ -175,7 +202,9 @@ class TestListGpuPeers:
         assert gpu_registry.list_gpu_peers(d) == []
 
     def test_failed_whoami_handshake_is_excluded(self, tmp_path, monkeypatch):
-        """A live PID whose /whoami identity check fails (impostor on a reused port, or just unreachable) must NOT be trusted as a peer - file contents alone are never enough."""
+        """A live PID whose /whoami identity check fails (impostor on a reused
+        port, or just unreachable) must NOT be trusted as a peer - file
+        contents alone are never enough."""
         d = tmp_path / "reg"
         self._write(d, "peer3", 9003, model="peer-model")
         monkeypatch.setattr(gpu_registry, "pid_alive", lambda pid: True)
@@ -193,7 +222,14 @@ class TestListGpuPeers:
         assert peers == []
 
     def test_self_pid_excluded_even_without_exclude_self_id(self, tmp_path, monkeypatch):
-        """The caller may have no instance_id to pass at all - llamacpp/_sizing.py's _vram_holder_hint has none, by design (see its docstring) - and must still never see itself as a peer."""
+        """The caller may have no instance_id to pass at all -
+        llamacpp/_sizing.py's _vram_holder_hint has none, by design (see its
+        docstring) - and must still never see itself as a peer. A registry
+        entry whose pid is THIS test process's own pid must be excluded even
+        with no exclude_self_id given, and even though pid_alive/_try_whoami
+        would happily vouch for it: this is the exact real-world shape of the
+        bug (a low-VRAM warning blaming "another localm instance" that was
+        actually itself, port and all)."""
         d = tmp_path / "reg"
         self._write(d, "self-by-pid", 9010, model="my-model", pid=os.getpid())
         monkeypatch.setattr(gpu_registry, "pid_alive", lambda pid: True)
@@ -332,7 +368,20 @@ def _make_engine(name):
 
 
 class _UnfittableEngine(_FakeEngine):
-    """Simulates the backend's OWN final sizing decision genuinely refusing (GgufBackend._check_vram raising because the model cannot fit even at 0 GPU layers - llamacpp/_sizing.py)."""
+    """Simulates the backend's OWN final sizing decision genuinely refusing
+    (GgufBackend._check_vram raising because the model cannot fit even at 0
+    GPU layers - llamacpp/_sizing.py). Since #753, switch_engine no longer
+    hard-refuses on its own crude whole-model estimate once local +
+    cooperative eviction is exhausted - it falls through to a real load
+    attempt and lets the backend decide, converting a genuine backend
+    RuntimeError into the same clean 503 shape the old crude refusal used to
+    produce (see switch_engine's `except RuntimeError` around new_engine.load).
+    These cooperative-unload tests are about the COOPERATION SEQUENCING
+    (was the registry queried, did a peer get asked, does failure never
+    escalate past 503), not about whole-model sizing - test_auto_gpu_layers.py
+    already covers that - so the model-b factory here must simulate a load
+    that genuinely cannot fit, or switch_engine's fall-through would just
+    succeed (200) instead of ever reaching a 503 to assert on."""
 
     def load(self):
         raise RuntimeError("VRAM exhausted: cannot fit even at 0 GPU layers")
@@ -365,7 +414,9 @@ def multi_model_registry(monkeypatch):
 
 
 def _dynamic_vram(free_gate=None):
-    """10 GB total; ~8 GB consumed per loaded model, UNLESS free_gate() reports the coordination freed things up (used to simulate a peer's unload actually releasing driver-level VRAM)."""
+    """10 GB total; ~8 GB consumed per loaded model, UNLESS free_gate()
+    reports the coordination freed things up (used to simulate a peer's
+    unload actually releasing driver-level VRAM)."""
     def _read():
         if free_gate is not None and free_gate():
             return {"free": 10 * 1024 ** 3, "total": 10 * 1024 ** 3}
@@ -377,7 +428,13 @@ def _dynamic_vram(free_gate=None):
 
 class TestSwitchEngineCooperativeUnload:
     def test_falls_back_to_503_without_coordination(self, multi_model_registry, monkeypatch):
-        """hs._gpu_coord unset (today's default for every existing test and every --isolated run) -> the new branch is a pure no-op, cooperation is never attempted, and the load still ends in a clean 503 when the backend's own sizing (simulated here - see _UnfittableEngine) genuinely cannot fit it (since #753,..."""
+        """hs._gpu_coord unset (today's default for every existing test and
+        every --isolated run) -> the new branch is a pure no-op, cooperation is
+        never attempted, and the load still ends in a clean 503 when the
+        backend's own sizing (simulated here - see _UnfittableEngine) genuinely
+        cannot fit it (since #753, switch_engine itself no longer hard-refuses
+        on its own crude estimate; it falls through and lets the backend
+        decide)."""
         assert hs._gpu_coord is None
         monkeypatch.setattr("localm.discover.vram_info", probe_double(_dynamic_vram()))
 
@@ -394,7 +451,11 @@ class TestSwitchEngineCooperativeUnload:
 
     def test_cooperation_attempted_but_no_holder_falls_back_to_503(
             self, multi_model_registry, monkeypatch):
-        """Coordination IS configured, but no live peer holds a model - the attempt is genuinely made (proving the wiring runs), and the load still ends in a clean 503 once the backend's own sizing (simulated - see _UnfittableEngine) genuinely cannot fit it, never a harder failure."""
+        """Coordination IS configured, but no live peer holds a model - the
+        attempt is genuinely made (proving the wiring runs), and the load
+        still ends in a clean 503 once the backend's own sizing (simulated -
+        see _UnfittableEngine) genuinely cannot fit it, never a harder
+        failure."""
         hs._gpu_coord = {"instance_id": "self1", "port": 1, "host": "127.0.0.1",
                          "scheme": "http", "token": "selftok"}
         calls = {"n": 0}
@@ -420,7 +481,9 @@ class TestSwitchEngineCooperativeUnload:
 
     def test_cooperation_failure_falls_back_to_503_not_harder(
             self, multi_model_registry, monkeypatch):
-        """A peer exists but declines/fails cooperation - the load still ends in a clean 503 once the backend's own sizing (simulated - see _UnfittableEngine) genuinely cannot fit it, never escalated."""
+        """A peer exists but declines/fails cooperation - the load still ends
+        in a clean 503 once the backend's own sizing (simulated -
+        see _UnfittableEngine) genuinely cannot fit it, never escalated."""
         hs._gpu_coord = {"instance_id": "self1", "port": 1, "host": "127.0.0.1",
                          "scheme": "http", "token": "selftok"}
         peer_entry = {"instance_id": "peer1", "port": 9100, "scheme": "http",
@@ -441,7 +504,9 @@ class TestSwitchEngineCooperativeUnload:
 
     def test_successful_cooperation_frees_vram_and_load_succeeds(
             self, multi_model_registry, monkeypatch):
-        """A live peer holding a model cooperates - the request IS made (with the peer's own coordination_token) and, once it reports success, the load proceeds without any LOCAL eviction (model-a stays resident)."""
+        """A live peer holding a model cooperates - the request IS made (with
+        the peer's own coordination_token) and, once it reports success, the
+        load proceeds without any LOCAL eviction (model-a stays resident)."""
         hs._gpu_coord = {"instance_id": "self1", "port": 1, "host": "127.0.0.1",
                          "scheme": "http", "token": "selftok"}
         peer_entry = {"instance_id": "peer1", "port": 9200, "scheme": "http",
@@ -515,7 +580,11 @@ class TestCooperateUnloadEndpointAuth:
         assert r.status_code == 403
 
     def test_not_reachable_via_a_real_bearer_credential_alone(self):
-        """A caller presenting a real per-process secret (standing in for a real API key / shell token) as Authorization, WITHOUT the coordination_token, must still be refused - proves this is a genuinely separate auth path from require_scope/MODELS_WRITE, not just 'also accepts a real key'."""
+        """A caller presenting a real per-process secret (standing in for a
+        real API key / shell token) as Authorization, WITHOUT the
+        coordination_token, must still be refused - proves this is a
+        genuinely separate auth path from require_scope/MODELS_WRITE, not
+        just 'also accepts a real key'."""
         hs._gpu_coord = {"instance_id": "self1", "port": 1, "host": "127.0.0.1",
                          "scheme": "http", "token": "the-real-token"}
         app = create_app(None)
@@ -526,7 +595,8 @@ class TestCooperateUnloadEndpointAuth:
         assert r.status_code == 403
 
     def test_disabled_when_coordination_not_registered(self):
-        """No _gpu_coord at all (isolated run / plain app) - the endpoint refuses every token rather than silently accepting one."""
+        """No _gpu_coord at all (isolated run / plain app) - the endpoint
+        refuses every token rather than silently accepting one."""
         hs._gpu_coord = None
         client = self._client()
         r = client.post("/v1/instances/cooperate-unload",
@@ -576,7 +646,10 @@ class TestGpuRegistrySync:
 # ------------------------------------------------------------------ #
 
 class TestLifespanRegistersGpuCoordination:
-    """Mirrors test_surfaces.py's `_api_app` pattern: an app wired the way instances.advertise() wires it (instance_id/port/scheme/bind_host set on app.state), then `with TestClient(app) as client:` to actually run the ASGI lifespan startup/shutdown events this feature hooks into."""
+    """Mirrors test_surfaces.py's `_api_app` pattern: an app wired the way
+    instances.advertise() wires it (instance_id/port/scheme/bind_host set on
+    app.state), then `with TestClient(app) as client:` to actually run the
+    ASGI lifespan startup/shutdown events this feature hooks into."""
 
     def _advertised_app(self, *, isolated=False):
         app = create_app(None)
@@ -607,14 +680,20 @@ class TestLifespanRegistersGpuCoordination:
             assert hs._gpu_coord is None
 
     def test_plain_app_without_instance_id_never_registers(self, tmp_path):
-        """A bare create_app() (no instances.advertise() wiring at all - every pre-existing test in this codebase) must never touch the registry."""
+        """A bare create_app() (no instances.advertise() wiring at all - every
+        pre-existing test in this codebase) must never touch the registry."""
         app = create_app(None)
         with TestClient(app):
             assert gpu_registry.list_entries(gpu_registry.registry_dir()) == []
             assert hs._gpu_coord is None
 
     def test_startup_reaps_a_dead_peers_leftover_entry(self, tmp_path, monkeypatch):
-        """A prior instance that crashed (SIGKILL, no shutdown cleanup) leaves its entry on disk forever unless something sweeps it."""
+        """A prior instance that crashed (SIGKILL, no shutdown cleanup) leaves
+        its entry on disk forever unless something sweeps it. Confirms the
+        NEXT instance to start does that sweep (gpu_registry.reap_stale wired
+        into the same startup path instances.advertise() uses), not merely
+        that a dead entry is filtered out of list_gpu_peers - the entry must
+        actually be gone from disk afterward."""
         d = gpu_registry.registry_dir()
         d.mkdir(parents=True, exist_ok=True)
         dead = d / "dead-peer.json"
