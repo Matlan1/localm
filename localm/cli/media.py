@@ -11,6 +11,7 @@ def _open_file(path: Path) -> None:
     """Open *path* with the OS default application (best-effort, never fatal)."""
     import os as _os
     import subprocess as _sp
+    from rich.markup import escape
     try:
         if sys.platform == "win32":
             _os.startfile(str(path))  # type: ignore[attr-defined]
@@ -19,7 +20,7 @@ def _open_file(path: Path) -> None:
         else:
             _sp.Popen(["xdg-open", str(path)])
     except Exception as e:
-        console.print(f"[dim]Could not open it automatically: {e}[/dim]")
+        console.print(f"[dim]Could not open it automatically: {escape(str(e))}[/dim]")
 
 
 
@@ -146,6 +147,8 @@ def _generate_or_abort(api_url: str, run):
     KeyboardInterrupt is re-raised afterwards so Click still exits the way it
     always did.
     """
+    from rich.markup import escape
+
     from ..media.comfy_client import free_comfy_vram, interrupt_comfy
     try:
         return run()
@@ -157,7 +160,7 @@ def _generate_or_abort(api_url: str, run):
             free_comfy_vram(api_url)
         except Exception as e:
             console.print(f"[yellow]![/yellow]  Could not reach ComfyUI to stop it "
-                          f"({e}). It may still be rendering and holding VRAM.")
+                          f"({escape(str(e))}). It may still be rendering and holding VRAM.")
             raise
         if aborted:
             console.print("[dim]Render aborted, queue cleared, VRAM freed.[/dim]")
@@ -205,6 +208,8 @@ def image_cmd(prompt, negative, guidance, cfg, seed, input_image, denoise,
     """
     import time as _time
 
+    from rich.markup import escape
+
     from ..audit import SessionMode, effective_mode
     from ..image_gen.comfy import (default_api_url, free_comfy_vram,
                                   generate_image)
@@ -241,7 +246,7 @@ def image_cmd(prompt, negative, guidance, cfg, seed, input_image, denoise,
         ok, message = _maybe_apply_func_shim_and_retry(
             message, api_url,
             lambda: _generate_or_abort(api_url, _gen_image))
-    console.print(f"[{'green' if ok else 'red'}]{message}[/{'green' if ok else 'red'}]")
+    console.print(f"[{'green' if ok else 'red'}]{escape(str(message))}[/{'green' if ok else 'red'}]")
     if not ok:
         sys.exit(1)
     free_comfy_vram(api_url)
@@ -275,6 +280,7 @@ def music_cmd(tags, lyrics, duration, out, seed, steps, cfg):
     """
     import time as _time
     from rich.console import Console
+    from rich.markup import escape
     from ..audit import SessionMode, effective_mode
     from ..media.comfy_client import default_api_url
     from ..music_gen import generate_music
@@ -299,7 +305,7 @@ def music_cmd(tags, lyrics, duration, out, seed, steps, cfg):
             lyrics=lyr,
             duration_seconds=duration,
             api_url=api_url,
-            on_progress=lambda t: console.print(f"  [dim]{t}[/dim]"),
+            on_progress=lambda t: console.print(f"  [dim]{escape(t)}[/dim]"),
             write_sidecar=_write_sidecar,
             delete_outputs=_is_privacy,
             **kwargs,
@@ -309,7 +315,7 @@ def music_cmd(tags, lyrics, duration, out, seed, steps, cfg):
     if not ok:
         ok, message = _maybe_apply_func_shim_and_retry(
             message, api_url, lambda: _generate_or_abort(api_url, _gen_music))
-    console.print(f"[{'green' if ok else 'red'}]{message}[/{'green' if ok else 'red'}]")
+    console.print(f"[{'green' if ok else 'red'}]{escape(str(message))}[/{'green' if ok else 'red'}]")
     if not ok:
         sys.exit(1)
     _offer_open(out_path)
@@ -354,6 +360,7 @@ def video_cmd(prompt, negative, duration, fps, width, height, input_image,
     """
     import time as _time
     from rich.console import Console
+    from rich.markup import escape
     from ..audit import SessionMode, effective_mode
     from ..media.comfy_client import default_api_url
     from ..video_gen import generate_video
@@ -380,7 +387,7 @@ def video_cmd(prompt, negative, duration, fps, width, height, input_image,
             fps=fps,
             api_url=api_url,
             input_image=Path(input_image) if input_image else None,
-            on_progress=lambda t: console.print(f"  [dim]{t}[/dim]"),
+            on_progress=lambda t: console.print(f"  [dim]{escape(t)}[/dim]"),
             write_sidecar=_write_sidecar,
             delete_outputs=_is_privacy,
             **kwargs,
@@ -390,7 +397,7 @@ def video_cmd(prompt, negative, duration, fps, width, height, input_image,
     if not ok:
         ok, message = _maybe_apply_func_shim_and_retry(
             message, api_url, lambda: _generate_or_abort(api_url, _gen_video))
-    console.print(f"[{'green' if ok else 'red'}]{message}[/{'green' if ok else 'red'}]")
+    console.print(f"[{'green' if ok else 'red'}]{escape(str(message))}[/{'green' if ok else 'red'}]")
     if not ok:
         sys.exit(1)
     _offer_open(out_path)
