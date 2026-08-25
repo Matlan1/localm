@@ -513,3 +513,56 @@ class TestGenerateEarlyExitCleanup:
         message = str(excinfo.value)
         assert "Not enough memory to create a" in message
         assert "lower n_ctx_max" in message
+
+
+# ---------------------------------------------------------------------------
+#  MTP speculative drafting vs grammar-constrained sampling
+# ---------------------------------------------------------------------------
+
+class TestMtpDraftingRespectsGrammar:
+    """Drafting picks tokens with a bare greedy sampler and then accepts them
+    into the main chain. With a grammar in that chain the accepted token was
+    never masked by the grammar, so a JSON-schema or tool-calling reply could
+    emit text the schema forbids - and the out-of-step accept is the documented
+    cause of a native abort. Constrained requests take the single-token path."""
+
+    _MTP_CTX = 444
+
+    def _mock_api(self):
+        mock_api = MagicMock()
+        mock_api.llama_sampler_sample.return_value = 42
+        mock_api.llama_decode.return_value = 0
+        mock_api.llama_batch_init.side_effect = fake_batch_init
+        return mock_api
+
+    def _drive(self, grammar):
+        llm = _bare_llama()
+        llm._mtp_ctx_ptr = self._MTP_CTX
+        llm._tokenizer.is_eog.return_value = False
+        mock_api = self._mock_api()
+        with patch("localm.inference.backends.llamacpp.llama.api", mock_api), \
+             patch("localm.inference.backends.llamacpp.llama._build_sampler",
+                   return_value=999):
+            list(llm._generate(
+                prompt_tokens=[1, 2, 3], max_new_tokens=2, temperature=0.8,
+                top_k=40, top_p=0.95, repeat_penalty=1.1, grammar=grammar))
+        # Sampling against the draft context is what drafting does and nothing
+        # else does. Counting DECODES there would also catch the draft
+        # context's own prefill, which happens either way.
+        drafted = [c for c in mock_api.llama_sampler_sample.call_args_list
+                   if c[0][1] == self._MTP_CTX]
+        return mock_api, drafted
+
+    def test_no_drafting_while_a_grammar_constrains_sampling(self):
+        mock_api, drafted = self._drive(grammar='root ::= "a"')
+        mock_api.llama_sampler_init_greedy.assert_not_called()
+        assert drafted == []
+        # A token chosen off-grammar must never be pushed into the real chain.
+        mock_api.llama_sampler_accept.assert_not_called()
+
+    def test_drafting_still_runs_for_unconstrained_requests(self):
+        """The gate is narrow on purpose: MTP models keep their speedup on
+        ordinary chat, which is what makes this a refusal and not a disable."""
+        mock_api, drafted = self._drive(grammar=None)
+        mock_api.llama_sampler_init_greedy.assert_called_once()
+        assert drafted, "MTP drafting should still run without a grammar"

@@ -1482,7 +1482,18 @@ class LlamaCpp:
                     grammar_lazy=grammar_lazy,
                     grammar_triggers=grammar_triggers,
                 )
-                draft_sampler = api.llama_sampler_init_greedy() if self._mtp_ctx_ptr is not None else None
+                # Drafting samples with a plain greedy sampler and then pushes the
+                # winning token into the main chain. With a grammar in that chain
+                # the token was chosen without the grammar's mask, so it can be one
+                # the grammar forbids, and accepting it advances the parse stacks
+                # out of step - the same mis-sequenced accept documented below,
+                # which throws across the C ABI. Constrained requests therefore
+                # take the single-token path.
+                draft_sampler = (
+                    api.llama_sampler_init_greedy()
+                    if self._mtp_ctx_ptr is not None and grammar is None
+                    else None
+                )
 
                 pos = n_prompt
                 # Why generation ended, read by callers as self.last_finish_reason.
