@@ -730,6 +730,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   downloaded the RX 6000 (RDNA2) build by name, the same file every card
   received. The GPU is now detected first and the matching build is
   requested; RX 6000 keeps its existing behavior unchanged.
+- **Older saved memories could stay stuck in plain keyword search forever.**
+  A memory saved before an embedding model was installed, or a backlog too
+  large for the usual background pass to catch up on its own, used to need a
+  manual `localm setup-embeddings` re-run to become semantically searchable
+  again. A background pass now catches them up on its own while you use
+  localm, so semantic recall keeps improving without a manual step.
 
 ### Security
 - **Turning network access off no longer left the voice model able to
