@@ -86,6 +86,31 @@ export function classifyLoadError(err, { cached = false, online = true } = {}) {
   };
 }
 
+// R-NET: the browser fetches the Kokoro model directly from Hugging Face, so
+// localm's server-side net_mode enforcement (netpolicy.py) never sees this
+// request. planModelFetch is the client-side gate: "allow" (already cached,
+// or net_mode=allow) proceeds with no prompt; "refuse" (net_mode=off) throws
+// without ever fetching; "confirm" (net_mode=ask, or any other value) needs
+// an explicit one-time user action before the fetch is allowed to proceed.
+export function planModelFetch(mode, cached) {
+  if (cached) return "allow";
+  if (mode === "allow") return "allow";
+  if (mode === "off") return "refuse";
+  return "confirm";
+}
+
+// Thrown by tts.js's load() when planModelFetch returns "refuse" or the user
+// declines a "confirm" prompt. A distinct class so the catch handler in
+// ensureLoaded() can show this message as-is instead of running it through
+// classifyLoadError, whose networkish regex (e.g. /blocked/) would otherwise
+// relabel it as a generic connectivity failure.
+export class NetGateError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "NetGateError";
+  }
+}
+
 // R08: only promise a download when the model is NOT already cached, so a hard
 // reload that loads from the browser cache does not falsely claim a fresh ~90 MB
 // "first time setup". `secureContext` false (plain-HTTP LAN origin) means the

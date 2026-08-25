@@ -11,7 +11,7 @@ property for free).
 Routes (mounted by the engine, auto-scoped to the ``tts`` capability):
   GET /api/tts/status   - is the plugin usable / which engine
   GET /api/tts/config   - resolved {engine, model, device, dtype, voice, speed,
-                          library, wasm_paths}
+                          library, wasm_paths, net_mode}
 
 Config resolution mirrors the media plugins' template+override idea: the shipped
 defaults live in the tracked ``tts.example.json`` template, and the user's
@@ -62,7 +62,13 @@ async def tts_status():
 
 @_router.get("/api/tts/config")
 async def tts_config():
-    return _resolved()
+    """Resolved config plus the live net_mode: the Kokoro model is fetched by
+    the browser directly, so the client needs net_mode to gate that fetch
+    itself (netpolicy.py never sees a browser-originated request)."""
+    from localm.netpolicy import network_mode
+    cfg = _resolved()
+    cfg["net_mode"] = network_mode()
+    return cfg
 
 
 def register(host) -> None:
