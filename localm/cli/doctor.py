@@ -35,11 +35,19 @@ def _render(result) -> None:
     A result with NO findings prints nothing, which is not an oversight: an
     absent optional backend has never produced a line, and a report people read
     under stress does not need one saying so."""
+    from rich.markup import escape
+
     for f in result.findings:
-        note = f" [dim]({f.note})[/dim]" if f.note else ""
-        console.print(f"  {_SYM_FOR.get(f.status, _WARN_SYM)}  {f.text}{note}")
+        # escape(): diagnostics.py builds text/note/hints from real probe
+        # output - a subprocess's stderr/stdout, an exception message, raw
+        # filenames read off disk, a native ABI mismatch detail - none of it
+        # is restricted to a safe charset, and diagnostics.py itself
+        # deliberately never escapes (its own docstring: "nothing here
+        # imports click or rich"), so this renderer is the one place that must.
+        note = f" [dim]({escape(f.note)})[/dim]" if f.note else ""
+        console.print(f"  {_SYM_FOR.get(f.status, _WARN_SYM)}  {escape(f.text)}{note}")
         for hint in f.hints:
-            console.print(f"       [dim]{hint}[/dim]")
+            console.print(f"       [dim]{escape(hint)}[/dim]")
 
 
 def _check_python() -> None:
@@ -115,6 +123,7 @@ def _check_gpu_driver() -> bool:
     detail line, while a false positive costs the whole warning."""
     import subprocess
     from localm.debuglog import logger as _dbg
+    from rich.markup import escape
     for cmd, label in [
         (["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader"],
          "NVIDIA"),
@@ -138,13 +147,18 @@ def _check_gpu_driver() -> bool:
             said = (out or (r.stderr or "").strip() or "no output")
             _dbg.debug("doctor: %s probe (%s) exited %d: %s",
                        label, cmd[0], r.returncode, said)
+            # escape(): `said` is nvidia-smi/rocm-smi's own stderr/stdout - an
+            # external driver tool's text, not a string localm controls the
+            # charset of. `cmd[0]` and `label` are the hardcoded literals above.
             console.print(
                 f"  {_WARN_SYM}  {cmd[0]} is installed but failed "
-                f"(exit {r.returncode}): {said.splitlines()[0]}")
+                f"(exit {r.returncode}): {escape(said.splitlines()[0])}")
             continue
         if out:
+            # escape(): `first_line` is the GPU name/memory nvidia-smi/rocm-smi
+            # itself reported - hardware/driver text, not localm's own string.
             first_line = out.splitlines()[0]
-            console.print(f"  {_OK_SYM}  {label} GPU: {first_line}")
+            console.print(f"  {_OK_SYM}  {label} GPU: {escape(first_line)}")
             return True
     return False
 
@@ -181,6 +195,8 @@ def _check_vram_torch() -> bool:
     doomed-combination conflict above reached some other way - must not
     escape and silently truncate every later doctor check."""
     torch_gpu_found = False
+    from rich.markup import escape
+
     from localm.inference.backends.llamacpp import _loader
     if _loader.native_lib_loaded():
         from localm.debuglog import logger as _dbg
@@ -273,8 +289,11 @@ def _check_vram_torch() -> bool:
                 else:
                     free_s = ""
                     note = "  [yellow](free VRAM reading unavailable on this platform)[/yellow]"
+                # escape(): `props.name` is the CUDA/ROCm driver's own device
+                # name string - hardware/driver-reported text, same risk class
+                # as the nvidia-smi/rocm-smi output above.
                 console.print(
-                    f"  {_OK_SYM}  GPU {i}: {props.name}  "
+                    f"  {_OK_SYM}  GPU {i}: {escape(props.name)}  "
                     f"{free_s}{total_b / 1024**3:.1f} GB total"
                     f"{note}"
                 )
@@ -290,7 +309,12 @@ def _check_vram_torch() -> bool:
                    "reached some other way); GPU VRAM check skipped for this "
                    "supplementary line - see _check_gpu_verdict for the real "
                    "verdict", type(e).__name__)
-        console.print(f"  {_WARN_SYM}  torch GPU/VRAM probe failed ({type(e).__name__}) - skipped")
+        # escape(): a dynamically-constructed exception class can carry an
+        # arbitrary __name__ - escaped for the same reason the collection
+        # names in #1463 were, despite being normally identifier-shaped: a
+        # no-op on the common case, real protection if that ever stops holding.
+        console.print(f"  {_WARN_SYM}  torch GPU/VRAM probe failed "
+                      f"({escape(type(e).__name__)}) - skipped")
     return torch_gpu_found
 
 
@@ -349,16 +373,24 @@ def _check_runtime_build(find_binary_dir) -> None:
     predate tag recording exist and will keep existing."""
     if not find_binary_dir():
         return
+    from rich.markup import escape
+
     try:
         from localm.setup_llama import installed_build, pinned_tag
         build = installed_build()
         pin = pinned_tag()
     except Exception as e:
         console.print(f"  {_WARN_SYM}  could not read the llama.cpp build "
-                      f"[dim]({e})[/dim]")
+                      f"[dim]({escape(str(e))})[/dim]")
         return
+    # escape(): `build` is the second token of a plain marker file localm's own
+    # provisioning code writes but never re-validates on read (setup_llama.py's
+    # _read_marker() just splits on whitespace). `pin` IS already restricted to
+    # a safe tag charset by pinned_tag()'s own is_safe_tag() check, but is
+    # escaped anyway rather than relying on that chain holding - same reasoning
+    # #1463 used for rag.py's already-validated collection names.
     if build:
-        console.print(f"  {_OK_SYM}  llama.cpp build: {build}")
+        console.print(f"  {_OK_SYM}  llama.cpp build: {escape(build)}")
     else:
         console.print(f"  {_WARN_SYM}  llama.cpp build not recorded - this "
                       "install predates build recording")
@@ -370,11 +402,12 @@ def _check_runtime_build(find_binary_dir) -> None:
         # pin was set but never provisioned through (setup-llama not re-run, or
         # it fell back to another backend). Saying only "pinned to X" here would
         # assert something the filesystem contradicts.
-        console.print(f"  {_WARN_SYM}  pinned to {pin} but {build} is installed"
-                      " - run 'localm setup-llama --force' to apply the pin")
+        console.print(f"  {_WARN_SYM}  pinned to {escape(pin)} but {escape(build)} "
+                      "is installed - run 'localm setup-llama --force' to apply "
+                      "the pin")
     elif pin:
-        console.print(f"     [dim]pinned to {pin}; 'localm setup-llama --tag "
-                      "latest' resumes tracking upstream[/dim]")
+        console.print(f"     [dim]pinned to {escape(pin)}; 'localm setup-llama "
+                      "--tag latest' resumes tracking upstream[/dim]")
 
 
 def _probe_gpu_devices() -> Optional[dict]:
@@ -408,6 +441,8 @@ def _check_gpu_verdict(find_binary_dir, lib_healthy: bool, smi_or_torch_gpu: boo
     "CPU mode only" is emitted only for a genuine cpu build, a runtime that loads
     with no GPU device, or a truly indeterminate no-signal case - never from the
     mere absence of the vendor CLIs the default GPU path never needs."""
+    from rich.markup import escape
+
     backend = _provisioned_backend_name(find_binary_dir)
     probe = _probe_gpu_devices() if lib_healthy else None
     loaded = bool(probe.get("loaded")) if probe else False
@@ -434,7 +469,10 @@ def _check_gpu_verdict(find_binary_dir, lib_healthy: bool, smi_or_torch_gpu: boo
     # Each verdict is a SHORT primary line (the pass/fail phrase never wraps, so
     # a narrow terminal cannot split "CPU mode only" across a line break and mask
     # it), with any elaboration on a separate dim hint line - the doctor idiom.
-    tag = f" ({backend})" if backend and backend != "custom" else ""
+    # escape(): `backend` is read from the same unvalidated marker file as
+    # `build` above (setup_llama.py's _read_marker(), no charset check on
+    # read) - escaped once here so every use of `tag` below is already safe.
+    tag = f" ({escape(backend)})" if backend and backend != "custom" else ""
 
     # (1) Ground truth: the runtime loaded and reported its real compute devices.
     if loaded and devices:
@@ -445,7 +483,11 @@ def _check_gpu_verdict(find_binary_dir, lib_healthy: bool, smi_or_torch_gpu: boo
         gpu = [name for (name, dtype) in devices
                if int(dtype) == _loader_gpu_type()]
         if gpu:
-            console.print(f"  {_OK_SYM}  GPU: {', '.join(gpu)}{tag} - used for inference")
+            # escape(): device names come from the native ggml compute-device
+            # probe - hardware/driver-reported text (Vulkan/ROCm/CUDA device
+            # names), same risk class as nvidia-smi/rocm-smi output.
+            console.print(f"  {_OK_SYM}  GPU: {', '.join(escape(g) for g in gpu)}"
+                          f"{tag} - used for inference")
         else:
             console.print(f"  {_WARN_SYM}  GPU: none in the loaded runtime{tag} - CPU mode only")
         return
@@ -459,7 +501,8 @@ def _check_gpu_verdict(find_binary_dir, lib_healthy: bool, smi_or_torch_gpu: boo
     #     success for a known-broken state).
     marker_trustworthy = loaded or (probe is None and lib_healthy)
     if marker_trustworthy and backend in _GPU_BACKENDS:
-        console.print(f"  {_OK_SYM}  GPU: '{backend}' backend provisioned - used for inference")
+        console.print(f"  {_OK_SYM}  GPU: '{escape(backend)}' backend provisioned "
+                      "- used for inference")
         return
     if marker_trustworthy and backend == "cpu":
         console.print(f"  {_WARN_SYM}  GPU: 'cpu' backend provisioned - CPU mode only")
@@ -483,7 +526,10 @@ def _check_gpu_verdict(find_binary_dir, lib_healthy: bool, smi_or_torch_gpu: boo
     # unverified claim on the very path that exists to stop making them.
     if probe_error:
         console.print(f"  {_WARN_SYM}  GPU: could not be determined{tag} - the runtime probe failed")
-        console.print(f"       [dim]{probe_error}[/dim]")
+        # escape(): `probe_error` is repr(e) of whatever exception the native
+        # loader raised, JSON round-tripped out of a subprocess - exactly the
+        # "probe error text" class this sweep exists to cover.
+        console.print(f"       [dim]{escape(probe_error)}[/dim]")
         # No provisioning advice here on purpose. The runtime IS provisioned, and
         # _check_llama_lib / _check_native_abi have already run and already say
         # what to do about a runtime that will not load - repeating it adds noise
@@ -520,6 +566,7 @@ def _check_packages() -> dict:
     already confirmed is merely importable (see ``_check_hf_backend_usable``)."""
     import importlib
     import importlib.metadata as _ilm
+    from rich.markup import escape
     packages = [
         ("fastapi",           "FastAPI (HTTP server)"),
         ("uvicorn",           "uvicorn (ASGI server)"),
@@ -595,7 +642,10 @@ def _check_packages() -> dict:
                 except Exception:
                     ver = ""
             sym = _OK_SYM
-            ver_str = f" {ver}" if ver else ""
+            # escape(): `ver` is read from an installed package's own
+            # distribution metadata (or its __version__ attribute) - a
+            # third-party package's string, not localm's to control.
+            ver_str = f" {escape(ver)}" if ver else ""
         except ImportError:
             modules[mod] = None
             sym     = _WARN_SYM if (mod, label) in optional_pkgs else _FAIL_SYM
@@ -613,7 +663,9 @@ def _check_packages() -> dict:
                        "reached some other way); reported as unavailable for "
                        "this run", type(e).__name__)
             sym = _WARN_SYM
-            ver_str = f" - import failed ({type(e).__name__})"
+            # escape(): defense-in-depth, same reasoning as _check_vram_torch's
+            # type(e).__name__ site above - a no-op for a normal class name.
+            ver_str = f" - import failed ({escape(type(e).__name__)})"
         console.print(f"  {sym}  {label}{ver_str}")
     return modules
 
@@ -634,17 +686,28 @@ def _check_hf_backend_usable(torch_mod, transformers_mod) -> None:
 def _check_plugin_deps() -> None:
     """Report enabled plugins whose declared pip extras are not installed, and
     point at the one-shot fix."""
+    from rich.markup import escape
+
     try:
         from localm.plugins.engine import PluginManager
         missing = PluginManager(None).all_missing_deps(enabled_only=True)
     except Exception as e:
-        console.print(f"  {_WARN_SYM}  plugin dependency check skipped [dim]({e})[/dim]")
+        console.print(f"  {_WARN_SYM}  plugin dependency check skipped "
+                      f"[dim]({escape(str(e))})[/dim]")
         return
     if not missing:
         console.print(f"  {_OK_SYM}  plugin dependencies: enabled plugins have theirs")
         return
+    # escape(): `name`/`reqs` come from an installed plugin's own manifest, not
+    # a localm-controlled charset - a community plugin's declared name or pip
+    # requirement string could contain anything. Quoted by hand rather than via
+    # Python's !r/repr(): repr() applied AFTER escape() re-escapes escape()'s
+    # own backslash (verified empirically - it re-breaks the bracketed span),
+    # and escape() applied to a repr'd string is the wrong order too; a plain
+    # manual quote sidesteps the interaction entirely.
     for name, reqs in missing.items():
-        console.print(f"  {_WARN_SYM}  plugin {name!r} is missing: {', '.join(reqs)}")
+        console.print(f"  {_WARN_SYM}  plugin '{escape(name)}' is missing: "
+                      f"{', '.join(escape(r) for r in reqs)}")
     console.print("       [dim]Install them with:  localm plugin install-deps --all[/dim]")
 
 
@@ -660,6 +723,8 @@ def _check_managed_comfy() -> None:
     skipped line (AGENTS.md rule 5: surface, do not silence) rather than muted or
     escalated into a doctor failure.
     """
+    from rich.markup import escape
+
     try:
         from localm.media.managed_comfy import (
             is_managed_comfy_installed,
@@ -667,14 +732,18 @@ def _check_managed_comfy() -> None:
         )
         installed = is_managed_comfy_installed()
     except Exception as e:  # noqa: BLE001 - a hint must not fail doctor; surface why.
-        console.print(f"  {_WARN_SYM}  managed-ComfyUI hint skipped [dim]({e})[/dim]")
+        console.print(f"  {_WARN_SYM}  managed-ComfyUI hint skipped "
+                      f"[dim]({escape(str(e))})[/dim]")
         return
     # soft_wrap: this line names a literal path/command a user may copy-paste; a
     # narrow terminal must never break it mid-token (only affects THIS line, not
     # the rest of doctor's output, which still wraps normally).
     if installed:
+        # escape(): a real filesystem path under LOCALM_HOME - the same risk
+        # class as the document paths #1463 fixed in rag.py.
         console.print(
-            f"  {_OK_SYM}  managed ComfyUI: installed at {managed_comfy_paths().root}",
+            f"  {_OK_SYM}  managed ComfyUI: installed at "
+            f"{escape(str(managed_comfy_paths().root))}",
             soft_wrap=True,
         )
     else:
