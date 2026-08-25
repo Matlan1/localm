@@ -706,6 +706,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   wrong moment could load a half-written, invalid workflow file. The write is
   now atomic, so a read always sees the complete file, before or after the
   upload.
+- **`localm setup-llama --backend amd-rocm` now fetches the self-contained
+  build that matches your AMD card, instead of always the RX 6000 one.**
+  Explicitly requesting this backend on an RX 7000 or RX 9000 card silently
+  downloaded the RX 6000 (RDNA2) build by name, the same file every card
+  received. The GPU is now detected first and the matching build is
+  requested; RX 6000 keeps its existing behavior unchanged.
 
 ### Security
 - **Turning network access off no longer left the voice model able to
