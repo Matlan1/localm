@@ -807,6 +807,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   Some error messages quote the file path in a form the scrubber did not
   recognize, so the account name inside it slipped through untouched. Every
   form of the path is now caught.
+- **The no-Python fallback bug reporter no longer files a report without
+  asking you first.** If it could not show the confirmation prompt (no
+  console attached, or nothing left to type into), it used to go ahead and
+  send anyway. It now treats that exactly like you said no: the report is
+  saved locally and nothing is sent, with a note on where to find it.
 
 ## [0.1.5rc3] - 2026-08-13
 
