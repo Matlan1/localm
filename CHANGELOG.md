@@ -779,6 +779,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   change did not actually work. It now runs the project's own check (or
   whichever one you configured) against its own worktree, and a failing
   check is reported as a failure rather than a success.
+- **HuggingFace-backend chats no longer crash instead of reporting a clean
+  error.** A prompt too long for the model's context window reported a
+  generic worker crash rather than the intended, actionable "conversation
+  exceeded context window" message, and stopping the server while a reply
+  was still streaming could itself crash instead of ending the reply
+  cleanly.
 
 ### Security
 - **Turning network access off no longer left the voice model able to
