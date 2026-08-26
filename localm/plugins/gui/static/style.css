@@ -2710,9 +2710,13 @@ div:has(> .data-table) { overflow-x: auto; }
   .composer-row { flex-wrap: wrap; gap: 6px 10px; }
   #chat-usage, #coder-usage { width: 100%; }
 
-  /* Stack 2-column form grids into one column. */
+  /* Stack 2-column form grids into one column. .media-subsection
+     .settings-fields is repeated here: its own selector has higher
+     specificity than a bare .settings-fields, so it would otherwise keep
+     winning the cascade past this breakpoint. */
   .grid2,
-  .settings-fields { grid-template-columns: 1fr; }
+  .settings-fields,
+  .media-subsection .settings-fields { grid-template-columns: 1fr; }
 
   /* Settings nav stacks above the content and wraps as a row of chips. */
   .settings-layout { flex-direction: column; }

@@ -46,7 +46,8 @@ test("Media settings subsections do not overlap", async ({ page }) => {
   const boxes = [];
   for (const sub of await subs.all()) {
     const box = await visualFootprint(sub);
-    expect(box, "each media subsection must have a real layout box").not.toBeNull();
+    expect(Number.isFinite(box.width), "each media subsection must have a real layout box")
+      .toBe(true);
     boxes.push(box);
   }
 
@@ -63,4 +64,35 @@ test("Media settings subsections do not overlap", async ({ page }) => {
   }
 
   expect(pageErrors, "no uncaught JS errors").toEqual([]);
+});
+
+// The page's own mobile breakpoint (@media (max-width: 760px)) stacks every
+// .settings-fields grid to one column. .media-subsection .settings-fields has
+// higher CSS specificity than that bare selector (two classes vs one), so a
+// media query alone does not make it lose the cascade - it must be repeated
+// inside the breakpoint. The real page's own .media-settings-grid sizing
+// happens to keep every subsection narrow enough that this cascade defect
+// stays invisible on the actual Settings page at any width up to the
+// breakpoint - so this asserts the cascade rule directly, on an isolated
+// element wide enough to expose it, rather than relying on the real page's
+// current width math to reproduce it.
+test("nested .settings-fields still stacks to one column below the mobile breakpoint", async ({ page }) => {
+  await page.setViewportSize({ width: 700, height: 812 });
+  await page.goto("/?view=settings");
+
+  const columns = await page.evaluate(() => {
+    const probe = document.createElement("div");
+    probe.className = "media-subsection";
+    probe.style.width = "400px";   // comfortably above the 2-column threshold
+    const fields = document.createElement("div");
+    fields.className = "settings-fields";
+    probe.appendChild(fields);
+    document.body.appendChild(probe);
+    const n = getComputedStyle(fields).gridTemplateColumns.trim().split(/\s+/).length;
+    probe.remove();
+    return n;
+  });
+  expect(columns, "a media subsection's fields must stack to one column below the "
+    + "page's own mobile breakpoint, matching every other settings section, even "
+    + "when the subsection itself is wide enough for two").toBe(1);
 });
