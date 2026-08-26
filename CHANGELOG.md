@@ -846,6 +846,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   but still exited 0 with empty output, so a script chaining on the exit
   code (or piping the output to a next step) could not tell that call apart
   from a normal reply that happened to be empty.
+- **A worker crash no longer points you at a debug log that was never
+  written.** The message after a native crash always said "full trace in
+  the debug log", even when nothing had turned debug mode on and no such
+  file existed. It now says so only when the log actually exists, and
+  otherwise tells you to rerun with `--debug` to get one.
 
 ### Security
 - **Two more model families' role markers are now defanged in untrusted text.**
