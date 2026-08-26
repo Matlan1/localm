@@ -94,16 +94,19 @@ localm key create dashboard --scope rag --rag-root D:\docs\manuals --rag-root D:
 Any `--rag-root` grant REPLACES the key's RAG reach with exactly those
 folders, instead of falling back to your home dir, working dir, and the
 configured allowed roots. Omit `--rag-root` to leave the key unrestricted (it
-still obeys the global folder policy above). The confinement covers indexing,
-querying, and listing collections:
+still obeys the global folder policy above). The confinement covers every
+collection route:
 
 - **Indexing** (`POST /api/rag/collections/{name}/add`) refuses a path
   outside the granted roots.
-- **Querying** (`.../query`) is refused (403) for a collection that holds
-  any document indexed from outside the granted roots, even one added by a
-  different, less-restricted key.
-- **Listing** (`GET /api/rag/collections`) leaves such a collection out
-  entirely, rather than showing a name the key cannot then query.
+- **Listing** (`GET /api/rag/collections`) leaves out a collection that
+  holds any document from outside the granted roots entirely, rather than
+  showing a name the key cannot then use.
+- **Querying, detail, delete, removing a document, repair and re-embed**
+  (`.../query`, `GET .../{name}`, `DELETE .../{name}`, `.../remove-doc`,
+  `.../repair`, `.../reembed`) are all refused (403) for a collection that
+  holds any document indexed from outside the granted roots, even one added
+  by a different, less-restricted key.
 
 A document added through `.../upload` (bytes from the caller's own device,
 never a host filesystem read) is not subject to this check - it never named a
