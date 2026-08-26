@@ -51,6 +51,27 @@ def test_collect_diagnostics_never_includes_env_secrets(monkeypatch):
     assert "super-secret-value" not in repr(diag)
 
 
+def test_runtime_libs_returns_uniform_three_tuple_when_unprovisioned(monkeypatch):
+    monkeypatch.setattr(
+        "localm.inference.backends.llamacpp._loader.runtime_binary_dir",
+        lambda: None,
+    )
+    binary_dir, names, lib_name = bugreport._runtime_libs()
+    assert binary_dir is None
+    assert names == []
+    assert lib_name == ""
+
+
+def test_collect_diagnostics_reports_unprovisioned_runtime(monkeypatch):
+    monkeypatch.setattr(
+        "localm.inference.backends.llamacpp._loader.runtime_binary_dir",
+        lambda: None,
+    )
+    diag = bugreport.collect_diagnostics({})
+    assert diag["native_runtime_provisioned"] is False
+    assert diag["native_libs"] == []
+
+
 # --------------------------- report rendering ----------------------------- #
 
 def test_build_report_has_sections_and_summary():

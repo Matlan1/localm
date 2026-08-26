@@ -142,7 +142,7 @@ def _runtime_libs() -> tuple:
             lib_filename, runtime_binary_dir)
         d = runtime_binary_dir()
         if d is None:
-            return None, []
+            return None, [], ""
         # Load-bearing shared libraries only - the bundled llama-*.exe tools are
         # noise in a report (dozens of them) and not relevant to a load failure.
         names = sorted(
@@ -657,7 +657,7 @@ def _recent_log_tail_result(home=None, pid=None, max_chars: int = 6000) -> tuple
     """``(digest, unavailable_reason)`` - the digest _recent_log_tail returns,
     plus WHY it is empty when it is empty.
 
-    Exactly one of the two is ever non-empty. An empty reason alongside an empty
+    At most one of the two is ever non-empty. An empty reason alongside an empty
     digest is the honest third case: the log WAS collected and simply held
     nothing notable, which needs no line in the report. Never raises."""
     try:
