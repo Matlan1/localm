@@ -67,14 +67,32 @@ def _wire_plugin_cli_entries() -> None:
 _wire_plugin_cli_entries()
 
 
-# GUI is core kernel surface (the WebUI), not a PluginManager-tracked plugin
-# (no plugin.toml - it is not an installable feature), so it is wired directly
-# rather than through cli_entries().
-try:
-    from ..plugins.gui.cli import main as _gui_main
-    main.add_command(_gui_main, name="gui")
-except ImportError:
-    pass
+def _wire_gui_cli() -> None:
+    """Wire the GUI (the WebUI) directly rather than through cli_entries():
+    it is core kernel surface, not a PluginManager-tracked plugin (no
+    plugin.toml - it is not an installable feature)."""
+    try:
+        from ..plugins.gui.cli import main as _gui_main
+        main.add_command(_gui_main, name="gui")
+    except ImportError as e:
+        # defer_log, NOT logger.debug: this runs at module-import time, before
+        # Click invokes main() to install any handler - see the identical note
+        # on _wire_plugin_cli_entries() above.
+        defer_log(logging.DEBUG, "gui CLI not wired (import failed): %s", e)
+
+        @main.command("gui", context_settings={"ignore_unknown_options": True})
+        def _gui_stub(**_):
+            """The web UI (currently unavailable - see the error below)."""
+            console.print(
+                '[yellow]The GUI could not be loaded.[/yellow]\n'
+                'It is core to localm, not an optional extra, so this usually '
+                'means a broken or partial install. Run with '
+                '[bold]LOCALM_DEBUG=1[/bold] to see the import error, then '
+                'try:  [bold]pip install -e .[/bold]'
+            )
+
+
+_wire_gui_cli()
 
 
 
