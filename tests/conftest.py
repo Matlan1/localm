@@ -837,6 +837,28 @@ def _clear_keep_diagnostics_env():
 
 
 @pytest.fixture(autouse=True)
+def _reset_coder_privacy_registry():
+    """A top-level coder Agent publishes its privacy mode into a process-global
+    counter in ``__init__`` and only takes it back out in ``close()``. Agent's
+    default mode IS privacy, and test files build agents and let them fall out
+    of scope without closing them, so the count carries into every later test in
+    the same worker.
+
+    What that breaks is not the coder: ``debuglog.debug_content_enabled()``
+    consults the same counter and suppresses raw chat content whenever any coder
+    session is in privacy mode. So one unclosed agent silently turns off raw
+    content logging for the rest of the worker, and a test asserting that the
+    debug log captured raw model output fails while passing on its own. Restores
+    the count rather than zeroing it, so a test that deliberately registers one
+    and checks the gate still sees its own effect.
+    """
+    import localm.audit as audit
+    before = audit._active_coder_privacy_count
+    yield
+    audit._active_coder_privacy_count = before
+
+
+@pytest.fixture(autouse=True)
 def _neutralise_bare_llama_pointers():
     """tests/_bare_llama.py's make_bare_llama() registers every instance it
     builds in a module-level list; a caller that overrides a pointer to a
