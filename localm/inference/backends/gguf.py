@@ -133,7 +133,19 @@ class GgufBackend(VramSizingMixin, BaseBackend):
     def supports_mtp(self) -> bool:
         """True once loaded with active Multi-Token Prediction heads (MTP).
 
-        Cached from the child's load response (self._supports_mtp)."""
+        A MODEL capability, not a statement about any one request. Two things it
+        deliberately does not track:
+
+        A turn carrying an image never speculates - the multimodal path has no
+        draft context, and upstream's own driver skips vision batches for the
+        same reason. This still reads True there, because the same model
+        speculates normally on its text turns.
+
+        It is cached from the child's load response, and the child can turn MTP
+        off after that (a conversation outgrowing the draft context, a failed
+        draft decode), so this can read True for a session that has stopped
+        speculating. The child's own log says which; carrying it back would need
+        a field on the per-call done envelope."""
         return bool(self.loaded and self._supports_mtp)
 
     # ------------------------------------------------------------------ #

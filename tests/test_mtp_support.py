@@ -248,6 +248,40 @@ def test_recurrent_rollback_is_requested_when_mtp_is_enabled():
         "speculation stops the moment a conversation outgrows its first context")
 
 
+def test_an_image_turn_clears_the_draft_cache_too():
+    """An image turn must not leave the draft cache describing the old context.
+
+    mtmd evaluates an image prompt from position 0, so the main cache is emptied
+    first. The draft cache has to go with it: the next text turn rebuilds both
+    from scratch, but only because it finds no cached tokens to reuse. Clearing
+    one and not the other would leave drafts after an image conditioned on a
+    conversation that is no longer there, and the reply would still look fine,
+    because a bad draft is rejected rather than emitted.
+
+    Verified live on a vision MTP model: 14 drafts on a text turn, 0 on the image
+    turn, 15 on the text turn after it.
+    """
+    llm = make_bare_llama(
+        _model_ptr=ctypes.c_void_p(1),
+        _ctx_ptr=ctypes.c_void_p(2),
+        _mtp_ctx_ptr=ctypes.c_void_p(3),
+        supports_mtp=True,
+    )
+    llm._cached_tokens = [1, 2, 3]
+    llm._kv_supported = True
+
+    with patch("localm.inference.backends.llamacpp.llama.api") as mock_api:
+        mock_api.llama_get_memory.side_effect = lambda ctx: ("mem", int(ctx.value))
+        llm._reset_kv_for_image()
+
+    cleared = {call.args[0] for call in mock_api.llama_memory_clear.call_args_list}
+    assert ("mem", 2) in cleared, "the main cache was not cleared for the image eval"
+    assert ("mem", 3) in cleared, (
+        "the draft cache survived an image turn, so drafts after an image would be "
+        "conditioned on a conversation that is no longer in the main cache")
+    assert llm._cached_tokens == []
+
+
 def test_gguf_backend_supports_mtp():
     """Verify GgufBackend correctly reflects supports_mtp state."""
     backend = GgufBackend("test_model.gguf")
