@@ -269,12 +269,12 @@ test("update: no releases yet -> ok with version null", async () => {
 test("update: no channel param -> uses the releases list, filtered by app tag pattern", async () => {
   // Regression test for the 2026-08-07 incident: this repo also hosts non-app
   // releases in the SAME release list (llama-cuda-linux-<tag>, the self-built
-  // Linux CUDA runtime - see dev-notes/ADR-0010). A newer non-app release must
-  // never be offered as the "latest" app version. This reproduces the exact
-  // shape that happened live: a CUDA-linux release published AFTER the real
-  // app release, non-draft, non-prerelease - exactly what the old, unfiltered
-  // /releases/latest call returned for several minutes before both the CI
-  // workflow (--prerelease) and this filter were fixed.
+  // Linux CUDA runtime). A newer non-app release must never be offered as the
+  // "latest" app version. This reproduces the exact shape that happened live:
+  // a CUDA-linux release published AFTER the real app release, non-draft,
+  // non-prerelease - exactly what the old, unfiltered /releases/latest call
+  // returned for several minutes before both the CI workflow (--prerelease)
+  // and this filter were fixed.
   const seen = {};
   const restore = stubFetch(async (url, opts) => {
     seen.url = url; seen.opts = opts;

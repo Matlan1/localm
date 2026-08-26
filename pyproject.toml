@@ -309,7 +309,7 @@ markers = [
     "real_gguf: real end-to-end GGUF inference; needs the native llama runtime (localm setup-llama). Skipped unless available.",
     "real_comfy: real ComfyUI round-trip; set LOCALM_TEST_COMFY_URL to a running instance. Skipped unless set.",
     "real_browser: drives the GUI in a real browser; needs Playwright (pip install playwright && playwright install). Skipped unless available.",
-    "real_vulkan_split: real multi-device split/load/inference across the native ggml-vulkan backend (a real GPU plus a second real Vulkan device, e.g. Mesa lavapipe - see dev-notes/split-gpu-testing-research-2026-07-13.md). Set LOCALM_TEST_LAVAPIPE_ICD to the second device's Vulkan ICD manifest path. Skipped unless set.",
+    "real_vulkan_split: real multi-device split/load/inference across the native ggml-vulkan backend (a real GPU plus a second real Vulkan device, e.g. Mesa lavapipe). Set LOCALM_TEST_LAVAPIPE_ICD to the second device's Vulkan ICD manifest path. Skipped unless set.",
     "real_multi_gpu_hardware: Tier 2 real-hardware GPU-split gate - real VRAM pressure/allocator/OOM behavior and the amd-rocm/HIP split path, on any real 2-GPU box, owned or rented (see scripts/tier2_gpu_split/README.md). Set LOCALM_TEST_REAL_MULTI_GPU=1. Skipped unless set.",
 ]
 

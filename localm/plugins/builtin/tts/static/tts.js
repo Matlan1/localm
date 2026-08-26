@@ -345,7 +345,7 @@ export async function register(ctx) {
             "[tts] repaired " + rep.count + " out-of-range audio sample(s) (peak " +
             rep.peak.toFixed(2) + ", first at index " + rep.firstIndex + ") from the " +
             activeDevice + " backend. Audio must lie in [-1,1]; this is a backend fault, " +
-            "not a repair we want to be needed - see dev-notes/TTS-ROOT-CAUSE-2026-08-13.md.");
+            "not a repair we want to be needed.");
         }
         const url = URL.createObjectURL(chunk.audio.toBlob());
         const wasIdle = queue.length === 0 && player.paused;
