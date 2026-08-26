@@ -777,7 +777,7 @@ def _reset_gpu_probe_cache() -> None:
     a no-op (see _run), which the clears alone provably could not do."""
     global _gpu_last_good, _gpu_probe_inflight, _gpu_probe_epoch
     global _gpu_probe_done, _gpu_probe_result, _isolated_torch_unavailable
-    global _isolated_torch_broken_warned
+    global _isolated_torch_broken_warned, _child_stderr_cap_reported
     with _gpu_probe_lock:
         _gpu_last_good = None
         _gpu_probe_inflight = False
@@ -786,6 +786,13 @@ def _reset_gpu_probe_cache() -> None:
         # would silently disable the torch path for every later test in the worker.
         _isolated_torch_unavailable = False
         _isolated_torch_broken_warned = False
+        # The child-stderr latch has the SAME cross-test leak as the line above and
+        # therefore belongs in the same reset: without it, one test's simulated
+        # probe failure suppresses the stderr relay for every later test in the
+        # worker, which reads as "the relay is broken" rather than "it already
+        # said this once".
+        _child_stderr_seen.clear()
+        _child_stderr_cap_reported = False
         # Unpublish the join handles too: after a reset the slot reads free, so no
         # caller should join a probe from the epoch just retired. An abandoned
         # thread still holding its own local done/result is unaffected (it sets its

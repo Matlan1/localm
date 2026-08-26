@@ -15,6 +15,7 @@ would be flaky on a loaded runner; this one is deterministic.
 from __future__ import annotations
 
 import json
+import logging
 import pathlib
 import subprocess
 import sys
@@ -458,12 +459,6 @@ cuda = _Cuda()
 #  (_isolated_torch_broken_warned); the stderr relay never got one.            #
 # --------------------------------------------------------------------------- #
 
-import logging
-import subprocess as _subprocess
-import types
-
-import pytest
-
 from localm import discover as _discover
 
 
@@ -489,7 +484,13 @@ def probe_log(monkeypatch, caplog):
         def _fake_run(*a, **kw):
             return _FakeCompleted(stdout=stdout, stderr=next(replies))
 
-        monkeypatch.setattr(_subprocess, "run", _fake_run)
+        monkeypatch.setattr(subprocess, "run", _fake_run)
+        # caplog.records ACCUMULATES across calls, so a test that drives this
+        # helper twice would otherwise read the FIRST drive's lines back out of
+        # the second drive's result and pass no matter what the second one did.
+        # Measured: the reset test below was green with its fix reverted until
+        # this clear was added.
+        caplog.clear()
         with caplog.at_level(logging.DEBUG, logger="localm"):
             for _ in stderrs:
                 _discover._torch_gpus_isolated()
@@ -540,3 +541,24 @@ def test_the_latch_announces_itself_rather_than_going_silently_blind(probe_log):
     messages = probe_log([f"distinct failure {i}" for i in range(12)])
     assert any("further distinct causes suppressed" in m for m in messages), (
         "the cap was reached with no line saying so")
+
+
+def test_resetting_the_probe_cache_also_clears_the_stderr_latch(probe_log):
+    """The latch belongs in _reset_gpu_probe_cache, same as its neighbour.
+
+    That function already clears _isolated_torch_broken_warned with a comment
+    saying why: without it, one test's simulated probe failure silently changes
+    behaviour for every later test in the worker. This latch has the identical
+    property, so leaving it out makes a reset only PARTIALLY reset - and the
+    symptom (a relay that never appears again) reads as "the relay is broken"
+    rather than "it already said this once".
+    """
+    boom = "RuntimeError: HIP error: no ROCm-capable device is detected"
+    assert any(boom in m for m in probe_log([boom])), "test premise: first relay"
+
+    _discover._reset_gpu_probe_cache()
+
+    relayed_again = [m for m in probe_log([boom]) if boom in m]
+    assert relayed_again, (
+        "after a probe-cache reset the same failure was still suppressed - the "
+        "reset does not clear the stderr latch, so it only partially resets")
