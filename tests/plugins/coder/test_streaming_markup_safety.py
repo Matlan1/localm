@@ -96,8 +96,13 @@ class TestDisplayFunctionsSurviveHostileText:
         assert "[/INST]" in out
 
     def test_confirm_diff_survives_a_hostile_path_label(self, capsys, monkeypatch):
-        monkeypatch.setattr(display.console, "input", lambda prompt: "n")
+        # Patch the builtin input() Console.input() falls through to, NOT
+        # console.input itself - it must still render the real prompt (where
+        # the crash would occur), only the blocking stdin read is stubbed.
+        monkeypatch.setattr("builtins.input", lambda: "n")
         assert display.confirm_diff("[/INST]evil.txt") is False
+        out = capsys.readouterr().out
+        assert "[/INST]evil.txt" in out
 
 
 # ---------------------------------------------------------------------------
