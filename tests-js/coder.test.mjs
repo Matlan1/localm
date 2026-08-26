@@ -17,7 +17,9 @@ function okFetch(state = {}) {
     const u = String(url);
     if (u.includes("/api/coder/resumable")) {
       return { ok: true, status: 200,
-               json: async () => state.resumable
+               json: async () => state.unreadable
+                 ? { resumable: false, unreadable: true }
+                 : state.resumable
                  ? { resumable: true, turns: 3, messages: 5,
                      interrupted_at: "2026-06-22T10:00:00" }
                  : { resumable: false } };
@@ -69,6 +71,22 @@ test("CODER-2: 'Continue last session' shows when the cwd has a checkpoint", asy
   await window.refreshResumable();
   assert.equal(btn.style.display, "none");
 });
+
+test("CODER-2: an unreadable checkpoint toasts instead of reading as 'nothing to resume'",
+  async () => {
+    const state = { unreadable: true };
+    const { window } = loadApp({ fetchImpl: okFetch(state) });
+    const toasts = [];
+    window.toast = (msg) => toasts.push(String(msg));
+    window.document.getElementById("setup-cwd").value = "Z:/proj";
+
+    await window.refreshResumable();
+    await settle();
+    const btn = window.document.querySelector(".coder-continue");
+    assert.equal(btn.style.display, "none", "nothing to actually resume");
+    assert.ok(toasts.some((t) => t.includes("could not be read")),
+      `must toast that a checkpoint was found but unreadable, got: ${JSON.stringify(toasts)}`);
+  });
 
 test("CODER-2: a resumed session's history events render as message rows", () => {
   const { window } = loadApp({ fetchImpl: okFetch() });

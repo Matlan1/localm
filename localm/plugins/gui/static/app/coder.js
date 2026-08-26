@@ -823,6 +823,9 @@ export async function refreshResumable() {
       btn.textContent = `Continue last session (${d.turns} turns, ${when})`;
       btn.style.display = "";
     } else {
+      if (r.ok && d.unreadable) {
+        toast("A saved session was found for this project but could not be read");
+      }
       btn.style.display = "none";
     }
   } catch { btn.style.display = "none"; }
