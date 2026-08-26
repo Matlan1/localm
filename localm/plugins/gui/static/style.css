@@ -2211,6 +2211,22 @@ div:has(> .data-table) { overflow-x: auto; }
 }
 .modal-head button:hover { color: var(--red); }
 .modal-body { padding: 14px 16px; overflow-y: auto; font-size: 13px; }
+/* A remote image the proxy refused (helpers.js showBlockedImage). Reads as a
+   deliberate note, not a broken image. */
+.img-blocked {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  margin: 4px 0;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  background: var(--bg-raised);
+  max-width: 100%;
+}
+.img-blocked-label { font-size: .9em; opacity: .85; }
+.img-blocked-why { font-size: .8em; opacity: .65; overflow-wrap: anywhere; }
+
 /* promptText()'s text input (helpers.js) - same chrome as .card's fields. */
 .modal-body input[type="text"] {
   width: 100%; box-sizing: border-box; background: var(--bg-input);

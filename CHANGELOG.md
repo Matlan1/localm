@@ -472,6 +472,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
   a failed load or the server becoming unreachable.
 
 ### Fixed
+- **A remote image a reply links to no longer disappears without explanation.**
+  Showing remote images is off by default, and several other things can stop one
+  loading: the host is not on your Allowed domains list, it is unreachable, the
+  file is too big, or it is not an image. All of those used to look identical -
+  the picture simply was not there, and when the model wrote no caption there was
+  nothing on screen at all to say one had been meant. A short note now takes its
+  place and says which of those happened, so a setting you can change is not
+  mistaken for a broken link. The Allowed domains list is also now mentioned in
+  the remote-images setting itself.
 - **Your sampling settings now apply to every token on a multi-token-prediction
   model.** These models predict a token ahead and check the guess against the
   main model. That check ignored the temperature, top-k, top-p and repetition
