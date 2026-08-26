@@ -840,7 +840,8 @@ class LlamaCpp:
     # helpers) as well as through __init__. Cleared the first time a rejected
     # draft's KV cell cannot be removed; speculation needs that rewind, so it
     # stays off for the rest of the model's life.
-    _mtp_rewind_ok = True
+    _mtp_usable = True
+    _mtp_ctx_capacity = 0        # the draft context's own n_ctx, 0 until created
 
     def __init__(
         self,
@@ -884,7 +885,7 @@ class LlamaCpp:
         self._mtp_ctx_ptr = None   # Multi-Token Prediction draft context
         self.supports_mtp = False  # True when MTP heads and draft context are active
         self.mtp_status   = "not-initialised"  # short token: why MTP is or is not active
-        self._mtp_rewind_ok = True
+        self._mtp_usable = True
         self._mmproj_path = mmproj_path
         self._mtmd        = None   # MtmdContext (vision) when an mmproj is loaded
         self._tokenizer   = None   # type: ignore[assignment]
@@ -1181,6 +1182,7 @@ class LlamaCpp:
                         self._mtp_ctx_ptr = api.llama_init_from_model(self._model_ptr, cp_mtp)
                     if self._mtp_ctx_ptr:
                         self.supports_mtp = True
+                        self._mtp_ctx_capacity = cp_mtp.n_ctx
                     else:
                         self.mtp_status = "context-refused"
             except Exception as exc:
@@ -1516,7 +1518,7 @@ class LlamaCpp:
                 draft_sampler = (
                     api.llama_sampler_init_greedy()
                     if self._mtp_ctx_ptr is not None and grammar is None
-                    and self._mtp_rewind_ok
+                    and self._mtp_usable
                     else None
                 )
 
@@ -1618,7 +1620,7 @@ class LlamaCpp:
                         # --- Speculative MTP drafting (if draft context is active) ---
                         draft_token = None
                         if (self._mtp_ctx_ptr is not None and draft_sampler is not None
-                                and self._mtp_rewind_ok):
+                                and self._mtp_usable):
                             with self._gen_lock:
                                 if not (self._stop.is_set() or self._ctx_ptr is None):
                                     try:
@@ -1688,7 +1690,7 @@ class LlamaCpp:
                                                 # Rebuild from the tokens actually
                                                 # emitted and stop speculating.
                                                 # See test_a_stuck_draft_cell_disables_mtp_and_keeps_generating.
-                                                self._mtp_rewind_ok = False
+                                                self._mtp_usable = False
                                                 self.supports_mtp = False
                                                 self.mtp_status = "rewind-unsupported"
                                                 from localm.debuglog import logger as _dbg_rewind
@@ -2036,6 +2038,48 @@ class LlamaCpp:
             return False
         return True
 
+    def _disable_mtp(self, status: str, detail: str) -> None:
+        """Turn speculation off for the rest of this model's life, and say why."""
+        self._mtp_usable = False
+        self.supports_mtp = False
+        self.mtp_status = status
+        from localm.debuglog import logger as _dbg
+        _dbg.info("MTP: speculation disabled - %s", detail)
+
+    def _prefill_mtp(self, tokens: List[int], base_pos: int) -> None:
+        """Mirror a prefill into the MTP draft cache.
+
+        The draft context is created once, with its own smaller n_ctx, and is
+        never resized while the main context grows. A conversation that outgrows
+        it can no longer be drafted for, so stop here rather than paying a
+        failing decode per token for the rest of the session. A draft decode
+        that fails for any other reason leaves the draft cache out of step with
+        the main one, which is the same dead end.
+        """
+        if not tokens:
+            return
+        cap = self._mtp_ctx_capacity
+        if cap and base_pos + len(tokens) > cap:
+            self._disable_mtp(
+                "draft-context-full",
+                "the conversation outgrew the %d-token draft context" % cap)
+            return
+        for i in range(0, len(tokens), _PREFILL_CHUNK):
+            batch = self._create_batch(tokens[i:i + _PREFILL_CHUNK],
+                                       base_pos + i, logits_at_last_only=True)
+            try:
+                ret = api.llama_decode(self._mtp_ctx_ptr, batch)
+            except Exception as exc:
+                self._disable_mtp("draft-prefill-error:%s" % type(exc).__name__,
+                                  "the draft prefill raised %s" % type(exc).__name__)
+                return
+            finally:
+                api.llama_batch_free(batch)
+            if ret != 0:
+                self._disable_mtp("draft-prefill-failed:%d" % ret,
+                                  "the draft prefill returned %d" % ret)
+                return
+
     def _rebuild_kv_after_stuck_draft(self) -> bool:
         """Re-decode the emitted tokens into a cleared main KV cache.
 
@@ -2085,6 +2129,7 @@ class LlamaCpp:
         # text out of order"). A zero prefix clears the memory outright instead of
         # removing a range: recurrent and M-RoPE state cannot be partially rewound,
         # so a range removal can leave them stale.
+        mtp_needs_full_prefill = False
         if prefix == 0:
             api.llama_memory_clear(mem, True)
             if self._mtp_ctx_ptr is not None:
@@ -2094,7 +2139,24 @@ class LlamaCpp:
                 except Exception:
                     pass
         elif prefix < len(self._cached_tokens) or not self._cached_tokens:
-            if not api.llama_memory_seq_rm(mem, 0, prefix, -1):
+            if api.llama_memory_seq_rm(mem, 0, prefix, -1):
+                # The suffix below is decoded into BOTH caches at prefix + i, so
+                # the draft cache has to drop the same range the main one did.
+                # A draft cache that cannot be trimmed is cleared and refilled
+                # from the whole prompt instead of the suffix alone.
+                if self._mtp_ctx_ptr is not None:
+                    try:
+                        mem_mtp = api.llama_get_memory(self._mtp_ctx_ptr)
+                        if not api.llama_memory_seq_rm(mem_mtp, 0, prefix, -1):
+                            api.llama_memory_clear(mem_mtp, True)
+                            mtp_needs_full_prefill = True
+                    except Exception as exc:
+                        # The draft cache's state is now unknown, so refilling it
+                        # would guess. Stop drafting instead.
+                        self._disable_mtp(
+                            "draft-trim-error:%s" % type(exc).__name__,
+                            "trimming the draft cache raised %s" % type(exc).__name__)
+            else:
                 # Partial removal unsupported (e.g. SWA cache / M-RoPE) - start over
                 api.llama_memory_clear(mem, True)
                 if self._mtp_ctx_ptr is not None:
@@ -2139,15 +2201,10 @@ class LlamaCpp:
                 else:
                     raise RuntimeError(f"llama_decode failed during prefill (code {ret})")
 
-        if self._mtp_ctx_ptr is not None:
-            try:
-                for i in range(0, len(suffix), _PREFILL_CHUNK):
-                    chunk = suffix[i:i + _PREFILL_CHUNK]
-                    mtp_batch = self._create_batch(chunk, prefix + i, logits_at_last_only=True)
-                    api.llama_decode(self._mtp_ctx_ptr, mtp_batch)
-                    api.llama_batch_free(mtp_batch)
-            except Exception:
-                pass
+        if self._mtp_ctx_ptr is not None and self._mtp_usable:
+            mtp_tokens = prompt_tokens if mtp_needs_full_prefill else suffix
+            mtp_base = 0 if mtp_needs_full_prefill else prefix
+            self._prefill_mtp(mtp_tokens, mtp_base)
 
         self._cached_tokens = list(prompt_tokens)
 
@@ -2221,15 +2278,8 @@ class LlamaCpp:
                 self._cached_tokens = []
                 raise RuntimeError(f"llama_decode failed during prefill (code {ret})")
 
-        if self._mtp_ctx_ptr is not None:
-            try:
-                for i in range(0, len(prompt_tokens), n_batch):
-                    chunk = prompt_tokens[i:i + n_batch]
-                    mtp_batch = self._create_batch(chunk, i, logits_at_last_only=True)
-                    api.llama_decode(self._mtp_ctx_ptr, mtp_batch)
-                    api.llama_batch_free(mtp_batch)
-            except Exception:
-                pass
+        if self._mtp_ctx_ptr is not None and self._mtp_usable:
+            self._prefill_mtp(prompt_tokens, 0)
 
         self._cached_tokens = list(prompt_tokens)
 
