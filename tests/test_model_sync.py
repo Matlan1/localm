@@ -8,12 +8,37 @@ that external (out-of-folder) models are never pruned.
 """
 
 import os
+import struct
 import time
 from unittest.mock import MagicMock
 
 import pytest
 
 from localm import model_manager as mm
+
+
+def _gguf_header(tensors, *, version=3, alignment=32):
+    """A real GGUF magic + version + counts + (empty KV) + tensor-info block
+    for *tensors* = [(name, size_bytes), ...], alignment-padded - offsets are
+    contiguous from the size_bytes, as a real writer lays tensors out."""
+    def s(text):
+        raw = text.encode("utf-8")
+        return struct.pack("<Q", len(raw)) + raw
+
+    out = [b"GGUF", struct.pack("<I", version), struct.pack("<QQ", len(tensors), 0)]
+    offset = 0
+    for name, size in tensors:
+        out.append(s(name))
+        out.append(struct.pack("<I", 1))       # n_dims
+        out.append(struct.pack("<Q", 1))        # dims[0]
+        out.append(struct.pack("<I", 0))        # ggml_type F32
+        out.append(struct.pack("<Q", offset))
+        offset += size
+    body = b"".join(out)
+    remainder = len(body) % alignment
+    if remainder:
+        body += b"\0" * (alignment - remainder)
+    return body
 
 
 def _backdate(path, seconds=60):
@@ -121,6 +146,43 @@ class TestSettlePeriod:
         second = mm.sync_models_dir(prune=False)
         assert second.added == 1
         assert any(e["path"].endswith("copying.gguf") for e in store.values())
+
+
+class TestTruncatedFileDetection:
+    """NEW-TRUNCATED-GGUF-DEFEATS-REGISTRATION-GUARDS: a copy cut short
+    keeps its magic (start of file) and can carry an old mtime, so it defeats
+    BOTH TestRegisterLooseFiles' and TestSettlePeriod's guards at once - the
+    live-reproduced bug was `localm list` and the GUI showing exactly such a
+    file as a usable registered model."""
+
+    def test_truncated_gguf_with_backdated_mtime_is_not_registered(self, fake_registry):
+        store, models_dir, _ = fake_registry
+        f = models_dir / "truncated.gguf"
+        # weight.0 declares 4096 bytes, so weight.1 (never reached) is
+        # declared to start at offset 4096 - the file below has only a
+        # handful of bytes of body after the header.
+        header = _gguf_header([("weight.0", 4096), ("weight.1", 1)])
+        f.write_bytes(header.ljust(len(header) + 100, b"\0"))
+        _backdate(f, seconds=60)   # settled, not mid-copy - both old guards pass
+
+        result = mm.sync_models_dir(prune=False)
+
+        assert result.added == 0
+        assert not store
+
+    def test_genuinely_complete_gguf_still_registers(self, fake_registry):
+        # Regression guard: the new check must not block a real, complete
+        # file just because it is small.
+        store, models_dir, _ = fake_registry
+        f = models_dir / "complete.gguf"
+        header = _gguf_header([("weight.0", 2000)])
+        f.write_bytes(header + (b"\xAB" * 2000))
+        _backdate(f, seconds=60)
+
+        result = mm.sync_models_dir(prune=False)
+
+        assert result.added == 1
+        assert any(e["path"].endswith("complete.gguf") for e in store.values())
 
 
 class TestMissingFlagging:
