@@ -4548,6 +4548,35 @@ def _messages_prompt_text(messages: list) -> str:
     )
 
 
+def _debug_prompt_dump(messages: list) -> str:
+    """One line per message: index, role, and its text; non-text content parts
+    (e.g. an image) are named, not embedded."""
+    lines = []
+    for i, m in enumerate(messages):
+        content = m.get("content")
+        if isinstance(content, str):
+            text = content
+        else:
+            parts = []
+            for p in (content or []):
+                if isinstance(p, dict) and p.get("type") == "text":
+                    parts.append(p.get("text", ""))
+                elif isinstance(p, dict):
+                    parts.append(f"<{p.get('type', 'non-text')}>")
+            text = " ".join(parts)
+        lines.append(f"[{i}] {m.get('role', '?')}: {text}")
+    return "\n".join(lines)
+
+
+def _log_assembled_prompt(messages: list) -> None:
+    """Debug-log the messages about to reach the backend, content-gated on
+    debug_content_enabled(). See test_assembled_prompt_debug_capture.py."""
+    from localm.debuglog import debug_content_enabled, logger as _dbg
+    if debug_content_enabled():
+        _dbg.debug("assembled chat prompt (%d message(s)):\n%s",
+                    len(messages), _debug_prompt_dump(messages))
+
+
 def _audit_exchange(audit, transcript, messages: list, reply: str) -> None:
     """Record one chat exchange (log/full modes; no-op log in privacy)."""
     if audit is None:
@@ -4731,6 +4760,7 @@ async def _stream_sse(
         # would block forever at `await token_queue.get()` holding the per-model
         # semaphore - a permanent per-model deadlock. Inside the try, the except
         # surfaces it and the finally still enqueues _DONE.
+        _log_assembled_prompt(messages)
         gen = None
         try:
             gen = engine.chat_stream(messages, **gen_kwargs)
@@ -4886,6 +4916,7 @@ async def _stream_sse_completion(
         # chat_stream INSIDE the try: it eagerly runs the auto-reload before
         # returning the generator, so an eager raise must not escape the try and
         # orphan the consumer (see the fuller note in _stream_sse).
+        _log_assembled_prompt(messages)
         gen = None
         try:
             gen = engine.chat_stream(messages, **gen_kwargs)
@@ -5041,6 +5072,7 @@ async def _generate_full(engine, messages: list, request=None, *,
             poll = getattr(request, "is_disconnected", None)
 
     def _run() -> str:
+        _log_assembled_prompt(messages)
         gen = engine.chat_stream(messages, **gen_kwargs)
         parts: list[str] = []
         try:

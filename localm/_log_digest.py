@@ -131,6 +131,10 @@ _CONTENT_MARKER_RES = (
     # tool name immediately followed by the start of the args dict's repr -
     # rather than by content, so only the args-carrying branch has a "{" here.
     re.compile(r"\bjobs web tool: \S+ \{"),
+    # http_server.py's _log_assembled_prompt(): "assembled chat prompt (%d
+    # message(s)):\n%s" - the count is on the header line, the messages ride
+    # in as continuation lines below it.
+    re.compile(r"assembled chat prompt \(\d+ message\(s\)\):\s*$"),
 )
 
 
