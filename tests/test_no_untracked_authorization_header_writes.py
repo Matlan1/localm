@@ -35,9 +35,7 @@ latter would flag these two as violations:
                                  open-mode gate never applies, so get_api_key()
                                  alone (no instance_token fallback) is correct,
                                  the same classification as coder/plug.py and
-                                 jobs/runner.py's chat/completions calls (see
-                                 dev-notes/FIX-2026-08-05-cli-unload-stop-open-
-                                 mode-auth.md).
+                                 jobs/runner.py's chat/completions calls.
 
   localm/inference/http_engine.py, HttpEngine._headers() and
   remote_model_status()
@@ -59,11 +57,9 @@ latter would flag these two as violations:
                                  function hard-breaks in the default
                                  configuration" shape after all, contrary to
                                  its own "not a hard-block" reasoning at the
-                                 time - see dev-notes/FIX-2026-08-05-
-                                 credential-resolution-helper.md for the
-                                 original, since-corrected rationale). The raw
-                                 instance token remains the correct value to
-                                 pass in for the open-mode fallback.
+                                 time). The raw instance token remains the
+                                 correct value to pass in for the open-mode
+                                 fallback.
 
   localm/plugins/coder/backends/http.py, HTTPBackend._headers()
                                  the standalone coder CLI's own HTTP backend,
