@@ -50,7 +50,7 @@ class GgufWorker(VramSizingMixin):
         vram_overhead_bytes: Optional[int] = None,
         gpu_split_ratios: Optional[list] = None,
         n_cpu_moe: int = 0,
-        mtp_enabled: bool = True,
+        mtp_enabled: bool = False,
     ) -> None:
         self.model_path = model_path
         self.mmproj_path = mmproj_path

@@ -228,7 +228,11 @@ DEFAULT_CONFIG: dict = {
     # Enable Multi-Token Prediction (MTP) speculative decoding for models with
     # native MTP/next-n prediction heads (e.g. DeepSeek-V3/R1, Qwen MTP models).
     # True = active when model supports it; False = force standard autoregressive.
-    "mtp_enabled": True,
+    # Off by default: this runtime exports llama_model_n_layer_nextn but not the
+    # staging API that feeds an MTP draft head its hidden state
+    # (llama_set_embeddings_nextn / llama_get_embeddings_nextn), so the head runs
+    # on the token embedding alone. See test_mtp_default_is_off_while_the_draft_head_is_starved.
+    "mtp_enabled": False,
     # VRAM (MB) that n_gpu_layers_auto/ctx_auto/_check_vram always reserve beyond
     # model weights for the GGUF backend, before deciding how many layers fit or
     # refusing outright. This is NOT a discardable safety margin - it funds the

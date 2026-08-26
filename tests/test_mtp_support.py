@@ -33,7 +33,9 @@ def test_mtp_constants_and_structs():
 def test_mtp_config_and_settings_schema():
     """Verify mtp_enabled setting is in default config and schema."""
     assert "mtp_enabled" in DEFAULT_CONFIG
-    assert DEFAULT_CONFIG["mtp_enabled"] is True
+    # The default flipped to False; the reason and the layer-by-layer check live in
+    # test_mtp_default_is_off_while_the_draft_head_is_starved.
+    assert DEFAULT_CONFIG["mtp_enabled"] is False
 
     schema_field = next((f for f in CORE_FIELDS if f.key == "mtp_enabled"), None)
     assert schema_field is not None
@@ -180,6 +182,51 @@ def test_absent_metadata_api_is_reported_as_its_own_reason():
         supported, reason = api.llama_model_mtp_support(ctypes.c_void_p(1234))
     assert supported is False
     assert reason == "no-metadata-api"
+
+
+def test_mtp_default_is_off_while_the_draft_head_is_starved():
+    """MTP ships OFF, and every layer's default agrees with the config.
+
+    The draft head's first operation consumes a hidden state that llama.cpp
+    writes only when a batch carries embeddings. Supplying it needs
+    llama_set_embeddings_nextn / llama_get_embeddings_nextn, which are a staging
+    API in llama.cpp's internal header and are NOT exported by the runtimes
+    localm ships, so the head runs on the token embedding alone. Measured on a
+    real MTP model: 9.7% of drafts accepted against 0.0% for a random-token
+    control, i.e. well above noise and far below paying for the extra decode
+    each token costs.
+
+    A disagreement between these defaults is what would quietly switch it back
+    on for one entry point only.
+    """
+    import inspect
+
+    from localm.config import DEFAULT_CONFIG
+    from localm.inference.backends.gguf import GgufBackend
+    from localm.inference.backends.llamacpp._worker import GgufWorker
+    from localm.inference.backends.llamacpp.llama import LlamaCpp
+
+    assert DEFAULT_CONFIG["mtp_enabled"] is False
+
+    for owner in (GgufBackend.__init__, LlamaCpp.__init__, GgufWorker.__init__):
+        param = inspect.signature(owner).parameters["mtp_enabled"]
+        assert param.default is False, (
+            f"{owner.__qualname__} still defaults mtp_enabled to {param.default!r}, "
+            "so a caller that omits it re-enables MTP")
+
+
+def test_engine_does_not_re_enable_mtp_when_the_key_is_absent():
+    """A config written before this default flipped has no mtp_enabled key, and
+    the fallback used for it must not be the old True."""
+    import inspect
+
+    from localm.inference import engine as engine_mod
+
+    src = inspect.getsource(engine_mod.Engine._create_backend
+                            if hasattr(engine_mod.Engine, "_create_backend")
+                            else engine_mod)
+    assert 'cfg.get("mtp_enabled", True)' not in src
+    assert 'cfg.get("mtp_enabled", False)' in src
 
 
 def test_gguf_backend_supports_mtp():

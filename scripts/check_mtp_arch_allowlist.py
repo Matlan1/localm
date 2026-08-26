@@ -64,6 +64,18 @@ TAG_CONST = "MTP_ARCH_SOURCE_TAG"
 # context, so every assignment of it has to sit downstream of the detector.
 MTP_CTX_CONST = "LLAMA_CONTEXT_TYPE_MTP"
 
+# Feeding an MTP draft head its hidden state needs these. They are a staging API
+# in llama.cpp's internal llama-ext.h rather than the public llama.h, and the
+# runtimes localm ships do not export them, so the head runs on the token
+# embedding alone and its drafts are rarely accepted. That is why mtp_enabled
+# defaults to False. If a later runtime DOES export them, this gate says so:
+# the real implementation becomes possible and the default should be revisited.
+MTP_HIDDEN_STATE_API = (
+    "llama_set_embeddings_nextn",
+    "llama_get_embeddings_nextn",
+)
+CONFIG_PATH = REPO / "localm" / "config.py"
+
 UPSTREAM_RAW = "https://raw.githubusercontent.com/ggml-org/llama.cpp/%s/%s"
 
 _ARCH_RE = re.compile(r"^[a-z][a-z0-9._-]*$")
@@ -140,6 +152,33 @@ def _ungated_mtp_context_sites(root: Path) -> list:
                 continue
             findings.append((str(path.relative_to(root)), func.name, func.lineno))
     return findings
+
+
+def _mtp_default_enabled() -> Optional[bool]:
+    """The shipped default for `mtp_enabled`, read without importing config."""
+    text = CONFIG_PATH.read_text(encoding="utf-8")
+    m = re.search(r'"mtp_enabled"\s*:\s*(True|False)', text)
+    return None if not m else (m.group(1) == "True")
+
+
+def _runtime_feeds_the_draft_head():
+    """(available, detail) for the hidden-state API, or (None, why) if unknown.
+
+    None means the runtime could not be loaded at all, which is a different
+    answer from "loaded and the symbol is absent" and must not collapse into it.
+    """
+    try:
+        from localm.inference.backends.llamacpp._api import load_lib
+        lib = load_lib()
+    except Exception as exc:
+        return None, "no runtime to query (%s)" % type(exc).__name__
+    # Prove the probe can see a symbol before believing it saw none.
+    if not hasattr(lib, "llama_model_n_embd_out"):
+        return None, "runtime loaded but the control symbol is absent, so the probe is blind"
+    missing = [n for n in MTP_HIDDEN_STATE_API if not hasattr(lib, n)]
+    if missing:
+        return False, "not exported: %s" % ", ".join(missing)
+    return True, "exported: %s" % ", ".join(MTP_HIDDEN_STATE_API)
 
 
 def _pinned_tag() -> Optional[str]:
@@ -262,6 +301,22 @@ def main(argv: Optional[list] = None) -> int:
             "%s() no longer reads %s. Without it, detection is back to trusting "
             "GGUF metadata alone and engages MTP on architectures that build no "
             "MTP graph." % (DETECTOR, ALLOWLIST))
+
+    default_on = _mtp_default_enabled()
+    feeds, detail = _runtime_feeds_the_draft_head()
+    print("  %-19s : %s" % ("mtp_enabled default", default_on))
+    print("  %-19s : %s (%s)" % ("draft-head API", feeds, detail))
+    print()
+    if feeds is True and default_on is False:
+        failures.append(
+            "this runtime DOES export %s, so an MTP draft head can now be fed its "
+            "hidden state. Implement that path and revisit the mtp_enabled default, "
+            "which is still False." % " / ".join(MTP_HIDDEN_STATE_API))
+    if feeds is False and default_on is True:
+        failures.append(
+            "mtp_enabled defaults to True while this runtime does not export the "
+            "hidden-state API (%s), so the draft head runs on the token embedding "
+            "alone and its drafts cost more than they save." % detail)
 
     ungated = _ungated_mtp_context_sites(REPO)
     if ungated:

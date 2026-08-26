@@ -230,8 +230,9 @@ CORE_FIELDS: list = [
                  "still loads instead of being refused. An explicit value is kept.",
                  group="Engine", applies=Applies.NEXT_LOAD),
     SettingField("mtp_enabled", Widget.TOGGLE, "Multi-Token Prediction (MTP)",
-                 "Enable speculative drafting on models trained with MTP/next-n "
-                 "prediction heads for faster inference.",
+                 "Speculative drafting on models with MTP/next-n heads. Off by "
+                 "default: this runtime cannot feed the draft head its hidden "
+                 "state, so drafts rarely land and cost more than they save.",
                  group="Engine", applies=Applies.NEXT_LOAD),
     # Trimmed to the 200-char budget; the consequence now leads. The removed
     # explanation, kept here because it is the WHY and a future reader will want
