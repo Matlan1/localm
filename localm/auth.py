@@ -44,7 +44,7 @@ ENV_VAR = "LOCALM_API_KEY"
 REQUIRE_ENV_VAR = "LOCALM_REQUIRE_AUTH"
 _TRUTHY = ("1", "true", "yes", "on")
 
-# Minimum length for an owner key to count as "strong enough" to authenticate a
+# Minimum length for an owner key to pass the length floor that gates a
 # NETWORK bind. Enforced at set time (set_api_key) AND at the network-bind gate
 # (cli._exposed_bind_warning), so a trivially-guessable key supplied via the
 # LOCALM_API_KEY env var or a hand-edited auth.key cannot be served to the LAN.
