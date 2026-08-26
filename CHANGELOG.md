@@ -469,6 +469,18 @@ permanent public record of what shipped and are never rewritten; the in-progress
   a failed load or the server becoming unreachable.
 
 ### Fixed
+- **Your sampling settings now apply to every token on a multi-token-prediction
+  model.** These models predict a token ahead and check the guess against the
+  main model. That check ignored the temperature, top-k, top-p and repetition
+  penalty on your request, so a large share of the reply came out as if you had
+  asked for greedy decoding, and the repetition penalty that exists to stop a
+  reply looping was not consulted for those tokens. When the guess turns out to
+  be wrong, the model's own token is now used instead of being thrown away.
+- **A stray turn marker no longer opens a reply.** Some models emit their own
+  training-format turn markers as ordinary text. Several dialects were already
+  removed before the reply reached you, but the ChatML, Llama 3 and Gemma ones
+  were not, so a reply could begin with a stray marker or a bare role word such
+  as "model". A role word the model writes in ordinary prose is untouched.
 - **Chat comes back on the model you were actually using after generating
   media.** Making an image, music, or video unloads the chat model to free up
   VRAM and reloads it when the job finishes. That reload asked for the model
@@ -814,6 +826,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   fixed (the graphical launcher is unaffected).
 
 ### Security
+- **Two more model families' role markers are now defanged in untrusted text.**
+  A fetched page, a tool result or a stored memory is escaped so it cannot forge
+  a system or assistant turn using the model's own delimiters. EXAONE and GLM
+  models use delimiters that were not in that list, so text aimed at them passed
+  through unescaped.
 - **Turning network access off no longer left the voice model able to
   download anyway.** The neural text-to-speech voice is fetched by your
   browser directly, so localm's network switch, which every other
