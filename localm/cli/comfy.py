@@ -177,7 +177,12 @@ def comfy_status(ping: bool) -> None:
     # GUI/CLI config setters, but config.json can be hand-edited, so this print
     # does not rely on that validation holding - same defense-in-depth stance
     # as rag.py's already-safe collection names (escape() is a no-op on "own").
-    console.print(f"  Preferred target  : {escape(str(cfg.get('comfy_target', 'own')))}")
+    _preferred = str(cfg.get('comfy_target', 'own'))
+    _preferred_label = {"own": "localm's managed ComfyUI",
+                        "user": "your own ComfyUI"}.get(_preferred)
+    _preferred_shown = (f"{_preferred} ({_preferred_label})" if _preferred_label
+                       else _preferred)
+    console.print(f"  Preferred target  : {escape(_preferred_shown)}")
     if installed:
         # paths.root/models_dir are <LOCALM_HOME>/comfyui(-models) - LOCALM_HOME
         # itself is user-configurable (env var / --home), so these are not
