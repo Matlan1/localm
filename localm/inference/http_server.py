@@ -2979,12 +2979,9 @@ def _shutdown_teardown(*, instance_id: Optional[str] = None) -> None:
 
 
 def _announce_stopping() -> None:
-    """Print the one line that tells a console user the stop has begun.
+    """Print the line that tells a console user the stop has begun.
 
-    The teardown that follows can take a moment (a native model context has to
-    be freed), and without this the console shows nothing between the keypress
-    and the prompt coming back. Best-effort: a console that cannot be written
-    to must never block the stop itself."""
+    Best-effort: a console that cannot be written to never blocks the stop."""
     try:
         from localm.console import console
         console.print("[dim]Stopping localm...[/dim]")
@@ -2993,10 +2990,9 @@ def _announce_stopping() -> None:
 
 
 def _do_shutdown(*, instance_id: Optional[str] = None) -> None:
-    """The full stop: _shutdown_teardown, then exit the process so the stop is
-    guaranteed. Used by the GUI/tray Stop button and the shutdown route, which
-    have no unwinding call stack of their own to return into. Separated from the
-    route so it can be tested without exiting."""
+    """The full stop: _shutdown_teardown, then exit the process. Used by the
+    GUI/tray Stop button and the shutdown route. Separated from the route so it
+    can be tested without exiting."""
     _shutdown_teardown(instance_id=instance_id)
     import os
     os._exit(0)
@@ -5305,9 +5301,9 @@ def run_advertised(app, host: str, port: int, *, mode: str,
                                ssl_certfile=ssl_certfile, ssl_keyfile=ssl_keyfile)
         finally:
             # Serving has ended - Ctrl+C, a signal, or an error. Runs the same
-            # stop sequence the GUI/tray Stop button runs. _shutdown_teardown
-            # rather than _do_shutdown: the caller's own finally still closes a
-            # tray icon and an mDNS advertisement, which an exit here would skip.
+            # stop sequence the GUI/tray Stop button runs. Must not exit the
+            # process here: the caller's own finally still closes a tray icon
+            # and an mDNS advertisement.
             _announce_stopping()
             _shutdown_teardown(
                 instance_id=getattr(getattr(app, "state", None),

@@ -389,12 +389,9 @@ def ignore_interrupt_signals() -> bool:
     or when the mechanism is unavailable.
 
     A console interrupt reaches EVERY process on the console, not only the one
-    being typed at - on Windows the CRT raises SIGINT in each of them, on POSIX
-    the terminal signals the whole foreground process group - so a worker sees
-    an interrupt aimed at its parent. Ignoring it leaves the parent as the only
-    thing that stops this worker: its explicit shutdown command on unload/stop,
-    or install_parent_death_watchdog when the parent dies without running any
-    code.
+    being typed at, so a worker receives interrupts aimed at its parent. The
+    parent remains the only thing that stops this worker: its shutdown command
+    on unload/stop, or install_parent_death_watchdog.
 
     No-op in the main process (parent_process() is None there). Idempotent and
     fully guarded: never raises, so it can never block a normal worker start."""
