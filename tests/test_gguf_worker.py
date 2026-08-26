@@ -68,8 +68,8 @@ class TestLoad:
         assert kwargs.get("cancel_event") is None
         assert kwargs.get("n_gpu_layers") == 99
         assert meta == {"n_layers": 42, "kv_bytes_per_token": 12_345,
-                         "supports_images": True, "weight_placement": [],
-                         "moe_skip_reason": None}
+                         "supports_images": True, "supports_mtp": False,
+                         "weight_placement": [], "moe_skip_reason": None}
         assert w._loaded is True
 
     def test_load_passes_through_weight_placement_from_llamacpp(self, tmp_path):

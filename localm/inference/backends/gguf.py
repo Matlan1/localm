@@ -34,6 +34,16 @@ from .llamacpp._sizing import VramSizingMixin
 _count_messages_tokens_rpc_warned = False
 
 
+# Statuses the child reports once speculation has stopped for the rest of a
+# model's life. A per-call status outside this set says nothing about whether
+# the model can still speculate: an image turn does not speculate, and that does
+# not mean the next text turn will not.
+_MTP_STOPPED = frozenset({
+    "rewind-unsupported", "draft-context-full", "hidden-state-refused",
+    "context-refused", "no-ctx-type-field",
+})
+
+
 class GgufBackend(VramSizingMixin, BaseBackend):
     """
     Inference backend for GGUF model files.
@@ -94,6 +104,8 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         # True once loaded, from the child's load response.
         self._supports_images = False
         self._supports_mtp = False
+        self.last_mtp_status = None    # why speculation is or is not running
+        self.last_mtp_active = False   # whether the last call actually speculated
         # Always None in production; the real LlamaCpp instance lives in the
         # child process.
         self._llm = None
@@ -129,23 +141,40 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         in the isolated worker process, not here."""
         return bool(self.loaded and self._supports_images)   # a dead worker has no vision
 
+    def _record_mtp(self, done: dict) -> None:
+        """Take the speculation state from one call's done envelope.
+
+        The child can turn speculation off after the load that reported it, so
+        the load response goes stale on its own. This is the same latch shape
+        grammar_unsupported uses: the child reports this call's outcome, the
+        parent owns the state that has to survive across calls.
+
+        A status outside _MTP_STOPPED never re-enables anything - a model that
+        stopped speculating does not start again on the next reply.
+        """
+        if "mtp_status" not in done:
+            return          # an older child, or a path that does not report it
+        self.last_mtp_status = done.get("mtp_status")
+        self.last_mtp_active = bool(done.get("mtp_active"))
+        if self.last_mtp_status in _MTP_STOPPED:
+            self._supports_mtp = False
+
     @property
     def supports_mtp(self) -> bool:
         """True once loaded with active Multi-Token Prediction heads (MTP).
 
-        A MODEL capability, not a statement about any one request. Two things it
-        deliberately does not track:
+        A MODEL capability, not a statement about any one request: a turn
+        carrying an image never speculates, because the multimodal path has no
+        draft context and upstream's own driver skips vision batches for the
+        same reason, yet this still reads True there, because the same model
+        speculates normally on its text turns. ``last_mtp_active`` is the
+        per-call answer.
 
-        A turn carrying an image never speculates - the multimodal path has no
-        draft context, and upstream's own driver skips vision batches for the
-        same reason. This still reads True there, because the same model
-        speculates normally on its text turns.
-
-        It is cached from the child's load response, and the child can turn MTP
-        off after that (a conversation outgrowing the draft context, a failed
-        draft decode), so this can read True for a session that has stopped
-        speculating. The child's own log says which; carrying it back would need
-        a field on the per-call done envelope."""
+        It starts from the child's load response and is corrected by every call
+        after that, so a session whose speculation has stopped reads False from
+        the next reply onward. ``last_mtp_status`` carries the reason, and
+        ``last_mtp_active`` says whether the call that just finished actually
+        speculated - False on a turn carrying an image even when this is True."""
         return bool(self.loaded and self._supports_mtp)
 
     # ------------------------------------------------------------------ #
@@ -665,6 +694,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         else:
             done = getattr(self._runner, "last_done", None) or {}
             self.last_finish_reason = done.get("finish_reason", "stop")
+            self._record_mtp(done)
             if done.get("grammar_unsupported") and not self._grammar_unsupported:
                 # First time this model has shown it cannot do grammar: latch it, so
                 # later calls skip sending grammar at all, and surface the degrade.

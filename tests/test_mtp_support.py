@@ -17,6 +17,7 @@ from localm.inference.backends.llamacpp._structs import (
 )
 from localm.inference.backends.llamacpp import _api as api
 from localm.inference.engine import Engine
+from localm.inference.backends.llamacpp import llama as LlamaCppModule
 from tests._bare_llama import make_bare_llama
 
 
@@ -280,6 +281,67 @@ def test_an_image_turn_clears_the_draft_cache_too():
         "the draft cache survived an image turn, so drafts after an image would be "
         "conditioned on a conversation that is no longer in the main cache")
     assert llm._cached_tokens == []
+
+
+def test_a_stopped_session_stops_reporting_mtp_support():
+    """supports_mtp is read from the load response, and the child can turn
+    speculation off after that, so later calls have to correct it.
+
+    Without this the flag describes a session that stopped speculating hours
+    ago, which is the same stale observable this whole area exists to remove.
+    """
+    from localm.inference.backends import gguf as gguf_mod
+
+    for status in sorted(gguf_mod._MTP_STOPPED):
+        backend = GgufBackend("test_model.gguf")
+        backend._loaded = True
+        backend._supports_mtp = True
+        backend._record_mtp({"mtp_status": status, "mtp_active": False})
+        assert backend.supports_mtp is False, (
+            f"{status} stops speculation for this model, so supports_mtp must "
+            "stop saying otherwise")
+        assert backend.last_mtp_status == status
+
+
+def test_a_call_that_merely_did_not_speculate_leaves_the_capability_alone():
+    """An image turn does not speculate and must not be read as the model having
+    lost the ability - the next text turn speculates normally."""
+    backend = GgufBackend("test_model.gguf")
+    backend._loaded = True
+    backend._supports_mtp = True
+
+    backend._record_mtp({"mtp_status": "ok:qwen35", "mtp_active": False})
+
+    assert backend.supports_mtp is True
+    assert backend.last_mtp_active is False    # this call did not speculate
+    assert backend.last_mtp_status == "ok:qwen35"
+
+
+def test_an_envelope_without_the_field_changes_nothing():
+    """A child that does not report it must not be read as a stop."""
+    backend = GgufBackend("test_model.gguf")
+    backend._loaded = True
+    backend._supports_mtp = True
+
+    backend._record_mtp({"finish_reason": "stop"})
+
+    assert backend.supports_mtp is True
+    assert backend.last_mtp_status is None
+
+
+def test_the_stopped_statuses_are_ones_the_child_can_actually_report():
+    """A status in the stop set that the child never emits would be dead, and one
+    the child emits that is missing from the set leaves the flag stale. Both are
+    silent, so pin the set against llama.py's own vocabulary."""
+    from pathlib import Path
+
+    from localm.inference.backends import gguf as gguf_mod
+
+    src = Path(inspect.getfile(LlamaCppModule)).read_text(encoding="utf-8")
+    for status in sorted(gguf_mod._MTP_STOPPED):
+        assert f'"{status}"' in src, (
+            f"{status!r} is treated as a permanent stop but llama.py never "
+            "reports it, so the entry is dead")
 
 
 def test_gguf_backend_supports_mtp():

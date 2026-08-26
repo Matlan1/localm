@@ -326,6 +326,8 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
                     "finish_reason": worker.last_finish_reason,
                     "grammar_unsupported": worker.grammar_unsupported_this_call,
                     "chatml_fallback_reason": worker.chatml_fallback_reason,
+                    "mtp_status": worker.mtp_status,
+                    "mtp_active": worker.mtp_active_this_call,
                 }))
             except ContextCapacityExceededError as e:
                 # An oversized prompt exceeding the configured context capacity or
