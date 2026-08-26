@@ -543,12 +543,25 @@ async def create_session(req: CreateSessionRequest, request: Request):
         except Exception as e:
             raise HTTPException(500, f"Failed to load {req.model}: {e}")
 
-    from localm.audit import effective_mode
+    from localm.audit import effective_mode, mode_at_least_as_private, parse_mode
     # Pass the session's project dir so a per-project .localcoder/config.toml mode
     # is honored by the GUI coder, not just the global coder_mode (REC-CODER-MODE-TOML).
     # Resolved BEFORE the backend, not after: the privacy gate needs it to decide
     # whether this session may talk to an off-machine model at all.
-    session_mode = req.mode or effective_mode("coder", cwd=cwd).value
+    floor_mode = effective_mode("coder", cwd=cwd)
+    if req.mode:
+        try:
+            requested_mode = parse_mode(req.mode)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        # A scoped key must not force a less-private mode than the project's
+        # configured floor - the same shape as the req.model gate above (a
+        # restricted key cannot switch models either).
+        if restricted and not mode_at_least_as_private(requested_mode, floor_mode):
+            raise HTTPException(
+                403, "Requesting a less private mode needs the owner key; a "
+                "scoped key uses the project's configured mode.")
+    session_mode = req.mode or floor_mode.value
 
     loop = asyncio.get_running_loop()
     # WHICH model server answers this session (ADR-0013). Off the event loop:
