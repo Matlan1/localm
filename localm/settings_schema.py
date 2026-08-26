@@ -1134,7 +1134,9 @@ CORE_FIELDS: list = [
                  "Show remote images in replies (fetched by this machine)",
                  "Off by default. When on, this machine fetches the image so "
                  "the site never learns your IP or browser. It cannot stop a "
-                 "link carrying data out, so leave it off unless you need it.",
+                 "link carrying data out, so leave it off unless you need it. "
+                 "Which hosts it may reach is bounded by the Allowed domains "
+                 "list (net_allow), if you set one.",
                  # Reachable in the default keyless install regardless: the schema
                  # route treats open mode as owner (is_owner = held is None or
                  # ADMIN in held), so admin_only hides this from a SCOPED key, not

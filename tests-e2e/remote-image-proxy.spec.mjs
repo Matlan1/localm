@@ -82,10 +82,26 @@ const renderRemoteImage = (page, url, id) => page.evaluate(([u, i]) => {
   window.renderMarkdown(box, "reply text\n\n![alt](" + u + ")\n");
 }, [url, id]);
 
+/** A refused image is REPLACED by a `.img-blocked` note carrying the route's
+ *  reason, so read whichever of the two is present. */
 const imgState = (page, id) => page.evaluate((i) => {
-  const img = document.querySelector("#" + i + " img");
+  const box = document.getElementById(i);
+  const note = box && box.querySelector(".img-blocked");
+  if (note) {
+    return {
+      blocked: true,
+      hasSrc: false,
+      naturalWidth: 0,
+      proxySrc: note.dataset.lmProxySrc || null,
+      failed: note.dataset.lmProxyFailed || null,
+      reason: (note.textContent || "").trim(),
+      visible: note.getBoundingClientRect().height > 0,
+    };
+  }
+  const img = box && box.querySelector("img");
   if (!img) return { missing: true };
   return {
+    blocked: false,
     srcScheme: (img.getAttribute("src") || "").split(":")[0] || "(none)",
     hasSrc: img.hasAttribute("src"),
     proxySrc: img.dataset.lmProxySrc || null,
@@ -103,7 +119,7 @@ async function boot(page) {
   expect(await patchConfig(page, { net_allow_private: true })).toBe(200);
 }
 
-test("OFF (the default): the browser never contacts the remote origin, and the image stays blank",
+test("OFF (the default): the browser never contacts the remote origin, and the reader is told",
   async ({ page }) => {
     const origin = await startOrigin();
     try {
@@ -118,6 +134,13 @@ test("OFF (the default): the browser never contacts the remote origin, and the i
       expect(st.proxySrc, "what the model asked for is kept for diagnostics")
         .toBe(origin.url("/off.png"));
       expect(origin.seen, "the REMOTE ORIGIN saw no request from anyone").toEqual([]);
+      // And the reader is TOLD. Before this the reply just had a hole in it: a
+      // src-less <img> paints the model's alt text, or nothing at all when the
+      // model wrote `![](...)`, so an image could vanish with no way to know.
+      expect(st.visible, "the note is actually on screen, not a 0x0 element").toBe(true);
+      expect(st.reason).toContain("Image not shown");
+      expect(st.reason, "and carries the route's own reason, which names the setting")
+        .toContain("Show remote images in replies");
     } finally { origin.close(); }
   });
 

@@ -302,6 +302,44 @@ function _rememberProxiedImage(href, objUrl) {
   _imgProxyCache.set(href, objUrl);
 }
 
+/** A refusal the PROXY ROUTE issued, carrying the reason it gave. Distinct from a
+ *  transport failure, which arrives at the same catch as an ordinary Error. */
+class ImageProxyRefused extends Error {
+  constructor(status, detail) {
+    super(detail || ("HTTP " + status));
+    this.status = status;
+    this.detail = detail || "";
+  }
+}
+
+/** One sentence saying why an image did not load, for the placeholder below. */
+function proxyRefusalText(e) {
+  if (e instanceof ImageProxyRefused) {
+    if (e.detail) return e.detail;
+    if (e.status === 403) return "This localm refused to fetch it.";
+    return "This localm could not fetch it (HTTP " + e.status + ").";
+  }
+  return "This localm could not reach it.";
+}
+
+/** Replace a remote image that did not load with a visible note saying so.
+ *
+ *  Builds the node with createElement/textContent and never assigns markup, so
+ *  it stays outside the sanitize-then-modify hazard the surrounding function is
+ *  careful about. The model's alt text is carried along as TEXT.
+ *  See "a refused image says why" in tests-js/image-proxy-rewrite.test.mjs. */
+function showBlockedImage(img, reason) {
+  const note = el("span", "img-blocked");
+  note.dataset.lmProxySrc = img.dataset.lmProxySrc || "";
+  note.dataset.lmProxyFailed = "1";
+  note.title = reason;
+  const alt = (img.getAttribute("alt") || "").trim();
+  note.appendChild(el("span", "img-blocked-label",
+                      alt ? "Image not shown (" + alt + ")" : "Image not shown"));
+  note.appendChild(el("span", "img-blocked-why", reason));
+  if (img.parentNode) img.parentNode.replaceChild(note, img);
+}
+
 function proxyRemoteImages(root) {
   // srcset FIRST, and it is not optional tidying. DOMPurify's default allowlist
   // passes `srcset`, `picture` and `source` (verified against the vendored
@@ -341,24 +379,31 @@ function proxyRemoteImages(root) {
     // 403 without the token, 200 with it, on the same URL.
     const pending = fetch("/api/image-proxy?url=" + encodeURIComponent(u.href),
                           { headers: authHeaders() })
-      .then((r) => (r.ok ? r.blob() : Promise.reject(new Error("HTTP " + r.status))))
+      .then(async (r) => {
+        if (r.ok) return r.blob();
+        // The route answers with a REASON, and each one is different work for
+        // the user: the feature is off (and which setting turns it on), the host
+        // is not on their own net_allow list, the image is over the size cap, the
+        // response was not an image. Read it here, because after this it is gone.
+        let detail = "";
+        try { detail = (await r.json()).detail || ""; } catch (e) { /* no JSON body */ }
+        return Promise.reject(new ImageProxyRefused(r.status, detail));
+      })
       .then((blob) => {
         const objUrl = URL.createObjectURL(blob);
         _rememberProxiedImage(u.href, objUrl);
         return objUrl;
       })
-      .catch(() => {
-        // Off (403 - the DEFAULT state), refused by the network policy, or the
-        // host is unreachable. Forget it so a later render may retry, and leave
-        // the image blank exactly as a blocked remote image looks today rather
-        // than inventing an error state in the middle of a reply.
+      .catch((e) => {
+        // Forget it so a later render may retry, and carry the reason out so the
+        // caller can say WHY rather than leaving a silent hole in the reply.
         _imgProxyCache.delete(u.href);
-        return null;
+        return { failed: true, reason: proxyRefusalText(e) };
       });
     _imgProxyCache.set(u.href, pending);
     pending.then((o) => {
-      if (o) img.src = o;
-      else img.dataset.lmProxyFailed = "1";
+      if (typeof o === "string") img.src = o;
+      else if (o && o.failed) showBlockedImage(img, o.reason);
     });
   });
 }

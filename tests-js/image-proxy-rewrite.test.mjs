@@ -14,7 +14,8 @@
 //
 // The rewrite is UNCONDITIONAL by design; the server owns the on/off decision
 // (see the rationale on proxyRemoteImages in helpers.js). So there is no
-// enabled/disabled arm here - a refusal just leaves the image blank.
+// enabled/disabled arm here - a refusal is surfaced instead, with the reason the
+// route gave, which the last tests in this file pin.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -25,12 +26,20 @@ const VENDOR = new URL("../localm/plugins/gui/static/vendor/", import.meta.url);
 /** loadApp() with the REAL vendored marked + DOMPurify over the stubs (the stubs
  *  pass everything through, which would make any claim about what survives
  *  sanitisation meaningless), plus a fetch spy standing in for the proxy. */
-function loadReal({ ok = true } = {}) {
+function loadReal({ ok = true, status = 403, detail = "" } = {}) {
   const calls = [];
   const { window: win } = loadApp({
     fetchImpl: async (url, opts) => {
       calls.push({ url: String(url), headers: (opts && opts.headers) || {} });
-      if (!ok) return { ok: false, status: 403, blob: async () => null };
+      if (!ok) {
+        return {
+          ok: false, status, blob: async () => null,
+          json: async () => {
+            if (detail === null) throw new Error("not JSON");
+            return { detail };
+          },
+        };
+      }
       return { ok: true, status: 200, blob: async () => new win.Blob([1, 2, 3]) };
     },
   });
@@ -174,17 +183,24 @@ test("a src the sanitizer strips is never resurrected by the rewrite", async () 
   assert.equal(t.querySelectorAll("script").length, 0);
 });
 
-test("a refused proxy fetch leaves the image blank instead of throwing", async () => {
+test("a refused proxy fetch is noted, never thrown, and never falls back remote", async () => {
   // 403 is the DEFAULT state (the feature ships off), so this is the ordinary
-  // path, not an edge case. It must not surface an error inside a reply.
+  // path, not an edge case. It must not throw inside a reply - and it must not
+  // pass silently either, which is what it did until the note below existed.
   const { win, calls } = loadReal({ ok: false });
   const t = render(win, "![x](https://example.com/a.png)");
   await settle();
   assert.equal(proxied(calls).length, 1);
-  const img = t.querySelector("img");
-  assert.equal(img.dataset.lmProxyFailed, "1", "the failure was not recorded");
-  assert.ok(!(img.getAttribute("src") || "").startsWith("http"),
+  const note = t.querySelector(".img-blocked");
+  assert.equal(note.dataset.lmProxyFailed, "1", "the failure was not recorded");
+  // The URL survives in data-lm-proxy-src on purpose (diagnostics, same as it was
+  // on the <img>). What must not survive is anything the browser would FETCH.
+  const fetchable = [...t.querySelectorAll("*")].filter((n) =>
+    ["src", "href", "srcset", "poster", "data"].some((a) =>
+      (n.getAttribute(a) || "").includes("example.com")));
+  assert.deepEqual(fetchable, [],
     "a failed proxy fetch must not fall back to the remote URL");
+  assert.equal(t.querySelector("img"), null, "and no src-less <img> is left behind");
 });
 
 test("a remote srcset is stripped so the proxied src is what renders", async () => {
@@ -240,4 +256,68 @@ test("clearImageProxyCache drops cached images so the OFF switch takes effect", 
   await settle();
   assert.equal(proxied(calls).length, 2,
     "after clearing, the image must be re-fetched (and so re-authorised by the route)");
+});
+
+// --- the refusal is SURFACED, not swallowed -------------------------------
+// The route answers with seven distinct reasons and each one is different work
+// for the user: the feature is off (and which setting turns it on), the host is
+// not on their own net_allow list, the image is over the size cap, the response
+// was not an image. All of them used to collapse to a src-less <img>, which
+// renders as the model's alt text if it wrote one and as NOTHING at all if it
+// wrote `![](...)`. So a reply could silently lose an image with no way for the
+// reader to know one had been there.
+
+const OFF_REASON =
+  "Showing remote images is off. Turn on 'Show remote images in replies' " +
+  "under Settings > Network to enable it.";
+
+test("a refused image says why, using the reason the route gave", async () => {
+  const { win } = loadReal({ ok: false, detail: OFF_REASON });
+  const t = render(win, "![a chart of Q3 revenue](https://cdn.example.com/a.png)");
+  await settle();
+
+  const note = t.querySelector(".img-blocked");
+  assert.ok(note, "a refused image leaves a visible note, not a hole in the reply");
+  assert.equal(t.querySelector("img"), null, "and the dead <img> is gone");
+  assert.match(note.textContent, /Image not shown/);
+  assert.ok(note.textContent.includes(OFF_REASON),
+    "the route's own reason is shown - it names the setting that fixes this, and " +
+    "discarding it is what made a net_allow miss look identical to a dead host");
+  assert.equal(note.title, OFF_REASON, "and repeated as a tooltip");
+  assert.equal(note.dataset.lmProxySrc, "https://cdn.example.com/a.png",
+    "what the model asked for is still recorded for diagnostics");
+});
+
+test("the model's alt text is carried across as TEXT, never as markup", async () => {
+  const { win } = loadReal({ ok: false, detail: OFF_REASON });
+  const t = render(win, "![<img src=x onerror=alert(1)>](https://cdn.example.com/a.png)");
+  await settle();
+
+  const note = t.querySelector(".img-blocked");
+  assert.ok(note);
+  assert.equal(note.querySelector("img"), null,
+    "the alt text is inserted with textContent, so markup inside it stays inert");
+  assert.ok(note.textContent.includes("<img src=x onerror=alert(1)>"),
+    "and is shown literally");
+});
+
+test("an image with NO alt still leaves a visible note (the silent-hole case)", async () => {
+  const { win } = loadReal({ ok: false, detail: OFF_REASON });
+  const t = render(win, "![](https://cdn.example.com/a.png)");
+  await settle();
+
+  const note = t.querySelector(".img-blocked");
+  assert.ok(note, "an empty alt used to render a 0x0 element - nothing on screen at all");
+  assert.match(note.textContent, /Image not shown/);
+});
+
+test("a refusal with no JSON body still says something rather than nothing", async () => {
+  const { win } = loadReal({ ok: false, status: 502, detail: null });
+  const t = render(win, "![x](https://cdn.example.com/a.png)");
+  await settle();
+
+  const note = t.querySelector(".img-blocked");
+  assert.ok(note, "a body-less failure is still surfaced");
+  assert.match(note.textContent, /could not fetch it \(HTTP 502\)/,
+    "with the status, so it is diagnosable rather than a bare shrug");
 });
