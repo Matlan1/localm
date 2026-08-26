@@ -184,3 +184,42 @@ test("CODER-EPISODES: an empty recall renders nothing (silence when irrelevant)"
   window.handleCoderEvent(s, { type: "episodes_recalled", episodes: [] });
   assert.equal(feedEl.querySelector(".feed-info"), null, "no row for an empty recall");
 });
+
+function _rejectionSequence(window, s) {
+  window.handleCoderEvent(s, { type: "tool_call", tool: "run_shell", args: { command: "rm -rf /" } });
+  window.handleCoderEvent(s, { type: "confirm_request", confirm_id: "c1", tool: "run_shell", args: {} });
+  window.handleCoderEvent(s, { type: "confirm_resolved", confirm_id: "c1", approved: false, timed_out: false });
+  window.handleCoderEvent(s, { type: "tool_result", tool: "run_shell", ok: false, summary: "rejected by user" });
+}
+
+test("rejected-2-shell: a rejected call shows ONE card, not two", () => {
+  const { window } = loadApp({ fetchImpl: okFetch() });
+  const feedEl = window.document.createElement("div");
+  const s = { info: { id: "z" }, feedEl, liveBody: null, liveText: "",
+             pendingCards: [], confirmCards: new Map() };
+  _rejectionSequence(window, s);
+
+  assert.equal(feedEl.querySelectorAll(".tool-card").length, 0,
+    "the tool_call card has nothing left to show once the confirm card narrates the rejection");
+  const confirmCards = feedEl.querySelectorAll(".confirm-card");
+  assert.equal(confirmCards.length, 1, "the confirm card stays - it is the one useful record");
+  assert.match(confirmCards[0].textContent, /Rejected run_shell/);
+});
+
+test("rejected-2-shell CONTROL: an APPROVED call keeps both cards (output still matters)", () => {
+  const { window } = loadApp({ fetchImpl: okFetch() });
+  const feedEl = window.document.createElement("div");
+  const s = { info: { id: "z" }, feedEl, liveBody: null, liveText: "",
+             pendingCards: [], confirmCards: new Map() };
+  window.handleCoderEvent(s, { type: "tool_call", tool: "run_shell", args: { command: "ls" } });
+  window.handleCoderEvent(s, { type: "confirm_request", confirm_id: "c2", tool: "run_shell", args: {} });
+  window.handleCoderEvent(s, { type: "confirm_resolved", confirm_id: "c2", approved: true, timed_out: false });
+  window.handleCoderEvent(s, { type: "tool_result", tool: "run_shell", ok: true, summary: "ok",
+                              output: "file1.txt\nfile2.txt" });
+
+  assert.equal(feedEl.querySelectorAll(".tool-card").length, 1,
+    "an approved call's real output is not redundant with the confirm checkmark");
+  assert.match(feedEl.querySelector(".tool-card").textContent, /file1\.txt/);
+  assert.equal(feedEl.querySelectorAll(".confirm-card").length, 1);
+  assert.match(feedEl.querySelector(".confirm-card").textContent, /Approved run_shell/);
+});
