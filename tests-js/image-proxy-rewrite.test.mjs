@@ -563,3 +563,34 @@ test("ask: a DECLINED origin stays declined for its other images too", async () 
   assert.equal(consented(calls).length, 0, "and nothing was fetched");
   assert.ok(t.querySelector(".img-blocked"), "the second image is refused too");
 });
+
+test("a REFUSED origin's later images resolve without waiting on another dialog",
+  async () => {
+    // The reason requestOriginConsent answers from memory BEFORE joining the
+    // queue. An ALLOWED origin never reaches it (it sends its consent and gets
+    // a 200, so no 428 and no ask). A REFUSED one does: every later image from
+    // it still 428s, and without the memory read up front that 428 queues
+    // behind whatever dialog happens to be open, so a reply full of images from
+    // a host the reader already refused sits blank until they deal with an
+    // unrelated host.
+    const { win, calls } = loadAsking();
+    renderScoped(win, "![a](https://refused.example.com/1.png)", "chat:1");
+    await settle();
+    clickConsent(win, "Do not load");
+    await settle();
+
+    // Open a dialog for a DIFFERENT, undecided host and LEAVE IT OPEN.
+    renderScoped(win, "![b](https://undecided.example.net/2.png)", "chat:1");
+    await settle();
+    assert.ok(modalOpen(win), "the undecided host is asking");
+    assert.match(modalText(win), /undecided\.example\.net/);
+
+    // Another image from the refused host must reach its note meanwhile.
+    const t = renderScoped(win, "![c](https://refused.example.com/3.png)", "chat:1");
+    await settle();
+    assert.ok(t.querySelector(".img-blocked"),
+      "a refused origin's image still says so while an unrelated dialog is open");
+    assert.equal(consented(calls).length, 0, "and nothing was fetched for it");
+    assert.ok(modalOpen(win), "without disturbing the open dialog");
+    assert.match(modalText(win), /undecided\.example\.net/);
+  });
