@@ -118,10 +118,11 @@ def read_model_file_hold(scheme: str, port, model: str,
     download rather than a wrong status line.
 
     ``"absent"`` (404) is deliberately NOT folded into ``"ok"/held: False``
-    either. It means this instance serves a different data home, so it is
-    genuinely not a holder of THIS file - but that is a conclusion about scope,
-    not about residency, and a caller that wants to report accurately why it
-    refused (or did not) has to be able to tell them apart.
+    either: they are different facts about this server's registry, not about
+    the file's residency. ``"absent"`` means no entry exists under *model*'s
+    name; ``held: False`` means an entry exists and nothing loaded has its
+    file open. A caller that wants to report accurately why it refused (or
+    did not) has to be able to tell them apart.
 
     Deliberately mirrors :func:`read_activity`'s signature and state machine
     rather than inventing a second shape: both are "ask each discovered
@@ -199,6 +200,20 @@ def remote_hold_reason(model: str) -> Optional[str]:
     refused delete costs one command and names the server to go and check; a
     deleted model file is gone.
 
+    ``"absent"`` is the one non-ok state this loop treats as a rule-out rather
+    than a refusal: it means the responding server's own registry has no entry
+    under *model*'s name. Every server this loop can reach shares that
+    registry - ``instances.snapshot`` reads this home's run dir, and the one
+    call site that ever writes an entry into it, ``instances.advertise``, is
+    always called with that same home - so "absent" here reads as "not
+    registered under this name in the one registry every reachable server
+    shares", never as "a different data home". The route behind
+    :func:`read_model_file_hold` is itself NAME-keyed: it looks *model_id* up
+    in its own registry and 404s before ever comparing a file path. Widening
+    discovery to span more than one registry would turn this skip into a
+    false all-clear for a file held under a different name in another
+    registry.
+
     No server running at all is a certain all-clear (``instances.snapshot``
     yields nothing to loop over, so this returns None immediately), never a
     refusal - a tool that blocked every deletion whenever nothing happened to
@@ -241,7 +256,7 @@ def remote_hold_reason(model: str) -> Optional[str]:
             return (f"the localm server at {where} still has this model's "
                     f"file loaded as {key!r}")
         if state == "absent":
-            continue              # that instance serves a different library
+            continue              # no entry under this name in the shared registry
         if state == "unauthorized":
             return (f"the localm server at {where} requires an API key this "
                     f"process does not have, so whether it has this model "
