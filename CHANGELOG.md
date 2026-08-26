@@ -517,13 +517,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   asked for it, so a single constrained request could briefly stall chat for
   every other client. The check now runs alongside other work.
 - **A model in use can no longer be deleted out from under itself.** Removing a
-  model through an AI assistant (the MCP `remove_model` tool) deleted its file
-  without checking whether anything was still using it, so a model you had just
-  been chatting with could have its downloaded file destroyed while loaded. The
-  same removal in the app has always refused this. It now refuses everywhere,
-  naming what is holding the model, and it also checks a running localm server
-  rather than only the assistant's own session. When it cannot reach a running
-  server to ask, it refuses rather than assuming the model is free.
+  model through an AI assistant (the MCP `remove_model` tool) or from a
+  terminal (`localm rm`) deleted its file without checking whether anything
+  was still using it, so a model you had just been chatting with could have
+  its downloaded file destroyed while loaded. The same removal in the app has
+  always refused this. It now refuses everywhere, naming what is holding the
+  model, and it also checks a running localm server rather than trusting only
+  its own state. When it cannot reach a running server to ask, it refuses
+  rather than assuming the model is free.
 - **Downloading the same model twice at once no longer corrupts the download.**
   Two downloads of the same direct URL wrote into a single partly-downloaded
   file, interleaving their bytes: the download finished and then failed its
