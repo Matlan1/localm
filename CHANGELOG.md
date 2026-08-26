@@ -912,6 +912,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   warning, and the matching message in the GUI's bind-fallback notice, now
   say the length is a floor and point at `localm key generate` for an
   actually strong, random key.
+- **`localm memory clear` now actually erases everything it reports erasing.**
+  It could print "Erased N remembered and M forgotten fact(s)" and exit
+  successfully while two records of your own words stayed on disk: a pending
+  suggestion to update or delete a saved fact, and the text of a suggestion
+  you had already turned down. Both are now removed by the same command, and
+  it refuses to report success if anything is still there afterward.
 
 ## [0.1.5rc3] - 2026-08-13
 
