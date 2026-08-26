@@ -841,6 +841,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   browser-only deep link. `--api-mode` mounts no GUI at all, so both now
   match: the hint points at `localm pull <name>`, and the address line shows
   the plain API base under "API base".
+- **`localm run MODEL -p "..."` now exits non-zero when the model load
+  hard-fails.** A crashed or unreachable load printed the real error in red
+  but still exited 0 with empty output, so a script chaining on the exit
+  code (or piping the output to a next step) could not tell that call apart
+  from a normal reply that happened to be empty.
 
 ### Security
 - **Two more model families' role markers are now defanged in untrusted text.**
