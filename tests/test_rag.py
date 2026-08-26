@@ -376,13 +376,13 @@ class TestCollection:
         assert not c.query("sourdough flour water", k=3)
 
     def test_reserved_device_names_rejected(self, tmp_path):
-        # BUG-8: names that match the regex but break mkdir on Windows
+        # Names that match the regex but break mkdir on Windows.
         for bad in ("con", "CON", "nul", "com1", "LPT9", "aux"):
             with pytest.raises(ValueError):
                 Collection(bad, base=tmp_path)
 
     def test_corrupt_meta_does_not_crash_listing(self, tmp_path, docs_dir):
-        # BUG-7: a single corrupt meta.json must not 500 the whole list
+        # A single corrupt meta.json must not 500 the whole list.
         base = tmp_path / "rag"
         Collection("good", base=base).create().add_paths([docs_dir])
         bad = base / "bad"
@@ -437,7 +437,7 @@ class TestCollection:
         assert healed.query("rocm")
 
     def test_vectors_json_records_dim(self, tmp_path, docs_dir):
-        # BUG-5 / FAC: the documented vectors.json "dim" field is now written
+        # The documented vectors.json "dim" field is written.
         base = tmp_path / "rag"
         c = Collection("kb", base=base).create()
         c.add_paths([docs_dir], embed_fn=lambda ts: [[1.0, 0.0, 0.0] for _ in ts])
@@ -513,8 +513,8 @@ class TestCollection:
     def test_query_embedding_model_change_warns(self, tmp_path, docs_dir, caplog):
         """Querying with an embedding model of a different dimensionality than the
         stored vectors surfaces a 'model changed' warning + a stats reason (and
-        still answers lexically). Also covers BUG-5 (dim mismatch must degrade to
-        lexical, never crash or silently truncate)."""
+        still answers lexically). A dim mismatch degrades to lexical, never
+        crashing or silently truncating."""
         base = tmp_path / "rag"
         c = Collection("kb", base=base).create()
         c.add_paths([docs_dir],

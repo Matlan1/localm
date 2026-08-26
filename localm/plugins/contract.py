@@ -24,8 +24,8 @@ API_VERSION = 1
 #: formats: this engine contract (parsed by engine.parse_spec) and the legacy
 #: CLI format (parsed by loader.parse_manifest; its own keys are name/version/
 #: description/entry plus the separate [tools] table). Both formats share the
-#: installed dir, so each parser tolerates the other format's keys and warns
-#: only on a key known to NEITHER. Shared here so the two parsers cannot drift.
+#: installed dir; each parser tolerates the other format's keys and warns only
+#: on a key known to NEITHER.
 KNOWN_PLUGIN_KEYS = frozenset({
     "name", "version", "api_version", "description", "scope",
     "requires_extras", "requires", "capabilities", "data_subdir",
@@ -52,9 +52,8 @@ class Surface:
                                 # enabled, and shows a flat tab when exactly one is
 
 
-#: The keys a plugin.toml [surface] table understands. Derived from the Surface
-#: dataclass so it can never drift from what parse_spec actually reads; used to
-#: warn (never fail) on an unknown or misspelled key.
+#: The keys a plugin.toml [surface] table understands, derived from the Surface
+#: dataclass. An unknown or misspelled key warns; it never fails.
 KNOWN_SURFACE_KEYS = frozenset(Surface.__dataclass_fields__)
 
 
@@ -140,7 +139,7 @@ class PluginSpec:
 class Host(Protocol):
     """The API the engine hands a plugin at register() time. The plugin attaches
     itself through this object and never imports the app or global config
-    directly - which is what lets a plugin be loaded/unloaded at runtime."""
+    directly."""
 
     api_version: int
 
@@ -150,13 +149,13 @@ class Host(Protocol):
     # GET/POST /v1/plugins/<name>/settings - see PluginSettingField above.
     def add_settings(self, fields: "list[PluginSettingField]") -> None: ...
     def register_tab(self, surface: Surface) -> None: ...
-    # Config r/w is CONFINED to the plugin's own block; a different name is refused
-    # (compartmentalisation). name is optional and defaults to the plugin's own.
+    # Config r/w is CONFINED to the plugin's own block; a different name is
+    # refused. name is optional and defaults to the plugin's own.
     def plugin_config(self, name: Optional[str] = ...) -> dict: ...
     def save_plugin_config(self, name: Optional[str] = ..., cfg: Optional[dict] = ...) -> None: ...
-    # Host-side scope checks are NOT implemented: the host has no request
-    # context, and scopes are enforced per-request on the routes mounted via
-    # mount_router. Both raise NotImplementedError.
+    # Host-side scope checks are NOT implemented: scopes are enforced
+    # per-request on the routes mounted via mount_router. Both raise
+    # NotImplementedError.
     def has_scope(self, scope: str) -> bool: ...
     def require_scope(self, scope: str) -> None: ...
     def engine(self) -> Any: ...                          # inference engine handle

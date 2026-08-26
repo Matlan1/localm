@@ -6,7 +6,7 @@ These drive the REAL tools against REAL OS processes - the point of the feature
 is process lifecycle, and a mocked subprocess would prove nothing about the two
 things that actually break: whether a kill reaps the process TREE, and whether
 the buffer stays bounded. The only mock here is a spy on ShellJob's constructor,
-used to assert the argv-vs-shell ROUTING decision (checking a security decision,
+which asserts the argv-vs-shell ROUTING decision (checking a security decision,
 not standing in for the thing under test).
 """
 
@@ -455,9 +455,9 @@ def test_drain_can_filter_by_kind(tmp_path, make_registry):
 def test_pruning_evicts_drained_jobs_before_undrained_ones(make_registry):
     """A completion nobody has collected must outlive one already handed over.
 
-    The drained job is deliberately NOT the oldest. If it were, "evict drained
-    first" and plain "evict oldest first" would pick the same victim and this
-    test would pass either way - proving nothing about the ordering it names.
+    The drained job is NOT the oldest. If it were, "evict drained first" and
+    plain "evict oldest first" would pick the same victim and this test would
+    pass either way - proving nothing about the ordering it names.
     """
     reg = make_registry(kind_caps={"agent": 50}, keep_finished=2)
 
@@ -543,9 +543,9 @@ def test_background_uses_the_same_argv_routing_as_run_shell(tmp_path, monkeypatc
     assert seen["argv"] == _shell_argv(plain), "diverged from run_shell's routing"
 
     # Shell metacharacters -> the platform shell, same as run_shell. The launch
-    # form differs by platform on purpose: a raw command-line STRING on Windows,
-    # an argv list on POSIX (see tools/base.py:platform_shell), so compare
-    # against _shell_argv rather than assuming a list here.
+    # form differs by platform: a raw command-line STRING on Windows, an argv
+    # list on POSIX (see tools/base.py:platform_shell), so compare against
+    # _shell_argv rather than assuming a list here.
     piped = f"{plain} | more" if sys.platform == "win32" else f"{plain} | cat"
     res2 = tool_run_shell_background(tmp_path, piped)
     assert res2.ok, res2.output
@@ -582,7 +582,7 @@ def test_privacy_mode_zeroes_shell_history_env(tmp_path, _py):
 
 
 def test_disabling_run_shell_also_disables_the_background_variant():
-    """Otherwise a shareable, deliberately shell-less session keeps RCE."""
+    """Otherwise a shareable, shell-less session keeps RCE."""
     from localm.plugins.coder.agent.constants import expand_shell_disable
     expanded = expand_shell_disable(frozenset({"run_shell"}))
     for name in ("run_shell", "run_shell_background",
@@ -829,12 +829,12 @@ def test_job_id_is_returned_immediately_without_waiting(tmp_path, _py):
 
 
 # --------------------------------------------------------------------------- #
-#  Honesty of reporting (follow-ups from the adversarial review of #784)        #
+#  Honesty of reporting                                                        #
 #                                                                              #
 #  None of these is a security hole; every one is a case where a step that      #
-#  FAILED reported success, which is the failure mode AGENTS.md rule 5 exists   #
-#  to stop. Each "absence" assertion below is paired with a fires-control that  #
-#  shows the same check firing, so a check that can never fire cannot pass.     #
+#  FAILED reported success. Each "absence" assertion below is paired with a     #
+#  fires-control that shows the same check firing, so a check that can never    #
+#  fire cannot pass.                                                            #
 # --------------------------------------------------------------------------- #
 
 class _FakeShellJob(_FakeAgentJob):
@@ -957,11 +957,11 @@ def test_exit_teardown_is_silent_when_there_is_nothing_to_stop(make_registry, ca
 # -- finding 2: one kind's undrained pile-up evicted another kind's result --- #
 
 def test_one_kind_cannot_evict_another_kinds_uncollected_completion(make_registry):
-    """#796 added a kind whose completions ARE drained, while nothing drains the
-    shell kind at all (both drain call sites filter kind="agent"). Against ONE
-    global budget the undrained shell pile-up evicts the sub-agent completion the
-    parent is about to absorb - and absorption is drain-only, so that child's
-    summary, branch and diff are then unrecoverable.
+    """One kind's completions ARE drained, while nothing drains the shell kind at
+    all (both drain call sites filter kind="agent"). Against ONE global budget
+    the undrained shell pile-up evicts the sub-agent completion the parent is
+    about to absorb - and absorption is drain-only, so that child's summary,
+    branch and diff are then unrecoverable.
     """
     reg = make_registry(kind_caps={"agent": 4, "shell": 50}, keep_finished=2)
 
@@ -1029,7 +1029,7 @@ def test_a_lost_completion_is_reported_to_its_consumer_exactly_once(make_registr
     assert reg.take_dropped_undrained("agent") == 0, (
         "the same loss was handed out twice - a turn-boundary consumer would "
         "warn about it every turn forever")
-    # The cumulative total is deliberately NOT consumed: /bg shows it all session.
+    # The cumulative total is NOT consumed: /bg shows it all session.
     assert reg.dropped_undrained > 0
 
 
@@ -1302,10 +1302,10 @@ def test_a_missing_psutil_and_a_failed_lookup_report_DIFFERENT_reasons(
     warning hunting the wrong thing."""
     pytest.importorskip("psutil")
     reg = make_registry()
-    # A job that has already FINISHED, on purpose: the second half of this test
-    # patches builtins.__import__ process-wide, and doing that while this job's
-    # watcher and reader threads are still live would put a global seam under
-    # threads that import.
+    # A job that has already FINISHED: the second half of this test patches
+    # builtins.__import__ process-wide, and doing that while this job's watcher
+    # and reader threads are still live would put a global seam under threads
+    # that import.
     job = reg.submit(lambda: ShellJob(_argv("print('x')"), tmp_path, label="tree"),
                      kind="shell")
     assert _wait_for(lambda: job.state == "done")

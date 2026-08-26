@@ -1,16 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """GET /v1/models/{id}/hold and its client, against the REAL route and a REAL socket.
 
-The MCP remove_model tests patch ``read_model_file_hold`` so they can drive
-every branch of the refusal cheaply. That is the right shape for those, and it
-leaves one thing unproven: whether the two halves actually connect. A mocked
-reader is satisfied by a route that does not exist, a scope that refuses, a
-body shape the client cannot parse, or a URL that never matches - each of which
-would ship a guard that answers "unreachable" forever and refuses every
-removal, or worse, one whose 404 is read as "this server does not carry the
-model" when it really means "this server has no such route".
-
-So this file exercises the real thing in two layers:
+A mocked ``read_model_file_hold`` is satisfied by a route that does not exist,
+a scope that refuses, a body shape the client cannot parse, or a URL that never
+matches. This file exercises the real thing in two layers:
 
 * The ROUTE, through TestClient, against the real
   ``loaded_engine_holding_model_file`` - so the answer comes from the same
@@ -20,10 +13,9 @@ So this file exercises the real thing in two layers:
 
 The 404 pair is the load-bearing case and gets both arms. Status alone cannot
 tell "this server is too old to have the route" from "this server does not
-carry that model", and those are opposite conclusions: the first must refuse
-the removal, the second must let it proceed. The client reads the body to tell
-them apart, and if that ever regresses to reading the status only, one of the
-two tests below goes red.
+carry that model", and those are opposite conclusions: the first refuses the
+removal, the second lets it proceed. The client reads the BODY to tell them
+apart.
 """
 
 from __future__ import annotations
@@ -78,15 +70,11 @@ def _register(home, entries):
 def resident(monkeypatch):
     """Put an engine in the server's OWN map, the way a load does.
 
-    CALL THIS AFTER THE APP EXISTS AND ITS LIFESPAN HAS STARTED, never before.
-    ``create_app`` opens with ``_engines.clear()`` and sets ``_engine`` to
-    whatever it was handed, so an engine injected first is wiped by app
-    construction - and the wipe leaves exactly the state of a server with
-    nothing loaded, i.e. a confident all-clear from the guard. An earlier
-    version of this file injected first, asserted the injection had taken
-    (it had), and then had it cleared out from under the assertion; the route
-    answered ``held: False`` for a model that really was resident. Proving an
-    injection fired only means anything at the moment of USE.
+    PRECONDITION: call this AFTER the app exists and its lifespan has started,
+    never before. ``create_app`` opens with ``_engines.clear()`` and sets
+    ``_engine`` to whatever it was handed, so an engine injected first is wiped
+    by app construction, leaving exactly the state of a server with nothing
+    loaded and a confident all-clear from the guard.
     """
     import localm.inference.http_server as hs
 
@@ -118,8 +106,7 @@ def test_route_reports_a_hold_from_the_real_guard(home, resident):
     assert body["held"] is True, body
     assert body["key"] == "victim", body
     # reason None means PROVEN, not merely un-ruled-out. The client renders
-    # those two as different sentences, so the distinction has to survive the
-    # wire.
+    # those two as different sentences.
     assert body["reason"] is None, body
 
 
@@ -159,14 +146,13 @@ def test_route_404s_for_a_model_this_server_does_not_carry(home):
 
     assert r.status_code == 404
     # The client discriminates on this exact prefix to tell a missing MODEL
-    # from a missing ROUTE. If this wording changes, the client silently
-    # starts refusing every removal against a healthy server.
+    # from a missing ROUTE.
     assert r.json()["detail"].startswith("Model not registered"), r.json()
 
 
 def test_route_does_not_leak_the_model_path(home, resident):
-    """The detail route is careful never to return an absolute path; this one
-    returns registry NAMES and a fixed reason, and must stay that way."""
+    """This route returns registry NAMES and a fixed reason, never an absolute
+    path."""
     path = _model_file(home)
     _register(home, {"victim": {"path": str(path), "source": "test"}})
     with TestClient(create_app(None)) as c:
@@ -228,9 +214,8 @@ def test_client_reads_a_real_hold_over_the_wire(home, resident):
 
 
 def test_client_reads_a_real_all_clear_over_the_wire(home):
-    """The permissive arm on the wire. Without it, a client that answered
-    "unreachable" for everything would satisfy every refusal test in the MCP
-    file while making removal impossible."""
+    """The permissive arm on the wire: a real all-clear reaches the client as
+    an all-clear, not as "unreachable"."""
     from localm.selfclient import read_model_file_hold
 
     path = _model_file(home)
@@ -306,9 +291,9 @@ def test_client_treats_a_route_less_server_as_unsupported(home):
 def test_client_reports_a_dead_port_as_unreachable():
     """The arm that separates fail-closed from fail-open.
 
-    A dead port must reach the caller as "I could not ask", never as an empty
-    or false hold. Bind a socket to claim a port, close it, then dial it - so
-    the port is one nothing is listening on rather than one guessed at.
+    A dead port reaches the caller as "I could not ask", never as an empty or
+    false hold. A socket claims a port, closes it, and the test then dials it,
+    so the port is one nothing is listening on rather than one guessed at.
     """
     from localm.selfclient import read_model_file_hold
 

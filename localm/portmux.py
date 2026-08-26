@@ -140,7 +140,7 @@ def _run_uvicorn_on_socket(uvicorn, app, host, port, *, log_level,
     degraded path as on the normal one.
 
     If even the socket cannot be built, this falls back to uvicorn's own binding
-    rather than leaving the user with no server, and logs the reason."""
+    and logs a warning naming the failure."""
     config_kwargs = dict(app=app, log_level=log_level)
     if ssl_certfile:
         config_kwargs.update(ssl_certfile=ssl_certfile, ssl_keyfile=ssl_keyfile)
@@ -220,7 +220,7 @@ async def _serve_async(app, host, port, ssl_certfile, ssl_keyfile, log_level) ->
         _lsock.close()
         raise
 
-    # SRV-6: Ensure Windows event loop wakes up to process Ctrl+C
+    # Keeps the Windows event loop waking up so it can process Ctrl+C.
     wakeup_task = None
     if sys.platform == "win32":
         async def _wakeup():
@@ -282,7 +282,7 @@ async def _serve_async_plain(app, host, port, log_level) -> None:
         _lsock.close()
         raise
 
-    # SRV-6: Ensure Windows event loop wakes up to process Ctrl+C
+    # Keeps the Windows event loop waking up so it can process Ctrl+C.
     wakeup_task = None
     if sys.platform == "win32":
         async def _wakeup():

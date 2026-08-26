@@ -52,10 +52,10 @@ _GRAMMAR = 'root ::= "yes" | "no"'
 # --------------------------------------------------------------------------- #
 
 class _MinimalBackend(BaseBackend):
-    """A backend that declares nothing beyond the abstract minimum.
+    """A backend that declares nothing beyond the abstract minimum, standing in
+    for the deny-by-default contract.
 
-    It must never grow a ``supports_grammar`` declaration: the deny-by-default
-    contract is what this stands in for.
+    It must never grow a ``supports_grammar`` declaration.
     """
 
     def __init__(self) -> None:
@@ -448,7 +448,7 @@ class TestBothPathsAgree:
             self, exc_factory, status, reason):
         # These surface only once generation has started, after the streaming
         # path has committed its 200, so the STATUS cannot agree. What is
-        # asserted instead is that the reason reaches the caller on both paths
+        # asserted instead is that its reason reaches the caller on both paths
         # and that the failure is machine-detectable on both.
         payload = {"model": "test-model", "messages": _TEXT_MSG}
 
@@ -457,7 +457,7 @@ class TestBothPathsAgree:
         plain = _post(_mock_engine(stream_exc=exc_factory(reason)),
                       {**payload, "stream": False})
 
-        # Same input, same failure: the reason reaches the caller on both.
+        # Same input, same failure: its reason reaches the caller on both.
         assert reason in self._sse_text(streamed.text)
         assert reason in plain.json()["detail"]
         assert plain.json()["detail"] != "Internal server error"
@@ -525,9 +525,8 @@ def _completion_finish_reasons(body: str) -> list:
 
 
 class TestARuntimeErrorReachesTheClientOnAllFourPaths:
-    """All FOUR legs are asserted, not just one: "these four agree" is the
-    property, and a leg covered only through its neighbour cannot fail on its
-    own."""
+    """All FOUR legs are asserted separately: "these four agree" is the
+    property."""
 
     def test_non_streaming_completions_reports_the_reason_and_marks_it(self):
         r = _post(_mock_engine(stream_exc=RuntimeError(_RUNTIME_REASON)),
@@ -601,7 +600,7 @@ class TestTheReasonIsRedactedNotMuted:
                                 "stream": False})
         body = r.json()["choices"][0]["text"]
         assert "someaccount" not in body, body
-        # ...and the reason survives.
+        # ...and the failure reason survives.
         assert "no backends loaded" in body, body
         assert "thing.gguf" in body, body
 
@@ -614,7 +613,8 @@ class TestTheReasonIsRedactedNotMuted:
         assert "no backends loaded" in body, body
 
     def test_the_streaming_legs_scrub_too(self):
-        # The streaming legs render the reason inline, so they scrub it too.
+        # The streaming legs render the failure reason inline, so they scrub it
+        # too.
         for path, payload in (
             ("/v1/completions", {"model": "test-model", "prompt": "hi"}),
             ("/v1/chat/completions", {"model": "test-model", "messages": _TEXT_MSG}),

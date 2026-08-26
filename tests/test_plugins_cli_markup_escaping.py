@@ -2,8 +2,7 @@
 """A plugin name, scope, version, description, or dependency list shown by the
 `plugin` CLI must survive verbatim - Rich's ``Console.print()`` parses ``[...]``
 in ANY interpolated string as markup, not just inside a command's own literal
-``[style]`` tags. Reproduced directly against this venv's rich (same repro as
-test_rag_cli_markup_escaping.py):
+``[style]`` tags:
 
     Console().print('widget[draft]')       -> prints "widget"
     Console().print('widget[bold red]')    -> prints "widget"
@@ -18,17 +17,15 @@ brackets possible), so this file cannot construct a NAME that exercises the
 bug and does not try to. ``scope``, ``version``, ``description``, ``requires``
 and ``requires_extras`` are read from the SAME manifest with NO such
 restriction (plain ``str()``/``list()`` casts in ``parse_spec``), so those are
-the fields exercised here with real, on-disk third-party plugin manifests -
-the same convention test_cli_plugin.py's ``cli_env`` fixture uses (a
-synthetic store/installed pair, ``PluginManager`` pointed at them).
+the fields exercised here, with real on-disk third-party plugin manifests: a
+synthetic store/installed pair with ``PluginManager`` pointed at them.
 
 A CLI-typed argument (an unknown plugin NAME/TARGET/KEY passed to install/
 enable/disable/uninstall/config) is a second, independent risk: that text is
 never manifest-validated at all, so TestUnknownPluginArgumentMarkupEscaping
 exercises it directly. TestInstallErrorMarkupEscaping and
-TestSetupSkipErrorMarkupEscaping force a real ``ValueError`` the same way
-test_rag_cli_markup_escaping.py's TestLockMessageEscaping does, since the
-exact wording of a collision/validation error is not something a fixture can
+TestSetupSkipErrorMarkupEscaping force a real ``ValueError``, since the exact
+wording of a collision or validation error is not something a fixture can
 reliably reproduce on disk.
 """
 
@@ -37,7 +34,7 @@ from __future__ import annotations
 import pytest
 from click.testing import CliRunner
 
-# One value Rich DROPS outright, one it consumes as a (bogus) style tag - the
+# One value Rich DROPS outright, one it consumes as a (bogus) style tag: the
 # two distinct failure shapes described in the module docstring above.
 BRACKET_DROP = "[draft]"
 BRACKET_STYLE = "[bold red]"
@@ -45,8 +42,8 @@ BRACKET_STYLE = "[bold red]"
 
 def _write_plugin(root, name, *, scope=None, version=None, description=None,
                    requires=None, requires_extras=None):
-    """A minimal on-disk 'engine' plugin (register=, not entry=) under *root*,
-    matching test_cli_plugin.py's own synthetic-plugin shape."""
+    """A minimal on-disk 'engine' plugin (register=, not entry=) under
+    *root*."""
     d = root / name
     d.mkdir(parents=True)
     lines = ["[plugin]", f'name = "{name}"']
@@ -72,10 +69,9 @@ def _write_plugin(root, name, *, scope=None, version=None, description=None,
 
 @pytest.fixture
 def cli_env(tmp_path, monkeypatch):
-    """Own copy of test_cli_plugin.py's fixture (module-private there), with
-    an EMPTY store/installed pair this file populates per-test via
-    _write_plugin - the fixed 'needy'/'dep1' pair does not carry the manifest
-    fields (scope/version/description/requires) these tests need to control."""
+    """A store/installed pair that starts EMPTY and is populated per-test via
+    _write_plugin, so each test controls the manifest fields it needs
+    (scope/version/description/requires)."""
     monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     import localm.config as cfg
@@ -149,9 +145,10 @@ class TestInstallFromDirectoryMarkupEscaping:
 class TestWarnMissingRequiresMarkupEscaping:
     def test_missing_dependency_name_survives_verbatim(
             self, runner, cli_env, tmp_path):
-        """A declared 'requires' entry that names a plugin NOT installed - the
-        entry is free text in THIS plugin's own manifest, not the dependency's
-        own (validated) name field, so it carries no isidentifier() guarantee."""
+        """A declared 'requires' entry naming a plugin that is NOT installed.
+        The entry is free text in THIS plugin's own manifest, not the
+        dependency's own validated name field, so it carries no isidentifier()
+        guarantee."""
         ext = tmp_path / "thirdparty"
         _write_plugin(ext.parent, "thirdparty", requires=[f"dep{BRACKET_DROP}"])
         r = runner.invoke(cli_env.main, ["plugin", "install", str(ext)])
@@ -193,19 +190,16 @@ class TestPluginStatusMarkupEscaping:
 
 class TestUnknownPluginArgumentMarkupEscaping:
     """install/uninstall/enable/disable all build ``missing_msg=f"No such
-    plugin: {target}"`` and hand it to the SHARED ``run_or_die`` (errors.py,
-    out of scope for this file) - escaped here, at the point the value is
-    interpolated, so the message is already markup-safe by the time
-    run_or_die prints it, regardless of that file's own state."""
+    plugin: {target}"`` and hand it to the SHARED ``run_or_die`` in errors.py.
+    The value is escaped at the point it is interpolated, so the message is
+    already markup-safe by the time run_or_die prints it."""
 
     def test_uninstall_unknown_name_survives_verbatim(self, runner, cli_env):
         """NOT 'plugin install': that path resolves the target through
-        _installed_dir()/_check_plugin_name FIRST (path-traversal defence,
-        engine.py:1119), which raises its OWN ValueError for any non-identifier
-        name before this file's missing_msg is ever built - a different,
-        pre-existing, already-unescaped site in engine.py/errors.py, out of
-        scope here. 'plugin uninstall' checks membership in a dict/set first
-        (no shape validation), so it reaches missing_msg via a clean KeyError."""
+        _installed_dir()/_check_plugin_name first, which raises its OWN
+        ValueError for any non-identifier name before missing_msg is built.
+        'plugin uninstall' checks membership in a dict or set first, with no
+        shape validation, so it reaches missing_msg via a clean KeyError."""
         bad = f"ghost{BRACKET_DROP}"
         r = runner.invoke(cli_env.main, ["plugin", "uninstall", bad])
         assert r.exit_code == 1, r.output
@@ -222,9 +216,9 @@ class TestUnknownPluginArgumentMarkupEscaping:
             f"{r.output!r}")
 
     def test_config_unknown_key_survives_verbatim(self, runner, cli_env):
-        """image/music/video/tts have a static, developer-defined key schema,
-        so the KEY here is never validated against the manifest - it is the
-        raw CLI argument, exactly like the plugin names above."""
+        """image/music/video/tts have a static, developer-defined key schema, so
+        the KEY here is never validated against the manifest: it is the raw CLI
+        argument, like the plugin names above."""
         bad_key = f"workdir{BRACKET_DROP}"
         r = runner.invoke(cli_env.main, ["plugin", "config", "image", bad_key])
         assert r.exit_code == 1, r.output
@@ -257,8 +251,7 @@ class TestPluginConfigValueMarkupEscaping:
 
 
 # --------------------------------------------------------------------------- #
-#  A real domain ValueError, forced via monkeypatch (test_rag_cli_markup_     #
-#  escaping.py's TestLockMessageEscaping does the same for its own exception) #
+#  A real domain ValueError, forced via monkeypatch                          #
 # --------------------------------------------------------------------------- #
 
 class TestInstallErrorMarkupEscaping:
@@ -283,9 +276,10 @@ class TestInstallErrorMarkupEscaping:
 class TestSetupSkipErrorMarkupEscaping:
     def test_setup_skip_message_survives_verbatim(
             self, runner, cli_env, tmp_path, monkeypatch):
-        """'plugin setup --plugins <name>' hits a DIFFERENT except (KeyError,
-        ValueError) site than 'plugin install' above (line ~304, 'Skipped
-        NAME: ERROR'), reached only through the catalog-driven setup path."""
+        """'plugin setup --plugins <name>' hits a DIFFERENT
+        except (KeyError, ValueError) site than 'plugin install' above, the
+        'Skipped NAME: ERROR' one, reached only through the catalog-driven
+        setup path."""
         from localm.plugins import catalog
         from localm.plugins.engine import PluginManager
 

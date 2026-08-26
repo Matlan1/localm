@@ -4,8 +4,7 @@ ABI mismatch detail, a GPU/driver device name, a plugin's declared dependency
 string, a filesystem path - straight into ``rich.console.Console.print()``
 f-strings. Rich parses any ``[...]`` in a printed string as markup, not just
 inside a command's own literal ``[style]`` tags, so any of that free text can
-silently corrupt the report it appears in. Reproduced directly against this
-venv's rich (same repro as test_rag_cli_markup_escaping.py):
+silently corrupt the report it appears in. Rich renders these as:
 
     Console().print('report[draft].txt')       -> prints "report.txt"
     Console().print('notes[bold red].md')       -> prints "notes.md"
@@ -276,10 +275,9 @@ class TestRuntimeBuildMarkupEscaping:
 
     def test_pin_bracket_style_survives_verbatim(self, cli_runner, monkeypatch, tmp_path):
         """pinned_tag() validates its stored value via is_safe_tag() on every
-        real read, so this exercises the DEFENSE-IN-DEPTH escape (#1463's
-        precedent for rag.py's already-validated collection names) rather
-        than a reachable-today bug - the mock bypasses that validation the
-        same way mocking any other already-guarded internal would."""
+        real read, so this exercises the DEFENSE-IN-DEPTH escape rather than a
+        reachable-today bug - the mock bypasses that validation the same way
+        mocking any other already-guarded internal would."""
         _stub_unrelated_probes(monkeypatch)
         bindir = tmp_path / "bin"
         bindir.mkdir()

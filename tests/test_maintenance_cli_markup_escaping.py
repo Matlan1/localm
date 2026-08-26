@@ -1,16 +1,15 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Follow-up to PR #1463 (rag.py/errors.py), same bug: ``rich.console.Console.
-print()`` parses any ``[...]`` in a printed string as markup, so an unescaped
-non-literal value interpolated into a markup f-string is silently mangled on
-screen - never a crash, just wrong text shown to the user. Reproduced directly
-against this venv's rich:
+"""``rich.console.Console.print()`` parses any ``[...]`` in a printed string
+as markup, so an unescaped non-literal value interpolated into a markup
+f-string is silently mangled on screen - never a crash, just wrong text shown
+to the user. Rich renders these as:
 
     Console().print('report[draft]')      -> prints "report"        (dropped)
     Console().print('notes[bold red]')    -> prints "notes"          (consumed
                                               as a style directive)
 
 ``localm/cli/maintenance.py`` is the highest-value target in the wider sweep
-across ``localm/cli/*.py`` (dev-notes/MARKUP-ESCAPING-SWEEP-2026-08-20.md):
+across ``localm/cli/*.py``:
 `localm issues` / `localm issues <n>` print an issue's ``title``/``html_url``/
 ``state`` fetched LIVE from the GitHub API through the bug-report proxy
 (``issue_tracker.get_issue``/``list_issues``, whose own docstring says
@@ -103,8 +102,7 @@ class TestIssuesDetailMarkupEscaping:
 
     def test_state_field_survives_verbatim(self, cli_runner, monkeypatch):
         """``state`` is documented as "open"/"closed" by GitHub, but the proxy
-        JSON is not locally validated against that enum - defense in depth,
-        same reasoning PR #1463 applied to collection names."""
+        JSON is not locally validated against that enum - defense in depth."""
         from localm.cli.maintenance import issues_cmd
         from localm import issue_tracker
         monkeypatch.setattr(issue_tracker, "available", lambda: True)

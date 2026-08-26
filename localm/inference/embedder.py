@@ -333,8 +333,8 @@ def resolve_embedding_model_path(*, allow_download: Optional[bool] = None) -> Op
         return None
 
     # 0. Refuse a non-local spec BEFORE any filesystem call: a single is_file()
-    #    on a UNC path reaches the Windows SMB redirector. Returns None and
-    #    records and logs the reason.
+    #    on a UNC path reaches the Windows SMB redirector. Returns None,
+    #    recording and logging what was refused.
     bad = _nonlocal_spec_reason(spec)
     if bad:
         _record_resolve_failure(
@@ -466,11 +466,9 @@ def _warn_if_context_config_drifted(api, ctx, requested_n_ctx: int) -> None:
 
     With kv_unified honoured, n_ctx_seq is close to n_ctx; a runtime that
     silently falls back to slicing n_ctx across n_seq_max private KV slots
-    instead reports a much smaller n_ctx_seq - exactly the field-reported shape
-    (a large embedding batch failing native decode). This can only OBSERVE and
-    log the drift, not explain it (see _abi.py's own kv_unified diagnostic for
-    the complementary load-time struct-offset check) - the root cause needs a
-    live reproduction on the affected hardware.
+    instead reports a much smaller n_ctx_seq, which is what a large embedding
+    batch failing native decode looks like. This can only OBSERVE and log the
+    drift, not explain it.
 
     Never raises: a probe failure here must not take down an otherwise-working
     embedder, and this never changes what was actually configured."""
@@ -489,9 +487,9 @@ def _warn_if_context_config_drifted(api, ctx, requested_n_ctx: int) -> None:
         return                    # older build with no llama_n_ctx_seq accessor
     # A generous margin, not exact equality: kv_unified honoured can still
     # leave n_ctx_seq a hair under n_ctx on some builds. Below half is only
-    # reachable via the sliced-KV fallback (n_ctx / n_seq_max, and n_seq_max
-    # is always >= 2 whenever this matters - see _choose_n_seq_max), so it is
-    # a safe, non-noisy threshold for "kv_unified was silently not honoured".
+    # reachable via the sliced-KV fallback (n_ctx / n_seq_max, with n_seq_max
+    # always >= 2 whenever this matters - see _choose_n_seq_max), so it is the
+    # threshold for "kv_unified was silently not honoured".
     if actual_n_ctx_seq < requested_n_ctx // 2:
         logger.warning(
             "embedder: requested kv_unified=True (n_ctx=%d) but the loaded "
@@ -1078,9 +1076,9 @@ _TRIED_DOWNLOAD = False          # one-time auto-download attempt (only net_mode
 # Why the last LOAD or RESOLVE failed, for the GUI picker. See last_error() and
 # _record_resolve_failure/_record_resolve_success above.
 _LAST_ERROR: Optional[str] = None
-# Dedup key for _record_resolve_failure's WARNING-once-then-DEBUG: the reason
-# last logged at WARNING, so an unchanged misconfiguration does not re-warn on
-# every embed_texts() call.
+# Dedup key for _record_resolve_failure's WARNING-once-then-DEBUG: the failure
+# text last logged at WARNING, so an unchanged misconfiguration does not re-warn
+# on every embed_texts() call.
 _LAST_RESOLVE_WARNED: Optional[str] = None
 
 

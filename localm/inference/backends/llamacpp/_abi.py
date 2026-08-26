@@ -4,10 +4,7 @@
 The ctypes structs in :mod:`._structs` encode specific llama.cpp struct layouts
 (field order + byte offsets). Two of them - ``LlamaModelParams*`` and
 ``LlamaContextParams`` - cross the FFI boundary BY VALUE
-(``llama_load_model_from_file`` / ``llama_init_from_model``). If the loaded
-native library's real layout differs, ctypes marshals values into the wrong
-offsets and the native side reads/writes the wrong memory: silent corruption or
-a hard crash inside the GPU driver.
+(``llama_load_model_from_file`` / ``llama_init_from_model``).
 
 ``llama_model_default_params()`` and ``llama_context_default_params()`` return
 the structs BY VALUE with known defaults (no model, no GPU needed); they are
@@ -27,10 +24,10 @@ loads. Two further valves:
 Offsets for these POD fields are commit-determined, not OS-determined (natural
 alignment is identical on MS-x64 / SysV-x64 / arm64), so a given build matches on
 every OS. (Tag namespaces: b1xxx are lemonade-sdk/llamacpp-rocm, b10xxx are
-ggml-org/llama.cpp, and they collide - see _structs' docstring.)
+ggml-org/llama.cpp, and they collide.)
 
-Because upstream reordered ``llama_model_params`` IN PLACE at an unchanged
-72-byte size, this module also DECIDES WHICH LAYOUT to bind
+Upstream reordered ``llama_model_params`` IN PLACE at an unchanged 72-byte size,
+so this module also DECIDES WHICH LAYOUT to bind
 (:func:`detect_model_params_layout`) rather than assuming one. That decision is
 not part of the safety check and is made even when the check is skipped.
 """
@@ -95,7 +92,7 @@ _FINGERPRINT = {
 # immediately before a run of -1s is itself not -1" locates the layout. Each
 # entry is (ctx_type_offset, first_offset_of_the_run_of_-1s).
 #
-# All four fields of the run are graded, not three.
+# All four fields of the run are graded.
 _CONTEXT_FINGERPRINT = {
     CONTEXT_PARAMS_V1: (32, 36),
     CONTEXT_PARAMS_V2: (36, 40),
@@ -375,9 +372,9 @@ def evaluate(mp, cp) -> AbiVerdict:
     non-fatal diagnostics.
 
     The layout of *mp* AND *cp* is taken from their classes (model_params
-    V1/V2, context_params V1/V2 - independent axes, see _structs' module
-    docstring), so every check below reads each field at the offset its
-    actual bound layout uses. The checks name fields, never raw offsets:
+    V1/V2, context_params V1/V2 - independent axes), so every check below reads
+    each field at the offset its actual bound layout uses. The checks name
+    fields, never raw offsets:
     ``getattr(cp, name)`` resolves correctly regardless of which of the two
     context_params layouts *cp* actually is."""
     failures: List[str] = []
@@ -453,13 +450,10 @@ def evaluate(mp, cp) -> AbiVerdict:
         ("model_params.use_extra_bufts", bool(mp.use_extra_bufts), True),
         # kv_unified is opt-in (embedder.configure_embed_context is the one
         # caller that turns it on), so llama_context_default_params()'s own
-        # default is False on every build seen so far. A build that reports
-        # anything else here is corroborating evidence that this offset (which
-        # V1 and V2 share unchanged - see _structs) is not landing on the real
-        # kv_unified field on THIS runtime, which is the field-reported
-        # embedder context drift (2026-08-25) this check exists to make loud
-        # instead of silent. See embedder._warn_if_context_config_drifted for
-        # the companion LIVE (post-load) check this cannot make on its own.
+        # default is False on known builds. A build that reports anything else
+        # here is corroborating evidence that this offset, which V1 and V2 share
+        # unchanged, is not landing on the real kv_unified field on THIS
+        # runtime.
         ("context_params.kv_unified", bool(cp.kv_unified), False),
     ]
     # The mmap default is expressed differently per layout, so name the field
@@ -655,8 +649,7 @@ def penalties_arity(lib: Optional[ctypes.CDLL] = None) -> int:
 def _remember(verdict: AbiVerdict) -> AbiVerdict:
     """Store *verdict* as this process's authoritative ABI result and return it.
 
-    Called on EVERY verify_abi outcome, including the one that then raises: a
-    mismatch is exactly what a bug report most needs to carry."""
+    Called on EVERY verify_abi outcome, including the one that then raises."""
     global _last_verdict
     _last_verdict = verdict
     return verdict
@@ -767,8 +760,8 @@ def abi_report() -> AbiVerdict:
     """Best-effort ABI verdict for diagnostics (``localm doctor``). Never raises.
 
     Distinguishes: not provisioned / not loadable (unchecked) vs proven mismatch
-    vs ok. Loads the runtime in-process - the same load ``localm run`` performs -
-    so a loadable library is safe here."""
+    vs ok. Loads the runtime in-process, the same load ``localm run``
+    performs."""
     try:
         from ._loader import load_lib
     except Exception as e:  # noqa: BLE001

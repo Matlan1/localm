@@ -78,8 +78,7 @@ def _spec_names_a_host_path(spec: str) -> bool:
 
 
 def _require_registered(model: str, registry: dict | None = None) -> dict:
-    """Raise 404 unless *model* is in the registry (GUI-2: the same guard was
-    repeated verbatim across five route handlers). Returns the registry, so a
+    """Raise 404 unless *model* is in the registry. Returns the registry, so a
     caller that needs it afterward (model_alias) doesn't load it twice."""
     from localm.config import load_registry
     if registry is None:
@@ -260,7 +259,7 @@ def register(app: FastAPI, ctx) -> None:
         """Scan for ComfyUI models and register what it finds. An explicit
         `workdir` is a one-off scan of an arbitrary folder for the guided
         Import-from-ComfyUI flow (never written back to config); with no
-        `workdir` (the old button's bodyless POST, or an explicit `{}`) it
+        `workdir` (a bodyless POST, or an explicit `{}`) it
         scans whatever `comfy_workdir` is configured. `dry_run` previews
         per-type counts and registers nothing, and stays synchronous (its
         directory walk has no honest total to report progress against - see
@@ -269,10 +268,8 @@ def register(app: FastAPI, ctx) -> None:
         A REAL scan (`dry_run` false or absent) runs as a background job
         instead, exactly like a model pull: this returns `{"job_id": ...}`
         immediately and the registration loop reports "registering model N of
-        M" via Job.progress() as it goes, instead of the caller blocking on
-        the whole batch with zero feedback. GET /api/jobs/{id}/events streams
-        it; the final progress event before "end" carries added/skipped/method
-        (the same fields the old synchronous response returned directly).
+        M" via Job.progress() as it goes. GET /api/jobs/{id}/events streams
+        it; the final progress event before "end" carries added/skipped/method.
 
         BOTH forms require `require_fs_host`, called BEFORE either branch below
         so its 403 propagates as-is instead of becoming a generic 500. Either
@@ -596,14 +593,14 @@ def register(app: FastAPI, ctx) -> None:
         # The textual check runs first, so a UNC spec never reaches a stat.
         if _spec_names_a_host_path(spec):
             require_fs_host(request)
-        # Fail here rather than starting a second download of the same spec that
-        # cannot finish. ADVISORY ONLY, and deliberately not the guard: reading
-        # the job list and then starting a job are two steps, so two requests
-        # can both find nothing running and both proceed. What actually keeps
-        # two downloads from writing the same file is the cross-process lock the
-        # pull itself takes, which also covers the contender this cannot see - a
-        # `localm pull` a user ran in a terminal. This only spares the user a
-        # job that would start and immediately refuse.
+        # Fails here rather than starting a second download of the same spec
+        # that cannot finish. ADVISORY ONLY, not the guard: reading the job list
+        # and then starting a job are two steps, so two requests can both find
+        # nothing running and both proceed. What keeps two downloads from
+        # writing the same file is the cross-process lock the pull itself takes,
+        # which also covers the contender this cannot see - a `localm pull` a
+        # user ran in a terminal. This only spares the user a job that would
+        # start and immediately refuse.
         label = f"Model pull {spec}"
         if any(j.get("kind") == "pull" and j.get("status") == "running"
                and j.get("label") == label for j in jobs.snapshot()):
@@ -930,8 +927,7 @@ def register(app: FastAPI, ctx) -> None:
         return 422              # bad repo / no GGUF files / bad format token
 
     async def _run_discover(fn):
-        """Run *fn* off the event loop; map DiscoverError to its HTTP status
-        (GUI-3: discover_search/discover_files shared this try/except)."""
+        """Run *fn* off the event loop; map DiscoverError to its HTTP status."""
         from localm.discover import DiscoverError
         loop = asyncio.get_running_loop()
         try:

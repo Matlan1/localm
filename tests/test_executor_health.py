@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Thread-pool saturation detectability (_executor_health.py) - the "make
-exhaustion detectable, not silent" half of the thread-pool-exhaustion fix
-(dev-notes/decisions-2026-07-30-release-gate.md, Q2).
+"""Thread-pool saturation detectability (_executor_health.py): exhaustion must
+be detectable rather than silent.
 """
 
 from __future__ import annotations
@@ -22,11 +21,10 @@ from localm.inference._executor_health import (
 
 def test_pool_health_none_executor_reports_nothing_to_watch():
     # The asyncio default executor does not exist until the first
-    # run_in_executor(None, ...) call lazily creates it - an idle server
-    # legitimately has None here, and that must read as "not saturated",
-    # never as an error.
-    # "shutdown" is False, not None: a pool that does not exist yet has not been
-    # shut down, and that is a measured distinction rather than an unknown.
+    # run_in_executor(None, ...) call lazily creates it, so an idle server
+    # legitimately has None here and it reads as "not saturated", never as an
+    # error. "shutdown" is False, not None: a pool that does not exist yet has
+    # not been shut down.
     assert pool_health(None) == {
         "max_workers": None, "threads_spawned": 0, "queued": 0,
         "saturated": False, "shutdown": False}
@@ -85,11 +83,8 @@ class _CaptureHandler(logging.Handler):
 
 
 def test_saturation_watch_warns_once_then_throttles_to_debug():
-    """A pool saturated past the threshold for a SUSTAINED window logs
-    exactly ONE warning, then drops to DEBUG for as long as it stays
-    saturated - the log-once-then-throttle contract
-    (.claude/rules/hard-won-rules.md's VRAM-probe log-flood lesson), proven
-    here rather than assumed."""
+    """A pool saturated past the threshold for a SUSTAINED window logs exactly
+    ONE warning, then drops to DEBUG for as long as it stays saturated."""
     from localm.debuglog import logger as _dbg
 
     handler = _CaptureHandler()
@@ -106,11 +101,9 @@ def test_saturation_watch_warns_once_then_throttles_to_debug():
         fut2 = loop.run_in_executor(None, lambda: 1)   # queues behind it
         await asyncio.sleep(0.3)
 
-        # Generous margin over threshold (not a tight race): this box runs
-        # many concurrent test sessions, and a timing assertion with little
-        # headroom is exactly the flakiness class this repo's own test-slot
-        # policy has been burned by before (widened a 2s budget to 15s for
-        # the identical reason). 0.5s threshold vs a 3s window is 6x margin.
+        # Generous margin over the threshold rather than a tight race: 0.5s
+        # threshold against a 3s window is 6x headroom, so a loaded box does
+        # not turn this into a flake.
         stop, thread = start_executor_saturation_watch(loop, threshold=0.5, poll=0.2)
         try:
             await asyncio.sleep(3.0)
@@ -138,9 +131,8 @@ def test_saturation_watch_warns_once_then_throttles_to_debug():
 
 
 def test_saturation_watch_resets_streak_on_recovery():
-    """A pool that recovers (goes idle) and then re-saturates warns AGAIN -
-    the streak must not stay 'already warned' forever after the first
-    incident, or a second, unrelated exhaustion goes unreported."""
+    """A pool that recovers (goes idle) and then re-saturates warns AGAIN: the
+    streak does not stay 'already warned' after the first incident."""
     from localm.debuglog import logger as _dbg
 
     handler = _CaptureHandler()
@@ -153,8 +145,7 @@ def test_saturation_watch_resets_streak_on_recovery():
         pool = ThreadPoolExecutor(max_workers=1)
         loop.set_default_executor(pool)
 
-        # Generous margins throughout - see the identical note in
-        # test_saturation_watch_warns_once_then_throttles_to_debug.
+        # Generous margins throughout, as above.
         stop, thread = start_executor_saturation_watch(loop, threshold=0.4, poll=0.2)
         try:
             # First saturation window.
@@ -197,10 +188,10 @@ def test_saturation_watch_resets_streak_on_recovery():
 # --- run_in_threadpool's pool; see _executor_health.py's module docstring) --
 
 def test_anyio_pool_health_none_limiter_reports_nothing_to_watch():
-    # No captured reference at all (startup capture never ran, or failed) -
-    # unlike pool_health(None)'s "not created yet", this means "cannot
-    # observe from here", but the REPORTED shape is deliberately identical:
-    # never saturated, no counts.
+    # No captured reference at all (startup capture never ran, or failed).
+    # Unlike pool_health(None)'s "not created yet" this means "cannot observe
+    # from here", but the REPORTED shape is identical: never saturated, no
+    # counts.
     assert anyio_pool_health(None) == {
         "max_workers": None, "threads_spawned": None, "queued": None,
         "saturated": False, "shutdown": None}
@@ -218,11 +209,9 @@ def test_anyio_pool_health_idle_limiter_is_not_saturated():
 
 
 def test_anyio_pool_health_reports_saturated_and_recovers():
-    """Mirrors test_pool_health_reports_saturated_and_recovers exactly, but
-    for anyio's CapacityLimiter instead of a ThreadPoolExecutor - shrinks the
-    limiter to a single token so one blocked run_sync call plus one queued
-    behind it is enough to prove real saturated/recovered transitions, not
-    just the None/idle shapes above."""
+    """The saturated-and-recovered transitions for anyio's CapacityLimiter
+    instead of a ThreadPoolExecutor. The limiter is shrunk to a single token, so
+    one blocked run_sync call plus one queued behind it is enough."""
     async def scenario():
         import anyio.to_thread
         limiter = anyio.to_thread.current_default_thread_limiter()
@@ -265,9 +254,9 @@ def test_anyio_pool_health_never_raises_on_a_malformed_limiter():
 
 
 def test_executors_snapshot_includes_anyio_key():
-    """Proves the wiring, not just the standalone function: executors_snapshot
-    (what both the saturation watch and GET /debug/stacks consume) surfaces
-    anyio's pool under the "anyio" key at all, with a real captured limiter."""
+    """executors_snapshot, which both the saturation watch and GET
+    /debug/stacks consume, surfaces anyio's pool under the "anyio" key, with a
+    real captured limiter."""
     async def scenario():
         import anyio.to_thread
         limiter = anyio.to_thread.current_default_thread_limiter()
@@ -280,10 +269,8 @@ def test_executors_snapshot_includes_anyio_key():
 
 
 def test_executors_snapshot_anyio_key_present_but_unobservable_without_capture():
-    """The default (no anyio_limiter passed) must not silently omit the key -
-    a caller reading the snapshot should see "anyio" present and honestly
-    unobservable, not absent (which would look like a caller-side bug rather
-    than an intentional 'nothing captured here' state)."""
+    """The default (no anyio_limiter passed) does not omit the key: a caller
+    reading the snapshot sees "anyio" present and unobservable, not absent."""
     async def scenario():
         loop = asyncio.get_running_loop()
         snapshot = executors_snapshot(loop)
@@ -294,11 +281,10 @@ def test_executors_snapshot_anyio_key_present_but_unobservable_without_capture()
 
 
 def test_saturation_watch_detects_anyio_saturation():
-    """End-to-end proof the background watch (a plain daemon thread, NOT
-    async) actually warns on anyio saturation using a limiter reference
-    captured from async code beforehand - the exact "cannot fetch it itself,
-    must be handed a live reference" contract _executor_health.py's module
-    docstring describes, exercised for real rather than asserted."""
+    """The background watch (a plain daemon thread, NOT async) warns on anyio
+    saturation using a limiter reference captured from async code beforehand:
+    the "cannot fetch it itself, must be handed a live reference" contract
+    _executor_health.py describes."""
     from localm.debuglog import logger as _dbg
 
     handler = _CaptureHandler()
@@ -341,12 +327,10 @@ def test_saturation_watch_detects_anyio_saturation():
 
 
 def test_debug_stacks_reports_anyio_pool_over_real_http(monkeypatch):
-    """End-to-end through a REAL request, not just the unit-level function
-    calls above: GET /debug/stacks is an async handler with its own running
-    loop, so it fetches anyio's default thread limiter live on every call
-    (see http_server.py) rather than needing a captured reference the way
-    the background saturation watch does. Proves the wiring actually landed
-    in the route, not just in _executor_health.py in isolation."""
+    """End-to-end through a REAL request: GET /debug/stacks is an async handler
+    with its own running loop, so it fetches anyio's default thread limiter live
+    on every call rather than needing the captured reference the background
+    saturation watch does."""
     from unittest.mock import MagicMock
 
     from fastapi.testclient import TestClient
@@ -373,14 +357,11 @@ def test_debug_stacks_reports_anyio_pool_over_real_http(monkeypatch):
 # --------------------------------------------------------------------------- #
 
 def test_a_shut_down_pool_is_otherwise_indistinguishable_from_light_load():
-    """The measurement that justifies reporting `shutdown` at all.
-
-    After .shutdown() the other three fields still read plausibly, so the
-    pre-existing `saturated` proxy computes False and the whole shape looks
-    like a pool under light load - while every caller of it is getting
-    RuntimeError. This test pins that collapse, so if a future change ever
-    makes `saturated` able to express the dead state on its own, this fails
-    and tells the next reader the extra key has become redundant.
+    """After .shutdown() the other three fields still read plausibly, so the
+    `saturated` proxy computes False and the whole shape looks like a pool under
+    light load, while every caller of it gets RuntimeError. This pins that
+    collapse, so a change making `saturated` express the dead state on its own
+    fails here.
     """
     pool = ThreadPoolExecutor(max_workers=2)
     pool.submit(lambda: 1).result(timeout=10)
@@ -408,9 +389,8 @@ def test_pool_health_reports_a_shut_down_pool_distinctly():
 
 
 def test_pool_health_never_claims_a_shutdown_state_it_could_not_read():
-    # A pool it cannot introspect must report None ("cannot say"), never False
-    # ("measured healthy") - the same never-trust-in-silence rule the rest of
-    # this module follows.
+    # A pool it cannot introspect reports None ("cannot say"), never False
+    # ("measured healthy").
     class _NotARealExecutor:
         pass
 
@@ -418,8 +398,8 @@ def test_pool_health_never_claims_a_shutdown_state_it_could_not_read():
 
 
 def test_anyio_pool_never_claims_a_shutdown_state():
-    # A CapacityLimiter has no shut-down concept, so False would assert a fact
-    # about that pool nobody measured.
+    # A CapacityLimiter has no shut-down concept, so the field is None rather
+    # than False.
     async def scenario():
         import anyio.to_thread
         limiter = anyio.to_thread.current_default_thread_limiter()
@@ -432,9 +412,7 @@ def test_the_watch_warns_once_for_a_dead_pool_and_never_for_an_unknown_one(monke
     whose state is unknown (None) gets none at all.
 
     Deterministic by construction rather than by timing: the faked snapshot
-    counts its own calls and signals once it has been polled five times, so
-    "exactly one warning across five ticks" is a fact about the throttle, not a
-    race against the clock.
+    counts its own calls and signals once it has been polled five times.
     """
     import localm.inference._executor_health as eh
     from localm.debuglog import logger as _dbg
@@ -479,7 +457,6 @@ def test_the_watch_warns_once_for_a_dead_pool_and_never_for_an_unknown_one(monke
         f"got {len(shutdown_lines)}: {shutdown_lines}")
     assert shutdown_lines[0][0] == "WARNING"
     assert "plugin" in shutdown_lines[0][1]
-    # The unknown-state pool must stay silent: None means "cannot say", and a
-    # monitor that warns on what it could not measure is noise, not a signal.
+    # The unknown-state pool stays silent: None means "cannot say".
     assert not any("anyio" in r[1] and "SHUT DOWN" in r[1] for r in handler.records)
     assert not any("default" in r[1] and "SHUT DOWN" in r[1] for r in handler.records)

@@ -66,9 +66,8 @@ def _child_identity_env() -> dict:
     running code's location when nothing is configured, and ``-m`` puts the
     child's cwd first on ``sys.path``, where a ``localm/`` directory in that cwd
     (any other checkout) silently swaps which CODE runs. run_coder_task runs its
-    child in the TASK's directory (see its cwd comment), so without this pin a
-    server whose own home came from ITS location would hand the coder chain a
-    DIFFERENT, empty home.
+    child in the TASK's directory, so the pin is what keeps that child on this
+    server's home and code.
 
     LOCALM_HOME pins the data home; PYTHONSAFEPATH stops ``-m`` from putting
     the child's cwd on ``sys.path``; the PYTHONPATH entry keeps this server's
@@ -125,8 +124,7 @@ class EngineCache:
     headroom with no split shortfall. On a box that cannot measure VRAM, on an
     inconclusive probe, or for a model whose footprint cannot be read, this falls
     back to single-resident behaviour (evict, wait for the free to land, then
-    load). A wrong PERMIT here is a native OOM or a driver hang, not a tidy
-    error.
+    load).
     """
 
     def __init__(self, default_model: Optional[str] = None,
@@ -160,11 +158,9 @@ class EngineCache:
 
         ``default_model`` comes from the ``--model`` flag / the LOCALM_MODEL
         environment variable, i.e. from the person who launched the process, so a
-        filesystem path is legitimate there and gating it would break
-        ``localm mcp --model <path>``. Every OTHER name arrives in a tool call
-        from the MCP client, which is normally an LLM that can be steered by
-        content it was asked to summarise - so a name from that source is treated
-        as hostile input and must be a registered one."""
+        filesystem path is legitimate there. Every OTHER name arrives in a tool
+        call from the MCP client and is treated as hostile input: it must be a
+        registered one."""
         return bool(model_name) and model_name == self.default_model
 
     def _build_engine(self, model_name: str):
@@ -476,10 +472,8 @@ def _backend_can_embed(engines: "EngineCache") -> bool:
 
 
 def _coder_available() -> bool:
-    """True when the coder plugin is installed on disk AND enabled - matches the
-    same check `localm coder` itself does before accepting a task (see
-    plugins/coder/cli/_main.py), so the tool is only advertised when a call
-    would actually work."""
+    """True when the coder plugin is installed on disk AND enabled - the same
+    check `localm coder` itself does before accepting a task."""
     try:
         from localm.plugins.engine import PluginManager
         return PluginManager(None).is_active("coder")
@@ -745,14 +739,12 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
         home = home_dir().resolve()
 
         def _confine(raw: str, label: str):
-            """Keep an MCP OUTPUT path inside the localm data dir - this tool is
-            driven by an LLM client, so an arbitrary output_path could overwrite
-            anything on disk.
+            """Keep an MCP OUTPUT path inside the localm data dir.
 
-            WRITE targets only. ``input_image`` does NOT use this: confining a
-            READ to the data dir is far too wide, because the data dir is the
-            credential store (auth.key is the plaintext owner key, plus
-            auth.json, sessions.json, rag/, coder/). See below.
+            WRITE targets only. ``input_image`` does NOT use this: the data dir
+            is the credential store (auth.key is the plaintext owner key, plus
+            auth.json, sessions.json, rag/, coder/), so confining a READ to it
+            is far too wide. See below.
 
             Delegates to ``pathsafe.confined_absolute_or_under``, the same
             primitive coder/tools/base.py's ``_confine`` uses, which carries the
@@ -912,10 +904,7 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
 
         The MCP server keeps its own residents (chat, embed and the coder tool
         all load through ``engines``), so this process can be the very thing
-        holding the file open while it deletes it. That is not a race: it is
-        deterministic, and it is the most likely way this tool destroys a
-        model, because the agent that just chatted with one is the same agent
-        that asks to remove it.
+        holding the file open while it deletes it.
         """
         from localm.model_manager.registry import engine_holding_model_file
         candidates = [
@@ -931,14 +920,11 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
 
         This process shares no memory with the HTTP/GUI server, so the only way
         to find out is to ask each running instance over HTTP - the same
-        discovery the ``server_activity`` tool uses, for the same reason.
+        discovery the ``server_activity`` tool uses.
 
         EVERY OUTCOME THAT IS NOT AN ANSWER IS A REFUSAL, and the message says
         which one it was. "That server reports nothing holds it" and "I could
-        not reach that server" are opposite conclusions, and collapsing them
-        would delete a live model's file on the strength of never having found
-        out. A refused delete costs one command and names the server to go and
-        check; a deleted model file is gone.
+        not reach that server" are kept apart, never collapsed.
         """
         from localm import instances
         from localm.bindhost import self_connect_host, url_host
@@ -957,11 +943,9 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
                      + ":" + str(e.get("port")))
             if not e.get("alive"):
                 # A failed /whoami is NOT proof the process is gone: snapshot()
-                # reaps entries whose pid has died before this runs, and
-                # instances.py's own comment warns that a transient probe miss
-                # must never be read as death. A listed instance that did not
-                # answer is therefore a live process of unknown state, and
-                # unknown refuses.
+                # has already reaped every entry whose pid died, so a listed
+                # instance that did not answer is a live process of unknown
+                # state, and unknown refuses.
                 return (f"a localm server at {where} is registered but did not "
                         f"answer an identity check, so whether it has this "
                         f"model loaded could not be established")
@@ -1011,10 +995,8 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
         # the models dir, and nothing downstream of here asks whether anything
         # is still using it: model_manager.remove_model is the same code path
         # `localm rm` runs, with no server and no engine map in front of it.
-        # The GUI's remove route guards exactly this before spawning that
-        # command; this tool did not. Both holders are checked here - the
-        # engines resident in this process, and any running server - and either
-        # one refuses.
+        # Both holders are checked here - the engines resident in this process,
+        # and any running server - and either one refuses.
         hold = _local_hold(model, reg)
         if hold is not None:
             if hold.reason is None:

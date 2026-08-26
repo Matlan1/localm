@@ -23,14 +23,13 @@ def _inherited_confirm_handler(parent: Any):
 
     A child always runs ``run_task`` -> ``_loop(interactive=False)``, so it can
     never use execution.py's own interactive prompt branch. Inheriting only the
-    parent's ``confirm_handler`` therefore left the default interactive REPL
+    parent's ``confirm_handler`` therefore leaves the default interactive REPL
     (``localm coder`` without ``--yes``: auto_approve=False AND
     confirm_handler=None, because the terminal REPL confirms via ``_confirm_tool``
-    rather than a handler) with no channel at all - so every delegated
-    write/shell/git hit the fail-closed branch and was DENIED, even though the
-    user was sitting at the terminal that the parent's own tools prompt on
-    (REG-507). "Inherit the parent's confirmation posture" was meant to ASK, not
-    to block.
+    rather than a handler) with no channel at all, so every delegated
+    write/shell/git hits the fail-closed branch and is DENIED even though the
+    user is sitting at the terminal the parent's own tools prompt on. Inheriting
+    the parent's confirmation posture means ASK, not block.
 
     Precedence:
     - the parent's own handler when it has one (GUI/web routes to the browser);
@@ -39,9 +38,8 @@ def _inherited_confirm_handler(parent: Any):
       tool call, so that terminal is free and the answer returns up the same
       stack;
     - else None: a genuinely unattended parent (a scheduled job, a non-interactive
-      run_task) has nobody to ask, so the child keeps failing CLOSED. That is the
-      2026-07-09 bypass fix and it stays intact - this never self-approves, it
-      only reaches a real human.
+      run_task) has nobody to ask, so the child keeps failing CLOSED. This never
+      self-approves, it only reaches a real human.
     """
     handler = getattr(parent, "confirm_handler", None)
     if handler is not None:
@@ -133,18 +131,18 @@ def inherited_child_kwargs(
     worktree-isolated (see :func:`_isolated_verify_cmd`), which only the
     caller knows, so it is computed there and simply carried through here.
 
-    This helper only ASSEMBLES kwargs. It deliberately does no toolset resolution:
-    a role's narrowing is applied inside ``Agent`` after ``_apply_restricted_toolset``
-    and after MCP/plugin/skill registration. Pre-computing a toolset here would move
-    the narrowing BEFORE dynamic registration and silently let MCP/plugin tools
-    through - a capability leak dressed as an optimisation.
+    This helper only ASSEMBLES kwargs. It does no toolset resolution: a role's
+    narrowing is applied inside ``Agent`` after ``_apply_restricted_toolset``
+    and after MCP/plugin/skill registration. Pre-computing a toolset here would
+    move the narrowing BEFORE dynamic registration and silently let MCP/plugin
+    tools through.
 
     *scope* defaults to inheriting the parent's. A caller may pass an explicit
-    value, but note that OVERRIDING it with something broader would discard a
-    narrowing the parent had, which is a confinement regression dressed as
-    isolation. Worktree-isolated dispatch deliberately still inherits: cwd is what
-    confines the file tools there, so re-scoping would buy nothing and cost the
-    parent's narrowing.
+    value, but OVERRIDING it with something broader would discard a narrowing the
+    parent had, which is a confinement regression rather than isolation.
+    Worktree-isolated dispatch still inherits: cwd is what confines the file
+    tools there, so re-scoping would buy nothing and cost the parent's
+    narrowing.
     """
     from ..audit import SessionMode as _SessionMode
     return dict(
@@ -201,12 +199,11 @@ def _prepare_child(
     Returns ``(child, full_task)`` on success or ``(None, ToolResult)`` on a
     failure the caller should return verbatim.
 
-    ONE construction path on purpose. Every safety property a child needs -
-    scope (#781), role (#786), restricted/disabled_tools, the confirmation
-    posture - flows through ``inherited_child_kwargs``. A second, parallel
-    construction site is precisely how the scope hole and then the role hole
-    were introduced, so the background variant reuses this rather than
-    assembling its own kwargs.
+    ONE construction path. Every safety property a child needs - scope, role,
+    restricted/disabled_tools, the confirmation posture - flows through
+    ``inherited_child_kwargs``. A second, parallel construction site is what
+    introduced the scope hole and then the role hole, so the background variant
+    reuses this rather than assembling its own kwargs.
 
     *isolated* gates whether this child gets its own exit-code oracle (see
     :func:`_isolated_verify_cmd`). Only ``spawn_agent_background`` sets it: a
@@ -332,10 +329,10 @@ def tool_spawn_agent(
     # rather than raising, so arriving here is not success: a child that hit
     # max_turns or tripped its circuit breaker was reported to the model as
     # "finished", and ToolResult.success additionally CLEARS the parent's per-tool
-    # failure streak. This is the most-used delegation surface, so it is the one
-    # that matters most. The ToolResult itself stays a success - the delegation
-    # ran, and the child's own text carries the reason - but the summary must not
-    # claim an outcome the child did not reach.
+    # failure streak. The ToolResult below stays a success even when child_ok is
+    # False, so a failed child never counts toward the parent's failure breaker;
+    # the child's own text carries the cause, and the summary must not claim an
+    # outcome the child did not reach.
     child_ok = getattr(child, "last_run_ok", True)
     verdict = ("finished in" if child_ok else
                "DID NOT COMPLETE its task, stopping after")
@@ -481,13 +478,13 @@ def tool_spawn_agent_background(
     real widening compared with the synchronous ``spawn_agent``, where a child
     reaches the same human mid-run. It is the background extension of the
     invariant already stated for the synchronous path: an unattended parent has
-    nobody to ask, so it must fail closed rather than self-approve (the
-    2026-07-09 bypass fix). Hence the refusal below when no confirmation channel
-    exists at all - this never self-approves, it declines to start.
+    nobody to ask, so it must fail closed rather than self-approve. Hence the
+    refusal below when no confirmation channel exists at all - this never
+    self-approves, it declines to start.
 
     A background sub-agent CANNOT be stopped once running (there is no
-    cooperative cancellation in ``Agent.run_task``), which is why there is no
-    kill tool for it.
+    cooperative cancellation in ``Agent.run_task``), so there is no kill tool
+    for it.
     """
     if _parent_agent is None:
         return ToolResult.error(
@@ -617,7 +614,7 @@ def tool_check_agent_job(cwd: Path, job_id: str) -> ToolResult:
     # RETURNS its failure message rather than raising, so "the job ended" is not
     # "the sub-agent succeeded". Report the child's OWN verdict: this is the
     # model's polling surface, and telling it a child that hit max_turns
-    # "finished" is the same false ok the turn-boundary absorption used to make.
+    # "finished" would be a false ok.
     # The ToolResult itself stays a success - the POLL worked; it is the child
     # that did not - so a poll never counts toward the tool-failure breaker.
     child_ok = result.get("ok", True)

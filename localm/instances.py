@@ -278,7 +278,7 @@ def pid_alive(pid: int) -> bool:
             return psutil.pid_exists(pid)
         except Exception as e:
             # Conservative: a broken psutil must never reap a live instance, so
-            # this keeps returning True and logs the reason.
+            # this keeps returning True and logs the failure at debug.
             logger.debug("psutil check failed (%s); assuming pid alive - reaping disabled", e)
             return True   # cannot determine -> assume alive (do not reap)
     try:
@@ -361,7 +361,7 @@ def reap_stale(home: Path, *, self_id: Optional[str] = None,
 
 
 # ------------------------------------------------------------------ #
-#  Discovery: attach-or-spawn (H6 phase 4)                           #
+#  Discovery: attach-or-spawn                                        #
 # ------------------------------------------------------------------ #
 
 def _canon(p: str) -> str:

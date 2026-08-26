@@ -816,10 +816,11 @@ CORE_FIELDS: list = [
                  "by default. Patches only a ComfyUI that localm starts, in memory "
                  "- nothing is written into your install.",
                  group="Media", owner="image"),
-    # Per-component placement needs upstream ComfyUI 2026-05-25 or newer;
-    # localm's own managed ComfyUI has it, and an older ComfyUI declines
-    # cleanly and says why. It does NOT split one model across cards. Ships
-    # off; with it off, or on a single-GPU box, media generation is unchanged.
+    # Per-component placement needs an upstream ComfyUI new enough to ship the
+    # multigpu placement nodes; localm's own managed ComfyUI has them, and an
+    # older ComfyUI declines cleanly and says why. It does NOT split one model
+    # across cards. Ships off; with it off, or on a single-GPU box, media
+    # generation is unchanged.
     SettingField("comfy_gpu_placement", Widget.TOGGLE,
                  "Split media across GPUs (experimental)",
                  "EXPERIMENTAL, off by default. With two or more GPUs, put the text "

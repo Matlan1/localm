@@ -2,32 +2,18 @@
 """The MCP `remove_model` tool must not delete a model file something is using.
 
 `model_manager.remove_model` is the same code path `localm rm` runs: it deletes
-the file outright when that file lives in the models dir. The GUI's remove
-route guards this before spawning that command; the MCP tool did not, so an
-agent could delete a GGUF out from under a live engine and the download is
-gone.
+the file outright when that file lives in the models dir.
 
 TWO HOLDERS, and each gets its own arm here:
 
 * THIS process. The MCP server keeps its own ``EngineCache``, so `chat` and
-  `embed` leave a model resident right here. Deterministic, not a race - the
-  agent that just chatted is the one that asks to remove.
+  `embed` leave a model resident right here.
 * A running localm SERVER. A separate process sharing no memory with this one,
   so the only way to find out is to ask it over HTTP.
 
-WHY THESE TESTS ASSERT ON THE FILE FIRST. The property is "the bytes survive",
-and the refusal message is a proxy for it. A runner stops at the first failing
-assertion, so whichever comes first is the one that speaks: lead with the
-message and a regression reports a string mismatch, which reads as an assertion
-to adjust. Lead with the file and it reports that a model file was deleted
-while an engine that could not be ruled out was loaded, which you cannot talk
-yourself out of.
-
-AND EVERY ARM PROVES ITS OWN FAULT INJECTION FIRED. A patched-in engine whose
-path does not actually match, or a snapshot patch that did not take, looks
-exactly like a guard that checked and correctly found nothing to refuse - both
-produce a clean run. So each test asserts the injected state is in effect
-BEFORE it asserts anything about the outcome.
+Every arm asserts on the FILE before it asserts on the refusal message, and
+asserts that its own injected state is in effect before it asserts anything
+about the outcome.
 """
 
 from __future__ import annotations
@@ -56,8 +42,7 @@ def home(tmp_path, monkeypatch):
 
     model_manager.MODELS_DIR is what is_owned_model_path (and therefore
     resolve_deletion_target) reads; config.MODELS_DIR is pinned to the same
-    directory so nothing can answer against the session's real home and make
-    this file pass vacuously.
+    directory so nothing resolves against the session's real home.
     """
     h = tmp_path / ".localm"
     models = h / "models"
@@ -143,7 +128,6 @@ def test_refuses_when_this_process_holds_the_file(home, monkeypatch):
 
     text, is_error = _remove(_tools(engines), "victim")
 
-    # THE FILE FIRST. This is the property; everything below is a proxy for it.
     assert path.exists(), (
         "the model file was DELETED while an engine in this very process had "
         "it loaded - the download is gone")
@@ -154,12 +138,11 @@ def test_refuses_when_this_process_holds_the_file(home, monkeypatch):
 
 def test_refuses_after_a_cli_rename_left_the_engine_keyed_on_the_old_name(
         home, monkeypatch):
-    """Identity is by FILE PATH, not by name, and this is why.
+    """Identity is by FILE PATH, not by name.
 
     `localm rename` runs in a separate process and cannot re-key this one's
     engine map, so the engine stays keyed under the OLD name while the registry
-    carries only the new one. A name-keyed guard looks up the new name, finds
-    nothing, and deletes the file out from under the live engine.
+    carries only the new one.
     """
     path = _model_file(home)
     _register(home, {"new-name": {"path": str(path), "source": "test"}})
@@ -168,8 +151,8 @@ def test_refuses_after_a_cli_rename_left_the_engine_keyed_on_the_old_name(
     engines = EngineCache(default_model=None)
     engines._engines["old-name"] = _FileEngine("old-name", path)
     engines._lru.append("old-name")
-    # The injection took, and it is genuinely the name-keyed blind spot: the
-    # engine's key is absent from the registry the tool will read.
+    # The injection took: the engine's key is absent from the registry the
+    # tool reads.
     assert "old-name" not in json.loads(
         (home / "registry.json").read_text(encoding="utf-8"))
     assert engines._engines["old-name"].model_path == str(path)
@@ -185,8 +168,7 @@ def test_refuses_after_a_cli_rename_left_the_engine_keyed_on_the_old_name(
 
 def test_refuses_when_a_resident_engine_has_no_recorded_path(home, monkeypatch):
     """An engine that cannot say what it holds is an UNKNOWN, and unknown
-    refuses. The question is not "do these paths compare equal" but "can I
-    establish that nothing live is using this file"."""
+    refuses."""
     path = _model_file(home)
     _register(home, {"victim": {"path": str(path), "source": "test"}})
     _no_servers(monkeypatch)
@@ -203,15 +185,13 @@ def test_refuses_when_a_resident_engine_has_no_recorded_path(home, monkeypatch):
         "an engine that could not say which file it holds was treated as "
         "holding nothing, and the model file was deleted")
     assert is_error
-    # The two refusals must not read alike: telling a user their model is in
-    # use when what happened is that a path was unreadable sends them looking
-    # for the wrong thing.
+    # The two refusals read differently: unreadable path, not in use.
     assert "cannot be ruled out" in text
 
 
 def test_an_unloaded_engine_does_not_block_removal(home, monkeypatch):
-    """The refusal is scoped, not blanket. A cached-but-unloaded engine holds
-    no file, so tidying the library still works."""
+    """The refusal is scoped, not blanket: a cached-but-unloaded engine holds
+    no file, so the removal goes ahead."""
     path = _model_file(home)
     _register(home, {"victim": {"path": str(path), "source": "test"}})
     _no_servers(monkeypatch)
@@ -229,8 +209,8 @@ def test_an_unloaded_engine_does_not_block_removal(home, monkeypatch):
 
 def test_an_alias_keeps_the_bytes_so_there_is_nothing_to_refuse(home, monkeypatch):
     """While another registered name still points at the file, removal drops
-    the NAME and keeps the bytes - so a loaded engine is not a reason to
-    refuse, and blocking here would be a false positive."""
+    the NAME and keeps the bytes, so a loaded engine is not a reason to
+    refuse."""
     path = _model_file(home)
     _register(home, {"victim": {"path": str(path), "source": "test"},
                      "other": {"path": str(path), "source": "test"}})
@@ -277,14 +257,8 @@ def test_refuses_when_a_running_server_reports_a_hold(home, monkeypatch):
 ])
 def test_refuses_when_a_server_cannot_be_asked(home, monkeypatch, state,
                                                payload, expected_phrase):
-    """EVERY outcome that is not an answer is a refusal, and each says which
-    one it was.
-
-    This is the arm that separates a fail-closed design from a fail-open one.
-    A test that only covers the reachable case cannot tell them apart: folding
-    any of these into "nothing holds it" deletes a live model's file on the
-    evidence of never having found out.
-    """
+    """EVERY outcome that is not an answer is a refusal, and the message names
+    which one it was."""
     path = _model_file(home)
     _register(home, {"victim": {"path": str(path), "source": "test"}})
     _servers(monkeypatch, [dict(ROW)])
@@ -297,8 +271,7 @@ def test_refuses_when_a_server_cannot_be_asked(home, monkeypatch, state,
         f"ruled itself out, and the model file was deleted")
     assert calls, "the server was never actually asked"
     assert is_error
-    # Not merely "it refused": the message has to name WHICH state, or a user
-    # cannot tell "your model is in use" from "I could not reach the server".
+    # The message names WHICH state, not merely that it refused.
     assert expected_phrase in text, text
 
 
@@ -306,8 +279,8 @@ def test_refuses_when_a_registered_server_did_not_answer_its_identity_check(
         home, monkeypatch):
     """alive=False is a failed /whoami, NOT proof the process is gone.
 
-    snapshot() reaps entries whose pid has died before this runs, so a listed
-    instance that did not answer is a live process of unknown state.
+    snapshot() reaps entries whose pid has died by the time this runs, so a
+    listed instance that did not answer is a live process of unknown state.
     """
     path = _model_file(home)
     _register(home, {"victim": {"path": str(path), "source": "test"}})
@@ -327,8 +300,8 @@ def test_refuses_when_a_registered_server_did_not_answer_its_identity_check(
 
 
 def test_removes_when_the_only_server_positively_rules_itself_out(home, monkeypatch):
-    """The permissive arm. Without it, a fail-closed guard that refuses
-    everything would pass every test above while making the tool useless."""
+    """The permissive arm: a server that positively rules itself out lets the
+    removal through."""
     path = _model_file(home)
     _register(home, {"victim": {"path": str(path), "source": "test"}})
     _servers(monkeypatch, [dict(ROW)])
@@ -342,8 +315,8 @@ def test_removes_when_the_only_server_positively_rules_itself_out(home, monkeypa
 
 
 def test_a_server_serving_a_different_library_is_not_a_holder(home, monkeypatch):
-    """404-with-a-model-not-registered body means that instance does not carry
-    this model at all - a conclusion about scope, kept apart from residency."""
+    """A 404 with a model-not-registered body means that instance does not
+    carry this model at all, which is separate from residency."""
     path = _model_file(home)
     _register(home, {"victim": {"path": str(path), "source": "test"}})
     _servers(monkeypatch, [dict(ROW)])
@@ -357,7 +330,7 @@ def test_a_server_serving_a_different_library_is_not_a_holder(home, monkeypatch)
 
 
 def test_one_holding_server_outranks_another_that_ruled_itself_out(home, monkeypatch):
-    """Two instances, one clean and one holding. The clean answer must not
+    """Two instances, one clean and one holding: the clean answer does not
     short-circuit the loop into an all-clear."""
     path = _model_file(home)
     _register(home, {"victim": {"path": str(path), "source": "test"}})

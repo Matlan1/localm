@@ -469,7 +469,7 @@ def confine_index_path(p, policy: Optional[dict] = None) -> Path:
     # whitelist: home and the working dir are always allowed, plus the roots the
     # owner added. A KEY-SCOPED policy (indexing_policy(key_roots=...)) does NOT
     # imply home/cwd/the global rag_allowed_roots: only the key's own explicit
-    # roots count. The hard floor above runs before this branch either way.
+    # roots count. The hard floor above runs ahead of this branch either way.
     if policy.get("key_scoped"):
         roots: list[Path] = []
         for r in policy.get("allowed", []):
@@ -502,7 +502,7 @@ def check_collection_name(name: str) -> str:
     return name
 
 
-# Internal alias kept for the in-module call sites.
+# Internal alias for the in-module call sites.
 _check_name = check_collection_name
 
 
@@ -577,7 +577,7 @@ _NUMPY_DEGRADE_LOGGED: set = set()
 #: Warn-once keys already logged in THIS process: vector degrades
 #: (_note_vector_degrade) and the chunks.jsonl malformed-line warning in _load().
 #: Never consulted for state, only for whether to LOG. Every key starts with the
-#: collection dir plus a distinguishing tag (a literal string, or the reason
+#: collection dir plus a distinguishing tag (a literal string, or the degrade
 #: text).
 _WARNED_DEGRADES: set = set()
 
@@ -1210,7 +1210,7 @@ class Collection:
                     if len(vecs) == len(new_chunks):
                         if not _vectors_finite(vecs):
                             # A NaN/inf component: no vectors are stored for this
-                            # doc (lexical-only) and the reason is reported.
+                            # doc (lexical-only) and the degrade is reported.
                             say(f"embeddings had non-finite (NaN/inf) values for "
                                 f"{f.name} - indexing it lexical-only")
                         else:
@@ -1629,7 +1629,7 @@ class Collection:
                     if len(vecs) == len(new_chunks):
                         if not _vectors_finite(vecs):
                             # See add_paths: a NaN/inf component means this doc is
-                            # indexed lexical-only, with the reason reported.
+                            # indexed lexical-only, with the degrade reported.
                             say(f"embeddings had non-finite (NaN/inf) values for "
                                 f"{filename} - indexing it lexical-only")
                         else:
@@ -2043,11 +2043,11 @@ class Collection:
             "n_chunks": cache["n_chunks"],
             "has_vectors": bool(cache.get("has_vectors")),
             "corrupt": bool(cache.get("corrupt")),
-            # 0 on a cache written before this field existed; the caller then
+            # 0 when the cache does not carry this field; the caller then
             # falls back to generic "index damaged" wording instead of a count.
             "chunks_bad_lines": cache.get("chunks_bad_lines", 0),
             "vector_degrade_reason": cache.get("vector_degrade_reason"),
-            # Absent on a cache written before this field existed; the collection
+            # Absent when the cache does not carry this field; the collection
             # then falls back to the cold load-and-backfill path below once.
             "vector_dim": cache.get("vector_dim"),
         }
@@ -2114,7 +2114,7 @@ class Collection:
                     coll._atomic_write("meta.json", json.dumps(coll._meta, indent=2))
                 return coll
         except CollectionLockedError:
-            return cls(checked_name, base)       # busy: today's exact fallback
+            return cls(checked_name, base)       # busy: full load, no cache write
 
 
 def collection_provenance_report() -> list:

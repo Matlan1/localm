@@ -41,9 +41,8 @@ class TestRenderSummary:
         assert "+1.53" in text
 
     def test_shows_negative_headroom_when_below_floor(self):
-        """A below-floor run is not hidden or clamped - the actual gate
-        (pytest-cov's own fail_under) already failed the step; this only
-        has to report the number honestly."""
+        """A below-floor run is reported with its negative headroom, neither
+        hidden nor clamped. The gate itself is pytest-cov's own fail_under."""
         text = wcs.render_summary("Linux", 70.0, 78, None)
         assert "-8.00" in text
 
@@ -108,9 +107,9 @@ class TestMainPublishing:
         assert "Could not read" in summary.read_text(encoding="utf-8")
 
     def test_missing_totals_key_publishes_a_note_and_exits_zero(self, tmp_path, monkeypatch):
-        """A real coverage.json always has 'totals'; this guards against a
-        truncated write or an incompatible coverage.py version rather than
-        crashing an otherwise-green job over a display step."""
+        """A real coverage.json always has 'totals'. A truncated write or an
+        incompatible coverage.py version publishes a note and exits zero rather
+        than crashing the job."""
         summary = self._summary_file(tmp_path, monkeypatch)
         p = tmp_path / "coverage.json"
         p.write_text(json.dumps({"files": {}}), encoding="utf-8")
@@ -142,9 +141,8 @@ class TestMainPublishing:
     def test_linux_never_shows_the_module_table_even_if_files_present(
             self, tmp_path, monkeypatch):
         """Per-module floors are measured on Windows only (see
-        scripts/check_coverage_floors.py) - showing them against a Linux
-        measurement would compare a real number to a floor that was never
-        derived for this platform, which reads as a near-miss that is not one."""
+        scripts/check_coverage_floors.py), so a Linux run shows no module table:
+        the floors were never derived for this platform."""
         summary = self._summary_file(tmp_path, monkeypatch)
         monkeypatch.setenv("RUNNER_OS", "Linux")
         p = tmp_path / "coverage.json"
@@ -160,8 +158,8 @@ class TestMainPublishing:
     def test_windows_shows_the_real_module_table_via_check_coverage_floors(
             self, tmp_path, monkeypatch):
         """Integration with the real, shipped scripts/check_coverage_floors.py
-        (not a fake): proves the sys.path wiring actually finds it and its
-        real module names/floors reach the rendered table."""
+        rather than a fake: the sys.path wiring finds it and its real module
+        names and floors reach the rendered table."""
         summary = self._summary_file(tmp_path, monkeypatch)
         monkeypatch.setenv("RUNNER_OS", "Windows")
         p = tmp_path / "coverage.json"
@@ -198,9 +196,8 @@ class TestMainPublishing:
 
     def test_missing_pyproject_toml_degrades_to_floor_unavailable_not_a_crash(
             self, tmp_path, monkeypatch):
-        """FIRES-CONTROL for the best-effort fail_under read: without a
-        pyproject.toml at all, main() must still publish the measured number
-        rather than raising."""
+        """With no pyproject.toml at all, main() still publishes the measured
+        number rather than raising."""
         repo = tmp_path / "repo"
         repo.mkdir()
         monkeypatch.setattr(wcs, "REPO", repo)
@@ -217,8 +214,8 @@ class TestMainPublishing:
 
     def test_malformed_pyproject_toml_degrades_to_floor_unavailable_not_a_crash(
             self, tmp_path, monkeypatch):
-        """Same fires-control as the missing-file case, for a pyproject.toml
-        that exists but fails to parse (tomllib.TOMLDecodeError)."""
+        """Same as the missing-file case, for a pyproject.toml that exists but
+        fails to parse (tomllib.TOMLDecodeError)."""
         repo = tmp_path / "repo"
         repo.mkdir()
         (repo / "pyproject.toml").write_text("not valid toml {{{", encoding="utf-8")

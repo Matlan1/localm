@@ -3,8 +3,7 @@
 must survive verbatim - Rich's ``Console.print()`` (and ``Panel``'s renderable,
 and a bare ``console.print(some_string)`` with no literal markup around it at
 all) parses ``[...]`` in ANY interpolated string as markup, not just inside a
-command's own literal ``[style]`` tags. Reproduced directly against this venv's
-rich (see PR #1463's own module docstring for the base repro against rag.py):
+command's own literal ``[style]`` tags:
 
     Console().print('report[draft].txt')      -> prints "report.txt"
     Console().print('notes[bold red].md')     -> prints "notes.md"
@@ -19,12 +18,10 @@ differs from the real one - worst for `/image` and `/save`, where the path is
 exactly what the user just typed and expects to see echoed back.
 
 Every case here uses a REAL file on disk (or a real filesystem failure) under a
-name/path that exercises the bug, rather than mocking the display layer -
-matching test_rag_cli_markup_escaping.py's convention. The two genuinely
-exception-message sites that cannot be triggered by an ordinary filesystem
-state (`/save`'s "Invalid save path" and a streamed RuntimeError) force the
-real underlying call to raise, the same way test_rag_cli_markup_escaping.py's
-own TestLockMessageEscaping forces a real CollectionLockedError.
+name/path that exercises the bug, rather than mocking the display layer. The two
+exception-message sites that an ordinary filesystem state cannot trigger
+(`/save`'s "Invalid save path" and a streamed RuntimeError) force the real
+underlying call to raise.
 """
 
 from __future__ import annotations
@@ -43,15 +40,13 @@ BRACKET_STYLE_NAME = "notes[bold red].md"
 
 @pytest.fixture(autouse=True)
 def _wide_console(monkeypatch):
-    """rich.console.Console reads COLUMNS lazily on every render (confirmed:
-    Console().size re-reads the env var after construction, not only at
-    construction time), so this works even though chat.py's `console` is a
-    module-level singleton built once at import. Without it, the non-tty
-    width default (80) hard-wraps mid-word inside this session's long
-    pytest basetemp paths, splitting a path across two lines and making an
-    exact-substring assertion fail for a wrapping reason that has nothing to
-    do with the markup-escaping bug under test - see
-    test_rag_cli_markup_escaping.py's identical fixture."""
+    """Widen the console for every test in this module.
+
+    rich.console.Console reads COLUMNS lazily on every render, so this applies
+    even though chat.py's `console` is a module-level singleton built once at
+    import. Without it the non-tty width default of 80 hard-wraps mid-word
+    inside a long pytest basetemp path, splitting a path across two lines and
+    breaking an exact-substring assertion."""
     monkeypatch.setenv("COLUMNS", "300")
 
 
@@ -152,9 +147,7 @@ class TestSaveCommandMarkupEscaping:
     def test_invalid_save_path_exception_escaped(
             self, chat_mod, tmp_path, monkeypatch, capsys):
         """`(cwd / target).resolve()` essentially never fails on an ordinary
-        path, so - matching test_rag_cli_markup_escaping.py's own
-        TestLockMessageEscaping precedent for a message a normal filesystem
-        state cannot produce - force the real call to raise."""
+        path, so the real call is forced to raise."""
         monkeypatch.chdir(tmp_path)
         bad_message = "Invalid save path: drive[legacy]spec"
         real_resolve = Path.resolve
@@ -209,10 +202,8 @@ class TestStreamingErrorMarkupEscaping:
     def test_runtime_error_from_stream_survives_verbatim(
             self, cli_runner, tmp_path, monkeypatch):
         """A RuntimeError from an attached server's stream (no model loaded,
-        unreachable, ...) - forced via a mocked Engine, the same way
-        test_mmproj_cli_persist.py's TestCliRunPersistsConfirmedMmproj drives
-        `run()` end to end with the real backend stubbed out - since a real
-        server error message is not otherwise producible from a unit test."""
+        unreachable, ...), forced via a mocked Engine, since a real server error
+        message is not otherwise producible from a unit test."""
         model_f = tmp_path / "some-model.gguf"
         model_f.write_bytes(b"GGUF")
 
@@ -220,9 +211,9 @@ class TestStreamingErrorMarkupEscaping:
         engine_instance.__enter__ = MagicMock(return_value=engine_instance)
         engine_instance.__exit__ = MagicMock(return_value=False)
         # A digit-only bracket body ("[404]") is NOT recognised by Rich's own
-        # tag grammar (confirmed empirically: it survives even unescaped), so
-        # it cannot exercise this bug - use a lowercase-word body instead,
-        # matching BRACKET_DROP_NAME/BRACKET_STYLE_NAME's own shape.
+        # tag grammar and survives even unescaped, so it cannot exercise this
+        # bug; the body here is a lowercase word, like
+        # BRACKET_DROP_NAME/BRACKET_STYLE_NAME.
         bad_message = "attached server error: model[legacy].bin"
         engine_instance.chat_stream = MagicMock(side_effect=RuntimeError(bad_message))
         engine_cls = MagicMock(name="Engine", return_value=engine_instance)
@@ -241,12 +232,11 @@ class TestStreamingErrorMarkupEscaping:
 
 class TestInteractiveBannerMarkupEscaping:
     """`_interactive()`'s opening Panel embeds the engine's display name (a
-    Rich ``Panel`` given a plain string ALSO parses it as markup - confirmed
-    empirically, not assumed), and the system-prompt line embeds the
-    operator-supplied -s/--system text. Drive `_interactive()` directly with
-    `console.input` forced to raise EOFError immediately, so the loop exits
-    right after printing the banner/system line without needing to fake a
-    real generation."""
+    Rich ``Panel`` given a plain string also parses it as markup), and the
+    system-prompt line embeds the operator-supplied -s/--system text.
+    `_interactive()` is driven directly with `console.input` forced to raise
+    EOFError immediately, so the loop exits right after printing the
+    banner/system line."""
 
     def _run_banner_only(self, chat_mod, monkeypatch, *, display_name,
                          system_prompt):

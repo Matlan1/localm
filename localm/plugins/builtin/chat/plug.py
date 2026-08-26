@@ -10,8 +10,8 @@ the ``chat`` capability):
   GET/PUT/DELETE /api/prompts[/{name}]       - prompt library / personas
 
 Durable chat MEMORY (recall + consolidation + the /api/memory* routes) is a
-SEPARATE, opt-in plugin now (localm/plugins/builtin/memory); chat no longer
-depends on it. With memory disabled, chat simply runs without recall.
+SEPARATE, opt-in plugin (localm/plugins/builtin/memory); chat does not depend on
+it. With memory disabled, chat simply runs without recall.
 
 The actual LLM turn stays in the kernel: the SPA POSTs to /v1/chat/completions
 on the inference server directly. Chat ships installed + enabled and cannot be
@@ -23,8 +23,8 @@ shared services from attach_gui. Persistence is gated on the chat surface's
 session mode (see _persist_enabled): in privacy mode (the default) the store is
 off entirely - writes 403 and the list/get routes return empty/403 - so a
 conversation lives only in the browser tab for the current session and is gone
-on reload ("no new traces", by design; the GUI also wipes its localStorage copy
-when it confirms privacy mode). In log/full mode conversations are stored under
+on reload (no new traces; the GUI also wipes its localStorage copy when it
+confirms privacy mode). In log/full mode conversations are stored under
 the data dir and survive reloads and other devices on the LAN.
 """
 
@@ -98,10 +98,10 @@ def _conv_path(conv_id: str) -> Path:
     return _home() / "chats" / f"{conv_id}.json"
 
 
-# R40: cache the projected index row per file keyed by (mtime, size), so the
-# sidebar listing does not re-parse every chat JSON (with its embedded data-URI
-# images) on every request. A changed file re-parses; the cache is bounded by the
-# number of chat files. It only ever holds the lightweight meta row, never bodies.
+# Caches the projected index row per file keyed by (mtime, size), so the sidebar
+# listing does not re-parse every chat JSON (with its embedded data-URI images)
+# on every request. A changed file re-parses; the cache is bounded by the number
+# of chat files. It only ever holds the lightweight meta row, never bodies.
 _META_CACHE: dict = {}
 
 
@@ -129,11 +129,11 @@ def _conv_meta(p: Path) -> dict:
 async def conversations_list(meta: bool = False, limit: int = 0, offset: int = 0):
     """List conversations newest-first.
 
-    R40: pass ``meta=true`` for a lightweight index (id/title/updated_at/pinned/
+    Pass ``meta=true`` for a lightweight index (id/title/updated_at/pinned/
     folder/n_messages) without the heavy message bodies and data-URI images - the
     GUI sidebar uses this and lazy-loads each conversation's messages on open via
-    ``GET /api/conversations/{id}``. ``limit``/``offset`` paginate. Default (no
-    params) keeps the historical full-payload, 200-item behaviour for back-compat.
+    ``GET /api/conversations/{id}``. ``limit``/``offset`` paginate. With no
+    params, returns the full payload capped at 200 items.
     """
     if not _persist_enabled():
         return {"enabled": False, "conversations": []}
@@ -157,13 +157,13 @@ async def conversations_list(meta: bool = False, limit: int = 0, offset: int = 0
     elif offset:
         rows = rows[offset:]
     else:
-        rows = rows[:200]   # historical default cap when unpaginated
+        rows = rows[:200]   # default cap when unpaginated
     return {"enabled": True, "conversations": rows, "total": total}
 
 
 @_router.get("/api/conversations/{conv_id}")
 async def conversation_get(conv_id: str):
-    """The full body of one conversation (R40 lazy load). Path validated by
+    """The full body of one conversation, lazy-loaded. Path validated by
     _conv_path; 404 when absent so the client can fall back to its local copy."""
     if not _persist_enabled():
         raise HTTPException(403, "Chat persistence is off (privacy mode)")
@@ -312,7 +312,7 @@ async def prompt_delete(name: str):
 
 
 # ------------------------------------------------------------------ #
-#  CHAT-2b: thinking-model <think> nudge for regular chat             #
+#  Thinking-model <think> nudge for regular chat                      #
 # ------------------------------------------------------------------ #
 
 _THINK_INSTRUCTION = (
@@ -325,13 +325,12 @@ _THINK_INSTRUCTION = (
 def _thinking_inlet(messages, ctx):
     """Nudge a thinking/reasoning model to emit <think> markers in regular chat.
 
-    Coder sessions already carry this instruction in their system prompt, but
-    plain chat never did (CHAT-2b), so a model that needs the explicit nudge
-    produced no reasoning channel. Inject only for thinking-family models, and
-    never twice: skip when a system message already steers <think> (the coder
-    case, or a persona that already does it). Appends to the first system
-    message - chat templates commonly honour only the first - otherwise inserts
-    one. The kernel pipeline isolates any exception this raises."""
+    Injects only for thinking-family models, and never twice: skips when a system
+    message already steers <think> (a coder session, whose system prompt already
+    carries the instruction, or a persona that already does it). Appends to the
+    first system message - chat templates commonly honour only the first -
+    otherwise inserts one. The kernel pipeline isolates any exception this
+    raises."""
     from localm.inference.model_family import is_thinking_model
 
     if not is_thinking_model(getattr(ctx, "model_id", "") or ""):

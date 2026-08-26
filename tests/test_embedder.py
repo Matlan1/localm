@@ -1718,15 +1718,15 @@ def test_embedding_context_requests_a_shared_kv_cache():
 # --------------------------------------------------------------------------
 # THE REQUEST ABOVE CAN SILENTLY NOT TAKE.
 #
-# #1320 (just above) fixed the REQUEST (kv_unified=True). This covers whether
-# the loaded runtime actually HONOURS it - a field report (2026-08-25) of
-# native embed batches failing to decode with kv_unified requested, traced to
-# the loaded context coming back with kv_unified=false and a much smaller
-# effective n_ctx_seq. llama.cpp exposes no getter for kv_unified once a
-# context exists, so llama_n_ctx_seq is the closest observable proxy: sliced
-# (kv_unified not honoured) hands each sequence n_ctx/n_seq_max tokens instead
-# of the full shared n_ctx. This is a DIAGNOSTIC ONLY (a log line) - it cannot
-# fix or explain a drift, only make it loud instead of silent.
+# The section just above pins the REQUEST (kv_unified=True). This covers
+# whether the loaded runtime actually HONOURS it: the loaded context can come
+# back with kv_unified=false and a much smaller effective n_ctx_seq, which
+# makes native embed batches fail to decode. llama.cpp exposes no getter for
+# kv_unified once a context exists, so llama_n_ctx_seq is the closest
+# observable proxy: sliced (kv_unified not honoured) hands each sequence
+# n_ctx/n_seq_max tokens instead of the full shared n_ctx. This is a DIAGNOSTIC
+# ONLY (a log line) - it cannot fix or explain a drift, only make it loud
+# instead of silent.
 
 class _FakeCtxApi:
     """Stands in for the llamacpp _api module: only the two calls
@@ -1750,8 +1750,8 @@ def test_context_drift_check_silent_when_honoured(caplog):
 
 
 def test_context_drift_check_warns_when_kv_unified_not_honoured(caplog):
-    """The exact field-reported shape: n_ctx round-trips fine, but n_ctx_seq
-    comes back sliced (n_ctx/n_seq_max-sized) instead of the full window."""
+    """n_ctx round-trips fine, but n_ctx_seq comes back sliced
+    (n_ctx/n_seq_max-sized) instead of the full window."""
     caplog.set_level(logging.WARNING, logger="localm")
     emb._warn_if_context_config_drifted(_FakeCtxApi(2048, 64), object(), 2048)
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]

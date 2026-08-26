@@ -9,20 +9,19 @@ other in-flight request on the server stalls behind one caller's grammar check -
 not just the request that asked for it.
 
 The offload this pins is the same one the ``grammar_lazy`` trigger probe a few
-lines above each call site already uses, and for the reason stated there.
+lines above each call site already uses.
 
-WHY THE ASSERTION IS ON A THREAD IDENTITY rather than on wall-clock time: a
-timing assertion ("the second request finished within N ms") measures a proxy
-and is load-sensitive on a shared box, which is exactly how a test ends up
-registered as a known flake. Thread identity states the property directly - this
-call did not execute on the loop's thread - and is deterministic.
+THE ASSERTION IS ON A THREAD IDENTITY, not on wall-clock time: a timing
+assertion measures a proxy and is load-sensitive on a shared box. Thread
+identity states the property directly - this call did not execute on the loop's
+thread - and is deterministic.
 
-WHY THE ASSERTION IS MADE FROM OUTSIDE THE CALL: the route wraps
+THE ASSERTION IS MADE FROM OUTSIDE THE CALL: the route wraps
 ``validate_grammar`` in ``except GrammarUnsupportedError / InvalidGrammarError /
-RuntimeError``. A ``side_effect`` that raised to signal "wrong thread" would be
-an INPUT to the code under test, and the RuntimeError arm would catch it and
-turn the failure into a tidy 503 - the test would pass in both directions. So
-the thread is RECORDED here and compared after the response comes back.
+RuntimeError``, so a ``side_effect`` raising to signal "wrong thread" would be
+an INPUT to the code under test and the RuntimeError arm would turn it into a
+tidy 503, passing in both directions. The thread is RECORDED here and compared
+after the response comes back.
 """
 
 from __future__ import annotations

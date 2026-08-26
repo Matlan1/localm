@@ -85,15 +85,15 @@ def _ctx_principal(ctx) -> str | None:
 
 
 def _request_principal(request: Request | None) -> str | None:
-    """MEMORY-1: the principal-resolution half of the request/store snippet
-    every /api/memory* route repeated."""
+    """The principal-resolution half of the request/store snippet shared by
+    every /api/memory* route."""
     from localm.inference.http_server import memory_principal
     return memory_principal(request) if request is not None else None
 
 
 def _request_store(request: Request | None):
-    """MEMORY-1: the principal-resolution + store-open snippet every mutating
-    /api/memory* route repeated verbatim."""
+    """The principal-resolution + store-open snippet shared verbatim by every
+    mutating /api/memory* route."""
     return _chat_store(_request_principal(request))
 
 
@@ -1030,18 +1030,15 @@ def _maybe_auto_consolidate(principal: str | None = None) -> None:
 #  Automatic (unattended) vector backfill                             #
 # ------------------------------------------------------------------ #
 # backfill_all (memory.backfill) walks EVERY namespace under the memory root to
-# completion; before this its only caller was the manual `setup-embeddings` CLI
-# command. The debounced auto-consolidate pass above only backfills the ONE
-# store for whichever principal just chatted, bounded to 64 records per pass
-# (MemoryStore.backfill_vectors) - so an unrelated namespace, or a backlog
-# bigger than that bound, never converges without the user re-running that
-# command by hand. Records written before an embedder existed then kept no
-# vector indefinitely, the semantic gate stayed unusable, and recall silently
-# fell back to the importance-ordered fallback (2026-08-14 low_coverage
-# report). This sweep needs only the EMBEDDER, not a loaded chat model, so it
-# is deliberately independent of memory_auto_consolidate and of whether a
-# model is currently loaded - coupling it to either would silently disable an
-# unrelated capability.
+# completion; the manual `setup-embeddings` CLI command calls it too. The
+# debounced auto-consolidate pass above only backfills the ONE store for
+# whichever principal just chatted, bounded to 64 records per pass
+# (MemoryStore.backfill_vectors), so an unrelated namespace, or a backlog
+# bigger than that bound, does not converge through that path. A record with no
+# vector is invisible to the semantic gate and recall falls back to the
+# importance-ordered path. This sweep needs only the EMBEDDER, not a loaded
+# chat model, and runs independently of memory_auto_consolidate and of whether
+# a model is currently loaded.
 
 BACKFILL_SWEEP_MIN_INTERVAL = 3600.0  # >= 1h between full-root backfill sweeps
 _sweep_lock = _threading.Lock()       # guards the marker read + in-progress flag
@@ -1068,7 +1065,6 @@ def _sweep_stamp(now: float) -> None:
         m.write_text(str(now), encoding="utf-8")
     except OSError as e:
         # Non-fatal: a failed stamp just means the next turn may re-check sooner.
-        # Surfaced, not hidden (rule 5).
         from localm.debuglog import logger
         logger.debug("memory backfill sweep: could not stamp marker: %s", e)
 
@@ -1193,9 +1189,9 @@ def _memory_outlet(text, messages, ctx):
         from localm.debuglog import logger
         logger.debug("memory outlet skipped: %s", e)
     try:
-        # A separate try/except from the consolidation trigger above: the two are
-        # independent capabilities (see _maybe_sweep_backfill's docstring), so a
-        # failure in one must not skip the other.
+        # A separate try/except from the consolidation trigger above: the two
+        # are independent capabilities, so a failure in one must not skip the
+        # other.
         _maybe_sweep_backfill()
     except Exception as e:
         from localm.debuglog import logger

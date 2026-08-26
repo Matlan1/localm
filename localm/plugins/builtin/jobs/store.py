@@ -46,7 +46,7 @@ TASK_KINDS = ("chat", "coder", "memory", "rag")
 SCHEDULE_KINDS = ("interval", "cron")
 
 # A job id is a short opaque token. Any string is accepted, but confined to a single
-# path segment when it is used to build a results directory.
+# path segment when building a results directory.
 _ID_RE = re.compile(r"[^A-Za-z0-9_.-]")
 
 # --------------------------------------------------------------------------- #

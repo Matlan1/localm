@@ -124,7 +124,7 @@ def register(app: FastAPI, ctx) -> None:
                         shutil.copy2(p, out / target)
                         copied += 1
                     except OSError as ce:
-                        # Record the reason so the response reports the copy failure
+                        # Record the error so the response reports the copy failure
                         # below rather than a "no files" success.
                         errors.append(f"{p.name}: {ce}")
         except OSError as e:
@@ -447,8 +447,8 @@ def register(app: FastAPI, ctx) -> None:
             raise HTTPException(404, f"Not found: {target_raw}")
         p = p.resolve()
         parent = p.parent
-        # new_name is proven separator-free before this resolves anything, so
-        # `parent / new_name` cannot become a UNC string.
+        # confined_name proves new_name separator-free before it resolves
+        # anything, so `parent / new_name` cannot become a UNC string.
         new_path = confined_name(parent, new_name)
         if new_path == p:
             raise HTTPException(400, "New name is the same as the current name")

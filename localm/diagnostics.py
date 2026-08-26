@@ -106,11 +106,8 @@ class Finding:
 class CheckResult:
     """One check's verdict plus every line it produced.
 
-    ``findings`` may be EMPTY, and that is meaningful rather than a bug: a check
-    that did not run has nothing to say to a terminal, which is exactly what
-    ``localm doctor`` has always done for an absent optional backend. ``summary``
-    still carries the reason, because a compact surface has room for one line and
-    rendering nothing at all would be the least honest option.
+    ``findings`` may be EMPTY: a check that did not run produces no finding
+    lines. ``summary`` still says why.
     """
 
     key: str
@@ -338,7 +335,7 @@ def check_native_abi() -> CheckResult:
     never crash the caller, and so the GPU runtime is loaded out-of-process."""
     # Kept separately from the `or {}` fallback below: None means the probe never
     # ran, which is a different fact from the probe running and reporting that it
-    # could not check. Only the reason line distinguishes them.
+    # could not check.
     abi_raw = run_probe_subprocess(_ABI_PROBE_CODE, "ABI_RESULT:")
     abi = abi_raw or {}
     status = abi.get("status", "unchecked")

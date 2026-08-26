@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Render the coverage.json produced by the Tests step as a GitHub Actions
-step summary, so the measured numbers survive after the runner is gone.
+step summary.
 
 Read-only and never fails the build: this is a display step, not a gate. The
-gates themselves are pyproject.toml's [tool.coverage.report] fail_under and
+gates are pyproject.toml's [tool.coverage.report] fail_under and
 scripts/check_coverage_floors.py.
 
 Run:  python scripts/write_coverage_summary.py [path/to/coverage.json]

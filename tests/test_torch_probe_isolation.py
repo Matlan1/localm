@@ -434,13 +434,6 @@ cuda = _Cuda()
 
 # --------------------------------------------------------------------------- #
 #  The child's stderr is relayed ONCE per distinct cause, not once per probe   #
-#                                                                              #
-#  list_gpus deliberately re-probes on every call (no TTL, so the live "free"  #
-#  reading is never stale) and the GUI VRAM meter polls it about every 2.5s.   #
-#  Relaying the child's whole stderr blob unconditionally wrote it ~24 times a #
-#  minute for the life of the server on any box where the probe keeps failing. #
-#  The file already had a latch for exactly this shape                         #
-#  (_isolated_torch_broken_warned); the stderr relay never got one.            #
 # --------------------------------------------------------------------------- #
 
 from localm import discover as _discover
@@ -472,8 +465,6 @@ def probe_log(monkeypatch, caplog):
         # caplog.records ACCUMULATES across calls, so a test that drives this
         # helper twice would otherwise read the FIRST drive's lines back out of
         # the second drive's result and pass no matter what the second one did.
-        # Measured: the reset test below was green with its fix reverted until
-        # this clear was added.
         caplog.clear()
         with caplog.at_level(logging.DEBUG, logger="localm"):
             for _ in stderrs:
@@ -494,13 +485,8 @@ def test_the_same_probe_failure_is_relayed_once_not_every_probe(probe_log):
 
 
 def test_a_DIFFERENT_probe_failure_is_still_relayed(probe_log):
-    """The property a plain once-only bool would destroy.
-
-    The neighbouring _isolated_torch_broken_warned latch guards a FIXED
-    sentence, so a bool is right there. Here the message IS the diagnostic, and
-    silencing a second, different cause would trade a log flood for a hidden
-    problem - the wrong side of rule 5. This is the test that keeps the latch
-    keyed on the text.
+    """The latch is keyed on the relayed TEXT, not on a once-only bool: a
+    second, different cause is still relayed rather than swallowed.
     """
     first = "RuntimeError: HIP error: no ROCm-capable device is detected"
     second = "ImportError: libtorch_hip.so: cannot open shared object file"
@@ -519,23 +505,17 @@ def test_a_probe_that_says_nothing_relays_nothing(probe_log):
 
 
 def test_the_latch_announces_itself_rather_than_going_silently_blind(probe_log):
-    # Pathological input (stderr that differs every probe) is bounded, but the
-    # bound is stated in the log rather than quietly dropping causes - a monitor
-    # that stops reporting without saying so is the failure rule 5 is about.
+    # Pathological input (stderr that differs every probe) is bounded, and the
+    # log says the cap was reached rather than dropping causes silently.
     messages = probe_log([f"distinct failure {i}" for i in range(12)])
     assert any("further distinct causes suppressed" in m for m in messages), (
         "the cap was reached with no line saying so")
 
 
 def test_resetting_the_probe_cache_also_clears_the_stderr_latch(probe_log):
-    """The latch belongs in _reset_gpu_probe_cache, same as its neighbour.
-
-    That function already clears _isolated_torch_broken_warned with a comment
-    saying why: without it, one test's simulated probe failure silently changes
-    behaviour for every later test in the worker. This latch has the identical
-    property, so leaving it out makes a reset only PARTIALLY reset - and the
-    symptom (a relay that never appears again) reads as "the relay is broken"
-    rather than "it already said this once".
+    """_reset_gpu_probe_cache clears the stderr latch as well as
+    _isolated_torch_broken_warned, so the same cause is relayed again after a
+    reset.
     """
     boom = "RuntimeError: HIP error: no ROCm-capable device is detected"
     assert any(boom in m for m in probe_log([boom])), "test premise: first relay"
