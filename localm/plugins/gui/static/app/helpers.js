@@ -283,9 +283,13 @@ const _IMG_PROXY_CACHE_MAX = 64;
 
 /** WHAT THE READER HAS AGREED TO, for the `ask` state of the setting.
  *
- *  Keyed on (scope, origin); the value is the reader's answer. The scope is the
- *  conversation the render belongs to (renderMarkdown's `imageScope` option),
- *  so a decision taken in one conversation is NOT VISIBLE in another - the
+ *  Keyed on (scope, origin); the value is the reader's answer, TRUE OR FALSE.
+ *  Both, because per-origin has to mean both: remembering only the yes left a
+ *  refused host re-opening the dialog for its every other image.
+ *
+ *  The scope is the conversation the render belongs to (renderMarkdown's
+ *  `imageScope` option), so a decision taken in one conversation is NOT VISIBLE
+ *  in another - the
  *  cross-conversation leak is unrepresentable rather than prevented by a reset
  *  that a future seventh way of switching conversation could miss.
  *
@@ -297,14 +301,18 @@ const _IMG_PROXY_CACHE_MAX = 64;
  *  ORIGIN, not URL, and that is the decision rather than an optimisation: the
  *  exfiltration payload is IN the URL, so one prompt per URL would be one
  *  mis-click chance per exfiltration attempt. An origin is also the thing a
- *  reader can actually reason about. */
+ *  reader can actually reason about.
+ *
+ *  A remembered NO can never keep an image out once the setting is `on`: it is
+ *  only ever consulted on the route's 428, and `on` does not raise one. */
 const _imgOriginConsent = new Map();
-/** scope+origin -> the in-flight ask for it, so ten images from one host raise
- *  ONE dialog rather than ten. */
-const _imgConsentPending = new Map();
 /** Dialogs are serialised through this: openModal drives a SINGLE #modal
  *  element, so two overlapping asks would leave the second silently replacing
- *  the first and the first's promise resolving off the wrong buttons. */
+ *  the first and the first's promise resolving off the wrong buttons.
+ *
+ *  It is also what de-duplicates them. Ten images from one host queue ten
+ *  thunks, the first opens a dialog, and each of the nine behind it re-reads
+ *  _imgOriginConsent on its turn and finds the answer already there. */
 let _imgConsentQueue = Promise.resolve();
 
 function _consentKey(scope, origin) {
@@ -335,7 +343,6 @@ export function clearImageProxyCache() {
   }
   _imgProxyCache.clear();
   _imgOriginConsent.clear();
-  _imgConsentPending.clear();
 }
 window.clearImageProxyCache = clearImageProxyCache;
 
@@ -384,22 +391,21 @@ function askOriginConsent(origin) {
   });
 }
 
-/** askOriginConsent, de-duplicated per scope+origin and serialised so only one
- *  dialog is ever open. A `true` answer is remembered in _imgOriginConsent. */
+/** The reader's answer for one scope+origin: the remembered one if there is one,
+ *  otherwise a dialog. Serialised so only one is ever open, which is also what
+ *  keeps ten images from one host to a single dialog - see _imgConsentQueue.
+ *  Both answers are remembered; nothing is remembered if the ask never ran. */
 function requestOriginConsent(scope, origin) {
   const key = _consentKey(scope, origin);
-  if (_imgOriginConsent.has(key)) return Promise.resolve(true);
-  const inFlight = _imgConsentPending.get(key);
-  if (inFlight) return inFlight;
+  if (_imgOriginConsent.has(key)) return Promise.resolve(_imgOriginConsent.get(key));
   const p = _imgConsentQueue
-    .then(() => (_imgOriginConsent.has(key) ? true : askOriginConsent(origin)))
-    .catch(() => false)
-    .then((ok) => {
-      if (ok) _imgOriginConsent.set(key, true);
-      _imgConsentPending.delete(key);
-      return ok;
-    });
-  _imgConsentPending.set(key, p);
+    .then(() => (_imgOriginConsent.has(key)
+      ? _imgOriginConsent.get(key)
+      : askOriginConsent(origin).then((ok) => {
+        _imgOriginConsent.set(key, ok);
+        return ok;
+      })))
+    .catch(() => false);
   // The QUEUE swallows the answer: a declined ask must not stop the next one.
   _imgConsentQueue = p.then(() => undefined, () => undefined);
   return p;

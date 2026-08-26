@@ -544,3 +544,22 @@ test("two origins in one reply raise their dialogs one at a time", async () => {
   assert.ok(modalOpen(win), "and the second one follows");
   assert.match(modalText(win), /https:\/\/two\.example\.net/);
 });
+
+test("ask: a DECLINED origin stays declined for its other images too", async () => {
+  // The mirror of the test above, and the one the fires-control exposed as
+  // missing: an ALLOW was remembered per origin while a DECLINE was remembered
+  // only per URL, so the next image from a host the reader had just refused
+  // opened the dialog all over again. Per-origin has to mean both answers.
+  const { win, calls } = loadAsking();
+  renderScoped(win, "![a](https://cdn.example.com/1.png)", "chat:1");
+  await settle();
+  clickConsent(win, "Do not load");
+  await settle();
+
+  const t = renderScoped(win, "![b](https://cdn.example.com/2.png)", "chat:1");
+  await settle();
+  assert.equal(modalOpen(win), false,
+    "a different image from an origin the reader already refused must not re-ask");
+  assert.equal(consented(calls).length, 0, "and nothing was fetched");
+  assert.ok(t.querySelector(".img-blocked"), "the second image is refused too");
+});
