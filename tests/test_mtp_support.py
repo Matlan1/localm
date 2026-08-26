@@ -33,8 +33,6 @@ def test_mtp_constants_and_structs():
 def test_mtp_config_and_settings_schema():
     """Verify mtp_enabled setting is in default config and schema."""
     assert "mtp_enabled" in DEFAULT_CONFIG
-    # The default flipped to False; the reason and the layer-by-layer check live in
-    # test_mtp_default_is_off_while_the_draft_head_is_starved.
     assert DEFAULT_CONFIG["mtp_enabled"] is False
 
     schema_field = next((f for f in CORE_FIELDS if f.key == "mtp_enabled"), None)
@@ -191,13 +189,7 @@ def test_mtp_default_is_off_while_the_draft_head_is_starved():
     writes only when a batch carries embeddings. Supplying it needs
     llama_set_embeddings_nextn / llama_get_embeddings_nextn, which are a staging
     API in llama.cpp's internal header and are NOT exported by the runtimes
-    localm ships, so the head runs on the token embedding alone. Measured on a
-    real MTP model: 9.7% of drafts accepted against 0.0% for a random-token
-    control, i.e. well above noise and far below paying for the extra decode
-    each token costs.
-
-    A disagreement between these defaults is what would quietly switch it back
-    on for one entry point only.
+    localm ships, so the head runs on the token embedding alone.
     """
     import inspect
 
@@ -216,8 +208,7 @@ def test_mtp_default_is_off_while_the_draft_head_is_starved():
 
 
 def test_engine_does_not_re_enable_mtp_when_the_key_is_absent():
-    """A config written before this default flipped has no mtp_enabled key, and
-    the fallback used for it must not be the old True."""
+    """A config with no mtp_enabled key falls back to False, never True."""
     import inspect
 
     from localm.inference import engine as engine_mod
@@ -247,11 +238,10 @@ def test_gguf_backend_supports_mtp():
 #  Speculative MTP decoding: which sampler decides, and what the chain is told
 #
 #  llama_sampler_sample ACCEPTS the token it returns into every stateful sampler
-#  in the chain, and llama.cpp offers no way to rewind that. So the sampler that
+#  in the chain, and llama.cpp offers no way to rewind that: the sampler that
 #  decides a speculation is the one whose state advances, and every token it is
 #  told about has to be a token that is actually emitted. The harness below
-#  records both sides so a test can assert that directly, rather than asserting
-#  that a token happened to appear somewhere in the output.
+#  records both sides.
 
 class _SpecRecorder:
     """Drives LlamaCpp._generate's native sampling and records every call.
@@ -361,8 +351,7 @@ def _assert_chain_matches_output(recorder, tokens):
 def test_mtp_verification_uses_the_request_sampler_not_the_greedy_drafter():
     """The token that decides a speculation is drawn through the REQUEST's
     sampler. Verifying with the bare greedy drafter drops temperature, top_k,
-    top_p and the repetition window for every accepted speculative token, which
-    on an MTP model is a large share of the reply."""
+    top_p and the repetition window for every accepted speculative token."""
     rec = _SpecRecorder(head=[100, _SpecRecorder.EOG], draft=[101], verify=[101])
 
     tokens, _ = _run_generate(rec, max_new_tokens=4)
@@ -375,7 +364,7 @@ def test_mtp_verification_uses_the_request_sampler_not_the_greedy_drafter():
 def test_mtp_accepted_draft_enters_the_chain_exactly_once():
     """llama_sampler_sample already accepts what it returns, so an accepted
     draft needs no second accept. A duplicate advances the repetition window
-    twice and, with a grammar in the chain, threw across the C ABI."""
+    twice and, with a grammar in the chain, throws across the C ABI."""
     rec = _SpecRecorder(head=[100, _SpecRecorder.EOG], draft=[101], verify=[101])
 
     tokens, mock_api = _run_generate(rec, max_new_tokens=4)
@@ -457,13 +446,10 @@ def test_a_stuck_draft_cell_disables_mtp_and_keeps_generating():
     llama_memory_seq_rm returns false on a memory module that cannot partially
     rewind. The rejected token then stays at pos + 1, and llama.cpp refuses any
     later batch whose start position it already holds, so generation dies a
-    couple of tokens in and reports a token budget it never reached. Measured on
-    unsloth/Qwen3.5-0.8B-MTP-GGUF: 28 characters and finish_reason "length"
-    against 941 characters with MTP off.
+    couple of tokens in and reports a token budget it never reached.
 
-    The cache here is modelled rather than mocked flat, because the defect's
-    symptom IS the later decodes failing: against a decode that always returns 0
-    the token stream comes out right whether the fix is present or not.
+    The cache here is modelled rather than mocked flat, so that the later
+    decodes fail the way they do against a real memory module.
     """
     rec = _SpecRecorder(head=[600, 604, _SpecRecorder.EOG],
                         draft=[601], verify=[602])
@@ -515,9 +501,8 @@ def test_a_stuck_draft_cell_disables_mtp_and_keeps_generating():
             top_k=40, top_p=0.95, repeat_penalty=1.1,
         ))
 
-    # THE PROPERTY: the turn survives the stuck cell. Assert the token stream
-    # before the status flags - a truncated reply is the user-visible loss, and
-    # a status assertion alone reads as a detail worth adjusting.
+    # The turn survives the stuck cell: the token stream is asserted before the
+    # status flags.
     assert tokens == [600, 602, 604], tokens
     assert llm.last_finish_reason == "stop"
 
@@ -560,8 +545,7 @@ def test_a_conversation_outgrowing_the_draft_context_stops_drafting():
 
 def test_a_failed_draft_prefill_decode_stops_drafting():
     """A draft decode that fails leaves the draft cache out of step with the
-    main one, so every later draft would be conditioned on the wrong prefix.
-    The return value used to be discarded inside a bare except."""
+    main one, so every later draft would be conditioned on the wrong prefix."""
     llm = _mtp_prefill_llama(2048)
 
     with patch("localm.inference.backends.llamacpp.llama.api") as mock_api:
@@ -603,8 +587,7 @@ def test_mtp_two_consecutive_rejections_each_emit_their_own_token():
 
 def test_mtp_sampler_state_never_advances_past_an_emitted_token():
     """The state-consistency property on its own, over a run that both accepts
-    and rejects a speculation, so it cannot be shadowed by an earlier assertion
-    about the token stream.
+    and rejects a speculation.
 
     llama.cpp offers no way to rewind a sampler, so a token the chain accepts
     and the caller never receives leaves the repetition window permanently out
