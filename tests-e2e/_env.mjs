@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Shared environment for the GUI end-to-end (real-browser) test. Everything here
-// is resolved at runtime relative to the repo or the OS temp dir - no hardcoded
-// absolute or machine-specific paths (AGENTS.md rule 1), and it depends only on
-// this repo's own venv + a throwaway data dir (rule 4).
+// is resolved at runtime relative to the repo - no hardcoded absolute or
+// machine-specific paths (AGENTS.md rule 1), and it depends only on this repo's
+// own venv + a throwaway data dir (rule 4).
 
-import os from "node:os";
 import path from "node:path";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -37,8 +36,13 @@ export const PYTHON = resolvePython();
 // A throwaway, isolated data dir so the test never touches real models/config/
 // chat history. Per-run (pid-suffixed) so a stale, still-locked dir from a crashed
 // prior run is never reused; recreated fresh in global-setup.
+//
+// Under the repo's own gitignored `.claude/`, NOT the OS temp dir: a run writes a
+// whole LOCALM_HOME plus every plugin it installs, and on Windows os.tmpdir() puts
+// that on the system drive. LOCALM_E2E_HOME still overrides it.
 export const LOCALM_HOME =
-  process.env.LOCALM_E2E_HOME || path.join(os.tmpdir(), `localm-e2e-home-${process.pid}`);
+  process.env.LOCALM_E2E_HOME
+  || path.join(REPO_ROOT, ".claude", "e2e-home", `run-${process.pid}`);
 
 // A distinctive fixed port. reuseExistingServer is OFF, so if this port is busy
 // (e.g. another session), the test FAILS LOUDLY starting its own server rather

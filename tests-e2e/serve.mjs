@@ -19,13 +19,24 @@ mkdirSync(LOCALM_HOME, { recursive: true });
 
 const env = { ...process.env, LOCALM_HOME };
 
+// Every localm call this harness makes goes through here. A `plugin install`
+// without --no-deps is REFUSED rather than run: PYTHON is the developer venv that
+// every other session on the machine shares, and the install would resolve the
+// plugins' pip extras into it.
+function runLocalm(args) {
+  if (args[0] === "plugin" && args[1] === "install" && !args.includes("--no-deps")) {
+    throw new Error("[e2e] refusing `localm plugin install` without --no-deps: it would "
+                    + "install pip extras into the shared developer venv this harness runs.");
+  }
+  execFileSync(PYTHON, ["-m", "localm", ...args], { cwd: REPO_ROOT, env, stdio: "inherit" });
+}
+
 // Install (which also enables) each first-party plugin, ONE target per call
 // (`plugin install` takes a single TARGET). --no-deps: a boot/switch smoke needs
 // only the nav tab + page module, not the generation backends, and pip extras
 // would make this slow + online. chat is the baseline that jobs `requires`.
 for (const name of PLUGINS) {
-  execFileSync(PYTHON, ["-m", "localm", "plugin", "install", name, "--no-deps"],
-    { cwd: REPO_ROOT, env, stdio: "inherit" });
+  runLocalm(["plugin", "install", name, "--no-deps"]);
 }
 
 // Now serve. Inherit stdio so [WebServer] output is visible; forward termination.
