@@ -2078,6 +2078,60 @@ class Collection:
             return None
         return {**stats, "docs": cls._docs_from_meta(meta)}
 
+    @staticmethod
+    def _doc_is_host_path(doc_key: str) -> bool:
+        """False for a doc key ``add_uploads`` records (``upload:<filename>``,
+        no host filesystem path behind it); True for a doc key ``add_paths``
+        records (an absolute, resolved host path)."""
+        return not doc_key.startswith("upload:")
+
+    @classmethod
+    def _docs_within_roots(cls, doc_keys, key_roots: list) -> bool:
+        """True when every host-filesystem doc key in *doc_keys* resolves
+        under one of *key_roots* (``_path_within``, both sides resolved).
+        Upload-recorded keys (see ``_doc_is_host_path``) are skipped. An
+        empty *key_roots*, or one whose entries all fail to resolve to a
+        real path, returns True and False respectively."""
+        if not key_roots:
+            return True
+        roots: list[Path] = []
+        for r in key_roots:
+            try:
+                roots.append(Path(r).expanduser().resolve())
+            except (OSError, ValueError):
+                continue
+        if not roots:
+            return False
+        for key in doc_keys:
+            if not cls._doc_is_host_path(key):
+                continue
+            if not any(_path_within(Path(key), r) for r in roots):
+                return False
+        return True
+
+    @classmethod
+    def confined_to(cls, name: str, key_roots: list, base: Optional[Path] = None
+                    ) -> Optional[bool]:
+        """Whether every host-filesystem document indexed into collection
+        *name* resolves under one of *key_roots*. Reads meta.json only, the
+        same cheap path ``peek_stats``/``peek_detail`` use.
+
+        An empty *key_roots* always returns True. Otherwise: True/False from
+        ``_docs_within_roots`` over the collection's recorded doc keys, or
+        None when meta.json cannot be read or parsed (missing, invalid JSON,
+        or a "docs" field that is not an object). A caller enforcing
+        confinement treats None the same as False."""
+        if not key_roots:
+            return True
+        found = cls._peek_meta(name, base)
+        if found is None:
+            return None
+        _checked_name, _coll_dir, meta = found
+        docs = meta.get("docs", {})
+        if not isinstance(docs, dict):
+            return None
+        return cls._docs_within_roots(docs.keys(), key_roots)
+
     @classmethod
     def load_and_maybe_backfill(cls, name: str, base: Optional[Path] = None
                                 ) -> "Collection":

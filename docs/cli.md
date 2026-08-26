@@ -285,8 +285,9 @@ your index). Put it on a schedule with
 `localm job add sync-docs --rag --collection NAME --cron "0 3 * * *"` - see
 [docs/jobs.md](../docs/jobs.md#keeping-an-indexed-folder-current).
 
-A named API key's RAG *indexing* reach can be confined to specific folders
-with `localm key create NAME --scope rag --rag-root DIR` (repeatable) - see
+A named API key's whole RAG reach - indexing, querying, and every other
+collection route - can be confined to specific folders with `localm key
+create NAME --scope rag --rag-root DIR` (repeatable) - see
 [API keys](#api-keys) and [docs/rag.md](../docs/rag.md#per-key-folder-scoping).
 
 Enable the rag plugin and install `pip install "localm[rag]"` for PDF parsing. See [docs/rag.md](../docs/rag.md) for retrieval design.
@@ -468,7 +469,7 @@ The owner key can also be set outside these commands: the `LOCALM_API_KEY` env v
 `key create` takes three optional confinements beyond `--scope`, each narrowing what the key can do below what the owner can:
 
 - `--fs-access [none|host]` - host filesystem reach for the coder/file tools. Defaults to `none` (device-upload-only); `host` grants the whole server disk, same as the owner.
-- `--rag-root DIR` (repeatable) - confines the key's RAG **indexing** reach to exactly these folders instead of the global folder policy; querying and listing collections are not scoped by this. Omit for no per-key restriction. See [docs/rag.md](../docs/rag.md#per-key-folder-scoping).
+- `--rag-root DIR` (repeatable) - confines the key's whole RAG reach (indexing and every other collection route) to exactly these folders instead of the global folder policy. Omit for no per-key restriction. See [docs/rag.md](../docs/rag.md#per-key-folder-scoping).
 - `--expires-in SECONDS` - the key stops working this many seconds after creation. Omitted means it never expires.
 
 Privileged scopes (`config:write`, `plugins:admin`, `keys:admin`, `admin`, `coder:full`) are refused by `key create` unless you pass `--allow-privileged`; an owner-authenticated `POST /v1/keys` API call can mint them too. See [SECURITY.md](../SECURITY.md) for the auth and scope model, and [docs/tls.md](../docs/tls.md) for serving over a LAN.
