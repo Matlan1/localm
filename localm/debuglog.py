@@ -809,12 +809,18 @@ def dedup_native_stderr():
     finally:
         os.dup2(saved_fd, 2)
         thread.join(timeout=_READER_JOIN_TIMEOUT)
+        os.close(saved_fd)
         if thread.is_alive():
+            # The reader is still draining. It owns debug_fd/console until it
+            # finishes on its own (daemon thread, never killed) - closing
+            # either here while it may still write to them would let the OS
+            # recycle the fd number for something unrelated mid-write.
             logger.warning("debuglog: native-stderr-dedup reader did not finish "
                             "within %.0fs of teardown; recent_activity() may be "
-                            "missing the tail of this run's native output",
+                            "missing the tail of this run's native output until "
+                            "the abandoned reader catches up",
                             _READER_JOIN_TIMEOUT)
-        os.close(saved_fd)
+            return
         if debug_fd is not None:
             with contextlib.suppress(OSError):
                 os.close(debug_fd)

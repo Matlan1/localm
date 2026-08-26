@@ -186,6 +186,53 @@ def test_persisted_write_failure_warns_once_and_keeps_ring_buffer(monkeypatch, c
         f"{[w.getMessage() for w in warns]}")
 
 
+def test_diagnose_ci_reader_thread_starvation(monkeypatch):
+    """TEMPORARY diagnostic, not a permanent regression test - packs a full
+    timeline into its own failure message so it is visible directly in CI's
+    short-test-summary output without needing to grep captured stdout.
+    Always fails. Remove once the CI-only starvation mechanism is
+    understood and the real fix is decided."""
+    import threading
+
+    feed_calls = []
+    real_feed = debuglog._LineGrouper.feed
+
+    def logging_feed(self, line):
+        feed_calls.append((time.monotonic(), line))
+        return real_feed(self, line)
+
+    monkeypatch.setattr(debuglog._LineGrouper, "feed", logging_feed)
+    monkeypatch.setattr(debuglog, "_READER_JOIN_TIMEOUT", 1.0)
+
+    t0 = time.monotonic()
+    with debuglog.dedup_native_stderr():
+        os.write(2, b"diag-line\n")
+    t_exit = time.monotonic()
+
+    reader_threads_at_exit = [t for t in threading.enumerate() if t.name == "native-stderr-dedup"]
+    alive_at_exit = [t.is_alive() for t in reader_threads_at_exit]
+
+    deadline = time.monotonic() + 45.0
+    while time.monotonic() < deadline and not feed_calls:
+        time.sleep(1.0)
+    total_wait = time.monotonic() - t_exit
+
+    final_reader_threads = [t for t in threading.enumerate() if t.name == "native-stderr-dedup"]
+    final_alive = [t.is_alive() for t in final_reader_threads]
+    timeline = [(round(t - t_exit, 2), line) for t, line in feed_calls]
+
+    pytest.fail(
+        f"DIAGNOSTIC (not a real regression, remove after triage): "
+        f"context-enter-to-exit={t_exit - t0:.3f}s (join timeout was 1.0s); "
+        f"reader threads registered at exit={len(reader_threads_at_exit)}, "
+        f"alive at exit={alive_at_exit}; "
+        f"total wait for first feed() call after exit={total_wait:.2f}s "
+        f"(capped at 45s); feed() call timeline (seconds after exit, line)="
+        f"{timeline}; reader threads at end={len(final_reader_threads)}, "
+        f"still alive at end={final_alive}"
+    )
+
+
 def test_teardown_survives_a_slow_reader_thread(monkeypatch, caplog):
     """A reader thread too slow to finish within the join timeout must not lose
     data permanently - it keeps draining in the background (a daemon thread,
