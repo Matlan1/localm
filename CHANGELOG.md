@@ -896,6 +896,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   it already failed cleanly with an error instead of crashing anything; such
   a file is now also skipped during registration, the same as any other file
   that is not really a usable model.
+- **`localm relocate` no longer tells you a mid-copy file "is not a GGUF
+  model file".** Pointing it at a file whose copy or download has not
+  finished yet used to get the same generic rejection as a genuinely
+  unrelated file, which sends you looking for the wrong problem. It now
+  says the file looks incomplete and to try again once the copy or download
+  has finished.
 
 ### Security
 - **Two more model families' role markers are now defanged in untrusted text.**
