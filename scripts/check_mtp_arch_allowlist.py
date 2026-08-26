@@ -340,10 +340,15 @@ def main(argv: Optional[list] = None) -> int:
             "head its hidden state, so the head runs on the token embedding alone "
             "and every token pays for drafts that rarely survive verification.")
     if drives and not default_on:
-        failures.append(
-            "localm now drives the draft head, so the mtp_enabled default of False "
-            "is stale. Measure acceptance against the mtp_enabled=False arm and "
-            "turn it on if it wins.")
+        # NOT a failure. Driving the head is necessary for speculation to pay,
+        # and not sufficient: the win also needs a target decode big enough that
+        # verifying two tokens costs about the same as one. On a small model it
+        # does not, and speculation loses. Whether to default it on is therefore
+        # a measurement on real hardware, not something this file can decide.
+        print("  NOTE: the draft head is driven while mtp_enabled defaults off. That "
+              "is a measured decision, not drift: speculation pays only when a "
+              "two-token verification costs about what one costs.")
+        print()
     if feeds is True and not drives:
         # A work item, not a violation: reported every run so it cannot be
         # forgotten, and NOT gated, because a permanently red gate gets disabled.

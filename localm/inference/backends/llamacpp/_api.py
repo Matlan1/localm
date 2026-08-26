@@ -890,6 +890,82 @@ _MTP_META_KEYS = (
 )
 
 
+# The MTP draft head predicts from the target model's hidden state for the
+# previous position. llama.cpp exposes that state through these, which are
+# declared in an internal header WITHOUT extern "C" and are therefore exported
+# with C++ linkage - see _symbols, which resolves them from the export table.
+_MTP_HIDDEN_STATE_FNS = (
+    "llama_set_embeddings_nextn",
+    "llama_get_embeddings_nextn",
+)
+
+
+def _resolve_staging(name, restype, *argtypes):
+    """Bind a C++-linkage llama.cpp function, or None when it is not exported."""
+    from ._symbols import resolve
+    fn = resolve(load_lib(), name)
+    if fn is None:
+        return None
+    fn.restype = restype
+    fn.argtypes = list(argtypes)
+    return fn
+
+
+def mtp_hidden_state_available() -> bool:
+    """True when this runtime lets a caller feed the MTP draft head.
+
+    Without it the head reads only the token embedding and its drafts rarely
+    survive verification, which is worse than not drafting at all.
+    """
+    from ._symbols import resolve
+    lib = load_lib()
+    return all(resolve(lib, n) is not None for n in _MTP_HIDDEN_STATE_FNS)
+
+
+def llama_set_embeddings_nextn(ctx: ctypes.c_void_p, enable: bool, masked: bool) -> bool:
+    """Ask *ctx* to expose (or consume) the next-n hidden state. False if unsupported."""
+    fn = _resolve_staging("llama_set_embeddings_nextn", None,
+                          ctypes.c_void_p, ctypes.c_bool, ctypes.c_bool)
+    if fn is None:
+        return False
+    fn(ctx, enable, masked)
+    return True
+
+
+def llama_get_embeddings_nextn(ctx: ctypes.c_void_p):
+    """The hidden state for the last decoded row, or None.
+
+    NULL is the documented answer before llama_set_embeddings_nextn enables it,
+    so a None here is "not available", never an error.
+    """
+    fn = _resolve_staging("llama_get_embeddings_nextn",
+                          ctypes.POINTER(ctypes.c_float), ctypes.c_void_p)
+    if fn is None:
+        return None
+    ptr = fn(ctx)
+    return ptr if ptr else None
+
+
+def llama_get_embeddings_nextn_ith(ctx: ctypes.c_void_p, i: int):
+    """The hidden state for row *i* of the last batch, or None."""
+    fn = _resolve_staging("llama_get_embeddings_nextn_ith",
+                          ctypes.POINTER(ctypes.c_float), ctypes.c_void_p, ctypes.c_int32)
+    if fn is None:
+        return None
+    ptr = fn(ctx, i)
+    return ptr if ptr else None
+
+
+def llama_set_nextn_layer_offset(ctx: ctypes.c_void_p, offset: int) -> bool:
+    """Select which trained MTP head runs, for models carrying more than one."""
+    fn = _resolve_staging("llama_set_nextn_layer_offset", None,
+                          ctypes.c_void_p, ctypes.c_int32)
+    if fn is None:
+        return False
+    fn(ctx, offset)
+    return True
+
+
 def llama_model_mtp_support(model: ctypes.c_void_p) -> "tuple[bool, str]":
     """Whether an MTP draft context on this model would run a real draft head.
 

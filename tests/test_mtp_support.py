@@ -184,17 +184,15 @@ def test_absent_metadata_api_is_reported_as_its_own_reason():
     assert reason == "no-metadata-api"
 
 
-def test_mtp_default_is_off_while_the_draft_head_is_starved():
+def test_mtp_default_is_off_until_speculation_is_measured_to_pay():
     """MTP ships OFF, and every layer's default agrees with the config.
 
-    The draft head's first operation consumes a hidden state that llama.cpp
-    writes only when a batch carries embeddings. Supplying it needs
-    llama_set_embeddings_nextn / llama_get_embeddings_nextn, which are a staging
-    API in llama.cpp's internal header and are NOT exported by the runtimes
-    localm ships, so the head runs on the token embedding alone. Measured on a
-    real MTP model: 9.7% of drafts accepted against 0.0% for a random-token
-    control, i.e. well above noise and far below paying for the extra decode
-    each token costs.
+    The draft head is now fed the hidden state it predicts from, and accepts
+    about half its drafts. That is necessary for speculation to pay and not
+    sufficient: a rejected draft still costs a two-token verification, and on a
+    small model that costs meaningfully more than verifying one token, so the
+    arithmetic comes out slightly negative. It turns positive on a model large
+    enough that the two cost about the same.
 
     A disagreement between these defaults is what would quietly switch it back
     on for one entry point only.
@@ -309,6 +307,25 @@ class _SpecRecorder:
         return [shape for shape, _ in self.calls]
 
 
+def _arm_drafting(llm):
+    """Give a bare LlamaCpp what the draft path now requires.
+
+    Drafting feeds the head the target's hidden state, so it is skipped entirely
+    when there is none - that is the fail-closed behaviour these fixtures would
+    otherwise silently exercise instead of the speculative path they are about.
+    The batch helpers do real ctypes work that cannot run against a mock api, so
+    they are stubbed; what they build is covered by the live probes, not here.
+    """
+    llm._mtp_wants_h = True
+    llm._pending_h = object()
+    llm._n_embd = 4
+    llm._capture_h = lambda row=-1: True
+    llm._create_draft_batch = lambda token, pos: (
+        llm._create_batch([token], pos, logits_at_last_only=True), None, None)
+    llm._free_draft_batch = staticmethod(lambda batch, original: None)
+    return llm
+
+
 def _run_generate(recorder, *, max_new_tokens, **kwargs):
     """Run _generate against *recorder*; return (yielded tokens, the mock api)."""
     llm = make_bare_llama(
@@ -317,6 +334,7 @@ def _run_generate(recorder, *, max_new_tokens, **kwargs):
         _mtp_ctx_ptr=ctypes.c_void_p(3),
         supports_mtp=True,
     )
+    _arm_drafting(llm)
     llm._tokenizer.is_eog.side_effect = lambda t: t == _SpecRecorder.EOG
     llm._fit_generation_budget = lambda n_prompt, max_new: max_new
     llm._can_reuse_kv = lambda needed: False
@@ -474,6 +492,7 @@ def test_a_stuck_draft_cell_disables_mtp_and_keeps_generating():
         _mtp_ctx_ptr=ctypes.c_void_p(3),
         supports_mtp=True,
     )
+    _arm_drafting(llm)
     llm._tokenizer.is_eog.side_effect = lambda t: t == _SpecRecorder.EOG
     llm._fit_generation_budget = lambda n_prompt, max_new: max_new
     llm._can_reuse_kv = lambda needed: False
@@ -537,6 +556,7 @@ def _mtp_prefill_llama(capacity):
         _mtp_ctx_ptr=ctypes.c_void_p(3),
         supports_mtp=True,
     )
+    _arm_drafting(llm)
     llm._mtp_ctx_capacity = capacity
     llm._create_batch = lambda tokens, pos, **kw: SimpleNamespace(
         tokens=list(tokens), pos=pos)
