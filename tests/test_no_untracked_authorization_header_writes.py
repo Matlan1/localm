@@ -273,6 +273,39 @@ def test_identical_value_text_in_different_scopes_does_not_collide():
     assert len(set(hits)) == 2
 
 
+def test_the_full_scanner_survives_padding_on_a_real_file(tmp_path):
+    """Fires-control for _authorization_header_writes itself, not just the
+    in-memory _authorization_header_hits the tests above exercise: padding a
+    real file with unrelated lines above every site must not change what the
+    file-walking scanner reports."""
+    root = tmp_path / "localm"
+    root.mkdir()
+    body = (
+        "def outer():\n"
+        "    headers = {}\n"
+        "    headers[\"Authorization\"] = f\"Bearer {token}\"\n"
+        "\n"
+        "class C:\n"
+        "    def meth(self):\n"
+        "        return {\"Authorization\": f\"Bearer {self._tok}\"}\n"
+        "\n"
+        "h = dict(Authorization=f\"Bearer {tok}\")\n"
+    )
+    expected = {
+        ("localm/x.py", "outer", "f'Bearer {token}'"),
+        ("localm/x.py", "C.meth", "f'Bearer {self._tok}'"),
+        ("localm/x.py", "<module>", "f'Bearer {tok}'"),
+    }
+
+    (root / "x.py").write_text(body, encoding="utf-8")
+    assert set(_authorization_header_writes(root)) == expected
+
+    (root / "x.py").write_text("# pad\n" * 40 + body, encoding="utf-8")
+    assert set(_authorization_header_writes(root)) == expected, (
+        "an unrelated edit above a site changed the reported hit, so every "
+        "reviewed entry detaches the next time its file grows")
+
+
 # --------------------------------------------------------------------------- #
 #  The real assertion                                                          #
 # --------------------------------------------------------------------------- #
