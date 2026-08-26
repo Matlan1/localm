@@ -877,6 +877,7 @@ class LlamaCpp:
         self._ctx_ptr     = None   # type: ignore[assignment]
         self._mtp_ctx_ptr = None   # Multi-Token Prediction draft context
         self.supports_mtp = False  # True when MTP heads and draft context are active
+        self.mtp_status   = "not-initialised"  # short token: why MTP is or is not active
         self._mmproj_path = mmproj_path
         self._mtmd        = None   # MtmdContext (vision) when an mmproj is loaded
         self._tokenizer   = None   # type: ignore[assignment]
@@ -1147,16 +1148,24 @@ class LlamaCpp:
             raise RuntimeError("Failed to create llama context")
 
         # Multi-Token Prediction (MTP) draft context initialization
-        if self._mtp_enabled:
+        if not self._mtp_enabled:
+            self.mtp_status = "disabled"
+        else:
             try:
-                if api.llama_model_has_mtp(self._model_ptr):
-                    cp_mtp = api.llama_context_default_params()
+                eligible, self.mtp_status = api.llama_model_mtp_support(self._model_ptr)
+                cp_mtp = api.llama_context_default_params() if eligible else None
+                if cp_mtp is not None and not hasattr(cp_mtp, "ctx_type"):
+                    # Without ctx_type this build cannot be ASKED for an MTP
+                    # context, so llama_init_from_model would hand back a second
+                    # ordinary decoder with its own uncharged KV cache.
+                    self.mtp_status = "no-ctx-type-field"
+                    cp_mtp = None
+                if cp_mtp is not None:
+                    from ._structs import LLAMA_CONTEXT_TYPE_MTP
+                    cp_mtp.ctx_type = LLAMA_CONTEXT_TYPE_MTP
                     cp_mtp.n_ctx = min(n_ctx, 2048)
                     cp_mtp.n_batch = cp_mtp.n_ctx
                     cp_mtp.n_ubatch = cp_mtp.n_batch
-                    if hasattr(cp_mtp, "ctx_type"):
-                        from ._structs import LLAMA_CONTEXT_TYPE_MTP
-                        cp_mtp.ctx_type = LLAMA_CONTEXT_TYPE_MTP
                     cp_mtp.offload_kqv = True
                     if n_threads is not None:
                         cp_mtp.n_threads = n_threads
@@ -1165,9 +1174,14 @@ class LlamaCpp:
                         self._mtp_ctx_ptr = api.llama_init_from_model(self._model_ptr, cp_mtp)
                     if self._mtp_ctx_ptr:
                         self.supports_mtp = True
-            except Exception:
+                    else:
+                        self.mtp_status = "context-refused"
+            except Exception as exc:
                 self._mtp_ctx_ptr = None
                 self.supports_mtp = False
+                self.mtp_status = f"error:{type(exc).__name__}"
+        from localm.debuglog import logger as _mtp_log
+        _mtp_log.info("MTP: active=%s status=%s", self.supports_mtp, self.mtp_status)
 
         self._tokenizer = _Tokenizer(self._model_ptr, self._ctx_ptr)
 

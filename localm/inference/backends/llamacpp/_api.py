@@ -852,26 +852,90 @@ def llama_kv_cache_seq_rm(
     return False
 
 
-def llama_model_has_mtp(model: ctypes.c_void_p) -> bool:
-    """True when the loaded GGUF model includes Multi-Token Prediction (MTP) heads."""
+# Architectures whose llama.cpp model class actually BUILDS an MTP draft graph:
+# it declares a nested `struct graph_mtp` and `build_arch_graph` returns it when
+# `params.gtype == LLM_GRAPH_TYPE_DECODER_MTP`. Carrying the `nextn_predict_layers`
+# metadata key does NOT imply this - glm4moe (GLM-4.5 / 4.5-Air / 4.6) ships the key
+# and the NextN tensors while `build_arch_graph` ignores gtype, so an MTP context on
+# it is a second full decoder rather than a draft head.
+#
+# Derived mechanically from upstream at MTP_ARCH_SOURCE_TAG, which must track
+# localm.setup_llama._PINNED_TAG. scripts/check_mtp_arch_allowlist.py is the gate
+# that fails when the two drift apart, and can re-derive this set from upstream.
+MTP_ARCH_SOURCE_TAG = "b10375"
+
+MTP_GRAPH_ARCHITECTURES = frozenset({
+    "cohere2moe",
+    "deepseek2",
+    "deepseek32",
+    "deepseek4",
+    "glm-dsa",
+    "hy_v3",
+    "mimo2",
+    "nemotron_h_moe",
+    "qwen35",
+    "qwen35moe",
+    "qwen3next",
+    "step35",
+})
+
+# Metadata keys read as "this GGUF declares MTP heads". Only the first is a real
+# llama.cpp key (LLM_KV_NEXTN_PREDICT_LAYERS, "%s.nextn_predict_layers"); the rest
+# are tolerated spellings seen on third-party conversions.
+_MTP_META_KEYS = (
+    "{arch}.nextn_predict_layers",
+    "{arch}.mtp_head_count",
+    "nextn_predict_layers",
+    "general.mtp_head_count",
+)
+
+
+def llama_model_mtp_support(model: ctypes.c_void_p) -> "tuple[bool, str]":
+    """Whether an MTP draft context on this model would run a real draft head.
+
+    Returns ``(supported, reason)``. The reason is a short stable token so a
+    caller can log WHY MTP did or did not engage; "MTP is off" and "MTP engaged
+    on a model that has no MTP graph" are otherwise indistinguishable.
+
+    Two conditions must BOTH hold, because they answer different questions:
+    the GGUF declares MTP heads (metadata), and the architecture has an MTP
+    graph in this runtime (capability).
+    """
     lib = load_lib()
     if hasattr(lib, "llama_model_has_mtp"):
-        return bool(_bind("llama_model_has_mtp", ctypes.c_bool, LlamaModel)(model))
-    if has_model_meta_api():
-        arch = llama_model_meta_val_str(model, "general.architecture")
-        candidates = ["nextn_predict_layers", "general.mtp_head_count"]
-        if arch:
-            candidates.append(f"{arch}.nextn_predict_layers")
-            candidates.append(f"{arch}.mtp_head_count")
-        for key in candidates:
-            val = llama_model_meta_val_str(model, key)
-            if val is not None:
-                try:
-                    if int(val) > 0:
-                        return True
-                except (ValueError, TypeError):
-                    pass
-    return False
+        native = bool(_bind("llama_model_has_mtp", ctypes.c_bool, LlamaModel)(model))
+        return native, "native" if native else "native-refused"
+    if not has_model_meta_api():
+        return False, "no-metadata-api"
+
+    arch = llama_model_meta_val_str(model, "general.architecture") or ""
+    declared = False
+    for template in _MTP_META_KEYS:
+        key = template.format(arch=arch) if "{arch}" in template else template
+        if "{arch}" in template and not arch:
+            continue
+        val = llama_model_meta_val_str(model, key)
+        if val is None:
+            continue
+        try:
+            if int(val) > 0:
+                declared = True
+                break
+        except (ValueError, TypeError):
+            continue
+
+    if not declared:
+        return False, "no-mtp-metadata"
+    if not arch:
+        return False, "unknown-architecture"
+    if arch not in MTP_GRAPH_ARCHITECTURES:
+        return False, f"no-mtp-graph:{arch}"
+    return True, f"ok:{arch}"
+
+
+def llama_model_has_mtp(model: ctypes.c_void_p) -> bool:
+    """True when an MTP draft context on this model would run a real draft head."""
+    return llama_model_mtp_support(model)[0]
 
 
 def llama_model_has_mrope(model: ctypes.c_void_p) -> bool:

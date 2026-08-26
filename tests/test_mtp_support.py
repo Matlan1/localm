@@ -87,7 +87,8 @@ def test_llama_model_has_mtp_detection():
         with patch.object(api, "llama_model_meta_val_str", side_effect=fake_meta_val):
             assert api.llama_model_has_mtp(mock_model) is True
 
-    # 3. GGUF metadata check (Qwen mtp_head_count)
+    # 3. GGUF metadata check, tolerated mtp_head_count spelling, on an arch
+    #    that does build an MTP graph
     with patch.object(api, "load_lib") as mock_load_lib, \
          patch.object(api, "has_model_meta_api", return_value=True):
         mock_dll = MagicMock(spec=[])
@@ -95,8 +96,8 @@ def test_llama_model_has_mtp_detection():
 
         def fake_meta_val_qwen(model, key):
             if key == "general.architecture":
-                return "qwen2"
-            if key == "qwen2.mtp_head_count":
+                return "qwen35moe"
+            if key == "qwen35moe.mtp_head_count":
                 return "2"
             return None
 
@@ -116,6 +117,68 @@ def test_llama_model_has_mtp_detection():
 
         with patch.object(api, "llama_model_meta_val_str", side_effect=fake_meta_val_none):
             assert api.llama_model_has_mtp(mock_model) is False
+
+
+def _detect(arch, extra):
+    """Run the real detector against a synthetic GGUF metadata table."""
+    def _val(model, key):
+        if key == "general.architecture":
+            return arch
+        return extra.get(key)
+
+    with patch.object(api, "load_lib") as mock_load_lib,          patch.object(api, "has_model_meta_api", return_value=True):
+        mock_load_lib.return_value = MagicMock(spec=[])  # no native llama_model_has_mtp
+        with patch.object(api, "llama_model_meta_val_str", side_effect=_val):
+            return api.llama_model_mtp_support(ctypes.c_void_p(1234))
+
+
+def test_metadata_key_alone_does_not_engage_mtp():
+    """An architecture that ships nextn metadata but builds no MTP graph is refused.
+
+    glm4moe (GLM-4.5 / 4.5-Air / 4.6) is the real case: published GGUFs carry
+    glm4moe.nextn_predict_layers=1 and the NextN tensors, while upstream's
+    build_arch_graph ignores the MTP graph type, so an MTP context there is a
+    second full decoder rather than a draft head.
+    """
+    supported, reason = _detect("glm4moe", {"glm4moe.nextn_predict_layers": "1"})
+    assert supported is False
+    assert reason == "no-mtp-graph:glm4moe"
+
+
+def test_mtp_engages_on_an_architecture_with_a_draft_graph():
+    """The same metadata on an architecture that does build an MTP graph is accepted."""
+    supported, reason = _detect("qwen35", {"qwen35.nextn_predict_layers": "1"})
+    assert supported is True
+    assert reason == "ok:qwen35"
+
+
+def test_mtp_needs_metadata_as_well_as_a_capable_architecture():
+    """A capable architecture with no nextn metadata is refused."""
+    supported, reason = _detect("qwen35", {})
+    assert supported is False
+    assert reason == "no-mtp-metadata"
+
+
+def test_every_allowlisted_architecture_is_accepted_with_metadata():
+    """No allowlist entry is unreachable - a typo would strand one silently."""
+    for arch in sorted(api.MTP_GRAPH_ARCHITECTURES):
+        supported, reason = _detect(arch, {f"{arch}.nextn_predict_layers": "1"})
+        assert supported is True, f"{arch} is allowlisted but was refused ({reason})"
+
+
+def test_zero_or_unparsable_nextn_value_is_not_mtp():
+    """nextn_predict_layers=0 declares no heads; a non-numeric value declares nothing."""
+    assert _detect("qwen35", {"qwen35.nextn_predict_layers": "0"})[1] == "no-mtp-metadata"
+    assert _detect("qwen35", {"qwen35.nextn_predict_layers": "x"})[1] == "no-mtp-metadata"
+
+
+def test_absent_metadata_api_is_reported_as_its_own_reason():
+    """"Could not look" is a distinct answer from "looked and found no MTP"."""
+    with patch.object(api, "load_lib") as mock_load_lib,          patch.object(api, "has_model_meta_api", return_value=False):
+        mock_load_lib.return_value = MagicMock(spec=[])
+        supported, reason = api.llama_model_mtp_support(ctypes.c_void_p(1234))
+    assert supported is False
+    assert reason == "no-metadata-api"
 
 
 def test_gguf_backend_supports_mtp():
