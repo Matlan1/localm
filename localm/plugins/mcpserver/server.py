@@ -1101,78 +1101,6 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
         ]
         return engine_holding_model_file(model, reg, candidates)
 
-    def _remote_hold(model: str):
-        """Why a running localm SERVER means this removal must be refused, or
-        None when every discovered instance positively ruled itself out.
-
-        This process shares no memory with the HTTP/GUI server, so the only way
-        to find out is to ask each running instance over HTTP - the same
-        discovery the ``server_activity`` tool uses, for the same reason.
-
-        EVERY OUTCOME THAT IS NOT AN ANSWER IS A REFUSAL, and the message says
-        which one it was. "That server reports nothing holds it" and "I could
-        not reach that server" are opposite conclusions, and collapsing them
-        would delete a live model's file on the strength of never having found
-        out. A refused delete costs one command and names the server to go and
-        check; a deleted model file is gone.
-        """
-        from localm import instances
-        from localm.bindhost import self_connect_host, url_host
-        from localm.config import home_dir
-        from localm.selfclient import read_model_file_hold
-
-        # include_token=True: this ASKS each instance over HTTP (an internal,
-        # non-display use), so it needs the attach token a genuinely open
-        # (keyless) instance's middleware requires. Never for anything a human
-        # reads.
-        rows = instances.snapshot(home_dir(), include_token=True)
-        for e in rows:
-            scheme = e.get("scheme", "http")
-            where = (scheme + "://"
-                     + url_host(self_connect_host(e.get("host")))
-                     + ":" + str(e.get("port")))
-            if not e.get("alive"):
-                # A failed /whoami is NOT proof the process is gone: snapshot()
-                # reaps entries whose pid has died before this runs, and
-                # instances.py's own comment warns that a transient probe miss
-                # must never be read as death. A listed instance that did not
-                # answer is therefore a live process of unknown state, and
-                # unknown refuses.
-                return (f"a localm server at {where} is registered but did not "
-                        f"answer an identity check, so whether it has this "
-                        f"model loaded could not be established")
-            state, payload = read_model_file_hold(
-                scheme, e.get("port"), model, e.get("token"), e.get("host"))
-            if state == "ok":
-                if not payload.get("held"):
-                    continue          # this server positively ruled itself out
-                key = payload.get("key") or "a loaded model"
-                reason = payload.get("reason")
-                if reason:
-                    return (f"the localm server at {where} has {key!r} loaded "
-                            f"and {reason}, so it cannot be ruled out as "
-                            f"holding this file")
-                return (f"the localm server at {where} still has this model's "
-                        f"file loaded as {key!r}")
-            if state == "absent":
-                continue              # that instance serves a different library
-            if state == "unauthorized":
-                return (f"the localm server at {where} requires an API key this "
-                        f"process does not have, so whether it has this model "
-                        f"loaded could not be established")
-            if state == "unsupported":
-                return (f"the localm server at {where} is an older localm that "
-                        f"cannot report which models it holds, so whether it "
-                        f"has this one loaded could not be established")
-            if state == "unreachable":
-                return (f"the localm server at {where} could not be reached "
-                        f"({payload}), so whether it has this model loaded "
-                        f"could not be established")
-            return (f"the localm server at {where} answered HTTP {payload} "
-                    f"instead of reporting what it holds, so whether it has "
-                    f"this model loaded could not be established")
-        return None
-
     def remove_model(args: dict) -> dict:
         model = args.get("model", "")
         if not model:
@@ -1204,7 +1132,8 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
                 f"delete the model file while it is in use. Unload it first "
                 f"(or restart this MCP server), then try again.",
                 is_error=True)
-        remote = _remote_hold(model)
+        from localm.selfclient import remote_hold_reason
+        remote = remote_hold_reason(model)
         if remote is not None:
             return _text_result(
                 f"Refusing to remove {model!r}: {remote}. Removing it could "
