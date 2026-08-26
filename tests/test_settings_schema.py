@@ -412,6 +412,23 @@ def test_avatar_value_accepts_a_data_uri(key):
 
 @pytest.mark.parametrize("key", ["user_avatar", "model_avatar_default"])
 @pytest.mark.parametrize("bad", [
+    # Each of these is <= _AVATAR_MAX_GLYPH_LEN chars, so a case here can only
+    # go red via the URL/path check itself - the length cap cannot mask it.
+    "http://x",
+    "https://x",
+    "//x",
+    "data:img",
+    "/etc/pw",
+    "a\\b",
+])
+def test_avatar_value_rejects_url_or_path_short_form(key, bad):
+    assert len(bad) <= ss._AVATAR_MAX_GLYPH_LEN
+    with pytest.raises(ValueError):
+        ss.validate_update({key: bad})
+
+
+@pytest.mark.parametrize("key", ["user_avatar", "model_avatar_default"])
+@pytest.mark.parametrize("bad", [
     "http://example.com/a.png",
     "https://example.com/a.png",
     "//example.com/a.png",
