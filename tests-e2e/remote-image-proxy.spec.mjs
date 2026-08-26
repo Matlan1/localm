@@ -249,3 +249,138 @@ test("CSP: this engine refuses a remote <img> outright, which is what the OFF st
       expect(origin.seen, "and the engine never issued the request at all").toEqual([]);
     } finally { origin.close(); }
   });
+
+// --------------------------------------------------------------------------- //
+//  ASK: the state that closes the channel for a host the reader has not agreed
+//  to. The jsdom suite drives the dialog against a stubbed fetch; only here can
+//  "the remote origin was never contacted" be READ rather than inferred, off a
+//  real origin server's own request log, in a real browser under the real CSP.
+// --------------------------------------------------------------------------- //
+
+/** Render into a fresh node with an explicit conversation scope, which is what
+ *  bounds how long a consent answer is remembered. */
+const renderScoped = (page, url, id, scope) => page.evaluate(([u, i, s]) => {
+  const box = document.createElement("div");
+  box.id = i;
+  document.body.appendChild(box);
+  window.renderMarkdown(box, "reply text\n\n![alt](" + u + ")\n", { imageScope: s });
+}, [url, id, scope]);
+
+const consentDialog = (page) => page.locator("#modal", { hasText: "Load images from this site?" });
+
+test("ASK: the origin is not contacted until the reader agrees, then it is",
+  async ({ page }) => {
+    const origin = await startOrigin();
+    try {
+      await boot(page);
+      expect(await patchConfig(page, { gui_proxy_remote_images: "ask" })).toBe(200);
+      await renderScoped(page, origin.url("/ask.png"), "a1", "chat:one");
+
+      // The dialog is up, and the LOAD-BEARING reading: the origin's own log is
+      // still empty. A status-code assertion could not say this - only the
+      // server that would have received the request can.
+      await expect(consentDialog(page)).toBeVisible();
+      await expect(page.locator("#modal-body")).toContainText(origin.url(""));
+      expect(origin.seen, "nothing reached the remote origin while the reader decided")
+        .toEqual([]);
+      expect((await imgState(page, "a1")).hasSrc, "and nothing is loading").toBe(false);
+
+      await page.getByRole("button", { name: "Show images from this site" }).click();
+      await expect.poll(async () => (await imgState(page, "a1")).naturalWidth).toBe(64);
+      // ONE request, and it came from the server, not the browser - the same
+      // property the ON arm pins, now reached only through consent.
+      expect(origin.seen.length).toBe(1);
+      expect(origin.seen[0].headers["user-agent"] || "").toContain("localm");
+      expect(origin.seen[0].headers.referer).toBeUndefined();
+    } finally { origin.close(); }
+  });
+
+test("ASK: declining leaves the origin uncontacted, and does not ask again",
+  async ({ page }) => {
+    const origin = await startOrigin();
+    try {
+      await boot(page);
+      expect(await patchConfig(page, { gui_proxy_remote_images: "ask" })).toBe(200);
+      await renderScoped(page, origin.url("/no.png"), "d1", "chat:one");
+      await expect(consentDialog(page)).toBeVisible();
+      await page.getByRole("button", { name: "Do not load" }).click();
+
+      await expect.poll(async () => (await imgState(page, "d1")).failed).toBe("1");
+      expect((await imgState(page, "d1")).reason).toContain("You chose not to load");
+      expect(origin.seen, "the remote origin saw no request from anyone").toEqual([]);
+
+      // A streamed reply re-renders on every token. An answer that is not
+      // remembered reopens the dialog for the length of the reply, which is the
+      // same defect keying this on the URL rather than the element avoids.
+      await renderScoped(page, origin.url("/no.png"), "d2", "chat:one");
+      await page.waitForTimeout(500);
+      await expect(consentDialog(page)).toBeHidden();
+      expect(origin.seen).toEqual([]);
+    } finally { origin.close(); }
+  });
+
+test("ASK: an answer is remembered for ONE conversation and no longer",
+  async ({ page }) => {
+    // The lifetime contract, end to end. It holds by KEYING the answer to the
+    // conversation, so a future way of switching conversation cannot forget to
+    // clear it - and it lives only in the page, so a reload asks again.
+    const origin = await startOrigin();
+    try {
+      await boot(page);
+      expect(await patchConfig(page, { gui_proxy_remote_images: "ask" })).toBe(200);
+      await renderScoped(page, origin.url("/mem1.png"), "m1", "chat:one");
+      await expect(consentDialog(page)).toBeVisible();
+      await page.getByRole("button", { name: "Show images from this site" }).click();
+      await expect.poll(async () => (await imgState(page, "m1")).naturalWidth).toBe(64);
+
+      // Same conversation, same host, a different image: no second dialog.
+      await renderScoped(page, origin.url("/mem2.png"), "m2", "chat:one");
+      await expect.poll(async () => (await imgState(page, "m2")).naturalWidth).toBe(64);
+      await expect(consentDialog(page)).toBeHidden();
+
+      // A DIFFERENT conversation asks again for the same host.
+      await renderScoped(page, origin.url("/mem3.png"), "m3", "chat:two");
+      await expect(consentDialog(page)).toBeVisible();
+      await page.getByRole("button", { name: "Do not load" }).click();
+      await expect.poll(async () => (await imgState(page, "m3")).failed).toBe("1");
+      expect(origin.seen.map((r) => r.path).sort(),
+             "only the two images the reader agreed to were ever fetched")
+        .toEqual(["/mem1.png", "/mem2.png"]);
+
+      // And a RELOAD asks again: consent never reaches disk.
+      await boot(page);
+      await renderScoped(page, origin.url("/mem1.png"), "m4", "chat:one");
+      await expect(consentDialog(page)).toBeVisible();
+    } finally { origin.close(); }
+  });
+
+test("ASK does not weaken OFF: the setting still refuses outright", async ({ page }) => {
+  // The control for the whole feature. If consent could reach past `off`, the
+  // three states would be two, and the default install would have changed.
+  const origin = await startOrigin();
+  try {
+    await boot(page);
+    expect(await patchConfig(page, { gui_proxy_remote_images: "off" })).toBe(200);
+    await renderScoped(page, origin.url("/still-off.png"), "o1", "chat:one");
+    await expect.poll(async () => (await imgState(page, "o1")).failed).toBe("1");
+    await expect(consentDialog(page)).toBeHidden();
+    expect((await imgState(page, "o1")).reason).toContain("Show remote images in replies");
+    expect(origin.seen).toEqual([]);
+  } finally { origin.close(); }
+});
+
+test("the pre-three-state boolean still means what it meant", async ({ page }) => {
+  // There is no config migration step in localm: load_config() is the defaults
+  // plus the stored delta. An install that switched the old boolean on, and any
+  // client still sending true/false, must keep working.
+  await boot(page);
+  const readMode = () => page.evaluate(async () => {
+    const r = await fetch("/v1/config", { headers: window.authHeaders() });
+    return (await r.json()).gui_proxy_remote_images;
+  });
+  expect(await patchConfig(page, { gui_proxy_remote_images: true })).toBe(200);
+  expect(await readMode()).toBe("on");
+  expect(await patchConfig(page, { gui_proxy_remote_images: false })).toBe(200);
+  expect(await readMode()).toBe("off");
+  expect(await patchConfig(page, { gui_proxy_remote_images: "nonsense" })).toBe(400);
+});

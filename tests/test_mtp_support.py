@@ -2,6 +2,7 @@
 """Tests for Multi-Token Prediction (MTP) model support."""
 
 import ctypes
+import inspect
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -217,6 +218,34 @@ def test_engine_does_not_re_enable_mtp_when_the_key_is_absent():
                             else engine_mod)
     assert 'cfg.get("mtp_enabled", True)' not in src
     assert 'cfg.get("mtp_enabled", False)' in src
+
+
+def test_recurrent_rollback_is_requested_when_mtp_is_enabled():
+    """A recurrent cache can only be rewound if it kept per-token snapshots.
+
+    Speculation writes a draft token into the cache and takes it back out when
+    the target rejects it. llama.cpp keeps no recurrent-state snapshots by
+    default, so on a hybrid model that removal fails, the rejected token stays,
+    and every later batch is refused for inconsistent positions. Measured on a
+    real hybrid MTP model: the same one-position rollback returns False with no
+    snapshots and True with them, which is the difference between MTP declining
+    at load and running.
+
+    One snapshot covers a one-token draft; the request is for two so a longer
+    draft has room. It costs nothing on a model with no recurrent layers.
+    """
+    from localm.inference.backends.llamacpp import _structs
+
+    for params in (_structs.LlamaContextParamsV1, _structs.LlamaContextParamsV2):
+        assert hasattr(params(), "n_rs_seq"), (
+            f"{params.__name__} has no n_rs_seq, so rollback cannot be requested "
+            "and MTP silently declines on every hybrid model")
+
+    from localm.inference.backends.llamacpp.llama import LlamaCpp
+    src = inspect.getsource(LlamaCpp)
+    assert src.count("n_rs_seq") >= 2, (
+        "both the initial context and the grown one must request rollback, or "
+        "speculation stops the moment a conversation outgrows its first context")
 
 
 def test_gguf_backend_supports_mtp():

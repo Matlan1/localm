@@ -40,7 +40,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   recorded in the debug log.
 
   The draft head is fed the hidden state it predicts from, so it now accepts
-  about half its drafts instead of about one in ten.
+  about half its drafts instead of about one in ten, and it works on models
+  whose cache keeps recurrent state (the Qwen3.5 and 3.6 MTP family, Nemotron
+  and DeepSeek V4 among them). Those declined outright before: speculation has
+  to take a rejected draft back out of the cache, and such a cache cannot be
+  rewound unless it was asked to keep per-token snapshots, which nothing did.
 
   `mtp_enabled` **stays off by default.** Good drafts are necessary for
   speculation to pay and not sufficient: a rejected draft still costs a
@@ -448,6 +452,18 @@ permanent public record of what shipped and are never rewritten; the in-progress
   had. Applies to both the interactive chat web toggle and scheduled chat
   jobs, on local grammar-capable backends; toggle with the new "Grammar-
   constrain chat tool calls" setting.
+- **"Show remote images in replies" can now ask you first, per site.** The
+  setting gained a third choice between off and on: set it to "ask" and localm
+  checks with you once per site per conversation before any image from that site
+  is fetched. Nothing leaves your machine while you decide, and choosing not to
+  load leaves a note in the reply saying so. A reply's image address is chosen by
+  the model and the address itself can carry information out, so "on" only moves
+  the request from your browser to this machine, it does not stop it; "ask" is
+  the setting that stops it for a site you have not agreed to. Your answers last
+  for that conversation in that browser tab only: they are never saved to disk,
+  never shared with another conversation, and a reload asks again. Off is still
+  the default, and an install that had this switched on before keeps working
+  exactly as it did.
 
 ### Changed
 - **The chat parameters drawer and the image, music and video generation forms
@@ -521,13 +537,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   asked for it, so a single constrained request could briefly stall chat for
   every other client. The check now runs alongside other work.
 - **A model in use can no longer be deleted out from under itself.** Removing a
-  model through an AI assistant (the MCP `remove_model` tool) deleted its file
-  without checking whether anything was still using it, so a model you had just
-  been chatting with could have its downloaded file destroyed while loaded. The
-  same removal in the app has always refused this. It now refuses everywhere,
-  naming what is holding the model, and it also checks a running localm server
-  rather than only the assistant's own session. When it cannot reach a running
-  server to ask, it refuses rather than assuming the model is free.
+  model through an AI assistant (the MCP `remove_model` tool) or from a
+  terminal (`localm rm`) deleted its file without checking whether anything
+  was still using it, so a model you had just been chatting with could have
+  its downloaded file destroyed while loaded. The same removal in the app has
+  always refused this. It now refuses everywhere, naming what is holding the
+  model, and it also checks a running localm server rather than trusting only
+  its own state. When it cannot reach a running server to ask, it refuses
+  rather than assuming the model is free.
 - **Downloading the same model twice at once no longer corrupts the download.**
   Two downloads of the same direct URL wrote into a single partly-downloaded
   file, interleaving their bytes: the download finished and then failed its
