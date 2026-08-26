@@ -835,6 +835,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   import, and the command was then dropped entirely - Click answered "No
   such command 'gui'", exactly what a typo would look like. It now tells you
   the GUI could not be loaded and how to see the underlying error.
+- **`localm gui --api-mode` no longer points you at a web page it never
+  serves.** With no model loaded, the model line said "add one on the Models
+  page"; the address line was always labelled "Open the GUI" and carried a
+  browser-only deep link. `--api-mode` mounts no GUI at all, so both now
+  match: the hint points at `localm pull <name>`, and the address line shows
+  the plain API base under "API base".
 
 ### Security
 - **Two more model families' role markers are now defanged in untrusted text.**
