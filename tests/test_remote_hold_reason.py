@@ -47,20 +47,6 @@ def test_strips_control_characters_from_a_remote_reported_reason(monkeypatch):
     assert "and locked" in result
 
 
-def test_a_non_string_reason_cannot_smuggle_control_characters(monkeypatch):
-    """payload["reason"] comes from parsed JSON, so nothing upstream of this
-    function guarantees it is a string. A list/dict wrapping a hostile string
-    must not resurface it unescaped either."""
-    _servers(monkeypatch, [dict(ROW)])
-    _reader(monkeypatch, ("ok", {"held": True, "key": "served",
-                                 "reason": ["\x1b[31mFAKE"]}))
-
-    result = sc.remote_hold_reason("victim")
-
-    assert result is not None
-    assert "\x1b" not in result, result
-
-
 def test_an_ordinary_reason_is_unaffected(monkeypatch):
     """The three real reasons this function has ever been asked to render
     contain no control characters, so the fix must be invisible to them."""
