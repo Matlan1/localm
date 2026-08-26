@@ -61,11 +61,13 @@ async def tts_status():
 @_router.get("/api/tts/config")
 async def tts_config():
     """Resolved config plus the live net_mode: the Kokoro model is fetched by
-    the browser directly, so the client needs net_mode to gate that fetch
-    itself (netpolicy.py never sees a browser-originated request)."""
-    from localm.netpolicy import network_mode
+    the browser directly, so the client needs net_mode (and whether
+    net_allow_model_downloads exempts it) to gate that fetch itself
+    (netpolicy.py never sees a browser-originated request)."""
+    from localm.netpolicy import downloads_allowed_when_off, network_mode
     cfg = _resolved()
     cfg["net_mode"] = network_mode()
+    cfg["net_allow_model_downloads"] = downloads_allowed_when_off()
     return cfg
 
 

@@ -61,7 +61,18 @@ _USER_AGENT = "Mozilla/5.0 (compatible; localm/0.1; +https://github.com/localm)"
 
 class NetworkPolicyError(Exception):
     """A request was refused by the network policy. The message says why
-    and how to change the policy - safe to show to the model and the user."""
+    and how to change the policy - safe to show to the model, and to a CLI
+    user (it names a CLI command).
+
+    *off* is True specifically for the net_mode=off refusal. A caller that
+    surfaces this to a browser (a GUI/API route, never the model) has no CLI
+    to run and should build its own remedy instead of showing this message's
+    CLI-flavored one, the same way DiscoverError.off is used in
+    localm/plugins/gui/routes/models.py's _run_discover."""
+
+    def __init__(self, message: str, *, off: bool = False):
+        super().__init__(message)
+        self.off = off
 
 
 # ---------------------------------------------------------------------------
@@ -85,6 +96,22 @@ def network_mode() -> str:
                        "cannot silently re-enable network access", exc)
         return "off"
     return mode if mode in NET_MODES else "ask"
+
+
+def downloads_allowed_when_off() -> bool:
+    """Whether an explicit user download (a model pull, HuggingFace search, or
+    a vision-projector/voice/embedding-model fetch) may proceed despite
+    network_mode() == "off", via settings_schema.py's
+    net_allow_model_downloads (admin_only, default False).
+
+    Never consulted by check_url's model-initiated choke point - that stays
+    governed by net_mode alone. Best-effort: an unreadable config resolves to
+    blocked, matching network_mode()'s own failure posture."""
+    try:
+        from localm.config import load_config
+        return bool(load_config().get("net_allow_model_downloads", False))
+    except Exception:
+        return False
 
 
 def _domain_list(value) -> list[str]:
@@ -163,7 +190,7 @@ def check_url_shape(url: str) -> str:
     return host
 
 
-def check_url(url: str) -> None:
+def check_url(url: str, *, allow_when_off: bool = False) -> None:
     """
     Validate one URL against the policy. Raises NetworkPolicyError with an
     actionable message when refused; returns silently when allowed.
@@ -171,9 +198,16 @@ def check_url(url: str) -> None:
     Checks, in order: mode, malformed-authority, scheme, deny list, allow list,
     resolved-IP class.
 
-    Reads the config exactly ONCE, up front: net_mode and the net_deny/
-    net_allow lists come from the same snapshot, so a read failure has exactly
-    one outcome - refuse - no matter what LOCALM_NET_MODE says.
+    Reads the config exactly ONCE, up front: net_mode, net_allow_model_downloads
+    and the net_deny/net_allow lists come from the same snapshot, so a read
+    failure has exactly one outcome - refuse - no matter what LOCALM_NET_MODE
+    says.
+
+    *allow_when_off*, default False: pass True only from an explicit-download
+    caller (a model pull's SSRF/redirect validation, HuggingFace search) so
+    net_allow_model_downloads can exempt it from the off floor. Never pass True
+    for a model-initiated request (coder fetch_url/web_search, the GUI chat web
+    toggle, the jobs webtool) - those stay governed by net_mode alone.
     """
     env = os.environ.get(NET_MODE_ENV_VAR, "").strip().lower()
     try:
@@ -191,10 +225,11 @@ def check_url(url: str) -> None:
     mode = env if env in NET_MODES else str(cfg.get("net_mode", "ask")).strip().lower()
     if mode not in NET_MODES:
         mode = "ask"
-    if mode == "off":
+    if mode == "off" and not (
+            allow_when_off and bool(cfg.get("net_allow_model_downloads", False))):
         raise NetworkPolicyError(
             "Network access is disabled (net_mode=off). Enable it with:  "
-            "localm config net_mode ask")
+            "localm config net_mode ask", off=True)
 
     host = check_url_shape(url)
 
@@ -422,6 +457,7 @@ def safe_fetch_bytes(
     *,
     max_bytes: int = _DEFAULT_MAX_BYTES,
     timeout: int = _DEFAULT_TIMEOUT,
+    allow_when_off: bool = False,
 ) -> tuple[str, str, bytes]:
     """
     Policy-checked GET returning RAW bytes. Returns (final_url, content_type,
@@ -433,11 +469,14 @@ def safe_fetch_bytes(
     NOT decoded, so this is the entry point for binary payloads (images fetched
     for vision input). Text callers go through safe_fetch / fetch_text.
 
+    *allow_when_off*: forwarded to every hop's check_url - see that function's
+    docstring for who may pass True.
+
     Raises NetworkPolicyError (policy refusal) or requests exceptions.
     """
     current = url
     for _ in range(_MAX_REDIRECTS + 1):
-        check_url(current)
+        check_url(current, allow_when_off=allow_when_off)
         parsed = urllib.parse.urlparse(current)
         # Pin the socket to the just-validated IP for this hop; each redirect
         # target is independently re-checked and re-pinned.

@@ -341,12 +341,14 @@ def pull_model(
         return _mm.add_local(str(local), name=name, model_type=local_type, store=store)
 
     # net_mode=off means "no network at all", so it stops a remote model
-    # download and the type auto-detect probe below.
-    from localm.netpolicy import network_mode
-    if network_mode() == "off":
+    # download and the type auto-detect probe below - unless the owner has
+    # exempted explicit downloads via net_allow_model_downloads.
+    from localm.netpolicy import downloads_allowed_when_off, network_mode
+    if network_mode() == "off" and not downloads_allowed_when_off():
         console.print(
             "[red]Network access is disabled (net_mode=off).[/red] A model pull "
-            "needs the network; enable it with: localm config net_mode ask")
+            "needs the network; enable it with: localm config net_mode ask - or "
+            "allow just downloads: localm config net_allow_model_downloads true")
         return False
 
     # Remote spec: resolve the model type (a network probe against HF for a bare
@@ -678,14 +680,15 @@ def backfill_mmproj_for_entry(entry: dict, path: Path) -> Optional[Path]:
     was found. NEVER RAISES, matching ``_maybe_fetch_repo_mmproj``'s contract,
     so one bad entry cannot take down a sync pass.
 
-    Network policy: gated on ``network_mode() != "off"``, the same bar
-    ``_pull_gguf_file``'s net_mode gate uses for this identical
-    HF-listing-plus-download operation, not the stricter ``== "allow"`` bar
-    ``embedder.py`` applies to its background fetch."""
+    Network policy: gated on ``network_mode() != "off"`` (or
+    ``downloads_allowed_when_off()``), the same bar ``pull_model``'s net_mode
+    gate uses for this identical HF-listing-plus-download operation, not the
+    stricter ``== "allow"`` bar ``embedder.py`` applies to its background
+    fetch."""
     if not mmproj_backfill_candidate(entry, path):
         return None
-    from localm.netpolicy import network_mode
-    if network_mode() == "off":
+    from localm.netpolicy import downloads_allowed_when_off, network_mode
+    if network_mode() == "off" and not downloads_allowed_when_off():
         return None
     repo_id = str(entry["source"])[len("hf:"):]
     if not repo_id:
@@ -1361,14 +1364,17 @@ def _ssrf_resolve_final_url(url: str) -> str:
     following, which a public URL could use to bounce the download into
     127.0.0.1, 169.254.169.254 or an RFC1918 service. Each HEAD is IP-pinned to
     the validated address so the connect cannot rebind off the checked host.
-    Raises NetworkPolicyError if any hop resolves to a non-public host or cannot
-    be resolved to a validated address."""
+    net_allow_model_downloads exempts this from the net_mode=off floor, same
+    as pull_model's own top-level gate; the SSRF/private-address checks apply
+    regardless. Raises NetworkPolicyError if any hop resolves to a non-public
+    host or cannot be resolved to a validated address."""
     import urllib.parse
 
     from localm import netpolicy
+    allow_off = netpolicy.downloads_allowed_when_off()
     current = url
     for _ in range(6):
-        netpolicy.check_url(current)
+        netpolicy.check_url(current, allow_when_off=allow_off)
         try:
             resp = netpolicy.pinned_request(
                 "HEAD", current, allow_redirects=False, timeout=10)
@@ -1383,7 +1389,7 @@ def _ssrf_resolve_final_url(url: str) -> str:
             current = urllib.parse.urljoin(current, loc)
             continue
         break
-    netpolicy.check_url(current)        # final target, revalidated
+    netpolicy.check_url(current, allow_when_off=allow_off)   # final target, revalidated
     return current
 
 
@@ -1670,7 +1676,8 @@ def _pull_url_locked(
         console.print(f"Downloading [bold cyan]{escape(url)}[/bold cyan]")
 
     try:
-        netpolicy.check_url(dl_url)     # revalidate immediately before the connect
+        # revalidate immediately before the connect
+        netpolicy.check_url(dl_url, allow_when_off=netpolicy.downloads_allowed_when_off())
         r = netpolicy.pinned_request("GET", dl_url, headers=headers, stream=True,
                                      timeout=30, allow_redirects=False)
         if r.status_code in (301, 302, 303, 307, 308):

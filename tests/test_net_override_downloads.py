@@ -4,10 +4,14 @@ prerequisite model downloads (the embedding model and the Whisper STT model).
 
 The properties pinned here, most important first:
 
-1. net_mode=off is an ABSOLUTE floor: even the explicit allow_download=True
+1. net_mode=off is the DEFAULT floor: even the explicit allow_download=True
    authorization refuses under off, on every surface (voice prefetch, the voice
-   download route, the embedding download route). The bypass rule is
-   bypass-ASK-respect-OFF, never bypass-both.
+   download route, the embedding download route), UNLESS the owner has set
+   net_allow_model_downloads (admin_only, default False - see
+   test_off_but_downloads_allowed_bypasses and
+   test_embedder_off_but_downloads_allowed_bypasses below). The bypass rule is
+   bypass-ASK-respect-OFF, never bypass-both - net_allow_model_downloads is the
+   one deliberate, explicit exception to "never bypass-both".
 2. The one-time authorization cannot persist BY CONSTRUCTION: the whole
    download flow leaves config.json byte-identical and never calls
    update_config. Asserted on the DATA (the file, the spy) before any status
@@ -95,15 +99,33 @@ def _snapshot_spy(monkeypatch, *, create: bool = False):
 
 class TestPrefetchPolicy:
     def test_off_beats_explicit_consent(self, monkeypatch, tmp_path):
-        """THE property: net_mode=off refuses even allow_download=True. If this
-        ever goes green while the spy recorded a call, the kill switch has a
-        bypass and everything else here is decoration."""
+        """THE property: net_mode=off refuses even allow_download=True, by
+        DEFAULT. If this ever goes green while the spy recorded a call, either
+        the kill switch has an unintended bypass, or net_allow_model_downloads
+        leaked into this config - _voice_cfg's dict never sets it, so .get(...,
+        False) must resolve False here."""
         _voice_cfg(monkeypatch, tmp_path, "off")
         calls = _snapshot_spy(monkeypatch)
         ok, reason = voice.prefetch_stt_model(allow_download=True)
         assert calls == [], "off must mean NO network call, even authorized"
         assert ok is False
         assert "net_mode=off" in reason
+
+    def test_off_but_downloads_allowed_bypasses(self, monkeypatch, tmp_path):
+        """net_allow_model_downloads exempts an explicit prefetch from the off
+        floor. Asserted on the spy (a real call happened), the same discipline
+        as its sibling above."""
+        monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
+        monkeypatch.delenv("LOCALM_NET_MODE", raising=False)
+        import localm.config as _cfg
+        monkeypatch.setattr(
+            _cfg, "load_config",
+            lambda: {"voice_stt_model": "base", "net_mode": "off",
+                     "net_allow_model_downloads": True})
+        calls = _snapshot_spy(monkeypatch, create=True)
+        ok, reason = voice.prefetch_stt_model(allow_download=True)
+        assert len(calls) == 1, "the override must let the real download through"
+        assert (ok, reason) == (True, "")
 
     def test_ask_without_consent_refuses_with_reason(self, monkeypatch, tmp_path):
         _voice_cfg(monkeypatch, tmp_path, "ask")
@@ -398,6 +420,16 @@ class TestVoiceRoutes:
         assert body["can_download"] is False
         assert "net_mode=off" in body["reason"]
 
+    def test_status_offers_download_under_off_when_downloads_allowed(
+            self, voice_client, monkeypatch):
+        _fake_faster_whisper_present(monkeypatch)
+        from localm.config import update_config
+        update_config(lambda c: c.__setitem__("net_mode", "off"))
+        update_config(lambda c: c.__setitem__("net_allow_model_downloads", True))
+        body = voice_client.c.get("/api/voice/status",
+                                  headers=_hdr(OWNER_KEY)).json()
+        assert body["can_download"] is True
+
     def test_download_route_403_without_config_write(self, voice_client):
         r = voice_client.c.post("/api/voice/model/download",
                                 headers=_hdr(voice_client.voice_only))
@@ -411,6 +443,14 @@ class TestVoiceRoutes:
                                 headers=_hdr(OWNER_KEY))
         assert r.status_code == 409
         assert "net_mode=off" in r.text
+
+    def test_download_route_200_under_off_when_downloads_allowed(self, voice_client):
+        from localm.config import update_config
+        update_config(lambda c: c.__setitem__("net_mode", "off"))
+        update_config(lambda c: c.__setitem__("net_allow_model_downloads", True))
+        r = voice_client.c.post("/api/voice/model/download",
+                                headers=_hdr(OWNER_KEY))
+        assert r.status_code == 200, r.text
 
     def test_download_route_runs_one_authorized_job_persists_nothing(
             self, voice_client):
@@ -488,6 +528,14 @@ class TestEmbeddingRoutes:
                                 headers=_hdr(OWNER_KEY)).json()
         assert body["can_download"] is False
 
+    def test_status_offers_download_under_off_when_downloads_allowed(self, rag_client):
+        from localm.config import update_config
+        update_config(lambda c: c.__setitem__("net_mode", "off"))
+        update_config(lambda c: c.__setitem__("net_allow_model_downloads", True))
+        body = rag_client.c.get("/api/rag/embedding",
+                                headers=_hdr(OWNER_KEY)).json()
+        assert body["can_download"] is True
+
     def test_download_route_403_without_config_write(self, rag_client):
         r = rag_client.c.post("/api/rag/embedding/download",
                               headers=_hdr(rag_client.rag_only))
@@ -501,6 +549,34 @@ class TestEmbeddingRoutes:
                               headers=_hdr(OWNER_KEY))
         assert r.status_code == 409
         assert "net_mode=off" in r.text
+
+    def test_download_route_200_under_off_when_downloads_allowed(
+            self, rag_client, monkeypatch):
+        """The route's own redundant pre-check (ahead of resolve_embedding_
+        model_path's inner one) honours the override too."""
+        from localm.inference.embedder import (
+            DEFAULT_EMBEDDING_MODEL, KNOWN_EMBEDDING_MODELS, _embeddings_dir)
+        _repo, filename = KNOWN_EMBEDDING_MODELS[DEFAULT_EMBEDDING_MODEL]
+        dest = _embeddings_dir() / filename
+        fetched = []
+
+        def _fake_hf_download(repo, fname, local_dir=None, **kw):
+            fetched.append((repo, fname))
+            target = (dest.parent if local_dir is None else Path(local_dir)) / fname
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b"GGUF")
+            return str(target)
+
+        monkeypatch.setattr(huggingface_hub, "hf_hub_download", _fake_hf_download)
+        from localm.config import update_config
+        update_config(lambda c: c.__setitem__("net_mode", "off"))
+        update_config(lambda c: c.__setitem__("net_allow_model_downloads", True))
+        r = rag_client.c.post("/api/rag/embedding/download",
+                              headers=_hdr(rag_client.rag_writer))
+        assert r.status_code == 200, r.text
+        job = _wait_job(rag_client.app, r.json()["job_id"])
+        assert fetched == [(_repo, filename)]
+        assert job.status == "done"
 
     def test_download_route_409_for_non_internal_model(self, rag_client):
         from localm.config import update_config
@@ -562,8 +638,10 @@ class TestEmbeddingRoutes:
         """The embedder-side twin of the voice off-floor test, pinned at
         _download_known itself: allow_download=True (the explicit consent the
         download route AND the existing change-model route pass) still refuses
-        under net_mode=off. This inner layer is what keeps the floor absolute
-        even if a future route forgets its own off pre-check."""
+        under net_mode=off, by DEFAULT. This inner layer is what keeps the
+        floor in place even if a future route forgets its own off pre-check;
+        net_allow_model_downloads (see the sibling test below) is the one
+        deliberate way past it."""
         monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
         monkeypatch.delenv("LOCALM_NET_MODE", raising=False)
         import localm.config as _cfg
@@ -579,6 +657,35 @@ class TestEmbeddingRoutes:
             assert fetched == [], "off must mean NO network call, even authorized"
             assert path is None
             assert "network is off" in (emb.last_error() or "")
+        finally:
+            emb.reset_embedder()
+
+    def test_embedder_off_but_downloads_allowed_bypasses(self, tmp_path, monkeypatch):
+        """net_allow_model_downloads exempts an explicit embedding-model fetch
+        from the off floor, at the same inner layer the test above pins."""
+        monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
+        monkeypatch.delenv("LOCALM_NET_MODE", raising=False)
+        import localm.config as _cfg
+        monkeypatch.setattr(
+            _cfg, "load_config",
+            lambda: {"net_mode": "off", "net_allow_model_downloads": True})
+        monkeypatch.setattr(_cfg, "MODELS_DIR", tmp_path / "models")
+        from localm.inference import embedder as emb
+        emb.reset_embedder()
+        fetched = []
+
+        def _fake_download(repo, filename, local_dir=None, **kw):
+            fetched.append((repo, filename))
+            target = Path(local_dir) / filename
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b"GGUF")
+            return str(target)
+
+        monkeypatch.setattr(huggingface_hub, "hf_hub_download", _fake_download)
+        try:
+            path = emb.resolve_embedding_model_path(allow_download=True)
+            assert len(fetched) == 1, "the override must let the real fetch through"
+            assert path is not None and Path(path).is_file()
         finally:
             emb.reset_embedder()
 

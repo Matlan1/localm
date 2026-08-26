@@ -16,11 +16,12 @@ That one download is gated by the network policy (netpolicy.network_mode), the
 same bypass-ask-respect-off rule the embedder's ``_download_known`` applies:
 under ``net_mode=allow`` the first use fetches automatically; under ``ask`` the
 fetch needs an explicit one-time authorization (``prefetch_stt_model``); under
-``off`` nothing fetches, ever - off is the kill switch and stays absolute. The
-worker enforces this structurally: it is dispatched with ``local_files_only``
-so it CANNOT download unless the policy decision in this (parent) process said
-so - and a cached model always loads with ``local_files_only=True``, so a
-routine load never touches the network at all.
+``off`` nothing fetches, unless ``net_allow_model_downloads`` exempts an
+explicit fetch - off is still the default kill switch. The worker enforces
+this structurally: it is dispatched with ``local_files_only`` so it CANNOT
+download unless the policy decision in this (parent) process said so - and a
+cached model always loads with ``local_files_only=True``, so a routine load
+never touches the network at all.
 
 Text-to-speech needs no backend at all: the GUI uses Kokoro in the browser
 (see the ``tts`` plugin) or the browser's built-in speechSynthesis.
@@ -214,8 +215,10 @@ def prefetch_stt_model(allow_download: Optional[bool] = None) -> tuple[bool, str
       bypasses net_mode="ask". The caller has collected the user's consent (the
       GUI's download action, gated on config:write, or installing the voice
       plugin - itself an explicit user action);
-    * net_mode="off" ALWAYS refuses, even with ``allow_download=True``: off is
-      the kill switch and stays absolute.
+    * net_mode="off" refuses, even with ``allow_download=True``, UNLESS
+      ``netpolicy.downloads_allowed_when_off()`` says the owner exempted
+      explicit downloads (settings_schema.py's ``net_allow_model_downloads``,
+      admin_only, default False - so off is still the default kill switch).
 
     The authorization is nothing but this function argument - not a config key,
     not module state, not an env var - so a one-time grant dies with this call
@@ -234,7 +237,7 @@ def prefetch_stt_model(allow_download: Optional[bool] = None) -> tuple[bool, str
     cached, name = stt_model_cached()
     if cached:
         return True, ""
-    from localm.netpolicy import network_mode
+    from localm.netpolicy import downloads_allowed_when_off, network_mode
     if allow_download is None:
         allow_download = network_mode() == "allow"
     if not allow_download:
@@ -242,7 +245,7 @@ def prefetch_stt_model(allow_download: Optional[bool] = None) -> tuple[bool, str
         reason = _stt_download_blocked_reason(name, network_mode())
         logger.info(reason)
         return False, reason
-    if network_mode() == "off":
+    if network_mode() == "off" and not downloads_allowed_when_off():
         reason = _stt_download_blocked_reason(name, "off")
         logger.info(reason)
         return False, reason

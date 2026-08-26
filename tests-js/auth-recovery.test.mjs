@@ -186,6 +186,38 @@ test("RESTART: a 403 from /api/image-proxy is the route saying the feature is OF
     "still gets its single recovery");
 });
 
+test("RESTART: a 403 from /api/discover/search is the route's own net_mode=off " +
+     "answer, so it must NOT trigger the shell recovery either", async () => {
+  // Same shape as the image-proxy case above: net_mode=off makes
+  // discover.py's _ensure_online refuse, and _discover_status maps that
+  // specific refusal to 403 - a real, expected outcome of a model search, not
+  // a rejected credential. Reproduces a live browser bug: searching while
+  // net_mode=off reloaded the whole app to the Chat tab mid-search, discarding
+  // the query and any results already on screen.
+  let status = 200;
+  const fetchImpl = async () => (status === 200
+    ? { ok: true, status: 200, json: async () => ({ models: [], active: "" }), text: async () => "" }
+    : { ok: false, status: 403, json: async () => ({ detail: "Network access is off. Turn it on, or allow downloads only, in Settings → Network." }), text: async () => "" });
+  const { window } = loadApp({ fetchImpl, shellToken: SHELL });
+  await tick();
+  assert.equal(window.__localmLocked, false, "premise: this boot unlocked normally");
+
+  stubReload(window);
+  const { unregistered, deleted } = stubSWAndCaches(window);
+  status = 403;
+  await window.fetch(
+    "/api/discover/search?q=smollm&formats=gguf&types=llm",
+    { headers: window.authHeaders() });
+  await tick();
+
+  assert.equal(unregistered.length, 0,
+    "the service worker must survive: the credential was fine, net_mode said no");
+  assert.deepEqual(deleted, [], "and its caches with it");
+  assert.equal(window.sessionStorage.getItem("localm.shellReset"), null,
+    "the one-shot recovery guard was never armed, so a later REAL stale token " +
+    "still gets its single recovery");
+});
+
 test("RESTART: a 403 with NO shell token is NOT swept into the shell recovery", async () => {
   const { window } = loadApp({ fetchImpl: forbidden });   // no shellToken
   await tick();

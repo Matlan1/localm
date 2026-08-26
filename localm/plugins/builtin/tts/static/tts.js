@@ -127,24 +127,28 @@ export async function register(ctx) {
   // real kill switch and a stale value would let a mid-session net_mode=off
   // change go unhonoured until the tab reloads. Same-origin call to localm's
   // own local API, never to huggingface.co, so it is not itself net_mode-gated.
-  async function currentNetMode() {
+  async function currentNetPolicy() {
     try {
       const r = await fetch("/api/tts/config", { headers: ctx.authHeaders() });
       if (r.ok) {
         const fresh = await r.json();
-        if (typeof fresh.net_mode === "string") return fresh.net_mode;
+        if (typeof fresh.net_mode === "string") {
+          return { mode: fresh.net_mode,
+                   allowDownloadsWhenOff: !!fresh.net_allow_model_downloads };
+        }
       }
     } catch { /* fall through to the page-load value */ }
-    return cfg.net_mode;
+    return { mode: cfg.net_mode, allowDownloadsWhenOff: !!cfg.net_allow_model_downloads };
   }
 
   async function load() {
     const cached = await modelCached();
-    const decision = planModelFetch(await currentNetMode(), cached);
+    const policy = await currentNetPolicy();
+    const decision = planModelFetch(policy.mode, cached, policy.allowDownloadsWhenOff);
     if (decision === "refuse") {
       throw new NetGateError(
-        "Voice model download is blocked (net_mode=off). Enable it with:  " +
-        "localm config net_mode ask");
+        "Voice model download is off. Turn it on, or allow downloads only, " +
+        "in Settings → Network.");
     }
     if (decision === "confirm" && !(await requestDownloadConsent())) {
       throw new NetGateError(

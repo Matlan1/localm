@@ -27,7 +27,11 @@ import { VIEWS, showView } from "./tabs.js";
 // credential. The stale-shell recovery below skips them.
 // See "a 403 from /api/image-proxy is the route saying the feature is OFF" in
 // tests-js/auth-recovery.test.mjs.
-const _ROUTE_OWNED_403 = ["/api/image-proxy"];
+// /api/discover/search and /api/discover/files answer 403 the same way
+// whenever net_mode=off refuses the lookup (discover.py's _discover_status) -
+// the same "route's own answer, not a rejected credential" shape as the
+// image proxy, on the same shell-token credential in open mode.
+const _ROUTE_OWNED_403 = ["/api/image-proxy", "/api/discover/search", "/api/discover/files"];
 
 function _routeOwns403(url) {
   let path = url;

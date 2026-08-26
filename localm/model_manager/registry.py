@@ -1730,8 +1730,9 @@ def sync_models_dir(prune: Optional[bool] = None, *,
                     from localm.model_manager.pull import (
                         backfill_mmproj_for_entry, mmproj_backfill_candidate)
                     if mmproj_backfill_candidate(entry, path):
-                        from localm.netpolicy import network_mode
-                        if network_mode() == "off":
+                        from localm.netpolicy import (
+                            downloads_allowed_when_off, network_mode)
+                        if network_mode() == "off" and not downloads_allowed_when_off():
                             # Recorded for the caller to surface via `note`,
                             # not printed: sync_models_dir runs silently on
                             # every launch (see its own docstring), and the

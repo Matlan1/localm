@@ -17,8 +17,9 @@ so it never races a chat-model load onto the GPU.
 Provisioning (``resolve_embedding_model_path``): the ``embedding_model`` config key
 is either a filesystem path, a registered model name, or a known key (default
 ``bge-small-en-v1.5``). A known model missing from ``<home>/models/embeddings/`` is
-downloaded on demand, gated by the network policy (never behind ``net_mode=off``;
-auto only under ``net_mode=allow`` - otherwise the user runs ``localm setup-embeddings``).
+downloaded on demand, gated by the network policy (never behind ``net_mode=off``
+unless ``net_allow_model_downloads`` exempts it; auto only under ``net_mode=allow``
+- otherwise the user runs ``localm setup-embeddings`` or the GUI's download action).
 When no embedding model can be resolved, callers degrade to lexical-only retrieval;
 the reason is recorded for ``last_error()`` (what the GUI's RAG-embedding status
 reads) on every resolve attempt, not only when a load is actually attempted. A
@@ -424,19 +425,19 @@ def _download_known(name: str, repo: str, filename: str, dest: Path,
     policy-gated branches log at INFO regardless of whether the write is
     skipped; only the download-failure branch warns, deduped the same way as
     ``resolve_embedding_model_path``'s own WARNING-worthy failures."""
-    from localm.netpolicy import network_mode
+    from localm.netpolicy import downloads_allowed_when_off, network_mode
     if allow_download is None:
         allow_download = network_mode() == "allow"
     if not allow_download:
         reason = (
             f"embedding model {name!r} not present and not auto-downloading "
-            f"(net_mode={network_mode()}); run 'localm setup-embeddings' or set "
-            "net_mode=allow to enable semantic search (memory/RAG use lexical "
-            "BM25 until then)")
+            f"(net_mode={network_mode()}); use the one-time download action, "
+            "or set net_mode=allow, to enable semantic search (memory/RAG use "
+            "lexical BM25 until then)")
         _set_resolve_outcome(name, reason)
         logger.info(reason)
         return None
-    if network_mode() == "off":
+    if network_mode() == "off" and not downloads_allowed_when_off():
         reason = f"embedding model {name!r} missing and network is off; lexical-only"
         _set_resolve_outcome(name, reason)
         logger.info(reason)

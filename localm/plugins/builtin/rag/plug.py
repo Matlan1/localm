@@ -935,10 +935,11 @@ async def rag_embedding_status(request: Request):
     `can_download` tells the GUI whether to offer the one-time "download now"
     action (POST /api/rag/embedding/download): the configured model is an
     internal key that is not on disk (only those are fetchable - a registered
-    model or a path has nothing to download), net_mode is not "off" (off has no
-    bypass, by design), and the caller could authorize it - open mode, or a key
-    granting config:write, the same scope that governs net_mode itself. UI hint
-    only; the download route re-checks everything server-side."""
+    model or a path has nothing to download), net_mode is not "off" (or
+    net_allow_model_downloads exempts it), and the caller could authorize it -
+    open mode, or a key granting config:write, the same scope that governs
+    net_mode itself. UI hint only; the download route re-checks everything
+    server-side."""
     import localm.inference.http_server as _hs
     from localm import scopes
     from localm.config import load_config, load_registry
@@ -965,8 +966,8 @@ async def rag_embedding_status(request: Request):
         model = "(set by the owner)"
     can_download = False
     if installed is False and model in KNOWN_EMBEDDING_MODELS:
-        from localm.netpolicy import network_mode
-        if network_mode() != "off":
+        from localm.netpolicy import downloads_allowed_when_off, network_mode
+        if network_mode() != "off" or downloads_allowed_when_off():
             can_download = held is None or scopes.grants(held, scopes.CONFIG_WRITE)
 
     # The three embedder readers run off the event loop together: each does
@@ -1012,9 +1013,11 @@ async def rag_embedding_download(request: Request):
     - net_mode itself stays exactly as configured for every other network path.
     Gated on config:write, the same scope that could change net_mode itself, so
     a key that could not lift the policy cannot bypass it here either; open
-    mode is the trusted local owner. net_mode=off always refuses: off is the
-    kill switch, and only a real config change lifts it. Only an internal
-    KNOWN_EMBEDDING_MODELS key is fetchable this way - a registered model or a
+    mode is the trusted local owner. net_mode=off refuses by default, and only
+    a real config change lifts it - either net_mode itself, or
+    net_allow_model_downloads exempting explicit downloads specifically. Only
+    an internal KNOWN_EMBEDDING_MODELS key is fetchable this way - a
+    registered model or a
     filesystem path has nothing to download, so those get an honest 409 (the
     model name is quoted only for callers GET /api/rag/embedding would answer,
     same disclosure rule)."""
@@ -1040,12 +1043,13 @@ async def rag_embedding_download(request: Request):
                  "instead.")
     if resolve_embedding_model_path(allow_download=False):
         return {"status": "already_installed", "model": model}
-    from localm.netpolicy import network_mode
-    if network_mode() == "off":
+    from localm.netpolicy import downloads_allowed_when_off, network_mode
+    if network_mode() == "off" and not downloads_allowed_when_off():
         raise HTTPException(
             409, "Network access is disabled (net_mode=off), which blocks even "
                  "an explicitly requested model download. Set net_mode to ask "
-                 "or allow first.")
+                 "or allow, or turn on \"Allow model downloads while network "
+                 "access is off\", first.")
     jobs = _require_jobs(request)
 
     def _run(job):

@@ -464,6 +464,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   never shared with another conversation, and a reload asks again. Off is still
   the default, and an install that had this switched on before keeps working
   exactly as it did.
+- **Explicit downloads can now proceed while Network access is off.** A model
+  pull, a HuggingFace search, or a vision-projector/voice/embedding-model
+  fetch you asked for used to be refused the same way a model's own request
+  is. There is now a setting, **Settings > Server & network > Outbound
+  access > "Allow model downloads while network access is off"**, **off by
+  default**. Turning it on exempts only your own explicit downloads; Network
+  access (net_mode) itself still refuses everything a model could trigger on
+  its own, unconditionally.
 
 ### Changed
 - **The chat parameters drawer and the image, music and video generation forms
@@ -504,6 +512,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   that as a startup warning nobody had asked for. That check now runs quietly
   in the background once the app is already serving, instead of during
   startup, and it no longer shows up as a startup message either way.
+- **A HuggingFace search or model pull refused because Network access is
+  off now points you to Settings, not a command line the GUI has no way to
+  run.** And on the Models page, that refusal no longer reloads the whole
+  app and lands you back on Chat mid-search, discarding your query.
 - **Ctrl+C in the server window now stops the server the same way the GUI's Stop
   button does.** It used to print a `gguf worker process crashed` report with a
   KeyboardInterrupt traceback, because the interrupt reaches every process

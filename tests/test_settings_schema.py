@@ -285,6 +285,9 @@ def test_admin_only_keys_lists_the_owner_only_settings():
         | {"gui_proxy_remote_images"}
         # update_ignore_net_policy exempts the update channel from net_mode=off.
         | {"update_ignore_net_policy"}
+        # net_allow_model_downloads exempts explicit downloads (pull, search,
+        # mmproj/voice/embedding fetch) from net_mode=off.
+        | {"net_allow_model_downloads"}
         # llama_runtime_pin decides which native build setup-llama downloads and
         # the server then loads in-process; llama_runtime_history is what
         # --rollback reads.
